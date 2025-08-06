@@ -1,0 +1,17 @@
+{
+  "name": "excel-mapper-fullstack",
+  "version": "1.0.0",
+  "description": "Excel Template Mapper - Full Stack Deployment",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "build": "cd frontend && npm install && npm run build",
+    "postinstall": "cd frontend && npm install && npm run build"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

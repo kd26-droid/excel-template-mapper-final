@@ -2,7 +2,7 @@
 
 import axios from 'axios';
 
-const API_URL = '/api';
+const API_URL = 'https://kartik-excel-mapper-backend-v2.azurewebsites.net/api';
 
 const api = {
   // ==========================================
