@@ -5,7 +5,7 @@ django-cors-headers==4.3.1
 
 # Database
 dj-database-url==2.1.0
-psycopg2-binary==2.9.7  # PostgreSQL adapter (optional)
+psycopg2-binary==2.9.7
 
 # File processing
 pandas==2.2.0
@@ -15,31 +15,7 @@ rapidfuzz==3.5.2
 
 # Environment and configuration
 python-decouple==3.8
-python-dotenv==1.0.0
-
-# Caching (optional)
-redis==5.0.1
-django-redis==5.4.0
 
 # Production deployment
 gunicorn==21.2.0
 whitenoise==6.6.0
-
-# Development and testing
-pytest==7.4.3
-pytest-django==4.7.0
-pytest-cov==4.1.0
-flake8==6.1.0
-black==23.11.0
-isort==5.12.0
-
-# Monitoring and logging
-sentry-sdk==1.38.0  # Error tracking (optional)
-
-# Security
-cryptography==41.0.7
-
-# Development dependencies (install with: pip install -r requirements-dev.txt)
-# ipython==8.17.2
-# django-debug-toolbar==4.2.0
-# factory-boy==3.3.0
