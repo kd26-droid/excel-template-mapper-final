@@ -265,9 +265,63 @@ def health_check(request):
     """Health check endpoint."""
     return Response({
         'status': 'healthy',
-        'timestamp': datetime.utcnow().isoformat(),
+        'timestamp': datetime.now().isoformat(),
         'version': '1.0.0'
     })
+
+
+@api_view(['POST'])
+def create_demo_session(request):
+    """Create a demo session with sample data for testing features"""
+    try:
+        # Create a new session
+        session_id = str(uuid.uuid4())
+        
+        # Sample data for demo
+        sample_headers = [
+            "Part Number", "Description", "Quantity", "Unit Price", 
+            "Manufacturer", "Category", "Status", "Lead Time"
+        ]
+        
+        sample_data = [
+            ["PN001", "Resistor 10K", "100", "0.10", "ABC Corp", "Electronics", "Active", "2 weeks"],
+            ["PN002", "Capacitor 100uF", "50", "0.25", "XYZ Inc", "Electronics", "Active", "1 week"],
+            ["PN003", "LED Red 5mm", "200", "0.05", "LED Co", "Components", "Active", "3 days"]
+        ]
+        
+        # Create session data
+        SESSION_STORE[session_id] = {
+            'client_headers': sample_headers,
+            'template_headers': ["Item Code", "Item Description", "Qty", "Unit Cost", "Vendor", "Type", "Active", "Delivery"],
+            'client_data': sample_data,
+            'mappings': {},
+            'formula_rules': [],
+            'factwise_rules': [],
+            'created': datetime.now().isoformat(),
+            'original_client_name': 'demo_client.xlsx',
+            'original_template_name': 'demo_template.xlsx',
+            'is_demo': True
+        }
+        
+        logger.info(f"🎯 Created demo session: {session_id}")
+        
+        return Response({
+            'success': True,
+            'session_id': session_id,
+            'message': 'Demo session created with sample data',
+            'demo_info': {
+                'client_columns': len(sample_headers),
+                'data_rows': len(sample_data),
+                'template_columns': len(SESSION_STORE[session_id]['template_headers'])
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Error creating demo session: {e}")
+        return Response({
+            'success': False,
+            'error': f'Failed to create demo session: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['POST'])
@@ -614,7 +668,12 @@ def mapping_suggestions(request):
         if not session_id or session_id not in SESSION_STORE:
             return Response({
                 'success': False,
-                'error': 'Invalid session'
+                'error': 'Invalid session',
+                'message': 'Please upload files first to create a valid session, or create a demo session using /api/demo-session/',
+                'help': {
+                    'upload_files': '/api/upload/',
+                    'demo_session': '/api/demo-session/'
+                }
             }, status=status.HTTP_400_BAD_REQUEST)
         
         info = SESSION_STORE[session_id]
@@ -687,7 +746,12 @@ def save_mappings(request):
         if not session_id or session_id not in SESSION_STORE:
             return Response({
                 'success': False,
-                'error': 'Invalid session'
+                'error': 'Invalid session',
+                'message': 'Please upload files first to create a valid session, or create a demo session using /api/demo-session/',
+                'help': {
+                    'upload_files': '/api/upload/',
+                    'demo_session': '/api/demo-session/'
+                }
             }, status=status.HTTP_400_BAD_REQUEST)
         
         # Save mappings to session
@@ -984,7 +1048,12 @@ def save_data(request):
         if not session_id or session_id not in SESSION_STORE:
             return Response({
                 'success': False,
-                'error': 'Invalid session'
+                'error': 'Invalid session',
+                'message': 'Please upload files first to create a valid session, or create a demo session using /api/demo-session/',
+                'help': {
+                    'upload_files': '/api/upload/',
+                    'demo_session': '/api/demo-session/'
+                }
             }, status=status.HTTP_400_BAD_REQUEST)
         
         # Save edited data to session
@@ -1016,7 +1085,12 @@ def download_file(request):
         if not session_id or session_id not in SESSION_STORE:
             return Response({
                 'success': False,
-                'error': 'Invalid session'
+                'error': 'Invalid session',
+                'message': 'Please upload files first to create a valid session, or create a demo session using /api/demo-session/',
+                'help': {
+                    'upload_files': '/api/upload/',
+                    'demo_session': '/api/demo-session/'
+                }
             }, status=status.HTTP_400_BAD_REQUEST)
         
         info = SESSION_STORE[session_id]
@@ -1133,7 +1207,12 @@ def download_original_file(request):
         if not session_id or session_id not in SESSION_STORE:
             return Response({
                 'success': False,
-                'error': 'Invalid session'
+                'error': 'Invalid session',
+                'message': 'Please upload files first to create a valid session, or create a demo session using /api/demo-session/',
+                'help': {
+                    'upload_files': '/api/upload/',
+                    'demo_session': '/api/demo-session/'
+                }
             }, status=status.HTTP_400_BAD_REQUEST)
         
         info = SESSION_STORE[session_id]
@@ -1396,7 +1475,12 @@ def update_mapping_template(request):
         if not session_id or session_id not in SESSION_STORE:
             return Response({
                 'success': False,
-                'error': 'Invalid session'
+                'error': 'Invalid session',
+                'message': 'Please upload files first to create a valid session, or create a demo session using /api/demo-session/',
+                'help': {
+                    'upload_files': '/api/upload/',
+                    'demo_session': '/api/demo-session/'
+                }
             }, status=status.HTTP_400_BAD_REQUEST)
         
         if not template_id:
@@ -1529,7 +1613,12 @@ def apply_mapping_template(request):
         if not session_id or session_id not in SESSION_STORE:
             return Response({
                 'success': False,
-                'error': 'Invalid session'
+                'error': 'Invalid session',
+                'message': 'Please upload files first to create a valid session, or create a demo session using /api/demo-session/',
+                'help': {
+                    'upload_files': '/api/upload/',
+                    'demo_session': '/api/demo-session/'
+                }
             }, status=status.HTTP_400_BAD_REQUEST)
         
         if not template_id:
@@ -2004,7 +2093,12 @@ def preview_formulas(request):
         if not session_id or session_id not in SESSION_STORE:
             return Response({
                 'success': False,
-                'error': 'Invalid session'
+                'error': 'Invalid session',
+                'message': 'Please upload files first to create a valid session, or create a demo session using /api/demo-session/',
+                'help': {
+                    'upload_files': '/api/upload/',
+                    'demo_session': '/api/demo-session/'
+                }
             }, status=status.HTTP_400_BAD_REQUEST)
         
         if not formula_rules:
@@ -2274,7 +2368,12 @@ def save_custom_formulas(request):
         if not session_id or session_id not in SESSION_STORE:
             return Response({
                 'success': False,
-                'error': 'Invalid session'
+                'error': 'Invalid session',
+                'message': 'Please upload files first to create a valid session, or create a demo session using /api/demo-session/',
+                'help': {
+                    'upload_files': '/api/upload/',
+                    'demo_session': '/api/demo-session/'
+                }
             }, status=status.HTTP_400_BAD_REQUEST)
         
         if not formula_rules:
@@ -2320,7 +2419,12 @@ def get_enhanced_data(request):
         if not session_id or session_id not in SESSION_STORE:
             return Response({
                 'success': False,
-                'error': 'Invalid session'
+                'error': 'Invalid session',
+                'message': 'Please upload files first to create a valid session, or create a demo session using /api/demo-session/',
+                'help': {
+                    'upload_files': '/api/upload/',
+                    'demo_session': '/api/demo-session/'
+                }
             }, status=status.HTTP_400_BAD_REQUEST)
         
         info = SESSION_STORE[session_id]
@@ -2405,7 +2509,12 @@ def check_column_conflicts(request):
         if not session_id or session_id not in SESSION_STORE:
             return Response({
                 'success': False,
-                'error': 'Invalid session'
+                'error': 'Invalid session',
+                'message': 'Please upload files first to create a valid session, or create a demo session using /api/demo-session/',
+                'help': {
+                    'upload_files': '/api/upload/',
+                    'demo_session': '/api/demo-session/'
+                }
             }, status=status.HTTP_400_BAD_REQUEST)
         
         info = SESSION_STORE[session_id]
@@ -2482,7 +2591,12 @@ def clear_formulas(request):
         if not session_id or session_id not in SESSION_STORE:
             return Response({
                 'success': False,
-                'error': 'Invalid session'
+                'error': 'Invalid session',
+                'message': 'Please upload files first to create a valid session, or create a demo session using /api/demo-session/',
+                'help': {
+                    'upload_files': '/api/upload/',
+                    'demo_session': '/api/demo-session/'
+                }
             }, status=status.HTTP_400_BAD_REQUEST)
         
         info = SESSION_STORE[session_id]
@@ -2688,7 +2802,12 @@ def create_factwise_id(request):
         if not session_id or session_id not in SESSION_STORE:
             return Response({
                 'success': False,
-                'error': 'Invalid session'
+                'error': 'Invalid session',
+                'message': 'Please upload files first to create a valid session, or create a demo session using /api/demo-session/',
+                'help': {
+                    'upload_files': '/api/upload/',
+                    'demo_session': '/api/demo-session/'
+                }
             }, status=status.HTTP_400_BAD_REQUEST)
         
         if not first_column or not second_column:

@@ -4,6 +4,7 @@ from django.urls import path
 from .views import (
     # Basic functionality views
     health_check,
+    create_demo_session,
     debug_session,
     upload_files,
     get_headers,
@@ -42,6 +43,9 @@ from .views import (
 urlpatterns = [
     # Health check
     path('health/', health_check, name='health-check'),
+    
+    # Demo session for testing
+    path('demo-session/', create_demo_session, name='create-demo-session'),
     
     # Debug session
     path('debug-session/', debug_session, name='debug-session'),
