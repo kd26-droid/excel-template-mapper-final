@@ -17,7 +17,7 @@ SECRET_KEY = os.environ.get(
 
 DEBUG = os.environ.get('DEBUG', 'True').lower() in ('true', '1', 'yes')
 
-ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,testserver').split(',')
+ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,testserver,kartik-excel-mapper-backend-v2.azurewebsites.net').split(',')
 
 # Application definition
 DJANGO_APPS = [
@@ -104,7 +104,7 @@ REST_FRAMEWORK = {
 # CORS Configuration
 CORS_ALLOWED_ORIGINS = os.environ.get(
     'CORS_ALLOWED_ORIGINS', 
-    'http://localhost:3000,http://127.0.0.1:3000'
+    'http://localhost:3000,http://127.0.0.1:3000,https://kartikexcelmapperstorage.z29.web.core.windows.net'
 ).split(',')
 
 CORS_ALLOW_ALL_ORIGINS = DEBUG  # Only allow all origins in development
