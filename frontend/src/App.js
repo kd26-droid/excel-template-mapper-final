@@ -15,6 +15,7 @@ function App() {
         <Box sx={{ mt: 4, mb: 4 }}>
           <Routes>
             <Route path="/" element={<Dashboard />} />
+            <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/upload" element={<UploadFiles />} />
             <Route path="/mapping/:sessionId" element={<ColumnMapping />} />
             <Route path="/editor/:sessionId" element={<DataEditor />} />
