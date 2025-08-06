@@ -1,6 +1,6 @@
 from django.apps import AppConfig
 
 
-class ExcelMappingConfig(AppConfig):
+class ExcelMapperConfig(AppConfig):
     default_auto_field = 'django.db.models.BigAutoField'
-    name = 'excel_mapping'
+    name = 'excel_mapper'

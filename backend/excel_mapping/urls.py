@@ -1,22 +1,28 @@
-from django.urls import path
-from . import views
+"""
+URL configuration for excel_mapping project.
+
+The `urlpatterns` list routes URLs to views. For more information please see:
+    https://docs.djangoproject.com/en/4.2/topics/http/urls/
+Examples:
+Function views
+    1. Add an import:  from my_app import views
+    2. Add a URL to urlpatterns:  path('', views.home, name='home')
+Class-based views
+    1. Add an import:  from other_app.views import Home
+    2. Add a URL to urlpatterns:  path('', Home.as_view(), name='home')
+Including another URLconf
+    1. Import the include() function: from django.urls import include, path
+    2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
+"""
+from django.contrib import admin
+from django.urls import path, include
+from django.conf import settings
+from django.conf.urls.static import static
 
 urlpatterns = [
-    # File upload endpoint
-    path('upload/', views.upload_files, name='upload_files'),
-    
-    # Column mapping endpoints
-    path('mapping/', views.get_column_mapping, name='get_column_mapping'),
-    path('mapping/save/', views.save_column_mapping, name='save_column_mapping'),
-    
-    # Data processing endpoints
-    path('data/', views.get_mapped_data, name='get_mapped_data'),
-    path('data/save/', views.save_edited_data, name='save_edited_data'),
-    
-    # Dashboard endpoints
-    path('dashboard/', views.get_upload_dashboard, name='get_upload_dashboard'),
-    path('download/', views.download_processed_file, name='download_processed_file'),
-    
-    # Health check
-    path('health/', views.health_check, name='health_check'),
+    path('admin/', admin.site.urls),
+    path('api/', include('excel_mapper.urls')),  # 👈 Add this line
 ]
+
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
