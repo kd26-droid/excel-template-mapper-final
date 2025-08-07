@@ -1,18 +1,21 @@
-name: Working Deployment
+name: Deploy Factwise Excel Mapper
 
 on:
+  push:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
-  deploy-backend:
-    name: Deploy Backend
+  deploy:
+    name: Deploy Backend and Frontend
     runs-on: ubuntu-latest
     
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
     
-    - name: Setup Python
+    # Backend Deployment
+    - name: Setup Python for Backend
       uses: actions/setup-python@v4
       with:
         python-version: '3.11'
@@ -20,43 +23,28 @@ jobs:
     - name: Install backend dependencies
       run: |
         cd backend
+        python -m pip install --upgrade pip
         pip install -r requirements.txt
-    
-    - name: Create backend deployment package
-      run: |
-        cd backend
-        zip -r backend-deploy.zip . -x "venv/*" "*.pyc" "__pycache__/*" "*.sqlite3"
     
     - name: Deploy Backend to Azure
       uses: azure/webapps-deploy@v2
       with:
         app-name: 'factwise-excel-mapper-backend'
         publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
-        package: 'backend/backend-deploy.zip'
-
-  deploy-frontend:
-    name: Deploy Frontend  
-    runs-on: ubuntu-latest
+        package: './backend'
     
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-    
-    - name: Setup Node.js
+    # Frontend Deployment
+    - name: Setup Node.js for Frontend
       uses: actions/setup-node@v4
       with:
         node-version: '18'
         cache: 'npm'
         cache-dependency-path: frontend/package-lock.json
     
-    - name: Install frontend dependencies
+    - name: Install and build frontend
       run: |
         cd frontend
         npm ci
-    
-    - name: Build frontend
-      run: |
-        cd frontend
         npm run build
     
     - name: Deploy Frontend to Azure Static Web Apps
@@ -68,3 +56,10 @@ jobs:
         app_location: "frontend"
         output_location: "build"
         skip_app_build: true
+    
+    # Success notification
+    - name: Deployment Success
+      run: |
+        echo "🎉 DEPLOYMENT SUCCESSFUL!"
+        echo "Frontend: https://mango-beach-0786e2d0f.2.azurestaticapps.net"
+        echo "Backend: https://factwise-excel-mapper-backend.azurewebsites.net"
