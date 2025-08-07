@@ -2,7 +2,6 @@ import React, { useState, useCallback, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import {
   Typography, 
-  Paper, 
   Button, 
   Grid, 
   Alert, 
@@ -20,11 +19,8 @@ import {
   DialogContent,
   DialogActions,
   Chip,
-  List,
-  ListItem,
-  ListItemText,
-  ListItemIcon,
-  Container
+  Container,
+  IconButton,
 } from '@mui/material';
 import { useDropzone } from 'react-dropzone';
 import {
@@ -257,11 +253,6 @@ const UploadFiles = () => {
     // Don't clear formula rules as user might have manually created them
   };
 
-  // Handle formula rules changes from Step 3
-  const handleFormulaRulesChange = useCallback((newRules) => {
-    setFormulaRules(newRules);
-  }, []);
-
   // Compatibility error modal handlers
   const handleContinueAnyway = () => {
     if (pendingSessionId) {
@@ -405,11 +396,6 @@ const UploadFiles = () => {
     } finally {
       setLoading(false);
     }
-  };
-
-  const formatDate = (dateString) => {
-    const date = new Date(dateString);
-    return date.toLocaleDateString();
   };
 
   return (
@@ -864,14 +850,20 @@ const UploadFiles = () => {
       >
         <DialogTitle sx={{ 
           display: 'flex', 
+          justifyContent: 'space-between',
           alignItems: 'center', 
           gap: 2,
           backgroundColor: '#fff3e0'
         }}>
-          <WarningIcon color="warning" fontSize="large" />
-          <Typography variant="h6" fontWeight="600" color="warning.main">
-            Template Compatibility Issue
-          </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <WarningIcon color="warning" fontSize="large" />
+            <Typography variant="h6" fontWeight="600" color="warning.main">
+              Template Compatibility Issue
+            </Typography>
+          </Box>
+          <IconButton onClick={handleCloseCompatibilityError}>
+            <CloseIcon />
+          </IconButton>
         </DialogTitle>
         
         <DialogContent sx={{ pt: 3 }}>

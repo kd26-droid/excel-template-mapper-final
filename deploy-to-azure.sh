@@ -40,98 +40,140 @@ echo ""
 
 # Step 2: Create Resource Group
 echo "📦 Step 2: Creating Resource Group"
-az group create \
-    --name $RESOURCE_GROUP \
-    --location $LOCATION \
-    --tags "Environment=Production" "Project=ExcelMapper" "Owner=Kartik"
-echo "✅ Resource Group created: $RESOURCE_GROUP"
+if az group show --name $RESOURCE_GROUP &>/dev/null; then
+    echo "✅ Resource Group '$RESOURCE_GROUP' already exists. Skipping creation."
+else
+    az group create \
+        --name $RESOURCE_GROUP \
+        --location $LOCATION \
+        --tags "Environment=Production" "Project=ExcelMapper" "Owner=Kartik"
+    echo "✅ Resource Group '$RESOURCE_GROUP' created."
+fi
 echo ""
 
 # Step 3: Create PostgreSQL Database
 echo "🗄️  Step 3: Creating PostgreSQL Database"
-az postgres flexible-server create \
-    --resource-group $RESOURCE_GROUP \
-    --name $DB_SERVER \
-    --location $LOCATION \
-    --admin-user dbadmin \
-    --admin-password "$DB_ADMIN_PASSWORD" \
-    --sku-name Standard_B2s \
-    --tier Burstable \
-    --compute-units 2 \
-    --storage-size 32 \
-    --version 13 \
-    --yes
+if az postgres flexible-server show --resource-group $RESOURCE_GROUP --name $DB_SERVER &>/dev/null; then
+    echo "✅ PostgreSQL Flexible Server '$DB_SERVER' already exists. Skipping creation."
+else
+    az postgres flexible-server create 
+        --resource-group $RESOURCE_GROUP 
+        --name $DB_SERVER 
+        --location $LOCATION 
+        --admin-user dbadmin 
+        --admin-password "$DB_ADMIN_PASSWORD" 
+        --sku-name Standard_B2s 
+        --tier Burstable 
+        
+        --storage-size 32 
+        --version 13 
+        --yes
+    echo "✅ PostgreSQL Flexible Server '$DB_SERVER' created."
+fi
 
 # Create database
-az postgres flexible-server db create \
-    --resource-group $RESOURCE_GROUP \
-    --server-name $DB_SERVER \
-    --database-name $DB_NAME
+if az postgres flexible-server db show --resource-group $RESOURCE_GROUP --server-name $DB_SERVER --database-name $DB_NAME &>/dev/null; then
+    echo "✅ PostgreSQL Database '$DB_NAME' already exists on server '$DB_SERVER'. Skipping creation."
+else
+    az postgres flexible-server db create 
+        --resource-group $RESOURCE_GROUP 
+        --server-name $DB_SERVER 
+        --database-name $DB_NAME
+    echo "✅ PostgreSQL Database '$DB_NAME' created on server '$DB_SERVER'."
+fi
 
 # Configure firewall to allow Azure services
-az postgres flexible-server firewall-rule create \
-    --resource-group $RESOURCE_GROUP \
-    --name $DB_SERVER \
-    --rule-name "AllowAzureServices" \
-    --start-ip-address 0.0.0.0 \
-    --end-ip-address 0.0.0.0
-
-echo "✅ PostgreSQL Database created: $DB_SERVER"
+if az postgres flexible-server firewall-rule show --resource-group $RESOURCE_GROUP --name $DB_SERVER --rule-name "AllowAzureServices" &>/dev/null; then
+    echo "✅ PostgreSQL Firewall Rule 'AllowAzureServices' already exists for server '$DB_SERVER'. Skipping creation."
+else
+    az postgres flexible-server firewall-rule create 
+        --resource-group $RESOURCE_GROUP 
+        --name $DB_SERVER 
+        --rule-name "AllowAzureServices" 
+        --start-ip-address 0.0.0.0 
+        --end-ip-address 0.0.0.0
+    echo "✅ PostgreSQL Firewall Rule 'AllowAzureServices' created for server '$DB_SERVER'."
+fi
 echo ""
+
 
 # Step 4: Create Storage Account
 echo "💾 Step 4: Creating Storage Account"
-az storage account create \
-    --resource-group $RESOURCE_GROUP \
-    --name $STORAGE_ACCOUNT \
-    --location $LOCATION \
-    --sku Standard_LRS \
-    --kind StorageV2 \
-    --access-tier Hot
+if az storage account show --resource-group $RESOURCE_GROUP --name $STORAGE_ACCOUNT &>/dev/null; then
+    echo "✅ Storage Account '$STORAGE_ACCOUNT' already exists. Skipping creation."
+else
+    az storage account create \
+        --resource-group $RESOURCE_GROUP \
+        --name $STORAGE_ACCOUNT \
+        --location $LOCATION \
+        --sku Standard_LRS \
+        --kind StorageV2 \
+        --access-tier Hot
+    echo "✅ Storage Account '$STORAGE_ACCOUNT' created."
+fi
 
-# Create containers
+# Get storage account key (needed even if account exists)
 STORAGE_KEY=$(az storage account keys list --resource-group $RESOURCE_GROUP --account-name $STORAGE_ACCOUNT --query "[0].value" -o tsv)
 
-az storage container create \
-    --account-name $STORAGE_ACCOUNT \
-    --account-key "$STORAGE_KEY" \
-    --name "uploaded-files" \
-    --public-access off
+# Create containers
+CONTAINER_UPLOADED_FILES="uploaded-files"
+CONTAINER_TEMP_DOWNLOADS="temp-downloads"
 
-az storage container create \
-    --account-name $STORAGE_ACCOUNT \
-    --account-key "$STORAGE_KEY" \
-    --name "temp-downloads" \
-    --public-access off
+if az storage container show --account-name $STORAGE_ACCOUNT --name $CONTAINER_UPLOADED_FILES --account-key "$STORAGE_KEY" &>/dev/null; then
+    echo "✅ Storage Container '$CONTAINER_UPLOADED_FILES' already exists. Skipping creation."
+else
+    az storage container create \
+        --account-name $STORAGE_ACCOUNT \
+        --account-key "$STORAGE_KEY" \
+        --name "$CONTAINER_UPLOADED_FILES" \
+        --public-access off
+    echo "✅ Storage Container '$CONTAINER_UPLOADED_FILES' created."
+fi
 
-echo "✅ Storage Account created: $STORAGE_ACCOUNT"
+if az storage container show --account-name $STORAGE_ACCOUNT --name $CONTAINER_TEMP_DOWNLOADS --account-key "$STORAGE_KEY" &>/dev/null; then
+    echo "✅ Storage Container '$CONTAINER_TEMP_DOWNLOADS' already exists. Skipping creation."
+else
+    az storage container create \
+        --account-name $STORAGE_ACCOUNT \
+        --account-key "$STORAGE_KEY" \
+        --name "$CONTAINER_TEMP_DOWNLOADS" \
+        --public-access off
+    echo "✅ Storage Container '$CONTAINER_TEMP_DOWNLOADS' created."
+fi
 echo ""
 
 # Step 5: Create App Service Plan
 echo "⚙️  Step 5: Creating App Service Plan"
-az appservice plan create \
-    --resource-group $RESOURCE_GROUP \
-    --name $APP_SERVICE_PLAN \
-    --location $LOCATION \
-    --sku S1 \
-    --is-linux \
-    --number-of-workers 1
-
-echo "✅ App Service Plan created: $APP_SERVICE_PLAN"
+if az appservice plan show --resource-group $RESOURCE_GROUP --name $APP_SERVICE_PLAN &>/dev/null; then
+    echo "✅ App Service Plan '$APP_SERVICE_PLAN' already exists. Skipping creation."
+else
+    az appservice plan create \
+        --resource-group $RESOURCE_GROUP \
+        --name $APP_SERVICE_PLAN \
+        --location $LOCATION \
+        --sku S1 \
+        --is-linux \
+        --number-of-workers 1
+    echo "✅ App Service Plan '$APP_SERVICE_PLAN' created."
+fi
 echo ""
 
 # Step 6: Create Backend App Service
 echo "🖥️  Step 6: Creating Backend App Service"
-az webapp create \
-    --resource-group $RESOURCE_GROUP \
-    --plan $APP_SERVICE_PLAN \
-    --name $BACKEND_APP \
-    --runtime "PYTHON:3.11" \
-    --startup-file "startup.sh"
+if az webapp show --resource-group $RESOURCE_GROUP --name $BACKEND_APP &>/dev/null; then
+    echo "✅ Backend App Service '$BACKEND_APP' already exists. Skipping creation."
+else
+    az webapp create \
+        --resource-group $RESOURCE_GROUP \
+        --plan $APP_SERVICE_PLAN \
+        --name $BACKEND_APP \
+        --runtime "PYTHON:3.11" \
+        --startup-file "startup.sh"
+    echo "✅ Backend App Service '$BACKEND_APP' created."
+fi
 
-# Get backend URL
+# Get backend URL (needed even if app service exists)
 BACKEND_URL="https://${BACKEND_APP}.azurewebsites.net"
-echo "✅ Backend App Service created: $BACKEND_URL"
 echo ""
 
 # Step 7: Configure Backend Environment Variables
@@ -166,18 +208,22 @@ echo ""
 
 # Step 8: Create Static Web App for Frontend
 echo "🌐 Step 8: Creating Static Web App for Frontend"
-az staticwebapp create \
-    --resource-group $RESOURCE_GROUP \
-    --name $STATIC_WEB_APP \
-    --location $LOCATION \
-    --source https://github.com/$GITHUB_REPO \
-    --branch main \
-    --app-location "/frontend" \
-    --build-location "build" \
-    --login-with-github
+if az staticwebapp show --resource-group $RESOURCE_GROUP --name $STATIC_WEB_APP &>/dev/null; then
+    echo "✅ Static Web App '$STATIC_WEB_APP' already exists. Skipping creation."
+else
+    az staticwebapp create \
+        --resource-group $RESOURCE_GROUP \
+        --name $STATIC_WEB_APP \
+        --location $LOCATION \
+        --source https://github.com/$GITHUB_REPO \
+        --branch main \
+        --app-location "/frontend" \
+        --build-location "build" \
+        --login-with-github
+    echo "✅ Static Web App '$STATIC_WEB_APP' created."
+fi
 
 FRONTEND_URL="https://${STATIC_WEB_APP}.azurestaticapps.net"
-echo "✅ Static Web App created: $FRONTEND_URL"
 echo ""
 
 # Step 9: Update CORS with actual frontend URL
@@ -192,7 +238,7 @@ echo "✅ CORS updated with frontend URL"
 echo ""
 
 # Step 10: Deploy Backend Code
-echo "📤 Step 10: Deploying Backend Code"
+echo "📤 Step 10: Configuring Backend Deployment (GitHub Actions)"
 
 # Create deployment configuration
 cat > /tmp/web.config << EOF

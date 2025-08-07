@@ -39,7 +39,8 @@ import {
   Check as CheckIcon,
   ArrowBack as ArrowBackIcon,
   AutoAwesome as AutoAwesomeIcon,
-  Badge as BadgeIcon
+  Badge as BadgeIcon,
+  Close as CloseIcon
 } from '@mui/icons-material';
 import api from '../services/api';
 import FormulaBuilder from '../components/FormulaBuilder';
@@ -61,9 +62,7 @@ const DataEditor = () => {
   const [downloadLoading, setDownloadLoading] = useState(false);
   const [saveAsDialogOpen, setSaveAsDialogOpen] = useState(false);
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'info' });
-  const [selectedRows, setSelectedRows] = useState([]);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
-  const [templateUpdateDialogOpen, setTemplateUpdateDialogOpen] = useState(false);
 
   // Unmapped columns state
   const [unmappedColumns, setUnmappedColumns] = useState([]);
@@ -72,7 +71,6 @@ const DataEditor = () => {
 
   // Grid state
   const [gridApi, setGridApi] = useState(null);
-  const [columnApi, setColumnApi] = useState(null);
 
   // Simplified template saving state
   const [templateSaveDialogOpen, setTemplateSaveDialogOpen] = useState(false);
@@ -133,6 +131,7 @@ const DataEditor = () => {
 
       const response = await api.getMappedDataWithSpecs(sessionId, 1, 1000, true);
       const { data } = response;
+      console.log('API Response in DataEditor:', data);
 
       if (!data || !data.headers || !Array.isArray(data.headers) || data.headers.length === 0) {
         setError('No mapped data found. Please go back to Column Mapping and create mappings first.');
@@ -177,7 +176,7 @@ const DataEditor = () => {
           suppressAutoSize: true
         },
         ...data.headers.map((col, index) => {
-          const displayName = data.display_headers ? data.display_headers[index] : col;
+          const displayName = data.display_headers && Array.isArray(data.display_headers) && index < data.display_headers.length && data.display_headers[index] ? data.display_headers[index] : col;
           const isUnmapped = data.unmapped_columns && data.unmapped_columns.includes(displayName);
           const isSpecificationColumn = displayName.toLowerCase().includes('specification');
           const isFormulaColumn = formulaColumns.includes(col);
@@ -688,7 +687,6 @@ const DataEditor = () => {
   // ─── EVENT HANDLERS ─────────────────────────────────────────────────────────
   const onGridReady = useCallback((params) => {
     setGridApi(params.api);
-    setColumnApi(params.columnApi);
   }, []);
 
   const onCellValueChanged = useCallback((event) => {
@@ -708,8 +706,8 @@ const DataEditor = () => {
 
   const onSelectionChanged = useCallback(() => {
     if (gridApi) {
-      const selectedNodes = gridApi.getSelectedNodes();
-      setSelectedRows(selectedNodes.map(node => node.data));
+      // const selectedNodes = gridApi.getSelectedNodes();
+      // setSelectedRows(selectedNodes.map(node => node.data));
     }
   }, [gridApi]);
 
@@ -893,20 +891,23 @@ const DataEditor = () => {
               flexWrap: 'wrap'
             }}>
               <Tooltip title="Add Tags - Automatically tag your components">
-                <Button
-                  onClick={handleOpenFormulaBuilder}
-                  variant="contained"
-                  startIcon={<AutoAwesomeIcon />}
-                  sx={{ 
-                    backgroundColor: '#9c27b0',
-                    color: 'white',
-                    '&:hover': { backgroundColor: '#7b1fa2' },
-                    textTransform: 'none',
-                    fontWeight: 600
-                  }}
-                >
-                  Add Tags
-                </Button>
+                <span>
+                  <Button
+                    onClick={handleOpenFormulaBuilder}
+                    variant="contained"
+                    startIcon={<AutoAwesomeIcon />}
+                    sx={{ 
+                      backgroundColor: '#9c27b0',
+                      color: 'white',
+                      '&:hover': { backgroundColor: '#7b1fa2' },
+                      textTransform: 'none',
+                      fontWeight: 600
+                    }}
+                    disabled={loading}
+                  >
+                    Add Tags
+                  </Button>
+                </span>
               </Tooltip>
 
               <Tooltip title="Create Factwise ID - Combine two columns to create a unique identifier">
@@ -1215,15 +1216,20 @@ const DataEditor = () => {
       >
         <DialogTitle sx={{ 
           display: 'flex', 
+          justifyContent: 'space-between',
           alignItems: 'center', 
-          gap: 2,
           pb: 1,
           borderBottom: '1px solid #e0e0e0'
         }}>
-          <SaveIcon color="primary" />
-          <Typography variant="h6" fontWeight="600">
-            Save Your Work
-          </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <SaveIcon color="primary" />
+            <Typography variant="h6" fontWeight="600">
+              Save Your Work
+            </Typography>
+          </Box>
+          <IconButton onClick={() => setSaveAsDialogOpen(false)}>
+            <CloseIcon />
+          </IconButton>
         </DialogTitle>
         <DialogContent sx={{ pt: 3 }}>
           <DialogContentText sx={{ mb: 3, fontSize: '16px' }}>
@@ -1293,9 +1299,14 @@ const DataEditor = () => {
         maxWidth="md"
         fullWidth
       >
-        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-          <ErrorIcon color="warning" />
-          Unmapped Template Columns Found
+        <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            <ErrorIcon color="warning" />
+            Unmapped Template Columns Found
+          </Box>
+          <IconButton onClick={() => setUnmappedDialogOpen(false)}>
+            <CloseIcon />
+          </IconButton>
         </DialogTitle>
         <DialogContent>
           <DialogContentText sx={{ mb: 2 }}>
@@ -1343,7 +1354,7 @@ const DataEditor = () => {
         maxWidth="sm"
         fullWidth
       >
-        <DialogTitle>
+        <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
             <SaveIcon color="primary" />
             <Box>
@@ -1355,6 +1366,9 @@ const DataEditor = () => {
               </Typography>
             </Box>
           </Box>
+          <IconButton onClick={() => setTemplateSaveDialogOpen(false)}>
+            <CloseIcon />
+          </IconButton>
         </DialogTitle>
         <DialogContent>
           <DialogContentText sx={{ mb: 2 }}>
@@ -1425,7 +1439,12 @@ const DataEditor = () => {
         maxWidth="sm"
         fullWidth
       >
-        <DialogTitle>Create Factwise ID</DialogTitle>
+        <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          Create Factwise ID
+          <IconButton onClick={handleCloseFactwiseIdDialog}>
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
         <DialogContent>
           <DialogContentText>
             Select two columns and an operator to create a unique Factwise ID. The new column will combine the values from both selected columns.
@@ -1507,7 +1526,7 @@ const DataEditor = () => {
         maxWidth="md"
         fullWidth
       >
-        <DialogTitle>
+        <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
             <TemplateIcon color="primary" />
             <Box>
@@ -1519,6 +1538,9 @@ const DataEditor = () => {
               </Typography>
             </Box>
           </Box>
+          <IconButton onClick={() => setTemplateChooseDialogOpen(false)}>
+            <CloseIcon />
+          </IconButton>
         </DialogTitle>
         <DialogContent>
           {templatesLoading ? (

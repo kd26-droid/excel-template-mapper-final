@@ -35,13 +35,15 @@ import {
   Add as AddIcon,
   Delete as DeleteIcon,
   Preview as PreviewIcon,
-  Save as SaveIcon,
-  LibraryBooks as TemplateIcon,
   Label as LabelIcon,
   Science as ScienceIcon,
   AutoAwesome as AutoAwesomeIcon,
   ExpandMore as ExpandMoreIcon,
-  ExpandLess as ExpandLessIcon
+  ExpandLess as ExpandLessIcon,
+  Close as CloseIcon,
+  CheckCircle,
+  DonutLarge,
+  RadioButtonUnchecked,
 } from '@mui/icons-material';
 import api from '../services/api';
 
@@ -50,10 +52,13 @@ const FormulaBuilder = ({
   onClose, 
   sessionId, 
   availableColumns = [], 
+  columnExamples = {},
+  columnFillStats = {},
   onApplyFormulas,
   onClear,
   initialRules = []
 }) => {
+  console.log('FormulaBuilder received props:', { availableColumns, columnExamples, columnFillStats });
   // ─── STATE MANAGEMENT ───────────────────────────────────────────────────────
   const [currentTab, setCurrentTab] = useState(0);
   const [formulaRules, setFormulaRules] = useState(initialRules.length > 0 ? initialRules : [createEmptyRule()]);
@@ -131,7 +136,6 @@ const FormulaBuilder = ({
         }, {});
       
       setTemplates(templatesWithFormulas);
-      setAllTemplates(allTemplates);
     } catch (error) {
       console.error('Error loading formula templates:', error);
       showSnackbar('Failed to load formula templates', 'error');
@@ -274,14 +278,6 @@ const FormulaBuilder = ({
     ));
   };
 
-  const applyTemplate = (templateKey) => {
-    if (templates[templateKey] && templates[templateKey].rules) {
-      setFormulaRules([...templates[templateKey].rules]);
-      setSelectedTemplate(templateKey);
-      showSnackbar(`Applied ${templates[templateKey].name} template`, 'success');
-    }
-  };
-
   // ─── PREVIEW FUNCTIONALITY ──────────────────────────────────────────────────
   const handlePreview = async () => {
     if (!validationResults?.isValid) {
@@ -397,6 +393,12 @@ const FormulaBuilder = ({
 
   
 
+  const statusIcons = {
+    full: <CheckCircle sx={{ color: 'success.main', fontSize: '1rem', mr: 1 }} />,
+    partial: <DonutLarge sx={{ color: 'warning.main', fontSize: '1rem', mr: 1 }} />,
+    empty: <RadioButtonUnchecked sx={{ color: 'text.disabled', fontSize: '1rem', mr: 1 }} />
+  };
+
   // ─── RENDER COMPONENTS ──────────────────────────────────────────────────────
   const renderRuleEditor = (rule, index) => (
     <Card key={index} variant="outlined" sx={{ mb: 3, position: 'relative' }}>
@@ -418,7 +420,7 @@ const FormulaBuilder = ({
 
         <Grid container spacing={2} sx={{ mb: 3 }}>
           {/* Source Column */}
-          <Grid item xs={12} md={4}>
+          <Grid item xs={12} md={6}>
             <FormControl fullWidth size="small">
               <InputLabel>Source Column</InputLabel>
               <Select
@@ -427,13 +429,38 @@ const FormulaBuilder = ({
                 label="Source Column"
                 sx={{
                   '& .MuiSelect-select': {
-                    color: rule.source_column && !availableColumns.includes(rule.source_column) ? '#d32f2f' : 'inherit'
+                    color: rule.source_column && !availableColumns.includes(rule.source_column) ? '#d32f2f' : 'inherit',
+                    display: 'flex',
+                    alignItems: 'center'
                   }
                 }}
               >
-                {availableColumns.map((col) => (
-                  <MenuItem key={col} value={col}>{col}</MenuItem>
-                ))}
+                {availableColumns.map((col) => {
+                  const example = columnExamples[col] || '';
+                  const status = columnFillStats[col] || 'empty';
+                  const icon = statusIcons[status];
+
+                  let displayExample = '';
+                  if (status === 'empty') {
+                    displayExample = '(Empty)';
+                  } else if (example) {
+                    const truncatedExample = example.toString().length > 30 ? `${example.toString().substring(0, 30)}...` : example;
+                    displayExample = `(${truncatedExample})`;
+                  } else if (status === 'partial') {
+                    displayExample = '(Partially Filled)';
+                  }
+                  
+                  return (
+                    <MenuItem key={col} value={col}>
+                      <Box sx={{ display: 'flex', justifyContent: 'space-between', width: '100%', alignItems: 'center' }}>
+                        <Typography variant="inherit" noWrap sx={{ flexGrow: 1 }}>
+                          {col} {displayExample}
+                        </Typography>
+                        {icon}
+                      </Box>
+                    </MenuItem>
+                  );
+                })}
                 {/* Show invalid column from template if it doesn't exist in available columns */}
                 {rule.source_column && !availableColumns.includes(rule.source_column) && (
                   <MenuItem value={rule.source_column} disabled sx={{ color: '#d32f2f', fontStyle: 'italic' }}>
@@ -451,13 +478,13 @@ const FormulaBuilder = ({
           </Grid>
 
           {/* Column Type */}
-          <Grid item xs={12} md={4}>
+          <Grid item xs={12} md={3}>
             <FormControl fullWidth size="small">
-              <InputLabel>Column Type</InputLabel>
+              <InputLabel>Destination Column Type</InputLabel>
               <Select
                 value={rule.column_type}
                 onChange={(e) => updateRule(index, 'column_type', e.target.value)}
-                label="Column Type"
+                label="Destination Column Type"
               >
                 <MenuItem value="Tag">Tag</MenuItem>
                 <MenuItem value="Specification Value">Specification Value</MenuItem>
@@ -467,7 +494,7 @@ const FormulaBuilder = ({
 
           {/* Specification Name (only show when column_type is 'Specification Value') */}
           {rule.column_type === 'Specification Value' && (
-            <Grid item xs={12} md={4}>
+            <Grid item xs={12} md={3}>
               <TextField
                 fullWidth
                 size="small"
@@ -587,62 +614,6 @@ const FormulaBuilder = ({
     </Card>
   );
 
-  const renderTemplates = () => (
-    <Box>
-      <Typography variant="h6" gutterBottom>
-        Choose a Template
-      </Typography>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
-        Select a pre-built template to get started quickly, or create your own custom rules.
-      </Typography>
-
-      <Grid container spacing={2}>
-        {Object.entries(templates || {}).map(([key, template]) => (
-          <Grid item xs={12} md={6} key={key}>
-            <Card 
-              variant="outlined" 
-              sx={{ 
-                cursor: 'pointer',
-                '&:hover': { bgcolor: 'action.hover' },
-                border: selectedTemplate === key ? 2 : 1,
-                borderColor: selectedTemplate === key ? 'primary.main' : 'divider'
-              }}
-              onClick={() => applyTemplate(key)}
-            >
-              <CardContent>
-                <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
-                  <TemplateIcon color="primary" sx={{ mr: 1 }} />
-                  <Typography variant="h6">{template.name}</Typography>
-                </Box>
-                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                  {template.description}
-                </Typography>
-                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
-                  {(template.rules || []).slice(0, 3).map((rule, idx) => (
-                    <Chip 
-                      key={idx}
-                      label={`${rule.search_text} → ${rule.output_value || rule.tag_value || ''}`}
-                      size="small"
-                      variant="outlined"
-                    />
-                  ))}
-                  {(template.rules || []).length > 3 && (
-                    <Chip 
-                      label={`+${(template.rules || []).length - 3} more`}
-                      size="small"
-                      variant="outlined"
-                      color="primary"
-                    />
-                  )}
-                </Box>
-              </CardContent>
-            </Card>
-          </Grid>
-        ))}
-      </Grid>
-    </Box>
-  );
-
   const renderPreview = () => (
     <Box>
       <Typography variant="h6" gutterBottom>
@@ -738,20 +709,26 @@ const FormulaBuilder = ({
       >
         <DialogTitle sx={{ 
           display: 'flex', 
+          justifyContent: 'space-between',
           alignItems: 'center', 
           gap: 2,
           pb: 1,
           borderBottom: '1px solid #e0e0e0'
         }}>
-          <ScienceIcon color="primary" />
-          <Box>
-            <Typography variant="h5" fontWeight="600">
-              Add Tags to Your Data
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              Create simple rules to automatically tag your components (e.g., if Description contains "Cap" then tag as "Capacitor")
-            </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <ScienceIcon color="primary" />
+            <Box>
+              <Typography variant="h5" fontWeight="600">
+                Add Tags to Your Data
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Create simple rules to automatically tag your components (e.g., if Description contains "Cap" then tag as "Capacitor")
+              </Typography>
+            </Box>
           </Box>
+          <IconButton onClick={onClose}>
+            <CloseIcon />
+          </IconButton>
         </DialogTitle>
 
         <DialogContent sx={{ p: 0 }}>

@@ -5,8 +5,6 @@ import {
   Card, 
   CardContent,
   Button,
-  Divider,
-  Paper,
   Table,
   TableBody,
   TableCell,
@@ -31,11 +29,6 @@ import {
   Select,
   MenuItem,
   TablePagination,
-  Menu,
-  MenuList,
-  MenuItem as MenuItemComponent,
-  ListItemIcon,
-  ListItemText,
   Avatar,
   List,
   ListItem,
@@ -45,34 +38,21 @@ import {
   Stack
 } from '@mui/material';
 import { useNavigate } from 'react-router-dom';
-// import StandaloneFormulaBuilder from '../components/StandaloneFormulaBuilder';
+import StandaloneFormulaBuilder from '../components/StandaloneFormulaBuilder';
 import {
   UploadFile as UploadFileIcon,
   History as HistoryIcon,
   LibraryBooks as LibraryBooksIcon,
   PlayArrow as PlayArrowIcon,
   Delete as DeleteIcon,
-  Schedule as ScheduleIcon,
-  TrendingUp as TrendingUpIcon,
   Star as StarIcon,
-  CheckCircle as CheckCircleIcon,
   Folder as FolderIcon,
   Search as SearchIcon,
-  FilterList as FilterListIcon,
-  Sort as SortIcon,
-  Download as DownloadIcon,
   GetApp as GetAppIcon,
   Description as DescriptionIcon,
   Transform as TransformIcon,
   Refresh as RefreshIcon,
   Clear as ClearIcon,
-  DateRange as DateRangeIcon,
-  ViewList as ViewListIcon,
-  Sync as SyncIcon,
-  Code as CodeIcon,
-  Speed as SpeedIcon,
-  AutoAwesome as AutoAwesomeIcon,
-  Settings as SettingsIcon,
   Science as ScienceIcon
 } from '@mui/icons-material';
 import api from '../services/api';
@@ -93,8 +73,8 @@ const Dashboard = () => {
   
   // Template search and filtering
   const [templateSearchTerm, setTemplateSearchTerm] = useState('');
-  const [templateSortBy, setTemplateSortBy] = useState('name');
-  const [templateSortOrder, setTemplateSortOrder] = useState('asc');
+  const [templateSortBy, setTemplateSortBy] = useState('usage_count');
+  const [templateSortOrder, setTemplateSortOrder] = useState('desc');
   const [templatePage, setTemplatePage] = useState(0);
   const [templatesPerPage, setTemplatesPerPage] = useState(10);
   
@@ -103,8 +83,8 @@ const Dashboard = () => {
   const [tagTemplatesLoading, setTagTemplatesLoading] = useState(true);
   const [tagTemplatesError, setTagTemplatesError] = useState(null);
   const [tagTemplateSearchTerm, setTagTemplateSearchTerm] = useState('');
-  const [tagTemplateSortBy, setTagTemplateSortBy] = useState('name');
-  const [tagTemplateSortOrder, setTagTemplateSortOrder] = useState('asc');
+  const [tagTemplateSortBy, setTagTemplateSortBy] = useState('usage_count');
+  const [tagTemplateSortOrder, setTagTemplateSortOrder] = useState('desc');
   const [tagTemplatePage, setTagTemplatePage] = useState(0);
   const [tagTemplatesPerPage, setTagTemplatesPerPage] = useState(10);
   const [tagTemplateDeleteDialogOpen, setTagTemplateDeleteDialogOpen] = useState(false);
@@ -131,7 +111,7 @@ const Dashboard = () => {
     totalTemplates: 0,
     totalUsage: 0,
     mostUsed: null,
-    recentTemplates: []
+    top3Templates: []
   });
 
   
@@ -167,11 +147,12 @@ const Dashboard = () => {
       setTemplates(templateData);
       
       // Calculate stats
+      const sortedByUsage = [...templateData].sort((a, b) => (b.usage_count || 0) - (a.usage_count || 0));
       const stats = {
         totalTemplates: templateData.length,
         totalUsage: templateData.reduce((sum, t) => sum + (t.usage_count || 0), 0),
-        mostUsed: templateData.sort((a, b) => (b.usage_count || 0) - (a.usage_count || 0))[0],
-        recentTemplates: templateData.slice(0, 3)
+        mostUsed: sortedByUsage[0],
+        top3Templates: sortedByUsage.slice(0, 3)
       };
       setTemplateStats(stats);
       setTemplatesError(null);
@@ -515,8 +496,8 @@ const Dashboard = () => {
 
   const clearTagTemplateFilters = () => {
     setTagTemplateSearchTerm('');
-    setTagTemplateSortBy('name');
-    setTagTemplateSortOrder('asc');
+    setTagTemplateSortBy('usage_count');
+    setTagTemplateSortOrder('desc');
     setTagTemplatePage(0);
   };
 
@@ -561,8 +542,8 @@ const Dashboard = () => {
 
   const clearTemplateFilters = () => {
     setTemplateSearchTerm('');
-    setTemplateSortBy('name');
-    setTemplateSortOrder('asc');
+    setTemplateSortBy('usage_count');
+    setTemplateSortOrder('desc');
     setTemplatePage(0);
   };
 
@@ -586,533 +567,81 @@ const Dashboard = () => {
         </Typography>
       </Box>
 
-      {/* Elegant Upload Card */}
-      <Grow in timeout={800}>
-        <Card 
-          sx={{ 
-            mb: 4, 
-            background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', 
-            color: 'white',
-            borderRadius: 3,
-            boxShadow: '0 20px 40px rgba(102, 126, 234, 0.3)',
-            overflow: 'hidden',
-            position: 'relative'
-          }}
-        >
-          <Box sx={{ 
-            position: 'absolute', 
-            top: 0, 
-            right: 0, 
-            width: 200, 
-            height: 200, 
-            background: 'rgba(255,255,255,0.1)', 
-            borderRadius: '50%', 
-            transform: 'translate(50%, -50%)' 
-          }} />
-          <CardContent sx={{ p: 4, position: 'relative', zIndex: 1 }}>
-            <Grid container spacing={3} alignItems="center">
-              <Grid item xs={12} md={8}>
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 2 }}>
-                  <Avatar sx={{ bgcolor: 'rgba(255,255,255,0.2)', width: 56, height: 56 }}>
-                    <UploadFileIcon sx={{ fontSize: 32 }} />
-                  </Avatar>
-                  <Box>
-                    <Typography variant="h4" fontWeight="600" gutterBottom>
-                      Upload Files
+      {/* Quick Stats */}
+      <Fade in timeout={1200}>
+        <Stack spacing={2} sx={{ mb: 4 }}>
+          <Card sx={{ borderRadius: 3, boxShadow: '0 4px 20px rgba(0,0,0,0.08)' }}>
+            <CardContent sx={{ p: 3 }}>
+              <Typography variant="h6" fontWeight="600" color="#1e293b" gutterBottom>
+                Quick Stats
+              </Typography>
+              <Grid container spacing={2}>
+                <Grid item xs={12} sm={4}>
+                  <Box sx={{ textAlign: 'center', p: 2, bgcolor: '#f0f9ff', borderRadius: 2 }}>
+                    <Typography variant="h4" fontWeight="700" color="#0369a1">
+                      {templateStats.totalTemplates}
                     </Typography>
-                    <Typography variant="h6" sx={{ opacity: 0.9 }}>
-                      Transform your data with intelligent column mapping
-                    </Typography>
+                    <Typography variant="body2" color="#64748b">Mapping Templates</Typography>
                   </Box>
-                </Box>
+                </Grid>
+                <Grid item xs={12} sm={4}>
+                  <Box sx={{ textAlign: 'center', p: 2, bgcolor: '#f5f3ff', borderRadius: 2 }}>
+                    <Typography variant="h4" fontWeight="700" color="#6d28d9">
+                      {tagTemplates.length}
+                    </Typography>
+                    <Typography variant="body2" color="#64748b">Tag Templates</Typography>
+                  </Box>
+                </Grid>
+                <Grid item xs={12} sm={4}>
+                  <Box sx={{ textAlign: 'center', p: 2, bgcolor: '#f0fdf4', borderRadius: 2 }}>
+                    <Typography variant="h4" fontWeight="700" color="#166534">
+                      {uploads.length}
+                    </Typography>
+                    <Typography variant="body2" color="#64748b">Uploads</Typography>
+                  </Box>
+                </Grid>
               </Grid>
-              <Grid item xs={12} md={4} sx={{ textAlign: { xs: 'left', md: 'right' } }}>
-                <Button 
-                  variant="contained"
-                  size="large"
-                  onClick={handleUploadClick}
-                  sx={{ 
-                    backgroundColor: 'rgba(255,255,255,0.2)', 
-                    '&:hover': { backgroundColor: 'rgba(255,255,255,0.3)' },
-                    fontWeight: 600,
-                    px: 4,
-                    py: 1.5,
-                    borderRadius: 2,
-                    backdropFilter: 'blur(10px)'
-                  }}
-                  startIcon={<UploadFileIcon />}
-                >
-                  Start Upload
-                </Button>
-              </Grid>
-            </Grid>
-          </CardContent>
-        </Card>
-      </Grow>
+            </CardContent>
+          </Card>
 
-      <Grid container spacing={3}>
-        {/* Compact Templates Section */}
-        <Grid item xs={12} lg={7}>
-          <Fade in timeout={1000}>
+          {templateStats.top3Templates && templateStats.top3Templates.length > 0 && (
             <Card sx={{ borderRadius: 3, boxShadow: '0 4px 20px rgba(0,0,0,0.08)' }}>
               <CardContent sx={{ p: 3 }}>
-                {/* Header */}
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                    <Avatar sx={{ bgcolor: '#3b82f6', width: 40, height: 40 }}>
-                      <LibraryBooksIcon />
-                    </Avatar>
-                    <Box>
-                      <Typography variant="h5" fontWeight="600" color="#1e293b">
-                        Mapping Templates
-                      </Typography>
-                      <Typography variant="body2" color="#64748b">
-                        {templateStats.totalTemplates} templates • {templateStats.totalUsage} total uses
-                      </Typography>
-                    </Box>
-                  </Box>
-                  <Box sx={{ display: 'flex', gap: 1 }}>
-                    <Tooltip title="Refresh">
-                      <IconButton onClick={() => window.location.reload()} size="small">
-                        <RefreshIcon />
-                      </IconButton>
-                    </Tooltip>
-                  </Box>
-                </Box>
-
-                {/* Compact Search & Filter */}
-                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ mb: 3 }}>
-                  <TextField
-                    size="small"
-                    placeholder="Search templates..."
-                    value={templateSearchTerm}
-                    onChange={(e) => setTemplateSearchTerm(e.target.value)}
-                    InputProps={{
-                      startAdornment: <InputAdornment position="start"><SearchIcon size="small" /></InputAdornment>,
-                      endAdornment: templateSearchTerm && (
-                        <InputAdornment position="end">
-                          <IconButton size="small" onClick={() => setTemplateSearchTerm('')}>
-                            <ClearIcon fontSize="small" />
-                          </IconButton>
-                        </InputAdornment>
-                      )
-                    }}
-                    sx={{ flex: 1 }}
-                  />
-                  <FormControl size="small" sx={{ minWidth: 120 }}>
-                    <InputLabel>Sort by</InputLabel>
-                    <Select value={templateSortBy} label="Sort by" onChange={(e) => setTemplateSortBy(e.target.value)}>
-                      <MenuItem value="name">Name</MenuItem>
-                      <MenuItem value="created_at">Date</MenuItem>
-                      <MenuItem value="usage_count">Usage</MenuItem>
-                    </Select>
-                  </FormControl>
-                  <FormControl size="small" sx={{ minWidth: 100 }}>
-                    <InputLabel>Order</InputLabel>
-                    <Select value={templateSortOrder} label="Order" onChange={(e) => setTemplateSortOrder(e.target.value)}>
-                      <MenuItem value="asc">A-Z</MenuItem>
-                      <MenuItem value="desc">Z-A</MenuItem>
-                    </Select>
-                  </FormControl>
-                  {(templateSearchTerm || templateSortBy !== 'name' || templateSortOrder !== 'asc') && (
-                    <Button size="small" onClick={clearTemplateFilters} startIcon={<ClearIcon />}>
-                      Clear
-                    </Button>
-                  )}
+                <Typography variant="h6" fontWeight="600" color="#1e293b" gutterBottom>
+                  Top 3 Mapping Templates
+                </Typography>
+                <Stack direction="row" spacing={1.5} sx={{ mt: 2, flexWrap: 'wrap' }}>
+                  {templateStats.top3Templates.map((template) => (
+                    <Chip
+                      key={template.id}
+                      avatar={
+                        <Avatar sx={{ bgcolor: '#fef3c7', color: '#f59e0b' }}>
+                          <StarIcon sx={{ fontSize: 16 }} />
+                        </Avatar>
+                      }
+                      label={`${template.name} (Used ${template.usage_count || 0} times)`}
+                      onClick={() => handleUseTemplate(template)}
+                      clickable
+                      sx={{
+                        fontWeight: 500,
+                        p: 2,
+                        '&:hover': {
+                          backgroundColor: '#f0f9ff',
+                          borderColor: '#3b82f6'
+                        }
+                      }}
+                    />
+                  ))}
                 </Stack>
-
-                {/* Compact Template List */}
-                {templatesLoading ? (
-                  <Box sx={{ textAlign: 'center', py: 4 }}>
-                    <CircularProgress size={32} />
-                    <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                      Loading templates...
-                    </Typography>
-                  </Box>
-                ) : templatesError ? (
-                  <Alert severity="error" sx={{ mb: 2 }}>{templatesError}</Alert>
-                ) : templateStats.totalTemplates === 0 ? (
-                  <Box sx={{ textAlign: 'center', py: 6, color: '#64748b' }}>
-                    <LibraryBooksIcon sx={{ fontSize: 48, mb: 2, opacity: 0.5 }} />
-                    <Typography variant="h6" fontWeight="500" gutterBottom>
-                      No Templates Yet
-                    </Typography>
-                    <Typography variant="body2">
-                      Create your first template by saving a column mapping
-                    </Typography>
-                  </Box>
-                ) : (
-                  <>
-                    <List sx={{ p: 0 }}>
-                      {paginatedTemplates.map((template, index) => (
-                        <Grow in timeout={600 + index * 100} key={template.id}>
-                          <ListItem 
-                            sx={{ 
-                              border: '1px solid #e2e8f0',
-                              borderRadius: 2,
-                              mb: 1,
-                              '&:hover': { 
-                                backgroundColor: '#f8fafc',
-                                borderColor: '#3b82f6',
-                                transform: 'translateY(-1px)',
-                                boxShadow: '0 4px 12px rgba(59, 130, 246, 0.15)'
-                              },
-                              transition: 'all 0.2s ease'
-                            }}
-                          >
-                            <ListItemAvatar>
-                              <Avatar sx={{ bgcolor: '#f1f5f9', color: '#3b82f6', width: 36, height: 36 }}>
-                                <LibraryBooksIcon fontSize="small" />
-                              </Avatar>
-                            </ListItemAvatar>
-                            <Box sx={{ flexGrow: 1, minWidth: 0 }}>
-                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
-                                <Typography variant="subtitle2" fontWeight="600" noWrap sx={{ color: '#1e293b' }}>
-                                  {template.name}
-                                </Typography>
-                                {templateStats.mostUsed && templateStats.mostUsed.id === template.id && template.usage_count > 0 && (
-                                  <StarIcon sx={{ color: '#f59e0b', fontSize: 16 }} />
-                                )}
-                              </Box>
-                              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                                <Chip 
-                                  label={`${template.total_mappings} mappings`}
-                                  size="small"
-                                  variant="outlined"
-                                  sx={{ height: 20, fontSize: '0.7rem' }}
-                                />
-                                <Chip 
-                                  label={`Used ${template.usage_count || 0}×`}
-                                  size="small"
-                                  color={getPopularityColor(template.usage_count || 0)}
-                                  variant="outlined"
-                                  sx={{ height: 20, fontSize: '0.7rem' }}
-                                />
-                                <Typography variant="caption" color="text.secondary" sx={{ alignSelf: 'center' }}>
-                                  {formatDate(template.created_at)}
-                                </Typography>
-                              </Box>
-                            </Box>
-                            <Box sx={{ display: 'flex', gap: 1 }}>
-                              <Button
-                                size="small"
-                                variant="contained"
-                                startIcon={<PlayArrowIcon />}
-                                onClick={() => handleUseTemplate(template)}
-                                sx={{ 
-                                  textTransform: 'none',
-                                  fontWeight: 600,
-                                  borderRadius: 1.5,
-                                  minWidth: 'auto'
-                                }}
-                              >
-                                Use
-                              </Button>
-                              <IconButton 
-                                size="small" 
-                                onClick={() => openDeleteDialog(template)}
-                                sx={{ color: '#ef4444' }}
-                              >
-                                <DeleteIcon fontSize="small" />
-                              </IconButton>
-                            </Box>
-                          </ListItem>
-                        </Grow>
-                      ))}
-                    </List>
-
-                    {/* Compact Pagination */}
-                    {filteredAndSortedTemplates.length > templatesPerPage && (
-                      <Box sx={{ display: 'flex', justifyContent: 'center', mt: 2 }}>
-                        <TablePagination
-                          component="div"
-                          count={filteredAndSortedTemplates.length}
-                          page={templatePage}
-                          onPageChange={(event, newPage) => setTemplatePage(newPage)}
-                          rowsPerPage={templatesPerPage}
-                          onRowsPerPageChange={(event) => {
-                            setTemplatesPerPage(parseInt(event.target.value, 10));
-                            setTemplatePage(0);
-                          }}
-                          rowsPerPageOptions={[5, 10, 15, 20]}
-                          labelDisplayedRows={({ from, to, count }) => `${from}–${to} of ${count}`}
-                          size="small"
-                        />
-                      </Box>
-                    )}
-                  </>
-                )}
               </CardContent>
             </Card>
-          </Fade>
-        </Grid>
-
-        {/* Tag Templates Section */}
-        <Grid item xs={12} lg={5}>
-          <Fade in timeout={1100}>
-            <Card sx={{ borderRadius: 3, boxShadow: '0 4px 20px rgba(0,0,0,0.08)' }}>
-              <CardContent sx={{ p: 3 }}>
-                {/* Header */}
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                    <Avatar sx={{ bgcolor: '#10b981', width: 40, height: 40 }}>
-                      <ScienceIcon />
-                    </Avatar>
-                    <Box>
-                      <Typography variant="h5" fontWeight="600" color="#1e293b">
-                        Tag Templates
-                      </Typography>
-                      <Typography variant="body2" color="#64748b">
-                        {tagTemplates.length} templates • Smart tag rules
-                      </Typography>
-                    </Box>
-                  </Box>
-                  <Box sx={{ display: 'flex', gap: 1 }}>
-                    <Tooltip title="Create Smart Tag Template">
-                      <Button
-                        variant="outlined"
-                        size="small"
-                        onClick={handleOpenFormulaBuilder}
-                        startIcon={<ScienceIcon />}
-                        sx={{ whiteSpace: 'nowrap' }}
-                      >
-                        New Template
-                      </Button>
-                    </Tooltip>
-                    <Tooltip title="Refresh">
-                      <IconButton onClick={() => loadTagTemplates()} size="small">
-                        <RefreshIcon />
-                      </IconButton>
-                    </Tooltip>
-                  </Box>
-                </Box>
-
-                {/* Compact Search & Filter */}
-                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ mb: 3 }}>
-                  <TextField
-                    size="small"
-                    placeholder="Search tag templates..."
-                    value={tagTemplateSearchTerm}
-                    onChange={(e) => setTagTemplateSearchTerm(e.target.value)}
-                    InputProps={{
-                      startAdornment: <InputAdornment position="start"><SearchIcon size="small" /></InputAdornment>,
-                      endAdornment: tagTemplateSearchTerm && (
-                        <InputAdornment position="end">
-                          <IconButton size="small" onClick={() => setTagTemplateSearchTerm('')}>
-                            <ClearIcon fontSize="small" />
-                          </IconButton>
-                        </InputAdornment>
-                      )
-                    }}
-                    sx={{ flex: 1 }}
-                  />
-                  <FormControl size="small" sx={{ minWidth: 120 }}>
-                    <InputLabel>Sort by</InputLabel>
-                    <Select value={tagTemplateSortBy} label="Sort by" onChange={(e) => setTagTemplateSortBy(e.target.value)}>
-                      <MenuItem value="name">Name</MenuItem>
-                      <MenuItem value="created_at">Date</MenuItem>
-                      <MenuItem value="usage_count">Usage</MenuItem>
-                    </Select>
-                  </FormControl>
-                  <FormControl size="small" sx={{ minWidth: 100 }}>
-                    <InputLabel>Order</InputLabel>
-                    <Select value={tagTemplateSortOrder} label="Order" onChange={(e) => setTagTemplateSortOrder(e.target.value)}>
-                      <MenuItem value="asc">A-Z</MenuItem>
-                      <MenuItem value="desc">Z-A</MenuItem>
-                    </Select>
-                  </FormControl>
-                  {(tagTemplateSearchTerm || tagTemplateSortBy !== 'name' || tagTemplateSortOrder !== 'asc') && (
-                    <Button size="small" onClick={clearTagTemplateFilters} startIcon={<ClearIcon />}>
-                      Clear
-                    </Button>
-                  )}
-                </Stack>
-
-                {/* Compact Tag Template List */}
-                {tagTemplatesLoading ? (
-                  <Box sx={{ textAlign: 'center', py: 4 }}>
-                    <CircularProgress size={32} />
-                    <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                      Loading tag templates...
-                    </Typography>
-                  </Box>
-                ) : tagTemplatesError ? (
-                  <Alert severity="error" sx={{ mb: 2 }}>{tagTemplatesError}</Alert>
-                ) : tagTemplates.length === 0 ? (
-                  <Box sx={{ textAlign: 'center', py: 6, color: '#64748b' }}>
-                    <ScienceIcon sx={{ fontSize: 48, mb: 2, opacity: 0.5 }} />
-                    <Typography variant="h6" fontWeight="500" gutterBottom>
-                      No Tag Templates Yet
-                    </Typography>
-                    <Typography variant="body2">
-                      Create your first template by saving smart tag rules
-                    </Typography>
-                  </Box>
-                ) : (
-                  <>
-                    <List sx={{ p: 0 }}>
-                      {paginatedTagTemplates.map((template, index) => (
-                        <Grow in timeout={600 + index * 100} key={template.id}>
-                          <ListItem 
-                            sx={{ 
-                              border: '1px solid #e2e8f0',
-                              borderRadius: 2,
-                              mb: 1,
-                              '&:hover': { 
-                                backgroundColor: '#f0fdf4',
-                                borderColor: '#10b981',
-                                transform: 'translateY(-1px)',
-                                boxShadow: '0 4px 12px rgba(16, 185, 129, 0.15)'
-                              },
-                              transition: 'all 0.2s ease'
-                            }}
-                          >
-                            <ListItemAvatar>
-                              <Avatar sx={{ bgcolor: '#ecfdf5', color: '#10b981', width: 36, height: 36 }}>
-                                <ScienceIcon fontSize="small" />
-                              </Avatar>
-                            </ListItemAvatar>
-                            <Box sx={{ flexGrow: 1, minWidth: 0 }}>
-                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
-                                <Typography variant="subtitle2" fontWeight="600" noWrap sx={{ color: '#1e293b' }}>
-                                  {template.name}
-                                </Typography>
-                              </Box>
-                              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                                <Chip 
-                                  label={`${(template.formula_rules || []).length} rules`}
-                                  size="small"
-                                  variant="outlined"
-                                  sx={{ height: 20, fontSize: '0.7rem' }}
-                                />
-                                <Chip 
-                                  label={`Used ${template.usage_count || 0}×`}
-                                  size="small"
-                                  color={getPopularityColor(template.usage_count || 0)}
-                                  variant="outlined"
-                                  sx={{ height: 20, fontSize: '0.7rem' }}
-                                />
-                                <Typography variant="caption" color="text.secondary" sx={{ alignSelf: 'center' }}>
-                                  {formatDate(template.created_at)}
-                                </Typography>
-                              </Box>
-                            </Box>
-                            <Box sx={{ display: 'flex', gap: 1 }}>
-                              <Button
-                                size="small"
-                                variant="contained"
-                                startIcon={<PlayArrowIcon />}
-                                onClick={() => handleUseTagTemplate(template)}
-                                sx={{ 
-                                  textTransform: 'none',
-                                  fontWeight: 600,
-                                  borderRadius: 1.5,
-                                  minWidth: 'auto',
-                                  bgcolor: '#10b981',
-                                  '&:hover': { bgcolor: '#059669' }
-                                }}
-                              >
-                                Use
-                              </Button>
-                              <IconButton 
-                                size="small" 
-                                onClick={() => openTagTemplateDeleteDialog(template)}
-                                sx={{ color: '#ef4444' }}
-                              >
-                                <DeleteIcon fontSize="small" />
-                              </IconButton>
-                            </Box>
-                          </ListItem>
-                        </Grow>
-                      ))}
-                    </List>
-
-                    {/* Compact Pagination */}
-                    {filteredAndSortedTagTemplates.length > tagTemplatesPerPage && (
-                      <Box sx={{ display: 'flex', justifyContent: 'center', mt: 2 }}>
-                        <TablePagination
-                          component="div"
-                          count={filteredAndSortedTagTemplates.length}
-                          page={tagTemplatePage}
-                          onPageChange={(event, newPage) => setTagTemplatePage(newPage)}
-                          rowsPerPage={tagTemplatesPerPage}
-                          onRowsPerPageChange={(event) => {
-                            setTagTemplatesPerPage(parseInt(event.target.value, 10));
-                            setTagTemplatePage(0);
-                          }}
-                          rowsPerPageOptions={[5, 10, 15, 20]}
-                          labelDisplayedRows={({ from, to, count }) => `${from}–${to} of ${count}`}
-                          size="small"
-                        />
-                      </Box>
-                    )}
-                  </>
-                )}
-              </CardContent>
-            </Card>
-          </Fade>
-        </Grid>
-
-        {/* Quick Stats */}
-        <Grid item xs={12}>
-          <Fade in timeout={1200}>
-            <Stack spacing={2}>
-              <Card sx={{ borderRadius: 3, boxShadow: '0 4px 20px rgba(0,0,0,0.08)' }}>
-                <CardContent sx={{ p: 3 }}>
-                  <Typography variant="h6" fontWeight="600" color="#1e293b" gutterBottom>
-                    Quick Stats
-                  </Typography>
-                  <Grid container spacing={2}>
-                    <Grid item xs={6}>
-                      <Box sx={{ textAlign: 'center', p: 2, bgcolor: '#f0f9ff', borderRadius: 2 }}>
-                        <Typography variant="h4" fontWeight="700" color="#0369a1">
-                          {templateStats.totalTemplates}
-                        </Typography>
-                        <Typography variant="body2" color="#64748b">Templates</Typography>
-                      </Box>
-                    </Grid>
-                    <Grid item xs={6}>
-                      <Box sx={{ textAlign: 'center', p: 2, bgcolor: '#f0fdf4', borderRadius: 2 }}>
-                        <Typography variant="h4" fontWeight="700" color="#166534">
-                          {uploads.length}
-                        </Typography>
-                        <Typography variant="body2" color="#64748b">Uploads</Typography>
-                      </Box>
-                    </Grid>
-                  </Grid>
-                </CardContent>
-              </Card>
-
-              {templateStats.mostUsed && (
-                <Card sx={{ borderRadius: 3, boxShadow: '0 4px 20px rgba(0,0,0,0.08)' }}>
-                  <CardContent sx={{ p: 3 }}>
-                    <Typography variant="h6" fontWeight="600" color="#1e293b" gutterBottom>
-                      Most Popular Template
-                    </Typography>
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                      <Avatar sx={{ bgcolor: '#fef3c7', color: '#f59e0b' }}>
-                        <StarIcon />
-                      </Avatar>
-                      <Box>
-                        <Typography variant="subtitle1" fontWeight="600">
-                          {templateStats.mostUsed.name}
-                        </Typography>
-                        <Typography variant="body2" color="text.secondary">
-                          Used {templateStats.mostUsed.usage_count} times
-                        </Typography>
-                      </Box>
-                    </Box>
-                  </CardContent>
-                </Card>
-              )}
-            </Stack>
-          </Fade>
-        </Grid>
-      </Grid>
+          )}
+        </Stack>
+      </Fade>
 
       {/* Enhanced Recent Uploads */}
       <Fade in timeout={1400}>
-        <Card sx={{ mt: 4, borderRadius: 3, boxShadow: '0 4px 20px rgba(0,0,0,0.08)' }}>
+        <Card sx={{ borderRadius: 3, boxShadow: '0 4px 20px rgba(0,0,0,0.08)' }}>
           <CardContent sx={{ p: 3 }}>
             {/* Header */}
             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
@@ -1129,6 +658,13 @@ const Dashboard = () => {
                   </Typography>
                 </Box>
               </Box>
+              <Button
+                variant="contained"
+                startIcon={<UploadFileIcon />}
+                onClick={handleUploadClick}
+              >
+                Start Upload
+              </Button>
             </Box>
 
             {/* Enhanced Search & Filter */}
@@ -1163,14 +699,22 @@ const Dashboard = () => {
                 <Select value={uploadSortBy} label="Sort by" onChange={(e) => setUploadSortBy(e.target.value)}>
                   <MenuItem value="upload_date">Date</MenuItem>
                   <MenuItem value="template_name">Name</MenuItem>
-                  <MenuItem value="rows_processed">Rows</MenuItem>
                 </Select>
               </FormControl>
               <FormControl size="small" sx={{ minWidth: 100 }}>
                 <InputLabel>Order</InputLabel>
                 <Select value={uploadSortOrder} label="Order" onChange={(e) => setUploadSortOrder(e.target.value)}>
-                  <MenuItem value="desc">Newest</MenuItem>
-                  <MenuItem value="asc">Oldest</MenuItem>
+                  {uploadSortBy === 'upload_date' ? (
+                    [
+                      <MenuItem key="desc" value="desc">Latest</MenuItem>,
+                      <MenuItem key="asc" value="asc">Earliest</MenuItem>
+                    ]
+                  ) : (
+                    [
+                      <MenuItem key="asc" value="asc">A → Z</MenuItem>,
+                      <MenuItem key="desc" value="desc">Z → A</MenuItem>
+                    ]
+                  )}
                 </Select>
               </FormControl>
               {(uploadSearchTerm || uploadStatusFilter !== 'all' || uploadSortBy !== 'upload_date' || uploadSortOrder !== 'desc') && (
@@ -1323,6 +867,410 @@ const Dashboard = () => {
         </Card>
       </Fade>
 
+      <Grid container spacing={3} sx={{ mt: 4 }}>
+        {/* Compact Templates Section */}
+        <Grid item xs={12} lg={6}>
+          <Fade in timeout={1000}>
+            <Card sx={{ borderRadius: 3, boxShadow: '0 4px 20px rgba(0,0,0,0.08)', height: '100%' }}>
+              <CardContent sx={{ p: 3 }}>
+                {/* Header */}
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                    <Avatar sx={{ bgcolor: '#3b82f6', width: 40, height: 40 }}>
+                      <LibraryBooksIcon />
+                    </Avatar>
+                    <Box>
+                      <Typography variant="h5" fontWeight="600" color="#1e293b">
+                        Mapping Templates
+                      </Typography>
+                      <Typography variant="body2" color="#64748b">
+                        {templateStats.totalTemplates} templates • {templateStats.totalUsage} total uses
+                      </Typography>
+                    </Box>
+                  </Box>
+                  <Box sx={{ display: 'flex', gap: 1 }}>
+                    <Tooltip title="Refresh">
+                      <IconButton onClick={() => window.location.reload()} size="small">
+                        <RefreshIcon />
+                      </IconButton>
+                    </Tooltip>
+                  </Box>
+                </Box>
+
+                {/* Compact Search & Filter */}
+                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ mb: 3 }}>
+                  <TextField
+                    size="small"
+                    placeholder="Search templates..."
+                    value={templateSearchTerm}
+                    onChange={(e) => setTemplateSearchTerm(e.target.value)}
+                    InputProps={{
+                      startAdornment: <InputAdornment position="start"><SearchIcon size="small" /></InputAdornment>,
+                      endAdornment: templateSearchTerm && (
+                        <InputAdornment position="end">
+                          <IconButton size="small" onClick={() => setTemplateSearchTerm('')}>
+                            <ClearIcon fontSize="small" />
+                          </IconButton>
+                        </InputAdornment>
+                      )
+                    }}
+                    sx={{ flex: 1 }}
+                  />
+                  <FormControl size="small" sx={{ minWidth: 120 }}>
+                    <InputLabel>Sort by</InputLabel>
+                    <Select value={templateSortBy} label="Sort by" onChange={(e) => setTemplateSortBy(e.target.value)}>
+                      <MenuItem value="name">Name</MenuItem>
+                      <MenuItem value="created_at">Date</MenuItem>
+                      <MenuItem value="usage_count">Usage</MenuItem>
+                    </Select>
+                  </FormControl>
+                  <FormControl size="small" sx={{ minWidth: 100 }}>
+                    <InputLabel>Order</InputLabel>
+                    <Select value={templateSortOrder} label="Order" onChange={(e) => setTemplateSortOrder(e.target.value)}>
+                      <MenuItem value="asc">{templateSortBy === 'name' ? 'A-Z' : templateSortBy === 'created_at' ? 'Earliest' : 'Least'}</MenuItem>
+                      <MenuItem value="desc">{templateSortBy === 'name' ? 'Z-A' : templateSortBy === 'created_at' ? 'Latest' : 'Most'}</MenuItem>
+                    </Select>
+                  </FormControl>
+                  {(templateSearchTerm || templateSortBy !== 'usage_count' || templateSortOrder !== 'desc') && (
+                    <Button size="small" onClick={clearTemplateFilters} startIcon={<ClearIcon />}>
+                      Clear
+                    </Button>
+                  )}
+                </Stack>
+
+                {/* Compact Template List */}
+                {templatesLoading ? (
+                  <Box sx={{ textAlign: 'center', py: 4 }}>
+                    <CircularProgress size={32} />
+                    <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                      Loading templates...
+                    </Typography>
+                  </Box>
+                ) : templatesError ? (
+                  <Alert severity="error" sx={{ mb: 2 }}>{templatesError}</Alert>
+                ) : templateStats.totalTemplates === 0 ? (
+                  <Box sx={{ textAlign: 'center', py: 6, color: '#64748b' }}>
+                    <LibraryBooksIcon sx={{ fontSize: 48, mb: 2, opacity: 0.5 }} />
+                    <Typography variant="h6" fontWeight="500" gutterBottom>
+                      No Templates Yet
+                    </Typography>
+                    <Typography variant="body2">
+                      Create your first template by saving a column mapping
+                    </Typography>
+                  </Box>
+                ) : (
+                  <>
+                    <List sx={{ p: 0 }}>
+                      {paginatedTemplates.map((template, index) => (
+                        <Grow in timeout={600 + index * 100} key={template.id}>
+                          <ListItem 
+                            sx={{ 
+                              border: '1px solid #e2e8f0',
+                              borderRadius: 2,
+                              mb: 1,
+                              '&:hover': { 
+                                backgroundColor: '#f8fafc',
+                                borderColor: '#3b82f6',
+                                transform: 'translateY(-1px)',
+                                boxShadow: '0 4px 12px rgba(59, 130, 246, 0.15)'
+                              },
+                              transition: 'all 0.2s ease'
+                            }}
+                          >
+                            <ListItemAvatar>
+                              <Avatar sx={{ bgcolor: '#f1f5f9', color: '#3b82f6', width: 36, height: 36 }}>
+                                <LibraryBooksIcon fontSize="small" />
+                              </Avatar>
+                            </ListItemAvatar>
+                            <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
+                                <Typography variant="subtitle2" fontWeight="600" noWrap sx={{ color: '#1e293b' }}>
+                                  {template.name}
+                                </Typography>
+                                {templateStats.mostUsed && templateStats.mostUsed.id === template.id && template.usage_count > 0 && (
+                                  <StarIcon sx={{ color: '#f59e0b', fontSize: 16 }} />
+                                )}
+                              </Box>
+                              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                                <Chip 
+                                  label={`${template.total_mappings} mappings`}
+                                  size="small"
+                                  variant="outlined"
+                                  sx={{ height: 20, fontSize: '0.7rem' }}
+                                />
+                                <Chip 
+                                  label={`Used ${template.usage_count || 0}×`}
+                                  size="small"
+                                  color={getPopularityColor(template.usage_count || 0)}
+                                  variant="outlined"
+                                  sx={{ height: 20, fontSize: '0.7rem' }}
+                                />
+                                <Typography variant="caption" color="text.secondary" sx={{ alignSelf: 'center' }}>
+                                  {formatDate(template.created_at)}
+                                </Typography>
+                              </Box>
+                            </Box>
+                            <Box sx={{ display: 'flex', gap: 1 }}>
+                              <Button
+                                size="small"
+                                variant="contained"
+                                startIcon={<PlayArrowIcon />}
+                                onClick={() => handleUseTemplate(template)}
+                                sx={{ 
+                                  textTransform: 'none',
+                                  fontWeight: 600,
+                                  borderRadius: 1.5,
+                                  minWidth: 'auto'
+                                }}
+                              >
+                                Use
+                              </Button>
+                              <IconButton 
+                                size="small" 
+                                onClick={() => openDeleteDialog(template)}
+                                sx={{ color: '#ef4444' }}
+                              >
+                                <DeleteIcon fontSize="small" />
+                              </IconButton>
+                            </Box>
+                          </ListItem>
+                        </Grow>
+                      ))}
+                    </List>
+
+                    {/* Compact Pagination */}
+                    {filteredAndSortedTemplates.length > templatesPerPage && (
+                      <Box sx={{ display: 'flex', justifyContent: 'center', mt: 2 }}>
+                        <TablePagination
+                          component="div"
+                          count={filteredAndSortedTemplates.length}
+                          page={templatePage}
+                          onPageChange={(event, newPage) => setTemplatePage(newPage)}
+                          rowsPerPage={templatesPerPage}
+                          onRowsPerPageChange={(event) => {
+                            setTemplatesPerPage(parseInt(event.target.value, 10));
+                            setTemplatePage(0);
+                          }}
+                          rowsPerPageOptions={[5, 10, 15, 20]}
+                          labelDisplayedRows={({ from, to, count }) => `${from}–${to} of ${count}`}
+                          size="small"
+                        />
+                      </Box>
+                    )}
+                  </>
+                )}
+              </CardContent>
+            </Card>
+          </Fade>
+        </Grid>
+
+        {/* Tag Templates Section */}
+        <Grid item xs={12} lg={6}>
+          <Fade in timeout={1100}>
+            <Card sx={{ borderRadius: 3, boxShadow: '0 4px 20px rgba(0,0,0,0.08)', height: '100%' }}>
+              <CardContent sx={{ p: 3 }}>
+                {/* Header */}
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                    <Avatar sx={{ bgcolor: '#10b981', width: 40, height: 40 }}>
+                      <ScienceIcon />
+                    </Avatar>
+                    <Box>
+                      <Typography variant="h5" fontWeight="600" color="#1e293b">
+                        Tag Templates
+                      </Typography>
+                      <Typography variant="body2" color="#64748b">
+                        {tagTemplates.length} templates • Smart tag rules
+                      </Typography>
+                    </Box>
+                  </Box>
+                  <Box sx={{ display: 'flex', gap: 1 }}>
+                    <Tooltip title="Create Smart Tag Template">
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        onClick={handleOpenFormulaBuilder}
+                        startIcon={<ScienceIcon />}
+                        sx={{ whiteSpace: 'nowrap' }}
+                      >
+                        New Template
+                      </Button>
+                    </Tooltip>
+                    <Tooltip title="Refresh">
+                      <IconButton onClick={() => loadTagTemplates()} size="small">
+                        <RefreshIcon />
+                      </IconButton>
+                    </Tooltip>
+                  </Box>
+                </Box>
+
+                {/* Compact Search & Filter */}
+                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ mb: 3 }}>
+                  <TextField
+                    size="small"
+                    placeholder="Search tag templates..."
+                    value={tagTemplateSearchTerm}
+                    onChange={(e) => setTagTemplateSearchTerm(e.target.value)}
+                    InputProps={{
+                      startAdornment: <InputAdornment position="start"><SearchIcon size="small" /></InputAdornment>,
+                      endAdornment: tagTemplateSearchTerm && (
+                        <InputAdornment position="end">
+                          <IconButton size="small" onClick={() => setTagTemplateSearchTerm('')}>
+                            <ClearIcon fontSize="small" />
+                          </IconButton>
+                        </InputAdornment>
+                      )
+                    }}
+                    sx={{ flex: 1 }}
+                  />
+                  <FormControl size="small" sx={{ minWidth: 120 }}>
+                    <InputLabel>Sort by</InputLabel>
+                    <Select value={tagTemplateSortBy} label="Sort by" onChange={(e) => setTagTemplateSortBy(e.target.value)}>
+                      <MenuItem value="name">Name</MenuItem>
+                      <MenuItem value="created_at">Date</MenuItem>
+                      <MenuItem value="usage_count">Usage</MenuItem>
+                    </Select>
+                  </FormControl>
+                  <FormControl size="small" sx={{ minWidth: 100 }}>
+                    <InputLabel>Order</InputLabel>
+                    <Select value={tagTemplateSortOrder} label="Order" onChange={(e) => setTagTemplateSortOrder(e.target.value)}>
+                      <MenuItem value="asc">{tagTemplateSortBy === 'name' ? 'A-Z' : tagTemplateSortBy === 'created_at' ? 'Earliest' : 'Least'}</MenuItem>
+                      <MenuItem value="desc">{tagTemplateSortBy === 'name' ? 'Z-A' : tagTemplateSortBy === 'created_at' ? 'Latest' : 'Most'}</MenuItem>
+                    </Select>
+                  </FormControl>
+                  {(tagTemplateSearchTerm || tagTemplateSortBy !== 'usage_count' || tagTemplateSortOrder !== 'desc') && (
+                    <Button size="small" onClick={clearTagTemplateFilters} startIcon={<ClearIcon />}>
+                      Clear
+                    </Button>
+                  )}
+                </Stack>
+
+                {/* Compact Tag Template List */}
+                {tagTemplatesLoading ? (
+                  <Box sx={{ textAlign: 'center', py: 4 }}>
+                    <CircularProgress size={32} />
+                    <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                      Loading tag templates...
+                    </Typography>
+                  </Box>
+                ) : tagTemplatesError ? (
+                  <Alert severity="error" sx={{ mb: 2 }}>{tagTemplatesError}</Alert>
+                ) : tagTemplates.length === 0 ? (
+                  <Box sx={{ textAlign: 'center', py: 6, color: '#64748b' }}>
+                    <ScienceIcon sx={{ fontSize: 48, mb: 2, opacity: 0.5 }} />
+                    <Typography variant="h6" fontWeight="500" gutterBottom>
+                      No Tag Templates Yet
+                    </Typography>
+                    <Typography variant="body2">
+                      Create your first template by saving smart tag rules
+                    </Typography>
+                  </Box>
+                ) : (
+                  <>
+                    <List sx={{ p: 0 }}>
+                      {paginatedTagTemplates.map((template, index) => (
+                        <Grow in timeout={600 + index * 100} key={template.id}>
+                          <ListItem 
+                            sx={{ 
+                              border: '1px solid #e2e8f0',
+                              borderRadius: 2,
+                              mb: 1,
+                              '&:hover': { 
+                                backgroundColor: '#f0fdf4',
+                                borderColor: '#10b981',
+                                transform: 'translateY(-1px)',
+                                boxShadow: '0 4px 12px rgba(16, 185, 129, 0.15)'
+                              },
+                              transition: 'all 0.2s ease'
+                            }}
+                          >
+                            <ListItemAvatar>
+                              <Avatar sx={{ bgcolor: '#ecfdf5', color: '#10b981', width: 36, height: 36 }}>
+                                <ScienceIcon fontSize="small" />
+                              </Avatar>
+                            </ListItemAvatar>
+                            <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
+                                <Typography variant="subtitle2" fontWeight="600" noWrap sx={{ color: '#1e293b' }}>
+                                  {template.name}
+                                </Typography>
+                              </Box>
+                              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                                <Chip 
+                                  label={`${(template.formula_rules || []).length} rules`}
+                                  size="small"
+                                  variant="outlined"
+                                  sx={{ height: 20, fontSize: '0.7rem' }}
+                                />
+                                <Chip 
+                                  label={`Used ${template.usage_count || 0}×`}
+                                  size="small"
+                                  color={getPopularityColor(template.usage_count || 0)}
+                                  variant="outlined"
+                                  sx={{ height: 20, fontSize: '0.7rem' }}
+                                />
+                                <Typography variant="caption" color="text.secondary" sx={{ alignSelf: 'center' }}>
+                                  {formatDate(template.created_at)}
+                                </Typography>
+                              </Box>
+                            </Box>
+                            <Box sx={{ display: 'flex', gap: 1 }}>
+                              <Button
+                                size="small"
+                                variant="contained"
+                                startIcon={<PlayArrowIcon />}
+                                onClick={() => handleUseTagTemplate(template)}
+                                sx={{ 
+                                  textTransform: 'none',
+                                  fontWeight: 600,
+                                  borderRadius: 1.5,
+                                  minWidth: 'auto',
+                                  bgcolor: '#10b981',
+                                  '&:hover': { bgcolor: '#059669' }
+                                }}
+                              >
+                                Use
+                              </Button>
+                              <IconButton 
+                                size="small" 
+                                onClick={() => openTagTemplateDeleteDialog(template)}
+                                sx={{ color: '#ef4444' }}
+                              >
+                                <DeleteIcon fontSize="small" />
+                              </IconButton>
+                            </Box>
+                          </ListItem>
+                        </Grow>
+                      ))}
+                    </List>
+
+                    {/* Compact Pagination */}
+                    {filteredAndSortedTagTemplates.length > tagTemplatesPerPage && (
+                      <Box sx={{ display: 'flex', justifyContent: 'center', mt: 2 }}>
+                        <TablePagination
+                          component="div"
+                          count={filteredAndSortedTagTemplates.length}
+                          page={tagTemplatePage}
+                          onPageChange={(event, newPage) => setTagTemplatePage(newPage)}
+                          rowsPerPage={tagTemplatesPerPage}
+                          onRowsPerPageChange={(event) => {
+                            setTagTemplatesPerPage(parseInt(event.target.value, 10));
+                            setTagTemplatePage(0);
+                          }}
+                          rowsPerPageOptions={[5, 10, 15, 20]}
+                          labelDisplayedRows={({ from, to, count }) => `${from}–${to} of ${count}`}
+                          size="small"
+                        />
+                      </Box>
+                    )}
+                  </>
+                )}
+              </CardContent>
+            </Card>
+          </Fade>
+        </Grid>
+      </Grid>
+
       {/* Delete Confirmation Dialog */}
       <Dialog
         open={deleteDialogOpen}
@@ -1331,18 +1279,23 @@ const Dashboard = () => {
         fullWidth
         PaperProps={{ sx: { borderRadius: 3 } }}
       >
-        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-          <Avatar sx={{ bgcolor: '#fee2e2', color: '#dc2626' }}>
-            <DeleteIcon />
-          </Avatar>
-          <Box>
-            <Typography variant="h6" fontWeight="600">
-              Delete Template
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              This action cannot be undone
-            </Typography>
+        <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <Avatar sx={{ bgcolor: '#fee2e2', color: '#dc2626' }}>
+              <DeleteIcon />
+            </Avatar>
+            <Box>
+              <Typography variant="h6" fontWeight="600">
+                Delete Template
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                This action cannot be undone
+              </Typography>
+            </Box>
           </Box>
+          <IconButton onClick={() => setDeleteDialogOpen(false)} disabled={deleting}>
+            <ClearIcon />
+          </IconButton>
         </DialogTitle>
         <DialogContent>
           <DialogContentText>
@@ -1375,18 +1328,23 @@ const Dashboard = () => {
         fullWidth
         PaperProps={{ sx: { borderRadius: 3 } }}
       >
-        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-          <Avatar sx={{ bgcolor: '#fee2e2', color: '#dc2626' }}>
-            <DeleteIcon />
-          </Avatar>
-          <Box>
-            <Typography variant="h6" fontWeight="600">
-              Delete Tag Template
-            </Typography>
-            <Typography variant="body2" color="text.secondary">
-              This action cannot be undone
-            </Typography>
+        <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <Avatar sx={{ bgcolor: '#fee2e2', color: '#dc2626' }}>
+              <DeleteIcon />
+            </Avatar>
+            <Box>
+              <Typography variant="h6" fontWeight="600">
+                Delete Tag Template
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                This action cannot be undone
+              </Typography>
+            </Box>
           </Box>
+          <IconButton onClick={() => setTagTemplateDeleteDialogOpen(false)} disabled={deletingTagTemplate}>
+            <ClearIcon />
+          </IconButton>
         </DialogTitle>
         <DialogContent>
           <DialogContentText>
@@ -1426,11 +1384,11 @@ const Dashboard = () => {
       )}
 
       {/* Standalone Formula Builder Dialog */}
-      {/* <StandaloneFormulaBuilder
+      <StandaloneFormulaBuilder
         open={formulaBuilderOpen}
         onClose={handleCloseFormulaBuilder}
         onSave={handleSaveFormulaTemplate}
-      /> */}
+      />
     </Box>
   );
 };

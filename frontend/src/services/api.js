@@ -2,7 +2,7 @@
 
 import axios from 'axios';
 
-const API_URL = 'https://kartik-excel-mapper-backend-working.azurewebsites.net/api';
+const API_URL = '/api';
 
 // Auto-create demo session when needed
 let demoSessionId = null;
@@ -77,7 +77,7 @@ const api = {
   saveColumnMappings: (sessionId, mappings) =>
     axios.post(`${API_URL}/mapping/save/`, {
       session_id: sessionId,
-      mappings
+      ...mappings
     }),
 
   /**

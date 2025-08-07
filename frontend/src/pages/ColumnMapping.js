@@ -12,16 +12,10 @@ import ReactFlow, {
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import {
-  Zap,
   Trash2,
   RotateCcw,
-  Eye,
-  EyeOff,
-  Save,
   ArrowRight,
   Brain,
-  Target,
-  Upload,
   CheckCircle,
   AlertCircle,
   Users,
@@ -30,16 +24,15 @@ import {
   RefreshCw,
   Library,
   X,
-  AlertTriangle,
   Settings,
-  CheckSquare,
-  HelpCircle
 } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
-  CircularProgress,
-  Typography
+  DialogTitle,
+  DialogActions,
+  Button,
+  Typography,
 } from '@mui/material';
 import api from '../services/api';
 
@@ -52,6 +45,8 @@ const CustomNode = ({ data, id }) => {
   const isFromTemplate = data.isFromTemplate;
   const isSpecificationMapping = data.isSpecificationMapping;
   const hasDefaultValue = data.hasDefaultValue;
+  const mappedToLabel = data.mappedToLabel || '';
+  const mappedFromLabel = data.mappedFromLabel || '';
   
   return (
     <div className={`
@@ -93,8 +88,8 @@ const CustomNode = ({ data, id }) => {
         )}
         
         {/* Node content */}
-        <div className="px-3 break-words text-center leading-tight" title={data.label}>
-          {data.label}
+        <div className="px-3 break-words text-center leading-tight" title={data.originalLabel}>
+          {data.originalLabel}
         </div>
         
         {/* Status indicators */}
@@ -106,24 +101,31 @@ const CustomNode = ({ data, id }) => {
           </div>
         )}
         
-        {/* Template indicator */}
-        {isFromTemplate && (
-          <div className="absolute -bottom-2 -right-2 bg-green-500 text-white text-xs px-2 py-1 rounded-full font-bold shadow-lg">
-            Template
+        {/* Source node mapping indicator */}
+        {isSource && isConnected && mappedFromLabel && mappedFromLabel.trim() !== '' && (
+          <div className="absolute -bottom-2 -right-2 bg-blue-500 text-white text-xs px-2 py-1 rounded-full font-bold shadow-lg">
+            Map-{mappedFromLabel}
           </div>
         )}
         
-        {/* Specification mapping indicator */}
-        {isSpecificationMapping && (
+        {/* Template indicator - Show Map-{Column Name} for manual mappings */}
+        {isFromTemplate && mappedToLabel && mappedToLabel.trim() !== '' && (
+          <div className="absolute -bottom-2 -right-2 bg-green-500 text-white text-xs px-2 py-1 rounded-full font-bold shadow-lg">
+            Map-{mappedToLabel}
+          </div>
+        )}
+        
+        {/* Specification mapping indicator - Show A.Map-{Column Name} for automatic mappings */}
+        {isSpecificationMapping && mappedToLabel && mappedToLabel.trim() !== '' && (
           <div className="absolute -bottom-2 -right-2 bg-orange-500 text-white text-xs px-2 py-1 rounded-full font-bold shadow-lg">
-            Spec
+            A.Map-{mappedToLabel}
           </div>
         )}
         
         {/* Default value indicator for unmapped template fields */}
         {!isSource && hasDefaultValue && !isConnected && (
           <div className="absolute -bottom-2 -right-2 bg-blue-500 text-white text-xs px-2 py-1 rounded-full font-bold shadow-lg">
-            Default
+            Default-{data.defaultValue}
           </div>
         )}
         
@@ -152,7 +154,7 @@ const CustomNode = ({ data, id }) => {
               : 'bg-gradient-to-r from-red-400 to-red-600 text-white'
             }
           `}>
-            {Math.round(confidence * 100)}%
+            {Math.round(confidence)}%
           </div>
         </div>
       )}
@@ -178,12 +180,12 @@ export default function ColumnMapping() {
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
   const [mappingHistory, setMappingHistory] = useState([]);
-  const [showConfidence, setShowConfidence] = useState(true);
   const [selectedEdge, setSelectedEdge] = useState(null);
   const [selectedSourceNode, setSelectedSourceNode] = useState(null);
   
   // Auto mapping state
   const [isAutoMapping, setIsAutoMapping] = useState(false);
+  const [showAutoMapConfirm, setShowAutoMapConfirm] = useState(false);
   
   // Review state
   const [isReviewing, setIsReviewing] = useState(false);
@@ -202,7 +204,6 @@ export default function ColumnMapping() {
   const [templateSuccess, setTemplateSuccess] = useState(false);
 
   // Specification handling state
-  const [specificationOpportunity, setSpecificationOpportunity] = useState(null);
   // COMMENTED OUT: Specification overflow state
   // const [specificationOverflow, setSpecificationOverflow] = useState(null);
   // const [showSpecOverflowAlert, setShowSpecOverflowAlert] = useState(false);
@@ -251,14 +252,18 @@ export default function ColumnMapping() {
           console.error('❌ template_headers is not an array:', typeof template_headers, template_headers);
         }
         
-        setClientHeaders(client_headers);
-        setTemplateHeaders(template_headers);
+        // Validate headers before setting
+        const validClientHeaders = Array.isArray(client_headers) ? client_headers : [];
+        const validTemplateHeaders = Array.isArray(template_headers) ? template_headers : [];
+        
+        setClientHeaders(validClientHeaders);
+        setTemplateHeaders(validTemplateHeaders);
         
         console.log('✅ Headers set successfully:', {
-          clientCount: client_headers.length,
-          templateCount: template_headers.length,
-          clientHeaders: client_headers,
-          templateHeaders: template_headers
+          clientCount: validClientHeaders.length,
+          templateCount: validTemplateHeaders.length,
+          clientHeaders: validClientHeaders,
+          templateHeaders: validTemplateHeaders
         });
         
         // DEBUG: Additional validation
@@ -391,6 +396,7 @@ export default function ColumnMapping() {
   // Apply existing mappings to the React Flow
   const applyExistingMappingsToFlow = (mappings, clientHdrs, templateHdrs) => {
     const newEdges = [];
+    const mappingPairs = [];
     
     console.log('🔍 Applying existing mappings:', mappings);
     console.log('🔍 Client headers:', clientHdrs);
@@ -411,6 +417,7 @@ export default function ColumnMapping() {
         if (sourceIdx >= 0 && targetIdx >= 0) {
           const edge = createEdge(sourceIdx, targetIdx, false, null, true); // true = from template
           newEdges.push(edge);
+          mappingPairs.push({ sourceIdx, targetIdx, sourceCol, templateCol });
         }
       });
     } else {
@@ -423,6 +430,7 @@ export default function ColumnMapping() {
         if (sourceIdx >= 0 && targetIdx >= 0) {
           const edge = createEdge(sourceIdx, targetIdx, false, null, true); // true = from template
           newEdges.push(edge);
+          mappingPairs.push({ sourceIdx, targetIdx, sourceCol, templateCol });
         }
       });
     }
@@ -434,22 +442,47 @@ export default function ColumnMapping() {
     
     // Update node connection states
     setTimeout(() => {
-      setNodes(prev => prev.map(node => {
-        const isConnected = newEdges.some(edge => 
-          edge.source === node.id || edge.target === node.id
-        );
-        const isFromTemplate = newEdges.some(edge => 
-          (edge.source === node.id || edge.target === node.id) && edge.data?.isFromTemplate
-        );
-        return {
-          ...node,
-          data: { 
-            ...node.data, 
+      setNodes(prev => {
+        const updatedNodes = [...prev];
+        
+        // First, update all nodes with basic connection state
+        updatedNodes.forEach(node => {
+          const isConnected = newEdges.some(edge =>
+            edge.source === node.id || edge.target === node.id
+          );
+          const isFromTemplate = newEdges.some(edge =>
+            (edge.source === node.id || edge.target === node.id) && edge.data?.isFromTemplate
+          );
+          
+          node.data = {
+            ...node.data,
             isConnected,
             isFromTemplate
+          };
+        });
+        
+        // Then, update target nodes with the correct mapping labels
+        mappingPairs.forEach(({ sourceIdx, targetIdx, sourceCol, templateCol }) => {
+          const targetNode = updatedNodes.find(n => n.id === `t-${targetIdx}`);
+          const sourceNode = updatedNodes.find(n => n.id === `c-${sourceIdx}`);
+          
+          if (targetNode) {
+            targetNode.data = {
+              ...targetNode.data,
+              mappedToLabel: sourceCol
+            };
           }
-        };
-      }));
+          
+          if (sourceNode) {
+            sourceNode.data = {
+              ...sourceNode.data,
+              mappedFromLabel: templateCol
+            };
+          }
+        });
+        
+        return updatedNodes;
+      });
     }, 100);
     
     // Save to mapping history
@@ -478,8 +511,9 @@ export default function ColumnMapping() {
       id: `c-${idx}`,
       type: 'custom',
       position: { x: 20, y: startY + idx * (nodeHeight + nodeSpacing) },
-      data: { 
-        label: header, 
+      data: {
+        label: header,
+        originalLabel: header,
         isConnected: false,
         isSelected: false,
         isFromTemplate: false,
@@ -513,6 +547,7 @@ export default function ColumnMapping() {
               },
               data: { 
                 label: templateCol, 
+                originalLabel: templateCol,
                 isConnected: false,
                 isSelected: false,
                 isFromTemplate: false,
@@ -538,6 +573,7 @@ export default function ColumnMapping() {
             position: { x: 600, y: unmatchedY },
             data: { 
               label: header, 
+              originalLabel: header,
               isConnected: false,
               isSelected: false,
               isFromTemplate: false,
@@ -559,6 +595,7 @@ export default function ColumnMapping() {
         position: { x: 600, y: 40 + idx * (nodeHeight + nodeSpacing) },
         data: { 
           label: header, 
+          originalLabel: header,
           isConnected: false,
           isSelected: false,
           isFromTemplate: false,
@@ -656,13 +693,16 @@ export default function ColumnMapping() {
     setEdges([]);
     setNodes(prev => prev.map(node => ({
       ...node,
-      data: { 
-        ...node.data, 
-        isConnected: false, 
+      data: {
+        ...node.data,
+        label: node.data.originalLabel,
+        isConnected: false,
         isFromTemplate: false,
         isSpecificationMapping: false,
-        confidence: undefined, 
-        isSelected: false 
+        confidence: undefined,
+        isSelected: false,
+        mappedToLabel: '',
+        mappedFromLabel: ''
       }
     })));
     setSelectedSourceNode(null);
@@ -677,7 +717,6 @@ export default function ColumnMapping() {
     console.log('Cleared template mappings');
   };
 
-  // Check if all template fields are mapped
   const isCompleteMapping = () => {
     const targetNodeIds = templateHeaders.map((_, idx) => `t-${idx}`);
     const mappedTargets = edges.map(edge => edge.target);
@@ -712,20 +751,38 @@ export default function ColumnMapping() {
       setEdges(prev => addEdge(newEdge, prev));
       
       // Update node connection states
+      const sourceNode = nodes.find(n => n.id === selectedSourceNode);
+      
       setNodes(prev => prev.map(n => {
-        if (n.id === selectedSourceNode || n.id === node.id) {
-          return { 
-            ...n, 
-            data: { 
-              ...n.data, 
-              isConnected: true, 
+        if (n.id === selectedSourceNode) {
+          // Update source node with target node's label
+          const targetNode = prev.find(t => t.id === node.id);
+          return {
+            ...n,
+            data: {
+              ...n.data,
+              isSelected: false,
+              isConnected: true,
+              mappedFromLabel: targetNode ? targetNode.data.originalLabel : ''
+            }
+          };
+        }
+        if (n.id === node.id) {
+          // Update target node with source node's label
+          return {
+            ...n,
+            data: {
+              ...n.data,
+              label: node.data.originalLabel,
+              mappedToLabel: sourceNode.data.originalLabel,
+              isConnected: true,
               isSelected: false,
               isFromTemplate: false, // Manual mapping overrides template
               isSpecificationMapping: false // Manual mapping overrides specification
-            } 
+            }
           };
         }
-        return { ...n, data: { ...n.data, isSelected: false } };
+        return n;
       }));
       
       setSelectedSourceNode(null);
@@ -745,7 +802,17 @@ export default function ColumnMapping() {
   }, [selectedSourceNode, nodes, edges, setNodes, setEdges, templateHeaders, defaultValueMappings]);
 
   // Auto-mapping using real API with enhanced specification handling
+  // Auto-mapping using real API with enhanced specification handling
   const handleAutoMap = async () => {
+    if (edges.length > 0) {
+      setShowAutoMapConfirm(true);
+    } else {
+      proceedWithAutoMap();
+    }
+  };
+
+  const proceedWithAutoMap = async () => {
+    setShowAutoMapConfirm(false);
     setIsAutoMapping(true);
     setMappingHistory(prev => [...prev, { nodes, edges }]);
     
@@ -767,7 +834,7 @@ export default function ColumnMapping() {
       
       // Handle specification opportunity
       if (specification_opportunity && specification_opportunity.detected) {
-        setSpecificationOpportunity(specification_opportunity);
+        // setSpecificationOpportunity(specification_opportunity);
         console.log('Specification opportunity detected:', specification_opportunity);
       }
       
@@ -815,16 +882,30 @@ export default function ColumnMapping() {
         
         // Update node connection states
         const mapping = mappings[i];
+        const sourceNode = nodes.find(n => n.id === `c-${mapping.sourceIdx}`);
         setNodes(prev => prev.map(node => {
-          if (node.id === `c-${mapping.sourceIdx}` || node.id === `t-${mapping.targetIdx}`) {
+          if (node.id === `c-${mapping.sourceIdx}`) {
+            const targetNode = prev.find(n => n.id === `t-${mapping.targetIdx}`);
             return {
               ...node,
-              data: { 
-                ...node.data, 
+              data: {
+                ...node.data,
+                isConnected: true,
+                mappedFromLabel: targetNode ? targetNode.data.originalLabel : ''
+              }
+            };
+          }
+          if (node.id === `t-${mapping.targetIdx}`) {
+            return {
+              ...node,
+              data: {
+                ...node.data,
+                label: node.data.originalLabel,
+                mappedToLabel: sourceNode.data.originalLabel,
                 isConnected: true,
                 isFromTemplate: false, // AI mapping, not template
                 isSpecificationMapping: mapping.isSpecificationMapping,
-                confidence: node.id === `t-${mapping.targetIdx}` ? mapping.confidence : undefined
+                confidence: mapping.confidence
               }
             };
           }
@@ -946,17 +1027,36 @@ export default function ColumnMapping() {
     );
     setEdges(prevEdges => addEdge(newEdge, prevEdges));
     
+    // Get source and target nodes
+    const sourceNode = nodes.find(n => n.id === connection.source);
+    const targetNode = nodes.find(n => n.id === connection.target);
+    
     // Update node connection states
     setNodes(prev => prev.map(node => {
-      if (node.id === connection.source || node.id === connection.target) {
-        return { 
-          ...node, 
-          data: { 
-            ...node.data, 
+      if (node.id === connection.source) {
+        // Update source node with target node's label
+        return {
+          ...node,
+          data: {
+            ...node.data,
             isConnected: true,
             isFromTemplate: false, // Manual connection overrides template
-            isSpecificationMapping: false // Manual connection overrides specification
-          } 
+            isSpecificationMapping: false, // Manual connection overrides specification
+            mappedFromLabel: targetNode ? targetNode.data.originalLabel : ''
+          }
+        };
+      }
+      if (node.id === connection.target) {
+        // Update target node with source node's label
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            isConnected: true,
+            isFromTemplate: false, // Manual connection overrides template
+            isSpecificationMapping: false, // Manual connection overrides specification
+            mappedToLabel: sourceNode ? sourceNode.data.originalLabel : ''
+          }
         };
       }
       return node;
@@ -981,19 +1081,37 @@ export default function ColumnMapping() {
       setTimeout(() => {
         setNodes(prev => prev.map(node => {
           if (edgeToDelete && (node.id === edgeToDelete.source || node.id === edgeToDelete.target)) {
-            const stillConnected = edges.some(edge => 
+            const stillConnected = edges.some(edge =>
               edge.id !== selectedEdge && (edge.source === node.id || edge.target === node.id)
             );
-            return {
-              ...node,
-              data: { 
-                ...node.data, 
-                isConnected: stillConnected,
-                isFromTemplate: stillConnected ? node.data.isFromTemplate : false,
-                isSpecificationMapping: stillConnected ? node.data.isSpecificationMapping : false,
-                confidence: node.id === edgeToDelete.target ? undefined : node.data.confidence
-              }
-            };
+            
+            if (stillConnected) {
+              // Node is still connected to other edges
+              return {
+                ...node,
+                data: {
+                  ...node.data,
+                  isConnected: true,
+                  isFromTemplate: node.data.isFromTemplate,
+                  isSpecificationMapping: node.data.isSpecificationMapping
+                }
+              };
+            } else {
+              // Node is no longer connected to any edges - reset all mapping properties
+              return {
+                ...node,
+                data: {
+                  ...node.data,
+                  label: node.data.originalLabel,
+                  isConnected: false,
+                  isFromTemplate: false,
+                  isSpecificationMapping: false,
+                  confidence: undefined,
+                  mappedToLabel: '',
+                  mappedFromLabel: ''
+                }
+              };
+            }
           }
           return node;
         }));
@@ -1009,13 +1127,16 @@ export default function ColumnMapping() {
     setEdges([]);
     setNodes(prev => prev.map(node => ({
       ...node,
-      data: { 
-        ...node.data, 
-        isConnected: false, 
+      data: {
+        ...node.data,
+        label: node.data.originalLabel,
+        isConnected: false,
         isFromTemplate: false,
         isSpecificationMapping: false,
-        confidence: undefined, 
-        isSelected: false 
+        confidence: undefined,
+        isSelected: false,
+        mappedToLabel: '',
+        mappedFromLabel: ''
       }
     })));
     setSelectedSourceNode(null);
@@ -1092,17 +1213,25 @@ export default function ColumnMapping() {
       
       const targetIdx = parseInt(node.id.replace('t-', ''));
       const templateFieldName = templateHeaders[targetIdx];
-      const hasDefaultValue = templateFieldName && defaultValueMappings[templateFieldName];
+      const defaultValue = defaultValueMappings[templateFieldName];
+      const hasDefaultValue = !!defaultValue;
       
+      let newLabel = node.data.originalLabel || node.data.label;
+      if (hasDefaultValue && !edges.some(edge => edge.target === node.id)) {
+        newLabel = `Default-${defaultValue}`;
+      }
+
       return {
         ...node,
         data: {
           ...node.data,
-          hasDefaultValue: !!hasDefaultValue
+          label: newLabel,
+          hasDefaultValue: hasDefaultValue,
+          defaultValue: defaultValue
         }
       };
     }));
-  }, [defaultValueMappings, templateHeaders, setNodes]);
+  }, [defaultValueMappings, templateHeaders, setNodes, edges]);
 
   // Update mapping statistics and auto-save mappings
   useEffect(() => {
@@ -1192,7 +1321,13 @@ export default function ColumnMapping() {
         default_values: defaultValueMappings
       };
 
-      console.log('🔄 Sending mapping data to backend:', mappingData);
+      console.log('🔄 Sending mapping data to backend. Full context:', {
+        sessionId,
+        mappingData,
+        clientHeaders,
+        templateHeaders,
+        edges
+      });
 
       // Send mapping to backend
       await api.saveColumnMappings(sessionId, mappingData);
@@ -1732,6 +1867,27 @@ export default function ColumnMapping() {
             </div>
           </div>
         </DialogContent>
+      </Dialog>
+
+      {/* Auto-map Confirmation Dialog */}
+      <Dialog
+        open={showAutoMapConfirm}
+        onClose={() => setShowAutoMapConfirm(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>Confirm Auto-Mapping</DialogTitle>
+        <DialogContent>
+          <Typography>
+            This will remove all existing mappings. Are you sure you want to proceed?
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setShowAutoMapConfirm(false)}>Cancel</Button>
+          <Button onClick={proceedWithAutoMap} color="primary">
+            Proceed
+          </Button>
+        </DialogActions>
       </Dialog>
     </div>
   );

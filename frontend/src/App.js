@@ -11,7 +11,7 @@ function App() {
   return (
     <div className="App">
       <Header />
-      <Container maxWidth="lg">
+      <Container maxWidth="xl">
         <Box sx={{ mt: 4, mb: 4 }}>
           <Routes>
             <Route path="/" element={<Dashboard />} />
