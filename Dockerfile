@@ -25,5 +25,9 @@ ENV DJANGO_SETTINGS_MODULE=excel_mapping.settings
 # Expose port
 EXPOSE 8000
 
-# Run Django application
-CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--timeout", "600", "--workers", "2", "excel_mapping.wsgi:application"]
+# Copy startup script
+COPY simple_startup.sh /app/startup.sh
+RUN chmod +x /app/startup.sh
+
+# Run with startup script for Azure
+CMD ["/app/startup.sh"]

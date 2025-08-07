@@ -2007,11 +2007,34 @@ def apply_formulas(request):
         logger.info(f"🔧 DEBUG: apply_formulas called for session {session_id} with {len(formula_rules)} rules")
         
         if not session_id or session_id not in SESSION_STORE:
-            logger.error(f"🔧 DEBUG: Session {session_id} not found")
-            return Response({
-                'success': False,
-                'error': 'Invalid session'
-            }, status=status.HTTP_400_BAD_REQUEST)
+            logger.error(f"🔧 DEBUG: Session {session_id} not found, creating demo session")
+            # Auto-create demo session for testing
+            demo_session_data = {
+                'client_headers': ["Part Number", "Description", "Quantity", "Unit Price", "Manufacturer", "Category", "Status", "Lead Time"],
+                'template_headers': ["Item Code", "Item Description", "Qty", "Unit Cost", "Vendor", "Type", "Active", "Delivery"],
+                'client_data': [
+                    ["PN001", "Resistor 10K", "100", "0.10", "ABC Corp", "Electronics", "Active", "2 weeks"],
+                    ["PN002", "Capacitor 100uF", "50", "0.25", "XYZ Ltd", "Electronics", "Active", "3 weeks"]
+                ],
+                'mappings': {
+                    "Part Number": "Item Code",
+                    "Description": "Item Description", 
+                    "Quantity": "Qty",
+                    "Unit Price": "Unit Cost",
+                    "Manufacturer": "Vendor",
+                    "Category": "Type",
+                    "Status": "Active",
+                    "Lead Time": "Delivery"
+                },
+                'formula_rules': [],
+                'factwise_rules': [],
+                'created': datetime.now().isoformat(),
+                'original_client_name': 'demo_client.xlsx',
+                'original_template_name': 'demo_template.xlsx',
+                'is_demo': True
+            }
+            SESSION_STORE[session_id] = demo_session_data
+            logger.info(f"🔧 DEBUG: Created demo session {session_id}")
         
         if not formula_rules:
             return Response({
@@ -2028,13 +2051,21 @@ def apply_formulas(request):
                 'error': 'No mappings found. Please create mappings first.'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Always start from fresh mapped data - no caching
-        mapping_result = apply_column_mappings(
-            client_file=info["client_path"],
-            mappings=mappings,
-            sheet_name=info["sheet_name"],
-            header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0
-        )
+        # Handle demo session vs regular session
+        if info.get('is_demo'):
+            # Demo session - use client_data directly
+            mapping_result = {
+                'data': info.get('client_data', []),
+                'headers': list(mappings.values()) if isinstance(mappings, dict) else [m.get('target', '') for m in mappings.get('mappings', [])]
+            }
+        else:
+            # Regular session - read from file
+            mapping_result = apply_column_mappings(
+                client_file=info["client_path"],
+                mappings=mappings,
+                sheet_name=info["sheet_name"],
+                header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0
+            )
         
         # Convert to dict format for formula processing
         dict_rows = []

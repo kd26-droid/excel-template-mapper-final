@@ -2,7 +2,26 @@
 
 import axios from 'axios';
 
-const API_URL = 'https://kartik-excel-mapper-backend-v2.azurewebsites.net/api';
+const API_URL = 'https://kartik-excel-mapper-backend-working.azurewebsites.net/api';
+
+// Auto-create demo session when needed
+let demoSessionId = null;
+
+const ensureSession = async () => {
+  if (demoSessionId) return demoSessionId;
+  
+  try {
+    const response = await axios.post(`${API_URL}/demo-session/`);
+    if (response.data.success) {
+      demoSessionId = response.data.session_id;
+      console.log('🎯 Created demo session:', demoSessionId);
+      return demoSessionId;
+    }
+  } catch (error) {
+    console.error('Failed to create demo session:', error);
+  }
+  return null;
+};
 
 const api = {
   // ==========================================
@@ -195,16 +214,18 @@ const api = {
    * @param {array} formulaRules - Optional formula rules
    * @param {array} factwiseRules - Optional factwise ID rules
    */
-  saveMappingTemplate: (sessionId, templateName, description = '', mappings = null, formulaRules = null, factwiseRules = null, defaultValues = null) =>
-    axios.post(`${API_URL}/templates/save/`, {
-      session_id: sessionId,
+  saveMappingTemplate: async (sessionId, templateName, description = '', mappings = null, formulaRules = null, factwiseRules = null, defaultValues = null) => {
+    const effectiveSessionId = sessionId || await ensureSession();
+    return axios.post(`${API_URL}/templates/save/`, {
+      session_id: effectiveSessionId,
       template_name: templateName,
       description: description,
       ...(mappings !== null && { mappings }),
       ...(formulaRules !== null && { formula_rules: formulaRules }),
       ...(factwiseRules !== null && { factwise_rules: factwiseRules }),
       ...(defaultValues !== null && { default_values: defaultValues })
-    }),
+    });
+  },
 
   /**
    * Get all saved mapping templates
@@ -736,13 +757,15 @@ const api = {
    * @param {string} secondColumn - Second column name
    * @param {string} operator - Operator to combine columns
    */
-  createFactwiseId: (sessionId, firstColumn, secondColumn, operator = '_') =>
-    axios.post(`${API_URL}/create-factwise-id/`, {
-      session_id: sessionId,
+  createFactwiseId: async (sessionId, firstColumn, secondColumn, operator = '_') => {
+    const effectiveSessionId = sessionId || await ensureSession();
+    return axios.post(`${API_URL}/create-factwise-id/`, {
+      session_id: effectiveSessionId,
       first_column: firstColumn,
       second_column: secondColumn,
       operator: operator
-    }),
+    });
+  },
 
   // ==========================================
   // 1️⃣5️⃣ FORMULA MANAGEMENT ENDPOINTS
@@ -773,11 +796,13 @@ const api = {
    * @param {string} sessionId - Session ID
    * @param {Array} formulaRules - Array of formula rule objects
    */
-  applyFormulas: (sessionId, formulaRules) =>
-    axios.post(`${API_URL}/formulas/apply/`, {
-      session_id: sessionId,
+  applyFormulas: async (sessionId, formulaRules) => {
+    const effectiveSessionId = sessionId || await ensureSession();
+    return axios.post(`${API_URL}/formulas/apply/`, {
+      session_id: effectiveSessionId,
       formula_rules: formulaRules
-    }),
+    });
+  },
 
   /**
    * Save custom formulas as part of mapping template (unified system)
@@ -821,11 +846,13 @@ const api = {
    * @param {string} sessionId - Session ID
    * @param {Array} formulaRules - Array of formula rule objects
    */
-  checkColumnConflicts: (sessionId, formulaRules) =>
-    axios.post(`${API_URL}/formulas/conflicts/`, {
-      session_id: sessionId,
+  checkColumnConflicts: async (sessionId, formulaRules) => {
+    const effectiveSessionId = sessionId || await ensureSession();
+    return axios.post(`${API_URL}/formulas/conflicts/`, {
+      session_id: effectiveSessionId,
       formula_rules: formulaRules
-    }),
+    });
+  },
 
   /**
    * Clear all formulas and remove generated columns from session

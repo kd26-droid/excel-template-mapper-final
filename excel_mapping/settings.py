@@ -102,10 +102,36 @@ REST_FRAMEWORK = {
 }
 
 # CORS Configuration
-CORS_ALLOWED_ORIGINS = os.environ.get(
-    'CORS_ALLOWED_ORIGINS', 
-    'http://localhost:3000,http://127.0.0.1:3000,https://kartikexcelmapperstorage.z29.web.core.windows.net'
-).split(',')
+CORS_ALLOWED_ORIGINS = [
+    'https://factwiseexcelmapper.z13.web.core.windows.net',
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+]
+
+# Additional CORS headers for Azure
+CORS_ALLOW_CREDENTIALS = True
+
+# Ensure all required headers are included
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding', 
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+]
+
+CORS_ALLOW_METHODS = [
+    'DELETE',
+    'GET',
+    'OPTIONS',
+    'PATCH',
+    'POST',
+    'PUT',
+]
 
 CORS_ALLOW_ALL_ORIGINS = DEBUG  # Only allow all origins in development
 
