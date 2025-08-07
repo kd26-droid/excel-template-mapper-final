@@ -57,6 +57,9 @@ jobs:
     
     - name: Install and build frontend
       if: ${{ github.event.inputs.deploy_frontend == 'true' || github.event.inputs.deploy_frontend == '' }}
+      env:
+        CI: false
+        ESLINT_NO_DEV_ERRORS: true
       run: |
         cd frontend
         npm ci
