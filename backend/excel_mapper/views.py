@@ -23,6 +23,7 @@ from openpyxl.styles import Font, PatternFill
 
 from .bom_header_mapper import BOMHeaderMapper
 from .models import MappingTemplate, TagTemplate
+from ..azure_storage import hybrid_file_manager
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -34,7 +35,7 @@ SESSION_STORE = {}
 def save_session_to_file(session_id, session_data):
     """Save session data to file for persistence."""
     try:
-        session_file = file_manager.temp_dir / f"session_{session_id}.json"
+        session_file = hybrid_file_manager.local_temp_dir / f"session_{session_id}.json"
         import json
         with open(session_file, 'w') as f:
             # Convert paths to strings for JSON serialization
@@ -52,7 +53,7 @@ def save_session_to_file(session_id, session_data):
 def load_session_from_file(session_id):
     """Load session data from file."""
     try:
-        session_file = file_manager.temp_dir / f"session_{session_id}.json"
+        session_file = hybrid_file_manager.local_temp_dir / f"session_{session_id}.json"
         if session_file.exists():
             import json
             with open(session_file, 'r') as f:
@@ -64,34 +65,9 @@ def load_session_from_file(session_id):
     return None
 
 
-class FileManager:
-    """Simple file manager for uploads and downloads."""
-    
-    def __init__(self):
-        self.upload_dir = Path(settings.BASE_DIR) / 'uploaded_files'
-        self.temp_dir = Path(settings.BASE_DIR) / 'temp_downloads'
-        self.ensure_directories()
-    
-    def ensure_directories(self):
-        """Ensure required directories exist."""
-        self.upload_dir.mkdir(parents=True, exist_ok=True)
-        self.temp_dir.mkdir(parents=True, exist_ok=True)
-    
-    def save_upload_file(self, file, prefix="upload"):
-        """Save uploaded file with unique name."""
-        file_extension = Path(file.name).suffix
-        unique_filename = f"{uuid.uuid4()}_{prefix}{file_extension}"
-        file_path = self.upload_dir / unique_filename
-        
-        with open(file_path, 'wb+') as destination:
-            for chunk in file.chunks():
-                destination.write(chunk)
-        
-        return str(file_path), file.name
-
-
-# Initialize file manager
-file_manager = FileManager()
+# Use hybrid file manager from azure_storage module
+# This automatically handles Azure Blob Storage when available,
+# falls back to local storage for development
 
 
 def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, session_id=None):
@@ -343,8 +319,8 @@ def upload_files(request):
             }, status=status.HTTP_400_BAD_REQUEST)
         
         # Save uploaded files
-        client_path, client_original_name = file_manager.save_upload_file(client_file, "client")
-        template_path, template_original_name = file_manager.save_upload_file(template_file, "template")
+        client_path, client_original_name = hybrid_file_manager.save_upload_file(client_file, "client")
+        template_path, template_original_name = hybrid_file_manager.save_upload_file(template_file, "template")
         
         # Generate session ID
         session_id = str(uuid.uuid4())
@@ -380,7 +356,7 @@ def upload_files(request):
                 # Read client headers to apply template
                 mapper = BOMHeaderMapper()
                 client_headers = mapper.read_excel_headers(
-                    file_path=client_path,
+                    file_path=hybrid_file_manager.get_file_path(client_path),
                     sheet_name=sheet_name,
                     header_row=header_row - 1 if header_row > 0 else 0
                 )
@@ -1148,7 +1124,7 @@ def download_file(request):
             format_type = request.GET.get('format', 'excel').lower()
         
         # Create output file
-        output_dir = file_manager.temp_dir
+        output_dir = hybrid_file_manager.local_temp_dir
         
         if format_type == 'csv':
             output_file = output_dir / f"processed_data_{session_id}.csv"
