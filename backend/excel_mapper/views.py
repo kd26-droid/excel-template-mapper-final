@@ -729,13 +729,34 @@ def get_existing_mappings(request, session_id):
                 'error': 'Session not found'
             }, status=status.HTTP_404_NOT_FOUND)
         
-        mappings = SESSION_STORE[session_id].get("mappings", {})
-        default_values = SESSION_STORE[session_id].get("default_values", {})
+        session_data = SESSION_STORE[session_id]
+        mappings = session_data.get("mappings", {})
+        default_values = session_data.get("default_values", {})
+        
+        # Include session metadata for template state restoration
+        session_metadata = {
+            'template_applied': bool(session_data.get("original_template_id")),
+            'original_template_id': session_data.get("original_template_id"),
+            'template_name': None,  # Will be filled if we have template
+            'template_success': True,  # Assume success if template was applied
+            'formula_rules': session_data.get("formula_rules", []),
+            'factwise_rules': session_data.get("factwise_rules", [])
+        }
+        
+        # Get template name if template was applied
+        if session_metadata['original_template_id']:
+            try:
+                from .models import MappingTemplate
+                template = MappingTemplate.objects.get(id=session_metadata['original_template_id'])
+                session_metadata['template_name'] = template.name
+            except Exception:
+                session_metadata['template_name'] = 'Applied Template'
         
         return Response({
             'success': True,
             'mappings': mappings,
-            'default_values': default_values
+            'default_values': default_values,
+            'session_metadata': session_metadata
         })
         
     except Exception as e:
@@ -785,10 +806,19 @@ def data_view(request):
                 'error': 'No mappings found. Please create mappings first.'
             }, status=status.HTTP_400_BAD_REQUEST)
         
+        # Convert mappings list format to expected dict format for apply_column_mappings
+        if isinstance(mappings, list):
+            # Convert list format to new dict format that apply_column_mappings expects
+            formatted_mappings = {"mappings": mappings}
+            logger.info(f"🔧 DEBUG: Converted list mappings to dict format: {formatted_mappings}")
+        else:
+            formatted_mappings = mappings
+            logger.info(f"🔧 DEBUG: Using existing dict mappings: {formatted_mappings}")
+        
         # Apply mappings to get fresh transformed data
         mapping_result = apply_column_mappings(
             client_file=info["client_path"],
-            mappings=mappings,
+            mappings=formatted_mappings,
             sheet_name=info["sheet_name"],
             header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0,
             session_id=session_id
@@ -800,32 +830,68 @@ def data_view(request):
         
         # Apply formula rules if they exist to create unique tag columns
         formula_rules = info.get("formula_rules", [])
-        if formula_rules and transformed_rows:
-            try:
-                # Convert list-based data to dict format for formula processing
-                if transformed_rows and isinstance(transformed_rows[0], list):
-                    dict_rows = []
-                    for row_list in transformed_rows:
-                        row_dict = {}
-                        for i, header in enumerate(headers_to_use):
-                            if i < len(row_list):
-                                row_dict[header] = row_list[i]
-                            else:
-                                row_dict[header] = ""
-                        dict_rows.append(row_dict)
-                    transformed_rows_for_formulas = dict_rows
-                else:
-                    transformed_rows_for_formulas = transformed_rows
-                    
-                formula_result = apply_formula_rules(
-                    data_rows=transformed_rows_for_formulas,
-                    headers=headers_to_use,
-                    formula_rules=formula_rules
+        
+        # Deduplicate formula rules to prevent duplicate columns
+        if formula_rules:
+            # Create a unique key for each rule to identify duplicates
+            seen_rules = set()
+            deduplicated_rules = []
+            
+            for rule in formula_rules:
+                # Create a unique identifier for this rule
+                rule_key = (
+                    rule.get('source_column', ''),
+                    rule.get('column_type', ''),
+                    rule.get('specification_name', ''),
+                    str(rule.get('sub_rules', []))
                 )
                 
-                # Use formula-enhanced data
-                transformed_rows = formula_result['data']
-                headers_to_use = formula_result['headers']
+                if rule_key not in seen_rules:
+                    seen_rules.add(rule_key)
+                    deduplicated_rules.append(rule)
+                else:
+                    logger.info(f"🔧 DEBUG: Skipping duplicate formula rule: {rule}")
+            
+            formula_rules = deduplicated_rules
+            logger.info(f"🔧 DEBUG: Deduplicated {len(info.get('formula_rules', []))} rules to {len(formula_rules)} rules")
+        
+        if formula_rules and transformed_rows:
+            try:
+                # Check if formula columns already exist in headers to avoid duplicates
+                existing_formula_columns = [h for h in headers_to_use if h.startswith('Tag_') or h.startswith('Spec_')]
+                
+                if existing_formula_columns:
+                    logger.info(f"🔧 DEBUG: Formula columns already exist in headers: {existing_formula_columns}")
+                    logger.info(f"🔧 DEBUG: Skipping formula application to avoid duplicates")
+                else:
+                    logger.info(f"🔧 DEBUG: No existing formula columns found, applying {len(formula_rules)} formula rules")
+                    
+                    # Convert list-based data to dict format for formula processing
+                    if transformed_rows and isinstance(transformed_rows[0], list):
+                        dict_rows = []
+                        for row_list in transformed_rows:
+                            row_dict = {}
+                            for i, header in enumerate(headers_to_use):
+                                if i < len(row_list):
+                                    row_dict[header] = row_list[i]
+                                else:
+                                    row_dict[header] = ""
+                            dict_rows.append(row_dict)
+                        transformed_rows_for_formulas = dict_rows
+                    else:
+                        transformed_rows_for_formulas = transformed_rows
+                        
+                    formula_result = apply_formula_rules(
+                        data_rows=transformed_rows_for_formulas,
+                        headers=headers_to_use,
+                        formula_rules=formula_rules
+                    )
+                    
+                    # Use formula-enhanced data
+                    transformed_rows = formula_result['data']
+                    headers_to_use = formula_result['headers']
+                    
+                    logger.info(f"🔧 DEBUG: Applied formula rules, new headers: {headers_to_use}")
                 
             except Exception as e:
                 logger.warning(f"Formula application failed in data_view: {e}")
@@ -838,6 +904,11 @@ def data_view(request):
         for factwise_rule in factwise_rules:
             if factwise_rule.get("type") == "factwise_id" and transformed_rows:
                 try:
+                    # Check if Factwise_ID column already exists to avoid duplicates
+                    if "Factwise_ID" in headers_to_use:
+                        logger.info(f"🔧 DEBUG: Factwise_ID column already exists, skipping duplicate creation")
+                        continue
+                        
                     # Add Factwise ID as the first column
                     first_col = factwise_rule.get("first_column")
                     second_col = factwise_rule.get("second_column")
@@ -942,21 +1013,17 @@ def data_view(request):
         # Include formula rules in response if they exist
         formula_rules = info.get("formula_rules", [])
         
-        # Create display headers (remove the _1, _2 suffixes for UI display)
-        display_headers = []
-        for header in headers_to_use:
-            # Remove the _1, _2, etc. suffixes for display
-            if '_' in header and header.split('_')[-1].isdigit():
-                display_name = '_'.join(header.split('_')[:-1])
-            else:
-                display_name = header
-            display_headers.append(display_name)
+        
+        # Apply pagination 
+        total_rows = len(transformed_rows)
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        paginated_rows = transformed_rows[start_idx:end_idx]
         
         return Response({
             'success': True,
             'data': paginated_rows,
-            'headers': headers_to_use,  # Keep unique keys for data access
-            'display_headers': display_headers,  # Original names for UI display
+            'headers': headers_to_use,
             'formula_rules': formula_rules,  # Include existing formula rules
             'pagination': {
                 'page': page,
@@ -1066,26 +1133,13 @@ def download_file(request):
                     converted_rows.append(row_list)
                 transformed_rows = converted_rows
         
-        # Create display headers for export (remove _1, _2 suffixes)
-        if all_headers:
-            display_headers_for_export = []
-            for header in all_headers:
-                # Remove the _1, _2, etc. suffixes for export
-                if '_' in header and header.split('_')[-1].isdigit():
-                    display_name = '_'.join(header.split('_')[:-1])
-                else:
-                    display_name = header
-                display_headers_for_export.append(display_name)
-        else:
-            display_headers_for_export = []
-        
         # Create DataFrame with duplicate column names support
         if transformed_rows and all_headers:
-            # Use pandas with list data and original display names for export
-            df = pd.DataFrame(transformed_rows, columns=display_headers_for_export)
+            # Use pandas with list data and original headers for export
+            df = pd.DataFrame(transformed_rows, columns=all_headers)
         else:
             # Create empty DataFrame
-            df = pd.DataFrame(columns=display_headers_for_export or [])
+            df = pd.DataFrame(columns=all_headers or [])
         
         # Get format preference (default to Excel)
         if request.method == 'POST':
@@ -1939,12 +1993,22 @@ def apply_formulas(request):
                 'error': 'No mappings found. Please create mappings first.'
             }, status=status.HTTP_400_BAD_REQUEST)
         
+        # Convert mappings list format to expected dict format for apply_column_mappings
+        if isinstance(mappings, list):
+            # Convert list format to new dict format that apply_column_mappings expects
+            formatted_mappings = {"mappings": mappings}
+            logger.info(f"🔧 DEBUG: Converted list mappings to dict format for formulas: {formatted_mappings}")
+        else:
+            formatted_mappings = mappings
+            logger.info(f"🔧 DEBUG: Using existing dict mappings for formulas: {formatted_mappings}")
+        
         # Always start from fresh mapped data - no caching
         mapping_result = apply_column_mappings(
             client_file=info["client_path"],
-            mappings=mappings,
+            mappings=formatted_mappings,
             sheet_name=info["sheet_name"],
-            header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0
+            header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0,
+            session_id=session_id
         )
         
         # Convert to dict format for formula processing
@@ -2506,7 +2570,15 @@ def clear_formulas(request):
         if info.get("enhanced_headers"):
             original_headers = info.get("enhanced_headers", [])
             mappings = info.get("mappings", {})
-            template_columns = list(mappings.keys()) if mappings else []
+            
+            # Handle different mapping formats
+            if isinstance(mappings, list):
+                # List format: [{'source': 'A', 'target': 'B'}, ...]
+                template_columns = [m.get('target', '') for m in mappings if isinstance(m, dict)]
+            elif isinstance(mappings, dict):
+                template_columns = list(mappings.keys())
+            else:
+                template_columns = []
             
             # Find formula-generated columns (columns not in original mappings)
             formula_columns = [h for h in original_headers if h not in template_columns]
@@ -2708,10 +2780,19 @@ def create_factwise_id(request):
 
         logger.info(f"🆔 Creating Factwise ID: {first_column} {operator} {second_column}")
         
+        # Convert mappings list format to expected dict format for apply_column_mappings
+        if isinstance(mappings, list):
+            # Convert list format to new dict format that apply_column_mappings expects
+            formatted_mappings = {"mappings": mappings}
+            logger.info(f"🔧 DEBUG: Converted list mappings to dict format for Factwise ID: {formatted_mappings}")
+        else:
+            formatted_mappings = mappings
+            logger.info(f"🔧 DEBUG: Using existing dict mappings for Factwise ID: {formatted_mappings}")
+        
         # Get the current data
         mapping_result = apply_column_mappings(
             client_file=info["client_path"],
-            mappings=mappings,
+            mappings=formatted_mappings,
             sheet_name=info["sheet_name"],
             header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0,
             session_id=session_id

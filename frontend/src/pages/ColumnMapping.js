@@ -349,7 +349,13 @@ export default function ColumnMapping() {
       console.log('🔍 Existing mappings response:', response.data);
       console.log('🔍 Existing default values:', existingDefaultValues);
       
-      if (existingMappings && Object.keys(existingMappings).length > 0) {
+      // Handle both list and object formats for mappings
+      const hasExistingMappings = existingMappings && (
+        (Array.isArray(existingMappings) && existingMappings.length > 0) ||
+        (typeof existingMappings === 'object' && Object.keys(existingMappings).length > 0)
+      );
+      
+      if (hasExistingMappings) {
         console.log('Found existing mappings:', existingMappings);
         
         // Apply existing mappings to the flow
@@ -364,7 +370,8 @@ export default function ColumnMapping() {
         // ENHANCED: Set template applied state from session metadata
         if (sessionMetadata.template_applied) {
           setTemplateApplied(true);
-          setTemplateMappingCount(Object.keys(existingMappings).length);
+          const mappingCount = Array.isArray(existingMappings) ? existingMappings.length : Object.keys(existingMappings).length;
+          setTemplateMappingCount(mappingCount);
           
           if (sessionMetadata.template_name) {
             setAppliedTemplateName(sessionMetadata.template_name);
@@ -383,7 +390,8 @@ export default function ColumnMapping() {
         } else {
           // Fallback to generic template applied state
           setTemplateApplied(true);
-          setTemplateMappingCount(Object.keys(existingMappings).length);
+          const mappingCount = Array.isArray(existingMappings) ? existingMappings.length : Object.keys(existingMappings).length;
+          setTemplateMappingCount(mappingCount);
           setAppliedTemplateName('Previously Applied Template');
         }
       }
@@ -402,9 +410,26 @@ export default function ColumnMapping() {
     console.log('🔍 Client headers:', clientHdrs);
     console.log('🔍 Template headers:', templateHdrs);
     
-    // Handle new mapping format with 'mappings' array
-    if (mappings && mappings.mappings && Array.isArray(mappings.mappings)) {
-      console.log('🔍 Processing new mapping format');
+    // Handle direct array format (from template application)
+    if (Array.isArray(mappings)) {
+      console.log('🔍 Processing direct array mapping format');
+      mappings.forEach(mapping => {
+        const sourceCol = mapping.source;
+        const templateCol = mapping.target;
+        
+        const sourceIdx = clientHdrs.indexOf(sourceCol);
+        const targetIdx = templateHdrs.indexOf(templateCol);
+        
+        console.log(`🔍 Mapping: ${sourceCol} -> ${templateCol} (source idx: ${sourceIdx}, target idx: ${targetIdx})`);
+        
+        if (sourceIdx >= 0 && targetIdx >= 0) {
+          const edge = createEdge(sourceIdx, targetIdx, false, null, true); // true = from template
+          newEdges.push(edge);
+          mappingPairs.push({ sourceIdx, targetIdx, sourceCol, templateCol });
+        }
+      });
+    } else if (mappings && mappings.mappings && Array.isArray(mappings.mappings)) {
+      console.log('🔍 Processing nested mapping format');
       mappings.mappings.forEach(mapping => {
         const sourceCol = mapping.source;
         const templateCol = mapping.target;

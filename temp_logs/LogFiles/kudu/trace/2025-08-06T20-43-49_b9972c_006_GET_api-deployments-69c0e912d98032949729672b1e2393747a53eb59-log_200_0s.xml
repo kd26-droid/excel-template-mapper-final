@@ -1,6 +1,0 @@
-<step title="Incoming Request" date="2025-08-06T20:43:49.847" instance="b9972c" url="/api/deployments/69c0e912d98032949729672b1e2393747a53eb59/log" method="GET" type="request" pid="770,1,3" Accept="*/*" Host="kartik-excel-mapper-backend.scm.azurewebsites.net" User-Agent="AZURECLI/2.75.0 (HOMEBREW)" Accept-Encoding="gzip, deflate" Authorization="Bas..." x-ms-client-request-id="0d02067a-7306-11f0-915c-4a3d85fb86c1" X-ARR-LOG-ID="0d02067a-7306-11f0-915c-4a3d85fb86c1" CLIENT-IP="103.133.248.12:56741" X-SITE-DEPLOYMENT-ID="kartik-excel-mapper-backend" WAS-DEFAULT-HOSTNAME="kartik-excel-mapper-backend.scm.azurewebsites.net" X-Forwarded-Proto="https" X-AppService-Proto="https" X-Forwarded-TlsVersion="1.3" X-WAWS-Unencoded-URL="/api/deployments/69c0e912d98032949729672b1e2393747a53eb59/log" X-Client-IP="103.133.248.12" X-Client-Port="56741" >
-  <step title="DeploymentService.GetLogEntry" date="2025-08-06T20:43:49.886" >
-    <step title="DeploymentManager.GetLogEntries(id:69c0e912d98032949729672b1e2393747a53eb59)" date="2025-08-06T20:43:49.892" /><!-- duration: 21ms -->
-  </step><!-- duration: 52ms -->
-  <step title="Outgoing response" date="2025-08-06T20:43:49.965" type="response" statusCode="200" statusText="OK" /><!-- duration: 5ms -->
-</step><!-- duration: 125ms -->

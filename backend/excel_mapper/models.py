@@ -39,13 +39,21 @@ class MappingTemplate(models.Model):
         applied_mappings_list = []  # New format preserving duplicates
         mapping_confidence = {}
         
-        # Handle both old and new mapping formats
-        if isinstance(self.mappings, dict) and 'new_format' in self.mappings:
-            # New format with duplicate support - process ALL mappings
+        # Handle different mapping formats
+        if isinstance(self.mappings, list):
+            # Direct list format (new format without wrapper)
+            mappings_to_process = self.mappings
+        elif isinstance(self.mappings, dict) and 'new_format' in self.mappings:
+            # New format with wrapper - process ALL mappings
             mappings_to_process = self.mappings['new_format']
+        else:
+            mappings_to_process = None
+        
+        # Process list-based mappings (both direct list and new_format)
+        if mappings_to_process:
             for mapping_item in mappings_to_process:
-                template_col = mapping_item['target']
-                original_source_col = mapping_item['source']
+                template_col = mapping_item.get('target', '')
+                original_source_col = mapping_item.get('source', '')
                 
                 matched_source_col = None
                 confidence = 0.0
@@ -100,11 +108,18 @@ class MappingTemplate(models.Model):
                     mapping_confidence[template_col] = confidence
         
         # Calculate total template columns based on format
-        if isinstance(self.mappings, dict) and 'new_format' in self.mappings:
+        if isinstance(self.mappings, list):
+            # Direct list format
+            total_template_columns = len(set(mapping.get('target', '') for mapping in self.mappings if isinstance(mapping, dict)))
+        elif isinstance(self.mappings, dict) and 'new_format' in self.mappings:
+            # New format with wrapper
             total_template_columns = len(set(mapping['target'] for mapping in self.mappings['new_format']))
-        else:
-            mappings_dict = self.mappings.get('old_format', self.mappings) if isinstance(self.mappings, dict) and 'old_format' in self.mappings else self.mappings
+        elif isinstance(self.mappings, dict):
+            # Old format (dictionary)
+            mappings_dict = self.mappings.get('old_format', self.mappings) if 'old_format' in self.mappings else self.mappings
             total_template_columns = len(mappings_dict)
+        else:
+            total_template_columns = 0
         
         return {
             'mappings': applied_mappings_dict,  # Old format for backward compatibility
@@ -155,21 +170,34 @@ class MappingTemplate(models.Model):
         except AttributeError:
             default_values = {}
         
-        # Handle both old and new mapping formats
-        if isinstance(self.mappings, dict) and 'new_format' in self.mappings:
-            # New format with duplicate support
+        # Handle different mapping formats
+        if isinstance(self.mappings, list):
+            # Direct list format (new format without wrapper)
+            mappings_list = self.mappings
+            # Get unique template columns (targets)
+            template_columns = list(set(mapping.get('target', '') for mapping in mappings_list if isinstance(mapping, dict)))
+            # Get unique source columns  
+            source_columns = list(set(mapping.get('source', '') for mapping in mappings_list if isinstance(mapping, dict)))
+            total_mappings = len(mappings_list)
+        elif isinstance(self.mappings, dict) and 'new_format' in self.mappings:
+            # New format with wrapper
             mappings_list = self.mappings['new_format']
             # Get unique template columns (targets)
             template_columns = list(set(mapping['target'] for mapping in mappings_list))
             # Get unique source columns  
             source_columns = list(set(mapping['source'] for mapping in mappings_list))
             total_mappings = len(mappings_list)  # Count all mappings including duplicates
-        else:
+        elif isinstance(self.mappings, dict):
             # Old format (dictionary) or fallback
-            mappings_dict = self.mappings.get('old_format', self.mappings) if isinstance(self.mappings, dict) and 'old_format' in self.mappings else self.mappings
+            mappings_dict = self.mappings.get('old_format', self.mappings) if 'old_format' in self.mappings else self.mappings
             template_columns = list(mappings_dict.keys())
             source_columns = list(mappings_dict.values())
             total_mappings = len(mappings_dict)
+        else:
+            # Fallback for unexpected formats
+            template_columns = []
+            source_columns = []
+            total_mappings = 0
         
         return {
             'id': self.id,
@@ -182,6 +210,8 @@ class MappingTemplate(models.Model):
             'has_formulas': len(formula_rules) > 0,
             'default_values': default_values,  # Include default values with fallback
             'has_default_values': len(default_values) > 0,
+            'factwise_rules': getattr(self, 'factwise_rules', []), # Include factwise rules
+            'has_factwise_rules': len(getattr(self, 'factwise_rules', [])) > 0,
             'created_at': self.created_at.isoformat(),
             'usage_count': self.usage_count
         }

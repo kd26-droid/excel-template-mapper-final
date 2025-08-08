@@ -1,3 +1,0 @@
-<step title="Startup Request" date="2025-08-06T20:29:37.137" instance="b9972c" url="/deploy?scmType=ExternalGit&amp;isAsync=true" method="POST" type="request" pid="769,1,7" ScmType="ExternalGit" SCM_DO_BUILD_DURING_DEPLOYMENT="true" >
-  <step title="Cleanup Xml Logs" date="2025-08-06T20:29:37.180" /><!-- duration: 56ms -->
-</step><!-- duration: 162ms -->

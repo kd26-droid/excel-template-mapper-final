@@ -1,9 +1,5 @@
-import React, { useRef, useState, useCallback, useMemo, useEffect } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import { useParams, useNavigate, useLocation } from 'react-router-dom';
-import { AgGridReact } from 'ag-grid-react';
-import { ModuleRegistry, AllCommunityModule } from 'ag-grid-community';
-import 'ag-grid-community/styles/ag-grid.css';
-import 'ag-grid-community/styles/ag-theme-alpine.css';
 import {
   Box,
   Button,
@@ -45,13 +41,10 @@ import {
 import api from '../services/api';
 import FormulaBuilder from '../components/FormulaBuilder';
 
-// Register AG Grid modules
-ModuleRegistry.registerModules([AllCommunityModule]);
 
 const DataEditor = () => {
   const { sessionId } = useParams();
   const navigate = useNavigate();
-  const gridRef = useRef();
 
   // ─── STATE MANAGEMENT ───────────────────────────────────────────────────────
   const [loading, setLoading] = useState(true);
@@ -63,14 +56,13 @@ const DataEditor = () => {
   const [saveAsDialogOpen, setSaveAsDialogOpen] = useState(false);
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'info' });
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [firstNonEmptyRowData, setFirstNonEmptyRowData] = useState(null);
 
   // Unmapped columns state
   const [unmappedColumns, setUnmappedColumns] = useState([]);
   const [mappedColumns, setMappedColumns] = useState([]);
   const [unmappedDialogOpen, setUnmappedDialogOpen] = useState(false);
 
-  // Grid state
-  const [gridApi, setGridApi] = useState(null);
 
   // Simplified template saving state
   const [templateSaveDialogOpen, setTemplateSaveDialogOpen] = useState(false);
@@ -155,6 +147,7 @@ const DataEditor = () => {
       const columns = [
         {
           headerName: '#',
+          field: '__row_number__',
           valueGetter: 'node.rowIndex + 1',
           cellStyle: { 
             backgroundColor: '#f8f9fa', 
@@ -175,7 +168,7 @@ const DataEditor = () => {
           suppressSizeToFit: true,
           suppressAutoSize: true
         },
-        ...data.headers.map((col, index) => {
+        ...data.headers.filter(col => col && col.trim() !== '').map((col, index) => {
           const displayName = data.display_headers && Array.isArray(data.display_headers) && index < data.display_headers.length && data.display_headers[index] ? data.display_headers[index] : col;
           const isUnmapped = data.unmapped_columns && data.unmapped_columns.includes(displayName);
           const isSpecificationColumn = displayName.toLowerCase().includes('specification');
@@ -278,6 +271,31 @@ const DataEditor = () => {
       setLoading(false);
     }
   }, [sessionId, calculateColumnWidth, showSnackbar]);
+
+  useEffect(() => {
+    if (rowData.length > 0 && columnDefs.length > 0) {
+      // Find first non-empty row (exclude row number column)
+      const firstDataRow = rowData[0];
+      const formattedRow = {};
+      
+      // Only include actual data columns, not the row number column
+      columnDefs
+        .filter(colDef => colDef.field && colDef.field !== '__row_number__')
+        .forEach(colDef => {
+          const cellValue = firstDataRow[colDef.field];
+          if (cellValue && cellValue.toString().trim() !== '') {
+            const displayName = colDef.headerName || colDef.field;
+            // Only show first few characters to avoid overwhelming the display
+            const truncatedValue = cellValue.toString().length > 20 
+              ? cellValue.toString().substring(0, 20) + '...' 
+              : cellValue.toString();
+            formattedRow[displayName] = truncatedValue;
+          }
+        });
+      
+      setFirstNonEmptyRowData(formattedRow);
+    }
+  }, [rowData, columnDefs]);
 
   // ─── FORMULA FUNCTIONS ──────────────────────────────────────────────────────
   const handleOpenFormulaBuilder = useCallback(() => {
@@ -434,40 +452,18 @@ const DataEditor = () => {
 
   // Auto-scroll to unmapped columns
   const scrollToUnmappedColumn = useCallback(() => {
-    if (gridApi && unmappedColumns.length > 0) {
+    if (unmappedColumns.length > 0) {
       const firstUnmappedColumn = unmappedColumns[0];
-      try {
-        gridApi.ensureColumnVisible(firstUnmappedColumn);
-        showSnackbar(`Scrolled to unmapped column: ${firstUnmappedColumn}`, 'info');
-      } catch (err) {
-        console.error('Error scrolling to column:', err);
-        showSnackbar('Unable to scroll to unmapped column', 'warning');
-      }
+      showSnackbar(`Found unmapped column: ${firstUnmappedColumn}`, 'info');
     }
-  }, [gridApi, unmappedColumns, showSnackbar]);
+  }, [unmappedColumns, showSnackbar]);
 
   // Auto-scroll to unknown cells
   const scrollToUnknownCell = useCallback(() => {
-    if (gridApi && unknownCellsCount > 0) {
-      let found = false;
-      gridApi.forEachNode((node, index) => {
-        if (found) return;
-        const rowData = node.data;
-        for (const [columnId, cellValue] of Object.entries(rowData)) {
-          if (cellValue && cellValue.toString().toLowerCase() === 'unknown') {
-            gridApi.ensureColumnVisible(columnId);
-            gridApi.ensureIndexVisible(index);
-            showSnackbar(`Scrolled to unknown value in ${columnId} at row ${index + 1}`, 'info');
-            found = true;
-            break;
-          }
-        }
-      });
-      if (!found) {
-        showSnackbar('No unknown values found', 'info');
-      }
+    if (unknownCellsCount > 0) {
+      showSnackbar(`Found ${unknownCellsCount} unknown values`, 'info');
     }
-  }, [gridApi, unknownCellsCount, showSnackbar]);
+  }, [unknownCellsCount, showSnackbar]);
 
   // Simplified template saving
   const handleSaveTemplate = useCallback(async () => {
@@ -504,14 +500,24 @@ const DataEditor = () => {
         operator: factwiseIdRule.operator
       }] : [];
 
-      // Pass both formula rules and factwise rules to the API
+      // Collect default values from unmapped columns (if any)
+      const default_values = {};
+      if (unmappedColumns && unmappedColumns.length > 0) {
+        unmappedColumns.forEach(col => {
+          // Set empty default values for unmapped columns
+          default_values[col] = '';
+        });
+      }
+
+      // Pass all template data to the API including default values
       await api.saveMappingTemplate(
         sessionId, 
         templateName.trim(), 
         templateData.description,
         null, // mappings (let backend get from session)
         appliedFormulas.length > 0 ? appliedFormulas : null, // formula_rules
-        factwise_rules.length > 0 ? factwise_rules : null // factwise_rules
+        factwise_rules.length > 0 ? factwise_rules : null, // factwise_rules
+        Object.keys(default_values).length > 0 ? default_values : null // default_values
       );
       showSnackbar(`Template "${templateName}" saved successfully!`, 'success');
       
@@ -524,14 +530,12 @@ const DataEditor = () => {
     } finally {
       setTemplateSaving(false);
     }
-  }, [sessionId, templateName, appliedFormulas, factwiseIdRule, showSnackbar]);
+  }, [sessionId, templateName, appliedFormulas, factwiseIdRule, unmappedColumns, showSnackbar]);
 
   // ─── ACTION HANDLERS ────────────────────────────────────────────────────────
   const saveCurrentData = useCallback(async () => {
     try {
-      const allRowData = [];
-      gridApi.forEachNode(node => allRowData.push(node.data));
-      await api.saveEditedData(sessionId, { rows: allRowData });
+      await api.saveEditedData(sessionId, { rows: rowData });
       setHasUnsavedChanges(false);
       return true;
     } catch (err) {
@@ -539,7 +543,7 @@ const DataEditor = () => {
       showSnackbar('Failed to save changes. Please try again.', 'error');
       return false;
     }
-  }, [gridApi, sessionId, showSnackbar]);
+  }, [rowData, sessionId, showSnackbar]);
 
   const handleSaveAs = useCallback(() => {
     setSaveAsDialogOpen(true);
@@ -570,23 +574,13 @@ const DataEditor = () => {
         }
       }
 
-      // Get the actual grid data that's displayed in the frontend
-      const allRowData = [];
-      if (gridApi) {
-        gridApi.forEachNode(node => allRowData.push(node.data));
-      } else {
-        // Fallback to rowData state if gridApi not available
-        allRowData.push(...rowData);
-      }
+      // Get the actual data that's displayed in the frontend
+      const allRowData = rowData;
       
-      // Get headers from column definitions, excluding the row number column
-      const gridHeaders = columnDefs
-        .filter(col => col.field && col.field !== '#') // Exclude row number column
-        .map(col => col.headerName.replace(/[⚠️🏷️]/g, '').trim()); // Clean display names
-      
-      const columnKeys = columnDefs
-        .filter(col => col.field && col.field !== '#')
-        .map(col => col.field);
+      // Get headers from column definitions (exclude row number column)
+      const dataColumnDefs = columnDefs.filter(col => col.field && col.field !== '__row_number__');
+      const gridHeaders = dataColumnDefs.map(col => col.headerName || col.field);
+      const columnKeys = dataColumnDefs.map(col => col.field);
       
       // Convert row data to array format matching headers
       const gridRows = allRowData.map(rowData => {
@@ -630,7 +624,7 @@ const DataEditor = () => {
     } finally {
       setDownloadLoading(false);
     }
-  }, [hasUnsavedChanges, saveCurrentData, sessionId, showSnackbar, hasFormulas, gridApi, columnDefs]);
+  }, [hasUnsavedChanges, saveCurrentData, sessionId, showSnackbar, hasFormulas, columnDefs, rowData]);
 
   const handleBackToMapping = useCallback(() => {
     if (hasUnsavedChanges) {
@@ -640,83 +634,28 @@ const DataEditor = () => {
     navigate(`/mapping/${sessionId}`);
   }, [hasUnsavedChanges, navigate, sessionId]);
 
-  // ─── AG GRID CONFIGURATION ──────────────────────────────────────────────────
-  const defaultColDef = useMemo(() => ({
-    editable: true,
-    sortable: true,
-    filter: true,
-    resizable: true,
-    floatingFilter: true,
-    cellStyle: { 
-      borderRight: '1px solid #e0e0e0',
-      fontSize: '14px',
-      fontFamily: 'Segoe UI, Tahoma, Geneva, Verdana, sans-serif',
-      padding: '12px 16px',
-      lineHeight: '1.4'
-    },
-    headerClass: 'ag-header-cell-excel',
-    minWidth: 120,
-    maxWidth: 600,
-    suppressSizeToFit: true,
-    suppressAutoSize: false
-  }), []);
-
-  const gridOptions = useMemo(() => ({
-    animateRows: true,
-    // Removed enterprise features: enableRangeSelection, enableRangeHandle, enableFillHandle, undoRedoCellEditing
-    enableClipboard: true,
-    enableCellTextSelection: true,
-    ensureDomOrder: true,
-    suppressRowClickSelection: false,
-    rowSelection: 'multiple',
-    suppressContextMenu: false,
-    allowContextMenuWithControlKey: true,
-    stopEditingWhenCellsLoseFocus: true,
-    enterMovesDown: true,
-    enterMovesDownAfterEdit: true,
-    suppressHorizontalScroll: false,
-    suppressColumnVirtualisation: false,
-    suppressRowVirtualisation: false,
-    pagination: false,
-    domLayout: 'normal',
-    rowHeight: 45,
-    headerHeight: 50,
-    suppressSizeToFit: true
-  }), []);
 
   // ─── EVENT HANDLERS ─────────────────────────────────────────────────────────
-  const onGridReady = useCallback((params) => {
-    setGridApi(params.api);
-  }, []);
-
-  const onCellValueChanged = useCallback((event) => {
-    setHasUnsavedChanges(true);
-    
-    // Recalculate unknown count dynamically
-    let unknownCount = 0;
-    gridApi.forEachNode((node) => {
-      unknownCount += Object.values(node.data).filter(cell => 
-        cell && cell.toString().toLowerCase() === 'unknown'
-      ).length;
-    });
-    setUnknownCellsCount(unknownCount);
-    
-    showSnackbar('Cell updated - changes not saved yet', 'info');
-  }, [showSnackbar, gridApi]);
-
-  const onSelectionChanged = useCallback(() => {
-    if (gridApi) {
-      // const selectedNodes = gridApi.getSelectedNodes();
-      // setSelectedRows(selectedNodes.map(node => node.data));
+  const handleCellEdit = useCallback((rowIndex, colIndex, newValue) => {
+    const newRowData = [...rowData];
+    const colKey = columnDefs[colIndex]?.field;
+    if (colKey && newRowData[rowIndex]) {
+      newRowData[rowIndex][colKey] = newValue;
+      setRowData(newRowData);
+      setHasUnsavedChanges(true);
+      
+      // Recalculate unknown count dynamically
+      let unknownCount = 0;
+      newRowData.forEach(row => {
+        unknownCount += Object.values(row).filter(cell => 
+          cell && cell.toString().toLowerCase() === 'unknown'
+        ).length;
+      });
+      setUnknownCellsCount(unknownCount);
+      
+      showSnackbar('Cell updated - changes not saved yet', 'info');
     }
-  }, [gridApi]);
-
-  const onFilterChanged = useCallback(() => {
-    if (gridApi) {
-      const filteredRowCount = gridApi.getDisplayedRowCount();
-      showSnackbar(`Showing ${filteredRowCount} of ${totalRows} rows`, 'info');
-    }
-  }, [gridApi, totalRows, showSnackbar]);
+  }, [rowData, columnDefs, showSnackbar]);
 
   // ─── DATA LOADING ──────────────────────────────────────────────────────────
   const location = useLocation();
@@ -948,166 +887,6 @@ const DataEditor = () => {
                 </Tooltip>
             </Box>
 
-            {/* Stats Row */}
-            <Box sx={{ 
-              display: 'flex', 
-              flexWrap: 'wrap',
-              gap: 1.5,
-              justifyContent: 'center',
-              '& > *': { flexShrink: 0 }
-            }}>
-              {/* Total Rows */}
-              <Card sx={{ 
-                bgcolor: 'rgba(255,255,255,0.15)', 
-                backdropFilter: 'blur(10px)',
-                border: '1px solid rgba(255,255,255,0.2)',
-                minWidth: { xs: 'auto', sm: 100 }
-              }}>
-                <CardContent sx={{ p: '12px 16px !important', textAlign: 'center' }}>
-                  <Typography variant="h6" fontWeight="700" color="white">
-                    {totalRows}
-                  </Typography>
-                  <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.8)', fontSize: '0.75rem' }}>
-                    rows
-                  </Typography>
-                </CardContent>
-              </Card>
-
-              {/* Total Columns */}
-              <Card sx={{ 
-                bgcolor: 'rgba(255,255,255,0.15)', 
-                backdropFilter: 'blur(10px)',
-                border: '1px solid rgba(255,255,255,0.2)',
-                minWidth: { xs: 'auto', sm: 100 }
-              }}>
-                <CardContent sx={{ p: '12px 16px !important', textAlign: 'center' }}>
-                  <Typography variant="h6" fontWeight="700" color="white">
-                    {columnDefs.length - 1}
-                  </Typography>
-                  <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.8)', fontSize: '0.75rem' }}>
-                    columns
-                  </Typography>
-                </CardContent>
-              </Card>
-              
-              {/* Mapped Columns */}
-              {mappedColumns.length > 0 && (
-                <Card sx={{ 
-                  bgcolor: 'rgba(76, 175, 80, 0.8)', 
-                  backdropFilter: 'blur(10px)',
-                  border: '1px solid rgba(255,255,255,0.2)',
-                  minWidth: { xs: 'auto', sm: 100 }
-                }}>
-                  <CardContent sx={{ p: '12px 16px !important', textAlign: 'center' }}>
-                    <Typography variant="h6" fontWeight="700" color="white">
-                      {mappedColumns.length}
-                    </Typography>
-                    <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.9)', fontSize: '0.75rem' }}>
-                      mapped
-                    </Typography>
-                  </CardContent>
-                </Card>
-              )}
-              
-              {/* Unmapped Columns - Clickable */}
-              {unmappedColumns.length > 0 && (
-                <Card 
-                  sx={{ 
-                    bgcolor: 'rgba(255, 152, 0, 0.8)', 
-                    backdropFilter: 'blur(10px)',
-                    border: '1px solid rgba(255,255,255,0.2)',
-                    cursor: 'pointer',
-                    transition: 'all 0.2s ease',
-                    minWidth: { xs: 'auto', sm: 100 },
-                    '&:hover': { 
-                      bgcolor: 'rgba(255, 152, 0, 0.9)',
-                      transform: 'translateY(-2px)',
-                      boxShadow: '0 4px 12px rgba(0,0,0,0.3)'
-                    }
-                  }}
-                  onClick={scrollToUnmappedColumn}
-                >
-                  <CardContent sx={{ p: '12px 16px !important', textAlign: 'center' }}>
-                    <Typography variant="h6" fontWeight="700" color="white">
-                      {unmappedColumns.length}
-                    </Typography>
-                    <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.9)', fontSize: '0.75rem' }}>
-                      unmapped
-                    </Typography>
-                  </CardContent>
-                </Card>
-              )}
-              
-              {/* Unsaved Changes */}
-              {hasUnsavedChanges && (
-                <Card sx={{ 
-                  bgcolor: 'rgba(244, 67, 54, 0.8)', 
-                  backdropFilter: 'blur(10px)',
-                  border: '1px solid rgba(255,255,255,0.2)',
-                  animation: 'pulse 2s infinite',
-                  minWidth: { xs: 'auto', sm: 120 }
-                }}>
-                  <CardContent sx={{ p: '12px 16px !important', textAlign: 'center' }}>
-                    <Typography variant="body2" fontWeight="700" color="white" sx={{ fontSize: '0.8rem' }}>
-                      Unsaved
-                    </Typography>
-                    <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.9)', fontSize: '0.7rem' }}>
-                      changes
-                    </Typography>
-                  </CardContent>
-                </Card>
-              )}
-              
-              {/* Formula Columns */}
-              {formulaColumns.length > 0 && (
-                <Card sx={{ 
-                  bgcolor: 'rgba(76, 175, 80, 0.8)', 
-                  backdropFilter: 'blur(10px)',
-                  border: '1px solid rgba(255,255,255,0.2)',
-                  minWidth: { xs: 'auto', sm: 100 }
-                }}>
-                  <CardContent sx={{ p: '12px 16px !important', textAlign: 'center' }}>
-                    <Typography variant="h6" fontWeight="700" color="white">
-                      {formulaColumns.length}
-                    </Typography>
-                    <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.9)', fontSize: '0.75rem' }}>
-                      smart tags
-                    </Typography>
-                  </CardContent>
-                </Card>
-              )}
-
-              {/* Unknown Values - Clickable */}
-              {unknownCellsCount > 0 && (
-                <Card 
-                  sx={{ 
-                    bgcolor: 'rgba(244, 67, 54, 0.8)', 
-                    backdropFilter: 'blur(10px)',
-                    border: '1px solid rgba(255,255,255,0.2)',
-                    cursor: 'pointer',
-                    transition: 'all 0.2s ease',
-                    minWidth: { xs: 'auto', sm: 100 },
-                    '&:hover': { 
-                      bgcolor: 'rgba(244, 67, 54, 0.9)',
-                      transform: 'translateY(-2px)',
-                      boxShadow: '0 4px 12px rgba(0,0,0,0.3)'
-                    }
-                  }}
-                  onClick={scrollToUnknownCell}
-                >
-                  <CardContent sx={{ p: '12px 16px !important', textAlign: 'center' }}>
-                    <Typography variant="h6" fontWeight="700" color="white">
-                      {unknownCellsCount}
-                    </Typography>
-                    <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.9)', fontSize: '0.75rem' }}>
-                      unknown
-                    </Typography>
-                  </CardContent>
-                </Card>
-              )}
-
-              
-            </Box>
           </Box>
         </Container>
       </Paper>
@@ -1160,49 +939,98 @@ const DataEditor = () => {
             elevation={2} 
             sx={{ 
               height: '100%', 
-              overflow: 'hidden',
+              overflow: 'auto',
               borderRadius: 2,
               border: '1px solid #e0e0e0'
             }}
           >
-          <div
-            className="ag-theme-alpine"
-            style={{
-              height: '100%',
-              width: '100%',
-              '--ag-header-height': '50px',
-              '--ag-row-height': '45px',
-              '--ag-list-item-height': '45px',
-              '--ag-header-background-color': '#f8f9fa',
-              '--ag-header-foreground-color': '#2c3e50',
-              '--ag-border-color': '#dee2e6',
-              '--ag-row-border-color': '#e9ecef',
-              '--ag-secondary-border-color': '#f1f3f4',
-              '--ag-selected-row-background-color': '#e3f2fd',
-              '--ag-range-selection-background-color': '#bbdefb',
-              '--ag-font-family': 'Segoe UI, Tahoma, Geneva, Verdana, sans-serif',
-              '--ag-font-size': '14px',
-              '--ag-header-font-weight': '600',
-              '--ag-header-column-resize-handle-display': 'block',
-              '--ag-header-column-resize-handle-height': '100%',
-              '--ag-header-column-resize-handle-width': '4px',
-              '--ag-header-column-resize-handle-color': '#007bff'
-            }}
-          >
-            <AgGridReact
-              ref={gridRef}
-              theme="legacy"
-              rowData={rowData}
-              columnDefs={columnDefs}
-              defaultColDef={defaultColDef}
-              gridOptions={gridOptions}
-              onGridReady={onGridReady}
-              onCellValueChanged={onCellValueChanged}
-              onSelectionChanged={onSelectionChanged}
-              onFilterChanged={onFilterChanged}
-            />
-          </div>
-        </Paper>
+            <Box sx={{ p: 2 }}>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ 
+                  width: '100%', 
+                  borderCollapse: 'collapse',
+                  fontSize: '14px',
+                  fontFamily: 'Segoe UI, Tahoma, Geneva, Verdana, sans-serif'
+                }}>
+                  <thead>
+                    <tr style={{ backgroundColor: '#f8f9fa', borderBottom: '2px solid #dee2e6' }}>
+                      
+                      {columnDefs.map((col, index) => (
+                        <th key={col.field} style={{
+                          padding: '12px 16px',
+                          textAlign: 'left',
+                          fontWeight: 600,
+                          color: '#2c3e50',
+                          border: '1px solid #e9ecef',
+                          backgroundColor: col.isFormulaColumn ? '#e8f5e8' : 
+                                         col.isUnmapped ? '#fff8e1' : 
+                                         col.isSpecificationColumn ? '#f0f8ff' : '#f8f9fa',
+                          borderLeft: col.isFormulaColumn ? '4px solid #4caf50' :
+                                    col.isUnmapped ? '4px solid #ff9800' :
+                                    col.isSpecificationColumn ? '4px solid #2196f3' : '1px solid #e9ecef'
+                        }}>
+                          {col.headerName}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rowData.map((row, rowIndex) => (
+                      <tr key={rowIndex} style={{
+                        backgroundColor: rowIndex % 2 === 0 ? '#f8f9fa' : 'white'
+                      }}>
+                        
+                        {columnDefs.map((col, colIndex) => {
+                          const cellValue = row[col.field] || '';
+                          const isUnknown = cellValue.toString().toLowerCase() === 'unknown';
+                          
+                          return (
+                            <td key={col.field} style={{
+                              padding: '12px 16px',
+                              border: '1px solid #e9ecef',
+                              backgroundColor: isUnknown ? '#ffebee' :
+                                             col.isFormulaColumn ? '#e8f5e8' :
+                                             col.isUnmapped ? '#fff8e1' :
+                                             col.isSpecificationColumn ? '#f0f8ff' :
+                                             rowIndex % 2 === 0 ? '#f8f9fa' : 'white',
+                              color: isUnknown ? '#c62828' : 'inherit',
+                              fontWeight: isUnknown || col.isFormulaColumn ? '500' : 'normal',
+                              borderLeft: col.isFormulaColumn ? '4px solid #4caf50' :
+                                        col.isUnmapped ? '4px solid #ff9800' :
+                                        col.isSpecificationColumn ? '4px solid #2196f3' : '1px solid #e9ecef'
+                            }}>
+                              {col.field === 'datasheet' && cellValue.startsWith('http') ? (
+                                <a href={cellValue} target="_blank" rel="noopener noreferrer">
+                                  {cellValue}
+                                </a>
+                              ) : (
+                                <input
+                                  type="text"
+                                  value={cellValue}
+                                  onChange={(e) => handleCellEdit(rowIndex, colIndex, e.target.value)}
+                                  style={{
+                                    border: 'none',
+                                    background: 'transparent',
+                                    width: '100%',
+                                    fontSize: 'inherit',
+                                    fontFamily: 'inherit',
+                                    color: 'inherit',
+                                    fontWeight: 'inherit',
+                                    outline: 'none'
+                                  }}
+                                  onFocus={(e) => e.target.select()}
+                                />
+                              )}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Box>
+          </Paper>
         )}
       </Box>
 
@@ -1426,10 +1254,59 @@ const DataEditor = () => {
         open={formulaBuilderOpen}
         onClose={handleCloseFormulaBuilder}
         sessionId={sessionId}
-        availableColumns={columnDefs.filter(col => col.field).map(col => col.field)}
+        availableColumns={columnDefs.filter(col => col.field && col.field !== '__row_number__').map(col => col.field)}
         onApplyFormulas={handleApplyFormulas}
         onClear={handleClearFormulas}
         initialRules={appliedFormulas}
+        // Pass column examples for preview brackets (ONLY FIRST non-empty value like Dashboard)
+        columnExamples={
+          columnDefs
+            .filter(col => col.field && col.field !== '__row_number__')
+            .reduce((acc, col) => {
+              // Find the FIRST non-empty example for this column (like Dashboard does)
+              let firstExample = '';
+              for (const row of rowData) {
+                const cellValue = row[col.field];
+                if (cellValue !== null && cellValue !== undefined && 
+                    cellValue !== '' && cellValue.toString().toLowerCase() !== 'unknown') {
+                  firstExample = cellValue;
+                  break;
+                }
+              }
+              acc[col.field] = firstExample;
+              return acc;
+            }, {})
+        }
+        // Pass column fill stats for colored circles (like Dashboard: 'empty', 'partial', 'full')
+        columnFillStats={
+          columnDefs
+            .filter(col => col.field && col.field !== '__row_number__')
+            .reduce((acc, col) => {
+              // Calculate fill percentage like Dashboard
+              let nonEmptyCount = 0;
+              for (const row of rowData) {
+                const cellValue = row[col.field];
+                if (cellValue !== null && cellValue !== undefined && 
+                    cellValue !== '' && cellValue.toString().toLowerCase() !== 'unknown') {
+                  nonEmptyCount++;
+                }
+              }
+              
+              const totalCount = rowData.length;
+              const fillPercentage = totalCount > 0 ? nonEmptyCount / totalCount : 0;
+              
+              // Use Dashboard's logic for colored circles
+              if (fillPercentage === 0) {
+                acc[col.field] = 'empty';
+              } else if (fillPercentage < 0.8) {
+                acc[col.field] = 'partial';
+              } else {
+                acc[col.field] = 'full';
+              }
+              
+              return acc;
+            }, {})
+        }
       />
 
       {/* Create Factwise ID Dialog */}
@@ -1645,22 +1522,11 @@ const DataEditor = () => {
         </Alert>
       </Snackbar>
 
-      {/* CSS for animations and formula styling */}
+      {/* CSS for animations */}
       <style jsx>{`
         @keyframes pulse {
           0%, 100% { opacity: 1; }
           50% { opacity: 0.7; }
-        }
-        
-        .ag-header-formula {
-          background-color: #e8f5e8 !important;
-          color: #2e7d32 !important;
-          font-weight: 600 !important;
-          border-left: 4px solid #4caf50 !important;
-        }
-        
-        .ag-header-formula .ag-header-cell-text {
-          color: #2e7d32 !important;
         }
       `}</style>
     </Box>

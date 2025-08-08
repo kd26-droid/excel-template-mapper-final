@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  excel-mapper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: excel-template-mapper:latest
+    container_name: excel-template-mapper
+    ports:
+      - "8080:80"
+    environment:
+      - SECRET_KEY=your-secret-key-for-local-development
+      - DEBUG=False
+      - ALLOWED_HOSTS=localhost,127.0.0.1
+      - DATABASE_URL=sqlite:///db.sqlite3
+      - CORS_ALLOWED_ORIGINS=http://localhost:8080
+    volumes:
+      - excel_mapper_data:/app/backend/media
+      - excel_mapper_static:/app/backend/static
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/api/health/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  excel_mapper_data:
+  excel_mapper_static:
