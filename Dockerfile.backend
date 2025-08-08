@@ -1,0 +1,34 @@
+# Backend-only Dockerfile for Azure App Service
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install dependencies
+COPY backend/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy backend code
+COPY backend/ .
+
+# Create necessary directories
+RUN mkdir -p media/uploads temp_downloads uploaded_files logs static
+RUN chmod -R 755 media temp_downloads uploaded_files logs static
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV DJANGO_SETTINGS_MODULE=excel_mapping.settings
+
+# Expose port
+EXPOSE 8000
+
+# Collect static files and run migrations
+RUN python manage.py collectstatic --noinput --verbosity 1 || echo "Static files collection done"
+
+# Start gunicorn
+CMD ["gunicorn", "excel_mapping.wsgi:application", "--bind", "0.0.0.0:8000", "--timeout", "600", "--workers", "2"]

@@ -71,7 +71,7 @@ COPY nginx.conf /etc/nginx/sites-available/default
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
 
-# Expose ports
+# Expose ports  
 EXPOSE 80
 
 # Set working directory to backend for easier command execution

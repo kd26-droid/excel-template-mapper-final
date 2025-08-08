@@ -23,7 +23,40 @@ from openpyxl.styles import Font, PatternFill
 
 from .bom_header_mapper import BOMHeaderMapper
 from .models import MappingTemplate, TagTemplate
-from ..azure_storage import hybrid_file_manager
+try:
+    from azure_storage import hybrid_file_manager
+except ImportError:
+    # Fallback to local file manager if azure_storage is not available
+    import os
+    import uuid
+    from pathlib import Path
+    from typing import Tuple
+    
+    class LocalFileManager:
+        def __init__(self):
+            self.local_upload_dir = Path(settings.BASE_DIR) / 'uploaded_files'
+            self.local_temp_dir = Path(settings.BASE_DIR) / 'temp_downloads'
+            self._ensure_local_directories()
+        
+        def _ensure_local_directories(self):
+            self.local_upload_dir.mkdir(parents=True, exist_ok=True)
+            self.local_temp_dir.mkdir(parents=True, exist_ok=True)
+        
+        def save_upload_file(self, file, prefix="upload") -> Tuple[str, str]:
+            file_extension = Path(file.name).suffix
+            unique_filename = f"{uuid.uuid4()}_{prefix}{file_extension}"
+            local_file_path = self.local_upload_dir / unique_filename
+            
+            with open(local_file_path, 'wb+') as destination:
+                for chunk in file.chunks():
+                    destination.write(chunk)
+            
+            return str(local_file_path), file.name
+        
+        def get_file_path(self, file_identifier: str) -> str:
+            return file_identifier
+    
+    hybrid_file_manager = LocalFileManager()
 
 # Configure logging
 logger = logging.getLogger(__name__)
