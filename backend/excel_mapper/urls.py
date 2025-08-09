@@ -25,6 +25,7 @@ from .views import (
     delete_mapping_template,
     apply_mapping_template,
     update_mapping_template,
+    update_column_counts,
     apply_formulas,
     preview_formulas,
     check_column_conflicts,
@@ -76,6 +77,7 @@ urlpatterns = [
     path('templates/<int:template_id>/', delete_mapping_template, name='delete-mapping-template'),
     path('templates/apply/', apply_mapping_template, name='apply-mapping-template'),
     path('templates/update/', update_mapping_template, name='update-mapping-template'),
+    path('column-counts/update/', update_column_counts, name='update-column-counts'),
     
     # Formula Management (integrated with templates)
     path('formulas/apply/', apply_formulas, name='apply-formulas'),

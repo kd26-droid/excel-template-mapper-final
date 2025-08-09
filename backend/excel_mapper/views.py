@@ -139,29 +139,42 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
     try:
         logger.info(f"🔍 apply_column_mappings received mappings: {mappings}")
         
-        # Get template headers from session if available, otherwise read from template file
+        # Get template headers - use dynamic columns if available, otherwise read from file
         template_headers = []
         if session_id and session_id in SESSION_STORE:
-            template_headers = SESSION_STORE[session_id].get("template_headers", [])
+            info = SESSION_STORE[session_id]
             
-            # If template headers not in session, read them from template file
-            if not template_headers:
-                try:
-                    info = SESSION_STORE[session_id]
-                    from .bom_header_mapper import BOMHeaderMapper
-                    mapper = BOMHeaderMapper()
-                    template_headers = mapper.read_excel_headers(
-                        file_path=hybrid_file_manager.get_file_path(info["template_path"]),
-                        sheet_name=info.get("template_sheet_name"),
-                        header_row=info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0
-                    )
-                    # Store in session for future use
-                    SESSION_STORE[session_id]["template_headers"] = template_headers
-                    logger.info(f"🔍 Read and cached {len(template_headers)} template headers from file")
-                except Exception as e:
-                    logger.warning(f"Could not read template headers: {e}")
+            # Prefer enhanced headers (e.g., optional deletions or formula overrides)
+            enhanced_headers = info.get("enhanced_headers")
+            if enhanced_headers and isinstance(enhanced_headers, list) and len(enhanced_headers) > 0:
+                template_headers = enhanced_headers
+                logger.info(f"🔍 Using {len(template_headers)} enhanced template headers from session")
+            elif 'tags_count' in info or 'spec_pairs_count' in info or 'customer_id_pairs_count' in info:
+                # Dynamic template columns when counts provided
+                tags_count = info.get('tags_count', 1)
+                spec_pairs_count = info.get('spec_pairs_count', 1)
+                customer_id_pairs_count = info.get('customer_id_pairs_count', 1)
+                template_headers = generate_template_columns(tags_count, spec_pairs_count, customer_id_pairs_count)
+                logger.info(f"🔍 Generated {len(template_headers)} dynamic template columns")
             else:
-                logger.info(f"🔍 Found {len(template_headers)} template headers from session")
+                # Fallback to reading from template file
+                template_headers = SESSION_STORE[session_id].get("template_headers", [])
+                if not template_headers:
+                    try:
+                        from .bom_header_mapper import BOMHeaderMapper
+                        mapper = BOMHeaderMapper()
+                        template_headers = mapper.read_excel_headers(
+                            file_path=hybrid_file_manager.get_file_path(info["template_path"]),
+                            sheet_name=info.get("template_sheet_name"),
+                            header_row=info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0
+                        )
+                        # Store in session for future use
+                        SESSION_STORE[session_id]["template_headers"] = template_headers
+                        logger.info(f"🔍 Read and cached {len(template_headers)} template headers from file")
+                    except Exception as e:
+                        logger.warning(f"Could not read template headers: {e}")
+                else:
+                    logger.info(f"🔍 Found {len(template_headers)} template headers from session")
         
         # Handle new mapping format from frontend
         if isinstance(mappings, dict) and 'mappings' in mappings:
@@ -625,17 +638,80 @@ def get_headers(request, session_id):
             header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0
         )
         
-        # Read template headers
+        # Read template headers (allow enhanced headers override)
         template_headers = mapper.read_excel_headers(
             file_path=hybrid_file_manager.get_file_path(info["template_path"]),
             sheet_name=info.get("template_sheet_name"),
             header_row=info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0
         )
+        # Try to read optional/mandatory annotations from rows above headers (substring match)
+        template_optionals_map = {}
+        try:
+            import pandas as pd
+            template_path = hybrid_file_manager.get_file_path(info["template_path"])
+            template_header_row_idx = info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0
+            if template_header_row_idx > 0:
+                # Read all rows above the header row to scan for annotations
+                if str(template_path).lower().endswith('.csv'):
+                    df_ann = pd.read_csv(template_path, header=None, nrows=template_header_row_idx)
+                else:
+                    df_ann = pd.read_excel(template_path, sheet_name=info.get("template_sheet_name"), header=None, nrows=template_header_row_idx)
+                # For each header column, scan upward for any cell containing 'optional'
+                for idx, header in enumerate(template_headers):
+                    is_optional = False
+                    if idx < df_ann.shape[1] and df_ann.shape[0] > 0:
+                        col_series = df_ann.iloc[:, idx]
+                        for cell in col_series[::-1]:  # scan from nearest row upward
+                            try:
+                                text = str(cell).strip().lower()
+                            except Exception:
+                                text = ''
+                            if 'optional' in text:
+                                is_optional = True
+                                break
+                            if 'mandatory' in text:
+                                # Explicit mandatory marker above; stop scanning
+                                is_optional = False
+                                break
+                    template_optionals_map[str(header)] = is_optional
+        except Exception as e:
+            logger.warning(f"Optional/Mandatory annotations not read: {e}")
+        enhanced_headers = info.get("enhanced_headers")
+        if enhanced_headers and isinstance(enhanced_headers, list) and len(enhanced_headers) > 0:
+            template_headers = enhanced_headers
+        
+        # Compute template_optionals aligned to the headers being returned
+        def is_special_optional(h: str) -> bool:
+            h_lower = (h or '').lower()
+            return h == 'Tags' or ('specification' in h_lower) or ('customer identification' in h_lower)
+        template_optionals = []
+        for h in template_headers:
+            if is_special_optional(h):
+                template_optionals.append(True)
+            else:
+                template_optionals.append(bool(template_optionals_map.get(str(h), False)))
+        
+        # Get column counts from session (with defaults)
+        tags_count = info.get('tags_count', 1)
+        spec_pairs_count = info.get('spec_pairs_count', 1)
+        customer_id_pairs_count = info.get('customer_id_pairs_count', 1)
+        
+        # Generate template columns based on counts
+        template_columns = generate_template_columns(tags_count, spec_pairs_count, customer_id_pairs_count)
         
         return Response({
             'success': True,
             'client_headers': client_headers,
-            'template_headers': template_headers
+            'template_headers': template_headers,
+            'template_columns': template_columns,
+            'template_optionals': template_optionals,
+            'column_counts': {
+                'tags_count': tags_count,
+                'spec_pairs_count': spec_pairs_count,
+                'customer_id_pairs_count': customer_id_pairs_count
+            },
+            'client_file': info.get('original_client_name', ''),
+            'template_file': info.get('original_template_name', '')
         })
         
     except Exception as e:
@@ -1387,6 +1463,98 @@ def dashboard_view(request):
 
 # Template management views
 @api_view(['POST'])
+def update_column_counts(request):
+    """Update dynamic column counts for the current session."""
+    try:
+        session_id = request.data.get('session_id')
+        tags_count = request.data.get('tags_count', 1)
+        spec_pairs_count = request.data.get('spec_pairs_count', 1)
+        customer_id_pairs_count = request.data.get('customer_id_pairs_count', 1)
+        
+        if not session_id or session_id not in SESSION_STORE:
+            return Response({
+                'success': False,
+                'error': 'Invalid session ID'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Validate counts are positive integers
+        try:
+            tags_count = max(0, int(tags_count))
+            spec_pairs_count = max(0, int(spec_pairs_count))
+            customer_id_pairs_count = max(0, int(customer_id_pairs_count))
+        except (ValueError, TypeError):
+            return Response({
+                'success': False,
+                'error': 'Column counts must be positive integers'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Store column counts in session
+        SESSION_STORE[session_id]['tags_count'] = tags_count
+        SESSION_STORE[session_id]['spec_pairs_count'] = spec_pairs_count
+        SESSION_STORE[session_id]['customer_id_pairs_count'] = customer_id_pairs_count
+        
+        # Save session to file
+        save_session(session_id, SESSION_STORE[session_id])
+        
+        # Generate new template columns based on counts
+        template_columns = generate_template_columns(tags_count, spec_pairs_count, customer_id_pairs_count)
+
+        # Persist enhanced headers so downstream pages and downloads reflect deletions
+        current_basic = ["Quantity", "Description", "Part Number", "Manufacturer", "Unit"]
+        enhanced_headers = current_basic.copy()
+        for _ in range(tags_count):
+            enhanced_headers.append("Tags")
+        for _ in range(spec_pairs_count):
+            enhanced_headers.extend(["Specification Name", "Specification Value"])
+        for _ in range(customer_id_pairs_count):
+            enhanced_headers.extend(["Customer Identification Name", "Customer Identification Value"])
+        SESSION_STORE[session_id]["enhanced_headers"] = enhanced_headers
+        save_session(session_id, SESSION_STORE[session_id])
+        
+        return Response({
+            'success': True,
+            'template_columns': template_columns,
+            'counts': {
+                'tags_count': tags_count,
+                'spec_pairs_count': spec_pairs_count,
+                'customer_id_pairs_count': customer_id_pairs_count
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"❌ Error updating column counts: {str(e)}")
+        return Response({
+            'success': False,
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+def generate_template_columns(tags_count, spec_pairs_count, customer_id_pairs_count):
+    """Generate template column names based on counts."""
+    columns = []
+    
+    # Basic mandatory columns (these should come from template configuration)
+    basic_columns = ["Quantity", "Description", "Part Number", "Manufacturer"]
+    columns.extend(basic_columns)
+    
+    # Add Tags columns (all named "Tags")
+    for _ in range(tags_count):
+        columns.append("Tags")
+    
+    # Add Specification Name/Value pairs
+    for _ in range(spec_pairs_count):
+        columns.append("Specification Name")
+        columns.append("Specification Value")
+    
+    # Add Customer Identification Name/Value pairs
+    for _ in range(customer_id_pairs_count):
+        columns.append("Customer Identification Name")
+        columns.append("Customer Identification Value")
+    
+    return columns
+
+
+@api_view(['POST'])
 def save_mapping_template(request):
     """Save current session mapping as a reusable template."""
     try:
@@ -1476,6 +1644,11 @@ def save_mapping_template(request):
             client_headers = []
             template_headers = []
         
+        # Get column counts from request or use defaults
+        tags_count = request.data.get('tags_count', 1)
+        spec_pairs_count = request.data.get('spec_pairs_count', 1) 
+        customer_id_pairs_count = request.data.get('customer_id_pairs_count', 1)
+        
         # Create template with backward compatibility
         try:
             logger.info(f"🔧 DEBUG: Saving template '{template_name}' with factwise_rules: {factwise_rules}")
@@ -1489,6 +1662,9 @@ def save_mapping_template(request):
                 formula_rules=formula_rules,  # Include formula rules
                 factwise_rules=factwise_rules,  # Include factwise ID rules
                 default_values=default_values,  # Include default values
+                tags_count=tags_count,
+                spec_pairs_count=spec_pairs_count,
+                customer_id_pairs_count=customer_id_pairs_count,
                 session_id=session_id
             )
         except Exception as e:
@@ -1699,6 +1875,11 @@ def apply_mapping_template(request):
         if application_result['total_mapped'] > 0:
             # Update session with applied mappings
             SESSION_STORE[session_id]["original_template_id"] = template_id
+            
+            # Apply column counts from template
+            SESSION_STORE[session_id]["tags_count"] = getattr(template, 'tags_count', 1)
+            SESSION_STORE[session_id]["spec_pairs_count"] = getattr(template, 'spec_pairs_count', 1)
+            SESSION_STORE[session_id]["customer_id_pairs_count"] = getattr(template, 'customer_id_pairs_count', 1)
             
             # Convert mappings from old format to new format for session storage
             old_format_mappings = application_result['mappings']

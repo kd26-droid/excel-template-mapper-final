@@ -47,12 +47,53 @@ const CustomNode = ({ data, id }) => {
   const hasDefaultValue = data.hasDefaultValue;
   const mappedToLabel = data.mappedToLabel || '';
   const mappedFromLabel = data.mappedFromLabel || '';
+  const isOptional = data.isOptional || false;
+  const onDelete = data.onDelete;
+  
+  // Pair grouping properties
+  const isPairStart = data.isPairStart || false;
+  const isPairEnd = data.isPairEnd || false;
+  const pairType = data.pairType || 'single';
+  const pairColor = data.pairColor || 'gray';
+  const pairIndex = data.pairIndex || 0;
+  
+  // Get Tailwind color classes based on pair color
+  const getColorClasses = (color) => {
+    const colorMap = {
+      blue: { bg: 'bg-blue-400', border: 'border-blue-400', text: 'text-blue-700', light: 'bg-blue-100' },
+      green: { bg: 'bg-green-400', border: 'border-green-400', text: 'text-green-700', light: 'bg-green-100' },
+      purple: { bg: 'bg-purple-400', border: 'border-purple-400', text: 'text-purple-700', light: 'bg-purple-100' },
+      pink: { bg: 'bg-pink-400', border: 'border-pink-400', text: 'text-pink-700', light: 'bg-pink-100' },
+      yellow: { bg: 'bg-yellow-400', border: 'border-yellow-400', text: 'text-yellow-700', light: 'bg-yellow-100' },
+      indigo: { bg: 'bg-indigo-400', border: 'border-indigo-400', text: 'text-indigo-700', light: 'bg-indigo-100' },
+      red: { bg: 'bg-red-400', border: 'border-red-400', text: 'text-red-700', light: 'bg-red-100' },
+      teal: { bg: 'bg-teal-400', border: 'border-teal-400', text: 'text-teal-700', light: 'bg-teal-100' },
+      orange: { bg: 'bg-orange-400', border: 'border-orange-400', text: 'text-orange-700', light: 'bg-orange-100' },
+      cyan: { bg: 'bg-cyan-400', border: 'border-cyan-400', text: 'text-cyan-700', light: 'bg-cyan-100' },
+      gray: { bg: 'bg-gray-400', border: 'border-gray-400', text: 'text-gray-700', light: 'bg-gray-100' }
+    };
+    return colorMap[color] || colorMap.gray;
+  };
+  
+  const colorClasses = getColorClasses(pairColor);
   
   return (
     <div className={`
       relative group cursor-pointer transition-all duration-300 transform hover:scale-105
       ${isSource ? 'hover:translate-x-2' : 'hover:-translate-x-2'}
     `}>
+      {/* Pair grouping visual indicators */}
+      {!isSource && pairType !== 'single' && (
+        <div className={`absolute -left-2 w-1 h-full rounded-l-lg ${colorClasses.bg} ${isPairStart ? 'rounded-tl-lg' : ''} ${isPairEnd ? 'rounded-bl-lg' : ''}`}></div>
+      )}
+      
+      {/* Pair number indicator */}
+      {!isSource && pairType !== 'single' && (
+        <div className={`absolute -top-2 -left-2 w-6 h-6 rounded-full ${colorClasses.bg} text-white text-xs font-bold flex items-center justify-center shadow-lg`}>
+          {pairIndex}
+        </div>
+      )}
+      
       {/* Main node container */}
       <div className={`
         relative px-5 py-4 rounded-xl border-2 transition-all duration-300 shadow-lg
@@ -69,6 +110,7 @@ const CustomNode = ({ data, id }) => {
         ${isSelected ? 'ring-4 ring-purple-500 ring-opacity-80 scale-110 shadow-2xl' : ''}
         ${isFromTemplate ? 'ring-2 ring-green-400 ring-opacity-50' : ''}
         ${isSpecificationMapping ? 'ring-2 ring-orange-400 ring-opacity-50' : ''}
+        ${!isSource && pairType !== 'single' ? 'ml-2' : ''}
       `}>
         
         {/* Connection handles - more visible */}
@@ -90,6 +132,12 @@ const CustomNode = ({ data, id }) => {
         {/* Node content */}
         <div className="px-3 break-words text-center leading-tight" title={data.originalLabel}>
           {data.originalLabel}
+          {/* Pair indicator */}
+          {!isSource && pairType !== 'single' && (
+            <div className={`text-xs mt-1 font-semibold ${colorClasses.text}`}>
+              {pairType === 'specification' ? `Spec Pair ${pairIndex}` : `ID Pair ${pairIndex}`}
+            </div>
+          )}
         </div>
         
         {/* Status indicators */}
@@ -108,15 +156,15 @@ const CustomNode = ({ data, id }) => {
           </div>
         )}
         
-        {/* Template indicator - Show Map-{Column Name} for manual mappings */}
-        {isFromTemplate && mappedToLabel && mappedToLabel.trim() !== '' && (
+        {/* Template indicator - Show Map-{Column Name} for manual/template mappings. A.Map reserved for AI */}
+        {!isSource && !isSpecificationMapping && mappedToLabel && mappedToLabel.trim() !== '' && !data.isAiGenerated && (
           <div className="absolute -bottom-2 -right-2 bg-green-500 text-white text-xs px-2 py-1 rounded-full font-bold shadow-lg">
             Map-{mappedToLabel}
           </div>
         )}
         
-        {/* Specification mapping indicator - Show A.Map-{Column Name} for automatic mappings */}
-        {isSpecificationMapping && mappedToLabel && mappedToLabel.trim() !== '' && (
+        {/* AI mapping indicator - Show A.Map-{Column Name} when auto-mapped */}
+        {(isSpecificationMapping || data.isAiGenerated) && mappedToLabel && mappedToLabel.trim() !== '' && (
           <div className="absolute -bottom-2 -right-2 bg-orange-500 text-white text-xs px-2 py-1 rounded-full font-bold shadow-lg">
             A.Map-{mappedToLabel}
           </div>
@@ -140,6 +188,20 @@ const CustomNode = ({ data, id }) => {
         
         {/* Hover effect overlay */}
         <div className="absolute inset-0 rounded-xl bg-white bg-opacity-0 group-hover:bg-opacity-10 transition-all duration-200 pointer-events-none"></div>
+        {/* Optional field delete button (template side only) */}
+        {!isSource && isOptional && (
+          <button
+            type="button"
+            title="Delete optional field"
+            className="absolute -top-3 -right-3 w-7 h-7 rounded-full bg-red-500 text-white flex items-center justify-center shadow-md opacity-80 hover:opacity-100"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (typeof onDelete === 'function') onDelete(id);
+            }}
+          >
+            <Trash2 size={14} />
+          </button>
+        )}
       </div>
       
       {/* Confidence indicator - positioned outside the node on the right */}
@@ -219,6 +281,43 @@ export default function ColumnMapping() {
     confidence: { high: 0, medium: 0, low: 0 }
   });
 
+  // Column count state
+  const [columnCounts, setColumnCounts] = useState({
+    tags_count: 1,
+    spec_pairs_count: 1,
+    customer_id_pairs_count: 1
+  });
+  const [templateColumns, setTemplateColumns] = useState([]);
+  const [useDynamicTemplate, setUseDynamicTemplate] = useState(false);
+  const [clientFileName, setClientFileName] = useState('');
+  const [templateFileName, setTemplateFileName] = useState('');
+  const [templateOptionals, setTemplateOptionals] = useState([]);
+
+  // Function to update column counts
+  const updateColumnCounts = async (newCounts) => {
+    try {
+      const response = await api.updateColumnCounts(sessionId, newCounts);
+      
+      if (response.data.success) {
+        setColumnCounts(newCounts);
+        if (response.data.template_columns) {
+          setTemplateColumns(response.data.template_columns);
+          setUseDynamicTemplate(true);
+          // Immediately refresh nodes with new template columns
+          initializeNodes(clientHeaders, response.data.template_columns);
+          // Clear all existing edges to avoid index mismatches
+          setEdges([]);
+        }
+        
+        console.log('✅ Column counts updated successfully:', newCounts);
+      } else {
+        console.error('❌ Failed to update column counts:', response.data.error);
+      }
+    } catch (error) {
+      console.error('❌ Error updating column counts:', error);
+    }
+  };
+
   // Load real data from API and check for existing mappings
   useEffect(() => {
     if (!sessionId) return;
@@ -236,11 +335,22 @@ export default function ColumnMapping() {
         const { data } = response;
         console.log('🔍 Response data:', data);
         
-        const { client_headers = [], template_headers = [], session_metadata = {} } = data;
+        const { 
+          client_headers = [], 
+          template_headers = [], 
+          template_columns = [], 
+          column_counts = {}, 
+          session_metadata = {},
+          client_file = '',
+          template_file = '',
+          template_optionals = []
+        } = data;
         
         console.log('🔍 Extracted headers:', { 
           client_headers: client_headers, 
           template_headers: template_headers, 
+          template_columns: template_columns,
+          column_counts: column_counts,
           session_metadata: session_metadata 
         });
         
@@ -258,12 +368,29 @@ export default function ColumnMapping() {
         
         setClientHeaders(validClientHeaders);
         setTemplateHeaders(validTemplateHeaders);
+        setClientFileName(client_file || '');
+        setTemplateFileName(template_file || '');
+        if (Array.isArray(template_optionals)) {
+          setTemplateOptionals(template_optionals);
+        } else {
+          setTemplateOptionals([]);
+        }
+        
+        // Set column counts and template columns
+        if (column_counts && Object.keys(column_counts).length > 0) {
+          setColumnCounts(column_counts);
+        }
+        if (template_columns && Array.isArray(template_columns)) {
+          setTemplateColumns(template_columns);
+        }
         
         console.log('✅ Headers set successfully:', {
           clientCount: validClientHeaders.length,
           templateCount: validTemplateHeaders.length,
           clientHeaders: validClientHeaders,
-          templateHeaders: validTemplateHeaders
+          templateHeaders: validTemplateHeaders,
+          columnCounts: column_counts,
+          templateColumns: template_columns
         });
         
         // DEBUG: Additional validation
@@ -290,14 +417,19 @@ export default function ColumnMapping() {
           console.log('🔍 Applied template name:', session_metadata.template_name);
         }
         
-        // Initialize nodes
+        // Initialize nodes - prefer actual template headers unless user explicitly changed counts
+        const headersToUse = useDynamicTemplate && template_columns.length > 0 ? template_columns : template_headers;
         console.log('📝 About to initialize nodes with:', {
           clientHeadersLength: client_headers.length,
           templateHeadersLength: template_headers.length,
+          templateColumnsLength: template_columns.length,
+          headersToUseLength: headersToUse.length,
           clientHeaders: client_headers,
-          templateHeaders: template_headers
+          templateHeaders: template_headers,
+          templateColumns: template_columns,
+          headersToUse: headersToUse
         });
-        initializeNodes(client_headers, template_headers);
+        initializeNodes(client_headers, headersToUse);
         
         // DEBUG: Check what was actually passed to initializeNodes
         console.log('🔍 Values passed to initializeNodes:', {
@@ -308,7 +440,7 @@ export default function ColumnMapping() {
         });
         
         // Check for existing mappings first
-        await checkExistingMappings(client_headers, template_headers);
+        await checkExistingMappings(client_headers, headersToUse);
         
       } catch (err) {
         console.error('Error loading data:', err);
@@ -555,6 +687,13 @@ export default function ColumnMapping() {
       const matchedTargets = new Set();
       const alignedTargets = [];
       
+      // Define colors for pairs
+      const pairColors = [
+        'blue', 'green', 'purple', 'pink', 'yellow', 'indigo', 'red', 'teal', 'orange', 'cyan'
+      ];
+      let specPairIndex = 0;
+      let customerPairIndex = 0;
+      
       // Position matched targets aligned with their sources
       Object.entries(aiMappings).forEach(([templateCol, info]) => {
         if (info.suggested_column) {
@@ -563,6 +702,38 @@ export default function ColumnMapping() {
           
           if (sourceIdx >= 0 && targetIdx >= 0) {
             matchedTargets.add(targetIdx);
+            
+            // Add visual grouping data for pairs
+            const isPairStart = (
+              (templateCol === 'Specification Name' && templateHdrs[targetIdx + 1] === 'Specification Value') ||
+              (templateCol === 'Customer Identification Name' && templateHdrs[targetIdx + 1] === 'Customer Identification Value')
+            );
+            const isPairEnd = (
+              (templateCol === 'Specification Value' && templateHdrs[targetIdx - 1] === 'Specification Name') ||
+              (templateCol === 'Customer Identification Value' && templateHdrs[targetIdx - 1] === 'Customer Identification Name')
+            );
+            
+            // Determine pair color
+            let pairColor = 'gray';
+            let pairIndex = 0;
+            if (templateCol.includes('Specification')) {
+              if (templateCol === 'Specification Name') {
+                pairIndex = specPairIndex;
+                specPairIndex++;
+              } else {
+                pairIndex = specPairIndex - 1;
+              }
+              pairColor = pairColors[pairIndex % pairColors.length];
+            } else if (templateCol.includes('Customer Identification')) {
+              if (templateCol === 'Customer Identification Name') {
+                pairIndex = customerPairIndex;
+                customerPairIndex++;
+              } else {
+                pairIndex = customerPairIndex - 1;
+              }
+              pairColor = pairColors[pairIndex % pairColors.length];
+            }
+            
             alignedTargets.push({
               id: `t-${targetIdx}`,
               type: 'custom',
@@ -576,7 +747,17 @@ export default function ColumnMapping() {
                 isConnected: false,
                 isSelected: false,
                 isFromTemplate: false,
-                isSpecificationMapping: info.is_specification_mapping || false
+              isSpecificationMapping: info.is_specification_mapping || templateCol.includes('Specification'),
+                isPairStart: isPairStart,
+                isPairEnd: isPairEnd,
+                pairType: templateCol.includes('Specification') ? 'specification' : 
+                         templateCol.includes('Customer Identification') ? 'customer' : 'single',
+                pairColor: pairColor,
+              pairIndex: pairIndex + 1,
+              isOptional: (templateOptionals && templateOptionals.length === templateHdrs.length) 
+                ? !!templateOptionals[targetIdx]
+                : (templateCol === 'Tags' || templateCol.includes('Specification') || templateCol.includes('Customer Identification')),
+                onDelete: handleDeleteOptionalField
               },
               draggable: false
             });
@@ -584,12 +765,48 @@ export default function ColumnMapping() {
         }
       });
       
-      // Position unmatched targets
+      // Position unmatched targets with pair grouping
       let unmatchedY = 40;
       templateHdrs.forEach((header, idx) => {
         if (!matchedTargets.has(idx)) {
           while (alignedTargets.some(node => node.position.y === unmatchedY)) {
             unmatchedY += (nodeHeight + nodeSpacing);
+          }
+          
+          // Add visual grouping spacing for pairs
+          const isPairStart = (
+            (header === 'Specification Name' && templateHdrs[idx + 1] === 'Specification Value') ||
+            (header === 'Customer Identification Name' && templateHdrs[idx + 1] === 'Customer Identification Value')
+          );
+          const isPairEnd = (
+            (header === 'Specification Value' && templateHdrs[idx - 1] === 'Specification Name') ||
+            (header === 'Customer Identification Value' && templateHdrs[idx - 1] === 'Customer Identification Name')
+          );
+          
+          // Determine pair color for unmatched targets too
+          let pairColor = 'gray';
+          let pairIndex = 0;
+          if (header.includes('Specification')) {
+            if (header === 'Specification Name') {
+              pairIndex = specPairIndex;
+              specPairIndex++;
+            } else {
+              pairIndex = specPairIndex - 1;
+            }
+            pairColor = pairColors[pairIndex % pairColors.length];
+          } else if (header.includes('Customer Identification')) {
+            if (header === 'Customer Identification Name') {
+              pairIndex = customerPairIndex;
+              customerPairIndex++;
+            } else {
+              pairIndex = customerPairIndex - 1;
+            }
+            pairColor = pairColors[pairIndex % pairColors.length];
+          }
+          
+          // Add extra spacing before pair starts
+          if (isPairStart && alignedTargets.length > 0) {
+            unmatchedY += 15;
           }
           
           alignedTargets.push({
@@ -602,32 +819,116 @@ export default function ColumnMapping() {
               isConnected: false,
               isSelected: false,
               isFromTemplate: false,
-              isSpecificationMapping: false
+              isSpecificationMapping: header.includes('Specification'),
+              isPairStart: isPairStart,
+              isPairEnd: isPairEnd,
+              pairType: header.includes('Specification') ? 'specification' : 
+                       header.includes('Customer Identification') ? 'customer' : 'single',
+              pairColor: pairColor,
+              pairIndex: pairIndex + 1,
+              isOptional: (templateOptionals && templateOptionals.length === templateHdrs.length) 
+                ? !!templateOptionals[idx]
+                : (header === 'Tags' || header.includes('Specification') || header.includes('Customer Identification')),
+              onDelete: handleDeleteOptionalField
             },
             draggable: false
           });
           
           unmatchedY += (nodeHeight + nodeSpacing);
+          
+          // Add extra spacing after pair ends
+          if (isPairEnd) {
+            unmatchedY += 15;
+          }
         }
       });
       
       targetNodes = alignedTargets;
     } else {
-      // Regular positioning
-      targetNodes = templateHdrs.map((header, idx) => ({
-        id: `t-${idx}`,
-        type: 'custom',
-        position: { x: 600, y: 40 + idx * (nodeHeight + nodeSpacing) },
-        data: { 
-          label: header, 
-          originalLabel: header,
-          isConnected: false,
-          isSelected: false,
-          isFromTemplate: false,
-          isSpecificationMapping: false
-        },
-        draggable: false
-      }));
+      // Regular positioning - create individual nodes for each column (including duplicates)
+      targetNodes = [];
+      let currentY = 40;
+      let specPairIndex = 0;
+      let customerPairIndex = 0;
+      
+      // Define colors for pairs
+      const pairColors = [
+        'blue', 'green', 'purple', 'pink', 'yellow', 'indigo', 'red', 'teal', 'orange', 'cyan'
+      ];
+      
+      templateHdrs.forEach((header, idx) => {
+        // Add visual grouping spacing for pairs
+        const isPairStart = (
+          (header === 'Specification Name' && templateHdrs[idx + 1] === 'Specification Value') ||
+          (header === 'Customer Identification Name' && templateHdrs[idx + 1] === 'Customer Identification Value')
+        );
+        const isPairEnd = (
+          (header === 'Specification Value' && templateHdrs[idx - 1] === 'Specification Name') ||
+          (header === 'Customer Identification Value' && templateHdrs[idx - 1] === 'Customer Identification Name')
+        );
+        
+        // Determine pair color
+        let pairColor = 'gray';
+        let pairIndex = 0;
+        if (header.includes('Specification')) {
+          if (header === 'Specification Name') {
+            // Starting a new spec pair
+            pairIndex = specPairIndex;
+            specPairIndex++;
+          } else {
+            // This is the value for the current spec pair
+            pairIndex = specPairIndex - 1;
+          }
+          pairColor = pairColors[pairIndex % pairColors.length];
+        } else if (header.includes('Customer Identification')) {
+          if (header === 'Customer Identification Name') {
+            // Starting a new customer pair
+            pairIndex = customerPairIndex;
+            customerPairIndex++;
+          } else {
+            // This is the value for the current customer pair
+            pairIndex = customerPairIndex - 1;
+          }
+          pairColor = pairColors[pairIndex % pairColors.length];
+        }
+        
+        // Add extra spacing before pair starts (except for first item)
+        if (isPairStart && idx > 0) {
+          currentY += 15; // Extra spacing before pairs
+        }
+        
+        targetNodes.push({
+          id: `t-${idx}`,
+          type: 'custom',
+          position: { x: 600, y: currentY },
+          data: { 
+            label: header, 
+            originalLabel: header,
+            isConnected: false,
+            isSelected: false,
+            isFromTemplate: false,
+            isSpecificationMapping: header.includes('Specification'),
+            isPairStart: isPairStart,
+            isPairEnd: isPairEnd,
+            pairType: header.includes('Specification') ? 'specification' : 
+                     header.includes('Customer Identification') ? 'customer' : 'single',
+            pairColor: pairColor,
+            pairIndex: pairIndex + 1,
+            isOptional: (templateOptionals && templateOptionals.length === templateHdrs.length) 
+              ? !!templateOptionals[idx]
+              : (header === 'Tags' || header.includes('Specification') || header.includes('Customer Identification')),
+            onDelete: handleDeleteOptionalField
+          },
+          draggable: false
+        });
+        
+        currentY += (nodeHeight + nodeSpacing);
+        
+        // Add extra spacing after pair ends
+        if (isPairEnd) {
+          currentY += 15; // Extra spacing after pairs
+        }
+      });
     }
 
     const allNodes = [...clientNodes, ...targetNodes];
@@ -650,6 +951,51 @@ export default function ColumnMapping() {
       }
     }, 100);
   };
+
+  // Delete optional template field (or pair) after ensuring it's unmapped
+  const handleDeleteOptionalField = useCallback((nodeId) => {
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node || !node.id.startsWith('t-')) return;
+
+    const nodeData = node.data || {};
+    const pairType = nodeData.pairType || 'single';
+    const isSpec = pairType === 'specification';
+    const isCustomer = pairType === 'customer';
+    const isTag = nodeData.originalLabel === 'Tags';
+
+    // Determine affected target node ids
+    let targetIds = [node.id];
+    if (isSpec || isCustomer) {
+      const pairIndex = nodeData.pairIndex;
+      targetIds = nodes
+        .filter(n => n.id.startsWith('t-') && (n.data?.pairType === pairType) && (n.data?.pairIndex === pairIndex))
+        .map(n => n.id);
+    }
+
+    // Check if any of the target nodes are mapped
+    const hasMapping = edges.some(e => targetIds.includes(e.target));
+    if (hasMapping) {
+      window.alert('Please remove the mapping from this field before deleting it.');
+      return;
+    }
+
+    // Compute new counts
+    const newCounts = { ...columnCounts };
+    if (isSpec) {
+      newCounts.spec_pairs_count = Math.max(0, (newCounts.spec_pairs_count || 0) - 1);
+    } else if (isCustomer) {
+      newCounts.customer_id_pairs_count = Math.max(0, (newCounts.customer_id_pairs_count || 0) - 1);
+    } else if (isTag) {
+      newCounts.tags_count = Math.max(0, (newCounts.tags_count || 0) - 1);
+    } else {
+      // Not deletable
+      return;
+    }
+
+    // Persist and rebuild using dynamic template columns
+    setUseDynamicTemplate(true);
+    updateColumnCounts(newCounts);
+  }, [nodes, edges, columnCounts, updateColumnCounts]);
 
   // SUPER SIMPLE direct arrows - straight lines to what's in front
   const createEdge = (sourceIdx, targetIdx, isAI = false, confidence = null, isFromTemplate = false, isSpecificationMapping = false) => {
@@ -743,7 +1089,8 @@ export default function ColumnMapping() {
   };
 
   const isCompleteMapping = () => {
-    const targetNodeIds = templateHeaders.map((_, idx) => `t-${idx}`);
+    const targetHeaders = (useDynamicTemplate && templateColumns.length > 0) ? templateColumns : templateHeaders;
+    const targetNodeIds = targetHeaders.map((_, idx) => `t-${idx}`);
     const mappedTargets = edges.map(edge => edge.target);
     return targetNodeIds.every(targetId => mappedTargets.includes(targetId));
   };
@@ -818,13 +1165,14 @@ export default function ColumnMapping() {
       
       if (!isNodeMapped) {
         // Unmapped template field clicked - open default value dialog
-        const templateFieldName = templateHeaders[targetIdx];
+        const targetHeaders = (useDynamicTemplate && templateColumns.length > 0) ? templateColumns : templateHeaders;
+        const templateFieldName = targetHeaders[targetIdx];
         setSelectedTemplateField({ id: node.id, name: templateFieldName, index: targetIdx });
         setDefaultValueText(defaultValueMappings[templateFieldName] || '');
         setShowDefaultValueDialog(true);
       }
     }
-  }, [selectedSourceNode, nodes, edges, setNodes, setEdges, templateHeaders, defaultValueMappings]);
+  }, [selectedSourceNode, nodes, edges, setNodes, setEdges, templateHeaders, templateColumns, useDynamicTemplate, defaultValueMappings]);
 
   // Auto-mapping using real API with enhanced specification handling
   // Auto-mapping using real API with enhanced specification handling
@@ -1237,7 +1585,8 @@ export default function ColumnMapping() {
       if (!node.id.startsWith('t-')) return node; // Only update template nodes
       
       const targetIdx = parseInt(node.id.replace('t-', ''));
-      const templateFieldName = templateHeaders[targetIdx];
+      const targetHeaders = (useDynamicTemplate && templateColumns.length > 0) ? templateColumns : templateHeaders;
+      const templateFieldName = targetHeaders[targetIdx];
       const defaultValue = defaultValueMappings[templateFieldName];
       const hasDefaultValue = !!defaultValue;
       
@@ -1256,7 +1605,7 @@ export default function ColumnMapping() {
         }
       };
     }));
-  }, [defaultValueMappings, templateHeaders, setNodes, edges]);
+  }, [defaultValueMappings, templateHeaders, templateColumns, useDynamicTemplate, setNodes, edges]);
 
   // Update mapping statistics and auto-save mappings
   useEffect(() => {
@@ -1282,10 +1631,11 @@ export default function ColumnMapping() {
 
     // ENHANCED: Auto-save mappings to sessionStorage with template information
     if (edges.length > 0 && clientHeaders.length > 0 && templateHeaders.length > 0) {
+      const targetHeaders = (useDynamicTemplate && templateColumns.length > 0) ? templateColumns : templateHeaders;
       const mappingForRestore = {
         mappings: edges.map(edge => ({
           sourceColumn: clientHeaders[parseInt(edge.source.replace('c-', ''))],
-          targetColumn: templateHeaders[parseInt(edge.target.replace('t-', ''))],
+          targetColumn: targetHeaders[parseInt(edge.target.replace('t-', ''))],
           isAiGenerated: edge.data?.isAiGenerated || false,
           isFromTemplate: edge.data?.isFromTemplate || false,
           isSpecificationMapping: edge.data?.isSpecificationMapping || false,
@@ -1329,12 +1679,13 @@ export default function ColumnMapping() {
       });
       
       // Send as ordered array of individual mappings to preserve source-target relationships
+      const targetHeaders = (useDynamicTemplate && templateColumns.length > 0) ? templateColumns : templateHeaders;
       const mappingData = {
         mappings: sortedEdges.map(edge => {
           const sourceIdx = parseInt(edge.source.replace('c-', ''));
           const targetIdx = parseInt(edge.target.replace('t-', ''));
           const sourceColumn = clientHeaders[sourceIdx];
-          const targetColumn = templateHeaders[targetIdx];
+          const targetColumn = targetHeaders[targetIdx];
           
           console.log(`Processing edge: ${sourceColumn} -> ${targetColumn}`);
           return {
@@ -1361,7 +1712,7 @@ export default function ColumnMapping() {
       const mappingForRestore = {
         mappings: edges.map(edge => ({
           sourceColumn: clientHeaders[parseInt(edge.source.replace('c-', ''))],
-          targetColumn: templateHeaders[parseInt(edge.target.replace('t-', ''))],
+          targetColumn: targetHeaders[parseInt(edge.target.replace('t-', ''))],
           isAiGenerated: edge.data?.isAiGenerated || false,
           isFromTemplate: edge.data?.isFromTemplate || false,
           isSpecificationMapping: edge.data?.isSpecificationMapping || false,
@@ -1682,12 +2033,94 @@ export default function ColumnMapping() {
             <div className="w-full bg-gray-200 rounded-full h-2">
               <div 
                 className="bg-blue-600 h-2 rounded-full transition-all duration-300" 
-                style={{ width: `${templateHeaders.length > 0 ? (mappingStats.total / templateHeaders.length) * 100 : 0}%` }}
+                style={{ 
+                  width: `${
+                    (templateColumns.length > 0 ? templateColumns.length : templateHeaders.length) > 0 
+                      ? (mappingStats.total / (templateColumns.length > 0 ? templateColumns.length : templateHeaders.length)) * 100 
+                      : 0
+                  }%` 
+                }}
               ></div>
             </div>
             <div className="text-xs text-gray-500 mt-1">
-              {mappingStats.total} of {templateHeaders.length} columns mapped
+              {mappingStats.total} of {templateColumns.length > 0 ? templateColumns.length : templateHeaders.length} columns mapped
             </div>
+          </div>
+
+          {/* Column Count Controls */}
+          <div className="mt-8 p-4 bg-gray-50 rounded-xl">
+            <h4 className="text-sm font-semibold text-gray-700 mb-4">Template Column Counts</h4>
+            
+            <div className="space-y-4">
+              {/* Tags Count */}
+              <div className="flex items-center justify-between">
+                <label className="text-xs text-gray-600">Tags:</label>
+                <div className="flex items-center gap-2">
+                  <button 
+                    onClick={() => updateColumnCounts({...columnCounts, tags_count: Math.max(1, columnCounts.tags_count - 1)})}
+                    className="w-6 h-6 bg-red-200 hover:bg-red-300 rounded flex items-center justify-center text-xs font-bold transition-colors text-red-700"
+                    disabled={columnCounts.tags_count <= 1}
+                  >
+                    -
+                  </button>
+                  <span className="w-8 text-center text-sm font-semibold">{columnCounts.tags_count}</span>
+                  <button 
+                    onClick={() => updateColumnCounts({...columnCounts, tags_count: columnCounts.tags_count + 1})}
+                    className="w-6 h-6 bg-green-200 hover:bg-green-300 rounded flex items-center justify-center text-xs font-bold transition-colors text-green-700"
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+
+              {/* Specification Pairs Count */}
+              <div className="flex items-center justify-between">
+                <label className="text-xs text-gray-600">Spec Pairs:</label>
+                <div className="flex items-center gap-2">
+                  <button 
+                    onClick={() => updateColumnCounts({...columnCounts, spec_pairs_count: Math.max(1, columnCounts.spec_pairs_count - 1)})}
+                    className="w-6 h-6 bg-red-200 hover:bg-red-300 rounded flex items-center justify-center text-xs font-bold transition-colors text-red-700"
+                    disabled={columnCounts.spec_pairs_count <= 1}
+                  >
+                    -
+                  </button>
+                  <span className="w-8 text-center text-sm font-semibold">{columnCounts.spec_pairs_count}</span>
+                  <button 
+                    onClick={() => updateColumnCounts({...columnCounts, spec_pairs_count: columnCounts.spec_pairs_count + 1})}
+                    className="w-6 h-6 bg-green-200 hover:bg-green-300 rounded flex items-center justify-center text-xs font-bold transition-colors text-green-700"
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+
+              {/* Customer ID Pairs Count */}
+              <div className="flex items-center justify-between">
+                <label className="text-xs text-gray-600">Customer ID Pairs:</label>
+                <div className="flex items-center gap-2">
+                  <button 
+                    onClick={() => updateColumnCounts({...columnCounts, customer_id_pairs_count: Math.max(1, columnCounts.customer_id_pairs_count - 1)})}
+                    className="w-6 h-6 bg-red-200 hover:bg-red-300 rounded flex items-center justify-center text-xs font-bold transition-colors text-red-700"
+                    disabled={columnCounts.customer_id_pairs_count <= 1}
+                  >
+                    -
+                  </button>
+                  <span className="w-8 text-center text-sm font-semibold">{columnCounts.customer_id_pairs_count}</span>
+                  <button 
+                    onClick={() => updateColumnCounts({...columnCounts, customer_id_pairs_count: columnCounts.customer_id_pairs_count + 1})}
+                    className="w-6 h-6 bg-green-200 hover:bg-green-300 rounded flex items-center justify-center text-xs font-bold transition-colors text-green-700"
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-4 text-xs text-gray-500">
+              Total template columns: {templateColumns.length}
+            </div>
+            
+            {/* Instructional note removed as requested; functionality preserved */}
           </div>
 
           {/* COMMENTED OUT: Specification overflow stats */}
@@ -1710,16 +2143,18 @@ export default function ColumnMapping() {
           <div className="absolute left-1/2 top-0 w-px h-full bg-gray-300 opacity-50 pointer-events-none transform -translate-x-1/2"></div>
 
           {/* Fixed section headers - properly aligned with columns */}
-          <div className="sticky top-0 z-30 bg-white bg-opacity-95 backdrop-blur-sm border-b border-gray-200" style={{ height: '140px' }}>
+      <div className="sticky top-0 z-30 bg-white bg-opacity-95 backdrop-blur-sm border-b border-gray-200" style={{ height: '140px' }}>
             <div className="absolute" style={{ left: '35px', top: '80px' }}>
-              <div className="bg-blue-600 text-white px-6 py-3 rounded-xl shadow-lg font-bold">
-                Client Data ({clientHeaders.length})
+              <div className="bg-blue-600 text-white px-6 py-3 rounded-xl shadow-lg font-bold flex items-center gap-2">
+                <span>Client Data ({clientHeaders.length} fields)</span>
+                <Info size={16} className="opacity-90" title={clientFileName ? `File: ${clientFileName}` : 'Client file'} />
               </div>
             </div>
             
             <div className="absolute" style={{ left: '535px', top: '80px' }}>
-              <div className="bg-emerald-600 text-white px-6 py-3 rounded-xl shadow-lg font-bold">
-                Template ({templateHeaders.length})
+              <div className="bg-emerald-600 text-white px-6 py-3 rounded-xl shadow-lg font-bold flex items-center gap-2">
+                <span>Template ({(useDynamicTemplate && templateColumns.length > 0) ? templateColumns.length : templateHeaders.length} fields)</span>
+                <Info size={16} className="opacity-90" title={templateFileName ? `File: ${templateFileName}` : 'Template file'} />
               </div>
             </div>
           </div>

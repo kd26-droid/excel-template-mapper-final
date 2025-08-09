@@ -335,6 +335,17 @@ const api = {
     }),
 
   /**
+   * Update column counts for dynamic template generation
+   * @param {string} sessionId - Session ID
+   * @param {object} counts - Column counts {tags_count, spec_pairs_count, customer_id_pairs_count}
+   */
+  updateColumnCounts: (sessionId, counts) =>
+    axios.post(`${API_URL}/column-counts/update/`, {
+      session_id: sessionId,
+      ...counts
+    }),
+
+  /**
    * Validate if a template name is available
    * @param {string} templateName - Name to check
    */

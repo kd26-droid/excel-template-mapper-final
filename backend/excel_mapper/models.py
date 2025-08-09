@@ -13,6 +13,10 @@ class MappingTemplate(models.Model):
     formula_rules = models.JSONField(default=list, blank=True)  # Formula rules for auto-tagging
     factwise_rules = models.JSONField(default=list, blank=True)  # Factwise ID rules
     default_values = models.JSONField(default=dict, blank=True)  # Default values for unmapped fields
+    # Dynamic column counts
+    tags_count = models.IntegerField(default=1)  # Number of Tags columns
+    spec_pairs_count = models.IntegerField(default=1)  # Number of Specification Name/Value pairs
+    customer_id_pairs_count = models.IntegerField(default=1)  # Number of Customer ID Name/Value pairs
     session_id = models.CharField(max_length=100)  # Original session ID
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -212,6 +216,10 @@ class MappingTemplate(models.Model):
             'has_default_values': len(default_values) > 0,
             'factwise_rules': getattr(self, 'factwise_rules', []), # Include factwise rules
             'has_factwise_rules': len(getattr(self, 'factwise_rules', [])) > 0,
+            # Column counts
+            'tags_count': getattr(self, 'tags_count', 1),
+            'spec_pairs_count': getattr(self, 'spec_pairs_count', 1),
+            'customer_id_pairs_count': getattr(self, 'customer_id_pairs_count', 1),
             'created_at': self.created_at.isoformat(),
             'usage_count': self.usage_count
         }
