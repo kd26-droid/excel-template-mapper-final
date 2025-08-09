@@ -42,12 +42,12 @@ python manage.py migrate --verbosity 2
 #     print('Superuser already exists')
 # "
 
-# Start Gunicorn server
-echo "🌐 Starting Gunicorn server..."
+# Start Gunicorn server (SINGLE WORKER FOR SESSION PERSISTENCE)
+echo "🌐 Starting Gunicorn server with single worker for session persistence..."
 exec gunicorn excel_mapping.wsgi:application \
     --bind=0.0.0.0:${PORT:-8000} \
     --timeout 600 \
-    --workers 2 \
+    --workers 1 \
     --max-requests 1000 \
     --max-requests-jitter 100 \
     --preload \

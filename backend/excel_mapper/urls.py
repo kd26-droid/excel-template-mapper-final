@@ -5,6 +5,7 @@ from .views import (
     # Basic functionality views
     health_check,
     debug_session,
+    system_diagnostics,
     upload_files,
     get_headers,
     mapping_suggestions,
@@ -45,6 +46,7 @@ urlpatterns = [
     
     # Debug session
     path('debug-session/', debug_session, name='debug-session'),
+    path('system-diagnostics/', system_diagnostics, name='system-diagnostics'),
 
     # File upload
     path('upload/', upload_files, name='upload-files'),

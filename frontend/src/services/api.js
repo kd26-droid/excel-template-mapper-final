@@ -2,8 +2,8 @@
 
 import axios from 'axios';
 
-// Use environment variable for API URL, fallback to localhost for development
-const API_URL = process.env.REACT_APP_API_BASE_URL || 'http://localhost:8000/api';
+// Use environment variable for API URL, fallback to relative path for production  
+const API_URL = process.env.REACT_APP_API_BASE_URL || '/api';
 
 // Auto-create demo session when needed
 let demoSessionId = null;
@@ -30,13 +30,69 @@ const api = {
   // ==========================================
 
   /**
-   * Upload files without template
+   * Upload files without template with retry logic and validation
    * @param {FormData} formData - File upload data
    */
-  uploadFiles: (formData) =>
-    axios.post(`${API_URL}/upload/`, formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
-    }),
+  uploadFiles: async (formData) => {
+    const maxRetries = 3;
+    let lastError;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        console.log(`🔄 Upload attempt ${attempt}/${maxRetries}`);
+        const response = await axios.post(`${API_URL}/upload/`, formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+          timeout: 120000 // 2 minute timeout
+        });
+        
+        // Validate that upload was successful and has session_id
+        if (response.data && response.data.session_id) {
+          console.log(`✅ Upload successful on attempt ${attempt}:`, response.data.session_id);
+          
+          // Wait a moment for file processing, then validate headers
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          
+          try {
+            const headersCheck = await api.getHeaders(response.data.session_id);
+            const hasHeaders = headersCheck.data.client_headers.length > 0 || headersCheck.data.template_headers.length > 0;
+            
+            if (hasHeaders) {
+              console.log(`✅ Headers validation passed for session ${response.data.session_id}`);
+              return response;
+            } else {
+              console.log(`⚠️ Headers empty for session ${response.data.session_id}, retrying...`);
+              if (attempt === maxRetries) {
+                throw new Error('Upload completed but file processing failed - headers are empty');
+              }
+              continue;
+            }
+          } catch (headerError) {
+            console.log(`⚠️ Header validation failed:`, headerError.message);
+            if (attempt === maxRetries) {
+              // Return the upload response even if header validation fails
+              // The session exists, maybe headers will be populated later
+              return response;
+            }
+            continue;
+          }
+        } else {
+          throw new Error('Upload response missing session_id');
+        }
+        
+      } catch (error) {
+        console.error(`❌ Upload attempt ${attempt} failed:`, error.message);
+        lastError = error;
+        
+        if (attempt < maxRetries) {
+          const delay = Math.pow(2, attempt) * 1000; // Exponential backoff
+          console.log(`⏰ Waiting ${delay}ms before retry...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
+    }
+    
+    throw new Error(`Upload failed after ${maxRetries} attempts. Last error: ${lastError.message}`);
+  },
 
   /**
    * Upload files with optional template application

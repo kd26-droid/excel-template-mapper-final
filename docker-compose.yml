@@ -1,31 +1,48 @@
 version: '3.8'
 
 services:
-  excel-mapper:
+  backend:
     build:
       context: .
-      dockerfile: Dockerfile
-    image: excel-template-mapper:latest
-    container_name: excel-template-mapper
+      dockerfile: Dockerfile.backend
     ports:
-      - "8080:80"
+      - "8000:8000"
     environment:
+      - DEBUG=True
+      - PORT=8000
+      - ALLOWED_HOSTS=localhost,127.0.0.1,backend
       - SECRET_KEY=your-secret-key-for-local-development
-      - DEBUG=False
-      - ALLOWED_HOSTS=localhost,127.0.0.1
       - DATABASE_URL=sqlite:///db.sqlite3
-      - CORS_ALLOWED_ORIGINS=http://localhost:8080
+      - CORS_ALLOWED_ORIGINS=http://localhost:3000
     volumes:
-      - excel_mapper_data:/app/backend/media
-      - excel_mapper_static:/app/backend/static
-    restart: unless-stopped
+      - ./backend/media:/app/media
+      - ./backend/temp_downloads:/app/temp_downloads
+      - ./backend/uploaded_files:/app/uploaded_files
+      - ./backend/logs:/app/logs
+    networks:
+      - excel-mapper-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/api/health/"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health/"]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 120s
 
-volumes:
-  excel_mapper_data:
-  excel_mapper_static:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend.local
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - excel-mapper-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  excel-mapper-network:
+    driver: bridge

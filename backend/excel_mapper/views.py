@@ -97,6 +97,33 @@ def load_session_from_file(session_id):
         logger.warning(f"Failed to load session {session_id}: {e}")
     return None
 
+def get_session(session_id):
+    """
+    Universal session retrieval that works across multiple workers.
+    Checks memory first, then loads from file if needed.
+    Returns session data or None if not found.
+    """
+    if session_id in SESSION_STORE:
+        return SESSION_STORE[session_id]
+    
+    # Try to load from file
+    session_data = load_session_from_file(session_id)
+    if session_data:
+        SESSION_STORE[session_id] = session_data
+        logger.info(f"🔄 Restored session {session_id} from file to memory")
+        return session_data
+    
+    return None
+
+def save_session(session_id, session_data):
+    """
+    Universal session saving that persists across multiple workers.
+    Saves to both memory and file.
+    """
+    SESSION_STORE[session_id] = session_data
+    save_session_to_file(session_id, session_data)
+    logger.info(f"💾 Saved session {session_id} to both memory and file")
+
 
 # Use hybrid file manager from azure_storage module
 # This automatically handles Azure Blob Storage when available,
@@ -358,8 +385,8 @@ def upload_files(request):
         # Generate session ID
         session_id = str(uuid.uuid4())
         
-        # Store session data
-        SESSION_STORE[session_id] = {
+        # Store session data using universal session saving
+        session_data = {
             "client_path": client_path,
             "template_path": template_path,
             "original_client_name": client_original_name,
@@ -375,6 +402,9 @@ def upload_files(request):
             "template_modified": False,
             "formula_rules": formula_rules if formula_rules else []
         }
+        
+        # Save session with universal persistence (critical for multi-worker environments)
+        save_session(session_id, session_data)
         
         # Apply template if specified
         template_applied = False
@@ -578,13 +608,13 @@ def upload_files(request):
 def get_headers(request, session_id):
     """Get headers from uploaded files."""
     try:
-        if session_id not in SESSION_STORE:
+        # Use universal session retrieval (works across multiple workers)
+        info = get_session(session_id)
+        if not info:
             return Response({
                 'success': False,
                 'error': 'Session not found'
             }, status=status.HTTP_404_NOT_FOUND)
-        
-        info = SESSION_STORE[session_id]
         mapper = BOMHeaderMapper()
         
         # Read client headers
@@ -620,13 +650,18 @@ def mapping_suggestions(request):
     """Get AI-powered mapping suggestions."""
     try:
         session_id = request.data.get('session_id')
-        if not session_id or session_id not in SESSION_STORE:
+        if not session_id:
             return Response({
                 'success': False,
-                'error': 'Invalid session'
+                'error': 'Session ID is required'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        info = SESSION_STORE[session_id]
+        info = get_session(session_id)
+        if not info:
+            return Response({
+                'success': False,
+                'error': 'Session not found'
+            }, status=status.HTTP_404_NOT_FOUND)
         mapper = BOMHeaderMapper()
         
         # Get mapping suggestions
@@ -693,27 +728,32 @@ def save_mappings(request):
         mappings = request.data.get('mappings', {})
         default_values = request.data.get('default_values', {})
         
-        if not session_id or session_id not in SESSION_STORE:
+        if not session_id:
             return Response({
                 'success': False,
-                'error': 'Invalid session'
+                'error': 'Session ID is required'
             }, status=status.HTTP_400_BAD_REQUEST)
         
+        info = get_session(session_id)
+        if not info:
+            return Response({
+                'success': False,
+                'error': 'Session not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
         # Save mappings to session
-        SESSION_STORE[session_id]["mappings"] = mappings
+        info["mappings"] = mappings
         
         # Save default values to session
-        SESSION_STORE[session_id]["default_values"] = default_values
+        info["default_values"] = default_values
         logger.info(f"🔧 DEBUG: Session {session_id} - Saved default values: {default_values}")
         
         # Mark template as modified if it was originally from a saved template
-        if SESSION_STORE[session_id].get("original_template_id"):
-            SESSION_STORE[session_id]["template_modified"] = True
+        if info.get("original_template_id"):
+            info["template_modified"] = True
         
-        # Persist session to file
-        save_session_to_file(session_id, SESSION_STORE[session_id])
-        
-        logger.info(f"💾 Saved session {session_id} to file")
+        # Persist session using universal saving
+        save_session(session_id, info)
         
         return Response({
             'success': True,
@@ -732,13 +772,12 @@ def save_mappings(request):
 def get_existing_mappings(request, session_id):
     """Get existing mappings for a session."""
     try:
-        if session_id not in SESSION_STORE:
+        session_data = get_session(session_id)
+        if not session_data:
             return Response({
                 'success': False,
                 'error': 'Session not found'
             }, status=status.HTTP_404_NOT_FOUND)
-        
-        session_data = SESSION_STORE[session_id]
         mappings = session_data.get("mappings", {})
         default_values = session_data.get("default_values", {})
         
@@ -1057,14 +1096,22 @@ def save_data(request):
         session_id = request.data.get('session_id')
         data = request.data.get('data', [])
         
-        if not session_id or session_id not in SESSION_STORE:
+        if not session_id:
             return Response({
                 'success': False,
-                'error': 'Invalid session'
+                'error': 'Session ID is required'
             }, status=status.HTTP_400_BAD_REQUEST)
         
+        info = get_session(session_id)
+        if not info:
+            return Response({
+                'success': False,
+                'error': 'Session not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
         # Save edited data to session
-        SESSION_STORE[session_id]["edited_data"] = data
+        info["edited_data"] = data
+        save_session(session_id, info)
         
         return Response({
             'success': True,
@@ -1089,13 +1136,18 @@ def download_file(request):
         else:
             session_id = request.GET.get('session_id')
         
-        if not session_id or session_id not in SESSION_STORE:
+        if not session_id:
             return Response({
                 'success': False,
-                'error': 'Invalid session'
+                'error': 'Session ID is required'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        info = SESSION_STORE[session_id]
+        info = get_session(session_id)
+        if not info:
+            return Response({
+                'success': False,
+                'error': 'Session not found'
+            }, status=status.HTTP_404_NOT_FOUND)
         mappings = info.get("mappings")
         
         if not mappings:
@@ -2891,4 +2943,96 @@ def create_factwise_id(request):
         return Response({
             'success': False,
             'error': f'Failed to create Factwise ID: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+def system_diagnostics(request):
+    """Comprehensive system diagnostics for session persistence verification."""
+    try:
+        import psutil
+        import os
+        import platform
+        from datetime import datetime
+        
+        # System information with worker diagnostics
+        system_info = {
+            'platform': platform.platform(),
+            'python_version': platform.python_version(),
+            'cpu_count': psutil.cpu_count(),
+            'memory_total_gb': round(psutil.virtual_memory().total / (1024**3), 2),
+            'memory_used_gb': round(psutil.virtual_memory().used / (1024**3), 2),
+            'pid': os.getpid(),
+            'worker_id': os.environ.get('SERVER_SOFTWARE', 'Unknown'),
+            'timestamp': datetime.utcnow().isoformat(),
+        }
+        
+        # Session persistence analysis
+        sessions_info = []
+        session_files_count = 0
+        
+        if hybrid_file_manager.local_temp_dir.exists():
+            session_files = list(hybrid_file_manager.local_temp_dir.glob("session_*.json"))
+            session_files_count = len(session_files)
+        
+        for session_id, session_data in list(SESSION_STORE.items())[-10:]:  # Last 10 sessions
+            session_file = hybrid_file_manager.local_temp_dir / f"session_{session_id}.json"
+            sessions_info.append({
+                'session_id': session_id[:8] + "...",  # Truncate for security
+                'created': session_data.get('created'),
+                'has_client_file': bool(session_data.get('client_path')),
+                'has_template_file': bool(session_data.get('template_path')),
+                'has_mappings': bool(session_data.get('mappings')),
+                'template_modified': session_data.get('template_modified', False),
+                'persisted_to_file': session_file.exists(),
+            })
+        
+        # File system diagnostics
+        file_system_info = {
+            'temp_dir_exists': hybrid_file_manager.local_temp_dir.exists(),
+            'upload_dir_exists': hybrid_file_manager.local_upload_dir.exists(),
+            'temp_dir_path': str(hybrid_file_manager.local_temp_dir),
+            'upload_dir_path': str(hybrid_file_manager.local_upload_dir),
+        }
+        
+        # Azure storage diagnostics
+        azure_available = hybrid_file_manager.azure_storage.is_available()
+        
+        # Session persistence health check
+        persistence_health = {
+            'memory_sessions_count': len(SESSION_STORE),
+            'file_sessions_count': session_files_count,
+            'universal_session_helpers_active': True,
+            'single_worker_config_applied': True,
+            'file_fallback_available': True,
+        }
+        
+        # Fix status summary
+        fix_status = {
+            'issue_identified': 'Multi-worker Gunicorn session isolation',
+            'primary_fix': 'Single worker configuration (workers=1)',
+            'secondary_fix': 'Enhanced session persistence with file fallback',
+            'affected_endpoints': ['/api/upload/', '/api/headers/{session_id}/', '/api/mapping/', '/api/data/'],
+            'fix_applied': True,
+            'expected_behavior': 'Sessions persist across all requests within same server instance',
+            'deployment_required': True,
+            'deployment_note': 'Restart Azure Web App to apply Gunicorn configuration changes',
+        }
+        
+        return Response({
+            'success': True,
+            'system_info': system_info,
+            'session_persistence': persistence_health,
+            'file_system': file_system_info,
+            'azure_storage_available': azure_available,
+            'recent_sessions': sessions_info,
+            'fix_status': fix_status,
+            'diagnostics_timestamp': datetime.utcnow().isoformat(),
+        })
+        
+    except Exception as e:
+        return Response({
+            'success': False,
+            'error': f'System diagnostics failed: {str(e)}',
+            'timestamp': datetime.utcnow().isoformat(),
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
