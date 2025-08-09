@@ -1229,16 +1229,19 @@ def download_file(request):
         # Create output file
         output_dir = hybrid_file_manager.local_temp_dir
         
+        from datetime import datetime
+        timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
+        base_name = f"FW_Filled_Template_{timestamp}"
         if format_type == 'csv':
-            output_file = output_dir / f"processed_data_{session_id}.csv"
+            filename = f"{base_name}.csv"
+            output_file = output_dir / filename
             df.to_csv(output_file, index=False)
             content_type = 'text/csv'
-            filename = f"processed_data_{session_id}.csv"
         else:  # Excel format (default)
-            output_file = output_dir / f"processed_data_{session_id}.xlsx"
+            filename = f"{base_name}.xlsx"
+            output_file = output_dir / filename
             df.to_excel(output_file, index=False, engine='openpyxl')
             content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-            filename = f"processed_data_{session_id}.xlsx"
         
         response = FileResponse(
             open(output_file, 'rb'),
