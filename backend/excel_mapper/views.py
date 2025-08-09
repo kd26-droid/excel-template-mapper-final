@@ -151,7 +151,7 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
                     from .bom_header_mapper import BOMHeaderMapper
                     mapper = BOMHeaderMapper()
                     template_headers = mapper.read_excel_headers(
-                        file_path=info["template_path"],
+                        file_path=hybrid_file_manager.get_file_path(info["template_path"]),
                         sheet_name=info.get("template_sheet_name"),
                         header_row=info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0
                     )
@@ -196,11 +196,12 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
             
             logger.info(f"🔍 Converted old format to {len(mapping_list)} individual mappings")
         
-        # Read the client data
-        if str(client_file).lower().endswith('.csv'):
-            df = pd.read_csv(client_file, header=header_row)
+        # Resolve local path if using Azure Blob Storage and read the client data
+        client_local_path = hybrid_file_manager.get_file_path(client_file)
+        if str(client_local_path).lower().endswith('.csv'):
+            df = pd.read_csv(client_local_path, header=header_row)
         else:
-            result = pd.read_excel(client_file, sheet_name=sheet_name, header=header_row)
+            result = pd.read_excel(client_local_path, sheet_name=sheet_name, header=header_row)
             
             # Handle multiple sheets case
             if isinstance(result, dict):
@@ -617,16 +618,16 @@ def get_headers(request, session_id):
             }, status=status.HTTP_404_NOT_FOUND)
         mapper = BOMHeaderMapper()
         
-        # Read client headers
+        # Read client headers (support Azure Blob by resolving to local cache)
         client_headers = mapper.read_excel_headers(
-            file_path=info["client_path"],
+            file_path=hybrid_file_manager.get_file_path(info["client_path"]),
             sheet_name=info["sheet_name"],
             header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0
         )
         
         # Read template headers
         template_headers = mapper.read_excel_headers(
-            file_path=info["template_path"],
+            file_path=hybrid_file_manager.get_file_path(info["template_path"]),
             sheet_name=info.get("template_sheet_name"),
             header_row=info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0
         )
@@ -666,8 +667,8 @@ def mapping_suggestions(request):
         
         # Get mapping suggestions
         mapping_results = mapper.map_headers_to_template(
-            client_file=info["client_path"],
-            template_file=info["template_path"],
+            client_file=hybrid_file_manager.get_file_path(info["client_path"]),
+            template_file=hybrid_file_manager.get_file_path(info["template_path"]),
             client_sheet_name=info["sheet_name"],
             template_sheet_name=info.get("template_sheet_name"),
             client_header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0,
@@ -686,13 +687,13 @@ def mapping_suggestions(request):
         
         # Get headers for response
         client_headers = mapper.read_excel_headers(
-            file_path=info["client_path"],
+            file_path=hybrid_file_manager.get_file_path(info["client_path"]),
             sheet_name=info["sheet_name"],
             header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0
         )
         
         template_headers = mapper.read_excel_headers(
-            file_path=info["template_path"],
+            file_path=hybrid_file_manager.get_file_path(info["template_path"]),
             sheet_name=info.get("template_sheet_name"),
             header_row=info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0
         )
@@ -741,8 +742,17 @@ def save_mappings(request):
                 'error': 'Session not found'
             }, status=status.HTTP_404_NOT_FOUND)
         
-        # Save mappings to session
-        info["mappings"] = mappings
+        # Normalize mappings format and save
+        # Accept both array format [{source, target}, ...] and object with .mappings
+        normalized = mappings
+        if isinstance(mappings, dict) and 'mappings' in mappings and isinstance(mappings['mappings'], list):
+            normalized = mappings  # already in new format
+        elif isinstance(mappings, list):
+            normalized = { 'mappings': mappings }
+        elif isinstance(mappings, dict):
+            # old format {target: source} -> new format list
+            normalized = { 'mappings': [ {'source': src, 'target': tgt} for tgt, src in mappings.items() ] }
+        info["mappings"] = normalized
         
         # Save default values to session
         info["default_values"] = default_values
@@ -847,6 +857,14 @@ def data_view(request):
         
         # Always process fresh data - no caching
         mappings = info.get("mappings")
+        # If mappings missing, try to refresh from file to handle multi-worker race
+        if not mappings:
+            refreshed = load_session_from_file(session_id)
+            if refreshed and refreshed.get("mappings"):
+                SESSION_STORE[session_id] = refreshed
+                info = refreshed
+                mappings = info.get("mappings")
+                logger.info(f"🔄 Refreshed session {session_id} from file to load latest mappings")
         
         if not mappings:
             return Response({

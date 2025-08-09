@@ -44,6 +44,12 @@ gunicorn excel_mapping.wsgi:application \
     --workers 2 \
     --daemon
 
+# Start SSH (for Azure Portal SSH)
+echo "🔐 Preparing SSH server..."
+ssh-keygen -A || true
+echo "🔐 Starting SSH server on 2222..."
+/usr/sbin/sshd -D -p 2222 &
+
 # Start Nginx
 echo "🖥️ Starting Nginx server..."
 nginx -g "daemon off;"

@@ -102,10 +102,18 @@ REST_FRAMEWORK = {
 }
 
 # CORS Configuration
+# Exact origins (comma-separated)
 CORS_ALLOWED_ORIGINS = os.environ.get(
-    'CORS_ALLOWED_ORIGINS', 
+    'CORS_ALLOWED_ORIGINS',
     'http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001'
 ).split(',')
+
+# Regex origins (comma-separated Python regex patterns)
+raw_origin_regexes = os.environ.get(
+    'CORS_ALLOWED_ORIGIN_REGEXES',
+    r'^https?://.*\\.azurewebsites\\.net$'
+)
+CORS_ALLOWED_ORIGIN_REGEXES = [pattern.strip() for pattern in raw_origin_regexes.split(',') if pattern.strip()]
 
 CORS_ALLOW_ALL_ORIGINS = DEBUG  # Only allow all origins in development
 

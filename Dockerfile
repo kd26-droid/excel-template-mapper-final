@@ -31,6 +31,10 @@ FROM node:18-alpine AS frontend-build
 
 WORKDIR /app/frontend
 
+# Accept API base URL at build time for CRA
+ARG REACT_APP_API_BASE_URL
+ENV REACT_APP_API_BASE_URL=${REACT_APP_API_BASE_URL}
+
 # Copy frontend package files
 COPY frontend/package*.json ./
 
@@ -54,7 +58,14 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     nginx \
     curl \
+    openssh-server \
     && rm -rf /var/lib/apt/lists/*
+
+# Prepare SSH server
+RUN mkdir -p /var/run/sshd
+RUN sed -i 's/#\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config \
+ && sed -i 's/#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config \
+ && echo 'root:Docker!' | chpasswd
 
 # Copy backend from build stage
 COPY --from=backend-build /app/backend /app/backend
@@ -63,16 +74,23 @@ COPY --from=backend-build /usr/local/bin /usr/local/bin
 
 # Copy frontend build from build stage
 COPY --from=frontend-build /app/frontend/build /app/frontend/build
+RUN ls -la /app/frontend/build || true \
+ && test -f /app/frontend/build/index.html
 
-# Configure nginx
-COPY nginx.conf /etc/nginx/sites-available/default
+# Configure nginx (ensure our config is loaded)
+RUN rm -f /etc/nginx/conf.d/default.conf || true \
+ && rm -f /etc/nginx/sites-enabled/default || true
+COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 # Copy startup script
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
-RUN chmod +x /app/docker-entrypoint.sh
+# Normalize potential CRLF and make executable (prevents 'no such file' on Azure)
+RUN sed -i 's/\r$//' /app/docker-entrypoint.sh \
+ && chmod +x /app/docker-entrypoint.sh \
+ && ls -la /app/docker-entrypoint.sh
 
-# Expose ports  
-EXPOSE 80
+# Expose ports
+EXPOSE 80 2222
 
 # Set working directory to backend for easier command execution
 WORKDIR /app/backend
