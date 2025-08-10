@@ -104,15 +104,19 @@ def get_session(session_id):
     Returns session data or None if not found.
     """
     if session_id in SESSION_STORE:
+        logger.info(f"🔍 Session {session_id} found in memory")
         return SESSION_STORE[session_id]
     
     # Try to load from file
+    logger.info(f"🔍 Session {session_id} not in memory, trying file")
     session_data = load_session_from_file(session_id)
     if session_data:
         SESSION_STORE[session_id] = session_data
         logger.info(f"🔄 Restored session {session_id} from file to memory")
+        logger.info(f"🔍 Session keys: {list(session_data.keys())}")
         return session_data
     
+    logger.warning(f"❌ Session {session_id} not found in memory or file")
     return None
 
 def save_session(session_id, session_data):
@@ -144,11 +148,11 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
         if session_id and session_id in SESSION_STORE:
             info = SESSION_STORE[session_id]
             
-            # Prefer enhanced headers (e.g., optional deletions or formula overrides)
-            enhanced_headers = info.get("enhanced_headers")
-            if enhanced_headers and isinstance(enhanced_headers, list) and len(enhanced_headers) > 0:
-                template_headers = enhanced_headers
-                logger.info(f"🔍 Using {len(template_headers)} enhanced template headers from session")
+            # Prefer canonical current headers (persisted)
+            canonical_headers = info.get("current_template_headers") or info.get("enhanced_headers")
+            if canonical_headers and isinstance(canonical_headers, list) and len(canonical_headers) > 0:
+                template_headers = canonical_headers
+                logger.info(f"🔍 Using {len(template_headers)} canonical template headers from session")
             elif 'tags_count' in info or 'spec_pairs_count' in info or 'customer_id_pairs_count' in info:
                 # Dynamic template columns when counts provided
                 tags_count = info.get('tags_count', 1)
@@ -677,32 +681,110 @@ def get_headers(request, session_id):
         except Exception as e:
             logger.warning(f"Optional/Mandatory annotations not read: {e}")
         enhanced_headers = info.get("enhanced_headers")
-        if enhanced_headers and isinstance(enhanced_headers, list) and len(enhanced_headers) > 0:
-            template_headers = enhanced_headers
         
-        # Compute template_optionals aligned to the headers being returned
-        def is_special_optional(h: str) -> bool:
-            h_lower = (h or '').lower()
-            return h == 'Tags' or ('specification' in h_lower) or ('customer identification' in h_lower)
-        template_optionals = []
-        for h in template_headers:
-            if is_special_optional(h):
-                template_optionals.append(True)
-            else:
-                template_optionals.append(bool(template_optionals_map.get(str(h), False)))
+        # Debug logging
+        logger.info(f"🔍 Session {session_id} - enhanced_headers: {enhanced_headers}")
+        logger.info(f"🔍 Session {session_id} - template_headers from file: {template_headers}")
         
         # Get column counts from session (with defaults)
         tags_count = info.get('tags_count', 1)
         spec_pairs_count = info.get('spec_pairs_count', 1)
         customer_id_pairs_count = info.get('customer_id_pairs_count', 1)
         
-        # Generate template columns based on counts
+        # Helper functions for robust special-column detection (case/trim tolerant)
+        def _norm(h: str) -> str:
+            try:
+                return str(h or '').strip().lower()
+            except Exception:
+                return ''
+        def _is_tag(h: str) -> bool:
+            return _norm(h) == 'tag'
+        def _is_spec_name(h: str) -> bool:
+            return _norm(h) == 'specification name'
+        def _is_spec_value(h: str) -> bool:
+            return _norm(h) == 'specification value'
+        def _is_cust_name(h: str) -> bool:
+            return _norm(h) == 'customer identification name'
+        def _is_cust_value(h: str) -> bool:
+            return _norm(h) == 'customer identification value'
+
+        # Always regenerate a canonical header list based on current counts
+        # Start from original template headers, keep non-specials in order, cap specials to counts, then append any extras to reach counts
+        if tags_count > 0 or spec_pairs_count > 0 or customer_id_pairs_count > 0:
+            regenerated_headers = []
+            tags_used = 0
+            spec_used = 0
+            cust_used = 0
+            i = 0
+            while i < len(template_headers):
+                h = str(template_headers[i])
+                if _is_tag(h):
+                    if tags_used < tags_count:
+                        regenerated_headers.append('Tag')
+                        tags_used += 1
+                    i += 1
+                    continue
+                if _is_spec_name(h) and (i + 1) < len(template_headers) and _is_spec_value(template_headers[i+1]):
+                    if spec_used < spec_pairs_count:
+                        regenerated_headers.extend(['Specification Name', 'Specification Value'])
+                        spec_used += 1
+                    i += 2
+                    continue
+                if _is_cust_name(h) and (i + 1) < len(template_headers) and _is_cust_value(template_headers[i+1]):
+                    if cust_used < customer_id_pairs_count:
+                        regenerated_headers.extend(['Customer Identification Name', 'Customer Identification Value'])
+                        cust_used += 1
+                    i += 2
+                    continue
+                # Non-optional or unknown headers are preserved
+                regenerated_headers.append(h)
+                i += 1
+
+            # Append extras if counts exceed those available in the file
+            if tags_used < tags_count:
+                regenerated_headers.extend(['Tag'] * (tags_count - tags_used))
+            if spec_used < spec_pairs_count:
+                missing_spec = spec_pairs_count - spec_used
+                for _ in range(missing_spec):
+                    regenerated_headers.extend(['Specification Name', 'Specification Value'])
+            if cust_used < customer_id_pairs_count:
+                missing_cust = customer_id_pairs_count - cust_used
+                for _ in range(missing_cust):
+                    regenerated_headers.extend(['Customer Identification Name', 'Customer Identification Value'])
+
+            # Store canonical headers in session
+            info["current_template_headers"] = regenerated_headers
+            # Keep enhanced_headers for backward compatibility with older FE
+            info["enhanced_headers"] = regenerated_headers
+            save_session(session_id, info)
+            template_headers_to_use = regenerated_headers
+            logger.info(f"🔍 Regenerated canonical template headers based on counts: {template_headers_to_use}")
+        else:
+            template_headers_to_use = template_headers
+            logger.info(f"🔍 Using template_headers from file: {template_headers_to_use}")
+            # Store template_headers in session for future use by update_column_counts
+            info['template_headers'] = template_headers
+            save_session(session_id, info)
+        
+        # Compute template_optionals aligned to the headers being returned
+        def is_special_optional(h: str) -> bool:
+            h_lower = (h or '').lower()
+            return h == 'Tag' or ('specification' in h_lower) or ('customer identification' in h_lower)
+        
+        template_optionals = []
+        for h in template_headers_to_use:
+            if is_special_optional(h):
+                template_optionals.append(True)
+            else:
+                template_optionals.append(bool(template_optionals_map.get(str(h), False)))
+        
+        # Generate template columns based on counts (for reference)
         template_columns = generate_template_columns(tags_count, spec_pairs_count, customer_id_pairs_count)
         
         return Response({
             'success': True,
             'client_headers': client_headers,
-            'template_headers': template_headers,
+            'template_headers': template_headers_to_use,
             'template_columns': template_columns,
             'template_optionals': template_optionals,
             'column_counts': {
@@ -1471,7 +1553,8 @@ def update_column_counts(request):
         spec_pairs_count = request.data.get('spec_pairs_count', 1)
         customer_id_pairs_count = request.data.get('customer_id_pairs_count', 1)
         
-        if not session_id or session_id not in SESSION_STORE:
+        info = get_session(session_id)
+        if not info:
             return Response({
                 'success': False,
                 'error': 'Invalid session ID'
@@ -1489,31 +1572,107 @@ def update_column_counts(request):
             }, status=status.HTTP_400_BAD_REQUEST)
         
         # Store column counts in session
-        SESSION_STORE[session_id]['tags_count'] = tags_count
-        SESSION_STORE[session_id]['spec_pairs_count'] = spec_pairs_count
-        SESSION_STORE[session_id]['customer_id_pairs_count'] = customer_id_pairs_count
+        info['tags_count'] = tags_count
+        info['spec_pairs_count'] = spec_pairs_count
+        info['customer_id_pairs_count'] = customer_id_pairs_count
         
         # Save session to file
-        save_session(session_id, SESSION_STORE[session_id])
+        save_session(session_id, info)
         
-        # Generate new template columns based on counts
+        # Generate new template columns based on counts (for reference)
         template_columns = generate_template_columns(tags_count, spec_pairs_count, customer_id_pairs_count)
 
-        # Persist enhanced headers so downstream pages and downloads reflect deletions
-        current_basic = ["Quantity", "Description", "Part Number", "Manufacturer", "Unit"]
-        enhanced_headers = current_basic.copy()
-        for _ in range(tags_count):
-            enhanced_headers.append("Tags")
-        for _ in range(spec_pairs_count):
-            enhanced_headers.extend(["Specification Name", "Specification Value"])
-        for _ in range(customer_id_pairs_count):
-            enhanced_headers.extend(["Customer Identification Name", "Customer Identification Value"])
-        SESSION_STORE[session_id]["enhanced_headers"] = enhanced_headers
-        save_session(session_id, SESSION_STORE[session_id])
-        
+        # Build canonical headers by pruning/adding optional groups starting from original template headers
+        try:
+            base_headers = info.get('template_headers')
+            if not base_headers:
+                # Read from file if not cached
+                mapper = BOMHeaderMapper()
+                base_headers = mapper.read_excel_headers(
+                    file_path=hybrid_file_manager.get_file_path(info["template_path"]),
+                    sheet_name=info.get("template_sheet_name"),
+                    header_row=info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0
+                )
+                info['template_headers'] = base_headers
+        except Exception:
+            base_headers = []
+
+        def _norm(h: str) -> str:
+            try:
+                return str(h or '').strip().lower()
+            except Exception:
+                return ''
+        def _is_tag(h: str) -> bool:
+            return _norm(h) == 'tag'
+        def _is_spec_name(h: str) -> bool:
+            return _norm(h) == 'specification name'
+        def _is_spec_value(h: str) -> bool:
+            return _norm(h) == 'specification value'
+        def _is_cust_name(h: str) -> bool:
+            return _norm(h) == 'customer identification name'
+        def _is_cust_value(h: str) -> bool:
+            return _norm(h) == 'customer identification value'
+
+        regenerated_headers = []
+        tags_used = 0
+        spec_used = 0
+        cust_used = 0
+        i = 0
+        while i < len(base_headers):
+            h = str(base_headers[i])
+            if _is_tag(h):
+                if tags_used < tags_count:
+                    regenerated_headers.append('Tag')
+                    tags_used += 1
+                i += 1
+                continue
+            if _is_spec_name(h) and (i + 1) < len(base_headers) and _is_spec_value(base_headers[i+1]):
+                if spec_used < spec_pairs_count:
+                    regenerated_headers.extend(['Specification Name', 'Specification Value'])
+                    spec_used += 1
+                i += 2
+                continue
+            if _is_cust_name(h) and (i + 1) < len(base_headers) and _is_cust_value(base_headers[i+1]):
+                if cust_used < customer_id_pairs_count:
+                    regenerated_headers.extend(['Customer Identification Name', 'Customer Identification Value'])
+                    cust_used += 1
+                i += 2
+                continue
+            # Non-optional or unknown headers are preserved
+            regenerated_headers.append(h)
+            i += 1
+
+        # Append extras if counts exceed those available in the file
+        if tags_used < tags_count:
+            regenerated_headers.extend(['Tag'] * (tags_count - tags_used))
+        if spec_used < spec_pairs_count:
+            for _ in range(spec_pairs_count - spec_used):
+                regenerated_headers.extend(['Specification Name', 'Specification Value'])
+        if cust_used < customer_id_pairs_count:
+            for _ in range(customer_id_pairs_count - cust_used):
+                regenerated_headers.extend(['Customer Identification Name', 'Customer Identification Value'])
+
+        info["current_template_headers"] = regenerated_headers
+        # Backward compatibility
+        info["enhanced_headers"] = regenerated_headers
+        save_session(session_id, info)
+
+        # Debug logging
+        logger.info(f"🔧 Updated session {session_id} with canonical headers: {regenerated_headers}")
+        logger.info(f"🔧 Session store now contains: {list(info.keys())}")
+
+        # Compute template_optionals for the canonical headers (Tags/Spec/Customer always optional)
+        def is_special_optional(h: str) -> bool:
+            h_lower = (h or '').lower()
+            return h == 'Tag' or ('specification' in h_lower) or ('customer identification' in h_lower)
+
+        template_optionals = [True if is_special_optional(h) else False for h in regenerated_headers]
+
         return Response({
             'success': True,
             'template_columns': template_columns,
+            'enhanced_headers': regenerated_headers,
+            'template_optionals': template_optionals,
             'counts': {
                 'tags_count': tags_count,
                 'spec_pairs_count': spec_pairs_count,
@@ -1537,9 +1696,9 @@ def generate_template_columns(tags_count, spec_pairs_count, customer_id_pairs_co
     basic_columns = ["Quantity", "Description", "Part Number", "Manufacturer"]
     columns.extend(basic_columns)
     
-    # Add Tags columns (all named "Tags")
+    # Add Tag columns (all named "Tag")
     for _ in range(tags_count):
-        columns.append("Tags")
+        columns.append("Tag")
     
     # Add Specification Name/Value pairs
     for _ in range(spec_pairs_count):

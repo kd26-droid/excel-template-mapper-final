@@ -33,6 +33,7 @@ import {
   DialogActions,
   Button,
   Typography,
+  Tooltip,
 } from '@mui/material';
 import api from '../services/api';
 
@@ -300,11 +301,15 @@ export default function ColumnMapping() {
       
       if (response.data.success) {
         setColumnCounts(newCounts);
-        if (response.data.template_columns) {
-          setTemplateColumns(response.data.template_columns);
+        if (response.data.enhanced_headers) {
+          // Prefer canonical headers returned by backend (enhanced_headers is canonical now)
+          const newTemplateHeaders = response.data.enhanced_headers;
+          const newTemplateOptionals = response.data.template_optionals || [];
+          setTemplateHeaders(newTemplateHeaders);
+          setTemplateOptionals(newTemplateOptionals);
           setUseDynamicTemplate(true);
-          // Immediately refresh nodes with new template columns
-          initializeNodes(clientHeaders, response.data.template_columns);
+          // Immediately refresh nodes with new headers
+          initializeNodes(clientHeaders, newTemplateHeaders);
           // Clear all existing edges to avoid index mismatches
           setEdges([]);
         }
@@ -417,8 +422,8 @@ export default function ColumnMapping() {
           console.log('🔍 Applied template name:', session_metadata.template_name);
         }
         
-        // Initialize nodes - prefer actual template headers unless user explicitly changed counts
-        const headersToUse = useDynamicTemplate && template_columns.length > 0 ? template_columns : template_headers;
+        // Initialize nodes - always use template_headers returned by backend (canonical)
+        const headersToUse = template_headers;
         console.log('📝 About to initialize nodes with:', {
           clientHeadersLength: client_headers.length,
           templateHeadersLength: template_headers.length,
@@ -756,7 +761,7 @@ export default function ColumnMapping() {
               pairIndex: pairIndex + 1,
               isOptional: (templateOptionals && templateOptionals.length === templateHdrs.length) 
                 ? !!templateOptionals[targetIdx]
-                : (templateCol === 'Tags' || templateCol.includes('Specification') || templateCol.includes('Customer Identification')),
+                : (templateCol === 'Tag' || templateCol.includes('Specification') || templateCol.includes('Customer Identification')),
                 onDelete: handleDeleteOptionalField
               },
               draggable: false
@@ -826,9 +831,9 @@ export default function ColumnMapping() {
                        header.includes('Customer Identification') ? 'customer' : 'single',
               pairColor: pairColor,
               pairIndex: pairIndex + 1,
-              isOptional: (templateOptionals && templateOptionals.length === templateHdrs.length) 
-                ? !!templateOptionals[idx]
-                : (header === 'Tags' || header.includes('Specification') || header.includes('Customer Identification')),
+                          isOptional: (templateOptionals && templateOptionals.length === templateHdrs.length) 
+              ? !!templateOptionals[idx]
+              : (header === 'Tag' || header.includes('Specification') || header.includes('Customer Identification')),
               onDelete: handleDeleteOptionalField
             },
             draggable: false
@@ -916,7 +921,7 @@ export default function ColumnMapping() {
             pairIndex: pairIndex + 1,
             isOptional: (templateOptionals && templateOptionals.length === templateHdrs.length) 
               ? !!templateOptionals[idx]
-              : (header === 'Tags' || header.includes('Specification') || header.includes('Customer Identification')),
+              : (header === 'Tag' || header.includes('Specification') || header.includes('Customer Identification')),
             onDelete: handleDeleteOptionalField
           },
           draggable: false
@@ -961,7 +966,7 @@ export default function ColumnMapping() {
     const pairType = nodeData.pairType || 'single';
     const isSpec = pairType === 'specification';
     const isCustomer = pairType === 'customer';
-    const isTag = nodeData.originalLabel === 'Tags';
+            const isTag = nodeData.originalLabel === 'Tag';
 
     // Determine affected target node ids
     let targetIds = [node.id];
@@ -992,8 +997,12 @@ export default function ColumnMapping() {
       return;
     }
 
-    // Persist and rebuild using dynamic template columns
+    // Persist and rebuild using dynamic template columns and keep mappings that still apply
     setUseDynamicTemplate(true);
+    // Before switching, preserve edges that point to target indices that will still exist
+    const maxSpecTargets = (newCounts.spec_pairs_count || 0) * 2;
+    const maxCustomerTargets = (newCounts.customer_id_pairs_count || 0) * 2;
+    // After counts update we will re-init nodes; let backend persist counts and enhanced headers
     updateColumnCounts(newCounts);
   }, [nodes, edges, columnCounts, updateColumnCounts]);
 
@@ -1659,6 +1668,37 @@ export default function ColumnMapping() {
     }
   }, [edges, clientHeaders, templateHeaders, sessionId, originalTemplateId, templateApplied, appliedTemplateName, templateSuccess]);
 
+  // Debounced autosave to backend for persistence across refresh
+  useEffect(() => {
+    if (!sessionId || clientHeaders.length === 0 || templateHeaders.length === 0) return;
+
+    const timer = setTimeout(async () => {
+      try {
+        // Serialize mappings from edges to { source, target }
+        const mappings = edges.map(edge => {
+          const sourceIdx = parseInt(edge.source.replace('c-', ''));
+          const targetIdx = parseInt(edge.target.replace('t-', ''));
+          const sourceColumn = clientHeaders[sourceIdx];
+          const targetColumn = templateHeaders[targetIdx];
+          if (!sourceColumn || !targetColumn) return null;
+          return { source: sourceColumn, target: targetColumn };
+        }).filter(Boolean);
+
+        const payload = {
+          mappings,
+          default_values: defaultValueMappings
+        };
+
+        await api.saveColumnMappings(sessionId, payload);
+        // Silent success
+      } catch (e) {
+        console.error('❌ Debounced autosave failed:', e);
+      }
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [edges, defaultValueMappings, clientHeaders, templateHeaders, sessionId]);
+
   // ENHANCED: Navigate to review page - UPDATED TO SEND TO BACKEND with template preservation
   const handleReview = async () => {
     if (edges.length === 0) {
@@ -2035,15 +2075,15 @@ export default function ColumnMapping() {
                 className="bg-blue-600 h-2 rounded-full transition-all duration-300" 
                 style={{ 
                   width: `${
-                    (templateColumns.length > 0 ? templateColumns.length : templateHeaders.length) > 0 
-                      ? (mappingStats.total / (templateColumns.length > 0 ? templateColumns.length : templateHeaders.length)) * 100 
+                    templateHeaders.length > 0 
+                      ? (mappingStats.total / templateHeaders.length) * 100 
                       : 0
                   }%` 
                 }}
               ></div>
             </div>
             <div className="text-xs text-gray-500 mt-1">
-              {mappingStats.total} of {templateColumns.length > 0 ? templateColumns.length : templateHeaders.length} columns mapped
+              {mappingStats.total} of {templateHeaders.length} columns mapped
             </div>
           </div>
 
@@ -2117,7 +2157,7 @@ export default function ColumnMapping() {
             </div>
 
             <div className="mt-4 text-xs text-gray-500">
-              Total template columns: {templateColumns.length}
+              Total template columns: {templateHeaders.length}
             </div>
             
             {/* Instructional note removed as requested; functionality preserved */}
@@ -2147,14 +2187,18 @@ export default function ColumnMapping() {
             <div className="absolute" style={{ left: '35px', top: '80px' }}>
               <div className="bg-blue-600 text-white px-6 py-3 rounded-xl shadow-lg font-bold flex items-center gap-2">
                 <span>Client Data ({clientHeaders.length} fields)</span>
-                <Info size={16} className="opacity-90" title={clientFileName ? `File: ${clientFileName}` : 'Client file'} />
+                <Tooltip title={clientFileName ? `File: ${clientFileName}` : 'Client file'} placement="bottom">
+                  <span><Info size={16} className="opacity-90 cursor-default" /></span>
+                </Tooltip>
               </div>
             </div>
             
             <div className="absolute" style={{ left: '535px', top: '80px' }}>
               <div className="bg-emerald-600 text-white px-6 py-3 rounded-xl shadow-lg font-bold flex items-center gap-2">
-                <span>Template ({(useDynamicTemplate && templateColumns.length > 0) ? templateColumns.length : templateHeaders.length} fields)</span>
-                <Info size={16} className="opacity-90" title={templateFileName ? `File: ${templateFileName}` : 'Template file'} />
+                <span>Template ({templateHeaders.length} fields)</span>
+                <Tooltip title={templateFileName ? `File: ${templateFileName}` : 'Template file'} placement="bottom">
+                  <span><Info size={16} className="opacity-90 cursor-default" /></span>
+                </Tooltip>
               </div>
             </div>
           </div>
