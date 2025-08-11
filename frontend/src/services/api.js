@@ -271,7 +271,7 @@ const api = {
    * @param {array} formulaRules - Optional formula rules
    * @param {array} factwiseRules - Optional factwise ID rules
    */
-  saveMappingTemplate: async (sessionId, templateName, description = '', mappings = null, formulaRules = null, factwiseRules = null, defaultValues = null) => {
+  saveMappingTemplate: async (sessionId, templateName, description = '', mappings = null, formulaRules = null, factwiseRules = null, defaultValues = null, columnCounts = null) => {
     const effectiveSessionId = sessionId || await ensureSession();
     return axios.post(`${API_URL}/templates/save/`, {
       session_id: effectiveSessionId,
@@ -280,7 +280,12 @@ const api = {
       ...(mappings !== null && { mappings }),
       ...(formulaRules !== null && { formula_rules: formulaRules }),
       ...(factwiseRules !== null && { factwise_rules: factwiseRules }),
-      ...(defaultValues !== null && { default_values: defaultValues })
+      ...(defaultValues !== null && { default_values: defaultValues }),
+      ...(columnCounts !== null && { 
+        tags_count: columnCounts.tags_count, 
+        spec_pairs_count: columnCounts.spec_pairs_count, 
+        customer_id_pairs_count: columnCounts.customer_id_pairs_count 
+      })
     });
   },
 

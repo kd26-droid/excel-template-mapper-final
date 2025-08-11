@@ -135,7 +135,8 @@ const DataEditor = () => {
         setHasFormulas(true);
         // Identify formula columns by checking if they match the new naming pattern
         const formulaHeaders = data.headers.filter(h => 
-          h.startsWith('Tag_') || h.startsWith('Specification_') || h.startsWith('Tag') || h.startsWith('Specification')
+          h.startsWith('Tag_') || h.startsWith('Specification_Name_') || h.startsWith('Specification_Value_') || 
+          h.startsWith('Customer_Identification_') || h === 'Tag' || h.includes('Specification') || h.includes('Customer')
         );
         setFormulaColumns(formulaHeaders);
       } else {
@@ -500,12 +501,46 @@ const DataEditor = () => {
         operator: factwiseIdRule.operator
       }] : [];
 
-      // Collect default values from unmapped columns (if any)
+      // Collect default values from unmapped columns AND custom values from dynamic tag columns
       const default_values = {};
+      
+      // Add default values for unmapped columns (if any)
       if (unmappedColumns && unmappedColumns.length > 0) {
         unmappedColumns.forEach(col => {
           // Set empty default values for unmapped columns
           default_values[col] = '';
+        });
+      }
+      
+      // IMPORTANT: Collect custom values from dynamic tag columns
+      const dynamicTagColumns = columnDefs.filter(col => 
+        col.field && (col.field.startsWith('Tag_') || col.field.startsWith('Specification_'))
+      );
+      
+      if (dynamicTagColumns.length > 0 && rowData.length > 0) {
+        dynamicTagColumns.forEach(col => {
+          // Check if this column has any custom/non-empty values
+          const hasCustomData = rowData.some(row => {
+            const value = row[col.field];
+            return value && value.toString().trim() !== '' && value.toString().toLowerCase() !== 'unknown';
+          });
+          
+          if (hasCustomData) {
+            // Find the most common non-empty value, or use first non-empty value
+            let customValue = '';
+            for (const row of rowData) {
+              const value = row[col.field];
+              if (value && value.toString().trim() !== '' && value.toString().toLowerCase() !== 'unknown') {
+                customValue = value.toString();
+                break; // Use first custom value found
+              }
+            }
+            
+            if (customValue) {
+              default_values[col.field] = customValue;
+              console.log(`🔧 DEBUG: Collected custom value "${customValue}" for dynamic column "${col.field}"`);
+            }
+          }
         });
       }
 
@@ -519,7 +554,46 @@ const DataEditor = () => {
         factwise_rules.length > 0 ? factwise_rules : null, // factwise_rules
         Object.keys(default_values).length > 0 ? default_values : null // default_values
       );
-      showSnackbar(`Template "${templateName}" saved successfully!`, 'success');
+      // Create detailed save message
+      let saveDetails = [`Template "${templateName}" saved successfully!`];
+      
+      if (appliedFormulas.length > 0) {
+        saveDetails.push(`✅ ${appliedFormulas.length} tag rule(s) saved`);
+      }
+      if (factwiseIdRule) {
+        saveDetails.push(`✅ Factwise ID rule saved`);
+      }
+      if (Object.keys(default_values).length > 0) {
+        const unmappedCount = unmappedColumns ? unmappedColumns.length : 0;
+        const customTagCount = Object.keys(default_values).length - unmappedCount;
+        
+        if (unmappedCount > 0 && customTagCount > 0) {
+          saveDetails.push(`✅ ${customTagCount} custom tag value(s) + ${unmappedCount} unmapped column default(s) saved`);
+        } else if (customTagCount > 0) {
+          saveDetails.push(`✅ ${customTagCount} custom tag value(s) saved for template reuse`);
+        } else if (unmappedCount > 0) {
+          saveDetails.push(`✅ ${unmappedCount} default value(s) for unmapped columns saved`);
+        }
+      }
+      
+      // Check for manually added data in Tag columns
+      const tagColumns = columnDefs.filter(col => col.field && col.field.startsWith('Tag_'));
+      let customTagValues = 0;
+      if (tagColumns.length > 0 && rowData.length > 0) {
+        tagColumns.forEach(col => {
+          const hasCustomData = rowData.some(row => {
+            const value = row[col.field];
+            return value && value.toString().trim() !== '' && value.toString().toLowerCase() !== 'unknown';
+          });
+          if (hasCustomData) customTagValues++;
+        });
+      }
+      
+      if (customTagValues > 0) {
+        saveDetails.push(`✅ Custom values in ${customTagValues} tag column(s) will be preserved`);
+      }
+      
+      showSnackbar(saveDetails.join('\n'), 'success');
       
       setTemplateSaveDialogOpen(false);
       setTemplateName('');
@@ -579,7 +653,15 @@ const DataEditor = () => {
       
       // Get headers from column definitions (exclude row number column)
       const dataColumnDefs = columnDefs.filter(col => col.field && col.field !== '__row_number__');
-      const gridHeaders = dataColumnDefs.map(col => col.headerName || col.field);
+      
+      // For download: prune _number suffixes (Tag_1 → Tag, Tag_2 → Tag)
+      const originalHeaders = dataColumnDefs.map(col => col.headerName || col.field);
+      const prunedHeaders = originalHeaders.map(header => {
+        // Remove _number suffix (e.g., Tag_1 → Tag, Specification_Name_2 → Specification_Name)
+        return header.replace(/_\d+$/, '');
+      });
+      
+      const gridHeaders = prunedHeaders;
       const columnKeys = dataColumnDefs.map(col => col.field);
       
       // Convert row data to array format matching headers
@@ -587,9 +669,7 @@ const DataEditor = () => {
         return columnKeys.map(key => rowData[key] || '');
       });
       
-      const fileName = hasFormulas 
-        ? `enhanced_data_${sessionId}.xlsx`
-        : `processed_data_${sessionId}.xlsx`;
+      const fileName = "Factwise Template Converted.xlsx";
 
       const response = await api.downloadGridExcel(
         sessionId,

@@ -313,13 +313,33 @@ const FormulaBuilder = ({
       const conflictResponse = await api.checkColumnConflicts(sessionId, formulaRules);
       
       if (conflictResponse.data.conflicts && conflictResponse.data.conflicts.length > 0) {
-        const conflictMessage = conflictResponse.data.conflicts.map(c => 
-          `Column "${c.column}" already exists. Formula will use "${c.suggested_name}" instead.`
-        ).join('\n');
+        const autoNumberingConflicts = conflictResponse.data.conflicts.filter(c => c.conflict_type === 'auto_numbering');
+        const otherConflicts = conflictResponse.data.conflicts.filter(c => c.conflict_type !== 'auto_numbering');
         
-        const proceed = window.confirm(
-          `⚠️ Column Conflicts Detected:\n\n${conflictMessage}\n\nDo you want to proceed with the suggested column names?`
-        );
+        let message = '';
+        
+        if (autoNumberingConflicts.length > 0) {
+          message += '🎯 Smart Tag Numbering:\n\n';
+          message += autoNumberingConflicts.map(c => 
+            `• "${c.column}" → "${c.suggested_name}" (${c.message})`
+          ).join('\n');
+        }
+        
+        if (otherConflicts.length > 0) {
+          if (message) message += '\n\n⚠️ Column Conflicts:\n\n';
+          else message += '⚠️ Column Conflicts Detected:\n\n';
+          message += otherConflicts.map(c => 
+            `• "${c.column}" → "${c.suggested_name}" (${c.message})`
+          ).join('\n');
+        }
+        
+        const hasRealConflicts = otherConflicts.length > 0;
+        const title = hasRealConflicts ? 'Column Conflicts & Auto-Numbering' : 'Smart Tag Auto-Numbering';
+        const question = hasRealConflicts ? 
+          '\n\nDo you want to proceed with these changes?' : 
+          '\n\nProceed with smart numbering?';
+        
+        const proceed = window.confirm(`${title}:\n\n${message}${question}`);
         
         if (!proceed) {
           setLoading(false);

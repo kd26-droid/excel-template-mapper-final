@@ -556,7 +556,7 @@ const Dashboard = () => {
   };
 
   return (
-    <Box sx={{ p: 3, backgroundColor: '#f8fafc', minHeight: '100vh' }}>
+    <Box sx={{ p: 3, backgroundColor: '#f8fafc', minHeight: '100vh', flexGrow: 1 }}>
       {/* Modern Header */}
       <Box sx={{ mb: 4 }}>
         <Typography variant="h3" fontWeight="700" color="#1e293b" gutterBottom>
@@ -867,7 +867,7 @@ const Dashboard = () => {
         </Card>
       </Fade>
 
-      <Grid container spacing={3} sx={{ mt: 4 }}>
+      <Grid container spacing={3} sx={{ mt: 4, flexGrow: 1 }}>
         {/* Compact Templates Section */}
         <Grid item xs={12} lg={6}>
           <Fade in timeout={1000}>

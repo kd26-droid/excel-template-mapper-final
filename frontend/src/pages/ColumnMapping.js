@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import ReactFlow, {
   ReactFlowProvider,
@@ -36,6 +36,34 @@ import {
   Tooltip,
 } from '@mui/material';
 import api from '../services/api';
+
+// Helper function to generate template columns based on counts (matches backend logic)
+const generateTemplateColumns = (tagsCount, specPairsCount, customerIdPairsCount, baseTemplateHeaders = null) => {
+  const columns = [];
+  
+  // Basic mandatory columns
+  const basicColumns = ["Quantity", "Description", "Part Number", "Manufacturer"];
+  columns.push(...basicColumns);
+  
+  // Simple sequential tag numbering
+  for (let i = 0; i < tagsCount; i++) {
+    columns.push(`Tag_${i + 1}`);
+  }
+  
+  // Add Specification Name/Value pairs with unique numbers
+  for (let i = 0; i < specPairsCount; i++) {
+    columns.push(`Specification_Name_${i + 1}`);
+    columns.push(`Specification_Value_${i + 1}`);
+  }
+  
+  // Add Customer Identification Name/Value pairs with unique numbers
+  for (let i = 0; i < customerIdPairsCount; i++) {
+    columns.push(`Customer_Identification_Name_${i + 1}`);
+    columns.push(`Customer_Identification_Value_${i + 1}`);
+  }
+  
+  return columns;
+};
 
 // Enhanced Professional Custom Node Component
 const CustomNode = ({ data, id }) => {
@@ -136,7 +164,9 @@ const CustomNode = ({ data, id }) => {
           {/* Pair indicator */}
           {!isSource && pairType !== 'single' && (
             <div className={`text-xs mt-1 font-semibold ${colorClasses.text}`}>
-              {pairType === 'specification' ? `Spec Pair ${pairIndex}` : `ID Pair ${pairIndex}`}
+              {pairType === 'specification' ? `Spec ${pairIndex}` : 
+               pairType === 'customer' ? `ID ${pairIndex}` : 
+               pairType === 'tag' ? `Tag ${pairIndex}` : `${pairIndex}`}
             </div>
           )}
         </div>
@@ -259,6 +289,9 @@ export default function ColumnMapping() {
   const [defaultValueText, setDefaultValueText] = useState('');
   const [defaultValueMappings, setDefaultValueMappings] = useState({});
   
+  // Rebuild guard ref
+  const isRebuildingRef = useRef(false);
+  
   // ENHANCED: Template applied state with comprehensive tracking
   const [templateApplied, setTemplateApplied] = useState(false);
   const [appliedTemplateName, setAppliedTemplateName] = useState('');
@@ -294,31 +327,180 @@ export default function ColumnMapping() {
   const [templateFileName, setTemplateFileName] = useState('');
   const [templateOptionals, setTemplateOptionals] = useState([]);
 
-  // Function to update column counts
+  // C) Reconcile edges with current nodes (universal safety net)
+  const reconcileEdgesWithNodes = useCallback(() => {
+    console.log('🔧 DEBUG: Starting edge reconciliation');
+    
+    // Build set of current node IDs
+    const currentNodeIds = new Set(nodes.map(n => n.id));
+    
+    // Drop orphan edges
+    const validEdges = edges.filter(edge => {
+      const isValid = currentNodeIds.has(edge.source) && currentNodeIds.has(edge.target);
+      if (!isValid) {
+        console.log(`🗑️ Dropping orphan edge: ${edge.source} -> ${edge.target}`);
+      }
+      return isValid;
+    });
+    
+    if (validEdges.length !== edges.length) {
+      setEdges(validEdges);
+    }
+    
+    // Recompute node states
+    setTimeout(() => {
+      setNodes(currentNodes => currentNodes.map(node => {
+        const isConnected = validEdges.some(edge => 
+          edge.source === node.id || edge.target === node.id
+        );
+        
+        if (isConnected) {
+          // Find mapping labels
+          let mappedToLabel = '';
+          let mappedFromLabel = '';
+          
+          if (node.id.startsWith('c-')) {
+            // Source node - find connected target
+            const connectedEdge = validEdges.find(e => e.source === node.id);
+            if (connectedEdge) {
+              const targetNode = currentNodes.find(n => n.id === connectedEdge.target);
+              mappedFromLabel = targetNode?.data?.originalLabel || '';
+            }
+          } else if (node.id.startsWith('t-')) {
+            // Target node - find connected source
+            const connectedEdge = validEdges.find(e => e.target === node.id);
+            if (connectedEdge) {
+              const sourceNode = currentNodes.find(n => n.id === connectedEdge.source);
+              mappedToLabel = sourceNode?.data?.originalLabel || '';
+            }
+          }
+          
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              isConnected: true,
+              mappedToLabel,
+              mappedFromLabel
+            }
+          };
+        } else {
+          // Disconnected node - reset to original state
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              label: node.data.originalLabel,
+              isConnected: false,
+              isFromTemplate: false,
+              isSpecificationMapping: false,
+              confidence: undefined,
+              mappedToLabel: '',
+              mappedFromLabel: ''
+            }
+          };
+        }
+      }));
+    }, 50);
+    
+    console.log(`🔧 DEBUG: Reconciliation complete - kept ${validEdges.length}/${edges.length} edges`);
+  }, [nodes, edges, setNodes, setEdges]);
+
+  // A) Rebuild sequence for column count updates
   const updateColumnCounts = async (newCounts) => {
     try {
+      console.log('🔧 DEBUG: Starting column count update sequence');
+      
+      // A1) Set rebuild guard
+      isRebuildingRef.current = true;
+      
+      // A2) Clear all edges first (before touching headers/nodes)
+      setEdges([]);
+      
+      // Store existing mappings by labels for restoration
+      const existingMappings = edges.map(edge => {
+        const sourceNode = nodes.find(n => n.id === edge.source);
+        const targetNode = nodes.find(n => n.id === edge.target);
+        return {
+          sourceLabel: sourceNode?.data?.originalLabel,
+          targetLabel: targetNode?.data?.originalLabel,
+          edgeData: edge.data
+        };
+      }).filter(m => m.sourceLabel && m.targetLabel);
+      
+      console.log('🔧 DEBUG: Preserved mappings by label:', existingMappings);
+      
       const response = await api.updateColumnCounts(sessionId, newCounts);
       
       if (response.data.success) {
         setColumnCounts(newCounts);
+        
         if (response.data.enhanced_headers) {
-          // Prefer canonical headers returned by backend (enhanced_headers is canonical now)
+          // A3) Apply new headers from backend (canonical)
           const newTemplateHeaders = response.data.enhanced_headers;
           const newTemplateOptionals = response.data.template_optionals || [];
+          
           setTemplateHeaders(newTemplateHeaders);
           setTemplateOptionals(newTemplateOptionals);
+          setTemplateColumns(newTemplateHeaders); // Update templateColumns for default value dialog
           setUseDynamicTemplate(true);
-          // Immediately refresh nodes with new headers
+          
+          // A4) Rebuild template nodes with new headers
           initializeNodes(clientHeaders, newTemplateHeaders);
-          // Clear all existing edges to avoid index mismatches
-          setEdges([]);
+          
+          // A5) After nodes are in state, reconcile and restore mappings
+          setTimeout(() => {
+            setNodes(currentNodes => {
+              const newEdges = [];
+              
+              // D) Remap by labels (not indices)
+              existingMappings.forEach(mapping => {
+                const sourceIdx = clientHeaders.indexOf(mapping.sourceLabel);
+                const newTargetNode = currentNodes.find(n => 
+                  n.id.startsWith('t-') && n.data?.originalLabel === mapping.targetLabel
+                );
+                
+                if (sourceIdx >= 0 && newTargetNode) {
+                  const newTargetIdx = parseInt(newTargetNode.id.replace('t-', ''));
+                  const newEdge = createEdge(
+                    sourceIdx, 
+                    newTargetIdx, 
+                    false, 
+                    mapping.edgeData?.confidence, 
+                    mapping.edgeData?.isFromTemplate, 
+                    mapping.edgeData?.isSpecificationMapping
+                  );
+                  newEdges.push(newEdge);
+                  console.log(`🔧 DEBUG: Restored mapping: ${mapping.sourceLabel} -> ${mapping.targetLabel}`);
+                } else {
+                  console.warn(`❌ Could not restore mapping: ${mapping.sourceLabel} -> ${mapping.targetLabel}`);
+                }
+              });
+              
+              setEdges(newEdges);
+              
+              // A6) Run reconciliation after edge restoration
+              setTimeout(() => {
+                reconcileEdgesWithNodes();
+                // A7) Clear rebuild guard
+                isRebuildingRef.current = false;
+                console.log('🔧 DEBUG: Column count update sequence complete');
+              }, 100);
+              
+              return currentNodes;
+            });
+          }, 100);
+        } else {
+          isRebuildingRef.current = false;
         }
         
         console.log('✅ Column counts updated successfully:', newCounts);
       } else {
+        isRebuildingRef.current = false;
         console.error('❌ Failed to update column counts:', response.data.error);
       }
     } catch (error) {
+      isRebuildingRef.current = false;
       console.error('❌ Error updating column counts:', error);
     }
   };
@@ -495,9 +677,6 @@ export default function ColumnMapping() {
       if (hasExistingMappings) {
         console.log('Found existing mappings:', existingMappings);
         
-        // Apply existing mappings to the flow
-        applyExistingMappingsToFlow(existingMappings, clientHdrs, templateHdrs);
-        
         // Restore default values if they exist
         if (existingDefaultValues && Object.keys(existingDefaultValues).length > 0) {
           setDefaultValueMappings(existingDefaultValues);
@@ -523,8 +702,40 @@ export default function ColumnMapping() {
             setTemplateSuccess(sessionMetadata.template_success);
           }
           
+          // IMPORTANT: Restore column counts from template so all dynamic columns appear FIRST
+          if (sessionMetadata.column_counts) {
+            console.log('🔍 Restoring column counts from template metadata:', sessionMetadata.column_counts);
+            setColumnCounts(sessionMetadata.column_counts);
+            
+            // Force regeneration of template headers based on these counts, using original headers as base
+            const regeneratedHeaders = generateTemplateColumns(
+              sessionMetadata.column_counts.tags_count,
+              sessionMetadata.column_counts.spec_pairs_count, 
+              sessionMetadata.column_counts.customer_id_pairs_count,
+              templateHdrs  // Pass original template headers to preserve non-dynamic columns
+            );
+            setTemplateHeaders(regeneratedHeaders);
+            setTemplateColumns(regeneratedHeaders);
+            setUseDynamicTemplate(true);
+            console.log('🔍 Regenerated template headers from column counts:', regeneratedHeaders);
+            
+            // Use timeout to ensure state updates propagate before applying mappings
+            setTimeout(() => {
+              // Re-initialize nodes with the correct headers
+              initializeNodes(clientHdrs, regeneratedHeaders);
+              
+              // NOW apply existing mappings to the flow with correct headers
+              applyExistingMappingsToFlow(existingMappings, clientHdrs, regeneratedHeaders);
+            }, 100);
+          } else {
+            // No column counts, use original headers
+            applyExistingMappingsToFlow(existingMappings, clientHdrs, templateHdrs);
+          }
+          
           console.log('🔍 Template state restored from session metadata');
         } else {
+          // No template metadata, apply mappings with original headers
+          applyExistingMappingsToFlow(existingMappings, clientHdrs, templateHdrs);
           // Fallback to generic template applied state
           setTemplateApplied(true);
           const mappingCount = Array.isArray(existingMappings) ? existingMappings.length : Object.keys(existingMappings).length;
@@ -761,7 +972,7 @@ export default function ColumnMapping() {
               pairIndex: pairIndex + 1,
               isOptional: (templateOptionals && templateOptionals.length === templateHdrs.length) 
                 ? !!templateOptionals[targetIdx]
-                : (templateCol === 'Tag' || templateCol.includes('Specification') || templateCol.includes('Customer Identification')),
+                : (templateCol.includes('Tag') || templateCol.includes('Specification') || templateCol.includes('Customer')),
                 onDelete: handleDeleteOptionalField
               },
               draggable: false
@@ -833,7 +1044,7 @@ export default function ColumnMapping() {
               pairIndex: pairIndex + 1,
                           isOptional: (templateOptionals && templateOptionals.length === templateHdrs.length) 
               ? !!templateOptionals[idx]
-              : (header === 'Tag' || header.includes('Specification') || header.includes('Customer Identification')),
+              : (header.includes('Tag') || header.includes('Specification') || header.includes('Customer')),
               onDelete: handleDeleteOptionalField
             },
             draggable: false
@@ -921,7 +1132,7 @@ export default function ColumnMapping() {
             pairIndex: pairIndex + 1,
             isOptional: (templateOptionals && templateOptionals.length === templateHdrs.length) 
               ? !!templateOptionals[idx]
-              : (header === 'Tag' || header.includes('Specification') || header.includes('Customer Identification')),
+              : (header.includes('Tag') || header.includes('Specification') || header.includes('Customer')),
             onDelete: handleDeleteOptionalField
           },
           draggable: false
@@ -966,7 +1177,7 @@ export default function ColumnMapping() {
     const pairType = nodeData.pairType || 'single';
     const isSpec = pairType === 'specification';
     const isCustomer = pairType === 'customer';
-            const isTag = nodeData.originalLabel === 'Tag';
+            const isTag = nodeData.originalLabel && (nodeData.originalLabel === 'Tag' || nodeData.originalLabel.startsWith('Tag_'));
 
     // Determine affected target node ids
     let targetIds = [node.id];
@@ -1176,16 +1387,32 @@ export default function ColumnMapping() {
         // Unmapped template field clicked - open default value dialog
         const targetHeaders = (useDynamicTemplate && templateColumns.length > 0) ? templateColumns : templateHeaders;
         const templateFieldName = targetHeaders[targetIdx];
-        setSelectedTemplateField({ id: node.id, name: templateFieldName, index: targetIdx });
-        setDefaultValueText(defaultValueMappings[templateFieldName] || '');
-        setShowDefaultValueDialog(true);
+        
+        console.log('🔧 DEBUG Default Value Dialog:', {
+          targetIdx,
+          useDynamicTemplate,
+          templateColumnsLength: templateColumns.length,
+          templateHeadersLength: templateHeaders.length,
+          targetHeaders: targetHeaders,
+          templateFieldName
+        });
+        
+        if (templateFieldName) {
+          setSelectedTemplateField({ id: node.id, name: templateFieldName, index: targetIdx });
+          setDefaultValueText(defaultValueMappings[templateFieldName] || '');
+          setShowDefaultValueDialog(true);
+        } else {
+          console.warn('🔧 DEBUG: Template field name not found for index', targetIdx);
+        }
       }
     }
   }, [selectedSourceNode, nodes, edges, setNodes, setEdges, templateHeaders, templateColumns, useDynamicTemplate, defaultValueMappings]);
 
-  // Auto-mapping using real API with enhanced specification handling
-  // Auto-mapping using real API with enhanced specification handling
+  // L) Auto-mapping with rebuild guard
   const handleAutoMap = async () => {
+    // L) Early return if rebuilding
+    if (isRebuildingRef.current) return;
+    
     if (edges.length > 0) {
       setShowAutoMapConfirm(true);
     } else {
@@ -1194,6 +1421,9 @@ export default function ColumnMapping() {
   };
 
   const proceedWithAutoMap = async () => {
+    // L) Early return if rebuilding
+    if (isRebuildingRef.current) return;
+    
     setShowAutoMapConfirm(false);
     setIsAutoMapping(true);
     setMappingHistory(prev => [...prev, { nodes, edges }]);
@@ -1325,24 +1555,12 @@ export default function ColumnMapping() {
         const clientNodes = currentNodes.filter(n => n.id.startsWith('c-'));
         const templateNodes = currentNodes.filter(n => n.id.startsWith('t-'));
 
-        // If there are no edges, reset to default order based on templateHeaders
-        if (edges.length === 0) {
-          let hasChanged = false;
-          const newNodes = currentNodes.map(node => {
-            if (node.id.startsWith('t-')) {
-              const idx = templateHeaders.findIndex(h => h === node.data.label);
-              if (idx !== -1) {
-                const newY = startY + idx * yStep;
-                if (node.position.y !== newY) {
-                  hasChanged = true;
-                  return { ...node, position: { ...node.position, y: newY } };
-                }
-              }
-            }
-            return node;
-          });
-          return hasChanged ? newNodes : currentNodes;
-        }
+        // Determine the correct list of template headers to use for positioning
+        const currentTemplateHeaders = useDynamicTemplate && templateColumns.length > 0
+          ? templateColumns
+          : templateHeaders;
+
+        
 
         const sourceToTargets = new Map();
         edges.forEach(edge => {
@@ -1394,7 +1612,7 @@ export default function ColumnMapping() {
     }, 50);
 
     return () => clearTimeout(timer);
-  }, [edges, setNodes, templateHeaders]);
+  }, [edges, setNodes, templateHeaders, templateColumns, useDynamicTemplate]);
 
   // Handle new connections
   const onConnect = useCallback((connection) => {
@@ -1668,18 +1886,21 @@ export default function ColumnMapping() {
     }
   }, [edges, clientHeaders, templateHeaders, sessionId, originalTemplateId, templateApplied, appliedTemplateName, templateSuccess]);
 
-  // Debounced autosave to backend for persistence across refresh
+  // E) Debounced autosave with rebuild guard and label-based targeting
   useEffect(() => {
-    if (!sessionId || clientHeaders.length === 0 || templateHeaders.length === 0) return;
+    // E) Early return if rebuilding
+    if (isRebuildingRef.current) return;
+    if (!sessionId || clientHeaders.length === 0) return;
 
     const timer = setTimeout(async () => {
       try {
-        // Serialize mappings from edges to { source, target }
+        // F) Get target column name from node data (not index)
         const mappings = edges.map(edge => {
           const sourceIdx = parseInt(edge.source.replace('c-', ''));
-          const targetIdx = parseInt(edge.target.replace('t-', ''));
+          const targetNode = nodes.find(n => n.id === edge.target);
           const sourceColumn = clientHeaders[sourceIdx];
-          const targetColumn = templateHeaders[targetIdx];
+          const targetColumn = targetNode?.data?.originalLabel;
+          
           if (!sourceColumn || !targetColumn) return null;
           return { source: sourceColumn, target: targetColumn };
         }).filter(Boolean);
@@ -1690,14 +1911,14 @@ export default function ColumnMapping() {
         };
 
         await api.saveColumnMappings(sessionId, payload);
-        // Silent success
+        console.log('🔧 DEBUG: Autosaved mappings by label');
       } catch (e) {
         console.error('❌ Debounced autosave failed:', e);
       }
     }, 1000);
 
     return () => clearTimeout(timer);
-  }, [edges, defaultValueMappings, clientHeaders, templateHeaders, sessionId]);
+  }, [edges, defaultValueMappings, clientHeaders, nodes, sessionId]);
 
   // ENHANCED: Navigate to review page - UPDATED TO SEND TO BACKEND with template preservation
   const handleReview = async () => {
@@ -1720,17 +1941,44 @@ export default function ColumnMapping() {
       
       // Send as ordered array of individual mappings to preserve source-target relationships
       const targetHeaders = (useDynamicTemplate && templateColumns.length > 0) ? templateColumns : templateHeaders;
+      
+      console.log(`🔧 DEBUG: Mapping context:`);
+      console.log(`  - useDynamicTemplate: ${useDynamicTemplate}`);
+      console.log(`  - templateColumns.length: ${templateColumns.length}`);
+      console.log(`  - targetHeaders selected: ${targetHeaders === templateColumns ? 'templateColumns' : 'templateHeaders'}`);
+      console.log(`  - targetHeaders: ${JSON.stringify(targetHeaders)}`);
+      console.log(`  - edges count: ${sortedEdges.length}`);
+      
       const mappingData = {
         mappings: sortedEdges.map(edge => {
           const sourceIdx = parseInt(edge.source.replace('c-', ''));
           const targetIdx = parseInt(edge.target.replace('t-', ''));
           const sourceColumn = clientHeaders[sourceIdx];
-          const targetColumn = targetHeaders[targetIdx];
           
-          console.log(`Processing edge: ${sourceColumn} -> ${targetColumn}`);
+          // Get target column name from the actual node data instead of relying on index
+          // This fixes the issue where numbered fields like Tag_2 weren't mapping correctly
+          const targetNode = nodes.find(n => n.id === edge.target);
+          const targetColumnFromIndex = targetHeaders[targetIdx];
+          const targetColumn = targetNode ? targetNode.data.originalLabel : targetColumnFromIndex;
+          
+          // Always show debugging information
+          console.log(`🔧 Processing edge: ${sourceColumn} -> ${targetColumn}`);
+          console.log(`  - Edge target ID: ${edge.target}`);
+          console.log(`  - Target index: ${targetIdx}`);
+          console.log(`  - Target node found: ${!!targetNode}`);
+          console.log(`  - Target node original label: ${targetNode?.data?.originalLabel}`);
+          console.log(`  - Target from index [${targetIdx}]: ${targetColumnFromIndex}`);
+          console.log(`  - Final target column: ${targetColumn}`);
+          console.log(`  - targetHeaders length: ${targetHeaders.length}`);
+          
+          if (!targetColumn) {
+            console.log(`  - Available target nodes: ${nodes.filter(n => n.id.startsWith('t-')).map(n => `${n.id}:${n.data?.originalLabel}`).join(', ')}`);
+          }
+          
           return {
             source: sourceColumn,
-            target: targetColumn
+            target: targetColumn,
+            targetNodeId: edge.target // Include for debugging
           };
         }),
         // Include default value mappings for unmapped fields
@@ -1750,14 +1998,20 @@ export default function ColumnMapping() {
 
       // ENHANCED: Save comprehensive mapping info to sessionStorage for restoration
       const mappingForRestore = {
-        mappings: edges.map(edge => ({
-          sourceColumn: clientHeaders[parseInt(edge.source.replace('c-', ''))],
-          targetColumn: targetHeaders[parseInt(edge.target.replace('t-', ''))],
-          isAiGenerated: edge.data?.isAiGenerated || false,
-          isFromTemplate: edge.data?.isFromTemplate || false,
-          isSpecificationMapping: edge.data?.isSpecificationMapping || false,
-          confidence: edge.data?.confidence
-        })),
+        mappings: edges.map(edge => {
+          const sourceIdx = parseInt(edge.source.replace('c-', ''));
+          const targetNode = nodes.find(n => n.id === edge.target);
+          const targetColumn = targetNode ? targetNode.data.originalLabel : targetHeaders[parseInt(edge.target.replace('t-', ''))];
+          
+          return {
+            sourceColumn: clientHeaders[sourceIdx],
+            targetColumn: targetColumn,
+            isAiGenerated: edge.data?.isAiGenerated || false,
+            isFromTemplate: edge.data?.isFromTemplate || false,
+            isSpecificationMapping: edge.data?.isSpecificationMapping || false,
+            confidence: edge.data?.confidence
+          };
+        }),
         sessionId: sessionId,
         originalTemplateId: originalTemplateId,     // 🔥 PRESERVE TEMPLATE ID
         templateApplied: templateApplied,            // 🔥 PRESERVE TEMPLATE STATE
@@ -1832,7 +2086,7 @@ export default function ColumnMapping() {
           <div className="flex items-center gap-4">
             <button
               onClick={handleAutoMap}
-              disabled={isAutoMapping}
+              disabled={isAutoMapping || isRebuildingRef.current}
               className={`
                 px-8 py-3 rounded-lg font-semibold flex items-center gap-2 shadow-sm transition-all
                 ${isAutoMapping 
@@ -1873,7 +2127,7 @@ export default function ColumnMapping() {
 
             <button
               onClick={handleReview}
-              disabled={edges.length === 0 || isReviewing}
+              disabled={edges.length === 0 || isReviewing || isRebuildingRef.current}
               className={`
                 px-8 py-3 rounded-lg font-semibold flex items-center gap-2 shadow-sm transition-all
                 ${edges.length > 0 && !isReviewing

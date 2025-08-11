@@ -9,9 +9,9 @@ import DataEditor from './pages/DataEditor';
 
 function App() {
   return (
-    <div className="App">
+    <div className="App" style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
       <Header />
-      <Container maxWidth="xl">
+      <Container maxWidth="xl" sx={{ flexGrow: 1 }}>
         <Box sx={{ mt: 4, mb: 4 }}>
           <Routes>
             <Route path="/" element={<Dashboard />} />

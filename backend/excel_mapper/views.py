@@ -250,58 +250,95 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
                 if template_col not in mapped_targets:
                     column_order.append(template_col)
         
-        # Process each row
+        # Get session default values for unmapped fields
+        session_default_values = {}
+        if session_id and session_id in SESSION_STORE:
+            session_default_values = SESSION_STORE[session_id].get("default_values", {})
+        
+        # Process each row - match the header logic
         transformed_rows = []
         for _, row in df.iterrows():
             transformed_row = []
             
             for target_column in column_order:
                 if target_column in mapping_dict:
-                    # This column has mappings - process each mapping for this target
+                    # This column has mappings - for numbered fields, take the first mapping only
                     mappings_for_target = mapping_dict[target_column]
-                    for mapping in mappings_for_target:
-                        source_column = mapping['source']
-                        
-                        if source_column and source_column in df.columns:
-                            value = row.get(source_column, "")
-                            if pd.isna(value):
-                                value = ""
-                            else:
-                                value = str(value).strip()
-                            transformed_row.append(value)
+                    
+                    # For our numbered fields (Tag_1, Tag_2, etc.), there should be exactly one mapping per target
+                    # Take the first (and usually only) mapping
+                    mapping = mappings_for_target[0]
+                    source_column = mapping['source']
+                    
+                    # IMPORTANT: Handle default value mappings (from template apply)
+                    if source_column and source_column.startswith("__DEFAULT__"):
+                        # Extract default value from special source format: "__DEFAULT__value"
+                        default_value = source_column[11:]  # Remove "__DEFAULT__" prefix
+                        transformed_row.append(default_value)
+                        logger.info(f"🔧 Applied default value '{default_value}' to column '{target_column}'")
+                    elif source_column and source_column in df.columns:
+                        value = row.get(source_column, "")
+                        if pd.isna(value):
+                            value = ""
                         else:
-                            transformed_row.append("")  # Empty value for missing source columns
+                            value = str(value).strip()
+                        transformed_row.append(value)
+                    else:
+                        transformed_row.append("")  # Empty value for missing source columns
+                        
+                    # Handle additional mappings to the same target (rare with numbered system)
+                    for additional_mapping in mappings_for_target[1:]:
+                        additional_source = additional_mapping['source']
+                        if additional_source and additional_source in df.columns:
+                            additional_value = row.get(additional_source, "")
+                            if pd.isna(additional_value):
+                                additional_value = ""
+                            else:
+                                additional_value = str(additional_value).strip()
+                            transformed_row.append(additional_value)
+                        else:
+                            transformed_row.append("")
                 else:
-                    # Unmapped template column - add empty value
-                    transformed_row.append("")
+                    # Unmapped template column - check for default value, otherwise empty
+                    if target_column in session_default_values:
+                        default_value = session_default_values[target_column]
+                        transformed_row.append(str(default_value))
+                        logger.info(f"🔧 Applied session default value '{default_value}' to unmapped column '{target_column}'")
+                    else:
+                        transformed_row.append("")  # Empty value for truly unmapped columns
             
             transformed_rows.append(transformed_row)
         
-        # Build final headers list including duplicates for multiple mappings to same target, ensuring uniqueness
-        raw_headers = []
+        # Build final headers list - for numbered fields, don't add duplicates
+        # Our numbered fields (Tag_1, Tag_2, etc.) are already unique
+        final_headers = []
+        seen_headers = set()
+        
         for target_column in column_order:
             if target_column in mapping_dict:
-                # Add one header for each mapping to this target
-                for _ in mapping_dict[target_column]:
-                    raw_headers.append(target_column)
+                # For numbered fields, each mapping should map to exactly one header
+                mappings_for_target = mapping_dict[target_column]
+                
+                # If target_column is already numbered (e.g., Tag_1, Tag_2), use it as-is
+                if target_column not in seen_headers:
+                    final_headers.append(target_column)
+                    seen_headers.add(target_column)
+                elif len(mappings_for_target) > 1:
+                    # Only create numbered variants if we have multiple mappings to the same unnumbered target
+                    # This should rarely happen with our new numbering system
+                    base_name = target_column.split('_')[0] if '_' in target_column else target_column
+                    counter = 2
+                    new_header = f"{base_name}_{counter}"
+                    while new_header in seen_headers:
+                        counter += 1
+                        new_header = f"{base_name}_{counter}"
+                    final_headers.append(new_header)
+                    seen_headers.add(new_header)
             else:
-                # Unmapped template column
-                raw_headers.append(target_column)
-
-        final_headers = []
-        counts = {}
-        raw_headers_set = set(raw_headers)
-        for header in raw_headers:
-            if header not in counts:
-                counts[header] = 1
-                final_headers.append(header)
-            else:
-                counts[header] += 1
-                new_header = f"{header}_{counts[header]}"
-                while new_header in final_headers or new_header in raw_headers_set:
-                    counts[header] += 1
-                    new_header = f"{header}_{counts[header]}"
-                final_headers.append(new_header)
+                # Unmapped template column - add as-is if not already seen
+                if target_column not in seen_headers:
+                    final_headers.append(target_column)
+                    seen_headers.add(target_column)
         
         # Return data structure that includes column order and data
         return {
@@ -484,7 +521,8 @@ def upload_files(request):
                             client_file=client_path,
                             mappings=new_format_mappings,
                             sheet_name=sheet_name,
-                            header_row=header_row - 1 if header_row > 0 else 0
+                            header_row=header_row - 1 if header_row > 0 else 0,
+                            session_id=session_id
                         )
                         
                         # Convert to dict format for formula processing
@@ -534,7 +572,8 @@ def upload_files(request):
                                                 client_file=client_path,
                                                 mappings=new_format_mappings,
                                                 sheet_name=sheet_name,
-                                                header_row=header_row - 1 if header_row > 0 else 0
+                                                header_row=header_row - 1 if header_row > 0 else 0,
+                                                session_id=session_id
                                             )
                                             current_data = mapping_result['data']
                                             current_headers = mapping_result['headers']
@@ -698,15 +737,20 @@ def get_headers(request, session_id):
             except Exception:
                 return ''
         def _is_tag(h: str) -> bool:
-            return _norm(h) == 'tag'
+            h_norm = _norm(h)
+            return h_norm == 'tag' or h_norm.startswith('tag_')
         def _is_spec_name(h: str) -> bool:
-            return _norm(h) == 'specification name'
+            h_norm = _norm(h)
+            return h_norm == 'specification name' or h_norm.startswith('specification_name_')
         def _is_spec_value(h: str) -> bool:
-            return _norm(h) == 'specification value'
+            h_norm = _norm(h)
+            return h_norm == 'specification value' or h_norm.startswith('specification_value_')
         def _is_cust_name(h: str) -> bool:
-            return _norm(h) == 'customer identification name'
+            h_norm = _norm(h)
+            return h_norm == 'customer identification name' or h_norm.startswith('customer_identification_name_')
         def _is_cust_value(h: str) -> bool:
-            return _norm(h) == 'customer identification value'
+            h_norm = _norm(h)
+            return h_norm == 'customer identification value' or h_norm.startswith('customer_identification_value_')
 
         # Always regenerate a canonical header list based on current counts
         # Start from original template headers, keep non-specials in order, cap specials to counts, then append any extras to reach counts
@@ -720,19 +764,19 @@ def get_headers(request, session_id):
                 h = str(template_headers[i])
                 if _is_tag(h):
                     if tags_used < tags_count:
-                        regenerated_headers.append('Tag')
+                        regenerated_headers.append(f'Tag_{tags_used + 1}')
                         tags_used += 1
                     i += 1
                     continue
                 if _is_spec_name(h) and (i + 1) < len(template_headers) and _is_spec_value(template_headers[i+1]):
                     if spec_used < spec_pairs_count:
-                        regenerated_headers.extend(['Specification Name', 'Specification Value'])
+                        regenerated_headers.extend([f'Specification_Name_{spec_used + 1}', f'Specification_Value_{spec_used + 1}'])
                         spec_used += 1
                     i += 2
                     continue
                 if _is_cust_name(h) and (i + 1) < len(template_headers) and _is_cust_value(template_headers[i+1]):
                     if cust_used < customer_id_pairs_count:
-                        regenerated_headers.extend(['Customer Identification Name', 'Customer Identification Value'])
+                        regenerated_headers.extend([f'Customer_Identification_Name_{cust_used + 1}', f'Customer_Identification_Value_{cust_used + 1}'])
                         cust_used += 1
                     i += 2
                     continue
@@ -742,15 +786,16 @@ def get_headers(request, session_id):
 
             # Append extras if counts exceed those available in the file
             if tags_used < tags_count:
-                regenerated_headers.extend(['Tag'] * (tags_count - tags_used))
+                for i in range(tags_used, tags_count):
+                    regenerated_headers.append(f'Tag_{i + 1}')
             if spec_used < spec_pairs_count:
                 missing_spec = spec_pairs_count - spec_used
-                for _ in range(missing_spec):
-                    regenerated_headers.extend(['Specification Name', 'Specification Value'])
+                for i in range(spec_used, spec_pairs_count):
+                    regenerated_headers.extend([f'Specification_Name_{i + 1}', f'Specification_Value_{i + 1}'])
             if cust_used < customer_id_pairs_count:
                 missing_cust = customer_id_pairs_count - cust_used
-                for _ in range(missing_cust):
-                    regenerated_headers.extend(['Customer Identification Name', 'Customer Identification Value'])
+                for i in range(cust_used, customer_id_pairs_count):
+                    regenerated_headers.extend([f'Customer_Identification_Name_{i + 1}', f'Customer_Identification_Value_{i + 1}'])
 
             # Store canonical headers in session
             info["current_template_headers"] = regenerated_headers
@@ -769,7 +814,10 @@ def get_headers(request, session_id):
         # Compute template_optionals aligned to the headers being returned
         def is_special_optional(h: str) -> bool:
             h_lower = (h or '').lower()
-            return h == 'Tag' or ('specification' in h_lower) or ('customer identification' in h_lower)
+            return (h == 'Tag' or h.startswith('Tag_') or 
+                   'specification' in h_lower or 
+                   'customer identification' in h_lower or 
+                   'customer_identification' in h_lower)
         
         template_optionals = []
         for h in template_headers_to_use:
@@ -940,7 +988,11 @@ def save_mappings(request):
 def get_existing_mappings(request, session_id):
     """Get existing mappings for a session."""
     try:
+        print(f"🔍 PRINT DEBUG: get_existing_mappings called for session {session_id}")
+        logger.info(f"🔍 DEBUG: get_existing_mappings called for session {session_id}")
         session_data = get_session(session_id)
+        print(f"🔍 PRINT DEBUG: Retrieved session data with keys: {list(session_data.keys()) if session_data else 'None'}")
+        logger.info(f"🔍 DEBUG: Retrieved session data with keys: {list(session_data.keys()) if session_data else 'None'}")
         if not session_data:
             return Response({
                 'success': False,
@@ -949,6 +1001,36 @@ def get_existing_mappings(request, session_id):
         mappings = session_data.get("mappings", {})
         default_values = session_data.get("default_values", {})
         
+        # IMPORTANT: Derive column counts from default values if missing from session
+        # This handles cases where templates were applied before the column count saving fix
+        tags_count = session_data.get("tags_count", 1)
+        spec_pairs_count = session_data.get("spec_pairs_count", 1)
+        customer_id_pairs_count = session_data.get("customer_id_pairs_count", 1)
+        
+        logger.info(f"🔍 DEBUG: Session column counts - tags={tags_count}, spec={spec_pairs_count}, customer={customer_id_pairs_count}")
+        logger.info(f"🔍 DEBUG: Default values keys: {list(default_values.keys()) if default_values else 'None'}")
+        logger.info(f"🔍 DEBUG: Original template ID: {session_data.get('original_template_id')}")
+        
+        # If column counts are missing but we have default values, derive them
+        if (tags_count == 1 and spec_pairs_count == 1 and customer_id_pairs_count == 1 
+            and default_values and session_data.get("original_template_id")):
+            logger.info("🔍 DEBUG: Conditions met, attempting to derive column counts")
+            # Count Tag_ fields in default values
+            tag_fields = [field for field in default_values.keys() if field.startswith("Tag_")]
+            logger.info(f"🔍 DEBUG: Found tag fields: {tag_fields}")
+            if tag_fields:
+                # Extract numbers from Tag_1, Tag_2, etc. and find the maximum
+                tag_numbers = []
+                for field in tag_fields:
+                    try:
+                        num = int(field.split('_')[1])
+                        tag_numbers.append(num)
+                    except (IndexError, ValueError):
+                        pass
+                if tag_numbers:
+                    tags_count = max(tag_numbers)
+                    logger.info(f"🔍 Derived tags_count={tags_count} from default values: {tag_fields}")
+        
         # Include session metadata for template state restoration
         session_metadata = {
             'template_applied': bool(session_data.get("original_template_id")),
@@ -956,7 +1038,13 @@ def get_existing_mappings(request, session_id):
             'template_name': None,  # Will be filled if we have template
             'template_success': True,  # Assume success if template was applied
             'formula_rules': session_data.get("formula_rules", []),
-            'factwise_rules': session_data.get("factwise_rules", [])
+            'factwise_rules': session_data.get("factwise_rules", []),
+            # IMPORTANT: Include column counts so frontend shows all dynamic columns
+            'column_counts': {
+                'tags_count': tags_count,
+                'spec_pairs_count': spec_pairs_count,
+                'customer_id_pairs_count': customer_id_pairs_count
+            }
         }
         
         # Get template name if template was applied
@@ -1055,6 +1143,19 @@ def data_view(request):
         # Apply formula rules if they exist to create unique tag columns
         formula_rules = info.get("formula_rules", [])
         
+        # Ensure formula column headers are included in headers_to_use
+        if formula_rules:
+            formula_headers = []
+            for rule in formula_rules:
+                target_col = rule.get('target_column')
+                if target_col and target_col not in headers_to_use:
+                    formula_headers.append(target_col)
+            
+            if formula_headers:
+                headers_to_use.extend(formula_headers)
+                logger.info(f"🔧 DEBUG: Added formula headers to response: {formula_headers}")
+                logger.info(f"🔧 DEBUG: Updated headers_to_use: {headers_to_use}")
+        
         # Deduplicate formula rules to prevent duplicate columns
         if formula_rules:
             # Create a unique key for each rule to identify duplicates
@@ -1081,41 +1182,51 @@ def data_view(request):
         
         if formula_rules and transformed_rows:
             try:
-                # Check if formula columns already exist in headers to avoid duplicates
-                existing_formula_columns = [h for h in headers_to_use if h.startswith('Tag_') or h.startswith('Spec_')]
+                # Get all expected formula columns from session's formula_rules
+                expected_formula_columns = set()
+                for rule in formula_rules:
+                    target_col = rule.get('target_column')
+                    if target_col and (target_col.startswith('Tag_') or target_col.startswith('Spec_')):
+                        expected_formula_columns.add(target_col)
                 
-                if existing_formula_columns:
-                    logger.info(f"🔧 DEBUG: Formula columns already exist in headers: {existing_formula_columns}")
-                    logger.info(f"🔧 DEBUG: Skipping formula application to avoid duplicates")
+                # Check which formula columns are missing from current headers
+                existing_formula_columns = [h for h in headers_to_use if h.startswith('Tag_') or h.startswith('Spec_')]
+                missing_formula_columns = expected_formula_columns - set(existing_formula_columns)
+                
+                if missing_formula_columns or expected_formula_columns:
+                    if missing_formula_columns:
+                        logger.info(f"🔧 DEBUG: Missing formula columns: {missing_formula_columns}, applying formulas")
+                    else:
+                        logger.info(f"🔧 DEBUG: All formula columns exist: {existing_formula_columns}, applying formulas to populate data")
                 else:
                     logger.info(f"🔧 DEBUG: No existing formula columns found, applying {len(formula_rules)} formula rules")
+                
+                # Convert list-based data to dict format for formula processing
+                if transformed_rows and isinstance(transformed_rows[0], list):
+                    dict_rows = []
+                    for row_list in transformed_rows:
+                        row_dict = {}
+                        for i, header in enumerate(headers_to_use):
+                            if i < len(row_list):
+                                row_dict[header] = row_list[i]
+                            else:
+                                row_dict[header] = ""
+                        dict_rows.append(row_dict)
+                    transformed_rows_for_formulas = dict_rows
+                else:
+                    transformed_rows_for_formulas = transformed_rows
                     
-                    # Convert list-based data to dict format for formula processing
-                    if transformed_rows and isinstance(transformed_rows[0], list):
-                        dict_rows = []
-                        for row_list in transformed_rows:
-                            row_dict = {}
-                            for i, header in enumerate(headers_to_use):
-                                if i < len(row_list):
-                                    row_dict[header] = row_list[i]
-                                else:
-                                    row_dict[header] = ""
-                            dict_rows.append(row_dict)
-                        transformed_rows_for_formulas = dict_rows
-                    else:
-                        transformed_rows_for_formulas = transformed_rows
-                        
-                    formula_result = apply_formula_rules(
-                        data_rows=transformed_rows_for_formulas,
-                        headers=headers_to_use,
-                        formula_rules=formula_rules
-                    )
-                    
-                    # Use formula-enhanced data
-                    transformed_rows = formula_result['data']
-                    headers_to_use = formula_result['headers']
-                    
-                    logger.info(f"🔧 DEBUG: Applied formula rules, new headers: {headers_to_use}")
+                formula_result = apply_formula_rules(
+                    data_rows=transformed_rows_for_formulas,
+                    headers=headers_to_use,
+                    formula_rules=formula_rules
+                )
+                
+                # Use formula-enhanced data
+                transformed_rows = formula_result['data']
+                headers_to_use = formula_result['headers']
+                
+                logger.info(f"🔧 DEBUG: Applied formula rules, new headers: {headers_to_use}")
                 
             except Exception as e:
                 logger.warning(f"Formula application failed in data_view: {e}")
@@ -1128,9 +1239,9 @@ def data_view(request):
         for factwise_rule in factwise_rules:
             if factwise_rule.get("type") == "factwise_id" and transformed_rows:
                 try:
-                    # Check if Factwise_ID column already exists to avoid duplicates
-                    if "Factwise_ID" in headers_to_use:
-                        logger.info(f"🔧 DEBUG: Factwise_ID column already exists, skipping duplicate creation")
+                    # Check if Factwise ID column already exists to avoid duplicates
+                    if "Factwise ID" in headers_to_use:
+                        logger.info(f"🔧 DEBUG: Factwise ID column already exists, skipping duplicate creation")
                         continue
                         
                     # Add Factwise ID as the first column
@@ -1148,14 +1259,14 @@ def data_view(request):
                         logger.info(f"🔧 DEBUG: Column indices - first_idx: {first_idx}, second_idx: {second_idx}")
                         
                         # Add Factwise ID column at the beginning
-                        headers_to_use.insert(0, "Factwise_ID")
+                        headers_to_use.insert(0, "Factwise ID")
                         
                         for i, row in enumerate(transformed_rows):
                             if isinstance(row, dict):
                                 first_val = row.get(first_col, "")
                                 second_val = row.get(second_col, "")
                                 factwise_id = f"{first_val}{operator}{second_val}" if first_val and second_val else ""
-                                row["Factwise_ID"] = factwise_id
+                                row["Factwise ID"] = factwise_id
                             else:
                                 # List-based row
                                 first_val = row[first_idx] if first_idx < len(row) else ""
@@ -1204,22 +1315,53 @@ def data_view(request):
             logger.info(f"🔧 DEBUG: Applying default values to {len(transformed_rows)} rows: {default_values}")
             
             for field_name, default_value in default_values.items():
-                # Check if this field is in our headers and not already mapped
+                # Enhanced field name matching for numbered fields
+                matched_field = None
+                
+                # First, try exact match
                 if field_name in headers_to_use:
-                    logger.info(f"🔧 DEBUG: Setting default value '{default_value}' for field '{field_name}' in {len(transformed_rows)} rows")
+                    matched_field = field_name
+                else:
+                    # For numbered fields, also try case-insensitive and normalized matching
+                    field_lower = field_name.lower().replace(' ', '_').replace('-', '_')
+                    
+                    for header in headers_to_use:
+                        header_lower = header.lower().replace(' ', '_').replace('-', '_')
+                        if header_lower == field_lower:
+                            matched_field = header
+                            break
+                    
+                    # If still no match, try pattern matching for numbered fields
+                    if not matched_field:
+                        # Handle cases where frontend might use different numbering format
+                        import re
+                        # Extract base name and number from field_name
+                        match = re.match(r'(.+?)_?(\d+)$', field_name)
+                        if match:
+                            base_name, number = match.groups()
+                            # Try to find a similar numbered field in headers
+                            for header in headers_to_use:
+                                if re.match(rf'{re.escape(base_name)}_?\d+$', header, re.IGNORECASE):
+                                    matched_field = header
+                                    break
+                
+                if matched_field:
+                    logger.info(f"🔧 DEBUG: Found matching field '{matched_field}' for default value field '{field_name}'")
+                    logger.info(f"🔧 DEBUG: Setting default value '{default_value}' for field '{matched_field}' in {len(transformed_rows)} rows")
                     
                     # Apply the default value to all rows for this field
                     rows_updated = 0
                     for row in transformed_rows:
                         # Only set default if the field is empty or doesn't exist
-                        current_value = row.get(field_name, "")
+                        current_value = row.get(matched_field, "")
                         if not current_value or current_value == "":
-                            row[field_name] = default_value
+                            row[matched_field] = default_value
                             rows_updated += 1
                     
-                    logger.info(f"🔧 DEBUG: Updated {rows_updated} rows with default value '{default_value}' for field '{field_name}'")
+                    logger.info(f"🔧 DEBUG: Updated {rows_updated} rows with default value '{default_value}' for field '{matched_field}'")
                 else:
                     logger.warning(f"🔧 DEBUG: Default value field '{field_name}' not found in headers: {headers_to_use}")
+                    logger.warning(f"🔧 DEBUG: Available header patterns: {[h for h in headers_to_use if any(base in h.lower() for base in ['tag', 'spec', 'customer'])]}")
         else:
             if not default_values:
                 logger.info(f"🔧 DEBUG: Session {session_id} - No default values found in session data")
@@ -1378,6 +1520,17 @@ def download_file(request):
             # Create empty DataFrame
             df = pd.DataFrame(columns=all_headers or [])
         
+        # Prune _numbers from column names for download only (Tag_1, Tag_2 → Tag)
+        if not df.empty:
+            import re
+            final_columns = []
+            for col in df.columns:
+                # Remove _number suffix from column names (e.g., Tag_1 → Tag, Specification_Name_2 → Specification_Name)
+                pruned_col = re.sub(r'_\d+$', '', str(col))
+                final_columns.append(pruned_col)
+            
+            df.columns = final_columns
+        
         # Get format preference (default to Excel)
         if request.method == 'POST':
             format_type = (request.data.get('format') or request.POST.get('format', 'excel')).lower()
@@ -1389,7 +1542,7 @@ def download_file(request):
         
         from datetime import datetime
         timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
-        base_name = f"FW_Filled_Template_{timestamp}"
+        base_name = f"Factwise Template Converted"
         if format_type == 'csv':
             filename = f"{base_name}.csv"
             output_file = output_dir / filename
@@ -1479,9 +1632,19 @@ def download_grid_excel(request):
         if headers:
             df.columns = headers[:len(df.columns)]
         
+        # Prune _numbers from column names for download only (Tag_1, Tag_2 → Tag)
+        if not df.empty and len(df.columns) > 0:
+            import re
+            final_columns = []
+            for col in df.columns:
+                # Remove _number suffix from column names (e.g., Tag_1 → Tag, Specification_Name_2 → Specification_Name)
+                pruned_col = re.sub(r'_\d+$', '', str(col))
+                final_columns.append(pruned_col)
+            
+            df.columns = final_columns
+        
         # Generate filename
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f'grid_export_{timestamp}.xlsx'
+        filename = 'Factwise Template Converted.xlsx'
         
         # Create temp file
         temp_file = os.path.join('temp_downloads', filename)
@@ -1579,8 +1742,16 @@ def update_column_counts(request):
         # Save session to file
         save_session(session_id, info)
         
-        # Generate new template columns based on counts (for reference)
-        template_columns = generate_template_columns(tags_count, spec_pairs_count, customer_id_pairs_count)
+        # Get existing headers to preserve numbering
+        existing_headers = info.get('current_template_headers') or info.get('enhanced_headers') or []
+        
+        # Generate new template columns based on counts, preserving existing numbering
+        template_columns = generate_template_columns(
+            tags_count, 
+            spec_pairs_count, 
+            customer_id_pairs_count, 
+            existing_headers=existing_headers
+        )
 
         # Build canonical headers by pruning/adding optional groups starting from original template headers
         try:
@@ -1603,15 +1774,20 @@ def update_column_counts(request):
             except Exception:
                 return ''
         def _is_tag(h: str) -> bool:
-            return _norm(h) == 'tag'
+            h_norm = _norm(h)
+            return h_norm == 'tag' or h_norm.startswith('tag_')
         def _is_spec_name(h: str) -> bool:
-            return _norm(h) == 'specification name'
+            h_norm = _norm(h)
+            return h_norm == 'specification name' or h_norm.startswith('specification_name_')
         def _is_spec_value(h: str) -> bool:
-            return _norm(h) == 'specification value'
+            h_norm = _norm(h)
+            return h_norm == 'specification value' or h_norm.startswith('specification_value_')
         def _is_cust_name(h: str) -> bool:
-            return _norm(h) == 'customer identification name'
+            h_norm = _norm(h)
+            return h_norm == 'customer identification name' or h_norm.startswith('customer_identification_name_')
         def _is_cust_value(h: str) -> bool:
-            return _norm(h) == 'customer identification value'
+            h_norm = _norm(h)
+            return h_norm == 'customer identification value' or h_norm.startswith('customer_identification_value_')
 
         regenerated_headers = []
         tags_used = 0
@@ -1622,19 +1798,19 @@ def update_column_counts(request):
             h = str(base_headers[i])
             if _is_tag(h):
                 if tags_used < tags_count:
-                    regenerated_headers.append('Tag')
+                    regenerated_headers.append(f'Tag_{tags_used + 1}')
                     tags_used += 1
                 i += 1
                 continue
             if _is_spec_name(h) and (i + 1) < len(base_headers) and _is_spec_value(base_headers[i+1]):
                 if spec_used < spec_pairs_count:
-                    regenerated_headers.extend(['Specification Name', 'Specification Value'])
+                    regenerated_headers.extend([f'Specification_Name_{spec_used + 1}', f'Specification_Value_{spec_used + 1}'])
                     spec_used += 1
                 i += 2
                 continue
             if _is_cust_name(h) and (i + 1) < len(base_headers) and _is_cust_value(base_headers[i+1]):
                 if cust_used < customer_id_pairs_count:
-                    regenerated_headers.extend(['Customer Identification Name', 'Customer Identification Value'])
+                    regenerated_headers.extend([f'Customer_Identification_Name_{cust_used + 1}', f'Customer_Identification_Value_{cust_used + 1}'])
                     cust_used += 1
                 i += 2
                 continue
@@ -1644,13 +1820,14 @@ def update_column_counts(request):
 
         # Append extras if counts exceed those available in the file
         if tags_used < tags_count:
-            regenerated_headers.extend(['Tag'] * (tags_count - tags_used))
+            for i in range(tags_used, tags_count):
+                regenerated_headers.append(f'Tag_{i + 1}')
         if spec_used < spec_pairs_count:
-            for _ in range(spec_pairs_count - spec_used):
-                regenerated_headers.extend(['Specification Name', 'Specification Value'])
+            for i in range(spec_used, spec_pairs_count):
+                regenerated_headers.extend([f'Specification_Name_{i + 1}', f'Specification_Value_{i + 1}'])
         if cust_used < customer_id_pairs_count:
-            for _ in range(customer_id_pairs_count - cust_used):
-                regenerated_headers.extend(['Customer Identification Name', 'Customer Identification Value'])
+            for i in range(cust_used, customer_id_pairs_count):
+                regenerated_headers.extend([f'Customer_Identification_Name_{i + 1}', f'Customer_Identification_Value_{i + 1}'])
 
         info["current_template_headers"] = regenerated_headers
         # Backward compatibility
@@ -1664,7 +1841,10 @@ def update_column_counts(request):
         # Compute template_optionals for the canonical headers (Tags/Spec/Customer always optional)
         def is_special_optional(h: str) -> bool:
             h_lower = (h or '').lower()
-            return h == 'Tag' or ('specification' in h_lower) or ('customer identification' in h_lower)
+            return (h == 'Tag' or h.startswith('Tag_') or 
+                   'specification' in h_lower or 
+                   'customer identification' in h_lower or 
+                   'customer_identification' in h_lower)
 
         template_optionals = [True if is_special_optional(h) else False for h in regenerated_headers]
 
@@ -1688,27 +1868,27 @@ def update_column_counts(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-def generate_template_columns(tags_count, spec_pairs_count, customer_id_pairs_count):
-    """Generate template column names based on counts."""
+def generate_template_columns(tags_count, spec_pairs_count, customer_id_pairs_count, existing_headers=None):
+    """Generate template column names with simple sequential numbering."""
     columns = []
     
     # Basic mandatory columns (these should come from template configuration)
     basic_columns = ["Quantity", "Description", "Part Number", "Manufacturer"]
     columns.extend(basic_columns)
     
-    # Add Tag columns (all named "Tag")
-    for _ in range(tags_count):
-        columns.append("Tag")
+    # Simple sequential tag numbering - just add what's requested
+    for i in range(tags_count):
+        columns.append(f"Tag_{i + 1}")
     
-    # Add Specification Name/Value pairs
-    for _ in range(spec_pairs_count):
-        columns.append("Specification Name")
-        columns.append("Specification Value")
+    # Add Specification Name/Value pairs with unique numbers
+    for i in range(spec_pairs_count):
+        columns.append(f"Specification_Name_{i + 1}")
+        columns.append(f"Specification_Value_{i + 1}")
     
-    # Add Customer Identification Name/Value pairs
-    for _ in range(customer_id_pairs_count):
-        columns.append("Customer Identification Name")
-        columns.append("Customer Identification Value")
+    # Add Customer Identification Name/Value pairs with unique numbers  
+    for i in range(customer_id_pairs_count):
+        columns.append(f"Customer_Identification_Name_{i + 1}")
+        columns.append(f"Customer_Identification_Value_{i + 1}")
     
     return columns
 
@@ -1803,10 +1983,17 @@ def save_mapping_template(request):
             client_headers = []
             template_headers = []
         
-        # Get column counts from request or use defaults
-        tags_count = request.data.get('tags_count', 1)
-        spec_pairs_count = request.data.get('spec_pairs_count', 1) 
-        customer_id_pairs_count = request.data.get('customer_id_pairs_count', 1)
+        # Get column counts from request, session, or use defaults
+        if info:
+            # Try to get from session first (for dynamic fields created in ColumnMapping)
+            tags_count = request.data.get('tags_count') or info.get('tags_count', 1)
+            spec_pairs_count = request.data.get('spec_pairs_count') or info.get('spec_pairs_count', 1) 
+            customer_id_pairs_count = request.data.get('customer_id_pairs_count') or info.get('customer_id_pairs_count', 1)
+        else:
+            # Standalone template - use request or defaults
+            tags_count = request.data.get('tags_count', 1)
+            spec_pairs_count = request.data.get('spec_pairs_count', 1) 
+            customer_id_pairs_count = request.data.get('customer_id_pairs_count', 1)
         
         # Create template with backward compatibility
         try:
@@ -2036,9 +2223,61 @@ def apply_mapping_template(request):
             SESSION_STORE[session_id]["original_template_id"] = template_id
             
             # Apply column counts from template
-            SESSION_STORE[session_id]["tags_count"] = getattr(template, 'tags_count', 1)
-            SESSION_STORE[session_id]["spec_pairs_count"] = getattr(template, 'spec_pairs_count', 1)
-            SESSION_STORE[session_id]["customer_id_pairs_count"] = getattr(template, 'customer_id_pairs_count', 1)
+            tags_count = getattr(template, 'tags_count', 1)
+            spec_pairs_count = getattr(template, 'spec_pairs_count', 1)
+            customer_id_pairs_count = getattr(template, 'customer_id_pairs_count', 1)
+            
+            SESSION_STORE[session_id]["tags_count"] = tags_count
+            SESSION_STORE[session_id]["spec_pairs_count"] = spec_pairs_count
+            SESSION_STORE[session_id]["customer_id_pairs_count"] = customer_id_pairs_count
+            
+            # Get existing template headers to preserve tag numbering
+            existing_template_headers = getattr(template, 'template_headers', [])
+            
+            # Regenerate numbered headers based on template column counts, preserving existing numbering
+            regenerated_headers = generate_template_columns(
+                tags_count, 
+                spec_pairs_count, 
+                customer_id_pairs_count, 
+                existing_headers=existing_template_headers
+            )
+            SESSION_STORE[session_id]["current_template_headers"] = regenerated_headers
+            SESSION_STORE[session_id]["enhanced_headers"] = regenerated_headers
+            
+            # IMPORTANT: Save session immediately after setting column counts
+            save_session(session_id, SESSION_STORE[session_id])
+            
+            logger.info(f"🔧 DEBUG: Template applied - regenerated {len(regenerated_headers)} numbered headers: {regenerated_headers}")
+            logger.info(f"🔧 DEBUG: Saved column counts to session: tags={tags_count}, spec_pairs={spec_pairs_count}, customer_id_pairs={customer_id_pairs_count}")
+            
+            # IMPORTANT: Auto-add dynamic tag columns to mappings with default values
+            # This ensures that when template is used in columnmapping.js, the dynamic tags appear immediately
+            if default_values:
+                current_mappings = SESSION_STORE[session_id].get("mappings", {})
+                if isinstance(current_mappings, dict):
+                    # Convert dict to list format for consistency
+                    mappings_list = [{"source": v, "target": k} for k, v in current_mappings.items()]
+                elif isinstance(current_mappings, list):
+                    mappings_list = current_mappings
+                else:
+                    mappings_list = []
+                
+                # Add mappings for dynamic tag columns that have default values
+                for field_name, default_value in default_values.items():
+                    if field_name in regenerated_headers:
+                        # Check if this field is already mapped
+                        already_mapped = any(mapping.get("target") == field_name for mapping in mappings_list)
+                        if not already_mapped:
+                            # Add a virtual mapping that maps the default value to this field
+                            # This will make the field appear as "mapped" in the UI with the default value
+                            mappings_list.append({
+                                "source": f"__DEFAULT__{default_value}",  # Special source indicating default value
+                                "target": field_name
+                            })
+                            logger.info(f"🔧 DEBUG: Auto-mapped dynamic tag '{field_name}' with default value '{default_value}'")
+                
+                # Update session with enhanced mappings
+                SESSION_STORE[session_id]["mappings"] = mappings_list
             
             # Convert mappings from old format to new format for session storage
             old_format_mappings = application_result['mappings']
@@ -2061,7 +2300,8 @@ def apply_mapping_template(request):
                     client_file=info["client_path"],
                     mappings=new_format_mappings,
                     sheet_name=info["sheet_name"],
-                    header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0
+                    header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0,
+                    session_id=session_id
                 )
                 
                 # Convert to dict format for formula processing
@@ -2084,6 +2324,9 @@ def apply_mapping_template(request):
                 
                 # Don't cache enhanced data - process fresh each time
                 logger.info(f"Applied {len(formula_rules)} formula rules from template")
+                
+                # Store the enhanced data temporarily for default value application
+                SESSION_STORE[session_id]["temp_formula_result"] = formula_result
             
             # Apply factwise rules if they exist
             factwise_rules = getattr(template, 'factwise_rules', []) or []
@@ -2110,27 +2353,59 @@ def apply_mapping_template(request):
                                     client_file=info["client_path"],
                                     mappings=new_format_mappings,
                                     sheet_name=info["sheet_name"],
-                                    header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0
+                                    header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0,
+                                    session_id=session_id
                                 )
                                 current_data = mapping_result['data']
                                 current_headers = mapping_result['headers']
                             
-                            # Check if required columns exist for Factwise ID
-                            if first_column not in current_headers:
-                                logger.warning(f"🆔 Template Factwise ID: First column '{first_column}' not found in headers: {current_headers}")
+                            # Map template column names to actual source column names
+                            # The Factwise rule stores template column names, but we need source column names
+                            first_source_column = None
+                            second_source_column = None
+                            
+                            # Find which source columns map to our target template columns
+                            applied_mappings = application_result.get('mappings', {})
+                            reverse_mappings = {v: k for k, v in applied_mappings.items()}  # template -> source
+                            
+                            logger.info(f"🔧 DEBUG: Reverse mappings: {reverse_mappings}")
+                            logger.info(f"🔧 DEBUG: Looking for template columns: '{first_column}', '{second_column}'")
+                            
+                            # Find source columns that map to our target template columns
+                            if first_column in reverse_mappings:
+                                first_source_column = reverse_mappings[first_column]
+                            if second_column in reverse_mappings:
+                                second_source_column = reverse_mappings[second_column]
+                                
+                            logger.info(f"🔧 DEBUG: Mapped to source columns: '{first_source_column}', '{second_source_column}'")
+                            
+                            # Check if we found the required source columns in client headers
+                            if not first_source_column or first_source_column not in client_headers:
+                                logger.warning(f"🆔 Template Factwise ID: First source column '{first_source_column}' not found in client headers: {client_headers}")
                                 continue  # Skip this factwise rule
                             
-                            if second_column not in current_headers:
-                                logger.warning(f"🆔 Template Factwise ID: Second column '{second_column}' not found in headers: {current_headers}")
+                            if not second_source_column or second_source_column not in client_headers:
+                                logger.warning(f"🆔 Template Factwise ID: Second source column '{second_source_column}' not found in client headers: {client_headers}")
                                 continue  # Skip this factwise rule
                             
-                            # Apply Factwise ID creation
+                            # Apply Factwise ID creation using source data
+                            # Read the client data directly to get the source column values
+                            from .bom_mapper import BOMHeaderMapper
+                            mapper = BOMHeaderMapper()
+                            client_data = mapper.read_excel_data(
+                                file_path=info["client_path"],
+                                sheet_name=info["sheet_name"], 
+                                header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0
+                            )
+                            
                             factwise_id_column = []
-                            first_col_idx = current_headers.index(first_column)
-                            second_col_idx = current_headers.index(second_column)
+                            first_col_idx = client_headers.index(first_source_column)
+                            second_col_idx = client_headers.index(second_source_column)
+                            
+                            logger.info(f"🔧 DEBUG: Client data indices - first_idx: {first_col_idx}, second_idx: {second_col_idx}")
                             
                             if first_col_idx >= 0 and second_col_idx >= 0:
-                                for row in current_data:
+                                for row in client_data:
                                     first_val = str(row[first_col_idx] if first_col_idx < len(row) else "").strip()
                                     second_val = str(row[second_col_idx] if second_col_idx < len(row) else "").strip()
                                     
@@ -2167,6 +2442,31 @@ def apply_mapping_template(request):
             if default_values:
                 SESSION_STORE[session_id]["default_values"] = default_values
                 logger.info(f"🔧 DEBUG: Applied default values from template: {default_values}")
+                
+                # Immediately populate any enhanced data with default values for instant preview
+                temp_formula_result = SESSION_STORE[session_id].get("temp_formula_result")
+                if temp_formula_result and temp_formula_result.get('data'):
+                    enhanced_data = temp_formula_result['data']
+                    enhanced_headers = temp_formula_result['headers']
+                    
+                    logger.info(f"🔧 DEBUG: Pre-populating enhanced data with {len(default_values)} default values")
+                    
+                    # Apply default values to enhanced data
+                    for field_name, default_value in default_values.items():
+                        if field_name in enhanced_headers:
+                            field_index = enhanced_headers.index(field_name)
+                            for row_dict in enhanced_data:
+                                if isinstance(row_dict, dict):
+                                    # For dict format data
+                                    if field_name not in row_dict or not row_dict[field_name] or row_dict[field_name] == '':
+                                        row_dict[field_name] = default_value
+                                        logger.info(f"🔧 DEBUG: Set default value '{default_value}' for field '{field_name}'")
+                        else:
+                            logger.info(f"🔧 DEBUG: Default value field '{field_name}' not found in enhanced headers: {enhanced_headers}")
+                    
+                    # Update the stored result
+                    SESSION_STORE[session_id]["temp_formula_result"] = temp_formula_result
+                    logger.info(f"🔧 DEBUG: Updated enhanced data with default values for immediate preview")
             
             # Increment template usage
             template.increment_usage()
@@ -2260,21 +2560,53 @@ def apply_formula_rules(data_rows, headers, formula_rules, replace_existing=Fals
         if not source_column or not sub_rules:
             continue
         
-        # Determine column name based on type - ALWAYS CREATE UNIQUE COLUMNS
+        # Determine column name based on type - REUSE EXISTING EMPTY TAG COLUMNS
         if column_type == 'Tag':
-            # Always create unique tag column names
-            column_name = f"Tag_{tag_counter}"
-            while column_name in used_column_names:
-                tag_counter += 1
-                column_name = f"Tag_{tag_counter}"
+            # First, check if there's an existing empty tag column we can reuse
+            column_name = None
             
-            logger.info(f"🔧 DEBUG: Creating new Tag column '{column_name}' for rule {rule_index + 1}")
+            # Look for existing tag columns that are empty across all rows
+            existing_tag_columns = [h for h in new_headers + list(used_column_names) if h.startswith('Tag_')]
             
-            # Add the unique column
-            new_headers.append(column_name)
-            new_columns.append(column_name)
-            used_column_names.add(column_name)
-            tag_counter += 1
+            for tag_col in sorted(existing_tag_columns):  # Check in order Tag_1, Tag_2, etc.
+                # Check if this column is empty across all rows
+                is_empty = True
+                for row in modified_data:
+                    if tag_col in row and row[tag_col] and str(row[tag_col]).strip():
+                        is_empty = False
+                        break
+                
+                if is_empty:
+                    column_name = tag_col
+                    logger.info(f"🔧 DEBUG: Reusing empty Tag column '{column_name}' for rule {rule_index + 1}")
+                    break
+            
+            # If no empty column found, create a new one
+            if not column_name:
+                # Find the highest existing tag number
+                existing_tag_numbers = []
+                for header in new_headers + list(used_column_names):
+                    if header.startswith('Tag_'):
+                        try:
+                            num = int(header.split('_')[1])
+                            existing_tag_numbers.append(num)
+                        except (IndexError, ValueError):
+                            pass
+                
+                # Get next available tag number
+                if existing_tag_numbers:
+                    next_tag_num = max(existing_tag_numbers) + 1
+                else:
+                    next_tag_num = 1
+                
+                column_name = f"Tag_{next_tag_num}"
+                logger.info(f"🔧 DEBUG: Creating new Tag column '{column_name}' for rule {rule_index + 1}")
+                
+                # Add the new column
+                if column_name not in used_column_names:
+                    new_headers.append(column_name)
+                    new_columns.append(column_name)
+                    used_column_names.add(column_name)
             
             # Apply sub-rules to each row (first match wins)
             for row in modified_data:
@@ -2406,6 +2738,50 @@ def apply_formulas(request):
                 'error': 'No formula rules provided'
             }, status=status.HTTP_400_BAD_REQUEST)
         
+        # First, get conflict suggestions for smart numbering
+        info = SESSION_STORE[session_id]
+        enhanced_headers = info.get("enhanced_headers", []) or info.get("current_template_headers", [])
+        
+        # Get all existing columns from all sources (matching check_column_conflicts logic)
+        template_headers = info.get("template_headers", [])
+        client_headers = list(info.get("source_headers", {}).keys())
+        
+        # Check for conflicts and get smart numbering suggestions
+        all_existing_columns = set(template_headers + client_headers + enhanced_headers)
+        column_name_mapping = {}  # Maps original names to suggested names
+        
+        for rule in formula_rules:
+            target_column = rule.get('target_column') or 'Tag'
+            column_type = rule.get('column_type', 'Tag')
+            
+            if column_type == 'Tag':
+                # Always apply smart numbering for Tag columns - find next available number
+                tag_numbers = []
+                for col in all_existing_columns:
+                    if col.startswith('Tag_') and col[4:].isdigit():
+                        tag_numbers.append(int(col[4:]))
+                    elif col == 'Tag':
+                        tag_numbers.append(1)
+                
+                next_tag_number = max(tag_numbers, default=0) + 1
+                suggested_name = f"Tag_{next_tag_number}"
+                column_name_mapping[target_column] = suggested_name
+                all_existing_columns.add(suggested_name)
+                
+                logger.info(f"🔧 DEBUG: Smart numbering - {target_column} → {suggested_name}")
+        
+        # Update formula rules with smart numbering
+        updated_formula_rules = []
+        for rule in formula_rules:
+            updated_rule = rule.copy()
+            original_target = rule.get('target_column') or 'Tag'
+            if original_target in column_name_mapping:
+                updated_rule['target_column'] = column_name_mapping[original_target]
+                logger.info(f"🔧 DEBUG: Updated rule target: {original_target} → {column_name_mapping[original_target]}")
+            updated_formula_rules.append(updated_rule)
+        
+        formula_rules = updated_formula_rules
+        
         info = SESSION_STORE[session_id]
         mappings = info.get("mappings")
         
@@ -2513,7 +2889,8 @@ def preview_formulas(request):
             client_file=info["client_path"],
             mappings=mappings,
             sheet_name=info["sheet_name"],
-            header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0
+            header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0,
+            session_id=session_id
         )
         # Convert to dict format for preview
         dict_rows = []
@@ -2832,7 +3209,8 @@ def get_enhanced_data(request):
                 client_file=info["client_path"],
                 mappings=mappings,
                 sheet_name=info["sheet_name"],
-                header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0
+                header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0,
+                session_id=session_id
             )
             # Convert to dict format
             dict_rows = []
@@ -2884,6 +3262,7 @@ def get_enhanced_data(request):
 @api_view(['POST'])
 def check_column_conflicts(request):
     """Check for column name conflicts before applying formulas."""
+    logger.info("🔧 DEBUG: Starting check_column_conflicts function")
     try:
         session_id = request.data.get('session_id')
         formula_rules = request.data.get('formula_rules', [])
@@ -2917,37 +3296,100 @@ def check_column_conflicts(request):
             header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0
         )
         
-        # Check for conflicts
+        # Get enhanced headers (includes numbered fields like Tag_1, Tag_2)
+        enhanced_headers = info.get("enhanced_headers", []) or info.get("current_template_headers", [])
+        all_existing_columns = set(template_headers + client_headers + enhanced_headers)
+        
+        # Check for conflicts and provide smart numbering
         conflicts = []
         suggestions = {}
-        existing_columns = set(template_headers + client_headers)
         
+        logger.info(f"🔧 DEBUG: About to process {len(formula_rules)} rules with {len(all_existing_columns)} existing columns")
         for rule in formula_rules:
-            target_column = rule.get('target_column') or 'Component_Type'
+            target_column = rule.get('target_column') or 'Tag'
+            column_type = rule.get('column_type', 'Tag')
             
-            if target_column in existing_columns:
-                # Suggest alternative names
-                base_name = target_column
-                counter = 1
-                suggested_name = f"{base_name}_New"
-                while suggested_name in existing_columns:
-                    counter += 1
+            # Smart numbering for Tag and Specification columns
+            if column_type == 'Tag':
+                # Always apply smart numbering for Tag columns - find next available number
+                tag_numbers = []
+                for col in all_existing_columns:
+                    if col.startswith('Tag_') and col[4:].isdigit():
+                        tag_numbers.append(int(col[4:]))
+                    elif col == 'Tag':
+                        tag_numbers.append(1)
+                
+                next_tag_number = max(tag_numbers, default=0) + 1
+                suggested_name = f"Tag_{next_tag_number}"
+                
+                # Only create conflict if the suggested name is different from target
+                if target_column != suggested_name:
+                    conflicts.append({
+                        'rule_index': formula_rules.index(rule),
+                        'column': target_column,
+                        'conflicting_column': target_column,
+                        'conflict_type': 'auto_numbering',
+                        'suggested_name': suggested_name,
+                        'message': f'Auto-assigned to next available tag number'
+                    })
+                    
+                    suggestions[target_column] = suggested_name
+                
+                # Always reserve the suggested name regardless of conflicts
+                all_existing_columns.add(suggested_name)
+                    
+            elif column_type == 'Specification Value':
+                spec_name = rule.get('specification_name', 'Unknown')
+                base_column = f"Specification_Value_{spec_name}"
+                
+                if base_column in all_existing_columns:
+                    # Find next available specification number
+                    spec_numbers = []
+                    for col in all_existing_columns:
+                        if col.startswith(f'Specification_Value_{spec_name}_') and col.split('_')[-1].isdigit():
+                            spec_numbers.append(int(col.split('_')[-1]))
+                    
+                    next_spec_number = max(spec_numbers, default=0) + 1
+                    suggested_name = f"Specification_Value_{spec_name}_{next_spec_number}"
+                    
+                    conflicts.append({
+                        'rule_index': formula_rules.index(rule),
+                        'column': base_column,
+                        'conflicting_column': base_column,
+                        'conflict_type': 'auto_numbering',
+                        'suggested_name': suggested_name,
+                        'message': f'Auto-assigned specification number for {spec_name}'
+                    })
+                    
+                    suggestions[base_column] = suggested_name
+                    all_existing_columns.add(suggested_name)  # Reserve this name
+            else:
+                # Generic conflict resolution for other column types
+                if target_column in all_existing_columns:
+                    base_name = target_column
+                    counter = 1
                     suggested_name = f"{base_name}_{counter}"
-                
-                conflicts.append({
-                    'rule_index': formula_rules.index(rule),
-                    'conflicting_column': target_column,
-                    'conflict_type': 'existing_column',
-                    'suggested_alternative': suggested_name
-                })
-                
-                suggestions[target_column] = suggested_name
+                    while suggested_name in all_existing_columns:
+                        counter += 1
+                        suggested_name = f"{base_name}_{counter}"
+                    
+                    conflicts.append({
+                        'rule_index': formula_rules.index(rule),
+                        'column': target_column,
+                        'conflicting_column': target_column,
+                        'conflict_type': 'existing_column',
+                        'suggested_name': suggested_name,
+                        'message': f'Column already exists, using numbered variant'
+                    })
+                    
+                    suggestions[target_column] = suggested_name
+                    all_existing_columns.add(suggested_name)  # Reserve this name
         
         return Response({
             'success': True,
             'conflicts': conflicts,
             'suggestions': suggestions,
-            'existing_columns': list(existing_columns),
+            'existing_columns': list(all_existing_columns),
             'has_conflicts': len(conflicts) > 0
         })
         
