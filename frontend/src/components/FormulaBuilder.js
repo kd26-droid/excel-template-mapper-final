@@ -91,6 +91,37 @@ const FormulaBuilder = ({
     };
   }
 
+  // Normalize a rule into the new unified schema
+  function normalizeRule(maybeRule) {
+    const rule = { ...(maybeRule || {}) };
+    if (!rule.column_type) rule.column_type = 'Tag';
+    if (rule.column_type === 'Specification Value' && !('specification_name' in rule)) {
+      rule.specification_name = '';
+    }
+    // Handle old flat schema: search_text/tag_value directly on rule
+    const hasFlatFields = (typeof rule.search_text === 'string') || (typeof rule.tag_value === 'string') || (typeof rule.output_value === 'string');
+    if (!Array.isArray(rule.sub_rules)) {
+      if (hasFlatFields) {
+        const searchText = rule.search_text || '';
+        const outputValue = rule.output_value || rule.tag_value || '';
+        const caseSensitive = !!rule.case_sensitive;
+        rule.sub_rules = [{ search_text: searchText, output_value: outputValue, case_sensitive: caseSensitive }];
+        console.warn('🔧 Normalized flat rule into sub_rules[]:', { rule });
+      } else {
+        rule.sub_rules = [createEmptySubRule()];
+        console.warn('🔧 Added default sub_rules[] to rule missing sub_rules:', { rule });
+      }
+    }
+    // Ensure each sub-rule has required fields
+    rule.sub_rules = rule.sub_rules.map(sr => ({
+      search_text: (sr && typeof sr.search_text === 'string') ? sr.search_text : '',
+      output_value: (sr && typeof sr.output_value === 'string') ? sr.output_value : (typeof sr.tag_value === 'string' ? sr.tag_value : ''),
+      case_sensitive: !!(sr && sr.case_sensitive)
+    }));
+
+    return rule;
+  }
+
   const showSnackbar = useCallback((message, severity = 'info') => {
     setSnackbar({ open: true, message, severity });
   }, []);
@@ -156,20 +187,21 @@ const FormulaBuilder = ({
 
   useEffect(() => {
     if (initialRules.length > 0) {
-      // Map template column names to available columns using fuzzy matching
-      const mappedRules = initialRules.map(rule => {
+      console.log('🔍 FormulaBuilder opened with initialRules:', initialRules);
+      // Normalize rules and map template column names to available columns using fuzzy matching
+      const normalizedAndMapped = initialRules.map(rawRule => {
+        const rule = normalizeRule(rawRule);
         if (!rule.source_column || availableColumns.includes(rule.source_column)) {
           return rule; // Exact match or empty, keep as is
         }
-        
-        // Try to find a fuzzy match
         const fuzzyMatch = findBestColumnMatch(rule.source_column, availableColumns);
-        return {
-          ...rule,
-          source_column: fuzzyMatch || rule.source_column // Use fuzzy match or keep original
-        };
+        return { ...rule, source_column: fuzzyMatch || rule.source_column };
       });
-      setFormulaRules(mappedRules);
+      const invalid = normalizedAndMapped.filter(r => !Array.isArray(r.sub_rules));
+      if (invalid.length > 0) {
+        console.warn('⚠️ Some rules still invalid after normalization:', invalid);
+      }
+      setFormulaRules(normalizedAndMapped);
     } else {
       setFormulaRules([createEmptyRule()]);
     }
@@ -249,32 +281,47 @@ const FormulaBuilder = ({
   };
 
   const addSubRule = (ruleIndex) => {
-    setFormulaRules(prev => prev.map((rule, i) => 
-      i === ruleIndex ? { 
-        ...rule, 
-        sub_rules: [...rule.sub_rules, createEmptySubRule()] 
-      } : rule
-    ));
+    setFormulaRules(prev => prev.map((rule, i) => {
+      if (i !== ruleIndex) return rule;
+      const safeSubRules = Array.isArray(rule.sub_rules) ? rule.sub_rules : [];
+      if (!Array.isArray(rule.sub_rules)) {
+        console.warn('🔧 addSubRule: sub_rules was not an array, initializing.', { ruleIndex });
+      }
+      return {
+        ...rule,
+        sub_rules: [...safeSubRules, createEmptySubRule()]
+      };
+    }));
   };
 
   const removeSubRule = (ruleIndex, subRuleIndex) => {
-    setFormulaRules(prev => prev.map((rule, i) => 
-      i === ruleIndex ? { 
-        ...rule, 
-        sub_rules: rule.sub_rules.filter((_, j) => j !== subRuleIndex) 
-      } : rule
-    ));
+    setFormulaRules(prev => prev.map((rule, i) => {
+      if (i !== ruleIndex) return rule;
+      const safeSubRules = Array.isArray(rule.sub_rules) ? rule.sub_rules : [];
+      if (!Array.isArray(rule.sub_rules)) {
+        console.warn('🔧 removeSubRule: sub_rules was not an array, initializing.', { ruleIndex });
+      }
+      return {
+        ...rule,
+        sub_rules: safeSubRules.filter((_, j) => j !== subRuleIndex)
+      };
+    }));
   };
 
   const updateSubRule = (ruleIndex, subRuleIndex, field, value) => {
-    setFormulaRules(prev => prev.map((rule, i) => 
-      i === ruleIndex ? { 
-        ...rule, 
-        sub_rules: rule.sub_rules.map((subRule, j) => 
+    setFormulaRules(prev => prev.map((rule, i) => {
+      if (i !== ruleIndex) return rule;
+      const safeSubRules = Array.isArray(rule.sub_rules) ? rule.sub_rules : [];
+      if (!Array.isArray(rule.sub_rules)) {
+        console.warn('🔧 updateSubRule: sub_rules was not an array, initializing.', { ruleIndex });
+      }
+      return {
+        ...rule,
+        sub_rules: safeSubRules.map((subRule, j) => 
           j === subRuleIndex ? { ...subRule, [field]: value } : subRule
-        ) 
-      } : rule
-    ));
+        )
+      };
+    }));
   };
 
   // ─── PREVIEW FUNCTIONALITY ──────────────────────────────────────────────────

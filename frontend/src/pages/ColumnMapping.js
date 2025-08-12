@@ -484,11 +484,27 @@ export default function ColumnMapping() {
               setEdges(newEdges);
               
               // A6) Run reconciliation after edge restoration
-              setTimeout(() => {
+              setTimeout(async () => {
                 reconcileEdgesWithNodes();
                 // A7) Clear rebuild guard
                 isRebuildingRef.current = false;
                 console.log('🔧 DEBUG: Column count update sequence complete');
+                // A8) Force-save mappings after dynamic rebuild to avoid autosave gap
+                try {
+                  const targetHeaders = newTemplateHeaders;
+                  const mappingsToSave = newEdges.map(edge => {
+                    const sourceIdx = parseInt(edge.source.replace('c-', ''));
+                    const targetIdx = parseInt(edge.target.replace('t-', ''));
+                    const sourceColumn = clientHeaders[sourceIdx];
+                    const targetColumn = targetHeaders[targetIdx];
+                    return sourceColumn && targetColumn ? { source: sourceColumn, target: targetColumn } : null;
+                  }).filter(Boolean);
+                  const payload = { mappings: mappingsToSave, default_values: defaultValueMappings };
+                  await api.saveColumnMappings(sessionId, payload);
+                  console.log('💾 Forced save of mappings after column count update');
+                } catch (forceSaveErr) {
+                  console.error('❌ Failed forced save after column count update:', forceSaveErr);
+                }
               }, 100);
               
               return currentNodes;

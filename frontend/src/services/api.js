@@ -944,61 +944,68 @@ const api = {
   validateFormulaRules: (formulaRules, availableColumns) => {
     const errors = [];
     const warnings = [];
-    
-    formulaRules.forEach((rule, index) => {
+    const safeRules = Array.isArray(formulaRules) ? formulaRules : [];
+
+    safeRules.forEach((rule, index) => {
+      if (!rule || typeof rule !== 'object') {
+        errors.push(`Rule ${index + 1}: Invalid rule shape`);
+        return;
+      }
+
       // Check required fields
       if (!rule.source_column) {
         errors.push(`Rule ${index + 1}: Source column is required`);
       }
-      
+
       // Check if column type is valid
       if (!rule.column_type || !['Tag', 'Specification Value'].includes(rule.column_type)) {
         errors.push(`Rule ${index + 1}: Column type must be either 'Tag' or 'Specification Value'`);
       }
-      
+
       // Check if specification name is provided when column type is 'Specification Value'
       if (rule.column_type === 'Specification Value' && (!rule.specification_name || rule.specification_name.trim() === '')) {
         errors.push(`Rule ${index + 1}: Specification name is required when column type is 'Specification Value'`);
       }
-      
+
       // Check if source column exists
       if (rule.source_column && !availableColumns.includes(rule.source_column)) {
         errors.push(`Rule ${index + 1}: Source column "${rule.source_column}" does not exist`);
       }
-      
+
       // Validate sub-rules
-      if (!rule.sub_rules || rule.sub_rules.length === 0) {
+      if (!Array.isArray(rule.sub_rules) || rule.sub_rules.length === 0) {
         errors.push(`Rule ${index + 1}: At least one condition (sub-rule) is required`);
       } else {
         rule.sub_rules.forEach((subRule, subIndex) => {
+          if (!subRule || typeof subRule !== 'object') {
+            errors.push(`Rule ${index + 1}, Condition ${subIndex + 1}: Invalid sub-rule shape`);
+            return;
+          }
           if (!subRule.search_text || subRule.search_text.trim() === '') {
             errors.push(`Rule ${index + 1}, Condition ${subIndex + 1}: Search text cannot be empty`);
           }
           if (!subRule.output_value || subRule.output_value.trim() === '') {
             errors.push(`Rule ${index + 1}, Condition ${subIndex + 1}: Output value cannot be empty`);
           }
-          
           // Warning for very short search text
           if (subRule.search_text && subRule.search_text.trim().length < 2) {
             warnings.push(`Rule ${index + 1}, Condition ${subIndex + 1}: Very short search text "${subRule.search_text}" may match too many rows`);
           }
         });
       }
-      
+
       // Info about multiple rules targeting same column type
-      const sameColumnTypeRules = formulaRules.filter((r, i) => 
-        i !== index && r.column_type === rule.column_type
-      );
+      const sameColumnTypeRules = safeRules.filter((r, i) => i !== index && r && r.column_type === rule.column_type);
       if (sameColumnTypeRules.length > 0 && rule.column_type === 'Tag') {
         warnings.push(`Rule ${index + 1}: Multiple Tag rules detected - each will create separate columns if different source columns are used`);
       }
     });
-    
+
     return {
       isValid: errors.length === 0,
       errors,
       warnings,
-      ruleCount: formulaRules.length
+      ruleCount: safeRules.length
     };
   }
 };

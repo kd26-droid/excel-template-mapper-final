@@ -1972,12 +1972,19 @@ def save_mapping_template(request):
                 sheet_name=info["sheet_name"],
                 header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0
             )
-            
-            template_headers = mapper.read_excel_headers(
-                file_path=info["template_path"],
-                sheet_name=info.get("template_sheet_name"),
-                header_row=info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0
-            )
+
+            # Prefer canonical dynamic headers if present in session to capture Tag_/Spec_/Customer dynamic changes
+            canonical_headers = info.get("current_template_headers") or info.get("enhanced_headers")
+            if canonical_headers and isinstance(canonical_headers, list) and len(canonical_headers) > 0:
+                template_headers = canonical_headers
+                logger.info(f"🔧 DEBUG: Using canonical template headers from session for save_mapping_template ({len(template_headers)} headers)")
+            else:
+                template_headers = mapper.read_excel_headers(
+                    file_path=info["template_path"],
+                    sheet_name=info.get("template_sheet_name"),
+                    header_row=info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0
+                )
+                logger.info(f"🔧 DEBUG: Using original file template headers for save_mapping_template ({len(template_headers)} headers)")
         else:
             # Standalone template - use empty headers
             client_headers = []
@@ -2088,12 +2095,19 @@ def update_mapping_template(request):
             sheet_name=info["sheet_name"],
             header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0
         )
-        
-        template_headers = mapper.read_excel_headers(
-            file_path=info["template_path"],
-            sheet_name=info.get("template_sheet_name"),
-            header_row=info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0
-        )
+
+        # Prefer canonical dynamic headers if available
+        canonical_headers = info.get("current_template_headers") or info.get("enhanced_headers")
+        if canonical_headers and isinstance(canonical_headers, list) and len(canonical_headers) > 0:
+            template_headers = canonical_headers
+            logger.info(f"🔧 DEBUG: Using canonical template headers from session for update_mapping_template ({len(template_headers)} headers)")
+        else:
+            template_headers = mapper.read_excel_headers(
+                file_path=info["template_path"],
+                sheet_name=info.get("template_sheet_name"),
+                header_row=info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0
+            )
+            logger.info(f"🔧 DEBUG: Using original file template headers for update_mapping_template ({len(template_headers)} headers)")
         
         # Get formula rules from session if they exist
         formula_rules = info.get("formula_rules", [])
@@ -2103,6 +2117,23 @@ def update_mapping_template(request):
         template.template_headers = template_headers
         template.mappings = mappings
         template.formula_rules = formula_rules  # Update formula rules
+
+        # Also persist dynamic counts and default values if present
+        tags_count = info.get('tags_count', getattr(template, 'tags_count', 1))
+        spec_pairs_count = info.get('spec_pairs_count', getattr(template, 'spec_pairs_count', 1))
+        customer_id_pairs_count = info.get('customer_id_pairs_count', getattr(template, 'customer_id_pairs_count', 1))
+        default_values = info.get('default_values', getattr(template, 'default_values', {}))
+
+        try:
+            template.tags_count = int(tags_count)
+            template.spec_pairs_count = int(spec_pairs_count)
+            template.customer_id_pairs_count = int(customer_id_pairs_count)
+        except Exception:
+            logger.warning("🔧 DEBUG: Could not convert dynamic counts to int during update_mapping_template")
+        try:
+            template.default_values = default_values
+        except Exception:
+            logger.warning("🔧 DEBUG: Could not set default_values during update_mapping_template")
         
         # Update name and description if provided
         if template_name:
@@ -2112,7 +2143,11 @@ def update_mapping_template(request):
         
         template.save()
         
-        logger.info(f"Template {template.id} updated successfully with {len(mappings)} mappings and {len(formula_rules)} formula rules")
+        logger.info(
+            f"Template {template.id} updated successfully with {len(mappings)} mappings, "
+            f"{len(formula_rules)} formula rules, counts: tags={getattr(template,'tags_count',None)}, "
+            f"spec_pairs={getattr(template,'spec_pairs_count',None)}, cust_pairs={getattr(template,'customer_id_pairs_count',None)}"
+        )
         
         return Response({
             'success': True,

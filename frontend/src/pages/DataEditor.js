@@ -502,14 +502,42 @@ const DataEditor = () => {
       // If template has formula rules, apply them automatically AFTER base template is set up
       if (template.formula_rules && template.formula_rules.length > 0) {
         console.log('🔧 TEMPLATE: Applying formula rules:', template.formula_rules);
-        
+
+        // Normalize rules to new schema (ensure sub_rules array)
+        const normalizedRules = template.formula_rules.map(r => {
+          const rule = { ...(r || {}) };
+          if (!rule.column_type) rule.column_type = 'Tag';
+          if (rule.column_type === 'Specification Value' && !('specification_name' in rule)) {
+            rule.specification_name = '';
+          }
+          const hasFlat = (typeof rule.search_text === 'string') || (typeof rule.tag_value === 'string') || (typeof rule.output_value === 'string');
+          if (!Array.isArray(rule.sub_rules)) {
+            if (hasFlat) {
+              const searchText = rule.search_text || '';
+              const outputValue = rule.output_value || rule.tag_value || '';
+              const caseSensitive = !!rule.case_sensitive;
+              rule.sub_rules = [{ search_text: searchText, output_value: outputValue, case_sensitive: caseSensitive }];
+              console.warn('🔧 Normalized template flat rule to sub_rules[]', { rule });
+            } else {
+              rule.sub_rules = [{ search_text: '', output_value: '', case_sensitive: false }];
+              console.warn('🔧 Added empty sub_rules[] to template rule missing sub_rules', { rule });
+            }
+          }
+          rule.sub_rules = rule.sub_rules.map(sr => ({
+            search_text: (sr && typeof sr.search_text === 'string') ? sr.search_text : '',
+            output_value: (sr && typeof sr.output_value === 'string') ? sr.output_value : (typeof sr.tag_value === 'string' ? sr.tag_value : ''),
+            case_sensitive: !!(sr && sr.case_sensitive)
+          }));
+          return rule;
+        });
+
         // Small delay to ensure template columns are set up first
         setTimeout(async () => {
           try {
-            const formulaResponse = await api.applyFormulas(sessionId, template.formula_rules);
+            const formulaResponse = await api.applyFormulas(sessionId, normalizedRules);
             setHasFormulas(true);
-            setAppliedFormulas(template.formula_rules);
-            
+            setAppliedFormulas(normalizedRules);
+
             // Handle formula response properly
             if (formulaResponse.data.success) {
               console.log('🔧 TEMPLATE: Formula rules applied successfully');
@@ -660,16 +688,28 @@ const DataEditor = () => {
         });
       }
 
-      // Get current mappings from backend to save in template
+      // Get current mappings and dynamic counts from backend to save in template
       let currentMappings = null;
+      let columnCounts = null;
       try {
-        const mappingsResponse = await api.getColumnMappings(sessionId);
-        if (mappingsResponse.data.success && mappingsResponse.data.mappings) {
+        const mappingsResponse = await api.getExistingMappings(sessionId);
+        if (mappingsResponse.data && mappingsResponse.data.mappings) {
           currentMappings = mappingsResponse.data.mappings;
           console.log('🔧 TEMPLATE: Retrieved current mappings for template:', currentMappings);
         }
+        // Prefer column counts from session metadata
+        const mdCounts = mappingsResponse.data?.session_metadata?.column_counts;
+        if (mdCounts) {
+          columnCounts = mdCounts;
+        } else {
+          // Fallback to headers endpoint
+          const headersResp = await api.getHeaders(sessionId);
+          const hdrCounts = headersResp.data?.column_counts;
+          if (hdrCounts) columnCounts = hdrCounts;
+        }
+        console.log('🔧 TEMPLATE: Using column counts for save:', columnCounts);
       } catch (error) {
-        console.warn('Could not retrieve mappings for template:', error);
+        console.warn('Could not retrieve mappings/column counts for template:', error);
       }
 
       // Pass all template data to the API including mappings and default values
@@ -680,7 +720,8 @@ const DataEditor = () => {
         currentMappings, // Save actual mappings!
         appliedFormulas.length > 0 ? appliedFormulas : null, // formula_rules
         factwise_rules.length > 0 ? factwise_rules : null, // factwise_rules
-        Object.keys(default_values).length > 0 ? default_values : null // default_values
+        Object.keys(default_values).length > 0 ? default_values : null, // default_values
+        columnCounts // dynamic column counts
       );
       // Create detailed save message
       let saveDetails = [`Template "${templateName}" saved successfully!`];
