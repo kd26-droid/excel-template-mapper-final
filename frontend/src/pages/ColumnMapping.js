@@ -2299,60 +2299,134 @@ export default function ColumnMapping() {
       {/* Main Flow Area with side stats */}
       <div className="flex-1 relative bg-gradient-to-br from-slate-50 to-blue-50 overflow-hidden flex">
         
-        {/* Left Stats Panel - updated with specification stats */}
-        <div className="w-64 bg-white shadow-lg border-r border-gray-200 p-6">
-          <h3 className="text-lg font-bold text-gray-800 mb-6">Mapping Statistics</h3>
+        {/* Left Stats Panel - with Template Column Counts at top */}
+        <div className="w-64 bg-white shadow-lg border-r border-gray-200 p-4">
+          {/* Column Count Controls (moved to top) */}
+          <div className="p-3 bg-gray-50 rounded-xl">
+            <h4 className="text-sm font-semibold text-gray-700 mb-3">Template Column Counts</h4>
+
+            <div className="space-y-3">
+              {/* Tags Count */}
+              <div className="flex items-center justify-between">
+                <label className="text-xs text-gray-600">Tags:</label>
+                <div className="flex items-center gap-2">
+                  <button 
+                    onClick={() => updateColumnCounts({...columnCounts, tags_count: Math.max(1, columnCounts.tags_count - 1)})}
+                    className="w-6 h-6 bg-red-200 hover:bg-red-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-red-700"
+                    disabled={columnCounts.tags_count <= 1}
+                  >
+                    -
+                  </button>
+                  <span className="w-8 text-center text-sm font-semibold">{columnCounts.tags_count}</span>
+                  <button 
+                    onClick={() => updateColumnCounts({...columnCounts, tags_count: columnCounts.tags_count + 1})}
+                    className="w-6 h-6 bg-green-200 hover:bg-green-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-green-700"
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+
+              {/* Specification Pairs Count */}
+              <div className="flex items-center justify-between">
+                <label className="text-xs text-gray-600">Spec Pairs:</label>
+                <div className="flex items-center gap-2">
+                  <button 
+                    onClick={() => updateColumnCounts({...columnCounts, spec_pairs_count: Math.max(1, columnCounts.spec_pairs_count - 1)})}
+                    className="w-6 h-6 bg-red-200 hover:bg-red-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-red-700"
+                    disabled={columnCounts.spec_pairs_count <= 1}
+                  >
+                    -
+                  </button>
+                  <span className="w-8 text-center text-sm font-semibold">{columnCounts.spec_pairs_count}</span>
+                  <button 
+                    onClick={() => updateColumnCounts({...columnCounts, spec_pairs_count: columnCounts.spec_pairs_count + 1})}
+                    className="w-6 h-6 bg-green-200 hover:bg-green-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-green-700"
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+
+              {/* Customer ID Pairs Count */}
+              <div className="flex items-center justify-between">
+                <label className="text-xs text-gray-600">Customer ID Pairs:</label>
+                <div className="flex items-center gap-2">
+                  <button 
+                    onClick={() => updateColumnCounts({...columnCounts, customer_id_pairs_count: Math.max(1, columnCounts.customer_id_pairs_count - 1)})}
+                    className="w-6 h-6 bg-red-200 hover:bg-red-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-red-700"
+                    disabled={columnCounts.customer_id_pairs_count <= 1}
+                  >
+                    -
+                  </button>
+                  <span className="w-8 text-center text-sm font-semibold">{columnCounts.customer_id_pairs_count}</span>
+                  <button 
+                    onClick={() => updateColumnCounts({...columnCounts, customer_id_pairs_count: columnCounts.customer_id_pairs_count + 1})}
+                    className="w-6 h-6 bg-green-200 hover:bg-green-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-green-700"
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-3 text-xs text-gray-500">
+              Total template columns: {templateHeaders.length}
+            </div>
+          </div>
+
+          <h3 className="text-sm font-bold text-gray-800 mt-4 mb-3">Mapping Statistics</h3>
           
-          <div className="space-y-6">
-            <div className="bg-blue-50 rounded-xl p-4 border border-blue-200">
-              <div className="text-3xl font-bold text-blue-600">{mappingStats.total}</div>
-              <div className="text-sm text-blue-700 font-medium">Total Mapped</div>
+          <div className="space-y-3">
+            <div className="bg-blue-50 rounded-xl p-3 border border-blue-200">
+              <div className="text-xl font-bold text-blue-600">{mappingStats.total}</div>
+              <div className="text-xs text-blue-700 font-medium">Total Mapped</div>
             </div>
             
             {mappingStats.template > 0 && (
-              <div className="bg-green-50 rounded-xl p-4 border border-green-200">
-                <div className="flex items-center gap-2 mb-2">
-                  <Library size={20} className="text-green-600" />
-                  <div className="text-2xl font-bold text-green-600">{mappingStats.template}</div>
+              <div className="bg-green-50 rounded-xl p-3 border border-green-200">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <Library size={18} className="text-green-600" />
+                  <div className="text-lg font-bold text-green-600">{mappingStats.template}</div>
                 </div>
-                <div className="text-sm text-green-700 font-medium">From Template</div>
+                <div className="text-xs text-green-700 font-medium">From Template</div>
               </div>
             )}
             
             {mappingStats.specification > 0 && (
-              <div className="bg-orange-50 rounded-xl p-4 border border-orange-200">
-                <div className="flex items-center gap-2 mb-2">
-                  <Settings size={20} className="text-orange-600" />
-                  <div className="text-2xl font-bold text-orange-600">{mappingStats.specification}</div>
+              <div className="bg-orange-50 rounded-xl p-3 border border-orange-200">
+                <div className="flex items-center gap-2 mb-1.5">
+                  <Settings size={18} className="text-orange-600" />
+                  <div className="text-lg font-bold text-orange-600">{mappingStats.specification}</div>
                 </div>
-                <div className="text-sm text-orange-700 font-medium">Specification</div>
+                <div className="text-xs text-orange-700 font-medium">Specification</div>
               </div>
             )}
             
-            <div className="bg-emerald-50 rounded-xl p-4 border border-emerald-200">
-              <div className="flex items-center gap-2 mb-2">
-                <Brain size={20} className="text-emerald-600" />
-                <div className="text-2xl font-bold text-emerald-600">{mappingStats.ai}</div>
+            <div className="bg-emerald-50 rounded-xl p-3 border border-emerald-200">
+              <div className="flex items-center gap-2 mb-1.5">
+                <Brain size={18} className="text-emerald-600" />
+                <div className="text-lg font-bold text-emerald-600">{mappingStats.ai}</div>
               </div>
-              <div className="text-sm text-emerald-700 font-medium">AI Suggested</div>
+              <div className="text-xs text-emerald-700 font-medium">AI Suggested</div>
             </div>
             
-            <div className="bg-purple-50 rounded-xl p-4 border border-purple-200">
-              <div className="flex items-center gap-2 mb-2">
-                <Users size={20} className="text-purple-600" />
-                <div className="text-2xl font-bold text-purple-600">{mappingStats.manual}</div>
+            <div className="bg-purple-50 rounded-xl p-3 border border-purple-200">
+              <div className="flex items-center gap-2 mb-1.5">
+                <Users size={18} className="text-purple-600" />
+                <div className="text-lg font-bold text-purple-600">{mappingStats.manual}</div>
               </div>
-              <div className="text-sm text-purple-700 font-medium">Manual</div>
+              <div className="text-xs text-purple-700 font-medium">Manual</div>
             </div>
             
-            <div className="bg-amber-50 rounded-xl p-4 border border-amber-200">
-              <div className="text-2xl font-bold text-amber-600">{mappingStats.confidence.high}</div>
-              <div className="text-sm text-amber-700 font-medium">High Confidence</div>
+            <div className="bg-amber-50 rounded-xl p-3 border border-amber-200">
+              <div className="text-lg font-bold text-amber-600">{mappingStats.confidence.high}</div>
+              <div className="text-xs text-amber-700 font-medium">High Confidence</div>
             </div>
           </div>
           
           {/* Progress indicator */}
-          <div className="mt-8 p-4 bg-gray-50 rounded-xl">
+          <div className="mt-4 p-3 bg-gray-50 rounded-xl">
             <div className="text-sm text-gray-600 mb-2">Mapping Progress</div>
             <div className="w-full bg-gray-200 rounded-full h-2">
               <div 
@@ -2369,82 +2443,6 @@ export default function ColumnMapping() {
             <div className="text-xs text-gray-500 mt-1">
               {mappingStats.total} of {templateHeaders.length} columns mapped
             </div>
-          </div>
-
-          {/* Column Count Controls */}
-          <div className="mt-8 p-4 bg-gray-50 rounded-xl">
-            <h4 className="text-sm font-semibold text-gray-700 mb-4">Template Column Counts</h4>
-            
-            <div className="space-y-4">
-              {/* Tags Count */}
-              <div className="flex items-center justify-between">
-                <label className="text-xs text-gray-600">Tags:</label>
-                <div className="flex items-center gap-2">
-                  <button 
-                    onClick={() => updateColumnCounts({...columnCounts, tags_count: Math.max(1, columnCounts.tags_count - 1)})}
-                    className="w-6 h-6 bg-red-200 hover:bg-red-300 rounded flex items-center justify-center text-xs font-bold transition-colors text-red-700"
-                    disabled={columnCounts.tags_count <= 1}
-                  >
-                    -
-                  </button>
-                  <span className="w-8 text-center text-sm font-semibold">{columnCounts.tags_count}</span>
-                  <button 
-                    onClick={() => updateColumnCounts({...columnCounts, tags_count: columnCounts.tags_count + 1})}
-                    className="w-6 h-6 bg-green-200 hover:bg-green-300 rounded flex items-center justify-center text-xs font-bold transition-colors text-green-700"
-                  >
-                    +
-                  </button>
-                </div>
-              </div>
-
-              {/* Specification Pairs Count */}
-              <div className="flex items-center justify-between">
-                <label className="text-xs text-gray-600">Spec Pairs:</label>
-                <div className="flex items-center gap-2">
-                  <button 
-                    onClick={() => updateColumnCounts({...columnCounts, spec_pairs_count: Math.max(1, columnCounts.spec_pairs_count - 1)})}
-                    className="w-6 h-6 bg-red-200 hover:bg-red-300 rounded flex items-center justify-center text-xs font-bold transition-colors text-red-700"
-                    disabled={columnCounts.spec_pairs_count <= 1}
-                  >
-                    -
-                  </button>
-                  <span className="w-8 text-center text-sm font-semibold">{columnCounts.spec_pairs_count}</span>
-                  <button 
-                    onClick={() => updateColumnCounts({...columnCounts, spec_pairs_count: columnCounts.spec_pairs_count + 1})}
-                    className="w-6 h-6 bg-green-200 hover:bg-green-300 rounded flex items-center justify-center text-xs font-bold transition-colors text-green-700"
-                  >
-                    +
-                  </button>
-                </div>
-              </div>
-
-              {/* Customer ID Pairs Count */}
-              <div className="flex items-center justify-between">
-                <label className="text-xs text-gray-600">Customer ID Pairs:</label>
-                <div className="flex items-center gap-2">
-                  <button 
-                    onClick={() => updateColumnCounts({...columnCounts, customer_id_pairs_count: Math.max(1, columnCounts.customer_id_pairs_count - 1)})}
-                    className="w-6 h-6 bg-red-200 hover:bg-red-300 rounded flex items-center justify-center text-xs font-bold transition-colors text-red-700"
-                    disabled={columnCounts.customer_id_pairs_count <= 1}
-                  >
-                    -
-                  </button>
-                  <span className="w-8 text-center text-sm font-semibold">{columnCounts.customer_id_pairs_count}</span>
-                  <button 
-                    onClick={() => updateColumnCounts({...columnCounts, customer_id_pairs_count: columnCounts.customer_id_pairs_count + 1})}
-                    className="w-6 h-6 bg-green-200 hover:bg-green-300 rounded flex items-center justify-center text-xs font-bold transition-colors text-green-700"
-                  >
-                    +
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-4 text-xs text-gray-500">
-              Total template columns: {templateHeaders.length}
-            </div>
-            
-            {/* Instructional note removed as requested; functionality preserved */}
           </div>
 
           {/* COMMENTED OUT: Specification overflow stats */}
