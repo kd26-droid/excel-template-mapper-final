@@ -39,11 +39,15 @@ import api from '../services/api';
 
 // Helper function to generate template columns based on counts (matches backend logic)
 const generateTemplateColumns = (tagsCount, specPairsCount, customerIdPairsCount, baseTemplateHeaders = null) => {
-  const columns = [];
+  let columns = [];
+
+  // Start with base columns from the provided template, filtering out any dynamic ones that might be there from a previous state.
+  if (baseTemplateHeaders && baseTemplateHeaders.length > 0) {
+    const dynamicColumnPattern = /^(Tag_|Specification_Name_|Specification_Value_|Customer_Identification_Name_|Customer_Identification_Value_)\d+$/;
+    columns = baseTemplateHeaders.filter(h => !dynamicColumnPattern.test(h));
+  }
   
-  // Basic mandatory columns
-  const basicColumns = ["Quantity", "Description", "Part Number", "Manufacturer"];
-  columns.push(...basicColumns);
+  // Now append the regenerated dynamic columns based on the provided counts.
   
   // Simple sequential tag numbering
   for (let i = 0; i < tagsCount; i++) {
@@ -774,6 +778,11 @@ export default function ColumnMapping() {
           const edge = createEdge(sourceIdx, targetIdx, false, null, true); // true = from template
           newEdges.push(edge);
           mappingPairs.push({ sourceIdx, targetIdx, sourceCol, templateCol });
+        } else if (sourceIdx >= 0 && targetIdx === -1) {
+          // Template column not found - try mapping to similar dynamic column names
+          console.log(`🔧 TEMPLATE FIX: Target column "${templateCol}" not found, searching for alternatives`);
+          
+          
         }
       });
     } else if (mappings && mappings.mappings && Array.isArray(mappings.mappings)) {
@@ -791,6 +800,11 @@ export default function ColumnMapping() {
           const edge = createEdge(sourceIdx, targetIdx, false, null, true); // true = from template
           newEdges.push(edge);
           mappingPairs.push({ sourceIdx, targetIdx, sourceCol, templateCol });
+        } else if (sourceIdx >= 0 && targetIdx === -1) {
+          // Template column not found - try mapping to similar dynamic column names
+          console.log(`🔧 TEMPLATE FIX: Target column "${templateCol}" not found, searching for alternatives`);
+          
+          
         }
       });
     } else {

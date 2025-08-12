@@ -104,6 +104,59 @@ const DataEditor = () => {
     setSnackbar(prev => ({ ...prev, open: false }));
   }, []);
 
+  // Helper function to get clean column names without emojis
+  const getFormulaColumnIcon = useCallback((columnKey, displayName) => {
+    return displayName; // Return clean name without any emojis
+  }, []);
+
+  // Memoized column examples and fill stats to prevent FormulaBuilder re-renders
+  // Always use the most current data structure from the API
+  const formulaColumnExamples = useMemo(() => {
+    const validColumns = columnDefs.filter(col => col.field && col.field !== '__row_number__');
+    
+    return validColumns.reduce((acc, col) => {
+      let firstExample = '';
+      for (const row of rowData) {
+        const cellValue = row[col.field];
+        if (cellValue !== null && cellValue !== undefined && 
+            cellValue !== '' && cellValue.toString().toLowerCase() !== 'unknown') {
+          firstExample = cellValue;
+          break;
+        }
+      }
+      acc[col.field] = firstExample;
+      return acc;
+    }, {});
+  }, [columnDefs, rowData]);
+
+  const formulaColumnFillStats = useMemo(() => {
+    const validColumns = columnDefs.filter(col => col.field && col.field !== '__row_number__');
+    
+    return validColumns.reduce((acc, col) => {
+      let nonEmptyCount = 0;
+      for (const row of rowData) {
+        const cellValue = row[col.field];
+        if (cellValue !== null && cellValue !== undefined && 
+            cellValue !== '' && cellValue.toString().toLowerCase() !== 'unknown') {
+          nonEmptyCount++;
+        }
+      }
+      
+      const totalCount = rowData.length;
+      const fillPercentage = totalCount > 0 ? nonEmptyCount / totalCount : 0;
+      
+      if (fillPercentage === 0) {
+        acc[col.field] = 'empty';
+      } else if (fillPercentage < 0.8) {
+        acc[col.field] = 'partial';
+      } else {
+        acc[col.field] = 'full';
+      }
+      
+      return acc;
+    }, {});
+  }, [columnDefs, rowData]);
+
   // Calculate optimal column width based on header text
   const calculateColumnWidth = useMemo(() => {
     return (headerText) => {
@@ -123,26 +176,32 @@ const DataEditor = () => {
 
       const response = await api.getMappedDataWithSpecs(sessionId, 1, 1000, true);
       const { data } = response;
-      console.log('API Response in DataEditor:', data);
 
       if (!data || !data.headers || !Array.isArray(data.headers) || data.headers.length === 0) {
         setError('No mapped data found. Please go back to Column Mapping and create mappings first.');
         return;
       }
 
+      // Always detect formula columns from actual headers (more robust)
+      const detectedFormulaColumns = data.headers.filter(h => 
+        h.startsWith('Tag_') || 
+        h.startsWith('Specification_Name_') || 
+        h.startsWith('Specification_Value_') || 
+        h.startsWith('Customer_Identification_') ||
+        h === 'Tag' || 
+        h === 'Factwise ID' ||
+        (h.includes('Specification') && (h.includes('Name') || h.includes('Value'))) ||
+        (h.includes('Customer') && h.includes('Identification'))
+      );
+      
+      setFormulaColumns(detectedFormulaColumns);
+      
       if (data.formula_rules && Array.isArray(data.formula_rules) && data.formula_rules.length > 0) {
         setAppliedFormulas(data.formula_rules);
         setHasFormulas(true);
-        // Identify formula columns by checking if they match the new naming pattern
-        const formulaHeaders = data.headers.filter(h => 
-          h.startsWith('Tag_') || h.startsWith('Specification_Name_') || h.startsWith('Specification_Value_') || 
-          h.startsWith('Customer_Identification_') || h === 'Tag' || h.includes('Specification') || h.includes('Customer')
-        );
-        setFormulaColumns(formulaHeaders);
       } else {
         setAppliedFormulas([]);
-        setHasFormulas(false);
-        setFormulaColumns([]);
+        setHasFormulas(detectedFormulaColumns.length > 0); // Keep true if we have formula columns
       }
 
       const columns = [
@@ -173,11 +232,12 @@ const DataEditor = () => {
           const displayName = data.display_headers && Array.isArray(data.display_headers) && index < data.display_headers.length && data.display_headers[index] ? data.display_headers[index] : col;
           const isUnmapped = data.unmapped_columns && data.unmapped_columns.includes(displayName);
           const isSpecificationColumn = displayName.toLowerCase().includes('specification');
-          const isFormulaColumn = formulaColumns.includes(col);
+          // More robust formula column detection
+          const isFormulaColumn = detectedFormulaColumns.includes(col) || col.startsWith('Tag_') || col.startsWith('Specification_') || col.startsWith('Customer_Identification_') || col === 'Factwise ID';
           const columnWidth = calculateColumnWidth(displayName);
           
           return {
-            headerName: isUnmapped ? `${displayName} ⚠️` : isFormulaColumn ? `${displayName} 🏷️` : displayName,
+            headerName: isUnmapped ? `${displayName} ⚠️` : isFormulaColumn ? getFormulaColumnIcon(col, displayName) : displayName,
             field: col,  // Keep using unique field key for data access
             width: columnWidth,
             minWidth: 120,
@@ -243,6 +303,7 @@ const DataEditor = () => {
         })
       ];
 
+      
       setColumnDefs(columns);
       setRowData(data.data || []);
       setTotalRows(data.pagination?.total_rows || data.data?.length || 0);
@@ -337,7 +398,14 @@ const DataEditor = () => {
           operator
         });
         
+        // Ensure UI refreshes properly after Factwise ID creation
         await fetchData(); // Refresh data to show new column
+        
+        // Small delay to ensure backend processing is complete
+        setTimeout(async () => {
+          await fetchData(); // Double refresh to ensure column appears
+        }, 1000);
+        
         showSnackbar('Factwise ID column created successfully!', 'success');
         handleCloseFactwiseIdDialog();
       } else {
@@ -354,9 +422,23 @@ const DataEditor = () => {
   const handleApplyFormulas = useCallback(async (formulaResult) => {
     try {
       setHasFormulas(true);
-      setFormulaColumns(formulaResult.new_columns || []);
+      
+      // Update formula columns to include all Tag, Specification, and Customer columns
+      const allFormulaColumns = formulaResult.headers?.filter(h => 
+        h.startsWith('Tag_') || 
+        h.startsWith('Specification_Name_') || 
+        h.startsWith('Specification_Value_') || 
+        h.startsWith('Customer_Identification_') ||
+        h === 'Tag' || 
+        h.includes('Specification') || 
+        h.includes('Customer')
+      ) || [];
+      setFormulaColumns(allFormulaColumns);
       setAppliedFormulas(formulaResult.formula_rules || []);
+      
+      // Force immediate refresh to get latest data structure
       await fetchData();
+      
       showSnackbar(
         `Successfully applied formulas! Added ${formulaResult.new_columns?.length || 0} new columns.`,
         'success'
@@ -414,11 +496,29 @@ const DataEditor = () => {
       // Apply the template mappings
       await api.applyMappingTemplate(sessionId, template.id);
       
-      // If template has formula rules, apply them automatically
+      // Initial refresh to get base mappings
+      await fetchData();
+      
+      // If template has formula rules, apply them automatically AFTER base template is set up
       if (template.formula_rules && template.formula_rules.length > 0) {
-        await api.applyFormulas(sessionId, template.formula_rules);
-        setHasFormulas(true);
-        setAppliedFormulas(template.formula_rules);
+        console.log('🔧 TEMPLATE: Applying formula rules:', template.formula_rules);
+        
+        // Small delay to ensure template columns are set up first
+        setTimeout(async () => {
+          try {
+            const formulaResponse = await api.applyFormulas(sessionId, template.formula_rules);
+            setHasFormulas(true);
+            setAppliedFormulas(template.formula_rules);
+            
+            // Handle formula response properly
+            if (formulaResponse.data.success) {
+              console.log('🔧 TEMPLATE: Formula rules applied successfully');
+              handleApplyFormulas(formulaResponse.data);
+            }
+          } catch (error) {
+            console.error('Error applying template formula rules:', error);
+          }
+        }, 1500);
       }
       
       // If template has factwise ID rule, apply it automatically
@@ -427,17 +527,23 @@ const DataEditor = () => {
         if (factwiseRule) {
           const { first_column, second_column, operator } = factwiseRule;
           await api.createFactwiseId(sessionId, first_column, second_column, operator);
+          
           // Convert backend format to frontend format for state
           setFactwiseIdRule({
             firstColumn: first_column,
             secondColumn: second_column,
             operator: operator
           });
+          
+          // Additional refresh for Factwise ID
+          await fetchData();
         }
       }
       
-      // Refresh data to show template results
-      await fetchData();
+      // Final refresh to ensure everything is properly displayed
+      setTimeout(async () => {
+        await fetchData();
+      }, 1000);
       
       showSnackbar(`Template "${template.name}" applied successfully!`, 'success');
       setTemplateChooseDialogOpen(false);
@@ -512,44 +618,66 @@ const DataEditor = () => {
         });
       }
       
-      // IMPORTANT: Collect custom values from dynamic tag columns
+      // SMART template saving: Handle formula vs non-formula columns differently
       const dynamicTagColumns = columnDefs.filter(col => 
-        col.field && (col.field.startsWith('Tag_') || col.field.startsWith('Specification_'))
+        col.field && (col.field.startsWith('Tag_') || col.field.startsWith('Specification_') || col.field.startsWith('Customer_Identification_') || col.field === 'Factwise ID')
       );
       
-      if (dynamicTagColumns.length > 0 && rowData.length > 0) {
+      if (dynamicTagColumns.length > 0) {
         dynamicTagColumns.forEach(col => {
-          // Check if this column has any custom/non-empty values
-          const hasCustomData = rowData.some(row => {
-            const value = row[col.field];
-            return value && value.toString().trim() !== '' && value.toString().toLowerCase() !== 'unknown';
-          });
-          
-          if (hasCustomData) {
-            // Find the most common non-empty value, or use first non-empty value
-            let customValue = '';
-            for (const row of rowData) {
+          // Key insight: If we have formula rules, save EMPTY defaults for formula columns
+          // This ensures columns exist in template but don't get pre-filled with partial data
+          if (appliedFormulas.length > 0) {
+            // For formula-generated columns, save empty default to ensure column structure
+            default_values[col.field] = '';
+            console.log(`🔧 SMART: Saved empty default for formula column "${col.field}" to preserve structure`);
+          } else {
+            // No formula rules - this might be a manually filled column, preserve actual values
+            const hasCustomData = rowData.some(row => {
               const value = row[col.field];
-              if (value && value.toString().trim() !== '' && value.toString().toLowerCase() !== 'unknown') {
-                customValue = value.toString();
-                break; // Use first custom value found
-              }
-            }
+              return value && value.toString().trim() !== '' && value.toString().toLowerCase() !== 'unknown';
+            });
             
-            if (customValue) {
-              default_values[col.field] = customValue;
-              console.log(`🔧 DEBUG: Collected custom value "${customValue}" for dynamic column "${col.field}"`);
+            if (hasCustomData) {
+              let customValue = '';
+              for (const row of rowData) {
+                const value = row[col.field];
+                if (value && value.toString().trim() !== '' && value.toString().toLowerCase() !== 'unknown') {
+                  customValue = value.toString();
+                  break;
+                }
+              }
+              
+              if (customValue) {
+                default_values[col.field] = customValue;
+                console.log(`🔧 MANUAL: Saved custom value "${customValue}" for non-formula column "${col.field}"`);
+              }
+            } else {
+              // Even if empty, save empty default to ensure column exists
+              default_values[col.field] = '';
             }
           }
         });
       }
 
-      // Pass all template data to the API including default values
+      // Get current mappings from backend to save in template
+      let currentMappings = null;
+      try {
+        const mappingsResponse = await api.getColumnMappings(sessionId);
+        if (mappingsResponse.data.success && mappingsResponse.data.mappings) {
+          currentMappings = mappingsResponse.data.mappings;
+          console.log('🔧 TEMPLATE: Retrieved current mappings for template:', currentMappings);
+        }
+      } catch (error) {
+        console.warn('Could not retrieve mappings for template:', error);
+      }
+
+      // Pass all template data to the API including mappings and default values
       await api.saveMappingTemplate(
         sessionId, 
         templateName.trim(), 
         templateData.description,
-        null, // mappings (let backend get from session)
+        currentMappings, // Save actual mappings!
         appliedFormulas.length > 0 ? appliedFormulas : null, // formula_rules
         factwise_rules.length > 0 ? factwise_rules : null, // factwise_rules
         Object.keys(default_values).length > 0 ? default_values : null // default_values
@@ -557,8 +685,12 @@ const DataEditor = () => {
       // Create detailed save message
       let saveDetails = [`Template "${templateName}" saved successfully!`];
       
+      if (currentMappings && Object.keys(currentMappings).length > 0) {
+        const mappingCount = Array.isArray(currentMappings) ? currentMappings.length : Object.keys(currentMappings).length;
+        saveDetails.push(`✅ ${mappingCount} column mapping(s) saved`);
+      }
       if (appliedFormulas.length > 0) {
-        saveDetails.push(`✅ ${appliedFormulas.length} tag rule(s) saved`);
+        saveDetails.push(`✅ ${appliedFormulas.length} formula rule(s) saved`);
       }
       if (factwiseIdRule) {
         saveDetails.push(`✅ Factwise ID rule saved`);
@@ -1334,59 +1466,12 @@ const DataEditor = () => {
         open={formulaBuilderOpen}
         onClose={handleCloseFormulaBuilder}
         sessionId={sessionId}
-        availableColumns={columnDefs.filter(col => col.field && col.field !== '__row_number__').map(col => col.field)}
+        availableColumns={columnDefs.filter(col => col.field && col.field !== '__row_number__').map(col => col.field || col.headerName).filter(Boolean)}
         onApplyFormulas={handleApplyFormulas}
         onClear={handleClearFormulas}
         initialRules={appliedFormulas}
-        // Pass column examples for preview brackets (ONLY FIRST non-empty value like Dashboard)
-        columnExamples={
-          columnDefs
-            .filter(col => col.field && col.field !== '__row_number__')
-            .reduce((acc, col) => {
-              // Find the FIRST non-empty example for this column (like Dashboard does)
-              let firstExample = '';
-              for (const row of rowData) {
-                const cellValue = row[col.field];
-                if (cellValue !== null && cellValue !== undefined && 
-                    cellValue !== '' && cellValue.toString().toLowerCase() !== 'unknown') {
-                  firstExample = cellValue;
-                  break;
-                }
-              }
-              acc[col.field] = firstExample;
-              return acc;
-            }, {})
-        }
-        // Pass column fill stats for colored circles (like Dashboard: 'empty', 'partial', 'full')
-        columnFillStats={
-          columnDefs
-            .filter(col => col.field && col.field !== '__row_number__')
-            .reduce((acc, col) => {
-              // Calculate fill percentage like Dashboard
-              let nonEmptyCount = 0;
-              for (const row of rowData) {
-                const cellValue = row[col.field];
-                if (cellValue !== null && cellValue !== undefined && 
-                    cellValue !== '' && cellValue.toString().toLowerCase() !== 'unknown') {
-                  nonEmptyCount++;
-                }
-              }
-              
-              const totalCount = rowData.length;
-              const fillPercentage = totalCount > 0 ? nonEmptyCount / totalCount : 0;
-              
-              // Use Dashboard's logic for colored circles
-              if (fillPercentage === 0) {
-                acc[col.field] = 'empty';
-              } else if (fillPercentage < 0.8) {
-                acc[col.field] = 'partial';
-              } else {
-                acc[col.field] = 'full';
-              }
-              
-              return acc;
-            }, {})
-        }
+        columnExamples={formulaColumnExamples}
+        columnFillStats={formulaColumnFillStats}
       />
 
       {/* Create Factwise ID Dialog */}
@@ -1415,7 +1500,7 @@ const DataEditor = () => {
                 label="First Column"
                 onChange={(e) => setFirstColumn(e.target.value)}
               >
-                {columnDefs.filter(col => col.field).map(col => (
+                {columnDefs.filter(col => col.field && col.field !== '__row_number__').map(col => (
                   <MenuItem key={col.field} value={col.field}>
                     {col.headerName || col.field}
                   </MenuItem>
@@ -1444,7 +1529,7 @@ const DataEditor = () => {
                 label="Second Column"
                 onChange={(e) => setSecondColumn(e.target.value)}
               >
-                {columnDefs.filter(col => col.field).map(col => (
+                {columnDefs.filter(col => col.field && col.field !== '__row_number__').map(col => (
                   <MenuItem key={col.field} value={col.field}>
                     {col.headerName || col.field}
                   </MenuItem>

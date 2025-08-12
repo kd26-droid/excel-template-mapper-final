@@ -58,7 +58,6 @@ const FormulaBuilder = ({
   onClear,
   initialRules = []
 }) => {
-  console.log('FormulaBuilder received props:', { availableColumns, columnExamples, columnFillStats });
   // ─── STATE MANAGEMENT ───────────────────────────────────────────────────────
   const [currentTab, setCurrentTab] = useState(0);
   const [formulaRules, setFormulaRules] = useState(initialRules.length > 0 ? initialRules : [createEmptyRule()]);
