@@ -429,7 +429,7 @@ const UploadFiles = () => {
           <Grid container spacing={3}>
             <Grid item xs={12} md={6}>
               <Typography variant="h6" gutterBottom>
-                Your Excel File
+                Client File
               </Typography>
               
               <Box 
@@ -494,7 +494,7 @@ const UploadFiles = () => {
             
             <Grid item xs={12} md={6}>
               <Typography variant="h6" gutterBottom>
-                Template File
+                FW Item Template
               </Typography>
               
               <Box 
@@ -513,7 +513,7 @@ const UploadFiles = () => {
                 <input {...getTemplateInputProps()} />
                 <DescriptionIcon fontSize="large" color="secondary" />
                 <Typography variant="body1" sx={{ mt: 2 }}>
-                  {templateFile ? templateFile.name : 'Drop your template file here or click to browse'}
+                  {templateFile ? templateFile.name : 'Drop your FW Item Template here or click to browse'}
                 </Typography>
                 <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
                   Supported: .xlsx, .xls
@@ -566,7 +566,7 @@ const UploadFiles = () => {
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 3 }}>
             <LibraryBooksIcon color="primary" fontSize="large" />
             <Typography variant="h5" fontWeight="600">
-              Step 2: Choose a Template (Optional)
+              Step 2: Choose a Mapping Template (Optional)
             </Typography>
           </Box>
           

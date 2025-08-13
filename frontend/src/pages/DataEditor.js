@@ -842,7 +842,15 @@ const DataEditor = () => {
         return columnKeys.map(key => rowData[key] || '');
       });
       
-      const fileName = "Factwise Template Converted.xlsx";
+      // Generate filename with YYMMDD_HHMMSS format
+      const now = new Date();
+      const timestamp = now.getFullYear().toString().slice(-2) + 
+                       String(now.getMonth() + 1).padStart(2, '0') + 
+                       String(now.getDate()).padStart(2, '0') + '_' +
+                       String(now.getHours()).padStart(2, '0') + 
+                       String(now.getMinutes()).padStart(2, '0') + 
+                       String(now.getSeconds()).padStart(2, '0');
+      const fileName = `FactWise_Filled_${timestamp}.xlsx`;
 
       const response = await api.downloadGridExcel(
         sessionId,
@@ -1053,7 +1061,7 @@ const DataEditor = () => {
 
               {/* Right - Download Icon */}
               <Box sx={{ display: 'flex', gap: 1 }}>
-                <Tooltip title={downloadLoading ? 'Downloading...' : 'Download Excel'}>
+                <Tooltip title={downloadLoading ? 'Downloading...' : 'Download FactWise Output'}>
                   <span>
                     <IconButton
                       onClick={handleDownloadExcel}
@@ -1119,7 +1127,7 @@ const DataEditor = () => {
                 </Button>
               </Tooltip>
 
-              <Tooltip title="Save as Template - Save mappings and tags for reuse">
+              <Tooltip title="Save As Mapping Template, Save Mapping, Tag Templates and FactWise ID for future use">
                 <Button
                   onClick={handleSaveAs}
                   variant="outlined"
@@ -1135,7 +1143,7 @@ const DataEditor = () => {
                       fontWeight: 600
                     }}
                   >
-                    Save Template
+                    Save Mapping Template
                   </Button>
                 </Tooltip>
             </Box>
@@ -1440,7 +1448,7 @@ const DataEditor = () => {
             <SaveIcon color="primary" />
             <Box>
               <Typography variant="h6" fontWeight="600">
-                Save Template
+                Save Mapping Template
               </Typography>
               <Typography variant="body2" color="text.secondary">
                 Save column mappings, tag rules, and factwise ID rule as reusable template
@@ -1497,7 +1505,7 @@ const DataEditor = () => {
             disabled={templateSaving || !templateName.trim()}
             startIcon={templateSaving ? <CircularProgress size={20} /> : <SaveIcon />}
           >
-            {templateSaving ? 'Saving...' : 'Save Template'}
+            {templateSaving ? 'Saving...' : 'Save Mapping Template'}
           </Button>
         </DialogActions>
       </Dialog>

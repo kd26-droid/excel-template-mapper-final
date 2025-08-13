@@ -105,6 +105,7 @@ const Dashboard = () => {
   // Download state
   const [downloadingOriginal, setDownloadingOriginal] = useState({});
   const [downloadingConverted, setDownloadingConverted] = useState({});
+  const [downloadingTemplate, setDownloadingTemplate] = useState({});
   
   // Template stats
   const [templateStats, setTemplateStats] = useState({
@@ -125,6 +126,7 @@ const Dashboard = () => {
       try {
         setLoading(true);
         const response = await api.getUploadDashboard();
+        console.log('🔧 DASHBOARD: Received uploads data:', response.data.uploads);
         setUploads(response.data.uploads || []);
         setError(null);
       } catch (err) {
@@ -262,8 +264,13 @@ const Dashboard = () => {
   // Enhanced upload filtering and sorting
   const filteredAndSortedUploads = React.useMemo(() => {
     let filtered = uploads.filter(upload => {
-      const matchesSearch = (upload.template_name || '').toLowerCase().includes(uploadSearchTerm.toLowerCase());
-      const matchesStatus = uploadStatusFilter === 'all' || upload.status === uploadStatusFilter;
+      const matchesSearch = (
+        (upload.client_file || '').toLowerCase().includes(uploadSearchTerm.toLowerCase()) ||
+        (upload.template_file || '').toLowerCase().includes(uploadSearchTerm.toLowerCase())
+      );
+      const matchesStatus = uploadStatusFilter === 'all' || 
+        (uploadStatusFilter === 'completed' && upload.has_mappings) ||
+        (uploadStatusFilter === 'in_progress' && !upload.has_mappings);
       return matchesSearch && matchesStatus;
     });
 
@@ -272,20 +279,24 @@ const Dashboard = () => {
       
       switch (uploadSortBy) {
         case 'upload_date':
-          aValue = new Date(a.upload_date);
-          bValue = new Date(b.upload_date);
+          aValue = new Date(a.created);
+          bValue = new Date(b.created);
           break;
         case 'template_name':
-          aValue = (a.template_name || '').toLowerCase();
-          bValue = (b.template_name || '').toLowerCase();
+          aValue = (a.template_file || '').toLowerCase();
+          bValue = (b.template_file || '').toLowerCase();
+          break;
+        case 'client_name':
+          aValue = (a.client_file || '').toLowerCase();
+          bValue = (b.client_file || '').toLowerCase();
           break;
         case 'rows_processed':
           aValue = a.rows_processed || 0;
           bValue = b.rows_processed || 0;
           break;
         default:
-          aValue = (a.template_name || '').toLowerCase();
-          bValue = (b.template_name || '').toLowerCase();
+          aValue = (a.client_file || '').toLowerCase();
+          bValue = (b.client_file || '').toLowerCase();
           break;
       }
       
@@ -528,6 +539,20 @@ const Dashboard = () => {
     }
   };
 
+  const handleDownloadTemplate = async (upload) => {
+    const uploadId = upload.session_id;
+    setDownloadingTemplate(prev => ({ ...prev, [uploadId]: true }));
+    
+    try {
+      // For template files, we'll download the original template file
+      await api.downloadFileEnhanced(uploadId, 'original');
+    } catch (err) {
+      console.error('Error downloading template file:', err);
+    } finally {
+      setDownloadingTemplate(prev => ({ ...prev, [uploadId]: false }));
+    }
+  };
+
   const formatDate = (dateString) => {
     const date = new Date(dateString);
     return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
@@ -690,15 +715,17 @@ const Dashboard = () => {
                 <InputLabel>Status</InputLabel>
                 <Select value={uploadStatusFilter} label="Status" onChange={(e) => setUploadStatusFilter(e.target.value)}>
                   <MenuItem value="all">All Status</MenuItem>
-                  <MenuItem value="completed">Completed</MenuItem>
-                  <MenuItem value="in_progress">In Progress</MenuItem>
+                  <MenuItem value="completed">Complete</MenuItem>
+                  <MenuItem value="in_progress">Pending</MenuItem>
                 </Select>
               </FormControl>
               <FormControl size="small" sx={{ minWidth: 120 }}>
                 <InputLabel>Sort by</InputLabel>
                 <Select value={uploadSortBy} label="Sort by" onChange={(e) => setUploadSortBy(e.target.value)}>
                   <MenuItem value="upload_date">Date</MenuItem>
-                  <MenuItem value="template_name">Name</MenuItem>
+                  <MenuItem value="client_name">Client File</MenuItem>
+                  <MenuItem value="template_name">FW Template</MenuItem>
+                  <MenuItem value="rows_processed">Rows</MenuItem>
                 </Select>
               </FormControl>
               <FormControl size="small" sx={{ minWidth: 100 }}>
@@ -747,7 +774,9 @@ const Dashboard = () => {
                   <Table size="small">
                     <TableHead>
                       <TableRow>
-                        <TableCell><strong>File Name</strong></TableCell>
+                        <TableCell><strong>Client File</strong></TableCell>
+                        <TableCell><strong>FW Filled Sheet</strong></TableCell>
+                        <TableCell><strong>FW Template</strong></TableCell>
                         <TableCell><strong>Upload Date</strong></TableCell>
                         <TableCell align="center"><strong>Rows</strong></TableCell>
                         <TableCell align="center"><strong>Status</strong></TableCell>
@@ -769,71 +798,104 @@ const Dashboard = () => {
                                 <Avatar sx={{ bgcolor: '#e0e7ff', color: '#3b82f6', width: 32, height: 32 }}>
                                   <DescriptionIcon fontSize="small" />
                                 </Avatar>
-                                <Box>
+                                <Box sx={{ flexGrow: 1 }}>
                                   <Typography variant="body2" fontWeight="600" color="#1e293b">
-                                    {extractReadableFilename(upload.template_name)}
-                                  </Typography>
-                                  <Typography variant="caption" color="#64748b">
-                                    Session: {upload.session_id.slice(0, 8)}...
+                                    {extractReadableFilename(upload.client_file)}
                                   </Typography>
                                 </Box>
+                                <IconButton
+                                  size="small"
+                                  onClick={() => handleDownloadOriginal(upload)}
+                                  disabled={downloadingOriginal[upload.session_id]}
+                                  sx={{ color: '#3b82f6' }}
+                                >
+                                  {downloadingOriginal[upload.session_id] ? <CircularProgress size={16} /> : <GetAppIcon />}
+                                </IconButton>
+                              </Box>
+                            </TableCell>
+                            <TableCell>
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+                                <Avatar sx={{ bgcolor: '#e0e7ff', color: '#3b82f6', width: 32, height: 32 }}>
+                                  <DescriptionIcon fontSize="small" />
+                                </Avatar>
+                                <Box sx={{ flexGrow: 1 }}>
+                                  <Typography variant="body2" fontWeight="600" color="#1e293b">
+                                    {upload.filled_sheet_name || (upload.has_mappings ? 'Ready' : 'Not Ready')}
+                                  </Typography>
+                                </Box>
+                                {upload.has_mappings && (
+                                  <IconButton
+                                    size="small"
+                                    onClick={() => handleDownloadConverted(upload)}
+                                    disabled={downloadingConverted[upload.session_id]}
+                                    sx={{ color: '#3b82f6' }}
+                                  >
+                                    {downloadingConverted[upload.session_id] ? <CircularProgress size={16} /> : <GetAppIcon />}
+                                  </IconButton>
+                                )}
+                              </Box>
+                            </TableCell>
+                            <TableCell>
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+                                <Avatar sx={{ bgcolor: '#e0e7ff', color: '#3b82f6', width: 32, height: 32 }}>
+                                  <DescriptionIcon fontSize="small" />
+                                </Avatar>
+                                <Box sx={{ flexGrow: 1 }}>
+                                  <Typography variant="body2" fontWeight="600" color="#1e293b">
+                                    {extractReadableFilename(upload.template_file)}
+                                  </Typography>
+                                </Box>
+                                <IconButton
+                                  size="small"
+                                  onClick={() => handleDownloadTemplate(upload)}
+                                  disabled={downloadingTemplate[upload.session_id]}
+                                  sx={{ color: '#3b82f6' }}
+                                >
+                                  {downloadingTemplate[upload.session_id] ? <CircularProgress size={16} /> : <GetAppIcon />}
+                                </IconButton>
                               </Box>
                             </TableCell>
                             <TableCell>
                               <Typography variant="body2" color="#64748b">
-                                {formatDate(upload.upload_date)}
+                                {formatDate(upload.created)}
                               </Typography>
                             </TableCell>
                             <TableCell align="center">
                               <Chip 
-                                label={upload.rows_processed || 0}
+                                label={upload.rows_processed || 'N/A'}
                                 size="small"
                                 color="info"
                                 variant="outlined"
+                                title={`Raw value: ${upload.rows_processed}`}
                               />
                             </TableCell>
                             <TableCell align="center">
                               <Chip 
-                                label={upload.status}
+                                label={upload.has_mappings ? 'Complete' : 'Pending'}
                                 size="small"
-                                color={upload.status === 'completed' ? 'success' : 'default'}
+                                color={upload.has_mappings ? 'success' : 'warning'}
                                 variant="outlined"
                               />
                             </TableCell>
                             <TableCell align="center">
-                              <Box sx={{ display: 'flex', gap: 1, justifyContent: 'center', flexWrap: 'wrap' }}>
-                                <Button 
-                                  size="small" 
+                              <Tooltip title="View">
+                                <IconButton
+                                  size="small"
                                   variant="outlined"
-                                  startIcon={<FolderIcon />}
-                                  sx={{ textTransform: 'none', minWidth: 'auto' }}
                                   onClick={() => navigate(`/editor/${upload.session_id}`)}
+                                  sx={{ 
+                                    textTransform: 'none', 
+                                    minWidth: 'auto',
+                                    border: '1px solid rgba(0, 0, 0, 0.23)',
+                                    '&:hover': {
+                                      borderColor: 'rgba(0, 0, 0, 0.87)',
+                                      backgroundColor: 'rgba(0, 0, 0, 0.04)'
+                                    }
+                                  }}
                                 >
-                                  View
-                                </Button>
-                                <Button
-                                  size="small"
-                                  variant="outlined"
-                                  color="primary"
-                                  startIcon={downloadingOriginal[upload.session_id] ? <CircularProgress size={14} /> : <GetAppIcon />}
-                                  onClick={() => handleDownloadOriginal(upload)}
-                                  disabled={downloadingOriginal[upload.session_id]}
-                                  sx={{ textTransform: 'none', minWidth: 'auto' }}
-                                >
-                                  Original
-                                </Button>
-                                <Button
-                                  size="small"
-                                  variant="outlined"
-                                  color="secondary"
-                                  startIcon={downloadingConverted[upload.session_id] ? <CircularProgress size={14} /> : <TransformIcon />}
-                                  onClick={() => handleDownloadConverted(upload)}
-                                  disabled={downloadingConverted[upload.session_id]}
-                                  sx={{ textTransform: 'none', minWidth: 'auto' }}
-                                >
-                                  Converted
-                                </Button>
-                              </Box>
+                                  <FolderIcon fontSize="small" />
+                                </IconButton>
+                              </Tooltip>
                             </TableCell>
                           </TableRow>
                         </Grow>

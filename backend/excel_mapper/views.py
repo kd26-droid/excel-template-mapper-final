@@ -1542,7 +1542,7 @@ def download_file(request):
         
         from datetime import datetime
         timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
-        base_name = f"Factwise Template Converted"
+        base_name = f"FactWise_Filled_{timestamp}"
         if format_type == 'csv':
             filename = f"{base_name}.csv"
             output_file = output_dir / filename
@@ -1643,8 +1643,10 @@ def download_grid_excel(request):
             
             df.columns = final_columns
         
-        # Generate filename
-        filename = 'Factwise Template Converted.xlsx'
+        # Generate filename with YYMMDD_HHMMSS
+        from datetime import datetime
+        timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
+        filename = f'FactWise_Filled_{timestamp}.xlsx'
         
         # Create temp file
         temp_file = os.path.join('temp_downloads', filename)
@@ -1677,12 +1679,170 @@ def dashboard_view(request):
         # Get recent sessions
         uploads = []
         for session_id, session_data in list(SESSION_STORE.items())[-10:]:  # Last 10 sessions
+            # Try to get row count from processed data or client data
+            rows_processed = 0
+            logger.info(f"Session {session_id}: Checking for data to calculate rows")
+            logger.info(f"Session {session_id}: Session data keys: {list(session_data.keys())}")
+            logger.info(f"Session {session_id}: edited_data type: {type(session_data.get('edited_data'))}")
+            logger.info(f"Session {session_id}: client_data type: {type(session_data.get('client_data'))}")
+            logger.info(f"Session {session_id}: client_path: {session_data.get('client_path')}")
+            
+            if session_data.get('edited_data'):
+                try:
+                    # If we have processed data, count the rows
+                    if isinstance(session_data['edited_data'], list):
+                        rows_processed = len(session_data['edited_data'])
+                        logger.info(f"Session {session_id}: Got rows from edited_data list: {rows_processed}")
+                    elif isinstance(session_data['edited_data'], dict) and 'data' in session_data['edited_data']:
+                        rows_processed = len(session_data['edited_data']['data'])
+                        logger.info(f"Session {session_id}: Got rows from edited_data dict: {rows_processed}")
+                except Exception as e:
+                    logger.warning(f"Session {session_id}: Error counting edited_data rows: {e}")
+                    rows_processed = 0
+            elif session_data.get('client_data'):
+                try:
+                    # Fallback to client data if processed data not available
+                    if isinstance(session_data['client_data'], list):
+                        rows_processed = len(session_data['client_data'])
+                        logger.info(f"Session {session_id}: Got rows from client_data list: {rows_processed}")
+                    elif isinstance(session_data['client_data'], dict) and 'data' in session_data['client_data']:
+                        rows_processed = len(session_data['client_data']['data'])
+                        logger.info(f"Session {session_id}: Got rows from client_data dict: {rows_processed}")
+                except Exception as e:
+                    logger.warning(f"Session {session_id}: Error counting client_data rows: {e}")
+                    rows_processed = 0
+            else:
+                # Try to calculate rows from processed data that would be used for download
+                try:
+                    if session_data.get('mappings'):
+                        # Import here to avoid circular imports
+                        from .bom_header_mapper import BOMHeaderMapper
+                        import pandas as pd
+                        
+                        # Get client file info
+                        client_path = session_data.get('client_path')
+                        sheet_name = session_data.get('sheet_name')
+                        header_row = session_data.get('header_row', 1) - 1 if session_data.get('header_row', 1) > 0 else 0
+                        
+                        logger.info(f"Session {session_id}: Attempting to read client file for row count")
+                        logger.info(f"Session {session_id}: client_path: {client_path}")
+                        logger.info(f"Session {session_id}: sheet_name: {sheet_name}")
+                        logger.info(f"Session {session_id}: header_row: {header_row}")
+                        
+                        if client_path:
+                            # Try to resolve the file path using hybrid_file_manager
+                            try:
+                                client_local_path = hybrid_file_manager.get_file_path(client_path)
+                                logger.info(f"Session {session_id}: Resolved client_local_path: {client_local_path}")
+                                
+                                # Check if the resolved path exists
+                                if Path(client_local_path).exists():
+                                    logger.info(f"Session {session_id}: Resolved path exists, reading file")
+                                    if str(client_local_path).lower().endswith('.csv'):
+                                        df = pd.read_csv(client_local_path, header=header_row)
+                                    else:
+                                        result = pd.read_excel(client_local_path, sheet_name=sheet_name, header=header_row)
+                                        if isinstance(result, dict):
+                                            first_sheet_name = list(result.keys())[0]
+                                            df = result[first_sheet_name]
+                                        else:
+                                            df = result
+                                    
+                                    rows_processed = len(df)
+                                    logger.info(f"Session {session_id}: Successfully calculated rows from client file: {rows_processed}")
+                                else:
+                                    logger.warning(f"Session {session_id}: Resolved path does not exist: {client_local_path}")
+                                    # Try to check if the original path exists
+                                    if Path(client_path).exists():
+                                        logger.info(f"Session {session_id}: Original path exists, using it directly")
+                                        if str(client_path).lower().endswith('.csv'):
+                                            df = pd.read_csv(client_path, header=header_row)
+                                        else:
+                                            result = pd.read_excel(client_path, sheet_name=sheet_name, header=header_row)
+                                            if isinstance(result, dict):
+                                                first_sheet_name = list(result.keys())[0]
+                                                df = result[first_sheet_name]
+                                            else:
+                                                df = result
+                                        
+                                        rows_processed = len(df)
+                                        logger.info(f"Session {session_id}: Successfully calculated rows from original path: {rows_processed}")
+                                    else:
+                                        logger.warning(f"Session {session_id}: Neither resolved nor original path exists")
+                            except Exception as path_error:
+                                logger.warning(f"Session {session_id}: Error resolving file path: {path_error}")
+                                # Fallback: try to read directly from client_path
+                                if Path(client_path).exists():
+                                    logger.info(f"Session {session_id}: Fallback: original path exists, reading directly")
+                                    if str(client_path).lower().endswith('.csv'):
+                                        df = pd.read_csv(client_path, header=header_row)
+                                    else:
+                                        result = pd.read_excel(client_path, sheet_name=sheet_name, header=header_row)
+                                        if isinstance(result, dict):
+                                            first_sheet_name = list(result.keys())[0]
+                                            df = result[first_sheet_name]
+                                        else:
+                                            df = result
+                                    
+                                    rows_processed = len(df)
+                                    logger.info(f"Session {session_id}: Fallback successful, rows: {rows_processed}")
+                                else:
+                                    logger.warning(f"Session {session_id}: Fallback path also does not exist: {client_path}")
+                        else:
+                            logger.info(f"Session {session_id}: No client_path found in session data")
+                except Exception as e:
+                    logger.warning(f"Session {session_id}: Error calculating rows from client file: {e}")
+                    rows_processed = 0
+                
+                if rows_processed == 0:
+                    logger.info(f"Session {session_id}: No edited_data, client_data, or client file found")
+            
+            logger.info(f"Session {session_id}: Final rows_processed: {rows_processed}")
+            
+            # Check if file is ready for download
+            has_mappings = bool(session_data.get('mappings'))
+            has_processed_data = bool(session_data.get('edited_data'))
+            # Consider complete if user has gone through the mapping process
+            is_complete = has_mappings
+            
+            # Generate the filename that would be used for download
+            filled_sheet_name = None
+            if is_complete:
+                from datetime import datetime
+                # Use the session creation time or current time for consistency
+                session_created = session_data.get('created')
+                if session_created:
+                    try:
+                        if isinstance(session_created, str):
+                            created_dt = datetime.fromisoformat(session_created.replace('Z', '+00:00'))
+                        else:
+                            created_dt = session_created
+                        timestamp = created_dt.strftime('%y%m%d_%H%M%S')
+                        filled_sheet_name = f"FactWise_Filled_{timestamp}.xlsx"
+                        logger.info(f"Session {session_id}: Generated filled_sheet_name from session_created: {filled_sheet_name}")
+                    except Exception as e:
+                        # Fallback to current time if session time parsing fails
+                        logger.warning(f"Session {session_id}: Error parsing session_created, using current time: {e}")
+                        timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
+                        filled_sheet_name = f"FactWise_Filled_{timestamp}.xlsx"
+                        logger.info(f"Session {session_id}: Generated filled_sheet_name from current time: {filled_sheet_name}")
+                else:
+                    logger.info(f"Session {session_id}: No session_created, using current time")
+                    timestamp = datetime.now().strftime('%y%m%d_%H%M%S')
+                    filled_sheet_name = f"FactWise_Filled_{timestamp}.xlsx"
+                    logger.info(f"Session {session_id}: Generated filled_sheet_name from current time: {filled_sheet_name}")
+            else:
+                logger.info(f"Session {session_id}: Not complete, no filled_sheet_name generated")
+            
             uploads.append({
                 'session_id': session_id,
                 'client_file': session_data.get('original_client_name', 'Unknown'),
                 'template_file': session_data.get('original_template_name', 'Unknown'),
-                'created': session_data.get('created', ''),
-                'has_mappings': bool(session_data.get('mappings'))
+                'filled_sheet_name': filled_sheet_name,
+                'created': session_data.get('created', datetime.now().isoformat()),
+                'has_mappings': is_complete,
+                'rows_processed': rows_processed,
+                'status': 'Complete' if is_complete else 'Pending'
             })
         
         # Get saved templates

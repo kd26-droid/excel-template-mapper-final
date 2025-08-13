@@ -2468,7 +2468,7 @@ export default function ColumnMapping() {
       <div className="sticky top-0 z-30 bg-white bg-opacity-95 backdrop-blur-sm border-b border-gray-200" style={{ height: '140px' }}>
             <div className="absolute" style={{ left: '35px', top: '80px' }}>
               <div className="bg-blue-600 text-white px-6 py-3 rounded-xl shadow-lg font-bold flex items-center gap-2">
-                <span>Client Data ({clientHeaders.length} fields)</span>
+                <span>Client File ({clientHeaders.length} fields)</span>
                 <Tooltip title={clientFileName ? `File: ${clientFileName}` : 'Client file'} placement="bottom">
                   <span><Info size={16} className="opacity-90 cursor-default" /></span>
                 </Tooltip>
@@ -2477,7 +2477,7 @@ export default function ColumnMapping() {
             
             <div className="absolute" style={{ left: '535px', top: '80px' }}>
               <div className="bg-emerald-600 text-white px-6 py-3 rounded-xl shadow-lg font-bold flex items-center gap-2">
-                <span>Template ({templateHeaders.length} fields)</span>
+                <span>FW Item Template ({templateHeaders.length} fields)</span>
                 <Tooltip title={templateFileName ? `File: ${templateFileName}` : 'Template file'} placement="bottom">
                   <span><Info size={16} className="opacity-90 cursor-default" /></span>
                 </Tooltip>
