@@ -282,9 +282,22 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
                             value = ""
                         else:
                             value = str(value).strip()
+
+                        # If the mapped source yields an empty value, fall back to session default if available
+                        if (value == "" or value is None) and target_column in session_default_values:
+                            default_value = session_default_values.get(target_column, "")
+                            value = str(default_value)
+                            logger.info(f"🔧 Applied session default value '{default_value}' to mapped column '{target_column}' due to empty source value")
+
                         transformed_row.append(value)
                     else:
-                        transformed_row.append("")  # Empty value for missing source columns
+                        # Source column missing - fall back to default if available
+                        if target_column in session_default_values:
+                            default_value = session_default_values.get(target_column, "")
+                            transformed_row.append(str(default_value))
+                            logger.info(f"🔧 Applied session default value '{default_value}' to unmapped/missing-source column '{target_column}'")
+                        else:
+                            transformed_row.append("")  # Empty value for missing source columns
                         
                     # Handle additional mappings to the same target (rare with numbered system)
                     for additional_mapping in mappings_for_target[1:]:
@@ -1480,6 +1493,7 @@ def download_file(request):
         if enhanced_data:
             # Use formula-enhanced data for download
             transformed_rows = enhanced_data
+            all_headers = info.get("enhanced_headers") or []
         else:
             # Fall back to regular mapped data
             mapping_result = apply_column_mappings(
@@ -1491,6 +1505,42 @@ def download_file(request):
             )
             transformed_rows = mapping_result['data']
             all_headers = mapping_result['headers']
+
+        # Ensure default values are applied in the download path as well (parity with data_view)
+        try:
+            session_default_values = info.get("default_values", {}) or {}
+            if session_default_values and transformed_rows:
+                # If rows are dicts, apply directly; if lists, map via headers
+                if transformed_rows and isinstance(transformed_rows[0], dict):
+                    for field_name, default_value in session_default_values.items():
+                        for row in transformed_rows:
+                            current_value = row.get(field_name, "")
+                            if not current_value or current_value == "":
+                                row[field_name] = default_value
+                elif transformed_rows and isinstance(transformed_rows[0], list) and all_headers:
+                    # Build header index map
+                    header_index = {h: idx for idx, h in enumerate(all_headers)}
+                    for field_name, default_value in session_default_values.items():
+                        # Exact match first
+                        target_header = None
+                        if field_name in header_index:
+                            target_header = field_name
+                        else:
+                            # Case-insensitive normalized match
+                            norm = field_name.lower().replace(' ', '_').replace('-', '_')
+                            for h in all_headers:
+                                if h.lower().replace(' ', '_').replace('-', '_') == norm:
+                                    target_header = h
+                                    break
+                        if target_header is not None:
+                            idx = header_index.get(target_header)
+                            if idx is not None:
+                                for row in transformed_rows:
+                                    if idx < len(row):
+                                        if row[idx] is None or str(row[idx]).strip() == "":
+                                            row[idx] = default_value
+        except Exception as _e:
+            logger.warning(f"Download default application skipped due to error: {_e}")
         
         if not transformed_rows:
             return Response({
