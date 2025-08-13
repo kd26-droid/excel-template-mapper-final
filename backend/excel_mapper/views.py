@@ -24,8 +24,9 @@ from openpyxl.styles import Font, PatternFill
 from .bom_header_mapper import BOMHeaderMapper
 from .models import MappingTemplate, TagTemplate
 try:
-    from azure_storage import hybrid_file_manager
-except ImportError:
+    # Prefer relative import; fall back gracefully on any import error
+    from .azure_storage import hybrid_file_manager
+except Exception:
     # Fallback to local file manager if azure_storage is not available
     import os
     import uuid
@@ -599,17 +600,28 @@ def upload_files(request):
                                         if second_column not in current_headers:
                                             logger.warning(f"🆔 Factwise ID: Second column '{second_column}' not found in headers: {current_headers}")
                                             continue  # Skip this factwise rule
-                                        
-                                        # Apply Factwise ID creation
-                                        factwise_id_column = []
+
+                                        # Apply Factwise ID creation and map it to 'Item code' column
                                         first_col_idx = current_headers.index(first_column)
                                         second_col_idx = current_headers.index(second_column)
-                                        
+
+                                        # Determine target 'Item code' index; add if missing
+                                        item_code_idx = None
+                                        if "Item code" in current_headers:
+                                            item_code_idx = current_headers.index("Item code")
+                                            new_headers = list(current_headers)
+                                            new_data_rows = []
+                                        else:
+                                            # Prepend 'Item code' if not present
+                                            new_headers = ["Item code"] + list(current_headers)
+                                            item_code_idx = 0
+                                            new_data_rows = []
+
                                         if first_col_idx >= 0 and second_col_idx >= 0:
                                             for row in current_data:
                                                 first_val = str(row[first_col_idx] if first_col_idx < len(row) else "").strip()
                                                 second_val = str(row[second_col_idx] if second_col_idx < len(row) else "").strip()
-                                                
+
                                                 if first_val and second_val:
                                                     factwise_id = f"{first_val}{operator}{second_val}"
                                                 elif first_val:
@@ -618,22 +630,24 @@ def upload_files(request):
                                                     factwise_id = second_val
                                                 else:
                                                     factwise_id = ""
-                                                
-                                                factwise_id_column.append(factwise_id)
-                                            
-                                            # Insert Factwise ID column at the beginning
-                                            new_headers = ["Factwise ID"] + current_headers
-                                            new_data_rows = []
-                                            
-                                            for i, row in enumerate(current_data):
-                                                new_row = [factwise_id_column[i]] + list(row)
+
+                                                # Place into Item code column, adjusting row shape if we had to prepend
+                                                if "Item code" in current_headers:
+                                                    new_row = list(row)
+                                                    # Ensure row length
+                                                    while len(new_row) < len(new_headers):
+                                                        new_row.append("")
+                                                    new_row[item_code_idx] = factwise_id
+                                                else:
+                                                    new_row = [factwise_id] + list(row)
+
                                                 new_data_rows.append(new_row)
-                                            
-                                            # Update session with Factwise ID enhanced data
+
+                                            # Update session with Item code-enhanced data
                                             SESSION_STORE[session_id]["formula_enhanced_data"] = new_data_rows
                                             SESSION_STORE[session_id]["enhanced_headers"] = new_headers
-                                            
-                                            logger.info(f"🆔 Applied Factwise ID rule from template during upload: {first_column} {operator} {second_column}")
+
+                                            logger.info(f"🆔 Applied Factwise ID rule (mapped to 'Item code') from template during upload: {first_column} {operator} {second_column}")
                             except Exception as factwise_error:
                                 logger.warning(f"🆔 Failed to apply Factwise ID rule during upload: {factwise_error}")
                                 # Continue with other rules even if this one fails
@@ -1252,15 +1266,10 @@ def data_view(request):
         for factwise_rule in factwise_rules:
             if factwise_rule.get("type") == "factwise_id" and transformed_rows:
                 try:
-                    # Check if Factwise ID column already exists to avoid duplicates
-                    if "Factwise ID" in headers_to_use:
-                        logger.info(f"🔧 DEBUG: Factwise ID column already exists, skipping duplicate creation")
-                        continue
-                        
-                    # Add Factwise ID as the first column
                     first_col = factwise_rule.get("first_column")
                     second_col = factwise_rule.get("second_column")
                     operator = factwise_rule.get("operator", "_")
+                    strategy = factwise_rule.get("strategy", "fill_only_null")
                     
                     logger.info(f"🔧 DEBUG: Factwise rule - first_col: '{first_col}', second_col: '{second_col}', operator: '{operator}'")
                     logger.info(f"🔧 DEBUG: Available headers: {headers_to_use}")
@@ -1271,21 +1280,56 @@ def data_view(request):
                         
                         logger.info(f"🔧 DEBUG: Column indices - first_idx: {first_idx}, second_idx: {second_idx}")
                         
-                        # Add Factwise ID column at the beginning
-                        headers_to_use.insert(0, "Factwise ID")
-                        
-                        for i, row in enumerate(transformed_rows):
-                            if isinstance(row, dict):
-                                first_val = row.get(first_col, "")
-                                second_val = row.get(second_col, "")
-                                factwise_id = f"{first_val}{operator}{second_val}" if first_val and second_val else ""
-                                row["Factwise ID"] = factwise_id
-                            else:
-                                # List-based row
-                                first_val = row[first_idx] if first_idx < len(row) else ""
-                                second_val = row[second_idx] if second_idx < len(row) else ""
-                                factwise_id = f"{first_val}{operator}{second_val}" if first_val and second_val else ""
-                                row.insert(0, factwise_id)
+                        # Map into Item code rather than creating a new column
+                        # Normalize headers to find Item code variant
+                        def norm(s: str) -> str:
+                            return str(s).strip().lower().replace(' ', '').replace('_', '').replace('-', '')
+
+                        item_header = None
+                        for h in headers_to_use:
+                            if norm(h) == norm('item code'):
+                                item_header = h
+                                break
+
+                        if not item_header:
+                            # If no Item code header exists yet, create one at the beginning
+                            headers_to_use.insert(0, 'Item code')
+                            item_header = 'Item code'
+                            for i, row in enumerate(transformed_rows):
+                                if isinstance(row, dict):
+                                    first_val = row.get(first_col, "")
+                                    second_val = row.get(second_col, "")
+                                    factwise_id = f"{first_val}{operator}{second_val}" if first_val and second_val else (first_val or second_val or "")
+                                    row[item_header] = factwise_id
+                                else:
+                                    first_val = row[first_idx] if first_idx < len(row) else ""
+                                    second_val = row[second_idx] if second_idx < len(row) else ""
+                                    factwise_id = f"{first_val}{operator}{second_val}" if first_val and second_val else (first_val or second_val or "")
+                                    row.insert(0, factwise_id)
+                        else:
+                            # Fill existing Item code per strategy
+                            for i, row in enumerate(transformed_rows):
+                                if isinstance(row, dict):
+                                    first_val = row.get(first_col, "")
+                                    second_val = row.get(second_col, "")
+                                    factwise_id = f"{first_val}{operator}{second_val}" if first_val and second_val else (first_val or second_val or "")
+                                    if strategy == 'override_all' or not row.get(item_header):
+                                        row[item_header] = factwise_id
+                                else:
+                                    first_val = row[first_idx] if first_idx < len(row) else ""
+                                    second_val = row[second_idx] if second_idx < len(row) else ""
+                                    factwise_id = f"{first_val}{operator}{second_val}" if first_val and second_val else (first_val or second_val or "")
+                                    # Find index of item_header
+                                    try:
+                                        item_idx = headers_to_use.index(item_header)
+                                    except ValueError:
+                                        item_idx = None
+                                    if item_idx is not None:
+                                        if strategy == 'override_all' or (item_idx < len(row) and (row[item_idx] is None or str(row[item_idx]).strip() == "")):
+                                            # Ensure row length and assign
+                                            while len(row) <= item_idx:
+                                                row.append("")
+                                            row[item_idx] = factwise_id
                             
                             if i == 0:  # Log first row for debugging
                                 logger.info(f"🔧 DEBUG: First row Factwise ID: '{factwise_id}' from '{first_val}' + '{operator}' + '{second_val}'")
@@ -3859,12 +3903,15 @@ def apply_tag_template(request, template_id):
 
 @api_view(['POST'])
 def create_factwise_id(request):
-    """Create a Factwise ID column by combining two existing columns."""
+    """Create a Factwise ID by combining two existing columns and map it to 'Item code'.
+    Supports strategy: 'fill_only_null' (default) or 'override_all'. Treats variants of Item code as same.
+    """
     try:
         session_id = request.data.get('session_id')
         first_column = request.data.get('first_column')
         second_column = request.data.get('second_column')
         operator = request.data.get('operator', '_')
+        strategy = request.data.get('strategy', 'fill_only_null')
         
         if not session_id or session_id not in SESSION_STORE:
             return Response({
@@ -3919,7 +3966,6 @@ def create_factwise_id(request):
         # Find column indices
         first_col_idx = -1
         second_col_idx = -1
-        
         for i, header in enumerate(headers):
             if header == first_column:
                 first_col_idx = i
@@ -3932,13 +3978,12 @@ def create_factwise_id(request):
                 'error': f'Columns not found: {first_column} or {second_column}'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Create new column data
+        # Create Factwise ID values
         factwise_id_column = []
         for row in data_rows:
             first_val = str(row[first_col_idx]) if first_col_idx < len(row) and row[first_col_idx] is not None else ""
             second_val = str(row[second_col_idx]) if second_col_idx < len(row) and row[second_col_idx] is not None else ""
-            
-            # Create Factwise ID
+
             if first_val and second_val:
                 factwise_id = f"{first_val}{operator}{second_val}"
             elif first_val:
@@ -3947,23 +3992,48 @@ def create_factwise_id(request):
                 factwise_id = second_val
             else:
                 factwise_id = ""
-            
+
             factwise_id_column.append(factwise_id)
-        
-        # Insert Factwise ID column at the very beginning for easy identification
-        new_headers = ["Factwise ID"] + headers
+
+        # Helper to normalize header names
+        def norm(s: str) -> str:
+            return str(s).strip().lower().replace(' ', '').replace('_', '').replace('-', '')
+
+        # Map Factwise ID into 'Item code' (create if missing). Treat Item code variants as same.
+        item_idx = None
+        new_headers = list(headers)
+        for i, h in enumerate(new_headers):
+            if norm(h) == norm('item code'):
+                item_idx = i
+                new_headers[i] = 'Item code'
+                break
+
         new_data_rows = []
-        
-        for i, row in enumerate(data_rows):
-            new_row = [factwise_id_column[i]] + list(row)
-            new_data_rows.append(new_row)
+        if item_idx is None:
+            new_headers = ['Item code'] + new_headers
+            for i, row in enumerate(data_rows):
+                new_row = [factwise_id_column[i]] + list(row)
+                new_data_rows.append(new_row)
+        else:
+            for i, row in enumerate(data_rows):
+                new_row = list(row)
+                while len(new_row) < len(new_headers):
+                    new_row.append("")
+                if strategy == 'override_all':
+                    new_row[item_idx] = factwise_id_column[i]
+                else:  # fill only null/empty
+                    current_val = new_row[item_idx]
+                    if current_val is None or str(current_val).strip() == "":
+                        new_row[item_idx] = factwise_id_column[i]
+                new_data_rows.append(new_row)
         
         # Store Factwise ID rule for template saving (no caching of data)
         factwise_id_rule = {
             "type": "factwise_id",
             "first_column": first_column,
             "second_column": second_column,
-            "operator": operator
+            "operator": operator,
+            "strategy": strategy
         }
         
         # Initialize factwise_rules if not exists
@@ -3977,13 +4047,12 @@ def create_factwise_id(request):
         # Save session
         save_session_to_file(session_id, info)
         
-        logger.info(f"🆔 Successfully created Factwise ID column with {len(factwise_id_column)} entries")
+        logger.info(f"🆔 Successfully created Factwise ID mapped into 'Item code' with {len(factwise_id_column)} entries (strategy={strategy})")
         
         return Response({
             'success': True,
-            'message': 'Factwise ID column created successfully',
-            'total_rows': len(factwise_id_column),
-            'column_name': 'Factwise ID'
+            'message': 'Factwise ID applied to Item code successfully',
+            'total_rows': len(factwise_id_column)
         })
         
     except Exception as e:

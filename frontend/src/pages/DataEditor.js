@@ -387,37 +387,40 @@ const DataEditor = () => {
     }
 
     try {
+      // Determine strategy based on existing Item code values
+      const itemCodeCol = columnDefs.find(c => (c.headerName || c.field).toLowerCase() === 'item code' || (c.headerName || c.field).toLowerCase() === 'item_code');
+      let strategy = 'fill_only_null';
+      if (itemCodeCol) {
+        const hasExisting = rowData.some(r => {
+          const v = r[itemCodeCol.field];
+          return v !== null && v !== undefined && String(v).trim() !== '';
+        });
+        if (hasExisting) {
+          const choice = window.prompt('Current values exist in "Item Code". Type:\n1 to Fill only null\n2 to Override all\n3 to Cancel');
+          if (choice === '3' || choice === null) return;
+          if (choice === '2') strategy = 'override_all';
+        }
+      }
+
       setLoading(true);
-      const response = await api.createFactwiseId(sessionId, firstColumn, secondColumn, operator);
+      const response = await api.createFactwiseId(sessionId, firstColumn, secondColumn, operator, strategy);
 
       if (response.data.success) {
-        // Store the factwise ID rule for template saving
-        setFactwiseIdRule({
-          firstColumn,
-          secondColumn,
-          operator
-        });
-        
-        // Ensure UI refreshes properly after Factwise ID creation
-        await fetchData(); // Refresh data to show new column
-        
-        // Small delay to ensure backend processing is complete
-        setTimeout(async () => {
-          await fetchData(); // Double refresh to ensure column appears
-        }, 1000);
-        
-        showSnackbar('Factwise ID column created successfully!', 'success');
+        setFactwiseIdRule({ firstColumn, secondColumn, operator, strategy });
+        await fetchData();
+        setTimeout(async () => { await fetchData(); }, 500);
+        showSnackbar('Item code updated successfully!', 'success');
         handleCloseFactwiseIdDialog();
       } else {
-        showSnackbar(response.data.error || 'Failed to create Factwise ID column', 'error');
+        showSnackbar(response.data.error || 'Failed to update Item code', 'error');
       }
     } catch (error) {
       console.error('Error creating Factwise ID:', error);
-      showSnackbar('Failed to create Factwise ID column', 'error');
+      showSnackbar('Failed to update Item code', 'error');
     } finally {
       setLoading(false);
     }
-  }, [sessionId, firstColumn, secondColumn, operator, showSnackbar, fetchData, handleCloseFactwiseIdDialog]);
+  }, [sessionId, firstColumn, secondColumn, operator, showSnackbar, fetchData, handleCloseFactwiseIdDialog, rowData, columnDefs]);
 
   const handleApplyFormulas = useCallback(async (formulaResult) => {
     try {
@@ -1549,11 +1552,28 @@ const DataEditor = () => {
                 label="First Column"
                 onChange={(e) => setFirstColumn(e.target.value)}
               >
-                {columnDefs.filter(col => col.field && col.field !== '__row_number__').map(col => (
-                  <MenuItem key={col.field} value={col.field}>
-                    {col.headerName || col.field}
-                  </MenuItem>
-                ))}
+                {columnDefs
+                  .filter(col => col.field && col.field !== '__row_number__')
+                  .filter(col => (col.headerName || col.field).toLowerCase() !== 'item code' && (col.headerName || col.field).toLowerCase() !== 'item_code')
+                  .map(col => {
+                  // Build example from first non-empty row
+                  let example = '';
+                  for (const row of rowData) {
+                    const val = row[col.field];
+                    if (val !== null && val !== undefined && val !== '' && val.toString().toLowerCase() !== 'unknown') {
+                      example = val;
+                      break;
+                    }
+                  }
+                  const displayName = col.headerName || col.field;
+                  const truncated = example && example.toString().length > 30 ? `${example.toString().substring(0, 30)}...` : example;
+                  const display = truncated ? `${displayName} (${truncated})` : `${displayName} (Empty)`;
+                  return (
+                    <MenuItem key={col.field} value={col.field}>
+                      {display}
+                    </MenuItem>
+                  );
+                })}
               </Select>
             </FormControl>
 
@@ -1578,11 +1598,28 @@ const DataEditor = () => {
                 label="Second Column"
                 onChange={(e) => setSecondColumn(e.target.value)}
               >
-                {columnDefs.filter(col => col.field && col.field !== '__row_number__').map(col => (
-                  <MenuItem key={col.field} value={col.field}>
-                    {col.headerName || col.field}
-                  </MenuItem>
-                ))}
+                {columnDefs
+                  .filter(col => col.field && col.field !== '__row_number__')
+                  .filter(col => (col.headerName || col.field).toLowerCase() !== 'item code' && (col.headerName || col.field).toLowerCase() !== 'item_code')
+                  .map(col => {
+                  // Build example from first non-empty row
+                  let example = '';
+                  for (const row of rowData) {
+                    const val = row[col.field];
+                    if (val !== null && val !== undefined && val !== '' && val.toString().toLowerCase() !== 'unknown') {
+                      example = val;
+                      break;
+                    }
+                  }
+                  const displayName = col.headerName || col.field;
+                  const truncated = example && example.toString().length > 30 ? `${example.toString().substring(0, 30)}...` : example;
+                  const display = truncated ? `${displayName} (${truncated})` : `${displayName} (Empty)`;
+                  return (
+                    <MenuItem key={col.field} value={col.field}>
+                      {display}
+                    </MenuItem>
+                  );
+                })}
               </Select>
             </FormControl>
           </Box>

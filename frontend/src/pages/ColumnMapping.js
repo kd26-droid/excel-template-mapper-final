@@ -359,26 +359,26 @@ export default function ColumnMapping() {
         );
         
         if (isConnected) {
-          // Find mapping labels
+          // Aggregate mapping labels across all edges for this node
           let mappedToLabel = '';
           let mappedFromLabel = '';
-          
+
           if (node.id.startsWith('c-')) {
-            // Source node - find connected target
-            const connectedEdge = validEdges.find(e => e.source === node.id);
-            if (connectedEdge) {
-              const targetNode = currentNodes.find(n => n.id === connectedEdge.target);
-              mappedFromLabel = targetNode?.data?.originalLabel || '';
-            }
+            const connectedEdges = validEdges.filter(e => e.source === node.id);
+            const targetLabels = connectedEdges.map(e => {
+              const t = currentNodes.find(n => n.id === e.target);
+              return t?.data?.originalLabel;
+            }).filter(Boolean);
+            mappedFromLabel = targetLabels.join(', ');
           } else if (node.id.startsWith('t-')) {
-            // Target node - find connected source
-            const connectedEdge = validEdges.find(e => e.target === node.id);
-            if (connectedEdge) {
-              const sourceNode = currentNodes.find(n => n.id === connectedEdge.source);
-              mappedToLabel = sourceNode?.data?.originalLabel || '';
-            }
+            const connectedEdges = validEdges.filter(e => e.target === node.id);
+            const sourceLabels = connectedEdges.map(e => {
+              const s = currentNodes.find(n => n.id === e.source);
+              return s?.data?.originalLabel;
+            }).filter(Boolean);
+            mappedToLabel = sourceLabels.join(', ');
           }
-          
+
           return {
             ...node,
             data: {
@@ -409,6 +409,12 @@ export default function ColumnMapping() {
     
     console.log(`🔧 DEBUG: Reconciliation complete - kept ${validEdges.length}/${edges.length} edges`);
   }, [nodes, edges, setNodes, setEdges]);
+
+  // Keep node mapping labels in sync with current edges
+  useEffect(() => {
+    reconcileEdgesWithNodes();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [edges]);
 
   // A) Rebuild sequence for column count updates
   const updateColumnCounts = async (newCounts) => {
