@@ -4029,6 +4029,10 @@ def create_factwise_id(request):
                         new_row[item_idx] = factwise_id_column[i]
                 new_data_rows.append(new_row)
         
+        # Update session with enhanced data/headers for immediate UI reflect
+        info["formula_enhanced_data"] = new_data_rows
+        info["enhanced_headers"] = new_headers
+
         # Store Factwise ID rule for template saving (no caching of data)
         factwise_id_rule = {
             "type": "factwise_id",
@@ -4046,8 +4050,8 @@ def create_factwise_id(request):
         info["factwise_rules"] = [rule for rule in info["factwise_rules"] if rule.get("type") != "factwise_id"]
         info["factwise_rules"].append(factwise_id_rule)
         
-        # Save session
-        save_session_to_file(session_id, info)
+        # Save session (memory + file) for multi-worker environments
+        save_session(session_id, info)
         
         logger.info(f"🆔 Successfully created Factwise ID mapped into 'Item code' with {len(factwise_id_column)} entries (strategy={strategy})")
         
