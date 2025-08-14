@@ -149,8 +149,9 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
         if session_id and session_id in SESSION_STORE:
             info = SESSION_STORE[session_id]
             
-            # Prefer canonical current headers (persisted)
-            canonical_headers = info.get("current_template_headers") or info.get("enhanced_headers")
+            # Prefer canonical current headers (persisted). Avoid using enhanced headers directly
+            # to prevent flip-flopping between operation-specific snapshots.
+            canonical_headers = info.get("current_template_headers")
             if canonical_headers and isinstance(canonical_headers, list) and len(canonical_headers) > 0:
                 template_headers = canonical_headers
                 logger.info(f"🔍 Using {len(template_headers)} canonical template headers from session")
@@ -1253,6 +1254,13 @@ def data_view(request):
                 transformed_rows = formula_result['data']
                 headers_to_use = formula_result['headers']
                 
+                # Update canonical headers to include formula-generated columns
+                try:
+                    info["current_template_headers"] = headers_to_use
+                    save_session(session_id, info)
+                except Exception:
+                    pass
+                
                 logger.info(f"🔧 DEBUG: Applied formula rules, new headers: {headers_to_use}")
                 
             except Exception as e:
@@ -1295,6 +1303,12 @@ def data_view(request):
                             # If no Item code header exists yet, create one at the beginning
                             headers_to_use.insert(0, 'Item code')
                             item_header = 'Item code'
+                            # Persist canonical headers
+                            try:
+                                info["current_template_headers"] = headers_to_use
+                                save_session(session_id, info)
+                            except Exception:
+                                pass
                             for i, row in enumerate(transformed_rows):
                                 if isinstance(row, dict):
                                     first_val = row.get(first_col, "")
@@ -1417,8 +1431,16 @@ def data_view(request):
                     
                     logger.info(f"🔧 DEBUG: Updated {rows_updated} rows with default value '{default_value}' for field '{matched_field}'")
                 else:
-                    logger.warning(f"🔧 DEBUG: Default value field '{field_name}' not found in headers: {headers_to_use}")
-                    logger.warning(f"🔧 DEBUG: Available header patterns: {[h for h in headers_to_use if any(base in h.lower() for base in ['tag', 'spec', 'customer'])]}")
+                    # If the default-only field is missing from headers, add it canonically and populate
+                    headers_to_use.append(field_name)
+                    for row in transformed_rows:
+                        if isinstance(row, dict):
+                            row[field_name] = default_value
+                    try:
+                        info["current_template_headers"] = headers_to_use
+                        save_session(session_id, info)
+                    except Exception:
+                        pass
         else:
             if not default_values:
                 logger.info(f"🔧 DEBUG: Session {session_id} - No default values found in session data")
@@ -1531,13 +1553,13 @@ def download_file(request):
                 'error': 'No mappings found'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Check if we have formula-enhanced data first
+        # Always prefer rebuilding from current canonical headers to avoid stale snapshots
         enhanced_data = info.get("formula_enhanced_data")
         
         if enhanced_data:
             # Use formula-enhanced data for download
             transformed_rows = enhanced_data
-            all_headers = info.get("enhanced_headers") or []
+            all_headers = info.get("current_template_headers") or info.get("enhanced_headers") or []
         else:
             # Fall back to regular mapped data
             mapping_result = apply_column_mappings(
@@ -1592,8 +1614,8 @@ def download_file(request):
                 'error': 'No data to download'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # For enhanced data, use the enhanced headers
-        enhanced_headers = info.get("enhanced_headers")
+        # For enhanced data, use the current canonical headers
+        enhanced_headers = info.get("current_template_headers") or info.get("enhanced_headers")
         if enhanced_data and enhanced_headers:
             all_headers = enhanced_headers
             # Convert enhanced data (dict format) to list format for consistency
@@ -3127,6 +3149,13 @@ def apply_formulas(request):
         SESSION_STORE[session_id]["formula_rules"] = formula_rules
         SESSION_STORE[session_id]["formula_enhanced_data"] = formula_result['data']
         SESSION_STORE[session_id]["enhanced_headers"] = formula_result['headers']
+        # Update canonical headers to include formula columns to prevent flip-flop
+        try:
+            info = SESSION_STORE[session_id]
+            info["current_template_headers"] = formula_result['headers']
+            save_session(session_id, info)
+        except Exception:
+            pass
 
         return Response({
             'success': True,
@@ -4032,6 +4061,11 @@ def create_factwise_id(request):
         # Update session with enhanced data/headers for immediate UI reflect
         info["formula_enhanced_data"] = new_data_rows
         info["enhanced_headers"] = new_headers
+        # Persist canonical headers to avoid alternating states across requests
+        try:
+            info["current_template_headers"] = new_headers
+        except Exception:
+            pass
 
         # Store Factwise ID rule for template saving (no caching of data)
         factwise_id_rule = {
