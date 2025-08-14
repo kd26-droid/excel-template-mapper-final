@@ -3123,9 +3123,11 @@ def apply_formulas(request):
         
         logger.info(f"🔧 DEBUG: Formula result - new_columns: {formula_result.get('new_columns', [])}, headers: {formula_result.get('headers', [])}")
         
-        # Only save the formula rules - no data caching
+        # Save rules and cache enhanced data/headers to reflect immediately in UI
         SESSION_STORE[session_id]["formula_rules"] = formula_rules
-        
+        SESSION_STORE[session_id]["formula_enhanced_data"] = formula_result['data']
+        SESSION_STORE[session_id]["enhanced_headers"] = formula_result['headers']
+
         return Response({
             'success': True,
             'data': formula_result['data'],

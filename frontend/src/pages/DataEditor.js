@@ -439,7 +439,7 @@ const DataEditor = () => {
       setFormulaColumns(allFormulaColumns);
       setAppliedFormulas(formulaResult.formula_rules || []);
       
-      // Force immediate refresh to get latest data structure
+      // Single immediate refresh to reflect backend-cached enhanced data/headers
       await fetchData();
       
       showSnackbar(
