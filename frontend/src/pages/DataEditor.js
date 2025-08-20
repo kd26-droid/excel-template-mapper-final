@@ -36,7 +36,8 @@ import {
   ArrowBack as ArrowBackIcon,
   AutoAwesome as AutoAwesomeIcon,
   Badge as BadgeIcon,
-  Close as CloseIcon
+  Close as CloseIcon,
+  Map as MapIcon
 } from '@mui/icons-material';
 import api from '../services/api';
 import FormulaBuilder from '../components/FormulaBuilder';
@@ -83,6 +84,7 @@ const DataEditor = () => {
   const [hasFormulas, setHasFormulas] = useState(false);
   const [formulaColumns, setFormulaColumns] = useState([]);
   const [appliedFormulas, setAppliedFormulas] = useState([]);
+  const [defaultValues, setDefaultValues] = useState({});
 
   // Create Factwise ID state
   const [factwiseIdDialogOpen, setFactwiseIdDialogOpen] = useState(false);
@@ -92,6 +94,13 @@ const DataEditor = () => {
   
   // Store factwise ID rule for template saving
   const [factwiseIdRule, setFactwiseIdRule] = useState(null);
+  
+  // CRITICAL FIX: Track dynamic column counts for template integration
+  const [dynamicColumnCounts, setDynamicColumnCounts] = useState({
+    tags_count: 1,
+    spec_pairs_count: 1,
+    customer_id_pairs_count: 1
+  });
 
   
 
@@ -173,9 +182,19 @@ const DataEditor = () => {
     try {
       setLoading(true);
       setError(null);
+      
+      console.log('🔧 FETCH: Starting data fetch for session:', sessionId);
 
       const response = await api.getMappedDataWithSpecs(sessionId, 1, 1000, true);
       const { data } = response;
+
+      console.log('🔧 FETCH: Received data response', {
+        hasData: !!data,
+        hasHeaders: !!(data && data.headers),
+        headersCount: data && data.headers ? data.headers.length : 0,
+        hasFormulaRules: !!(data && data.formula_rules),
+        formulaRulesCount: data && data.formula_rules ? data.formula_rules.length : 0
+      });
 
       if (!data || !data.headers || !Array.isArray(data.headers) || data.headers.length === 0) {
         setError('No mapped data found. Please go back to Column Mapping and create mappings first.');
@@ -229,11 +248,23 @@ const DataEditor = () => {
           suppressAutoSize: true
         },
         ...data.headers.filter(col => col && col.trim() !== '').map((col, index) => {
-          const displayName = data.display_headers && Array.isArray(data.display_headers) && index < data.display_headers.length && data.display_headers[index] ? data.display_headers[index] : col;
+          // Compute display name locally from internal header
+          let displayName = col;
+          if (col.startsWith('Tag_') || col === 'Tag') {
+            displayName = 'Tag';
+          } else if (col.startsWith('Specification_Name_') || col === 'Specification name') {
+            displayName = 'Specification name';
+          } else if (col.startsWith('Specification_Value_') || col === 'Specification value') {
+            displayName = 'Specification value';
+          } else if (col.startsWith('Customer_Identification_Name_') || col === 'Customer identification name' || col === 'Custom identification name') {
+            displayName = 'Customer identification name';
+          } else if (col.startsWith('Customer_Identification_Value_') || col === 'Customer identification value' || col === 'Custom identification value') {
+            displayName = 'Customer identification value';
+          }
           const isUnmapped = data.unmapped_columns && data.unmapped_columns.includes(displayName);
           const isSpecificationColumn = displayName.toLowerCase().includes('specification');
           // More robust formula column detection
-          const isFormulaColumn = detectedFormulaColumns.includes(col) || col.startsWith('Tag_') || col.startsWith('Specification_') || col.startsWith('Customer_Identification_') || col === 'Factwise ID';
+          const isFormulaColumn = detectedFormulaColumns.includes(col) || col.startsWith('Tag_') || col.startsWith('Specification_') || col.startsWith('Customer_Identification_') || col === 'Tag' || col.includes('Specification') || col.includes('Customer identification') || col.includes('Custom identification') || col === 'Factwise ID';
           const columnWidth = calculateColumnWidth(displayName);
           
           return {
@@ -407,8 +438,12 @@ const DataEditor = () => {
 
       if (response.data.success) {
         setFactwiseIdRule({ firstColumn, secondColumn, operator, strategy });
+        
+        // CRITICAL FIX: Single, immediate refresh instead of double refresh with timeout
+        // This prevents race conditions and ensures data is properly loaded
+        console.log('🔧 FACTWISE: Refreshing data after successful creation');
         await fetchData();
-        setTimeout(async () => { await fetchData(); }, 500);
+        
         showSnackbar('Item code updated successfully!', 'success');
         handleCloseFactwiseIdDialog();
       } else {
@@ -426,7 +461,7 @@ const DataEditor = () => {
     try {
       setHasFormulas(true);
       
-      // Update formula columns to include all Tag, Specification, and Customer columns
+      // CRITICAL FIX: Update formula columns and column counts
       const allFormulaColumns = formulaResult.headers?.filter(h => 
         h.startsWith('Tag_') || 
         h.startsWith('Specification_Name_') || 
@@ -438,6 +473,28 @@ const DataEditor = () => {
       ) || [];
       setFormulaColumns(allFormulaColumns);
       setAppliedFormulas(formulaResult.formula_rules || []);
+      
+      // Update dynamic column counts based on new columns created
+      const newHeaders = formulaResult.headers || [];
+      const tagColumns = newHeaders.filter(h => h.startsWith('Tag_') || h === 'Tag');
+      const specColumns = newHeaders.filter(h => h.startsWith('Specification_Name_') || h === 'Specification name');
+      const customerColumns = newHeaders.filter(h => h.startsWith('Customer_Identification_Name_') || h === 'Customer identification name' || h === 'Custom identification name');
+      
+      const newCounts = {
+        tags_count: Math.max(dynamicColumnCounts.tags_count, tagColumns.length),
+        spec_pairs_count: Math.max(dynamicColumnCounts.spec_pairs_count, Math.ceil(specColumns.length / 2)),
+        customer_id_pairs_count: Math.max(dynamicColumnCounts.customer_id_pairs_count, Math.ceil(customerColumns.length / 2))
+      };
+      
+      console.log('🔧 FORMULA: Updated column counts', {
+        old: dynamicColumnCounts,
+        new: newCounts,
+        tagColumns: tagColumns.length,
+        specColumns: specColumns.length,
+        customerColumns: customerColumns.length
+      });
+      
+      setDynamicColumnCounts(newCounts);
       
       // Single immediate refresh to reflect backend-cached enhanced data/headers
       await fetchData();
@@ -501,6 +558,18 @@ const DataEditor = () => {
       
       // Initial refresh to get base mappings
       await fetchData();
+
+      // Rehydrate defaults into local state if present in response/template
+      try {
+        const mappingsResponse = await api.getExistingMappings(sessionId);
+        const existingDefaults = mappingsResponse.data?.default_values || {};
+        // existingDefaults keys are internal names already
+        if (existingDefaults && Object.keys(existingDefaults).length > 0) {
+          setDefaultValues(existingDefaults);
+        }
+      } catch (e) {
+        // Non-fatal
+      }
       
       // If template has formula rules, apply them automatically AFTER base template is set up
       if (template.formula_rules && template.formula_rules.length > 0) {
@@ -571,14 +640,27 @@ const DataEditor = () => {
         }
       }
       
-      // Final refresh to ensure everything is properly displayed
+            // Final refresh to ensure everything is properly displayed
       setTimeout(async () => {
         await fetchData();
       }, 1000);
-      
+
       showSnackbar(`Template "${template.name}" applied successfully!`, 'success');
       setTemplateChooseDialogOpen(false);
       setSelectedTemplate(null);
+
+      // CRITICAL FIX: Set flag for ColumnMapping page to refresh
+      sessionStorage.setItem('templateAppliedInDataEditor', 'true');
+      sessionStorage.setItem('lastTemplateApplied', template.name);
+
+      // CRITICAL FIX: Notify user about ColumnMapping page for visual mapping
+      setTimeout(() => {
+        showSnackbar(
+          'Template applied! Go to Column Mapping page to see the visual mapping representation.',
+          'info',
+          8000 // Show for 8 seconds
+        );
+      }, 2000);
       
     } catch (error) {
       console.error('Error applying template:', error);
@@ -609,6 +691,13 @@ const DataEditor = () => {
       showSnackbar('Please enter a template name', 'error');
       return;
     }
+    
+    console.log('🔧 TEMPLATE: Starting template save process', {
+      templateName: templateName.trim(),
+      appliedFormulasCount: appliedFormulas.length,
+      hasFactwiseIdRule: !!factwiseIdRule,
+      unmappedColumnsCount: unmappedColumns ? unmappedColumns.length : 0
+    });
 
     try {
       setTemplateSaving(true);
@@ -641,18 +730,31 @@ const DataEditor = () => {
       // Collect default values from unmapped columns AND custom values from dynamic tag columns
       const default_values = {};
       
+      console.log('🔧 TEMPLATE: Collecting default values', {
+        unmappedColumns: unmappedColumns || [],
+        columnDefsCount: columnDefs.length,
+        rowDataCount: rowData.length
+      });
+      
       // Add default values for unmapped columns (if any)
       if (unmappedColumns && unmappedColumns.length > 0) {
         unmappedColumns.forEach(col => {
           // Set empty default values for unmapped columns
           default_values[col] = '';
         });
+        console.log('🔧 TEMPLATE: Added empty defaults for unmapped columns:', unmappedColumns);
       }
       
       // SMART template saving: Handle formula vs non-formula columns differently
       const dynamicTagColumns = columnDefs.filter(col => 
-        col.field && (col.field.startsWith('Tag_') || col.field.startsWith('Specification_') || col.field.startsWith('Customer_Identification_') || col.field === 'Factwise ID')
+        col.field && (col.field.startsWith('Tag_') || col.field.startsWith('Specification_') || col.field.startsWith('Customer_Identification_') || col.field === 'Tag' || col.field.includes('Specification') || col.field.includes('Customer identification') || col.field.includes('Custom identification') || col.field === 'Factwise ID')
       );
+      
+      console.log('🔧 TEMPLATE: Detected dynamic tag columns', {
+        dynamicTagColumns: dynamicTagColumns.map(col => col.field),
+        totalDynamicColumns: dynamicTagColumns.length,
+        hasFormulaRules: appliedFormulas.length > 0
+      });
       
       if (dynamicTagColumns.length > 0) {
         dynamicTagColumns.forEach(col => {
@@ -691,7 +793,7 @@ const DataEditor = () => {
         });
       }
 
-      // Get current mappings and dynamic counts from backend to save in template
+      // CRITICAL FIX: Get current mappings and use maximum of backend counts vs frontend counts
       let currentMappings = null;
       let columnCounts = null;
       try {
@@ -700,32 +802,67 @@ const DataEditor = () => {
           currentMappings = mappingsResponse.data.mappings;
           console.log('🔧 TEMPLATE: Retrieved current mappings for template:', currentMappings);
         }
-        // Prefer column counts from session metadata
-        const mdCounts = mappingsResponse.data?.session_metadata?.column_counts;
-        if (mdCounts) {
-          columnCounts = mdCounts;
-        } else {
+        
+        // Get backend column counts
+        const backendColumnCounts = mappingsResponse.data?.session_metadata?.column_counts;
+        if (!backendColumnCounts) {
           // Fallback to headers endpoint
           const headersResp = await api.getHeaders(sessionId);
           const hdrCounts = headersResp.data?.column_counts;
-          if (hdrCounts) columnCounts = hdrCounts;
+          if (hdrCounts) {
+            columnCounts = hdrCounts;
+          }
+        } else {
+          // Use maximum of backend counts vs frontend counts (for newly created tags)
+          columnCounts = {
+            tags_count: Math.max(backendColumnCounts.tags_count || 1, dynamicColumnCounts.tags_count),
+            spec_pairs_count: Math.max(backendColumnCounts.spec_pairs_count || 1, dynamicColumnCounts.spec_pairs_count),
+            customer_id_pairs_count: Math.max(backendColumnCounts.customer_id_pairs_count || 1, dynamicColumnCounts.customer_id_pairs_count)
+          };
         }
-        console.log('🔧 TEMPLATE: Using column counts for save:', columnCounts);
+        
+        console.log('🔧 TEMPLATE: Column count logic', {
+          backend: backendColumnCounts,
+          frontend: dynamicColumnCounts,
+          final: columnCounts
+        });
       } catch (error) {
         console.warn('Could not retrieve mappings/column counts for template:', error);
+        // Use frontend counts as fallback
+        columnCounts = dynamicColumnCounts;
       }
 
       // Pass all template data to the API including mappings and default values
-      await api.saveMappingTemplate(
+      const saveResponse = await api.saveMappingTemplate(
         sessionId, 
         templateName.trim(), 
         templateData.description,
-        currentMappings, // Save actual mappings!
+        null, // Let backend use session mappings (new-format list with duplicates, internal names)
         appliedFormulas.length > 0 ? appliedFormulas : null, // formula_rules
         factwise_rules.length > 0 ? factwise_rules : null, // factwise_rules
-        Object.keys(default_values).length > 0 ? default_values : null, // default_values
+        Object.keys(default_values).length > 0 ? default_values : null, // default_values (internal keys)
         columnCounts // dynamic column counts
       );
+      
+      // CRITICAL FIX: Apply default values immediately after template save
+      if (saveResponse.data.default_values && Object.keys(saveResponse.data.default_values).length > 0) {
+        console.log('🔧 TEMPLATE: Applying default values immediately after save:', saveResponse.data.default_values);
+        
+        // Update the current data with default values for immediate display
+        const updatedRowData = rowData.map(row => {
+          const updatedRow = { ...row };
+          Object.entries(saveResponse.data.default_values).forEach(([field, defaultValue]) => {
+            if (updatedRow[field] === undefined || updatedRow[field] === null || updatedRow[field] === '') {
+              updatedRow[field] = defaultValue;
+            }
+          });
+          return updatedRow;
+        });
+        
+        setRowData(updatedRowData);
+        console.log('🔧 TEMPLATE: Updated row data with default values');
+      }
+      
       // Create detailed save message
       let saveDetails = [`Template "${templateName}" saved successfully!`];
       
@@ -1135,10 +1272,10 @@ const DataEditor = () => {
                   onClick={handleSaveAs}
                   variant="outlined"
                   startIcon={<SaveIcon />}
-                    sx={{ 
+                    sx={{
                       color: 'white',
                       borderColor: 'white',
-                      '&:hover': { 
+                      '&:hover': {
                         backgroundColor: 'rgba(255,255,255,0.1)',
                         borderColor: 'white'
                       },
@@ -1147,6 +1284,26 @@ const DataEditor = () => {
                     }}
                   >
                     Save Mapping Template
+                  </Button>
+                </Tooltip>
+
+              <Tooltip title="View visual column mapping representation">
+                <Button
+                  onClick={() => navigate('/column-mapping')}
+                  variant="outlined"
+                  startIcon={<MapIcon />}
+                    sx={{
+                      color: '#2196f3',
+                      borderColor: '#2196f3',
+                      '&:hover': {
+                        backgroundColor: 'rgba(33,150,243,0.1)',
+                        borderColor: '#2196f3'
+                      },
+                      textTransform: 'none',
+                      fontWeight: 600
+                    }}
+                  >
+                    View Column Mapping
                   </Button>
                 </Tooltip>
             </Box>

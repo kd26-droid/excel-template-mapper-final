@@ -133,13 +133,66 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '[{asctime}] {levelname} {name} {message}',
+            'style': '{',
+            'datefmt': '%Y-%m-%d %H:%M:%S'
+        },
+        'simple': {
+            'format': '[{asctime}] {levelname} {message}',
+            'style': '{',
+            'datefmt': '%Y-%m-%d %H:%M:%S'
+        },
+        'debug': {
+            'format': '[{asctime}] 🔍 {levelname} {name} {funcName}:{lineno} {message}',
+            'style': '{',
+            'datefmt': '%Y-%m-%d %H:%M:%S.%f'
+        }
+    },
     'handlers': {
         'console': {
             'class': 'logging.StreamHandler',
+            'formatter': 'debug',
+            'level': 'DEBUG',
         },
+        'file': {
+            'class': 'logging.FileHandler',
+            'filename': BASE_DIR / 'debug.log',
+            'formatter': 'debug',
+            'level': 'DEBUG',
+        },
+        'error_file': {
+            'class': 'logging.FileHandler',
+            'filename': BASE_DIR / 'error.log',
+            'formatter': 'verbose',
+            'level': 'ERROR',
+        }
+    },
+    'loggers': {
+        'excel_mapper': {
+            'handlers': ['console', 'file', 'error_file'],
+            'level': 'DEBUG',
+            'propagate': False,
+        },
+        'django': {
+            'handlers': ['console', 'file'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        'django.request': {
+            'handlers': ['console', 'file', 'error_file'],
+            'level': 'DEBUG',
+            'propagate': False,
+        },
+        'django.db.backends': {
+            'handlers': ['console', 'file'],
+            'level': 'DEBUG',
+            'propagate': False,
+        }
     },
     'root': {
-        'handlers': ['console'],
+        'handlers': ['console', 'file'],
         'level': 'INFO',
     },
 }
