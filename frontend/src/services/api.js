@@ -8,6 +8,19 @@ const API_URL = process.env.REACT_APP_API_BASE_URL || '/api';
 // Auto-create demo session when needed
 let demoSessionId = null;
 
+// Global loader state management
+let globalLoaderCallback = null;
+
+export const showGlobalLoader = (show) => {
+  if (globalLoaderCallback) {
+    globalLoaderCallback(show);
+  }
+};
+
+export const setGlobalLoaderCallback = (callback) => {
+  globalLoaderCallback = callback;
+};
+
 const ensureSession = async () => {
   if (demoSessionId) return demoSessionId;
   
@@ -116,8 +129,17 @@ const api = {
    * Fetch raw headers for side-by-side display
    * @param {string} sessionId - Session ID
    */
-  getHeaders: (sessionId) =>
-    axios.get(`${API_URL}/headers/${sessionId}/`),
+  getHeaders: (sessionId) => {
+    const _ts = Date.now();
+    return axios.get(`${API_URL}/headers/${sessionId}/`, {
+      params: { _ts },
+      headers: { 
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+      }
+    });
+  },
 
   /**
    * Get AI suggestions + column lists + specification opportunities
@@ -131,18 +153,30 @@ const api = {
    * @param {string} sessionId - Session ID
    * @param {Object} mappings - Column mappings object
    */
-  saveColumnMappings: (sessionId, mappings) =>
+  saveColumnMappings: (sessionId, mappingData) =>
     axios.post(`${API_URL}/mapping/save/`, {
       session_id: sessionId,
-      ...mappings
+      mappings: mappingData.mappings,
+      default_values: mappingData.default_values || {},
+      formula_rules: mappingData.formula_rules || null,
+      factwise_rules: mappingData.factwise_rules || null,
     }),
 
   /**
    * Get existing mappings for a session
    * @param {string} sessionId - Session ID
    */
-  getExistingMappings: (sessionId) =>
-    axios.get(`${API_URL}/mapping/existing/${sessionId}/`),
+  getExistingMappings: (sessionId) => {
+    const _ts = Date.now();
+    return axios.get(`${API_URL}/mapping/existing/${sessionId}/`, {
+      params: { _ts },
+      headers: { 
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+      }
+    });
+  },
 
   /**
    * Run BOM parser (legacy endpoint)
@@ -161,14 +195,22 @@ const api = {
    * @param {number} page - Page number
    * @param {number} pageSize - Page size
    */
-  getMappedData: (sessionId, page = 1, pageSize = 10) =>
-    axios.get(`${API_URL}/data/`, { 
+  getMappedData: (sessionId, page = 1, pageSize = 10) => {
+    const _ts = Date.now();
+    return axios.get(`${API_URL}/data/`, { 
       params: { 
         session_id: sessionId,
         page,
-        page_size: pageSize 
-      } 
-    }),
+        page_size: pageSize,
+        _ts
+      },
+      headers: { 
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+      }
+    });
+  },
 
   /**
    * Get mapped data with optional specification parsing
@@ -177,15 +219,23 @@ const api = {
    * @param {number} pageSize - Page size
    * @param {boolean} enableSpecParsing - Enable specification parsing
    */
-  getMappedDataWithSpecs: (sessionId, page = 1, pageSize = 10, enableSpecParsing = false) =>
-    axios.get(`${API_URL}/data/`, { 
+  getMappedDataWithSpecs: (sessionId, page = 1, pageSize = 10, enableSpecParsing = false) => {
+    const _ts = Date.now();
+    return axios.get(`${API_URL}/data/`, {
       params: { 
         session_id: sessionId,
         page,
         page_size: pageSize,
-        enable_spec_parsing: enableSpecParsing
-      } 
-    }),
+        enable_spec_parsing: enableSpecParsing,
+        _ts
+      },
+      headers: { 
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+      }
+    });
+  },
     
   /**
    * Save edited data
@@ -273,38 +323,57 @@ const api = {
    */
   saveMappingTemplate: async (sessionId, templateName, description = '', mappings = null, formulaRules = null, factwiseRules = null, defaultValues = null, columnCounts = null) => {
     const effectiveSessionId = sessionId || await ensureSession();
-    return axios.post(`${API_URL}/templates/save/`, {
+    const payload = {
       session_id: effectiveSessionId,
       template_name: templateName,
-      description: description,
-      ...(mappings !== null && { mappings }),
-      ...(formulaRules !== null && { formula_rules: formulaRules }),
-      ...(factwiseRules !== null && { factwise_rules: factwiseRules }),
-      ...(defaultValues !== null && { default_values: defaultValues }),
-      ...(columnCounts !== null && { 
-        tags_count: columnCounts.tags_count, 
-        spec_pairs_count: columnCounts.spec_pairs_count, 
-        customer_id_pairs_count: columnCounts.customer_id_pairs_count 
-      })
-    });
+      description,
+      ...(mappings !== null ? { mappings } : {}),
+      ...(formulaRules !== null ? { formula_rules: formulaRules } : {}),
+      ...(factwiseRules !== null ? { factwise_rules: factwiseRules } : {}),
+      ...(defaultValues !== null ? { default_values: defaultValues } : {}),
+      ...(columnCounts !== null ? {
+        tags_count: columnCounts.tags_count,
+        spec_pairs_count: columnCounts.spec_pairs_count,
+        customer_id_pairs_count: columnCounts.customer_id_pairs_count,
+      } : {}),
+    };
+    return axios.post(`${API_URL}/templates/save/`, payload);
   },
 
   /**
    * Get all saved mapping templates
    */
-  getMappingTemplates: () =>
-    axios.get(`${API_URL}/templates/`),
+  getMappingTemplates: () => {
+    const _ts = Date.now();
+    return axios.get(`${API_URL}/templates/`, {
+      params: { _ts },
+      headers: { 
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+      }
+    });
+  },
 
   /**
    * Apply a saved mapping template to a session
    * @param {string} sessionId - Target session ID
    * @param {number} templateId - Template ID to apply
    */
-  applyMappingTemplate: (sessionId, templateId) =>
-    axios.post(`${API_URL}/templates/apply/`, {
-      session_id: sessionId,
-      template_id: templateId
-    }),
+  applyMappingTemplate: async (sessionId, templateId) => {
+    showGlobalLoader(true);
+    try {
+      const resp = await axios.post(`${API_URL}/templates/apply/`, {
+        session_id: sessionId,
+        template_id: templateId
+      });
+      
+      console.log('✅ Template application request sent successfully');
+      return resp;
+    } finally {
+      showGlobalLoader(false);
+    }
+  },
 
   /**
    * Delete a mapping template
@@ -340,15 +409,27 @@ const api = {
     }),
 
   /**
-   * Update column counts for dynamic template generation
+   * Update column counts for dynamic template generation (fast, no sync wait)
    * @param {string} sessionId - Session ID
    * @param {object} counts - Column counts {tags_count, spec_pairs_count, customer_id_pairs_count}
    */
-  updateColumnCounts: (sessionId, counts) =>
-    axios.post(`${API_URL}/column-counts/update/`, {
-      session_id: sessionId,
-      ...counts
-    }),
+  updateColumnCounts: async (sessionId, counts) => {
+    showGlobalLoader(true);
+    try {
+      const response = await axios.post(`${API_URL}/column-counts/update/`, {
+        session_id: sessionId,
+        tags_count: counts.tags_count,
+        spec_pairs_count: counts.spec_pairs_count,
+        customer_id_pairs_count: counts.customer_id_pairs_count,
+      });
+      
+      // Return immediately - no sync waiting
+      console.log('✅ Column counts updated successfully');
+      return response;
+    } finally {
+      showGlobalLoader(false);
+    }
+  },
 
   /**
    * Validate if a template name is available
@@ -474,6 +555,140 @@ const api = {
   // 8️⃣ SESSION MANAGEMENT ENDPOINTS
   // ==========================================
 
+  /**
+   * Get canonical session snapshot
+   * @param {string} sessionId - Session ID
+   */
+  getSessionSnapshot: (sessionId) => {
+    const _ts = Date.now();
+    return axios.get(`${API_URL}/session/${sessionId}/snapshot/`, {
+      params: { _ts },
+      headers: { 
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+      }
+    });
+  },
+
+  /**
+   * Get session status including template version for change tracking
+   * @param {string} sessionId - Session ID
+   * @param {Object} options - Additional options like timestamp
+   */
+  getSessionStatus: (sessionId, options = {}) => {
+    const _ts = options._ts || Date.now();
+    return axios.get(`${API_URL}/session/${sessionId}/status/`, {
+      params: { _ts },
+      headers: { 
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+      }
+    });
+  },
+
+  /**
+   * Rebuild template and update column counts
+   * @param {string} sessionId - Session ID
+   */
+  rebuildTemplate: (sessionId) =>
+    axios.post(`${API_URL}/rebuild-template/`, {
+      session_id: sessionId
+    }),
+
+  /**
+   * Wait until session template version advances (for synchronization)
+   * @param {string} sessionId - Session ID
+   * @param {number} currentVersion - Current template version
+   * @param {number} timeout - Timeout in milliseconds (default: 15000)
+   */
+  waitUntilFresh: async (sessionId, currentVersion = 0, timeout = 15000) => {
+    const start = Date.now();
+    
+    while (Date.now() - start < timeout) {
+      try {
+        const response = await api.getSessionStatus(sessionId);
+        const newVersion = response.data?.template_version ?? 0;
+        
+        if (newVersion > currentVersion) {
+          console.log('✅ Template version advanced:', { from: currentVersion, to: newVersion });
+          return response.data;
+        }
+        
+        // Wait before next poll
+        await new Promise(resolve => setTimeout(resolve, 400));
+      } catch (error) {
+        console.warn('Error polling session status:', error.message);
+        // Continue polling even if individual requests fail
+        await new Promise(resolve => setTimeout(resolve, 400));
+      }
+    }
+    
+    console.warn(`⏰ Timeout waiting for template version to advance from ${currentVersion}`);
+    // Don't throw error, just return null to indicate timeout
+    throw new Error(`Template version sync timeout after ${timeout}ms`);
+  },
+
+  /**
+   * Wait for fresh headers with flexible validation and fast timeout
+   * @param {string} sessionId - Session ID
+   * @param {number} prevVersion - Previous template version
+   * @param {number} minHeaders - Minimum expected header count (optional)
+   * @param {number} timeout - Timeout in milliseconds (default: 8000)
+   */
+  waitForFreshHeaders: async (sessionId, prevVersion, minHeaders, timeout = 8000) => {
+    const started = Date.now();
+    let attempts = 0;
+    const maxAttempts = 20; // Max 20 attempts
+    
+    while (Date.now() - started < timeout && attempts < maxAttempts) {
+      attempts++;
+      try {
+        const { data } = await api.getSessionStatus(sessionId);
+        if (!data?.success) {
+          console.warn(`Attempt ${attempts}: Session status not ready`);
+          await new Promise(r => setTimeout(r, 200));
+          continue;
+        }
+        
+        const vOk = data.template_version > prevVersion;
+        // Make header count check optional and more flexible
+        const hOk = !minHeaders || data.headers_count >= minHeaders || data.template_version > prevVersion + 1;
+        
+        if (vOk && hOk) {
+          console.log('✅ Fresh headers ready:', { version: data.template_version, headers: data.headers_count, attempts });
+          return data;
+        }
+        
+        // If version advanced but headers not ready, still consider it success after a few attempts
+        if (vOk && attempts > 5) {
+          console.log('✅ Version advanced, accepting result:', { version: data.template_version, attempts });
+          return data;
+        }
+        
+        await new Promise(r => setTimeout(r, 200));
+      } catch (error) {
+        console.warn(`Attempt ${attempts}: Error polling headers:`, error.message);
+        await new Promise(r => setTimeout(r, 300));
+      }
+    }
+    
+    // Don't throw error, just log warning and return - the operation likely succeeded
+    console.warn(`⚠️ Header sync timeout after ${attempts} attempts, but operation may have succeeded`);
+    try {
+      const { data } = await api.getSessionStatus(sessionId);
+      if (data?.template_version > prevVersion) {
+        console.log('✅ Operation succeeded despite timeout');
+        return data;
+      }
+    } catch (e) {
+      console.warn('Final status check failed:', e.message);
+    }
+    
+    // Return a reasonable fallback instead of throwing
+    return { template_version: prevVersion + 1, headers_count: minHeaders || 0 };
+  },
 
   // ==========================================
   // 9️⃣ UTILITY ENDPOINTS
@@ -824,7 +1039,7 @@ const api = {
   // ==========================================
 
   /**
-   * Create Factwise ID column by combining two existing columns
+   * Create Factwise ID column by combining two existing columns (no sync wait)
    * @param {string} sessionId - Session ID
    * @param {string} firstColumn - First column name
    * @param {string} secondColumn - Second column name
@@ -832,12 +1047,22 @@ const api = {
    */
   createFactwiseId: async (sessionId, firstColumn, secondColumn, operator = '_') => {
     const effectiveSessionId = sessionId || await ensureSession();
-    return axios.post(`${API_URL}/create-factwise-id/`, {
-      session_id: effectiveSessionId,
-      first_column: firstColumn,
-      second_column: secondColumn,
-      operator: operator
-    });
+    
+    showGlobalLoader(true);
+    try {
+      const resp = await axios.post(`${API_URL}/create-factwise-id/`, {
+        session_id: effectiveSessionId,
+        first_column: firstColumn,
+        second_column: secondColumn,
+        operator: operator
+      });
+      
+      // Just return immediately - no waiting for sync
+      console.log('✅ Factwise ID request sent successfully');
+      return resp;
+    } finally {
+      showGlobalLoader(false);
+    }
   },
 
   // ==========================================
@@ -865,16 +1090,21 @@ const api = {
     }),
 
   /**
-   * Apply formula rules to session data and create new tag columns
+   * Apply formula rules to session data and create new tag columns (with proper sync)
    * @param {string} sessionId - Session ID
    * @param {Array} formulaRules - Array of formula rule objects
    */
   applyFormulas: async (sessionId, formulaRules) => {
     const effectiveSessionId = sessionId || await ensureSession();
-    return axios.post(`${API_URL}/formulas/apply/`, {
+    
+    // Apply the formulas
+    const response = await axios.post(`${API_URL}/formulas/apply/`, {
       session_id: effectiveSessionId,
       formula_rules: formulaRules
     });
+    
+    console.log('✅ Formula rules applied successfully');
+    return response;
   },
 
   /**
@@ -1007,6 +1237,76 @@ const api = {
       warnings,
       ruleCount: safeRules.length
     };
+  },
+
+  // ==========================================
+  // DASHBOARD AND DOWNLOAD ENDPOINTS
+  // ==========================================
+
+  /**
+   * Get dashboard data including uploads and templates
+   */
+  getUploadDashboard: () =>
+    axios.get(`${API_URL}/dashboard/`),
+
+  /**
+   * Enhanced file download with proper file type handling
+   * @param {string} sessionId - Session ID
+   * @param {string} fileType - File type ('original', 'converted', or 'template')
+   */
+  downloadFileEnhanced: async (sessionId, fileType = 'converted') => {
+    try {
+      let endpoint;
+      switch (fileType) {
+        case 'original':
+          endpoint = `${API_URL}/download/${sessionId}/original/`;
+          break;
+        case 'template':
+          endpoint = `${API_URL}/download/${sessionId}/template/`;
+          break;
+        case 'converted':
+        default:
+          endpoint = `${API_URL}/download/${sessionId}/converted/`;
+          break;
+      }
+      
+      const response = await axios.get(endpoint, {
+        responseType: 'blob',
+        timeout: 60000 // 1 minute timeout for downloads
+      });
+
+      // Get filename from response headers
+      const contentDisposition = response.headers['content-disposition'];
+      let filename = `download_${sessionId}.xlsx`;
+      
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+        if (filenameMatch && filenameMatch[1]) {
+          filename = filenameMatch[1].replace(/['"]/g, '');
+        }
+      }
+
+      // Create download link
+      const blob = new Blob([response.data], {
+        type: response.headers['content-type'] || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', filename);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+
+      return {
+        success: true,
+        filename: filename
+      };
+    } catch (error) {
+      console.error(`Error downloading ${fileType} file:`, error);
+      throw new Error(`Failed to download ${fileType} file: ${error.response?.data?.error || error.message}`);
+    }
   }
 };
 

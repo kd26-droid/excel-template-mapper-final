@@ -393,14 +393,23 @@ const FormulaBuilder = ({
         }
       }
       
-      const response = await api.applyFormulas(sessionId, formulaRules);
+      const { data: res } = await api.applyFormulas(sessionId, formulaRules);
+      if (res?.success && res?.snapshot) {
+        // Apply snapshot immediately - parent component will handle this if applySnapshotToEditor is available
+        if (onApplyFormulas) {
+          onApplyFormulas({
+            ...res,
+            headers: res.snapshot.headers,
+            formula_rules: res.snapshot.formula_rules
+          });
+        }
+      }
       
-      if (response.data.success) {
-        showSnackbar(`Applied ${response.data.rules_applied} formula rules successfully!`, 'success');
-        onApplyFormulas(response.data);
+      if (res.success) {
+        showSnackbar(`Applied ${res.rules_applied} formula rules successfully!`, 'success');
         onClose();
       } else {
-        throw new Error(response.data.error || 'Failed to apply formulas');
+        throw new Error(res.error || 'Failed to apply formulas');
       }
     } catch (error) {
       console.error('Error applying formulas:', error);

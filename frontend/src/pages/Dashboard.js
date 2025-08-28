@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import LoaderOverlay, { useGlobalBlock } from '../components/LoaderOverlay';
 import { 
   Typography, 
   Grid, 
@@ -55,11 +56,19 @@ import {
   Clear as ClearIcon,
   Science as ScienceIcon
 } from '@mui/icons-material';
-import api from '../services/api';
+import api, { setGlobalLoaderCallback } from '../services/api';
 import FormulaBuilder from '../components/FormulaBuilder';
 
 const Dashboard = () => {
   const [uploads, setUploads] = useState([]);
+  const [globalLoading, setGlobalLoading] = useState(false);
+  useGlobalBlock(globalLoading);
+  
+  // Setup global loader callback
+  useEffect(() => {
+    setGlobalLoaderCallback(setGlobalLoading);
+    return () => setGlobalLoaderCallback(null);
+  }, []);
   const [templates, setTemplates] = useState([]);
   const [loading, setLoading] = useState(true);
   const [templatesLoading, setTemplatesLoading] = useState(true);
@@ -397,20 +406,13 @@ const Dashboard = () => {
       // Apply template to the most recent session
       const targetSession = sessionsWithData[0];
       try {
-        const response = await api.applyMappingTemplate(targetSession.session_id, template.id);
-        if (response.data.success) {
-          // Navigate to DataEditor to show results
-          navigate(`/data-editor/${targetSession.session_id}`);
-        } else {
-          console.error('Failed to apply template:', response.data.error);
-          // Fall back to upload flow
-          navigate('/upload', { 
-            state: { 
-              selectedTemplate: template,
-              autoApplyTemplate: true 
-            } 
-          });
-        }
+        // Navigate to ColumnMapping and let it handle template application using its working logic
+        navigate(`/mapping/${targetSession.session_id}`, {
+          state: { 
+            autoApplyTemplate: template,
+            fromDashboard: true
+          }
+        });
       } catch (error) {
         console.error('Error applying template:', error);
         // Fall back to upload flow
@@ -544,8 +546,8 @@ const Dashboard = () => {
     setDownloadingTemplate(prev => ({ ...prev, [uploadId]: true }));
     
     try {
-      // For template files, we'll download the original template file
-      await api.downloadFileEnhanced(uploadId, 'original');
+      // For FW Template, download the original template file
+      await api.downloadFileEnhanced(uploadId, 'template');
     } catch (err) {
       console.error('Error downloading template file:', err);
     } finally {
@@ -1451,6 +1453,9 @@ const Dashboard = () => {
         onClose={handleCloseFormulaBuilder}
         onSave={handleSaveFormulaTemplate}
       />
+
+      {/* Global Loader Overlay */}
+      <LoaderOverlay visible={globalLoading} label="Processing..." />
     </Box>
   );
 };

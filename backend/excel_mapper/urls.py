@@ -4,8 +4,11 @@ from django.urls import path
 from .views import (
     # Basic functionality views
     health_check,
+    get_session_snapshot,
     debug_session,
     system_diagnostics,
+    session_status,
+    rebuild_template,
     upload_files,
     get_headers,
     mapping_suggestions,
@@ -17,6 +20,7 @@ from .views import (
     save_data,
     download_file,
     download_original_file,
+    download_template_file,
     download_grid_excel,
     
     # Unified Template + Formula views (MappingTemplate based)
@@ -45,6 +49,15 @@ urlpatterns = [
     # Health check
     path('health/', health_check, name='health-check'),
     
+    # Session snapshot
+    path('session/<str:session_id>/snapshot/', get_session_snapshot, name='get-session-snapshot'),
+    
+    # Session status
+    path('session/<str:session_id>/status/', session_status, name='session-status'),
+    
+    # Template rebuild
+    path('rebuild-template/', rebuild_template, name='rebuild-template'),
+    
     # Debug session
     path('debug-session/', debug_session, name='debug-session'),
     path('system-diagnostics/', system_diagnostics, name='system-diagnostics'),
@@ -65,7 +78,10 @@ urlpatterns = [
 
     # Download endpoints
     path('download/', download_file, name='download-file'),
-    path('download/original/', download_original_file, name='download-original-file'),
+    path('download/<str:session_id>/converted/', download_file, name='download-converted-file'),
+    path('download/<str:session_id>/original/', download_original_file, name='download-original-file'),
+    path('download/<str:session_id>/template/', download_template_file, name='download-template-file'),
+    path('download/original/', download_original_file, name='download-original-file-legacy'),
     path('download/grid-excel/', download_grid_excel, name='download-grid-excel'),
 
     # Dashboard

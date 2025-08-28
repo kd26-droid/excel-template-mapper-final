@@ -1,5 +1,6 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
+import LoaderOverlay, { useGlobalBlock } from '../components/LoaderOverlay';
 import {
   Typography, 
   Button, 
@@ -38,10 +39,19 @@ import {
   Science as ScienceIcon
 } from '@mui/icons-material';
 import * as XLSX from 'xlsx';
-import api from '../services/api';
+import api, { setGlobalLoaderCallback } from '../services/api';
 // Removed unused UploadFormulaBuilder import
 
 const UploadFiles = () => {
+  const [globalLoading, setGlobalLoading] = useState(false);
+  useGlobalBlock(globalLoading);
+  
+  // Setup global loader callback
+  useEffect(() => {
+    setGlobalLoaderCallback(setGlobalLoading);
+    return () => setGlobalLoaderCallback(null);
+  }, []);
+  
   const [userFile, setUserFile] = useState(null);
   const [templateFile, setTemplateFile] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -313,8 +323,9 @@ const UploadFiles = () => {
       formData.append('templateSheetName', selectedTemplateSheet);
       formData.append('templateHeaderRow', templateHeaderRow.toString());
       
-      // Add formula rules if they exist
-      if (formulaRules && formulaRules.length > 0) {
+      // Add formula rules if they exist and NO mapping template is selected
+      // When a template is selected, it already contains the rules, so don't send them again
+      if (!selectedTemplate && formulaRules && formulaRules.length > 0) {
         formData.append('formulaRules', JSON.stringify(formulaRules));
       }
       
@@ -333,10 +344,13 @@ const UploadFiles = () => {
           setSuccess(successMessage);
           
           setTimeout(() => {
-            // Always go to mapping first to review the applied mappings
-            // The formula columns will be applied when user proceeds to data editor
+            // Navigate to ColumnMapping and let it handle template application using its working logic
             navigate(`/mapping/${response.data.session_id}`, {
-              state: { smartTagFormulaRules: formulaRules }
+              state: { 
+                autoApplyTemplate: selectedTemplate,
+                fromUpload: true,
+                smartTagFormulaRules: formulaRules
+              }
             });
           }, 1500);
           
@@ -973,6 +987,8 @@ const UploadFiles = () => {
         </DialogActions>
       </Dialog>
 
+      {/* Global Loader Overlay */}
+      <LoaderOverlay visible={globalLoading} label="Processing..." />
     </Container>
   );
 };

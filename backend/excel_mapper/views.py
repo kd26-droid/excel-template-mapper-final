@@ -12,12 +12,14 @@ from typing import Dict, Any, Optional
 
 import pandas as pd
 from django.conf import settings
+from django.core.cache import cache
 from django.http import FileResponse, Http404, JsonResponse, HttpResponse
 from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from django.views.decorators.cache import never_cache
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 import numpy as np
@@ -302,6 +304,48 @@ def normalize_headers_to_internal(headers: list, existing_headers: Optional[list
 # In-memory store for each session
 SESSION_STORE = {}
 
+# Cache control and snapshot helper functions
+def no_store(resp: Response) -> Response:
+    """Add no-store cache headers to prevent caching issues across workers."""
+    resp["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    resp["Pragma"] = "no-cache"
+    resp["Expires"] = "0"
+    return resp
+
+def increment_template_version(session_id):
+    """Increment template version for a session to track changes."""
+    if session_id in SESSION_STORE:
+        current_version = SESSION_STORE[session_id].get('template_version', 0)
+        new_version = current_version + 1
+        SESSION_STORE[session_id]['template_version'] = new_version
+        save_session_to_file(session_id, SESSION_STORE[session_id])
+        logger.info(f"🔄 Template version incremented for session {session_id}: {current_version} → {new_version}")
+        return new_version
+    return 0
+
+def get_template_version(session_id):
+    """Get current template version for a session."""
+    if session_id in SESSION_STORE:
+        return SESSION_STORE[session_id].get('template_version', 0)
+    return 0
+
+def build_snapshot(info: dict) -> dict:
+    """Build canonical snapshot of session state."""
+    return {
+        "version": info.get("version", 0),
+        "template_version": info.get("template_version", 0),
+        "headers": info.get("enhanced_headers") or info.get("current_template_headers") or info.get("template_headers") or [],
+        "mappings": info.get("mappings") or {"mappings": []},
+        "default_values": info.get("default_values") or {},
+        "counts": {
+            "tags_count": info.get("tags_count", 1),
+            "spec_pairs_count": info.get("spec_pairs_count", 1),
+            "customer_id_pairs_count": info.get("customer_id_pairs_count", 1),
+        },
+        "formula_rules": info.get("formula_rules") or [],
+        "factwise_rules": info.get("factwise_rules") or [],
+    }
+
 # Session persistence helper functions
 def save_session_to_file(session_id, session_data):
     """Save session data to file for persistence."""
@@ -335,6 +379,40 @@ def load_session_from_file(session_id):
         logger.warning(f"Failed to load session {session_id}: {e}")
     return None
 
+def get_session_consistent(session_id: str):
+    """
+    Get session from consistent storage (cache-first approach for Azure multi-worker).
+    1) Try Redis cache first (shared across workers)
+    2) Fallback to in-process memory
+    3) Fallback to file snapshot
+    """
+    # Try cache first (shared across Azure workers)
+    data = cache.get(f"mapper:session:{session_id}")
+    if data:
+        logger.info(f"🔍 Session {session_id} found in cache")
+        return data
+    
+    # Fallback to old in-memory store
+    if session_id in SESSION_STORE:
+        data = SESSION_STORE[session_id]
+        # Warm cache for next time
+        cache.set(f"mapper:session:{session_id}", data, 86400)
+        logger.info(f"🔄 Session {session_id} found in memory, warmed cache")
+        return data
+    
+    # Final fallback to file snapshot
+    logger.info(f"🔍 Session {session_id} not in cache/memory, trying file")
+    data = load_session_from_file(session_id)
+    if data:
+        # Warm both cache and memory
+        cache.set(f"mapper:session:{session_id}", data, 86400)
+        SESSION_STORE[session_id] = data
+        logger.info(f"🔄 Restored session {session_id} from file, warmed cache/memory")
+        return data
+    
+    logger.warning(f"❌ Session {session_id} not found anywhere")
+    return None
+
 def get_session(session_id):
     """
     Universal session retrieval that works across multiple workers.
@@ -360,11 +438,15 @@ def get_session(session_id):
 def save_session(session_id, session_data):
     """
     Universal session saving that persists across multiple workers.
-    Saves to both memory and file.
+    Saves to cache (shared), memory, and file.
     """
+    # Save to shared cache first (critical for Azure multi-worker)
+    cache.set(f"mapper:session:{session_id}", session_data, 86400)
+    # Keep compatibility with existing in-memory store
     SESSION_STORE[session_id] = session_data
+    # Persist to file/blob storage
     save_session_to_file(session_id, session_data)
-    logger.info(f"💾 Saved session {session_id} to both memory and file")
+    logger.info(f"💾 Saved session {session_id} to cache, memory, and file")
 
 
 # Use hybrid file manager from azure_storage module
@@ -606,6 +688,14 @@ def health_check(request):
         'version': '1.0.0'
     })
 
+@api_view(['GET'])
+def get_session_snapshot(request, session_id):
+    """Get canonical snapshot of session state."""
+    info = get_session(session_id)
+    if not info:
+        return no_store(Response({"success": False, "error": "Invalid session"}, status=400))
+    return no_store(Response({"success": True, "snapshot": build_snapshot(info)}))
+
 
 @api_view(['POST'])
 def debug_session(request):
@@ -758,7 +848,36 @@ def upload_files(request):
                     
                     # Apply formula rules if they exist (from template or Step 3)
                     template_formula_rules = getattr(template, 'formula_rules', []) or []
-                    combined_formula_rules = template_formula_rules + formula_rules
+                    
+                    # CRITICAL FIX: Deduplicate rules to prevent duplicate columns
+                    def _rule_signature(rule):
+                        """Create a unique signature for a rule to identify duplicates."""
+                        tgt = (rule.get('target_column') or '').strip().lower()
+                        ctype = (rule.get('column_type') or '').strip().lower()
+                        spec = (rule.get('specification_name') or '').strip().lower()
+                        subs = rule.get('sub_rules') or []
+                        norm = []
+                        for sr in subs:
+                            s = (sr.get('search_text') or '').strip().lower()
+                            o = (sr.get('output_value') or sr.get('tag_value') or '').strip().lower()
+                            cs = bool(sr.get('case_sensitive'))
+                            norm.append((s, o, cs))
+                        # order-insensitive signature
+                        return (ctype, tgt, spec, tuple(sorted(norm)))
+                    
+                    combined_formula_rules = []
+                    seen_signatures = set()
+                    for r in (template_formula_rules or []) + (formula_rules or []):
+                        if not r:
+                            continue
+                        sig = _rule_signature(r)
+                        if sig in seen_signatures:
+                            logger.info(f"🔧 DEBUG: Skipping duplicate formula rule with signature: {sig}")
+                            continue
+                        seen_signatures.add(sig)
+                        combined_formula_rules.append(r)
+                    
+                    logger.info(f"🔧 DEBUG: Deduplicated formula rules: {len(template_formula_rules or [])} template + {len(formula_rules or [])} request = {len(combined_formula_rules)} unique")
                     if combined_formula_rules:
                         SESSION_STORE[session_id]["formula_rules"] = combined_formula_rules
                         
@@ -922,6 +1041,7 @@ def upload_files(request):
 
 
 @api_view(['GET'])
+@never_cache
 def get_headers(request, session_id):
     """Get headers from uploaded files."""
     try:
@@ -1372,6 +1492,7 @@ def save_mappings(request):
 
 
 @api_view(['GET'])
+@never_cache
 def get_existing_mappings(request, session_id):
     """Get existing mappings for a session."""
     try:
@@ -1448,10 +1569,21 @@ def get_existing_mappings(request, session_id):
             except Exception:
                 session_metadata['template_name'] = 'Applied Template'
         
+        # Normalize mappings to always return { mappings: [{"source": "...", "target": "..."}] } format
+        normalized_mappings = {}
+        if isinstance(mappings, dict) and 'mappings' in mappings and isinstance(mappings['mappings'], list):
+            normalized_mappings = mappings
+        elif isinstance(mappings, list):
+            normalized_mappings = {'mappings': mappings}
+        elif isinstance(mappings, dict):
+            # old shape {target: source}
+            normalized_mappings = {'mappings': [{'source': s, 'target': t} for t, s in mappings.items()]}
+        else:
+            normalized_mappings = {'mappings': []}
+
         return Response({
             'success': True,
-            # Return mappings using internal names only
-            'mappings': mappings,
+            'mappings': normalized_mappings,                # <— one shape
             'default_values': default_values,
             'session_metadata': session_metadata
         })
@@ -1465,6 +1597,7 @@ def get_existing_mappings(request, session_id):
 
 
 @api_view(['GET'])
+@never_cache
 def data_view(request):
     """Get transformed data with applied mappings."""
     try:
@@ -1523,14 +1656,18 @@ def data_view(request):
         # Check if we have enhanced data from Factwise ID creation or formula application
         enhanced_data = info.get("formula_enhanced_data")
         enhanced_headers = info.get("enhanced_headers")
-        
-        if enhanced_data and enhanced_headers:
-            # Use enhanced data that includes Factwise IDs and formulas
+
+        template_just_applied = info.get("original_template_id") is not None
+        force_fresh_mapping = template_just_applied or request.GET.get('force_fresh', 'false').lower() == 'true'
+
+        using_enhanced = False
+        if enhanced_data and enhanced_headers and not force_fresh_mapping:
             transformed_rows = enhanced_data
             headers_to_use = enhanced_headers
+            using_enhanced = True
             logger.info(f"🔧 DEBUG: Using enhanced data with {len(headers_to_use)} headers and {len(transformed_rows)} rows")
         else:
-            # Apply mappings to get fresh transformed data
+            # fresh mapping
             mapping_result = apply_column_mappings(
                 client_file=info["client_path"],
                 mappings=formatted_mappings,
@@ -1538,10 +1675,24 @@ def data_view(request):
                 header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0,
                 session_id=session_id
             )
-            
-            # Extract data and headers from new format
+
             transformed_rows = mapping_result['data']
             headers_to_use = mapping_result['headers']
+            using_enhanced = False
+            logger.info(f"🔧 DEBUG: Using fresh mapped data with {len(headers_to_use)} headers and {len(transformed_rows)} rows")
+            
+            # CRITICAL FIX: If we forced fresh mapping due to template application, we need to re-apply formulas
+            # to ensure Tag columns are populated with the correct data from the original file
+            if force_fresh_mapping and template_just_applied:
+                logger.info(f"🔧 DEBUG: Re-applying formulas after fresh mapping for template application")
+                # Clear any stale enhanced data that might interfere and update local variables
+                if "formula_enhanced_data" in info:
+                    del info["formula_enhanced_data"]
+                if "enhanced_headers" in info:
+                    del info["enhanced_headers"]
+                # Update local variables to reflect the clearing
+                enhanced_data = None
+                enhanced_headers = None
         
         # Apply formula rules if they exist to create unique tag columns
         formula_rules = info.get("formula_rules", [])
@@ -1559,92 +1710,36 @@ def data_view(request):
                 logger.info(f"🔧 DEBUG: Added formula headers to response: {formula_headers}")
                 logger.info(f"🔧 DEBUG: Updated headers_to_use: {headers_to_use}")
         
-        # Deduplicate formula rules to prevent duplicate columns
-        if formula_rules:
-            # Create a unique key for each rule to identify duplicates
-            seen_rules = set()
-            deduplicated_rules = []
-            
-            for rule in formula_rules:
-                # Create a unique identifier for this rule
-                rule_key = (
-                    rule.get('source_column', ''),
-                    rule.get('column_type', ''),
-                    rule.get('specification_name', ''),
-                    str(rule.get('sub_rules', []))
-                )
+        # De-dup rules as you already do...
+        formula_rules = info.get('formula_rules', [])
+
+        # Convert list-based data to dict format BEFORE applying formulas
+        if transformed_rows and len(transformed_rows) > 0 and isinstance(transformed_rows[0], list):
+            dict_rows = []
+            for row_list in transformed_rows:
+                row_dict = {}
                 
-                if rule_key not in seen_rules:
-                    seen_rules.add(rule_key)
-                    deduplicated_rules.append(rule)
-                else:
-                    logger.info(f"🔧 DEBUG: Skipping duplicate formula rule: {rule}")
-            
-            formula_rules = deduplicated_rules
-            logger.info(f"🔧 DEBUG: Deduplicated {len(info.get('formula_rules', []))} rules to {len(formula_rules)} rules")
-        
-        # IMPORTANT: If we already have enhanced data/headers, do NOT re-apply formula rules here.
-        # This prevents duplicate Tag_N columns from being generated repeatedly.
-        applying_on_enhanced = bool(enhanced_data and enhanced_headers)
-        if formula_rules and transformed_rows and not applying_on_enhanced:
-            try:
-                # Get all expected formula columns from session's formula_rules
-                expected_formula_columns = set()
-                for rule in formula_rules:
-                    target_col = rule.get('target_column')
-                    if target_col and (target_col.startswith('Tag_') or target_col.startswith('Spec_') or target_col == 'Tag' or 'Specification' in target_col):
-                        expected_formula_columns.add(target_col)
-                
-                # Check which formula columns are missing from current headers
-                existing_formula_columns = [h for h in headers_to_use if h.startswith('Tag_') or h.startswith('Spec_') or h == 'Tag' or 'Specification' in h]
-                missing_formula_columns = expected_formula_columns - set(existing_formula_columns)
-                
-                if missing_formula_columns or expected_formula_columns:
-                    if missing_formula_columns:
-                        logger.info(f"🔧 DEBUG: Missing formula columns: {missing_formula_columns}, applying formulas")
+                for i, header in enumerate(headers_to_use):
+                    if i < len(row_list):
+                        row_dict[header] = row_list[i]
                     else:
-                        logger.info(f"🔧 DEBUG: All formula columns exist: {existing_formula_columns}, applying formulas to populate data")
-                else:
-                    logger.info(f"🔧 DEBUG: No existing formula columns found, applying {len(formula_rules)} formula rules")
+                        # Handle missing values
+                        row_dict[header] = ""
                 
-                # Convert list-based data to dict format for formula processing
-                if transformed_rows and isinstance(transformed_rows[0], list):
-                    dict_rows = []
-                    for row_list in transformed_rows:
-                        row_dict = {}
-                        for i, header in enumerate(headers_to_use):
-                            if i < len(row_list):
-                                row_dict[header] = row_list[i]
-                            else:
-                                row_dict[header] = ""
-                        dict_rows.append(row_dict)
-                    transformed_rows_for_formulas = dict_rows
-                else:
-                    transformed_rows_for_formulas = transformed_rows
-                    
-                formula_result = apply_formula_rules(
-                    data_rows=transformed_rows_for_formulas,
-                    headers=headers_to_use,
-                    formula_rules=formula_rules,
-                    session_info=info
-                )
-                
-                # Use formula-enhanced data
-                transformed_rows = formula_result['data']
-                headers_to_use = formula_result['headers']
-                
-                # Update canonical headers to include formula-generated columns
-                try:
-                    info["current_template_headers"] = headers_to_use
-                    save_session(session_id, info)
-                except Exception:
-                    pass
-                
-                logger.info(f"🔧 DEBUG: Applied formula rules, new headers: {headers_to_use}")
-                
-            except Exception as e:
-                logger.warning(f"Formula application failed in data_view: {e}")
-                # Continue with non-enhanced data
+                dict_rows.append(row_dict)
+            transformed_rows = dict_rows
+
+        # IMPORTANT: apply formulas only if we did NOT use the enhanced branch
+        if formula_rules and transformed_rows and not using_enhanced:
+            formula_result = apply_formula_rules(transformed_rows, headers_to_use, formula_rules, replace_existing=False, session_info=info)
+            transformed_rows = formula_result['data']
+            headers_to_use = formula_result['headers']
+            # Cache for next time
+            info['formula_enhanced_data'] = transformed_rows
+            info['enhanced_headers'] = headers_to_use
+            info['current_template_headers'] = headers_to_use
+            info['version'] = info.get('version', 0) + 1
+            save_session(session_id, info)
         
         # Apply factwise ID rules if they exist
         factwise_rules = info.get("factwise_rules", [])
@@ -1740,21 +1835,7 @@ def data_view(request):
                 'error': 'No data could be transformed'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Convert list-based data to dict format - headers are already unique
-        if transformed_rows and isinstance(transformed_rows[0], list):
-            dict_rows = []
-            for row_list in transformed_rows:
-                row_dict = {}
-                
-                for i, header in enumerate(headers_to_use):
-                    if i < len(row_list):
-                        row_dict[header] = row_list[i]
-                    else:
-                        # Handle missing values
-                        row_dict[header] = ""
-                
-                dict_rows.append(row_dict)
-            transformed_rows = dict_rows
+        # List-to-dict conversion already done above before formula processing
         
         # Apply default values for unmapped fields
         default_values = info.get("default_values", {})
@@ -1899,28 +1980,102 @@ def data_view(request):
             external_headers.append(external_header)
             internal_to_external_mapping[header] = external_header
         
-        return Response({
+        # CRITICAL FIX: Safe blank column cleanup - remove empty columns that have no data
+        # This fixes the persistent blank "Tag" column issue without affecting functionality
+        cleaned_headers = []
+        cleaned_external_headers = []
+        cleaned_internal_to_external = {}
+        
+        for i, header in enumerate(headers_to_use):
+            # Check if this column has any non-empty data across all rows
+            has_data = False
+            for row in transformed_rows:
+                if isinstance(row, dict):
+                    value = row.get(header, '')
+                elif isinstance(row, list) and i < len(row):
+                    value = row[i] if row[i] is not None else ''
+                else:
+                    value = ''
+                
+                # Consider column non-empty if it has any actual content
+                if value and str(value).strip() and str(value).strip().lower() not in ['', 'none', 'null', 'nan']:
+                    has_data = True
+                    break
+            
+            # Keep the column if it has data OR if it's a critical system column
+            is_critical_column = any([
+                header in ['Item code', 'Item name', 'Description', 'Item type', 'Measurement unit', 'Procurement entity name'],
+                header.startswith('Specification_Name_') and header in info.get('default_values', {}),
+                header in info.get('default_values', {}),  # Keep columns with default values
+            ])
+            
+            if has_data or is_critical_column:
+                cleaned_headers.append(header)
+                if i < len(external_headers):
+                    cleaned_external_headers.append(external_headers[i])
+                    cleaned_internal_to_external[header] = external_headers[i]
+                logger.debug(f"🔧 CLEANUP: Kept column '{header}' (has_data: {has_data}, is_critical: {is_critical_column})")
+            else:
+                logger.info(f"🔧 CLEANUP: Removed blank column '{header}' with no data")
+        
+        # Update the variables to use cleaned versions
+        headers_to_use = cleaned_headers
+        external_headers = cleaned_external_headers
+        internal_to_external_mapping = cleaned_internal_to_external
+        
+        # Also clean up the paginated_rows to only include data for kept columns  
+        original_header_count = len([h for h in (info.get('current_template_headers', []) or info.get('enhanced_headers', []) or [])])
+        if len(cleaned_headers) < original_header_count:
+            logger.info(f"🔧 CLEANUP: Cleaning data rows to match {len(cleaned_headers)} cleaned headers")
+            cleaned_paginated_rows = []
+            original_headers = [h for h in headers_to_use]  # Keep original reference
+            
+            for row in paginated_rows:
+                if isinstance(row, dict):
+                    # Keep only fields that correspond to cleaned headers
+                    cleaned_row = {header: row.get(header, '') for header in cleaned_headers}
+                    cleaned_paginated_rows.append(cleaned_row)
+                elif isinstance(row, list):
+                    # Keep only columns that correspond to cleaned headers indices
+                    cleaned_row = []
+                    original_headers_list = list(info.get('current_template_headers', [])) or headers_to_use
+                    for header in cleaned_headers:
+                        try:
+                            idx = original_headers_list.index(header)
+                            cleaned_row.append(row[idx] if idx < len(row) else '')
+                        except (ValueError, IndexError):
+                            cleaned_row.append('')
+                    cleaned_paginated_rows.append(cleaned_row)
+                else:
+                    cleaned_paginated_rows.append(row)
+            
+            paginated_rows = cleaned_paginated_rows
+        
+        # Clear one-shot flag so future reads use enhanced branch
+        if template_just_applied:
+            info.pop('original_template_id', None)
+            save_session(session_id, info)
+
+        # Include formula rules in response so frontend can display them
+        formula_rules = info.get('formula_rules', [])
+        
+        return no_store(Response({
             'success': True,
-            # IMPORTANT: Keep data keyed by internal headers so frontend can access
-            # by the field keys it uses (data.headers). Use display_headers only for
-            # column labels.
+            'headers': headers_to_use,
             'data': paginated_rows,
-            'headers': headers_to_use,  # Internal headers for field mapping
-            'formula_rules': formula_rules,  # Include existing formula rules
-            'pagination': {
-                'page': page,
-                'page_size': page_size,
-                'total_rows': total_rows,
-                'total_pages': (total_rows + page_size - 1) // page_size
-            }
-        })
+            'total_rows': total_rows,
+            'formula_rules': formula_rules,
+            'template_version': info.get('template_version', 0),
+        }))
         
     except Exception as e:
+        import traceback
         logger.error(f"Error in data_view: {e}")
-        return Response({
+        logger.error(f"Full traceback: {traceback.format_exc()}")
+        return no_store(Response({
             'success': False,
             'error': f'Failed to get data: {str(e)}'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        }, status=500))
 
 
 @api_view(['POST'])
@@ -1960,15 +2115,98 @@ def save_data(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+@api_view(['GET'])
+@never_cache
+def session_status(request, session_id):
+    """Get session status including template version for change tracking."""
+    try:
+        info = get_session_consistent(session_id)
+        if not info:
+            return no_store(Response({
+                'success': False,
+                'error': 'Session not found'
+            }, status=status.HTTP_404_NOT_FOUND))
+        
+        template_version = info.get('template_version', 0)
+        
+        # Get header counts for completeness
+        tags_count = info.get('tags_count', 1)
+        spec_pairs_count = info.get('spec_pairs_count', 1)
+        customer_id_pairs_count = info.get('customer_id_pairs_count', 1)
+        
+        # Get current headers
+        headers = info.get('enhanced_headers') or info.get('current_template_headers') or info.get('template_headers') or []
+        
+        return no_store(Response({
+            'success': True,
+            'template_version': template_version,
+            'session_id': session_id,
+            'counts': {
+                'tags_count': tags_count,
+                'spec_pairs_count': spec_pairs_count,
+                'customer_id_pairs_count': customer_id_pairs_count
+            },
+            'headers_count': len(headers),
+            'has_mappings': bool(info.get('mappings')),
+            'has_formula_rules': bool(info.get('formula_rules')),
+            'has_default_values': bool(info.get('default_values'))
+        }))
+        
+    except Exception as e:
+        logger.error(f"Error in session_status: {e}")
+        return no_store(Response({
+            'success': False,
+            'error': f'Failed to get session status: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR))
+
+
+@api_view(['POST'])
+def rebuild_template(request):
+    """Rebuild template and update column counts."""
+    try:
+        session_id = request.data.get('session_id')
+        if not session_id:
+            return Response({
+                'success': False,
+                'error': 'Session ID is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        info = get_session(session_id)
+        if not info:
+            return Response({
+                'success': False,
+                'error': 'Session not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Increment template version
+        new_version = increment_template_version(session_id)
+        logger.info(f"🔄 Rebuilt template for session {session_id}, version: {new_version}")
+        
+        return Response({
+            'success': True,
+            'template_version': new_version,
+            'message': 'Template rebuilt successfully'
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in rebuild_template: {e}")
+        return Response({
+            'success': False,
+            'error': f'Failed to rebuild template: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 @api_view(['GET', 'POST'])
-def download_file(request):
+def download_file(request, session_id=None):
     """Download processed/converted file."""
     try:
-        # Support both GET and POST requests (JSON or form data)
-        if request.method == 'POST':
-            session_id = request.data.get('session_id') or request.POST.get('session_id')
-        else:
-            session_id = request.GET.get('session_id')
+        # Support both URL path and query/form parameters for session_id
+        if not session_id:
+            # Fallback to old method for backwards compatibility
+            if request.method == 'POST':
+                session_id = request.data.get('session_id') or request.POST.get('session_id')
+            else:
+                session_id = request.GET.get('session_id')
         
         if not session_id:
             return Response({
@@ -2125,10 +2363,12 @@ def download_file(request):
 
 
 @api_view(['GET'])
-def download_original_file(request):
+def download_original_file(request, session_id=None):
     """Download original uploaded client file."""
     try:
-        session_id = request.GET.get('session_id')
+        # Support both URL path and query parameters for session_id
+        if not session_id:
+            session_id = request.GET.get('session_id')
         
         if not session_id or session_id not in SESSION_STORE:
             return Response({
@@ -2159,6 +2399,58 @@ def download_original_file(request):
         return Response({
             'success': False,
             'error': f'Download failed: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+def download_template_file(request, session_id=None):
+    """Download original uploaded template file."""
+    try:
+        # Support both URL path and query parameters for session_id
+        if not session_id:
+            session_id = request.GET.get('session_id')
+        
+        if not session_id or session_id not in SESSION_STORE:
+            return Response({
+                'success': False,
+                'error': 'Invalid session'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        info = SESSION_STORE[session_id]
+        template_path = info.get("template_path")
+        original_name = info.get("original_template_name")
+        
+        if not template_path:
+            return Response({
+                'success': False,
+                'error': 'No template file found in session'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Resolve the file path using hybrid_file_manager
+        try:
+            resolved_template_path = hybrid_file_manager.get_file_path(template_path)
+        except Exception:
+            # Fallback to original path if resolution fails
+            resolved_template_path = template_path
+        
+        if not Path(resolved_template_path).exists():
+            return Response({
+                'success': False,
+                'error': 'Template file not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        response = FileResponse(
+            open(resolved_template_path, 'rb'),
+            as_attachment=True,
+            filename=original_name or 'template.xlsx'
+        )
+        
+        return response
+    except Exception as e:
+        logger.error(f"Error downloading template file: {e}")
+        return Response({
+            'success': False,
+            'error': f'Template download failed: {str(e)}'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -2361,7 +2653,6 @@ def dashboard_view(request):
             # Generate the filename that would be used for download
             filled_sheet_name = None
             if is_complete:
-                from datetime import datetime
                 # Use the session creation time or current time for consistency
                 session_created = session_data.get('created')
                 if session_created:
@@ -2447,13 +2738,10 @@ def update_column_counts(request):
                 'error': 'Column counts must be positive integers'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Store column counts in session
+        # Store column counts in session (version will be bumped later atomically)
         info['tags_count'] = tags_count
         info['spec_pairs_count'] = spec_pairs_count
         info['customer_id_pairs_count'] = customer_id_pairs_count
-        
-        # Save session to file
-        save_session(session_id, info)
         
         # Get existing headers to preserve numbering
         existing_headers = info.get('current_template_headers') or info.get('enhanced_headers') or []
@@ -2524,15 +2812,6 @@ def update_column_counts(request):
             regenerated_headers.append(f'Customer_Identification_Name_{i+1}')
             regenerated_headers.append(f'Customer_Identification_Value_{i+1}')
 
-        info["current_template_headers"] = regenerated_headers
-        # Backward compatibility
-        info["enhanced_headers"] = regenerated_headers
-        save_session(session_id, info)
-
-        # Debug logging
-        logger.info(f"🔧 Updated session {session_id} with canonical headers: {regenerated_headers}")
-        logger.info(f"🔧 Session store now contains: {list(info.keys())}")
-
         # Compute template_optionals for the canonical headers (Tags/Spec/Customer always optional)
         def is_special_optional(h: str) -> bool:
             h_lower = (h or '').lower()
@@ -2543,16 +2822,31 @@ def update_column_counts(request):
 
         template_optionals = [True if is_special_optional(h) else False for h in regenerated_headers]
 
+        # Build canonical enhanced_headers and save to session BEFORE version bump
+        info["current_template_headers"] = regenerated_headers
+        info["enhanced_headers"] = regenerated_headers
+        info['template_columns'] = template_columns
+        info['template_optionals'] = template_optionals
+        info['column_counts'] = {
+            'tags_count': tags_count,
+            'spec_pairs_count': spec_pairs_count,
+            'customer_id_pairs_count': customer_id_pairs_count,
+        }
+        save_session(session_id, info)
+
+        # Atomic version bump AFTER all data is saved
+        new_version = increment_template_version(session_id)
+        
+        # Debug logging
+        logger.info(f"🔧 Updated session {session_id} with canonical headers: {regenerated_headers}")
+        logger.info(f"🔧 Session store now contains: {list(info.keys())}")
+
         return Response({
             'success': True,
-            'template_columns': template_columns,
+            'template_version': new_version,
             'enhanced_headers': regenerated_headers,
             'template_optionals': template_optionals,
-            'counts': {
-                'tags_count': tags_count,
-                'spec_pairs_count': spec_pairs_count,
-                'customer_id_pairs_count': customer_id_pairs_count
-            }
+            'column_counts': info['column_counts'],
         })
         
     except Exception as e:
@@ -2975,7 +3269,8 @@ def apply_mapping_template(request):
         logger.info(f"🔧 DEBUG: apply_mapping_template called with session_id: {session_id}, template_id: {template_id}")
         logger.debug(f"Request data: {request.data}")
         
-        if not session_id or session_id not in SESSION_STORE:
+        info = get_session_consistent(session_id)
+        if not session_id or not info:
             logger.error(f"❌ Invalid session_id: {session_id} (available: {list(SESSION_STORE.keys())})")
             return Response({
                 'success': False,
@@ -3029,6 +3324,14 @@ def apply_mapping_template(request):
             # Update session with applied template ID
             SESSION_STORE[session_id]["original_template_id"] = template_id
             logger.debug(f"Updated session with original_template_id: {template_id}")
+            
+            # CRITICAL FIX: Clear enhanced data cache to force fresh mapping on data review
+            if "formula_enhanced_data" in SESSION_STORE[session_id]:
+                del SESSION_STORE[session_id]["formula_enhanced_data"]
+                logger.debug("Cleared formula_enhanced_data cache")
+            if "enhanced_headers" in SESSION_STORE[session_id]:
+                del SESSION_STORE[session_id]["enhanced_headers"]
+                logger.debug("Cleared enhanced_headers cache")
             
             # CRITICAL FIX: Apply column counts from template and include counts implied by formula rules
             template_tags_count = getattr(template, 'tags_count', 1)
@@ -3381,18 +3684,32 @@ def apply_mapping_template(request):
                     SESSION_STORE[session_id]["mapped_data"] = current_data
                     logger.info(f"🔧 DEBUG: Applied {len(default_values)} default values to {len(current_data)} rows")
             
+            # Final save before template application completion
+            info['mappings'] = application_result.get('mappings') or info.get('mappings')
+            info['enhanced_headers'] = regenerated_headers
+            info['default_values'] = default_values or info.get('default_values', {})
+            info['column_counts'] = {
+                'tags_count': tags_count,
+                'spec_pairs_count': spec_pairs_count,
+                'customer_id_pairs_count': customer_id_pairs_count,
+            }
+            save_session(session_id, info)
+            
+            # Atomic version bump AFTER all data is saved
+            new_version = increment_template_version(session_id)
+            
             # Increment template usage
             template.increment_usage()
             
             return Response({
                 'success': True,
-                'message': f'Template "{template.name}" applied successfully',
-                'mappings': application_result['mappings'],
-                'formula_rules': formula_rules,
-                'factwise_rules': factwise_rules,
+                'template_version': new_version,
+                'enhanced_headers': regenerated_headers,
+                'mappings': application_result.get('mappings', {}),
+                'mappings_new_format': application_result.get('mappings_new_format', []),
                 'default_values': default_values,
-                'total_mapped': application_result['total_mapped'],
-                'total_template_columns': application_result['total_template_columns']
+                'column_counts': info['column_counts'],
+                'total_mapped': application_result.get('total_mapped', 0),
             })
         else:
             return Response({
@@ -3489,6 +3806,15 @@ def apply_formula_rules(data_rows, headers, formula_rules, replace_existing=Fals
                 else:
                     logger.warning(f"🔧 DEBUG: Specified Tag column '{column_name}' already exists, creating new one")
                     column_name = None  # Reset to None so we create a new one
+            elif target_column == 'Tag':
+                # CRITICAL FIX: Convert old-style 'Tag' to use first available numbered Tag column
+                logger.info(f"🔧 DEBUG: Converting old-style 'Tag' target to use existing numbered Tag column")
+                # Find the first available numbered Tag column in headers
+                for header in headers:
+                    if header.startswith('Tag_') and header not in used_column_names:
+                        column_name = header
+                        logger.info(f"🔧 DEBUG: Using existing Tag column '{column_name}' for old 'Tag' rule")
+                        break
             
             # If we don't have a valid column_name yet, create a new one
             if not column_name or column_name in used_column_names:
@@ -3632,12 +3958,10 @@ def apply_formulas(request):
         
         logger.info(f"🔧 DEBUG: apply_formulas called for session {session_id} with {len(formula_rules)} rules")
         
-        if not session_id or session_id not in SESSION_STORE:
+        info = get_session(session_id)
+        if not session_id or not info:
             logger.error(f"🔧 DEBUG: Session {session_id} not found")
-            return Response({
-                'success': False,
-                'error': 'Invalid session'
-            }, status=status.HTTP_400_BAD_REQUEST)
+            return no_store(Response({'success': False, 'error': 'Invalid session'}, status=400))
         
         if not formula_rules:
             return Response({
@@ -3645,8 +3969,7 @@ def apply_formulas(request):
                 'error': 'No formula rules provided'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Get session info
-        info = SESSION_STORE[session_id]
+        # Session info already retrieved via get_session_consistent
         enhanced_headers = info.get("enhanced_headers", []) or info.get("current_template_headers", [])
         
         # Get all existing columns from all sources
@@ -3728,34 +4051,35 @@ def apply_formulas(request):
         
         logger.info(f"🔧 DEBUG: Formula result - new_columns: {formula_result.get('new_columns', [])}, headers: {formula_result.get('headers', [])}")
         
-        # Save rules and cache enhanced data/headers to reflect immediately in UI
-        SESSION_STORE[session_id]["formula_rules"] = formula_rules
-        SESSION_STORE[session_id]["formula_enhanced_data"] = formula_result['data']
-        SESSION_STORE[session_id]["enhanced_headers"] = formula_result['headers']
-        # Update canonical headers to include formula columns to prevent flip-flop
-        try:
-            info = SESSION_STORE[session_id]
-            info["current_template_headers"] = formula_result['headers']
-            save_session(session_id, info)
-        except Exception:
-            pass
+        # Persist canonical state
+        info['formula_rules'] = formula_rules
+        info['formula_enhanced_data'] = formula_result['data']
+        info['enhanced_headers'] = formula_result['headers']
+        info['current_template_headers'] = formula_result['headers']
+        
+        # Increment template version when formulas create new columns
+        new_version = increment_template_version(session_id)
+        
+        # Also bump general version for compatibility
+        info['version'] = info.get('version', 0) + 1
+        save_session(session_id, info)
 
-        return Response({
+        return no_store(Response({
             'success': True,
-            'data': formula_result['data'],
-            'headers': formula_result['headers'],
-            'new_columns': formula_result['new_columns'],
-            'total_rows': formula_result['total_rows'],
+            'snapshot': build_snapshot(info),
+            'new_columns': formula_result.get('new_columns', []),
+            'total_rows': formula_result.get('total_rows', 0),
             'rules_applied': len(formula_rules),
+            'template_version': new_version,
             'message': f'Applied {len(formula_rules)} formula rules successfully'
-        })
+        }, status=200))
         
     except Exception as e:
         logger.error(f"Error in apply_formulas: {e}")
-        return Response({
+        return no_store(Response({
             'success': False,
             'error': f'Failed to apply formulas: {str(e)}'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        }, status=500))
 
 
 @api_view(['POST'])
@@ -4532,19 +4856,15 @@ def create_factwise_id(request):
         operator = request.data.get('operator', '_')
         strategy = request.data.get('strategy', 'fill_only_null')
         
-        if not session_id or session_id not in SESSION_STORE:
-            return Response({
-                'success': False,
-                'error': 'Invalid session'
-            }, status=status.HTTP_400_BAD_REQUEST)
+        info = get_session_consistent(session_id)
+        if not session_id or not info:
+            return no_store(Response({'success': False, 'error': 'Invalid session'}, status=400))
         
         if not first_column or not second_column:
-            return Response({
+            return no_store(Response({
                 'success': False,
                 'error': 'Both first_column and second_column are required'
-            }, status=status.HTTP_400_BAD_REQUEST)
-        
-        info = SESSION_STORE[session_id]
+            }, status=400))
         mappings = info.get("mappings")
         
         if not mappings:
@@ -4791,20 +5111,31 @@ def create_factwise_id(request):
             debug_log(session_id, f"Error saving session: {save_error}", level='error')
             # Continue anyway, but log the error
         
+        # Save all updated data and headers before version bump
+        info["formula_enhanced_data"] = new_data_rows
+        info["enhanced_headers"] = new_headers
+        info["current_template_headers"] = new_headers
+        save_session(session_id, info)
+        
+        # Atomic version bump AFTER all data is saved
+        new_version = increment_template_version(session_id)
+        
         logger.info(f"🆔 Successfully created Factwise ID mapped into 'Item code' with {len(factwise_id_column)} entries (strategy={strategy})")
         
-        return Response({
+        return no_store(Response({
             'success': True,
-            'message': 'Factwise ID applied to Item code successfully',
-            'total_rows': len(factwise_id_column)
-        })
+            'template_version': new_version,
+            'enhanced_headers': new_headers,
+            'rows': len(new_data_rows),
+            'message': 'Factwise ID created and mapped to Item code'
+        }))
         
     except Exception as e:
         logger.error(f"Error creating Factwise ID: {e}")
-        return Response({
+        return no_store(Response({
             'success': False,
             'error': f'Failed to create Factwise ID: {str(e)}'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        }, status=500))
 
 
 @api_view(['GET'])
@@ -4922,9 +5253,9 @@ def get_next_available_tag_column(session_info, used_tag_columns=None):
     if used_tag_columns is None:
         used_tag_columns = set()
     
-    # Get all existing Tag columns from session
+    # Get all existing Tag columns from session (only numbered ones)
     existing_headers = session_info.get('current_template_headers', []) or session_info.get('enhanced_headers', []) or []
-    existing_tag_columns = [h for h in existing_headers if h.startswith('Tag_') or h == 'Tag']
+    existing_tag_columns = [h for h in existing_headers if h.startswith('Tag_')]
     
     # Find next available number
     next_number = 1

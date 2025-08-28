@@ -7,6 +7,10 @@ django-cors-headers==4.3.1
 dj-database-url==2.1.0
 psycopg2-binary
 
+# Cache
+redis==5.0.1
+django-redis==5.4.0
+
 # File processing
 pandas==2.2.0
 openpyxl==3.1.2

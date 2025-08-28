@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
+import LoaderOverlay, { useGlobalBlock } from '../components/LoaderOverlay';
 import ReactFlow, {
   ReactFlowProvider,
   Background,
@@ -37,7 +38,23 @@ import {
   Snackbar,
   Alert
 } from '@mui/material';
-import api from '../services/api';
+import api, { setGlobalLoaderCallback } from '../services/api';
+// Inline helper functions to avoid module initialization issues
+// const getFieldNumber - hoisted above as function declaration
+
+// const isPairStartUpdated - hoisted above as function declaration
+
+// const isPairEndUpdated - hoisted above as function declaration
+
+// const getPairTypeUpdated - hoisted above as function declaration
+
+// const getPairIndexUpdated - hoisted above as function declaration
+
+// const getPairColorUpdated - hoisted above as function declaration
+
+// const isOptionalFieldUpdated - hoisted above as function declaration
+
+// const handleDeleteOptionalFieldUpdated - hoisted above as function declaration
 
 // Helper function to generate template columns based on counts (matches backend logic)
 const generateTemplateColumns = (tagsCount, specPairsCount, customerIdPairsCount, baseTemplateHeaders = null) => {
@@ -215,10 +232,10 @@ const CustomNode = ({ data, id }) => {
           </div>
         )}
         
-        {/* Default value indicator for unmapped template fields */}
-        {!isSource && hasDefaultValue && !isConnected && (
+        {/* Default value indicator for template fields */}
+        {!isSource && hasDefaultValue && (
           <div className="absolute -bottom-2 -right-2 bg-blue-500 text-white text-xs px-2 py-1 rounded-full font-bold shadow-lg">
-            Default-{data.defaultValue}
+            Default: {data.defaultValue}
           </div>
         )}
         
@@ -283,6 +300,17 @@ const nodeTypes = {
 export default function ColumnMapping() {
   const { sessionId } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
+  
+  // Global loading state
+  const [globalLoading, setGlobalLoading] = useState(false);
+  useGlobalBlock(globalLoading);
+  
+  // Setup global loader callback
+  useEffect(() => {
+    setGlobalLoaderCallback(setGlobalLoading);
+    return () => setGlobalLoaderCallback(null);
+  }, []);
   
   // State for real data
   const [clientHeaders, setClientHeaders] = useState([]);
@@ -304,6 +332,7 @@ export default function ColumnMapping() {
   
   // Review state
   const [isReviewing, setIsReviewing] = useState(false);
+  const [isProcessingMappings, setIsProcessingMappings] = useState(false); // 🔥 FAST NAVIGATION FIX
 
   // Default value popup state
   const [showDefaultValueDialog, setShowDefaultValueDialog] = useState(false);
@@ -315,6 +344,8 @@ export default function ColumnMapping() {
   const isRebuildingRef = useRef(false);
   // Persistent cache of mappings (internal names) for reliable restore/guards
   const mappingsCacheRef = useRef([]);
+  // Track if auto-apply has been triggered to prevent loops
+  const autoApplyTriggeredRef = useRef(false);
   
   // Rebuild state
   const [isRebuilding, setIsRebuilding] = useState(false);
@@ -333,13 +364,13 @@ export default function ColumnMapping() {
     severity: 'info'
   });
 
-  const showSnackbar = (message, severity = 'info') => {
+  function showSnackbar(message, severity = 'info') {
     setSnackbar({ open: true, message, severity });
-  };
+  }
 
-  const closeSnackbar = () => {
+  function closeSnackbar() {
     setSnackbar({ open: false, message: '', severity: 'info' });
-  };
+  }
 
   // Specification handling state
   // COMMENTED OUT: Specification overflow state
@@ -377,29 +408,34 @@ export default function ColumnMapping() {
   const [isInitializingMappings, setIsInitializingMappings] = useState(true);
   const isInitializingRef = useRef(true);
   
+  // Template version tracking for UI readiness
+  const [templateVersion, setTemplateVersion] = useState(0);
+  const [expectedTemplateVersion, setExpectedTemplateVersion] = useState(0);
+  const [isReady, setIsReady] = useState(false);
+  
   // Existing mappings and default values state
   const [existingMappings, setExistingMappings] = useState([]);
   const [existingDefaultValues, setExistingDefaultValues] = useState({});
 
   // Debug helpers
-  const debugLog = (...args) => {
+  function debugLog(...args) {
     try {
       // eslint-disable-next-line no-console
       console.log('🟦 CM', new Date().toISOString(), ...args);
     } catch (_) {}
-  };
-  const warnLog = (...args) => {
+  }
+  function warnLog(...args) {
     try {
       // eslint-disable-next-line no-console
       console.warn('🟨 CM', new Date().toISOString(), ...args);
     } catch (_) {}
-  };
-  const errorLog = (...args) => {
+  }
+  function errorLog(...args) {
     try {
       // eslint-disable-next-line no-console
       console.error('🔴 CM', new Date().toISOString(), ...args);
     } catch (_) {}
-  };
+  }
   
   // Global debug state for comprehensive debugging
   const [debugMode, setDebugMode] = useState(true);
@@ -446,12 +482,16 @@ export default function ColumnMapping() {
         setAppliedTemplateName(template.name);
         setOriginalTemplateId(template.id);
 
-        // Update column counts from template response
-        if (response.data.column_counts) {
-          setColumnCounts(response.data.column_counts);
-          enhancedDebugLog('TEMPLATE_APPLY', 'Updated column counts from template', {
-            columnCounts: response.data.column_counts
+        // CRITICAL FIX: Update template headers immediately if provided to prevent mapping restoration issues
+        if (response.data.enhanced_headers && Array.isArray(response.data.enhanced_headers)) {
+          enhancedDebugLog('TEMPLATE_APPLY', 'Updating template headers from template response', {
+            newHeaders: response.data.enhanced_headers,
+            previousCount: templateHeaders.length,
+            newCount: response.data.enhanced_headers.length
           });
+          setTemplateHeaders(response.data.enhanced_headers);
+          setTemplateColumns(response.data.enhanced_headers);
+          setUseDynamicTemplate(true);
         }
 
         // Load default values if available
@@ -464,10 +504,95 @@ export default function ColumnMapping() {
           });
         }
 
-        // Refresh the mapping view
-        await checkExistingMappings();
+        // CRITICAL FIX: Update column counts FIRST, then apply mappings after rebuild completes
+        if (response.data.column_counts) {
+          enhancedDebugLog('TEMPLATE_APPLY', 'Updating column counts from template', {
+            columnCounts: response.data.column_counts
+          });
+          
+          // Prepare data for after rebuild
+          const headersToUse = response.data.enhanced_headers || templateHeaders;
+          const defaultValuesToUse = response.data.default_values || {};
+          let mappingsToApply = response.data.mappings_new_format || [];
+          
+          // If no new format mappings, convert old format
+          if (mappingsToApply.length === 0 && response.data.mappings) {
+            if (typeof response.data.mappings === 'object') {
+              mappingsToApply = Object.entries(response.data.mappings).map(([target, source]) => ({
+                source,
+                target
+              }));
+            }
+          }
+          
+          // If still no mappings, try loading from backend as fallback
+          if (mappingsToApply.length === 0) {
+            console.log('🔄 Loading mappings from backend as fallback for template application...');
+            try {
+              const mappingsResult = await checkExistingMappings(clientHeaders, headersToUse, null);
+              mappingsToApply = mappingsResult?.mappings || [];
+            } catch (error) {
+              console.warn('Error loading mappings fallback:', error);
+            }
+          }
+          
+          console.log('🔄 Template mappings prepared for application after rebuild:', mappingsToApply);
+          
+          // Store data to apply after rebuild completes
+          const dataToApplyAfterRebuild = {
+            mappings: mappingsToApply,
+            headers: headersToUse,
+            defaultValues: defaultValuesToUse
+          };
+          
+          // Use updateColumnCounts to trigger full regeneration with new counts
+          await updateColumnCounts(response.data.column_counts);
+          
+          // CRITICAL FIX: Apply mappings and ensure default values after rebuild is complete
+          setTimeout(() => {
+            try {
+              // First, ensure default values are applied to nodes
+              if (Object.keys(dataToApplyAfterRebuild.defaultValues).length > 0) {
+                console.log('🔄 Ensuring default values are applied to nodes:', dataToApplyAfterRebuild.defaultValues);
+                setNodes(currentNodes => currentNodes.map(node => {
+                  if (!node.id.startsWith('t-')) return node; // Only update template nodes
+                  
+                  const fieldName = node.data.originalLabel;
+                  if (dataToApplyAfterRebuild.defaultValues[fieldName]) {
+                    return {
+                      ...node,
+                      data: {
+                        ...node.data,
+                        hasDefaultValue: true,
+                        defaultValue: dataToApplyAfterRebuild.defaultValues[fieldName]
+                      }
+                    };
+                  }
+                  return node;
+                }));
+              }
+              
+              // Then apply mappings
+              if (dataToApplyAfterRebuild.mappings.length > 0) {
+                console.log('🔄 Applying template mappings after rebuild completion:', dataToApplyAfterRebuild.mappings);
+                console.log('🔄 Using headers for mapping:', dataToApplyAfterRebuild.headers);
+                applyExistingMappingsToFlow(dataToApplyAfterRebuild.mappings, clientHeaders, dataToApplyAfterRebuild.headers, null);
+                console.log('✅ Template mappings applied successfully to create visual edges');
+              } else {
+                console.log('⚠️ No mappings found to create visual edges');
+              }
+            } catch (error) {
+              console.error('Error applying template data:', error);
+            }
+          }, 300); // Wait for rebuild timeouts (100 + 100 + buffer)
+        }
 
         showSnackbar(`Template "${template.name}" applied successfully!`, 'success');
+
+        // Update template version to mark template application completion
+        setTemplateVersion(prev => prev + 1);
+        setExpectedTemplateVersion(prev => prev + 1);
+        console.log('✅ UI: Template version synchronized after template application');
 
         enhancedDebugLog('TEMPLATE_APPLY', 'Template application completed successfully', {
           templateName: template.name,
@@ -488,10 +613,10 @@ export default function ColumnMapping() {
       setApplyingTemplate(false);
       setShowTemplateDialog(false);
     }
-  }, [sessionId, showSnackbar, checkExistingMappings]);
+  }, [sessionId, showSnackbar]);
   
   // Enhanced debug logging with history
-  const enhancedDebugLog = (category, message, data = null) => {
+  function enhancedDebugLog(category, message, data = null) {
     const timestamp = new Date().toISOString();
     const logEntry = { timestamp, category, message, data };
     
@@ -499,7 +624,7 @@ export default function ColumnMapping() {
       debugLog(`[${category}]`, message, data);
       setDebugHistory(prev => [...prev.slice(-99), logEntry]); // Keep last 100 entries
     }
-  };
+  }
   
   // Attach state dumpers for ad-hoc debugging in console
   try {
@@ -547,7 +672,7 @@ export default function ColumnMapping() {
   } catch (_) {}
 
   // C) Reconcile edges with current nodes (universal safety net)
-  const reconcileEdgesWithNodes = useCallback(() => {
+  function reconcileEdgesWithNodes() {
     // eslint-disable-next-line no-console
     console.log('🔧 DEBUG: Starting edge reconciliation');
     
@@ -600,33 +725,500 @@ export default function ColumnMapping() {
             ...node,
             data: {
               ...node.data,
-              isConnected: true,
+              isConnected,
               mappedToLabel,
               mappedFromLabel
             }
           };
-        } else {
-          // Disconnected node - reset to original state
-          return {
-            ...node,
-            data: {
-              ...node.data,
-              label: node.data.originalLabel,
-              isConnected: false,
-              isFromTemplate: false,
-              isSpecificationMapping: false,
-              confidence: undefined,
-              mappedToLabel: '',
-              mappedFromLabel: ''
-            }
-          };
         }
+
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            isConnected: false,
+            mappedToLabel: '',
+            mappedFromLabel: ''
+          }
+        };
       }));
     }, 50);
+  }
+
+  // HOISTED FUNCTIONS TO AVOID TDZ ERRORS
+
+  // Check for existing mappings and session metadata
+  async function checkExistingMappings(clientHdrs, templateHdrs, setIsInitializingMappings = null) {
+    try {
+      enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Starting existing mappings check', { 
+        sessionId, 
+        currentCacheCount: mappingsCacheRef.current?.length || 0 
+      });
+      
+      debugLog('Checking existing mappings...');
+      const response = await api.getExistingMappings(sessionId);
+      
+      enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Backend response received', {
+        success: response.data?.success,
+        hasMappings: !!response.data?.mappings,
+        hasDefaultValues: !!response.data?.default_values,
+        hasSessionMetadata: !!response.data?.session_metadata,
+        responseKeys: Object.keys(response.data || {})
+      });
+      
+      if (response.data.success) {
+        const { mappings, default_values, session_metadata } = response.data;
+        
+        enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Processing successful response', {
+          mappingsType: typeof mappings,
+          mappingsKeys: mappings ? Object.keys(mappings) : null,
+          mappingsIsArray: Array.isArray(mappings),
+          defaultValuesType: typeof default_values,
+          defaultValuesKeys: default_values ? Object.keys(default_values) : null,
+          sessionMetadataKeys: session_metadata ? Object.keys(session_metadata) : null
+        });
+        
+        // Store session metadata for badge display and other features
+        setSessionMetadata(session_metadata);
+        
+        // CRITICAL: Populate mappings cache for restoration during rebuilds
+        if (mappings && mappings.mappings && Array.isArray(mappings.mappings)) {
+          const normalizedMappings = mappings.mappings.map(m => ({
+            source: m.source,
+            target: m.target
+          }));
+          mappingsCacheRef.current = normalizedMappings;
+          
+          enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Populated cache from nested mappings', {
+            originalCount: mappings.mappings.length,
+            normalizedCount: normalizedMappings.length,
+            sampleMappings: normalizedMappings.slice(0, 5)
+          });
+          
+          debugLog('Populated mappingsCacheRef from backend:', normalizedMappings);
+        } else if (mappings && Array.isArray(mappings)) {
+          // Direct array format
+          mappingsCacheRef.current = mappings.map(m => ({
+            source: m.source,
+            target: m.target
+          }));
+          
+          enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Populated cache from direct array mappings', {
+            originalCount: mappings.length,
+            normalizedCount: mappingsCacheRef.current.length,
+            sampleMappings: mappingsCacheRef.current.slice(0, 5)
+          });
+          
+          debugLog('Populated mappingsCacheRef from backend (direct array):', mappingsCacheRef.current);
+        } else if (mappings && typeof mappings === 'object' && !Array.isArray(mappings)) {
+          // CRITICAL FIX: Handle old format (object with key-value pairs)
+          let normalizedMappings = [];
+          
+          // Check if it's a direct object mapping (target -> source)
+          const mappingKeys = Object.keys(mappings);
+          if (mappingKeys.length > 0) {
+            // Convert object format {target: source} to array format
+            normalizedMappings = mappingKeys.map(target => ({
+              source: mappings[target],
+              target: target
+            })).filter(m => m.source && m.target); // Filter out invalid mappings
+            
+            mappingsCacheRef.current = normalizedMappings;
+            
+            enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Populated cache from object format mappings', {
+              originalKeys: mappingKeys.length,
+              normalizedCount: normalizedMappings.length,
+              sampleMappings: normalizedMappings.slice(0, 5),
+              originalMappings: mappings
+            });
+            
+            debugLog('Populated mappingsCacheRef from backend (object format):', normalizedMappings);
+          } else {
+            mappingsCacheRef.current = [];
+            enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Empty object mappings', { mappings });
+          }
+        } else {
+          mappingsCacheRef.current = [];
+          enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'No mappings found in backend response', {
+            mappings,
+            mappingsType: typeof mappings,
+            mappingsKeys: mappings ? Object.keys(mappings) : null
+          });
+          debugLog('No mappings found in backend response');
+        }
+        
+        // Store existing mappings for restoration
+        setExistingMappings(mappings);
+        
+        // Store default values
+        if (default_values && typeof default_values === 'object') {
+          setExistingDefaultValues(default_values);
+          // CRITICAL: Also store in defaultValueMappings for UI integration
+          setDefaultValueMappings(default_values);
+
+          enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Loaded default values from backend', {
+            defaultValuesCount: Object.keys(default_values).length,
+            defaultValues: default_values,
+            keys: Object.keys(default_values)
+          });
+
+          debugLog('Loaded default values from backend:', default_values);
+        }
+        
+        // Update column counts from session metadata if available
+        if (session_metadata && session_metadata.column_counts) {
+          const { tags_count, spec_pairs_count, customer_id_pairs_count } = session_metadata.column_counts;
+          const newCounts = {
+            tags_count: tags_count || 1,
+            spec_pairs_count: spec_pairs_count || 1,
+            customer_id_pairs_count: customer_id_pairs_count || 1
+          };
+          
+          setColumnCounts(newCounts);
+          
+          enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Updated column counts from session metadata', {
+            originalCounts: session_metadata.column_counts,
+            newCounts,
+            sessionMetadata: session_metadata
+          });
+          
+          debugLog('Updated column counts from session metadata:', session_metadata.column_counts);
+        }
+        
+        enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Existing mappings check complete', {
+          mappingsCount: mappingsCacheRef.current.length,
+          defaultValuesCount: Object.keys(default_values || {}).length,
+          sessionMetadata: session_metadata,
+          cachePopulated: !!mappingsCacheRef.current.length
+        });
+        
+        debugLog('Existing mappings check complete', {
+          mappingsCount: mappingsCacheRef.current.length,
+          defaultValuesCount: Object.keys(default_values || {}).length,
+          sessionMetadata: session_metadata
+        });
+        
+        // Return normalized mappings for immediate restoration
+        return { 
+          mappings: mappingsCacheRef.current, 
+          defaults: default_values || {}, 
+          meta: session_metadata || {} 
+        };
+      } else {
+        enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Backend response not successful', {
+          success: response.data?.success,
+          error: response.data?.error,
+          responseData: response.data
+        });
+        return { mappings: [], defaults: {}, meta: {} };
+      }
+    } catch (error) {
+      enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Error during existing mappings check', {
+        error: error.message,
+        stack: error.stack,
+        sessionId
+      });
+      
+      console.error('❌ Error checking existing mappings:', error);
+      mappingsCacheRef.current = [];
+      return { mappings: [], defaults: {}, meta: {} };
+    }
+  }
+
+  // Function declaration for createEdge - hoisted to avoid TDZ
+  function createEdge(sourceIdx, targetIdx, isAI = false, confidence = null, isFromTemplate = false, isSpecificationMapping = false) {
+    // Generate unique edge ID by including timestamp to allow multiple edges to same target
+    const edgeId = `e-c-${sourceIdx}-t-${targetIdx}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     
+    let strokeColor = '#10b981'; // Always green for perfect mappings
+    let strokeWidth = 3;
+    let animated = true;
+    
+    return {
+      id: edgeId,
+      source: `c-${sourceIdx}`,
+      target: `t-${targetIdx}`,
+      type: 'straight', // STRAIGHT lines - no curves, no collision
+      animated,
+      style: { 
+        stroke: strokeColor, 
+        strokeWidth,
+        strokeOpacity: 0.8
+      },
+      markerEnd: {
+        type: MarkerType.ArrowClosed,
+        color: strokeColor,
+        width: 20,
+        height: 20
+      },
+      data: { 
+        confidence, 
+        isAiGenerated: isAI,
+        isFromTemplate,
+        isSpecificationMapping,
+        sourceIdx,
+        targetIdx
+      }
+    };
+  }
+
+  // Helper functions hoisted to avoid TDZ errors
+  function getFieldNumber(fieldName) {
+    const match = fieldName.match(/_(\d+)$/);
+    return match ? parseInt(match[1]) : 1;
+  }
+
+  function isPairStartUpdated(fieldName, nextFieldName) {
+    if (!nextFieldName) return false;
+    
+    const fieldNum = getFieldNumber(fieldName);
+    const nextFieldNum = getFieldNumber(nextFieldName);
+    
+    return (
+      (fieldName.includes('Specification_Name_') && nextFieldName.includes('Specification_Value_') && fieldNum === nextFieldNum) ||
+      (fieldName.includes('Customer_Identification_Name_') && nextFieldName.includes('Customer_Identification_Value_') && fieldNum === nextFieldNum)
+    );
+  }
+
+  function isPairEndUpdated(fieldName, prevFieldName) {
+    if (!prevFieldName) return false;
+    
+    const fieldNum = getFieldNumber(fieldName);
+    const prevFieldNum = getFieldNumber(prevFieldName);
+    
+    return (
+      (fieldName.includes('Specification_Value_') && prevFieldName.includes('Specification_Name_') && fieldNum === prevFieldNum) ||
+      (fieldName.includes('Customer_Identification_Value_') && prevFieldName.includes('Customer_Identification_Name_') && fieldNum === prevFieldNum)
+    );
+  }
+
+  function getPairTypeUpdated(fieldName) {
+    if (fieldName.includes('Specification')) return 'specification';
+    if (fieldName.includes('Customer_Identification') || fieldName.includes('Customer Identification')) return 'customer';
+    if (fieldName.includes('Tag_')) return 'tag';
+    return 'single';
+  }
+
+  function getPairIndexUpdated(fieldName) {
+    return getFieldNumber(fieldName);
+  }
+
+  function getPairColorUpdated(fieldName, pairColors) {
+    const pairType = getPairTypeUpdated(fieldName);
+    const pairIndex = getPairIndexUpdated(fieldName);
+    
+    if (pairType === 'specification' || pairType === 'customer') {
+      return pairColors[pairIndex % pairColors.length];
+    }
+    return 'gray';
+  }
+
+  function isOptionalFieldUpdated(fieldName, templateOptionals, idx) {
+    if (templateOptionals && templateOptionals.length > idx) {
+      return !!templateOptionals[idx];
+    }
+    // Default logic for numbered dynamic fields
+    return (fieldName.includes('Tag_') || fieldName.includes('Specification') || fieldName.includes('Customer_Identification'));
+  }
+
+  function handleDeleteOptionalFieldUpdated(nodeId, nodes, edges, columnCounts, updateColumnCounts) {
+    const node = nodes.find(n => n.id === nodeId);
+    if (!node || !node.id.startsWith('t-')) return;
+
+    const nodeData = node.data || {};
+    const fieldName = nodeData.originalLabel;
+    
+    // Check if any of the target nodes are mapped
+    const hasMapping = edges.some(e => e.target === nodeId);
+    if (hasMapping) {
+      window.alert('Please remove the mapping from this field before deleting it.');
+      return;
+    }
+
+    // Compute new counts based on field type
+    const newCounts = { ...columnCounts };
+    
+    if (fieldName.includes('Tag_')) {
+      newCounts.tags_count = Math.max(0, (newCounts.tags_count || 0) - 1);
+    } else if (fieldName.includes('Specification')) {
+      // For specifications, we delete pairs
+      const fieldNum = getFieldNumber(fieldName);
+      const pairNodes = nodes.filter(n => 
+        n.id.startsWith('t-') && 
+        n.data?.originalLabel && 
+        (n.data.originalLabel.includes(`Specification_Name_${fieldNum}`) || 
+         n.data.originalLabel.includes(`Specification_Value_${fieldNum}`))
+      );
+      
+      // Only decrease if we're deleting a complete pair
+      if (pairNodes.length >= 2) {
+        newCounts.spec_pairs_count = Math.max(0, (newCounts.spec_pairs_count || 0) - 1);
+      }
+    } else if (fieldName.includes('Customer_Identification')) {
+      // For customer IDs, we delete pairs
+      const fieldNum = getFieldNumber(fieldName);
+      const pairNodes = nodes.filter(n => 
+        n.id.startsWith('t-') && 
+        n.data?.originalLabel && 
+        (n.data.originalLabel.includes(`Customer_Identification_Name_${fieldNum}`) || 
+         n.data.originalLabel.includes(`Customer_Identification_Value_${fieldNum}`))
+      );
+      
+      // Only decrease if we're deleting a complete pair
+      if (pairNodes.length >= 2) {
+        newCounts.customer_id_pairs_count = Math.max(0, (newCounts.customer_id_pairs_count || 0) - 1);
+      }
+    }
+
+    // Update counts which will trigger backend update and node regeneration
+    updateColumnCounts(newCounts);
+  }
+
+  // Function declaration for initializeNodes - hoisted to avoid TDZ  
+  function initializeNodes(clientHdrs, templateHdrs, aiMappings = null, factwiseRules = [], defaultValues = {}, setIsInitializingMappings = null) {
     // eslint-disable-next-line no-console
-    console.log(`🔧 DEBUG: Reconciliation complete - kept ${validEdges.length}/${edges.length} edges`);
-  }, [nodes, edges, setNodes, setEdges]);
+    console.log('🔧 DEBUG: initializeNodes called with setIsInitializingMappings:', !!setIsInitializingMappings);
+    // eslint-disable-next-line no-console
+    console.log('🔧 Initializing nodes with:', { 
+      clientHdrs: clientHdrs, 
+      clientCount: clientHdrs?.length || 0,
+      templateHdrs: templateHdrs, 
+      templateCount: templateHdrs?.length || 0,
+      aiMappings: aiMappings,
+      factwiseRules: factwiseRules
+    });
+    
+    const nodeHeight = 90;
+    const nodeWidth = 200; // Add missing nodeWidth
+    const nodeSpacing = 30;
+    const startY = 40; // Space for frozen headers
+    
+    // Create stable delete handler using imported function
+    const stableDeleteHandler = (nodeId) => {
+      // Use the proper imported function
+      handleDeleteOptionalFieldUpdated(nodeId, nodes, edges, columnCounts, updateColumnCounts);
+    };
+
+    // Create source nodes (adjusted for sidebar)
+    const clientNodes = clientHdrs.map((header, idx) => ({
+      id: `c-${idx}`,
+      type: 'custom',
+      position: { x: 20, y: startY + idx * (nodeHeight + nodeSpacing) },
+      data: {
+        label: header,
+        originalLabel: header,
+        type: 'source',
+        headerType: 'client',
+        index: idx
+      },
+      draggable: false,
+      style: { width: nodeWidth, height: nodeHeight }
+    }));
+
+    // Calculate template node positions
+    const templateStartX = 900;
+    const templateNodeStartY = startY;
+    
+    let specPairIndex = 1;
+    let customerPairIndex = 1;
+    
+    // Use the color from the existing pairColors array
+    const pairColors = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'];
+    
+    // Build quick-look maps from session rules for FW-/AT- badges
+    const tagBadges = new Map();
+    const factwiseBadge = new Map();
+    try {
+      if (Array.isArray(factwiseRules)) {
+        factwiseRules.forEach(rule => {
+          if (rule && rule.type === 'factwise_id') {
+            const src = [rule.first_column, rule.operator || '_', rule.second_column].filter(Boolean).join('');
+            factwiseBadge.set('Item code', `FW-${rule.first_column}${rule.operator || '_'}${rule.second_column}`);
+          }
+        });
+      }
+      // formula rules can also come via aiMappings but we prefer session metadata path the caller passes in
+      if (Array.isArray(aiMappings)) {
+        aiMappings.forEach(r => {
+          const colType = r?.column_type || 'Tag';
+          const target = r?.target_column;
+          const src = r?.source_column;
+          if (colType === 'Tag' && target && src) {
+            tagBadges.set(target, `AT-${src}`);
+          }
+        });
+      }
+    } catch (e) {
+      // non-fatal; badges are best-effort
+    }
+
+    // Process template headers in their original order
+    const templateNodes = templateHdrs.map((header, idx) => {
+      // Use updated pair detection logic for numbered fields
+      const nextHeader = templateHdrs[idx + 1];
+      const prevHeader = templateHdrs[idx - 1];
+      
+      const isPairStart = isPairStartUpdated(header, nextHeader);
+      const isPairEnd = isPairEndUpdated(header, prevHeader);
+      const pairType = getPairTypeUpdated(header);
+      const pairIndex = getPairIndexUpdated(header);
+      const pairColor = getPairColorUpdated(header, pairColors);
+
+      // Check for custom formula rule from factwise
+      const factwiseFormula = factwiseRules?.find(rule => rule.target_column === header)?.formula_expression || null;
+      
+      // Check for default value
+      const hasDefaultValue = defaultValues && Object.prototype.hasOwnProperty.call(defaultValues, header);
+      const defaultValue = hasDefaultValue ? defaultValues[header] : '';
+      
+      const src = 'delete';
+      
+      return {
+        id: `t-${idx}`,
+        type: 'custom',
+        position: { x: templateStartX, y: templateNodeStartY + idx * (nodeHeight + nodeSpacing) },
+        data: {
+          label: header,
+          originalLabel: header,
+          type: 'target',
+          headerType: 'template',
+          index: idx,
+          isPairStart: isPairStart,
+          isPairEnd: isPairEnd,
+          pairType: pairType,
+          pairColor: pairColor,
+          pairIndex: pairIndex,
+          isOptional: isOptionalFieldUpdated(header, templateOptionals, idx),
+          onDelete: stableDeleteHandler,
+          factwiseFormula: factwiseFormula,
+          hasDefaultValue: hasDefaultValue,
+          defaultValue: defaultValue,
+          atBadge: tagBadges.get(header) || null,
+        },
+        draggable: false,
+        style: { 
+          width: nodeWidth, 
+          height: nodeHeight, 
+          backgroundColor: isPairStart || isPairEnd ? `${pairColor}20` : '#f3f4f6' 
+        }
+      };
+    });
+
+    const allNodes = [...clientNodes, ...templateNodes];
+    
+    enhancedDebugLog('INIT_NODES', 'Generated node structure', {
+      totalNodes: allNodes.length,
+      clientNodesCount: clientNodes.length,
+      targetNodesCount: templateNodes.length,
+      clientNodeIds: clientNodes.map(n => n.id),
+      targetNodeIds: templateNodes.map(n => n.id),
+      clientLabels: clientNodes.map(n => n.data.label),
+      targetLabels: templateNodes.map(n => n.data.label)
+    });
+    setNodes(allNodes);
+  }
+
+  // reconcileEdgesWithNodes - moved above to avoid TDZ
 
   // Keep node mapping labels in sync with current edges
   useEffect(() => {
@@ -637,10 +1229,21 @@ export default function ColumnMapping() {
   // A) Rebuild sequence for column count updates
   const updateColumnCounts = async (newCounts) => {
     try {
-      enhancedDebugLog('COLUMN_COUNT_UPDATE', 'Starting column count update sequence', { newCounts, edgesCount: edges.length, cacheCount: (mappingsCacheRef.current||[]).length });
+      // Ensure immutable counts object with all required keys
+      const safeNewCounts = {
+        tags_count: Math.max(0, newCounts.tags_count || 0),
+        spec_pairs_count: Math.max(0, newCounts.spec_pairs_count || 0), 
+        customer_id_pairs_count: Math.max(0, newCounts.customer_id_pairs_count || 0)
+      };
+      
+      enhancedDebugLog('COLUMN_COUNT_UPDATE', 'Starting column count update sequence', { 
+        newCounts: safeNewCounts, 
+        edgesCount: edges.length, 
+        cacheCount: (mappingsCacheRef.current||[]).length 
+      });
       // eslint-disable-next-line no-console
       console.log('🔧 DEBUG: Starting column count update sequence');
-      debugLog('REBUILD/DELETE start', { newCounts, edgesCount: edges.length, cacheCount: (mappingsCacheRef.current||[]).length });
+      debugLog('REBUILD/DELETE start', { newCounts: safeNewCounts, edgesCount: edges.length, cacheCount: (mappingsCacheRef.current||[]).length });
       
       // A1) Set rebuild guard
       isRebuildingRef.current = true;
@@ -750,29 +1353,33 @@ export default function ColumnMapping() {
         debugLog('Preserved mappings by label:', existingMappings);
       }
       
-      // A3) Clear all edges now that we've snapshotted
-      setEdges([]);
-      
+      // A3) Get backend response and new headers BEFORE making any changes
       const response = await api.updateColumnCounts(sessionId, newCounts);
       
       if (response.data.success) {
         setColumnCounts(newCounts);
+        
+        // Update template version to indicate a change occurred
+        setExpectedTemplateVersion(prev => prev + 1);
+        console.log('🔄 UI: Expected template version incremented after column count update');
         
         if (response.data.enhanced_headers) {
           // A3) Apply new headers from backend (canonical)
           const newTemplateHeaders = response.data.enhanced_headers;
           const newTemplateOptionals = response.data.template_optionals || [];
           
+          // A4) Apply all state updates atomically
           setTemplateHeaders(newTemplateHeaders);
           setTemplateOptionals(newTemplateOptionals);
           setTemplateColumns(newTemplateHeaders); // Update templateColumns for default value dialog
           setUseDynamicTemplate(true);
           
-          // A4) Rebuild template nodes with new headers
+          // A5) Rebuild template nodes with new headers
           const factwiseRules = sessionMetadata?.factwise_rules || [];
           initializeNodes(clientHeaders, newTemplateHeaders, null, factwiseRules, defaultValueMappings, setIsInitializingMappings);
           
-          // A5) After nodes are in state, reconcile and restore mappings
+          // A6) After nodes are in state, reconcile and restore mappings atomically
+          let restoredEdgesCount = 0;
           setTimeout(() => {
             setNodes(currentNodes => {
               const newEdges = [];
@@ -801,55 +1408,66 @@ export default function ColumnMapping() {
                 }
               });
               
+              // Apply edges atomically with the same render cycle as nodes
               setEdges(newEdges);
+              restoredEdgesCount = newEdges.length;
               
-              // A6) Run reconciliation after edge restoration
-              setTimeout(async () => {
-                reconcileEdgesWithNodes();
-                debugLog('REBUILD/DELETE complete', { restoredEdges: newEdges.length });
-                
-                // A8) Force-save mappings after dynamic rebuild to avoid autosave gap
-                try {
-                  // Skip forced save if still initializing to prevent partial saves
-                  if (isInitializingMappings || isInitializingRef.current) {
-                    debugLog('Skipping forced save - still initializing mappings. State:', isInitializingMappings, 'Ref:', isInitializingRef.current);
-                    isRebuildingRef.current = false;
-                    return;
-                  }
-                  
-                  debugLog('Forced save proceeding - not initializing');
-                  const targetHeaders = newTemplateHeaders;
-                  const mappingsToSave = newEdges.map(edge => {
-                    const sourceIdx = parseInt(edge.source.replace('c-', ''));
-                    const targetIdx = parseInt(edge.target.replace('t-', ''));
-                    const sourceColumn = clientHeaders[sourceIdx];
-                    const targetColumn = targetHeaders[targetIdx];
-                    return sourceColumn && targetColumn ? { source: sourceColumn, target: targetColumn } : null;
-                  }).filter(Boolean);
-                  
-                  // CRITICAL FIX: Only save if we have mappings to save
-                  if (mappingsToSave.length === 0) {
-                    debugLog('No mappings to save in forced save, skipping to prevent data loss');
-                    isRebuildingRef.current = false;
-                    return;
-                  }
-                  
-                  // Update cache before saving
-                  mappingsCacheRef.current = mappingsToSave;
-                  const payload = { mappings: mappingsToSave, default_values: defaultValueMappings };
-                  debugLog('Forced save payload:', payload);
-                  debugLog('defaultValueMappings in forced save:', defaultValueMappings);
-                  
-                  await api.saveColumnMappings(sessionId, payload);
-                  console.log('💾 Forced save of mappings after column count update');
-                  
-                } catch (saveError) {
-                  console.error('❌ Forced save failed:', saveError);
-                } finally {
-                  isRebuildingRef.current = false;
-                }
-              }, 100);
+              return currentNodes;
             });
+            
+            // A7) Run reconciliation and force-save in a single async operation
+            setTimeout(async () => {
+              reconcileEdgesWithNodes();
+              debugLog('REBUILD/DELETE complete', { restoredEdges: restoredEdgesCount });
+              
+              // Update template version to mark rebuild completion (before save attempt)
+              setTemplateVersion(prev => prev + 1);
+              console.log('✅ UI: Template version incremented after successful column count rebuild');
+              
+              // A8) Force-save mappings after dynamic rebuild to avoid autosave gap
+              try {
+                // Skip forced save if still initializing to prevent partial saves
+                if (isInitializingMappings || isInitializingRef.current) {
+                  debugLog('Skipping forced save - still initializing mappings. State:', isInitializingMappings, 'Ref:', isInitializingRef.current);
+                  isRebuildingRef.current = false;
+                  return;
+                }
+                
+                debugLog('Forced save proceeding - not initializing');
+                const targetHeaders = newTemplateHeaders;
+                
+                // Get current edges from state for saving
+                const currentEdges = edges;
+                const mappingsToSave = currentEdges.map(edge => {
+                  const sourceIdx = parseInt(edge.source.replace('c-', ''));
+                  const targetIdx = parseInt(edge.target.replace('t-', ''));
+                  const sourceColumn = clientHeaders[sourceIdx];
+                  const targetColumn = targetHeaders[targetIdx];
+                  return sourceColumn && targetColumn ? { source: sourceColumn, target: targetColumn } : null;
+                }).filter(Boolean);
+                
+                // CRITICAL FIX: Only save if we have mappings to save
+                if (mappingsToSave.length === 0) {
+                  debugLog('No mappings to save in forced save, skipping to prevent data loss');
+                  isRebuildingRef.current = false;
+                  return;
+                }
+                
+                // Update cache before saving
+                mappingsCacheRef.current = mappingsToSave;
+                const payload = { mappings: mappingsToSave, default_values: defaultValueMappings };
+                debugLog('Forced save payload:', payload);
+                debugLog('defaultValueMappings in forced save:', defaultValueMappings);
+                
+                await api.saveColumnMappings(sessionId, payload);
+                console.log('💾 Forced save of mappings after column count update');
+                
+              } catch (saveError) {
+                console.error('❌ Forced save failed:', saveError);
+              } finally {
+                isRebuildingRef.current = false;
+              }
+            }, 100);
           }, 100);
         }
       }
@@ -868,8 +1486,28 @@ export default function ColumnMapping() {
       setError(null);
       setIsInitializingMappings(true);
       isInitializingRef.current = true;
+      autoApplyTriggeredRef.current = false; // Reset for new session
       // eslint-disable-next-line no-console
       console.log('🔧 DEBUG: loadData started - isInitializingMappings set to true');
+      
+      // 🔥 CRITICAL FIX: Check for saved mappings from review session FIRST
+      let savedMappingData = null;
+      try {
+        const savedMapping = sessionStorage.getItem('currentMapping');
+        if (savedMapping) {
+          const parsedMapping = JSON.parse(savedMapping);
+          if (parsedMapping.reviewCompleted && parsedMapping.sessionId === sessionId) {
+            console.log('🔄 Restoring mappings from review session:', parsedMapping.mappings.length, 'mappings');
+            savedMappingData = parsedMapping;
+            // Clear the flag so it doesn't interfere with future loads
+            const updatedMapping = { ...parsedMapping };
+            delete updatedMapping.reviewCompleted;
+            sessionStorage.setItem('currentMapping', JSON.stringify(updatedMapping));
+          }
+        }
+      } catch (e) {
+        console.warn('🚫 Failed to parse saved mappings from review session:', e);
+      }
 
       // CRITICAL FIX: Check if template was applied in DataEditor
       const templateAppliedInDataEditor = sessionStorage.getItem('templateAppliedInDataEditor');
@@ -882,6 +1520,15 @@ export default function ColumnMapping() {
 
         // Show notification about the template that was applied
         showSnackbar(`Template "${lastTemplateApplied}" was applied in Data Editor. Refreshing mapping view...`, 'info');
+      }
+      
+      // CRITICAL FIX: Always reload session state when coming from DataEditor
+      const comingFromDataEditor = sessionStorage.getItem('navigatedFromDataEditor');
+      if (comingFromDataEditor === 'true') {
+        console.log('🔧 DEBUG: Returning from DataEditor, ensuring fresh session state');
+        sessionStorage.removeItem('navigatedFromDataEditor');
+        // Force a complete state refresh by clearing any cached mappings
+        mappingsCacheRef.current = [];
       }
       
       try {
@@ -987,8 +1634,24 @@ export default function ColumnMapping() {
           console.log('🔍 Applied template name:', session_metadata.template_name);
         }
         
-        // First fetch existing mappings and rules to avoid race with initial node render
-        await checkExistingMappings(client_headers, template_headers, setIsInitializingMappings);
+        // 🔥 CRITICAL FIX: Use saved mappings from review session if available, otherwise fetch from backend
+        let normalizedMappings = [];
+        if (savedMappingData && savedMappingData.mappings) {
+          // Use saved mappings from review session - preserve exact mapping relationships
+          console.log('🔄 Using saved mappings from review session instead of backend');
+          normalizedMappings = savedMappingData.mappings.map(mapping => ({
+            sourceLabel: mapping.source,
+            targetLabel: mapping.target,
+            confidence: mapping.confidence || 'saved',
+            isFromTemplate: mapping.isFromTemplate || false
+          }));
+          console.log('🔄 Restored mappings:', normalizedMappings);
+        } else {
+          // Fallback to backend mappings if no saved session data
+          console.log('🔄 No saved mappings from review, fetching from backend');
+          const result = await checkExistingMappings(client_headers, template_headers, setIsInitializingMappings);
+          normalizedMappings = result.mappings;
+        }
 
         // Initialize nodes AFTER we have session metadata for badges
         const headersToUse = template_headers;
@@ -1000,10 +1663,27 @@ export default function ColumnMapping() {
           clientHeaders: client_headers,
           templateHeaders: template_headers,
           templateColumns: template_columns,
-          headersToUse: headersToUse
+          headersToUse: headersToUse,
+          normalizedMappingsCount: normalizedMappings?.length || 0
         });
         const factwiseRules = session_metadata?.factwise_rules || [];
         initializeNodes(client_headers, headersToUse, session_metadata?.formula_rules || [], factwiseRules, defaultValueMappings, setIsInitializingMappings);
+        
+        // CRITICAL FIX: Apply existing mappings AFTER nodes are initialized
+        if (normalizedMappings && normalizedMappings.length > 0) {
+          console.log('🔄 Applying existing mappings after node initialization:', normalizedMappings);
+          applyExistingMappingsToFlow(normalizedMappings, client_headers, headersToUse, setIsInitializingMappings);
+        } else {
+          // No existing mappings, just end initialization
+          console.log('🔄 No existing mappings to apply, ending initialization');
+          setIsInitializingMappings(false);
+          isInitializingRef.current = false;
+          
+          // Initial load complete - synchronize template version
+          setTemplateVersion(prev => prev + 1);
+          setExpectedTemplateVersion(prev => prev + 1);
+          console.log('✅ UI: Template version synchronized after initial load');
+        }
         
       } catch (err) {
         console.error('Error loading data:', err);
@@ -1033,146 +1713,27 @@ export default function ColumnMapping() {
     loadData();
   }, [sessionId]);
 
-  // Check for existing mappings and session metadata
-  const checkExistingMappings = useCallback(async () => {
-    try {
-      enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Starting existing mappings check', { 
-        sessionId, 
-        currentCacheCount: mappingsCacheRef.current?.length || 0 
-      });
+  // Auto-apply template from Dashboard/Upload using the existing handleApplyTemplate logic
+  useEffect(() => {
+    const autoApplyTemplate = location.state?.autoApplyTemplate;
+    
+    if (autoApplyTemplate && !loading && clientHeaders.length > 0 && templateHeaders.length > 0 && !autoApplyTriggeredRef.current) {
+      console.log('🔧 AUTO_APPLY: Detected template from Dashboard/Upload:', autoApplyTemplate.name);
+      autoApplyTriggeredRef.current = true;
       
-      debugLog('Checking existing mappings...');
-      const response = await api.getExistingMappings(sessionId);
+      // Small delay to ensure page is fully loaded
+      const timer = setTimeout(() => {
+        handleApplyTemplate(autoApplyTemplate);
+        
+        // Clear the state so it doesn't re-apply on refresh
+        window.history.replaceState({}, '', window.location.pathname);
+      }, 500);
       
-      enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Backend response received', {
-        success: response.data?.success,
-        hasMappings: !!response.data?.mappings,
-        hasDefaultValues: !!response.data?.default_values,
-        hasSessionMetadata: !!response.data?.session_metadata,
-        responseKeys: Object.keys(response.data || {})
-      });
-      
-      if (response.data.success) {
-        const { mappings, default_values, session_metadata } = response.data;
-        
-        enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Processing successful response', {
-          mappingsType: typeof mappings,
-          mappingsKeys: mappings ? Object.keys(mappings) : null,
-          mappingsIsArray: Array.isArray(mappings),
-          defaultValuesType: typeof default_values,
-          defaultValuesKeys: default_values ? Object.keys(default_values) : null,
-          sessionMetadataKeys: session_metadata ? Object.keys(session_metadata) : null
-        });
-        
-        // Store session metadata for badge display and other features
-        setSessionMetadata(session_metadata);
-        
-        // CRITICAL: Populate mappings cache for restoration during rebuilds
-        if (mappings && mappings.mappings && Array.isArray(mappings.mappings)) {
-          const normalizedMappings = mappings.mappings.map(m => ({
-            source: m.source,
-            target: m.target
-          }));
-          mappingsCacheRef.current = normalizedMappings;
-          
-          enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Populated cache from nested mappings', {
-            originalCount: mappings.mappings.length,
-            normalizedCount: normalizedMappings.length,
-            sampleMappings: normalizedMappings.slice(0, 5)
-          });
-          
-          debugLog('Populated mappingsCacheRef from backend:', normalizedMappings);
-        } else if (mappings && Array.isArray(mappings)) {
-          // Direct array format
-          mappingsCacheRef.current = mappings.map(m => ({
-            source: m.source,
-            target: m.target
-          }));
-          
-          enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Populated cache from direct array mappings', {
-            originalCount: mappings.length,
-            normalizedCount: mappingsCacheRef.current.length,
-            sampleMappings: mappingsCacheRef.current.slice(0, 5)
-          });
-          
-          debugLog('Populated mappingsCacheRef from backend (direct array):', mappingsCacheRef.current);
-        } else {
-          mappingsCacheRef.current = [];
-          enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'No mappings found in backend response', {
-            mappings,
-            mappingsType: typeof mappings
-          });
-          debugLog('No mappings found in backend response');
-        }
-        
-        // Store existing mappings for restoration
-        setExistingMappings(mappings);
-        
-        // Store default values
-        if (default_values && typeof default_values === 'object') {
-          setExistingDefaultValues(default_values);
-          // CRITICAL: Also store in defaultValueMappings for UI integration
-          setDefaultValueMappings(default_values);
-
-          enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Loaded default values from backend', {
-            defaultValuesCount: Object.keys(default_values).length,
-            defaultValues: default_values,
-            keys: Object.keys(default_values)
-          });
-
-          debugLog('Loaded default values from backend:', default_values);
-        }
-        
-        // Update column counts from session metadata if available
-        if (session_metadata && session_metadata.column_counts) {
-          const { tags_count, spec_pairs_count, customer_id_pairs_count } = session_metadata.column_counts;
-          const newCounts = {
-            tags_count: tags_count || 1,
-            spec_pairs_count: spec_pairs_count || 1,
-            customer_id_pairs_count: customer_id_pairs_count || 1
-          };
-          
-          setColumnCounts(newCounts);
-          
-          enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Updated column counts from session metadata', {
-            originalCounts: session_metadata.column_counts,
-            newCounts,
-            sessionMetadata: session_metadata
-          });
-          
-          debugLog('Updated column counts from session metadata:', session_metadata.column_counts);
-        }
-        
-        enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Existing mappings check complete', {
-          mappingsCount: mappingsCacheRef.current.length,
-          defaultValuesCount: Object.keys(default_values || {}).length,
-          sessionMetadata: session_metadata,
-          cachePopulated: !!mappingsCacheRef.current.length
-        });
-        
-        debugLog('Existing mappings check complete', {
-          mappingsCount: mappingsCacheRef.current.length,
-          defaultValuesCount: Object.keys(default_values || {}).length,
-          sessionMetadata: session_metadata
-        });
-      } else {
-        enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Backend response not successful', {
-          success: response.data?.success,
-          error: response.data?.error,
-          responseData: response.data
-        });
-      }
-    } catch (error) {
-      enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Error during existing mappings check', {
-        error: error.message,
-        stack: error.stack,
-        sessionId
-      });
-      
-      console.error('❌ Error checking existing mappings:', error);
-      mappingsCacheRef.current = [];
+      return () => clearTimeout(timer);
     }
-  }, [sessionId]);
+  }, [location.state, loading, clientHeaders.length, templateHeaders.length]);
+
+  
 
   // Apply existing mappings to the React Flow
   const applyExistingMappingsToFlow = (mappings, clientHdrs, templateHdrs, setIsInitializingMappings = null) => {
@@ -1416,6 +1977,11 @@ export default function ColumnMapping() {
         setIsInitializingMappings(false);
         isInitializingRef.current = false;
         console.log('🔧 DEBUG: Initialization complete (applyExistingMappingsToFlow), autosave enabled');
+        
+        // Mappings applied successfully - synchronize template version
+        setTemplateVersion(prev => prev + 1);
+        setExpectedTemplateVersion(prev => prev + 1);
+        console.log('✅ UI: Template version synchronized after applying existing mappings');
       }
     }, 500); // Increased from 200ms to 500ms to ensure edges are fully set
 
@@ -1519,206 +2085,9 @@ export default function ColumnMapping() {
     }, 700);
   };
 
-  // Initialize nodes aligned with fixed headers and save initial state
-  const initializeNodes = (clientHdrs, templateHdrs, aiMappings = null, factwiseRules = [], defaultValues = {}, setIsInitializingMappings = null) => {
-    // eslint-disable-next-line no-console
-    console.log('🔧 DEBUG: initializeNodes called with setIsInitializingMappings:', !!setIsInitializingMappings);
-    // eslint-disable-next-line no-console
-    console.log('🔧 Initializing nodes with:', { 
-      clientHdrs: clientHdrs, 
-      clientCount: clientHdrs?.length || 0,
-      templateHdrs: templateHdrs, 
-      templateCount: templateHdrs?.length || 0,
-      aiMappings: aiMappings,
-      factwiseRules: factwiseRules
-    });
-    
-    const nodeHeight = 90;
-    const nodeSpacing = 30;
-    const startY = 40; // Space for frozen headers
-    
-    // Create source nodes (adjusted for sidebar)
-    const clientNodes = clientHdrs.map((header, idx) => ({
-      id: `c-${idx}`,
-      type: 'custom',
-      position: { x: 20, y: startY + idx * (nodeHeight + nodeSpacing) },
-      data: {
-        label: header,
-        originalLabel: header,
-        isConnected: false,
-        isSelected: false,
-        isFromTemplate: false,
-        isSpecificationMapping: false,
-        hasDefaultValue: false
-      },
-      draggable: false
-    }));
+  // initializeNodes function is hoisted above as function declaration to avoid TDZ
 
-    // ALWAYS preserve original column order - never reorder based on mapping status
-    const targetNodes = [];
-    let currentY = 40;
-    let specPairIndex = 0;
-    let customerPairIndex = 0;
-    
-    // Define colors for pairs
-    const pairColors = [
-      'blue', 'green', 'purple', 'pink', 'yellow', 'indigo', 'red', 'teal', 'orange', 'cyan'
-    ];
-    
-    // Build quick-look maps from session rules for FW-/AT- badges
-    const tagBadges = new Map();
-    const factwiseBadge = new Map();
-    try {
-      if (Array.isArray(factwiseRules)) {
-        factwiseRules.forEach(rule => {
-          if (rule && rule.type === 'factwise_id') {
-            const src = [rule.first_column, rule.operator || '_', rule.second_column].filter(Boolean).join('');
-            factwiseBadge.set('Item code', `FW-${rule.first_column}${rule.operator || '_'}${rule.second_column}`);
-          }
-        });
-      }
-      // formula rules can also come via aiMappings but we prefer session metadata path the caller passes in
-      if (Array.isArray(aiMappings)) {
-        aiMappings.forEach(r => {
-          const colType = r?.column_type || 'Tag';
-          const target = r?.target_column;
-          const src = r?.source_column;
-          if (colType === 'Tag' && target && src) {
-            tagBadges.set(target, `AT-${src}`);
-          }
-        });
-      }
-    } catch (e) {
-      // non-fatal; badges are best-effort
-    }
-    
-    // Process template headers in their original order
-    templateHdrs.forEach((header, idx) => {
-      // Add visual grouping spacing for pairs
-      const isPairStart = (
-        (header === 'Specification name' && templateHdrs[idx + 1] === 'Specification value') ||
-        (header === 'Customer identification name' && templateHdrs[idx + 1] === 'Customer identification value')
-      );
-      const isPairEnd = (
-        (header === 'Specification value' && templateHdrs[idx - 1] === 'Specification name') ||
-        (header === 'Customer identification value' && templateHdrs[idx - 1] === 'Customer identification name')
-      );
-      
-      // Determine pair color
-      let pairColor = 'gray';
-      let pairIndex = 0;
-      if (header.includes('Specification')) {
-        if (header === 'Specification name') {
-          // Starting a new spec pair
-          pairIndex = specPairIndex;
-          specPairIndex++;
-        } else {
-          // This is the value for the current spec pair
-          pairIndex = specPairIndex - 1;
-        }
-        pairColor = pairColors[pairIndex % pairColors.length];
-      } else if (header.includes('Customer identification') || header.includes('Custom identification')) {
-        if (header === 'Customer identification name' || header === 'Custom identification name') {
-          // Starting a new customer pair
-          pairIndex = customerPairIndex;
-          customerPairIndex++;
-        } else {
-          // This is the value for the current customer pair
-          pairIndex = customerPairIndex - 1;
-        }
-        pairColor = pairColors[pairIndex % pairColors.length];
-      }
-      
-      // Add extra spacing before pair starts (except for first item)
-      if (isPairStart && idx > 0) {
-        currentY += 15; // Extra spacing before pairs
-      }
-      
-      // Check if this field has a FactWise formula
-      let factwiseFormula = null;
-      if (factwiseRules && factwiseRules.length > 0) {
-        for (const rule of factwiseRules) {
-          if (rule.target_column === header || 
-              (header === 'Factwise ID' && rule.target_column === 'Item code')) {
-            const firstCol = rule.first_column || '';
-            const secondCol = rule.second_column || '';
-            const operator = rule.operator || '_';
-            factwiseFormula = `${firstCol}${operator}${secondCol}`;
-            break;
-          }
-        }
-      }
-      
-      // Check if this field has a default value
-      const defaultValue = defaultValues[header];
-      const hasDefaultValue = !!defaultValue;
-      
-      targetNodes.push({
-        id: `t-${idx}`,
-        type: 'custom',
-        position: { x: 600, y: currentY },
-        data: { 
-          label: header, 
-          originalLabel: header,
-          isConnected: false,
-          isSelected: false,
-          isFromTemplate: false,
-          isSpecificationMapping: header.includes('Specification'),
-          isPairStart: isPairStart,
-          isPairEnd: isPairEnd,
-          pairType: header.includes('Specification') ? 'specification' : 
-                   header.includes('Customer Identification') ? 'customer' : 'single',
-          pairColor: pairColor,
-          pairIndex: pairIndex + 1,
-          isOptional: (templateOptionals && templateOptionals.length === templateHdrs.length) 
-            ? !!templateOptionals[idx]
-            : (header.includes('Tag') || header.includes('Specification') || header.includes('Customer') || header.includes('Custom identification')),
-          onDelete: handleDeleteOptionalField,
-          factwiseFormula: factwiseFormula,
-          hasDefaultValue: hasDefaultValue,
-          defaultValue: defaultValue,
-          atBadge: tagBadges.get(header) || null,
-          fwBadge: factwiseBadge.get(header) || null
-        },
-        draggable: false
-      });
-      
-      currentY += (nodeHeight + nodeSpacing);
-      
-      // Add extra spacing after pair ends
-      if (isPairEnd) {
-        currentY += 15; // Extra spacing after pairs
-      }
-    });
-
-    const allNodes = [...clientNodes, ...targetNodes];
-    console.log('🔧 Created nodes summary:', {
-      totalNodes: allNodes.length,
-      clientNodesCount: clientNodes.length,
-      targetNodesCount: targetNodes.length,
-      clientNodeIds: clientNodes.map(n => n.id),
-      targetNodeIds: targetNodes.map(n => n.id),
-      clientLabels: clientNodes.map(n => n.data.label),
-      targetLabels: targetNodes.map(n => n.data.label)
-    });
-    setNodes(allNodes);
-    
-    // Save initial state to mapping history if it's empty and no existing mappings
-    setTimeout(() => {
-      if (mappingHistory.length === 0) {
-        setMappingHistory([{ nodes: allNodes, edges: [] }]);
-        console.log('Saved initial state to mapping history');
-      }
-      
-      // Set flag to false after nodes are initialized
-      if (setIsInitializingMappings) {
-        console.log('🔧 DEBUG: Setting isInitializingMappings to false after initializing nodes');
-        setIsInitializingMappings(false);
-        isInitializingRef.current = false;
-        console.log('🔧 DEBUG: Initialization complete (initializeNodes), autosave enabled');
-      }
-    }, 300); // Increased from 100ms to 300ms to ensure nodes are fully set
-  };
+  // DUPLICATE FUNCTION REMOVED - using const declaration at line 1503 instead
 
   // Generate template headers based on column counts
   const generateTemplateHeaders = (counts) => {
@@ -1751,128 +2120,6 @@ export default function ColumnMapping() {
     return headers;
   };
 
-  const handleDeleteOptionalField = useCallback(async (nodeId) => {
-    enhancedDebugLog('DELETE_FIELD', 'Field deletion requested', { 
-      nodeId, 
-      edgesCount: edges.length, 
-      cacheCount: (mappingsCacheRef.current || []).length,
-      totalNodes: nodes.length 
-    });
-    
-    debugLog('DELETE FIELD REQUESTED:', { nodeId, edgesCount: edges.length, cacheCount: (mappingsCacheRef.current || []).length });
-    
-    const node = nodes.find(n => n.id === nodeId);
-    if (!node || !node.id.startsWith('t-')) {
-      enhancedDebugLog('DELETE_FIELD', 'Invalid node for deletion', { 
-        nodeId, 
-        nodeFound: !!node, 
-        nodeType: node?.id?.startsWith('t-') 
-      });
-      return;
-    }
-    
-    const originalLabel = node.data?.originalLabel || '';
-    const pairType = node.data?.pairType || 'single';
-    const isSpec = pairType === 'specification' || originalLabel.includes('Specification');
-    const isCustomer = pairType === 'customer' || originalLabel.includes('Customer_Identification') || originalLabel.includes('Customer identification') || originalLabel.includes('Custom identification');
-    const isTag = originalLabel === 'Tag' || originalLabel.startsWith('Tag_');
-    
-    enhancedDebugLog('DELETE_FIELD', 'Node analysis', { 
-      originalLabel, 
-      pairType, 
-      isSpec, 
-      isCustomer, 
-      isTag,
-      nodeData: node.data 
-    });
-    
-    // CRITICAL: Check if field is mapped before allowing deletion
-    const pairIndex = node.data?.pairIndex;
-    const partner = nodes.find(n => n.id.startsWith('t-') && n.data?.pairType === pairType && n.data?.pairIndex === pairIndex && n.id !== nodeId);
-    
-    enhancedDebugLog('DELETE_FIELD', 'Partner node analysis', { 
-      pairIndex, 
-      partnerFound: !!partner, 
-      partnerId: partner?.id, 
-      partnerLabel: partner?.data?.originalLabel 
-    });
-    
-    // Check live edges first
-    const isMappedInEdges = edges.some(e => e.target === nodeId) || 
-                           ((isSpec || isCustomer) && partner && edges.some(e => e.target === partner.id));
-    
-    // Check cached mappings as backup
-    const cacheHasTarget = (label) => {
-      if (!label || !mappingsCacheRef.current || !Array.isArray(mappingsCacheRef.current)) return false;
-      return mappingsCacheRef.current.some(m => m && m.target === label);
-    };
-    
-    const isMappedInCache = cacheHasTarget(originalLabel) || 
-                           (partner && cacheHasTarget(partner.data?.originalLabel));
-    
-    const isMapped = isMappedInEdges || isMappedInCache;
-    
-    enhancedDebugLog('DELETE_FIELD', 'Mapping check results', { 
-      originalLabel,
-      isMappedInEdges,
-      isMappedInCache,
-      isMapped,
-      edgesToNode: edges.filter(e => e.target === nodeId),
-      edgesToPartner: partner ? edges.filter(e => e.target === partner.id) : [],
-      cacheMappings: mappingsCacheRef.current?.filter(m => m.target === originalLabel || (partner && m.target === partner.data?.originalLabel))
-    });
-    
-    debugLog('DELETE FIELD MAPPING CHECK:', {
-      originalLabel,
-      pairType,
-      isSpec,
-      isCustomer,
-      isTag,
-      isMappedInEdges,
-      isMappedInCache,
-      isMapped,
-      cacheContent: mappingsCacheRef.current
-    });
-    
-    if (isMapped) {
-      const message = 'Cannot delete this field because it has existing mappings. Please unmap it first.';
-      enhancedDebugLog('DELETE_FIELD', 'Deletion blocked - field is mapped', { 
-        message, 
-        originalLabel, 
-        isMappedInEdges, 
-        isMappedInCache 
-      });
-      
-      try {
-        if (setSnackbar) {
-          setSnackbar({ open: true, message, severity: 'warning' });
-        } else {
-          // eslint-disable-next-line no-console
-          console.warn(message);
-        }
-      } catch (e) {
-        // eslint-disable-next-line no-console
-        console.warn(message);
-      }
-      return;
-    }
-    
-    enhancedDebugLog('DELETE_FIELD', 'Deletion proceeding - field is not mapped', { 
-      originalLabel, 
-      pairType, 
-      pairIndex 
-    });
-    
-    // Field can be deleted - update counts and rebuild
-    const newCounts = { ...columnCounts };
-    if (isSpec) newCounts.spec_pairs_count = Math.max(0, (newCounts.spec_pairs_count || 0) - 1);
-    else if (isCustomer) newCounts.customer_id_pairs_count = Math.max(0, (newCounts.customer_id_pairs_count || 0) - 1);
-    else if (isTag) newCounts.tags_count = Math.max(0, (newCounts.tags_count || 0) - 1);
-    else return;
-    
-    debugLog('DELETE FIELD PROCEEDING:', { newCounts, originalLabel });
-    await updateColumnCounts(newCounts);
-  }, [nodes, edges, columnCounts, updateColumnCounts]);
         
 
   // Convert edges to mappings format for backend
@@ -1967,42 +2214,7 @@ export default function ColumnMapping() {
     }
   };
 
-  // SUPER SIMPLE direct arrows - straight lines to what's in front
-  const createEdge = (sourceIdx, targetIdx, isAI = false, confidence = null, isFromTemplate = false, isSpecificationMapping = false) => {
-    // Generate unique edge ID by including timestamp to allow multiple edges to same target
-    const edgeId = `e-c-${sourceIdx}-t-${targetIdx}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    
-    let strokeColor = '#10b981'; // Always green for perfect mappings
-    let strokeWidth = 3;
-    let animated = true;
-    
-    return {
-      id: edgeId,
-      source: `c-${sourceIdx}`,
-      target: `t-${targetIdx}`,
-      type: 'straight', // STRAIGHT lines - no curves, no collision
-      animated,
-      style: { 
-        stroke: strokeColor, 
-        strokeWidth,
-        strokeOpacity: 0.8
-      },
-      markerEnd: {
-        type: MarkerType.ArrowClosed,
-        color: strokeColor,
-        width: 20,
-        height: 20
-      },
-      data: { 
-        confidence, 
-        isAiGenerated: isAI,
-        isFromTemplate,
-        isSpecificationMapping,
-        sourceIdx,
-        targetIdx
-      }
-    };
-  };
+  // createEdge function is hoisted above as function declaration to avoid TDZ
 
   // Handle default value dialog
   const handleSaveDefaultValue = () => {
@@ -2012,6 +2224,21 @@ export default function ColumnMapping() {
     setDefaultValueMappings(prev => ({
       ...prev,
       [selectedTemplateField.name]: defaultValueText.trim()
+    }));
+    
+    // Update the specific template node to show the default value tag
+    setNodes(currentNodes => currentNodes.map(node => {
+      if (node.id === selectedTemplateField.id) {
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            hasDefaultValue: true,
+            defaultValue: defaultValueText.trim()
+          }
+        };
+      }
+      return node;
     }));
     
     // Close dialog and reset state
@@ -2477,13 +2704,39 @@ export default function ColumnMapping() {
     })));
   }, [setNodes]);
 
-  // Reinitialize nodes when default values change to ensure they are properly applied
+  // NOTE: Removed unnecessary reinitialisation on default value changes
+  // Default values are now handled in autosave without dropping edges
+  // This prevents the reinit loops that were causing mapping instability
+  
+  // Track template readiness to prevent review with stale data
   useEffect(() => {
-    if (clientHeaders.length > 0 && templateHeaders.length > 0) {
-      const factwiseRules = sessionMetadata?.factwise_rules || [];
-      initializeNodes(clientHeaders, templateHeaders, null, factwiseRules, defaultValueMappings, setIsInitializingMappings);
+    const ready = edges.length > 0 && templateVersion >= expectedTemplateVersion;
+    setIsReady(ready);
+    console.log('\ud83d\udee1\ufe0f UI Readiness check:', { ready, templateVersion, expectedTemplateVersion, edgesCount: edges.length });
+  }, [edges.length, templateVersion, expectedTemplateVersion]);
+
+  // Ensure default value tags are applied to nodes when defaultValueMappings changes
+  useEffect(() => {
+    if (Object.keys(defaultValueMappings).length > 0) {
+      console.log('🔄 Applying default values to existing nodes:', defaultValueMappings);
+      setNodes(currentNodes => currentNodes.map(node => {
+        if (!node.id.startsWith('t-')) return node; // Only update template nodes
+        
+        const fieldName = node.data?.originalLabel;
+        if (fieldName && defaultValueMappings[fieldName]) {
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              hasDefaultValue: true,
+              defaultValue: defaultValueMappings[fieldName]
+            }
+          };
+        }
+        return node;
+      }));
     }
-  }, [defaultValueMappings, clientHeaders, templateHeaders, sessionMetadata, setIsInitializingMappings]);
+  }, [defaultValueMappings, setNodes]);
 
   // Add escape key handling
   useEffect(() => {
@@ -2685,33 +2938,24 @@ export default function ColumnMapping() {
         // Store current mappings count for next comparison
         sessionStorage.setItem('previousMappingsCount', currentMappingsCount.toString());
 
-        // ADDITIONAL SAFETY CHECK: If we have very few mappings compared to what we expect,
-        // it might mean we're still loading. Skip autosave in this case.
-        // But be more lenient if we're dealing with existing mappings (not all columns need to be mapped)
-        const expectedMinMappings = Math.min(clientHeaders.length, templateHeaders.length);
-        const isRestoringExistingMappings = edges.some(edge => edge.data?.isFromTemplate);
-        
-        if (mappings.length < expectedMinMappings * 0.3) { // Reduced from 0.5 to 0.3
-          enhancedDebugLog('AUTOSAVE', 'Too few mappings detected - skipping autosave', {
+        // SAFETY CHECK: Only skip autosave if we have zero mappings
+        // This prevents accidental data loss while allowing small/partial mappings to be saved
+        if (mappings.length === 0) {
+          enhancedDebugLog('AUTOSAVE', 'No mappings to save - skipping autosave', {
             mappingsLength: mappings.length,
-            expectedMinMappings,
-            threshold: expectedMinMappings * 0.3,
-            isRestoringExistingMappings,
             clientHeadersLength: clientHeaders.length,
             templateHeadersLength: templateHeaders.length
           });
-          console.log('🔧 DEBUG: Too few mappings detected, skipping autosave to prevent partial saves. Expected at least:', expectedMinMappings * 0.3, 'Got:', mappings.length, 'Restoring existing:', isRestoringExistingMappings);
+          console.log('🔧 DEBUG: No mappings to save, skipping autosave');
           return;
         }
 
-        // Update cache for reliable restoration/guards
-        if (mappings.length > 0) {
-          mappingsCacheRef.current = mappings;
-          enhancedDebugLog('AUTOSAVE', 'Updated mappings cache', {
-            cacheCount: mappingsCacheRef.current.length,
-            mappings: mappingsCacheRef.current
-          });
-        }
+        // Update cache for reliable restoration/guards (allow empty mappings too)
+        mappingsCacheRef.current = mappings;
+        enhancedDebugLog('AUTOSAVE', 'Updated mappings cache', {
+          cacheCount: mappingsCacheRef.current.length,
+          mappings: mappingsCacheRef.current
+        });
 
         const payload = {
           mappings,
@@ -2750,7 +2994,7 @@ export default function ColumnMapping() {
         // eslint-disable-next-line no-console
         console.error('❌ Debounced autosave failed:', e);
       }
-    }, 1000);
+    }, 1500); // 🔥 FAST NAVIGATION FIX: Increased delay to prevent too-fast navigation
 
     return () => clearTimeout(timer);
   }, [edges, defaultValueMappings, clientHeaders, nodes, sessionId, isInitializingMappings, templateHeaders, loading]);
@@ -2763,6 +3007,8 @@ export default function ColumnMapping() {
     }
 
     setIsReviewing(true);
+    setIsProcessingMappings(true); // 🔥 FAST NAVIGATION FIX: Block navigation during processing
+    setGlobalLoading(true); // 🔥 LOADER FIX: Show global loader during review preparation
     setError(null);
 
     try {
@@ -2889,6 +3135,8 @@ export default function ColumnMapping() {
       setError('Failed to save mappings. Please try again.');
     } finally {
       setIsReviewing(false);
+      setIsProcessingMappings(false); // 🔥 FAST NAVIGATION FIX: Re-enable navigation
+      setGlobalLoading(false); // 🔥 LOADER FIX: Clear global loader when done
     }
   };
 
@@ -3009,10 +3257,10 @@ export default function ColumnMapping() {
 
             <button
               onClick={handleReview}
-              disabled={edges.length === 0 || isReviewing || isRebuildingRef.current}
+              disabled={edges.length === 0 || isReviewing || isRebuildingRef.current || !isReady || isProcessingMappings}
               className={`
                 px-8 py-3 rounded-lg font-semibold flex items-center gap-2 shadow-sm transition-all
-                ${edges.length > 0 && !isReviewing
+                ${edges.length > 0 && !isReviewing && !isProcessingMappings
                   ? 'bg-purple-600 hover:bg-purple-700 text-white'
                   : 'bg-gray-200 text-gray-500'
                 }
@@ -3020,8 +3268,8 @@ export default function ColumnMapping() {
             >
               {isReviewing ? (
                 <>
-                  <div className="w-4 h-4 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></div>
-                  Saving...
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                  <span>Preparing review...</span>
                 </>
               ) : (
                 <>
@@ -3163,7 +3411,11 @@ export default function ColumnMapping() {
                 <label className="text-xs text-gray-600">Tags:</label>
                 <div className="flex items-center gap-2">
                   <button 
-                    onClick={() => updateColumnCounts({...columnCounts, tags_count: Math.max(1, columnCounts.tags_count - 1)})}
+                    onClick={() => updateColumnCounts({
+                      tags_count: Math.max(1, columnCounts.tags_count - 1),
+                      spec_pairs_count: columnCounts.spec_pairs_count || 0,
+                      customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
+                    })}
                     className="w-6 h-6 bg-red-200 hover:bg-red-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-red-700"
                     disabled={columnCounts.tags_count <= 1}
                   >
@@ -3171,7 +3423,11 @@ export default function ColumnMapping() {
                   </button>
                   <span className="w-8 text-center text-sm font-semibold">{columnCounts.tags_count}</span>
                   <button 
-                    onClick={() => updateColumnCounts({...columnCounts, tags_count: columnCounts.tags_count + 1})}
+                    onClick={() => updateColumnCounts({
+                      tags_count: columnCounts.tags_count + 1,
+                      spec_pairs_count: columnCounts.spec_pairs_count || 0,
+                      customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
+                    })}
                     className="w-6 h-6 bg-green-200 hover:bg-green-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-green-700"
                   >
                     +
@@ -3184,7 +3440,11 @@ export default function ColumnMapping() {
                 <label className="text-xs text-gray-600">Spec Pairs:</label>
                 <div className="flex items-center gap-2">
                   <button 
-                    onClick={() => updateColumnCounts({...columnCounts, spec_pairs_count: Math.max(1, columnCounts.spec_pairs_count - 1)})}
+                    onClick={() => updateColumnCounts({
+                      tags_count: columnCounts.tags_count || 0,
+                      spec_pairs_count: Math.max(1, columnCounts.spec_pairs_count - 1),
+                      customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
+                    })}
                     className="w-6 h-6 bg-red-200 hover:bg-red-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-red-700"
                     disabled={columnCounts.spec_pairs_count <= 1}
                   >
@@ -3192,7 +3452,11 @@ export default function ColumnMapping() {
                   </button>
                   <span className="w-8 text-center text-sm font-semibold">{columnCounts.spec_pairs_count}</span>
                   <button 
-                    onClick={() => updateColumnCounts({...columnCounts, spec_pairs_count: columnCounts.spec_pairs_count + 1})}
+                    onClick={() => updateColumnCounts({
+                      tags_count: columnCounts.tags_count || 0,
+                      spec_pairs_count: columnCounts.spec_pairs_count + 1,
+                      customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
+                    })}
                     className="w-6 h-6 bg-green-200 hover:bg-green-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-green-700"
                   >
                     +
@@ -3205,7 +3469,11 @@ export default function ColumnMapping() {
                 <label className="text-xs text-gray-600">Customer ID Pairs:</label>
                 <div className="flex items-center gap-2">
                   <button 
-                    onClick={() => updateColumnCounts({...columnCounts, customer_id_pairs_count: Math.max(1, columnCounts.customer_id_pairs_count - 1)})}
+                    onClick={() => updateColumnCounts({
+                      tags_count: columnCounts.tags_count || 0,
+                      spec_pairs_count: columnCounts.spec_pairs_count || 0,
+                      customer_id_pairs_count: Math.max(1, columnCounts.customer_id_pairs_count - 1)
+                    })}
                     className="w-6 h-6 bg-red-200 hover:bg-red-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-red-700"
                     disabled={columnCounts.customer_id_pairs_count <= 1}
                   >
@@ -3213,7 +3481,11 @@ export default function ColumnMapping() {
                   </button>
                   <span className="w-8 text-center text-sm font-semibold">{columnCounts.customer_id_pairs_count}</span>
                   <button 
-                    onClick={() => updateColumnCounts({...columnCounts, customer_id_pairs_count: columnCounts.customer_id_pairs_count + 1})}
+                    onClick={() => updateColumnCounts({
+                      tags_count: columnCounts.tags_count || 0,
+                      spec_pairs_count: columnCounts.spec_pairs_count || 0,
+                      customer_id_pairs_count: columnCounts.customer_id_pairs_count + 1
+                    })}
                     className="w-6 h-6 bg-green-200 hover:bg-green-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-green-700"
                   >
                     +
@@ -3711,6 +3983,9 @@ export default function ColumnMapping() {
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* Global Loader Overlay */}
+      <LoaderOverlay visible={globalLoading} label="Processing..." />
     </div>
   );
 }

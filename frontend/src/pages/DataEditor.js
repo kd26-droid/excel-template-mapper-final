@@ -25,6 +25,7 @@ import {
   MenuItem,
   Container
 } from '@mui/material';
+import LoaderOverlay, { useGlobalBlock } from '../components/LoaderOverlay';
 import {
   Save as SaveIcon,
   Download as DownloadIcon,
@@ -39,9 +40,25 @@ import {
   Close as CloseIcon,
   Map as MapIcon
 } from '@mui/icons-material';
-import api from '../services/api';
+import api, { setGlobalLoaderCallback } from '../services/api';
 import FormulaBuilder from '../components/FormulaBuilder';
 
+// Helper function to apply snapshot to editor state
+function applySnapshotToEditor(snapshot, { setColumnDefs, setRowData, setDynamicColumnCounts, setHasFormulas }) {
+  const headers = snapshot.headers || [];
+  const counts = snapshot.counts || {};
+  setDynamicColumnCounts(counts);
+
+  // Rebuild AG Grid columns from headers
+  const cols = [{ headerName: '#', field: '__row_number__', width: 60 }];
+  headers.forEach(h => cols.push({ headerName: h, field: h }));
+  setColumnDefs(cols);
+
+  // If backend sent enriched data via /data, we keep fetchData().
+  // Here we only flip local state derived from snapshot to avoid flicker.
+
+  setHasFormulas((snapshot.formula_rules || []).length > 0);
+}
 
 const DataEditor = () => {
   const { sessionId } = useParams();
@@ -49,6 +66,14 @@ const DataEditor = () => {
 
   // ─── STATE MANAGEMENT ───────────────────────────────────────────────────────
   const [loading, setLoading] = useState(true);
+  const [globalLoading, setGlobalLoading] = useState(false);
+  useGlobalBlock(globalLoading);
+  
+  // Setup global loader callback
+  useEffect(() => {
+    setGlobalLoaderCallback(setGlobalLoading);
+    return () => setGlobalLoaderCallback(null);
+  }, []);
   const [error, setError] = useState(null);
   const [rowData, setRowData] = useState([]);
   const [columnDefs, setColumnDefs] = useState([]);
@@ -91,6 +116,7 @@ const DataEditor = () => {
   const [firstColumn, setFirstColumn] = useState('');
   const [secondColumn, setSecondColumn] = useState('');
   const [operator, setOperator] = useState('_');
+  const [factwiseIdLoading, setFactwiseIdLoading] = useState(false);
   
   // Store factwise ID rule for template saving
   const [factwiseIdRule, setFactwiseIdRule] = useState(null);
@@ -101,6 +127,15 @@ const DataEditor = () => {
     spec_pairs_count: 1,
     customer_id_pairs_count: 1
   });
+
+  // Grid key for forced re-mounting when template structure changes
+  const [gridKey, setGridKey] = useState(0);
+  const [templateVersion, setTemplateVersion] = useState(0);
+
+  // Force re-mount when template version or headers change
+  useEffect(() => {
+    setGridKey(prev => prev + 1);
+  }, [templateVersion, JSON.stringify(columnDefs.map(c => c.field))]);
 
   
 
@@ -195,6 +230,14 @@ const DataEditor = () => {
         hasFormulaRules: !!(data && data.formula_rules),
         formulaRulesCount: data && data.formula_rules ? data.formula_rules.length : 0
       });
+      
+      // Track template version for forced re-mounting
+      const newTemplateVersion = data.template_version ?? 0;
+      if (newTemplateVersion !== templateVersion) {
+        console.log('🔄 Template version changed:', { from: templateVersion, to: newTemplateVersion });
+        setTemplateVersion(newTemplateVersion);
+        setGridKey(prev => prev + 1);
+      }
 
       if (!data || !data.headers || !Array.isArray(data.headers) || data.headers.length === 0) {
         setError('No mapped data found. Please go back to Column Mapping and create mappings first.');
@@ -214,6 +257,27 @@ const DataEditor = () => {
       );
       
       setFormulaColumns(detectedFormulaColumns);
+      
+      // CRITICAL FIX: Calculate actual column counts from headers to sync with ColumnMapping
+      const tagColumns = data.headers.filter(h => h.startsWith('Tag_') || h === 'Tag');
+      const specNameColumns = data.headers.filter(h => h.startsWith('Specification_Name_'));
+      const customerNameColumns = data.headers.filter(h => h.startsWith('Customer_Identification_Name_'));
+      
+      const actualColumnCounts = {
+        tags_count: Math.max(tagColumns.length, 1),
+        spec_pairs_count: Math.max(specNameColumns.length, 1),
+        customer_id_pairs_count: Math.max(customerNameColumns.length, 1)
+      };
+      
+      console.log('🔧 FETCH: Calculated column counts from headers:', {
+        tagColumns: tagColumns.length,
+        specColumns: specNameColumns.length,
+        customerColumns: customerNameColumns.length,
+        actualCounts: actualColumnCounts,
+        oldCounts: dynamicColumnCounts
+      });
+      
+      setDynamicColumnCounts(actualColumnCounts);
       
       if (data.formula_rules && Array.isArray(data.formula_rules) && data.formula_rules.length > 0) {
         setAppliedFormulas(data.formula_rules);
@@ -433,16 +497,15 @@ const DataEditor = () => {
         }
       }
 
-      setLoading(true);
-      const response = await api.createFactwiseId(sessionId, firstColumn, secondColumn, operator, strategy);
+      console.log('🔧 FACTWISE: Creating Factwise ID with proper synchronization');
+      const response = await api.createFactwiseId(sessionId, firstColumn, secondColumn, operator);
 
       if (response.data.success) {
-        setFactwiseIdRule({ firstColumn, secondColumn, operator, strategy });
+        // The API now handles proper synchronization internally
+        setFactwiseIdRule({ firstColumn, secondColumn, operator });
         
-        // CRITICAL FIX: Single, immediate refresh instead of double refresh with timeout
-        // This prevents race conditions and ensures data is properly loaded
         console.log('🔧 FACTWISE: Refreshing data after successful creation');
-        await fetchData();
+        await fetchData(); // This will get fresh data with new template version
         
         showSnackbar('Item code updated successfully!', 'success');
         handleCloseFactwiseIdDialog();
@@ -452,8 +515,6 @@ const DataEditor = () => {
     } catch (error) {
       console.error('Error creating Factwise ID:', error);
       showSnackbar('Failed to update Item code', 'error');
-    } finally {
-      setLoading(false);
     }
   }, [sessionId, firstColumn, secondColumn, operator, showSnackbar, fetchData, handleCloseFactwiseIdDialog, rowData, columnDefs]);
 
@@ -496,7 +557,8 @@ const DataEditor = () => {
       
       setDynamicColumnCounts(newCounts);
       
-      // Single immediate refresh to reflect backend-cached enhanced data/headers
+      console.log('🔧 FORMULAS: Applied formulas with new template version');
+      // fetchData will automatically handle template version changes and re-mounting
       await fetchData();
       
       showSnackbar(
@@ -571,54 +633,11 @@ const DataEditor = () => {
         // Non-fatal
       }
       
-      // If template has formula rules, apply them automatically AFTER base template is set up
+      // Backend already applied formula rules when template was applied
+      // Just update frontend state to reflect the rules exist
       if (template.formula_rules && template.formula_rules.length > 0) {
-        console.log('🔧 TEMPLATE: Applying formula rules:', template.formula_rules);
-
-        // Normalize rules to new schema (ensure sub_rules array)
-        const normalizedRules = template.formula_rules.map(r => {
-          const rule = { ...(r || {}) };
-          if (!rule.column_type) rule.column_type = 'Tag';
-          if (rule.column_type === 'Specification Value' && !('specification_name' in rule)) {
-            rule.specification_name = '';
-          }
-          const hasFlat = (typeof rule.search_text === 'string') || (typeof rule.tag_value === 'string') || (typeof rule.output_value === 'string');
-          if (!Array.isArray(rule.sub_rules)) {
-            if (hasFlat) {
-              const searchText = rule.search_text || '';
-              const outputValue = rule.output_value || rule.tag_value || '';
-              const caseSensitive = !!rule.case_sensitive;
-              rule.sub_rules = [{ search_text: searchText, output_value: outputValue, case_sensitive: caseSensitive }];
-              console.warn('🔧 Normalized template flat rule to sub_rules[]', { rule });
-            } else {
-              rule.sub_rules = [{ search_text: '', output_value: '', case_sensitive: false }];
-              console.warn('🔧 Added empty sub_rules[] to template rule missing sub_rules', { rule });
-            }
-          }
-          rule.sub_rules = rule.sub_rules.map(sr => ({
-            search_text: (sr && typeof sr.search_text === 'string') ? sr.search_text : '',
-            output_value: (sr && typeof sr.output_value === 'string') ? sr.output_value : (typeof sr.tag_value === 'string' ? sr.tag_value : ''),
-            case_sensitive: !!(sr && sr.case_sensitive)
-          }));
-          return rule;
-        });
-
-        // Small delay to ensure template columns are set up first
-        setTimeout(async () => {
-          try {
-            const formulaResponse = await api.applyFormulas(sessionId, normalizedRules);
-            setHasFormulas(true);
-            setAppliedFormulas(normalizedRules);
-
-            // Handle formula response properly
-            if (formulaResponse.data.success) {
-              console.log('🔧 TEMPLATE: Formula rules applied successfully');
-              handleApplyFormulas(formulaResponse.data);
-            }
-          } catch (error) {
-            console.error('Error applying template formula rules:', error);
-          }
-        }, 1500);
+        setHasFormulas(true);
+        setAppliedFormulas(template.formula_rules);
       }
       
       // If template has factwise ID rule, apply it automatically
@@ -639,19 +658,14 @@ const DataEditor = () => {
           await fetchData();
         }
       }
-      
-            // Final refresh to ensure everything is properly displayed
-      setTimeout(async () => {
-        await fetchData();
-      }, 1000);
+
+      // Mark for ColumnMapping refresh
+      sessionStorage.setItem('templateAppliedInDataEditor', 'true');
+      sessionStorage.setItem('lastTemplateApplied', template.name);
 
       showSnackbar(`Template "${template.name}" applied successfully!`, 'success');
       setTemplateChooseDialogOpen(false);
       setSelectedTemplate(null);
-
-      // CRITICAL FIX: Set flag for ColumnMapping page to refresh
-      sessionStorage.setItem('templateAppliedInDataEditor', 'true');
-      sessionStorage.setItem('lastTemplateApplied', template.name);
 
       // CRITICAL FIX: Notify user about ColumnMapping page for visual mapping
       setTimeout(() => {
@@ -727,13 +741,24 @@ const DataEditor = () => {
         operator: factwiseIdRule.operator
       }] : [];
 
+      // Merge any session defaults (set in ColumnMapping) so they get stored in the template
+      let existingDefaults = {};
+      try {
+        const mappingsResponse = await api.getExistingMappings(sessionId);
+        existingDefaults = mappingsResponse.data?.default_values || {};
+        console.log('🔧 TEMPLATE: Retrieved session defaults for merging:', existingDefaults);
+      } catch (e) {
+        console.warn('🔧 TEMPLATE: Could not retrieve session defaults:', e.message);
+      }
+
       // Collect default values from unmapped columns AND custom values from dynamic tag columns
-      const default_values = {};
+      let default_values = {};
       
       console.log('🔧 TEMPLATE: Collecting default values', {
         unmappedColumns: unmappedColumns || [],
         columnDefsCount: columnDefs.length,
-        rowDataCount: rowData.length
+        rowDataCount: rowData.length,
+        existingDefaultsCount: Object.keys(existingDefaults).length
       });
       
       // Add default values for unmapped columns (if any)
@@ -761,9 +786,15 @@ const DataEditor = () => {
           // Key insight: If we have formula rules, save EMPTY defaults for formula columns
           // This ensures columns exist in template but don't get pre-filled with partial data
           if (appliedFormulas.length > 0) {
-            // For formula-generated columns, save empty default to ensure column structure
-            default_values[col.field] = '';
-            console.log(`🔧 SMART: Saved empty default for formula column "${col.field}" to preserve structure`);
+            // Check if user has set a default value for this column - if so, preserve it
+            if (existingDefaults && existingDefaults[col.field]) {
+              default_values[col.field] = existingDefaults[col.field];
+              console.log(`🔧 SMART: Preserved user-set default value "${existingDefaults[col.field]}" for column "${col.field}"`);
+            } else {
+              // For formula-generated columns with no user default, save empty default to ensure column structure
+              default_values[col.field] = '';
+              console.log(`🔧 SMART: Saved empty default for formula column "${col.field}" to preserve structure`);
+            }
           } else {
             // No formula rules - this might be a manually filled column, preserve actual values
             const hasCustomData = rowData.some(row => {
@@ -813,12 +844,63 @@ const DataEditor = () => {
             columnCounts = hdrCounts;
           }
         } else {
-          // Use maximum of backend counts vs frontend counts (for newly created tags)
-          columnCounts = {
-            tags_count: Math.max(backendColumnCounts.tags_count || 1, dynamicColumnCounts.tags_count),
-            spec_pairs_count: Math.max(backendColumnCounts.spec_pairs_count || 1, dynamicColumnCounts.spec_pairs_count),
-            customer_id_pairs_count: Math.max(backendColumnCounts.customer_id_pairs_count || 1, dynamicColumnCounts.customer_id_pairs_count)
+          // CRITICAL FIX: Calculate actual column counts from headers, then use maximum with backend
+          const actualTagColumns = columnDefs.filter(col => col.field && (col.field.startsWith('Tag_') || col.field === 'Tag'));
+          const actualSpecColumns = columnDefs.filter(col => col.field && col.field.startsWith('Specification_Name_'));
+          const actualCustomerColumns = columnDefs.filter(col => col.field && col.field.startsWith('Customer_Identification_Name_'));
+          
+          // Count highest numbered columns to preserve Tag_3, etc.
+          let maxTagNumber = 1;
+          actualTagColumns.forEach(col => {
+            if (col.field.startsWith('Tag_')) {
+              const tagNumber = parseInt(col.field.split('_')[1]);
+              if (!isNaN(tagNumber)) {
+                maxTagNumber = Math.max(maxTagNumber, tagNumber);
+              }
+            } else if (col.field === 'Tag') {
+              maxTagNumber = Math.max(maxTagNumber, 1);
+            }
+          });
+          
+          let maxSpecPair = 1;
+          actualSpecColumns.forEach(col => {
+            if (col.field.startsWith('Specification_Name_')) {
+              const specNumber = parseInt(col.field.split('_')[2]);
+              if (!isNaN(specNumber)) {
+                maxSpecPair = Math.max(maxSpecPair, specNumber);
+              }
+            }
+          });
+          
+          let maxCustomerPair = 1;
+          actualCustomerColumns.forEach(col => {
+            if (col.field.startsWith('Customer_Identification_Name_')) {
+              const customerNumber = parseInt(col.field.split('_')[3]);
+              if (!isNaN(customerNumber)) {
+                maxCustomerPair = Math.max(maxCustomerPair, customerNumber);
+              }
+            }
+          });
+          
+          const actualCounts = {
+            tags_count: Math.max(maxTagNumber, dynamicColumnCounts.tags_count, 1),
+            spec_pairs_count: Math.max(maxSpecPair, dynamicColumnCounts.spec_pairs_count, 1),
+            customer_id_pairs_count: Math.max(maxCustomerPair, dynamicColumnCounts.customer_id_pairs_count, 1)
           };
+          
+          // Use maximum of backend counts vs actual current counts (not frontend state which may be stale)
+          columnCounts = {
+            tags_count: Math.max(backendColumnCounts.tags_count || 1, actualCounts.tags_count),
+            spec_pairs_count: Math.max(backendColumnCounts.spec_pairs_count || 1, actualCounts.spec_pairs_count),
+            customer_id_pairs_count: Math.max(backendColumnCounts.customer_id_pairs_count || 1, actualCounts.customer_id_pairs_count)
+          };
+          
+          console.log('🔧 TEMPLATE: Calculated actual counts vs state', {
+            actualCounts,
+            dynamicColumnCountsState: dynamicColumnCounts,
+            backendCounts: backendColumnCounts,
+            finalColumnCounts: columnCounts
+          });
         }
         
         console.log('🔧 TEMPLATE: Column count logic', {
@@ -828,9 +910,72 @@ const DataEditor = () => {
         });
       } catch (error) {
         console.warn('Could not retrieve mappings/column counts for template:', error);
-        // Use frontend counts as fallback
-        columnCounts = dynamicColumnCounts;
+        // CRITICAL FIX: Calculate actual counts from headers as fallback instead of using stale state
+        const actualTagColumns = columnDefs.filter(col => col.field && (col.field.startsWith('Tag_') || col.field === 'Tag'));
+        const actualSpecColumns = columnDefs.filter(col => col.field && col.field.startsWith('Specification_Name_'));
+        const actualCustomerColumns = columnDefs.filter(col => col.field && col.field.startsWith('Customer_Identification_Name_'));
+        
+        // Count highest numbered columns to preserve Tag_3, etc.
+        let maxTagNumber = 1;
+        actualTagColumns.forEach(col => {
+          if (col.field.startsWith('Tag_')) {
+            const tagNumber = parseInt(col.field.split('_')[1]);
+            if (!isNaN(tagNumber)) {
+              maxTagNumber = Math.max(maxTagNumber, tagNumber);
+            }
+          } else if (col.field === 'Tag') {
+            maxTagNumber = Math.max(maxTagNumber, 1);
+          }
+        });
+        
+        let maxSpecPair = 1;
+        actualSpecColumns.forEach(col => {
+          if (col.field.startsWith('Specification_Name_')) {
+            const specNumber = parseInt(col.field.split('_')[2]);
+            if (!isNaN(specNumber)) {
+              maxSpecPair = Math.max(maxSpecPair, specNumber);
+            }
+          }
+        });
+        
+        let maxCustomerPair = 1;
+        actualCustomerColumns.forEach(col => {
+          if (col.field.startsWith('Customer_Identification_Name_')) {
+            const customerNumber = parseInt(col.field.split('_')[3]);
+            if (!isNaN(customerNumber)) {
+              maxCustomerPair = Math.max(maxCustomerPair, customerNumber);
+            }
+          }
+        });
+        
+        columnCounts = {
+          tags_count: Math.max(maxTagNumber, dynamicColumnCounts.tags_count, 1),
+          spec_pairs_count: Math.max(maxSpecPair, dynamicColumnCounts.spec_pairs_count, 1),
+          customer_id_pairs_count: Math.max(maxCustomerPair, dynamicColumnCounts.customer_id_pairs_count, 1)
+        };
+        
+        console.log('🔧 TEMPLATE: Using calculated fallback counts:', columnCounts);
       }
+      
+      // CRITICAL FIX: Persist column counts in session before saving template
+      if (columnCounts) {
+        console.log('🔧 TEMPLATE: Persisting column counts in session before template save:', columnCounts);
+        try {
+          await api.updateColumnCounts(sessionId, columnCounts);
+          console.log('🔧 TEMPLATE: Column counts persisted successfully');
+        } catch (error) {
+          console.warn('Failed to persist column counts:', error);
+          // Continue with template save anyway
+        }
+      }
+      
+      // Merge precedence: existing session defaults, then new computed defaults override empties
+      default_values = { ...(existingDefaults || {}), ...(default_values || {}) };
+      console.log('🔧 TEMPLATE: Final merged default values:', {
+        existingDefaultsCount: Object.keys(existingDefaults).length,
+        computedDefaultsCount: Object.keys(default_values).length - Object.keys(existingDefaults).length,
+        finalCount: Object.keys(default_values).length
+      });
 
       // Pass all template data to the API including mappings and default values
       const saveResponse = await api.saveMappingTemplate(
@@ -1027,13 +1172,81 @@ const DataEditor = () => {
     }
   }, [hasUnsavedChanges, saveCurrentData, sessionId, showSnackbar, hasFormulas, columnDefs, rowData]);
 
-  const handleBackToMapping = useCallback(() => {
+  const handleBackToMapping = useCallback(async () => {
     if (hasUnsavedChanges) {
       const confirmed = window.confirm('You have unsaved changes. Going back will lose them. Continue?');
       if (!confirmed) return;
     }
+    
+    // CRITICAL FIX: Calculate actual column counts from current headers, not state
+    const tagColumns = columnDefs.filter(col => col.field && (col.field.startsWith('Tag_') || col.field === 'Tag'));
+    const specColumns = columnDefs.filter(col => col.field && col.field.startsWith('Specification_Name_'));
+    const customerColumns = columnDefs.filter(col => col.field && col.field.startsWith('Customer_Identification_Name_'));
+    
+    // CRITICAL FIX: For tags, ensure we count the highest numbered tag to preserve Tag_3, etc.
+    let maxTagNumber = 1;
+    tagColumns.forEach(col => {
+      if (col.field.startsWith('Tag_')) {
+        const tagNumber = parseInt(col.field.split('_')[1]);
+        if (!isNaN(tagNumber)) {
+          maxTagNumber = Math.max(maxTagNumber, tagNumber);
+        }
+      } else if (col.field === 'Tag') {
+        maxTagNumber = Math.max(maxTagNumber, 1);
+      }
+    });
+    
+    // Same logic for spec pairs and customer pairs
+    let maxSpecPair = 1;
+    specColumns.forEach(col => {
+      if (col.field.startsWith('Specification_Name_')) {
+        const specNumber = parseInt(col.field.split('_')[2]);
+        if (!isNaN(specNumber)) {
+          maxSpecPair = Math.max(maxSpecPair, specNumber);
+        }
+      } else if (col.field === 'Specification name') {
+        maxSpecPair = Math.max(maxSpecPair, 1);
+      }
+    });
+    
+    let maxCustomerPair = 1;
+    customerColumns.forEach(col => {
+      if (col.field.startsWith('Customer_Identification_Name_')) {
+        const customerNumber = parseInt(col.field.split('_')[3]);
+        if (!isNaN(customerNumber)) {
+          maxCustomerPair = Math.max(maxCustomerPair, customerNumber);
+        }
+      } else if (col.field === 'Customer identification name') {
+        maxCustomerPair = Math.max(maxCustomerPair, 1);
+      }
+    });
+    
+    const actualColumnCounts = {
+      tags_count: Math.max(maxTagNumber, dynamicColumnCounts.tags_count, 1),
+      spec_pairs_count: Math.max(maxSpecPair, dynamicColumnCounts.spec_pairs_count, 1), 
+      customer_id_pairs_count: Math.max(maxCustomerPair, dynamicColumnCounts.customer_id_pairs_count, 1)
+    };
+    
+    console.log('🔧 REVIEW: Persisting ACTUAL column counts before navigation back to mapping:', {
+      actualColumnCounts,
+      tagColumnsFound: tagColumns.map(c => c.field),
+      specColumnsFound: specColumns.map(c => c.field),
+      customerColumnsFound: customerColumns.map(c => c.field),
+      oldDynamicColumnCounts: dynamicColumnCounts
+    });
+    
+    try {
+      await api.updateColumnCounts(sessionId, actualColumnCounts);
+      console.log('🔧 REVIEW: Actual column counts persisted successfully');
+    } catch (error) {
+      console.warn('Failed to persist column counts before navigation:', error);
+      // Continue with navigation anyway
+    }
+    
+    // CRITICAL FIX: Set flag to indicate navigation from DataEditor
+    sessionStorage.setItem('navigatedFromDataEditor', 'true');
     navigate(`/mapping/${sessionId}`);
-  }, [hasUnsavedChanges, navigate, sessionId]);
+  }, [hasUnsavedChanges, navigate, sessionId, dynamicColumnCounts, columnDefs]);
 
 
   // ─── EVENT HANDLERS ─────────────────────────────────────────────────────────
@@ -1069,7 +1282,10 @@ const DataEditor = () => {
         if (smartTagRulesFromDashboard && smartTagRulesFromDashboard.length > 0) {
           try {
             setLoading(true);
-            await api.applyFormulas(sessionId, smartTagRulesFromDashboard);
+            const response = await api.applyFormulas(sessionId, smartTagRulesFromDashboard);
+            if (response.data.success && response.data.snapshot) {
+              applySnapshotToEditor(response.data.snapshot, { setColumnDefs, setRowData, setDynamicColumnCounts, setHasFormulas });
+            }
             setAppliedFormulas(smartTagRulesFromDashboard);
             setHasFormulas(true);
             showSnackbar('Smart Tag rules from Dashboard applied!', 'success');
@@ -1289,7 +1505,7 @@ const DataEditor = () => {
 
               <Tooltip title="View visual column mapping representation">
                 <Button
-                  onClick={() => navigate('/column-mapping')}
+                  onClick={handleBackToMapping}
                   variant="outlined"
                   startIcon={<MapIcon />}
                     sx={{
@@ -1366,7 +1582,7 @@ const DataEditor = () => {
             }}
           >
             <Box sx={{ p: 2 }}>
-              <div style={{ overflowX: 'auto' }}>
+              <div key={gridKey} style={{ overflowX: 'auto' }}>
                 <table style={{ 
                   width: '100%', 
                   borderCollapse: 'collapse',
@@ -1797,9 +2013,9 @@ const DataEditor = () => {
           <Button 
             onClick={handleCreateFactwiseId}
             variant="contained"
-            disabled={!firstColumn || !secondColumn || loading}
+            disabled={!firstColumn || !secondColumn}
           >
-            {loading ? <CircularProgress size={20} /> : 'Create Factwise ID'}
+            Create Factwise ID
           </Button>
         </DialogActions>
       </Dialog>
@@ -1937,6 +2153,9 @@ const DataEditor = () => {
           50% { opacity: 0.7; }
         }
       `}</style>
+
+      {/* Global Loader Overlay */}
+      <LoaderOverlay visible={globalLoading} label="Processing..." />
     </Box>
   );
 };

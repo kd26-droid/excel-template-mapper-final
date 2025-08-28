@@ -1,6 +1,18 @@
 
 
 services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - excel-mapper-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   backend:
     build:
       context: .
@@ -14,6 +26,7 @@ services:
       - SECRET_KEY=your-secret-key-for-local-development
       - DATABASE_URL=sqlite:///db.sqlite3
       - CORS_ALLOWED_ORIGINS=http://localhost:3000
+      - REDIS_URL=redis://redis:6379/1
     volumes:
       - ./backend/media:/app/media
       - ./backend/temp_downloads:/app/temp_downloads
@@ -21,6 +34,8 @@ services:
       - ./backend/logs:/app/logs
     networks:
       - excel-mapper-network
+    depends_on:
+      - redis
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health/"]
       interval: 30s
