@@ -1637,15 +1637,24 @@ export default function ColumnMapping() {
         // 🔥 CRITICAL FIX: Use saved mappings from review session if available, otherwise fetch from backend
         let normalizedMappings = [];
         if (savedMappingData && savedMappingData.mappings) {
-          // Use saved mappings from review session - preserve exact mapping relationships
-          console.log('🔄 Using saved mappings from review session instead of backend');
-          normalizedMappings = savedMappingData.mappings.map(mapping => ({
-            sourceLabel: mapping.source,
-            targetLabel: mapping.target,
-            confidence: mapping.confidence || 'saved',
-            isFromTemplate: mapping.isFromTemplate || false
-          }));
-          console.log('🔄 Restored mappings:', normalizedMappings);
+          try {
+            // Use saved mappings from review session - preserve exact mapping relationships
+            console.log('🔄 Using saved mappings from review session instead of backend');
+            normalizedMappings = savedMappingData.mappings
+              .filter(mapping => mapping && mapping.source && mapping.target) // Filter out invalid mappings
+              .map(mapping => ({
+                sourceLabel: String(mapping.source || ''),
+                targetLabel: String(mapping.target || ''),
+                confidence: mapping.confidence || 'saved',
+                isFromTemplate: mapping.isFromTemplate || false
+              }));
+            console.log('🔄 Restored mappings:', normalizedMappings);
+          } catch (mappingError) {
+            console.warn('🚫 Error processing saved mappings, falling back to backend:', mappingError);
+            // Fallback to backend if sessionStorage mappings are corrupted
+            const result = await checkExistingMappings(client_headers, template_headers, setIsInitializingMappings);
+            normalizedMappings = result.mappings;
+          }
         } else {
           // Fallback to backend mappings if no saved session data
           console.log('🔄 No saved mappings from review, fetching from backend');
@@ -1671,8 +1680,20 @@ export default function ColumnMapping() {
         
         // CRITICAL FIX: Apply existing mappings AFTER nodes are initialized
         if (normalizedMappings && normalizedMappings.length > 0) {
-          console.log('🔄 Applying existing mappings after node initialization:', normalizedMappings);
-          applyExistingMappingsToFlow(normalizedMappings, client_headers, headersToUse, setIsInitializingMappings);
+          try {
+            console.log('🔄 Applying existing mappings after node initialization:', normalizedMappings);
+            applyExistingMappingsToFlow(normalizedMappings, client_headers, headersToUse, setIsInitializingMappings);
+          } catch (mappingApplicationError) {
+            console.warn('🚫 Error applying existing mappings, continuing with empty state:', mappingApplicationError);
+            // Continue without mappings if there's an error
+            setIsInitializingMappings(false);
+            isInitializingRef.current = false;
+            
+            // Initial load complete - synchronize template version
+            setTemplateVersion(prev => prev + 1);
+            setExpectedTemplateVersion(prev => prev + 1);
+            console.log('✅ UI: Template version synchronized after mapping application error');
+          }
         } else {
           // No existing mappings, just end initialization
           console.log('🔄 No existing mappings to apply, ending initialization');
@@ -1764,6 +1785,16 @@ export default function ColumnMapping() {
     
     // Helper function to find the best matching target column
     const findBestTargetColumn = (sourceCol, targetCol, templateHdrs, usedTargets = new Set()) => {
+      // 🔥 ENHANCED NULL SAFETY: Validate all inputs to prevent errors
+      if (!targetCol || typeof targetCol !== 'string') {
+        console.warn('🚫 findBestTargetColumn: Invalid targetCol:', targetCol);
+        return null;
+      }
+      if (!Array.isArray(templateHdrs)) {
+        console.warn('🚫 findBestTargetColumn: Invalid templateHdrs:', templateHdrs);
+        return null;
+      }
+      
       // First try exact match
       let targetIdx = templateHdrs.indexOf(targetCol);
       if (targetIdx >= 0) {
@@ -1832,8 +1863,10 @@ export default function ColumnMapping() {
       // Try fuzzy matching for other columns
       for (let i = 0; i < templateHdrs.length; i++) {
         const templateCol = templateHdrs[i];
-        if (templateCol.toLowerCase().includes(targetCol.toLowerCase()) || 
-            targetCol.toLowerCase().includes(templateCol.toLowerCase())) {
+        // 🔥 NULL SAFETY FIX: Check for undefined/null values before toLowerCase()
+        if (templateCol && targetCol && 
+            (templateCol.toLowerCase().includes(targetCol.toLowerCase()) || 
+             targetCol.toLowerCase().includes(templateCol.toLowerCase()))) {
           return { targetIdx: i, targetCol: templateCol, confidence: 'fuzzy' };
         }
       }
