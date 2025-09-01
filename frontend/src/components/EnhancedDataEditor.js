@@ -317,7 +317,20 @@ const EnhancedDataEditor = () => {
     if (!sessionId) return;
     try {
       setPageLoading(true);
-      const resp = await api.getMappedDataWithSpecs(sessionId, targetPage, size, true, { force_fresh: true, _fresh: Date.now() });
+      // Add timeout for large datasets - give more time for larger page sizes
+      const timeoutMs = size > 1000 ? 60000 : size > 500 ? 30000 : 15000;
+      showSnackbar(size > 1000 ? `Loading ${size} rows, this may take a moment...` : '', 'info');
+      
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      
+      const resp = await api.getMappedDataWithSpecs(sessionId, targetPage, size, true, { 
+        force_fresh: true, 
+        _fresh: Date.now(),
+        signal: controller.signal 
+      });
+      clearTimeout(timeoutId);
+      
       const payload = resp?.data || {};
       const headers = payload.headers || [];
       const rows = Array.isArray(payload.data) ? payload.data : [];
@@ -385,7 +398,11 @@ const EnhancedDataEditor = () => {
       setUnknownCellsCount(unknownCount);
     } catch (e) {
       console.error('Page fetch failed:', e);
-      showSnackbar(`Failed to load page ${targetPage}`, 'error');
+      if (e.name === 'AbortError') {
+        showSnackbar(`Loading timed out for ${size} rows. Try a smaller page size.`, 'error');
+      } else {
+        showSnackbar(`Failed to load page ${targetPage}: ${e.message}`, 'error');
+      }
     } finally {
       setPageLoading(false);
     }
@@ -1618,9 +1635,11 @@ const EnhancedDataEditor = () => {
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                 <Typography variant="body2" color="text.secondary">Rows per page</Typography>
                 <Select size="small" value={pageSize} onChange={(e) => { const v = parseInt(e.target.value, 10); setPage(1); setPageSize(v); fetchPageData(1, v); }}>
-                  {[50,100,200,500,1000].map(sz => <MenuItem key={sz} value={sz}>{sz}</MenuItem>)}
+                  {[50,100,200,500,1000,2000,3000].map(sz => <MenuItem key={sz} value={sz}>{sz}</MenuItem>)}
                 </Select>
-                <Typography variant="body2" color="text.secondary">Total: {totalRows}</Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Total: {totalRows.toLocaleString()} | Showing {((page - 1) * pageSize + 1).toLocaleString()}-{Math.min(page * pageSize, totalRows).toLocaleString()}
+                </Typography>
               </Box>
               <Pagination count={Math.max(1, totalPages)} page={page} onChange={(_, p) => { setPage(p); fetchPageData(p, pageSize); }} color="primary" size="small" shape="rounded" />
             </Box>
@@ -1785,9 +1804,11 @@ const EnhancedDataEditor = () => {
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                 <Typography variant="body2" color="text.secondary">Rows per page</Typography>
                 <Select size="small" value={pageSize} onChange={(e) => { const v = parseInt(e.target.value, 10); setPage(1); setPageSize(v); fetchPageData(1, v); }}>
-                  {[50,100,200,500,1000].map(sz => <MenuItem key={sz} value={sz}>{sz}</MenuItem>)}
+                  {[50,100,200,500,1000,2000,3000].map(sz => <MenuItem key={sz} value={sz}>{sz}</MenuItem>)}
                 </Select>
-                <Typography variant="body2" color="text.secondary">Page {page} of {Math.max(1, totalPages)}</Typography>
+                <Typography variant="body2" color="text.secondary">
+                  Page {page} of {Math.max(1, totalPages)} | Total: {totalRows.toLocaleString()}
+                </Typography>
               </Box>
               <Pagination count={Math.max(1, totalPages)} page={page} onChange={(_, p) => { setPage(p); fetchPageData(p, pageSize); }} color="primary" size="small" shape="rounded" />
             </Box>

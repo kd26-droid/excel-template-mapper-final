@@ -238,7 +238,9 @@ const api = {
         'Cache-Control': 'no-cache, no-store, must-revalidate',
         'Pragma': 'no-cache',
         'Expires': '0'
-      }
+      },
+      signal: options.signal,
+      timeout: pageSize > 1000 ? 60000 : pageSize > 500 ? 30000 : 15000
     });
   },
     
