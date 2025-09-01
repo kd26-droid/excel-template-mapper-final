@@ -29,6 +29,7 @@ import {
   Container,
   LinearProgress
 } from '@mui/material';
+import { Pagination } from '@mui/material';
 import {
   Save as SaveIcon,
   Download as DownloadIcon,
@@ -54,19 +55,30 @@ const EnhancedDataEditor = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const synchronizer = useRef(null);
+  const scrollContainerRef = useRef(null);
 
   // ─── STATE MANAGEMENT ───────────────────────────────────────────────────────
   const [loading, setLoading] = useState(true);
   const [syncStatus, setSyncStatus] = useState({ inProgress: false, operation: null });
+  const [syncProgress, setSyncProgress] = useState(0);
   const [error, setError] = useState(null);
   const [rowData, setRowData] = useState([]);
   const [columnDefs, setColumnDefs] = useState([]);
+  const [columnWidths, setColumnWidths] = useState({});
+  const [autoFitApplied, setAutoFitApplied] = useState(false);
+  const resizingRef = useRef({ active: false, field: null, startX: 0, startWidth: 0 });
   const [totalRows, setTotalRows] = useState(0);
   const [downloadLoading, setDownloadLoading] = useState(false);
   const [saveAsDialogOpen, setSaveAsDialogOpen] = useState(false);
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'info' });
+  const [syncNotice, setSyncNotice] = useState({ visible: false, message: 'Showing recent data while syncing latest changes…' });
+  const staleGuardRef = useRef(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [firstNonEmptyRowData, setFirstNonEmptyRowData] = useState(null);
+
+  // Virtualization state (large dataset optimization)
+  const [rowHeight] = useState(40);
+  const [visibleRange, setVisibleRange] = useState({ start: 0, end: 100 });
 
   // Data integrity tracking
   const [dataIntegrity, setDataIntegrity] = useState({
@@ -90,14 +102,62 @@ const EnhancedDataEditor = () => {
   const [availableTemplates, setAvailableTemplates] = useState([]);
   const [templatesLoading, setTemplatesLoading] = useState(false);
   const [selectedTemplate, setSelectedTemplate] = useState(null);
+  const [sessionVersion, setSessionVersion] = useState(0);
+  const [rebuildingColumns, setRebuildingColumns] = useState(false);
 
   // Unknown values state
   const [unknownCellsCount, setUnknownCellsCount] = useState(0);
+  // Pagination state
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(100);
+  const [totalPages, setTotalPages] = useState(1);
+  const [pageLoading, setPageLoading] = useState(false);
 
   // Formula Builder state
   const [formulaBuilderOpen, setFormulaBuilderOpen] = useState(false);
   const [hasFormulas, setHasFormulas] = useState(false);
   const [formulaColumns, setFormulaColumns] = useState([]);
+  // Column examples and fill stats for FormulaBuilder dropdowns
+  const rowsSample = useMemo(() => {
+    const cap = 300;
+    return Array.isArray(rowData) && rowData.length > cap ? rowData.slice(0, cap) : rowData;
+  }, [rowData]);
+
+  const columnExamples = useMemo(() => {
+    const examples = {};
+    (columnDefs || []).forEach(col => {
+      if (!col.field || col.field === '__row_number__') return;
+      let first = '';
+      for (const row of rowsSample || []) {
+        const v = row[col.field];
+        if (v !== null && v !== undefined && String(v).trim() !== '' && String(v).toLowerCase() !== 'unknown') {
+          first = String(v);
+          break;
+        }
+      }
+      examples[col.field] = first;
+    });
+    return examples;
+  }, [columnDefs, rowsSample]);
+
+  const columnFillStats = useMemo(() => {
+    const stats = {};
+    (columnDefs || []).forEach(col => {
+      if (!col.field || col.field === '__row_number__') return;
+      let nonEmpty = 0;
+      const total = (rowsSample || []).length;
+      for (const row of rowsSample || []) {
+        const v = row[col.field];
+        if (v !== null && v !== undefined && String(v).trim() !== '' && String(v).toLowerCase() !== 'unknown') {
+          nonEmpty++;
+        }
+      }
+      if (total === 0 || nonEmpty === 0) stats[col.field] = 'empty';
+      else if (nonEmpty < total * 0.8) stats[col.field] = 'partial';
+      else stats[col.field] = 'full';
+    });
+    return stats;
+  }, [columnDefs, rowsSample]);
   const [appliedFormulas, setAppliedFormulas] = useState([]);
   const [defaultValues, setDefaultValues] = useState({});
 
@@ -126,11 +186,21 @@ const EnhancedDataEditor = () => {
       // Set up event listeners
       synchronizer.current.addEventListener('start', (data) => {
         setSyncStatus({ inProgress: true, operation: data.operation });
+        setSyncProgress(0);
+      });
+      
+      // Progress updates during multi-page fetches
+      synchronizer.current.addEventListener('progress', (data) => {
+        if (data && data.totalPages && data.totalPages > 1) {
+          const pct = Math.max(0, Math.min(100, Math.round((data.page / data.totalPages) * 100)));
+          setSyncProgress(pct);
+        }
       });
       
       synchronizer.current.addEventListener('complete', (data) => {
         setSyncStatus({ inProgress: false, operation: null });
         console.log('🔄 Sync operation completed:', data.operation);
+        setSyncProgress(100);
       });
       
       synchronizer.current.addEventListener('error', (data) => {
@@ -175,6 +245,152 @@ const EnhancedDataEditor = () => {
     });
   }, []);
 
+  // Consider null/empty/whitespace and 'unknown' as empty for pruning
+  const isCellEmpty = useCallback((v) => {
+    if (v === null || v === undefined) return true;
+    const s = String(v).trim();
+    if (s === '') return true;
+    if (s.toLowerCase() === 'unknown') return true;
+    return false;
+  }, []);
+
+  // Remove completely blank Specification pairs (Specification_Name_N/Specification_Value_N and base name/value)
+  const pruneEmptySpecificationPairs = useCallback((headers, rows) => {
+    try {
+      const nameRegex = /^Specification_Name_(\d+)$/;
+      const valueRegex = /^Specification_Value_(\d+)$/;
+      const hasBaseName = headers.includes('Specification name');
+      const hasBaseValue = headers.includes('Specification value');
+
+      const pairs = {};
+      headers.forEach(h => {
+        const nm = h.match(nameRegex);
+        if (nm) {
+          const idx = nm[1];
+          pairs[idx] = pairs[idx] || { name: null, value: null };
+          pairs[idx].name = h;
+        }
+        const vm = h.match(valueRegex);
+        if (vm) {
+          const idx = vm[1];
+          pairs[idx] = pairs[idx] || { name: null, value: null };
+          pairs[idx].value = h;
+        }
+      });
+
+      const toRemove = new Set();
+
+      Object.values(pairs).forEach(pair => {
+        if (!pair.name || !pair.value) return;
+        const allEmpty = rows.every(r => isCellEmpty(r[pair.name]) && isCellEmpty(r[pair.value]));
+        if (allEmpty) {
+          toRemove.add(pair.name);
+          toRemove.add(pair.value);
+        }
+      });
+
+      if (hasBaseName && hasBaseValue) {
+        const allEmpty = rows.every(r => isCellEmpty(r['Specification name']) && isCellEmpty(r['Specification value']));
+        if (allEmpty) {
+          toRemove.add('Specification name');
+          toRemove.add('Specification value');
+        }
+      }
+
+      if (toRemove.size === 0) return { headers, rows };
+
+      const prunedHeaders = headers.filter(h => !toRemove.has(h));
+      const prunedRows = rows.map(row => {
+        const copy = { ...row };
+        toRemove.forEach(h => { delete copy[h]; });
+        return copy;
+      });
+
+      return { headers: prunedHeaders, rows: prunedRows };
+    } catch (_) {
+      return { headers, rows };
+    }
+  }, [isCellEmpty]);
+
+  // Fetch a specific page from backend (server-side pagination)
+  const fetchPageData = useCallback(async (targetPage = page, size = pageSize) => {
+    if (!sessionId) return;
+    try {
+      setPageLoading(true);
+      const resp = await api.getMappedDataWithSpecs(sessionId, targetPage, size, true, { force_fresh: true, _fresh: Date.now() });
+      const payload = resp?.data || {};
+      const headers = payload.headers || [];
+      const rows = Array.isArray(payload.data) ? payload.data : [];
+      const pg = payload.pagination || { page: targetPage, total_pages: 1, total_rows: rows.length };
+
+      // Initialize columns if not yet set or header count changed
+      if (!columnDefs || columnDefs.length === 0 || columnDefs.filter(c => c.field && c.field !== '__row_number__').length !== headers.length) {
+        const detectedFormulaColumns = headers.filter(h => 
+          h.startsWith('Tag_') || h.startsWith('Specification_Name_') || h.startsWith('Specification_Value_') || h.startsWith('Customer_Identification_') ||
+          h === 'Tag' || h === 'Factwise ID' || (h.includes('Specification') && (h.includes('Name') || h.includes('Value'))) || (h.includes('Customer') && h.includes('Identification'))
+        );
+        const columns = [
+          {
+            headerName: '#',
+            field: '__row_number__',
+            valueGetter: 'node.rowIndex + 1',
+            cellStyle: { backgroundColor: '#f8f9fa', fontWeight: 'bold', textAlign: 'center', borderRight: '2px solid #dee2e6', color: '#6c757d', padding: '12px' },
+            headerClass: 'ag-header-row-number',
+            width: 80,
+            pinned: 'left',
+            editable: false,
+            filter: false,
+            sortable: false,
+            resizable: false,
+            suppressMovable: true,
+            suppressSizeToFit: true,
+            suppressAutoSize: true
+          },
+          ...headers.map(col => ({
+            headerName: (col.startsWith('Tag_') || col === 'Tag') ? 'Tag'
+                      : (col.startsWith('Specification_Name_') || col === 'Specification name') ? 'Specification name'
+                      : (col.startsWith('Specification_Value_') || col === 'Specification value') ? 'Specification value'
+                      : (col.startsWith('Customer_Identification_Name_') || col === 'Customer identification name' || col === 'Custom identification name') ? 'Customer identification name'
+                      : (col.startsWith('Customer_Identification_Value_') || col === 'Customer identification value' || col === 'Custom identification value') ? 'Customer identification value'
+                      : col,
+            field: col,
+            tooltipField: col,
+            isFormulaColumn: detectedFormulaColumns.includes(col)
+          }))
+        ];
+        setColumnDefs(columns);
+        // Initialize default widths
+        setColumnWidths(prev => {
+          const next = { ...prev };
+          headers.forEach(h => { if (!next[h]) next[h] = 180; });
+          return next;
+        });
+      }
+
+      setRowData(rows);
+      setTotalRows(pg.total_rows || rows.length);
+      setTotalPages(pg.total_pages || 1);
+      setPage(pg.page || targetPage);
+
+      // Reset virtualization window to the full page
+      setVisibleRange({ start: 0, end: rows.length });
+
+      // Recompute unknowns for this page quickly
+      let unknownCount = 0;
+      for (const r of rows) {
+        for (const v of Object.values(r)) {
+          if (v && String(v).toLowerCase() === 'unknown') unknownCount++;
+        }
+      }
+      setUnknownCellsCount(unknownCount);
+    } catch (e) {
+      console.error('Page fetch failed:', e);
+      showSnackbar(`Failed to load page ${targetPage}`, 'error');
+    } finally {
+      setPageLoading(false);
+    }
+  }, [sessionId, page, pageSize, columnDefs, showSnackbar]);
+
   // ─── ENHANCED DATA LOADING WITH SYNCHRONIZATION ─────────────────────────────
   const initializeData = useCallback(async () => {
     try {
@@ -213,14 +429,24 @@ const EnhancedDataEditor = () => {
     try {
       console.log('🔄 Fetching data with synchronization...');
       
-      const syncResult = await synchronizer.current.fetchDataWithValidation(true);
-      
+      // Fetch with extended budget to warm caches and validate session
+      const syncResult = await synchronizer.current.fetchDataFast(12000);
+      if (syncResult.fromCache) {
+        showSnackbar('Showing recent data while syncing latest changes…', 'warning');
+        setSyncNotice(prev => ({ ...prev, visible: true }));
+      } else {
+        setSyncNotice(prev => ({ ...prev, visible: false }));
+      }
+
       if (!syncResult.success && !syncResult.fromCache) {
         throw new Error(syncResult.error || 'Failed to fetch data');
       }
       
       const data = syncResult.data;
-      
+      if (typeof data?.template_version === 'number') {
+        setSessionVersion(data.template_version);
+      }
+
       // Validate data structure
       updateDataIntegrity(syncResult.validation.isValid, syncResult.validation.errors);
       
@@ -228,8 +454,14 @@ const EnhancedDataEditor = () => {
         throw new Error('No mapped data found. Please go back to Column Mapping and create mappings first.');
       }
 
+      // Prune completely blank Specification pairs ONLY when we have full dataset
+      const hasAllRows = !data.pagination || (data.pagination.total_pages || 1) <= 1 || (Array.isArray(data.data) && data.pagination?.total_rows === data.data.length);
+      const { headers: viewHeaders, rows: viewRows } = hasAllRows
+        ? pruneEmptySpecificationPairs(data.headers || [], data.data || [])
+        : { headers: (data.headers || []), rows: (data.data || []) };
+
       // Process headers and create columns
-      const detectedFormulaColumns = data.headers.filter(h => 
+      const detectedFormulaColumns = viewHeaders.filter(h => 
         h.startsWith('Tag_') || 
         h.startsWith('Specification_Name_') || 
         h.startsWith('Specification_Value_') || 
@@ -243,9 +475,9 @@ const EnhancedDataEditor = () => {
       setFormulaColumns(detectedFormulaColumns);
       
       // Calculate column counts
-      const tagColumns = data.headers.filter(h => h.startsWith('Tag_') || h === 'Tag');
-      const specNameColumns = data.headers.filter(h => h.startsWith('Specification_Name_'));
-      const customerNameColumns = data.headers.filter(h => h.startsWith('Customer_Identification_Name_'));
+      const tagColumns = viewHeaders.filter(h => h.startsWith('Tag_') || h === 'Tag');
+      const specNameColumns = viewHeaders.filter(h => h.startsWith('Specification_Name_') || h === 'Specification name');
+      const customerNameColumns = viewHeaders.filter(h => h.startsWith('Customer_Identification_Name_'));
       
       const actualColumnCounts = {
         tags_count: Math.max(tagColumns.length, 1),
@@ -264,7 +496,7 @@ const EnhancedDataEditor = () => {
         setHasFormulas(detectedFormulaColumns.length > 0);
       }
 
-      // Create column definitions
+      // Create column definitions (from aggregated headers)
       const columns = [
         {
           headerName: '#',
@@ -289,7 +521,7 @@ const EnhancedDataEditor = () => {
           suppressSizeToFit: true,
           suppressAutoSize: true
         },
-        ...data.headers.filter(col => col && col.trim() !== '').map((col, index) => {
+        ...viewHeaders.filter(col => col && col.trim() !== '').map((col, index) => {
           let displayName = col;
           if (col.startsWith('Tag_') || col === 'Tag') {
             displayName = 'Tag';
@@ -369,6 +601,8 @@ const EnhancedDataEditor = () => {
             tooltipField: col,
             wrapText: false,
             autoHeight: false,
+            resizable: true,
+            minWidth: 120,
             suppressMovable: false,
             suppressSizeToFit: true,
             isFormulaColumn,
@@ -379,8 +613,18 @@ const EnhancedDataEditor = () => {
       ];
 
       setColumnDefs(columns);
-      setRowData(data.data || []);
+      // Use paginated fetch for rows to keep UI light
+      await fetchPageData(1, pageSize);
       setTotalRows(data.pagination?.total_rows || data.data?.length || 0);
+
+      // Initialize default widths for new columns if not present
+      setColumnWidths(prev => {
+        const next = { ...prev };
+        (viewHeaders || []).forEach(h => {
+          if (!next[h]) next[h] = 180; // default 180px
+        });
+        return next;
+      });
       
       const unmapped = data.unmapped_columns || [];
       const mapped = data.mapped_columns || [];
@@ -399,16 +643,140 @@ const EnhancedDataEditor = () => {
       }
 
       const message = syncResult.fromCache 
-        ? `Loaded cached data: ${data.data?.length || 0} rows with ${data.headers.length} columns`
-        : `Loaded ${data.data?.length || 0} rows with ${data.headers.length} columns`;
+        ? `Loaded cached data: ${viewRows.length || 0} rows with ${viewHeaders.length} columns`
+        : `Loaded ${viewRows.length || 0} rows with ${viewHeaders.length} columns`;
       
       showSnackbar(message, syncResult.fromCache ? 'warning' : 'success');
+
+      // Auto-refresh if data appears stale due to Azure lag (no Tag/Item code despite rules)
+      try {
+        await ensureFreshnessIfNeeded(data);
+      } catch (_) { /* non-fatal */ }
 
     } catch (err) {
       console.error('❌ Data fetch failed:', err);
       throw err;
     }
-  }, [showSnackbar, updateDataIntegrity]);
+  }, [showSnackbar, updateDataIntegrity, fetchPageData, pageSize]);
+
+  // Determine if the current dataset is fresh with respect to expected Tag/Factwise columns
+  const isDatasetFresh = useCallback((data, meta) => {
+    try {
+      const headers = Array.isArray(data?.headers) ? data.headers : [];
+      const rows = Array.isArray(data?.data) ? data.data : [];
+      const hasHeaders = headers.length > 0;
+      if (!hasHeaders) return false;
+
+      const hLower = headers.map(h => String(h || '').toLowerCase());
+      const hasTag = headers.some(h => typeof h === 'string' && (h.startsWith('Tag_') || h === 'Tag'));
+      const needTags = Array.isArray(meta?.formula_rules) && meta.formula_rules.some(r => (r?.column_type || 'Tag') === 'Tag');
+
+      let itemOk = true;
+      const needFactwise = Array.isArray(meta?.factwise_rules) && meta.factwise_rules.some(r => r?.type === 'factwise_id');
+      if (needFactwise) {
+        // find item code header
+        let itemHeader = null;
+        for (const h of headers) {
+          const hl = String(h || '').trim().toLowerCase().replace(/\s+/g, '');
+          if (hl === 'itemcode' || hl === 'item_code') { itemHeader = h; break; }
+        }
+        if (!itemHeader) itemOk = false;
+        else if (rows.length > 0) {
+          itemOk = rows.some(r => r && typeof r === 'object' && r[itemHeader] != null && String(r[itemHeader]).trim() !== '');
+        }
+      }
+
+      // If we need tags and factwise, require both; otherwise require whichever is needed
+      if (needTags && !hasTag) return false;
+      if (needFactwise && !itemOk) return false;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }, []);
+
+  // Ensure freshness by polling and re-applying formulas if needed (self-healing, no manual refresh)
+  const ensureFreshnessIfNeeded = useCallback(async (initialData) => {
+    if (staleGuardRef.current) return; // avoid concurrent loops
+    try {
+      // Load session metadata to determine rules in effect
+      const metaResp = await api.getExistingMappings(sessionId);
+      const sessionMeta = metaResp?.data?.session_metadata || {};
+
+      if (isDatasetFresh(initialData, sessionMeta)) {
+        setSyncNotice(prev => ({ ...prev, visible: false }));
+        return;
+      }
+
+      // Begin self-healing refresh loop
+      staleGuardRef.current = true;
+      setSyncNotice(prev => ({ ...prev, visible: true, message: 'Preparing fresh results… syncing template rules…' }));
+
+      const hasTagRules = Array.isArray(sessionMeta?.formula_rules) && sessionMeta.formula_rules.some(r => (r?.column_type || 'Tag') === 'Tag');
+      let formulasReapplied = false;
+      const deadline = Date.now() + 12000; // up to 12s
+      while (Date.now() < deadline) {
+        try {
+          // Re-apply formulas once if Tag columns are expected but missing
+          if (hasTagRules && !formulasReapplied) {
+            try {
+              await api.applyFormulas(sessionId, sessionMeta.formula_rules);
+            } catch (_) {}
+            formulasReapplied = true;
+          }
+
+          // Force-fresh fetch using synchronizer budget
+          const refreshed = await synchronizer.current.fetchDataFast(12000);
+          const freshEnough = isDatasetFresh(refreshed?.data, sessionMeta);
+          if (freshEnough) {
+            // Replace grid with fresh data
+            const data = refreshed?.data || {};
+            // Update state
+            const cols = [
+              {
+                headerName: '#',
+                field: '__row_number__',
+                valueGetter: 'node.rowIndex + 1',
+                cellStyle: { backgroundColor: '#f8f9fa', fontWeight: 'bold', textAlign: 'center', borderRight: '2px solid #dee2e6', color: '#6c757d', padding: '12px' },
+                headerClass: 'ag-header-row-number',
+                width: 80,
+                pinned: 'left',
+                editable: false,
+                filter: false,
+                sortable: false,
+                resizable: false,
+                suppressMovable: true,
+                suppressSizeToFit: true,
+                suppressAutoSize: true
+              },
+              ...data.headers.filter(col => col && col.trim() !== '').map((col) => ({
+                headerName: (col.startsWith('Tag_') || col === 'Tag') ? 'Tag'
+                            : (col.startsWith('Specification_Name_') || col === 'Specification name') ? 'Specification name'
+                            : (col.startsWith('Specification_Value_') || col === 'Specification value') ? 'Specification value'
+                            : (col.startsWith('Customer_Identification_Name_') || col === 'Customer identification name' || col === 'Custom identification name') ? 'Customer identification name'
+                            : (col.startsWith('Customer_Identification_Value_') || col === 'Customer identification value' || col === 'Custom identification value') ? 'Customer identification value'
+                            : col,
+                field: col,
+                tooltipField: col,
+              }))
+            ];
+            setColumnDefs(cols);
+            setTotalRows(data.pagination?.total_rows || data.data?.length || 0);
+            try { await fetchPageData(page, pageSize); } catch (_) {}
+            setSyncNotice(prev => ({ ...prev, visible: false }));
+            showSnackbar('Data synchronized', 'success');
+            return;
+          }
+        } catch (_) {
+          // continue polling
+        }
+        await new Promise(r => setTimeout(r, 500));
+      }
+      // Timed out — keep notice optionally visible for user to retry manually
+    } finally {
+      staleGuardRef.current = false;
+    }
+  }, [sessionId, isDatasetFresh, showSnackbar, fetchPageData, page, pageSize]);
 
   // ─── ENHANCED FACTWISE ID CREATION ──────────────────────────────────────────
   const handleCreateFactwiseIdSynchronized = useCallback(async () => {
@@ -478,6 +846,12 @@ const EnhancedDataEditor = () => {
       if (syncResult.success) {
         setHasFormulas(true);
         
+        // Prefer server-confirmed rules with stable Tag_N targets
+        const serverRules = syncResult?.result?.data?.snapshot?.formula_rules;
+        const effectiveRules = Array.isArray(serverRules) && serverRules.length > 0
+          ? serverRules
+          : (formulaResult.formula_rules || []);
+
         // Update formula columns
         const allFormulaColumns = formulaResult.headers?.filter(h => 
           h.startsWith('Tag_') || 
@@ -489,7 +863,7 @@ const EnhancedDataEditor = () => {
           h.includes('Customer')
         ) || [];
         setFormulaColumns(allFormulaColumns);
-        setAppliedFormulas(formulaResult.formula_rules || []);
+        setAppliedFormulas(effectiveRules);
         
         // Update dynamic column counts
         const newHeaders = formulaResult.headers || [];
@@ -532,7 +906,13 @@ const EnhancedDataEditor = () => {
   const handleApplyTemplateSynchronized = useCallback(async (template) => {
     try {
       setLoading(true);
-      
+      // Read current server version, so we can wait for a bump
+      let prevVersion = 0;
+      try {
+        const status = await api.getSessionStatus(sessionId);
+        prevVersion = status.data?.template_version ?? 0;
+      } catch (_) {}
+
       const syncResult = await synchronizer.current.applyTemplateSynchronized(template.id);
       
       if (syncResult.success) {
@@ -557,10 +937,11 @@ const EnhancedDataEditor = () => {
           }
         }
         
-        // Refresh data to show all changes
-        if (syncResult.validationData && syncResult.validationData.success) {
-          await fetchDataSynchronized();
-        }
+        // Wait for version bump and then refresh data to show all changes
+        try {
+          await api.waitUntilFresh(sessionId, prevVersion, 8000);
+        } catch (_) { /* proceed */ }
+        await fetchDataSynchronized();
         
         sessionStorage.setItem('templateAppliedInDataEditor', 'true');
         sessionStorage.setItem('lastTemplateApplied', template.name);
@@ -617,24 +998,202 @@ const EnhancedDataEditor = () => {
     }
   }, [fetchDataSynchronized, showSnackbar]);
 
+  // Accurate text measurement using an offscreen canvas
+  const getMeasureContext = useCallback(() => {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    // Match the table font for better accuracy
+    // Header is bold in UI but we keep a single font for simplicity
+    ctx.font = '14px "Segoe UI", Tahoma, Geneva, Verdana, sans-serif';
+    return ctx;
+  }, []);
+
+  const computeColumnWidthPx = useCallback((col) => {
+    if (!col || !col.field) return 180;
+    const ctx = getMeasureContext();
+    const header = String(col.headerName || col.field || '');
+    let max = ctx.measureText(header).width;
+    // Sample rows to keep complexity bounded for large datasets
+    const cap = 300;
+    const sample = Array.isArray(rowData) && rowData.length > cap ? rowData.slice(0, cap) : (rowData || []);
+    for (const row of sample) {
+      const v = row[col.field];
+      if (v == null) continue;
+      const w = ctx.measureText(String(v)).width;
+      if (w > max) max = w;
+    }
+    // Add padding/borders allowance
+    const padded = max + 40; // 16px left + 16px right + borders/margin
+    return Math.min(1600, Math.max(100, Math.ceil(padded)));
+  }, [getMeasureContext, rowData]);
+
+  // Auto-apply fit once after data loads to ensure clean view
+  useEffect(() => {
+    if (autoFitApplied) return;
+    if (!columnDefs || columnDefs.length === 0) return;
+    if (!rowData || rowData.length === 0) return;
+    // Skip heavy auto-fit for very large datasets; user can trigger manually
+    if (rowData.length > 2000) return;
+    const next = {};
+    columnDefs.forEach(col => {
+      if (!col.field || col.field === '__row_number__') return;
+      next[col.field] = computeColumnWidthPx(col);
+    });
+    if (Object.keys(next).length > 0) {
+      setColumnWidths(prev => ({ ...prev, ...next }));
+      setAutoFitApplied(true);
+    }
+  }, [columnDefs, rowData, autoFitApplied, computeColumnWidthPx]);
+
+  // Virtualization: compute visible range on scroll/resize (disabled for paging by resetting to full page)
+  const recomputeVisibleRange = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const scrollTop = el.scrollTop || 0;
+    const viewport = el.clientHeight || 0;
+    const total = rowData.length;
+    if (viewport <= 0) {
+      setVisibleRange({ start: 0, end: total });
+      return;
+    }
+    const start = Math.max(0, Math.floor(scrollTop / rowHeight) - 10); // buffer rows
+    const visibleCount = Math.max(1, Math.ceil(viewport / rowHeight) + 20);
+    const end = Math.min(total, start + visibleCount);
+    setVisibleRange({ start, end });
+  }, [rowData.length, rowHeight]);
+
+  useEffect(() => {
+    // Initialize visible range and attach listeners
+    recomputeVisibleRange();
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const onScroll = () => recomputeVisibleRange();
+    el.addEventListener('scroll', onScroll);
+    const onResize = () => recomputeVisibleRange();
+    window.addEventListener('resize', onResize);
+    return () => {
+      el.removeEventListener('scroll', onScroll);
+      window.removeEventListener('resize', onResize);
+    };
+  }, [recomputeVisibleRange]);
+
+  // Ensure full page range on any page change
+  useEffect(() => {
+    setVisibleRange({ start: 0, end: rowData.length });
+  }, [rowData.length, page]);
+
+  // Auto-fit all columns to content using measured pixel widths
+  const handleAutoFitAll = useCallback(() => {
+    try {
+      const next = {};
+      (columnDefs || []).forEach(col => {
+        if (!col.field || col.field === '__row_number__') return;
+        next[col.field] = computeColumnWidthPx(col);
+      });
+      setColumnWidths(prev => ({ ...prev, ...next }));
+      showSnackbar('Auto-fit applied to all columns', 'success');
+    } catch (e) {
+      showSnackbar('Auto-fit failed', 'error');
+    }
+  }, [columnDefs, computeColumnWidthPx, showSnackbar]);
+
+  // ─── SAVE TEMPLATE (EDITOR) ────────────────────────────────────────────────
+  const handleOpenSaveTemplateDialog = useCallback(() => {
+    setTemplateSaveDialogOpen(true);
+  }, []);
+
+  const handleCloseSaveTemplateDialog = useCallback(() => {
+    setTemplateSaveDialogOpen(false);
+    setTemplateName('');
+  }, []);
+
+  const handleSaveTemplateSynchronized = useCallback(async () => {
+    if (!templateName.trim()) {
+      showSnackbar('Please enter a template name', 'error');
+      return;
+    }
+    try {
+      setTemplateSaving(true);
+      const opStart = Date.now();
+      const counts = dynamicColumnCounts || { tags_count: 1, spec_pairs_count: 1, customer_id_pairs_count: 1 };
+      const defaults = defaultValues || {};
+      const rules = Array.isArray(appliedFormulas) ? appliedFormulas : [];
+      const resp = await api.saveMappingTemplate(
+        sessionId,
+        templateName.trim(),
+        `Saved from Data Editor (${rules.length} tag rules)`,
+        null,
+        rules,
+        null,
+        Object.keys(defaults).length > 0 ? defaults : null,
+        counts
+      );
+      const elapsed = Date.now() - opStart;
+      if (elapsed < 3000) await new Promise(r => setTimeout(r, 3000 - elapsed));
+      if (resp?.data?.success) {
+        showSnackbar(`Template "${templateName.trim()}" saved successfully!`, 'success');
+        handleCloseSaveTemplateDialog();
+      } else {
+        showSnackbar(resp?.data?.error || 'Failed to save template', 'error');
+      }
+    } catch (e) {
+      showSnackbar('Failed to save template', 'error');
+    } finally {
+      setTemplateSaving(false);
+    }
+  }, [sessionId, templateName, dynamicColumnCounts, defaultValues, appliedFormulas, showSnackbar, handleCloseSaveTemplateDialog]);
+
+  // ─── DOWNLOAD HANDLERS ─────────────────────────────────────────────────────
+  const handleDownloadConverted = useCallback(async () => {
+    try {
+      setDownloadLoading(true);
+      await api.downloadFileEnhanced(sessionId, 'converted');
+    } catch (e) {
+      showSnackbar(e.message || 'Failed to download converted file', 'error');
+    } finally {
+      setDownloadLoading(false);
+    }
+  }, [sessionId, showSnackbar]);
+
+  // No download-original per request
+
+  const handleRebuildColumns = useCallback(async () => {
+    try {
+      setRebuildingColumns(true);
+      showSnackbar('Rebuilding template columns…', 'info');
+      const opStart = Date.now();
+      const resp = await api.rebuildTemplate(sessionId);
+      const elapsed = Date.now() - opStart;
+      if (elapsed < 3000) await new Promise(r => setTimeout(r, 3000 - elapsed));
+      if (resp?.data?.success) {
+        await fetchDataSynchronized();
+        showSnackbar('Template columns rebuilt', 'success');
+      } else {
+        showSnackbar(resp?.data?.error || 'Failed to rebuild columns', 'error');
+      }
+    } catch (e) {
+      console.error('Rebuild columns failed:', e);
+      showSnackbar('Failed to rebuild columns', 'error');
+    } finally {
+      setRebuildingColumns(false);
+    }
+  }, [sessionId, fetchDataSynchronized, showSnackbar]);
+
   // ─── CELL EDIT HANDLER ──────────────────────────────────────────────────────
   const handleCellEdit = useCallback((rowIndex, colIndex, newValue) => {
     const newRowData = [...rowData];
     const colKey = columnDefs[colIndex]?.field;
     if (colKey && newRowData[rowIndex]) {
+      const prevVal = newRowData[rowIndex][colKey];
       newRowData[rowIndex][colKey] = newValue;
       setRowData(newRowData);
       setHasUnsavedChanges(true);
-      
-      // Recalculate unknown count
-      let unknownCount = 0;
-      newRowData.forEach(row => {
-        unknownCount += Object.values(row).filter(cell => 
-          cell && cell.toString().toLowerCase() === 'unknown'
-        ).length;
-      });
-      setUnknownCellsCount(unknownCount);
-      
+      // Incremental unknown counter update (avoid scanning entire dataset)
+      const wasUnknown = prevVal != null && String(prevVal).toLowerCase() === 'unknown';
+      const nowUnknown = newValue != null && String(newValue).toLowerCase() === 'unknown';
+      if (wasUnknown !== nowUnknown) {
+        setUnknownCellsCount(count => count + (nowUnknown ? 1 : -1));
+      }
       showSnackbar('Cell updated - changes not saved yet', 'info');
     }
   }, [rowData, columnDefs, showSnackbar]);
@@ -749,10 +1308,37 @@ const EnhancedDataEditor = () => {
   // ─── MAIN RENDER ────────────────────────────────────────────────────────────
   return (
     <Box sx={{ height: '100vh', display: 'flex', flexDirection: 'column', bgcolor: '#f8fafc' }}>
+      {syncNotice.visible && (
+        <Box sx={{
+          position: 'sticky',
+          top: 0,
+          zIndex: 1100,
+          bgcolor: '#fffbe6',
+          borderBottom: '1px solid #ffe58f',
+          color: '#ad8b00',
+          px: 2,
+          py: 1,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between'
+        }}>
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+            {syncNotice.message}
+          </Typography>
+          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+            <Button size="small" variant="outlined" onClick={fetchDataSynchronized} startIcon={<RefreshIcon />}>Refresh now</Button>
+            <IconButton size="small" onClick={() => setSyncNotice(prev => ({ ...prev, visible: false }))}>
+              <CloseIcon fontSize="small" />
+            </IconButton>
+          </Box>
+        </Box>
+      )}
       
       {/* Sync Status Indicator */}
       {syncStatus.inProgress && (
         <LinearProgress 
+          variant={syncProgress > 0 ? 'determinate' : 'indeterminate'}
+          value={syncProgress}
           sx={{ 
             position: 'absolute', 
             top: 0, 
@@ -829,14 +1415,18 @@ const EnhancedDataEditor = () => {
                     <ErrorIcon sx={{ color: '#ff9800' }} />
                   </Tooltip>
                 )}
+                <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.85)', mx: 1 }}>v{sessionVersion}</Typography>
                 
-                {/* Manual Refresh */}
-                <Tooltip title="Manual refresh with synchronization">
-                  <IconButton
-                    onClick={handleManualRefresh}
+              {/* Auto-fit All */}
+              <Tooltip title="Auto-fit all columns to content">
+                <span>
+                  <Button
+                    size="small"
+                    onClick={handleAutoFitAll}
                     disabled={syncStatus.inProgress}
                     sx={{ 
                       color: 'white',
+                      borderColor: 'rgba(255,255,255,0.6)',
                       backgroundColor: 'rgba(255,255,255,0.1)',
                       '&:hover': { backgroundColor: 'rgba(255,255,255,0.2)' },
                       '&:disabled': { 
@@ -844,10 +1434,52 @@ const EnhancedDataEditor = () => {
                         backgroundColor: 'rgba(255,255,255,0.05)'
                       }
                     }}
+                    variant="outlined"
                   >
-                    <RefreshIcon />
-                  </IconButton>
-                </Tooltip>
+                    Auto‑fit All
+                  </Button>
+                </span>
+              </Tooltip>
+
+              {/* Manual Refresh */}
+              <Tooltip title="Manual refresh with synchronization">
+                <IconButton
+                  onClick={handleManualRefresh}
+                  disabled={syncStatus.inProgress}
+                  sx={{ 
+                    color: 'white',
+                    backgroundColor: 'rgba(255,255,255,0.1)',
+                    '&:hover': { backgroundColor: 'rgba(255,255,255,0.2)' },
+                    '&:disabled': { 
+                      color: 'rgba(255,255,255,0.5)',
+                      backgroundColor: 'rgba(255,255,255,0.05)'
+                    }
+                  }}
+                >
+                  <RefreshIcon />
+                </IconButton>
+              </Tooltip>
+              {/* Rebuild Columns */}
+              <Tooltip title="Rebuild template columns">
+                <span>
+                  <Button
+                    size="small"
+                    onClick={handleRebuildColumns}
+                    disabled={rebuildingColumns || syncStatus.inProgress}
+                    sx={{
+                      color: 'white',
+                      borderColor: 'rgba(255,255,255,0.6)',
+                      borderWidth: 1,
+                      borderStyle: 'solid',
+                      ml: 1,
+                      textTransform: 'none',
+                      '&:hover': { backgroundColor: 'rgba(255,255,255,0.1)' }
+                    }}
+                  >
+                    {rebuildingColumns ? 'Rebuilding…' : 'Rebuild Columns'}
+                  </Button>
+                </span>
+              </Tooltip>
               </Box>
             </Box>
 
@@ -877,6 +1509,48 @@ const EnhancedDataEditor = () => {
                   </Button>
                 </span>
               </Tooltip>
+
+              <Tooltip title="Save current state as a reusable template">
+                <span>
+                  <Button
+                    onClick={handleOpenSaveTemplateDialog}
+                    variant="contained"
+                    startIcon={<TemplateIcon />}
+                    disabled={syncStatus.inProgress}
+                    sx={{
+                      backgroundColor: '#6a1b9a',
+                      color: 'white',
+                      '&:hover': { backgroundColor: '#4a148c' },
+                      textTransform: 'none',
+                      fontWeight: 600
+                    }}
+                  >
+                    Save Template
+                  </Button>
+                </span>
+              </Tooltip>
+
+              <Tooltip title="Download processed file">
+                <span>
+                  <Button
+                    onClick={handleDownloadConverted}
+                    variant="contained"
+                    startIcon={<DownloadIcon />}
+                    disabled={downloadLoading || syncStatus.inProgress}
+                    sx={{
+                      backgroundColor: '#1565c0',
+                      color: 'white',
+                      '&:hover': { backgroundColor: '#0d47a1' },
+                      textTransform: 'none',
+                      fontWeight: 600
+                    }}
+                  >
+                    Download File
+                  </Button>
+                </span>
+              </Tooltip>
+
+              {/* Download original removed per request */}
 
               <Tooltip title="Create FactWise ID - Synchronized column combination">
                 <span>
@@ -936,90 +1610,187 @@ const EnhancedDataEditor = () => {
             borderRadius: 2,
             border: '1px solid #e0e0e0'
           }}
+          ref={scrollContainerRef}
         >
           <Box sx={{ p: 2 }}>
+            {/* Top pagination controls */}
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                <Typography variant="body2" color="text.secondary">Rows per page</Typography>
+                <Select size="small" value={pageSize} onChange={(e) => { const v = parseInt(e.target.value, 10); setPage(1); setPageSize(v); fetchPageData(1, v); }}>
+                  {[50,100,200,500,1000].map(sz => <MenuItem key={sz} value={sz}>{sz}</MenuItem>)}
+                </Select>
+                <Typography variant="body2" color="text.secondary">Total: {totalRows}</Typography>
+              </Box>
+              <Pagination count={Math.max(1, totalPages)} page={page} onChange={(_, p) => { setPage(p); fetchPageData(p, pageSize); }} color="primary" size="small" shape="rounded" />
+            </Box>
+            {pageLoading && <LinearProgress sx={{ mb: 1 }} />}
             <div style={{ overflowX: 'auto' }}>
               <table style={{ 
                 width: '100%', 
                 borderCollapse: 'collapse',
+                tableLayout: 'fixed',
                 fontSize: '14px',
                 fontFamily: 'Segoe UI, Tahoma, Geneva, Verdana, sans-serif'
               }}>
+                <colgroup>
+                  {columnDefs.map(col => {
+                    const field = col.field;
+                    const base = field === '__row_number__' ? 80 : 180;
+                    const w = columnWidths[field] || base;
+                    return (
+                      <col key={field} style={{ width: `${w}px` }} />
+                    );
+                  })}
+                </colgroup>
                 <thead>
                   <tr style={{ backgroundColor: '#f8f9fa', borderBottom: '2px solid #dee2e6' }}>
                     {columnDefs.map((col, index) => (
-                      <th key={col.field} style={{
-                        padding: '12px 16px',
-                        textAlign: 'left',
-                        fontWeight: 600,
-                        color: '#2c3e50',
-                        border: '1px solid #e9ecef',
-                        backgroundColor: col.isFormulaColumn ? '#e8f5e8' : 
-                                       col.isUnmapped ? '#fff8e1' : 
-                                       col.isSpecificationColumn ? '#f0f8ff' : '#f8f9fa',
-                        borderLeft: col.isFormulaColumn ? '4px solid #4caf50' :
-                                  col.isUnmapped ? '4px solid #ff9800' :
-                                  col.isSpecificationColumn ? '4px solid #2196f3' : '1px solid #e9ecef'
-                      }}>
+                      <th
+                        key={col.field}
+                        onDoubleClick={() => {
+                          // Auto-fit to content width using measured pixels
+                          try {
+                            const px = computeColumnWidthPx(col);
+                            setColumnWidths(prev => ({ ...prev, [col.field]: px }));
+                          } catch (_) {}
+                        }}
+                        onMouseDown={(e) => {
+                          // Resize when:
+                          //  - User holds Shift and drags anywhere on header, OR
+                          //  - User clicks within 12px of the right edge (natural resize zone)
+                          const field = col.field;
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          const withinRightEdge = (rect.right - e.clientX) <= 12;
+                          if (!e.shiftKey && !withinRightEdge) return;
+                          e.preventDefault();
+                          const base = field === '__row_number__' ? 80 : 180;
+                          const startWidth = columnWidths[field] || base;
+                          resizingRef.current = { active: true, field, startX: e.clientX, startWidth };
+                          const onMove = (ev) => {
+                            if (!resizingRef.current.active) return;
+                            const dx = ev.clientX - resizingRef.current.startX;
+                            const newW = Math.max(80, resizingRef.current.startWidth + dx);
+                            setColumnWidths(prev => ({ ...prev, [field]: newW }));
+                          };
+                          const onUp = () => {
+                            resizingRef.current = { active: false, field: null, startX: 0, startWidth: 0 };
+                            window.removeEventListener('mousemove', onMove);
+                            window.removeEventListener('mouseup', onUp);
+                          };
+                          window.addEventListener('mousemove', onMove);
+                          window.addEventListener('mouseup', onUp);
+                        }}
+                        style={{
+                          padding: '12px 16px',
+                          textAlign: 'left',
+                          fontWeight: 600,
+                          color: '#2c3e50',
+                          border: '1px solid #e9ecef',
+                          backgroundColor: '#f8f9fa',
+                          position: 'relative',
+                          userSelect: 'none',
+                          width: `${columnWidths[col.field] || (col.field === '__row_number__' ? 80 : 180)}px`
+                        }}
+                        title="Tip: Drag edge to resize. Shift+Drag anywhere to resize. Double‑click to auto‑fit."
+                      >
                         {col.headerName}
+                        <span
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            const field = col.field;
+                            const base = field === '__row_number__' ? 80 : 180;
+                            const startWidth = columnWidths[field] || base;
+                            resizingRef.current = { active: true, field, startX: e.clientX, startWidth };
+                            const onMove = (ev) => {
+                              if (!resizingRef.current.active) return;
+                              const dx = ev.clientX - resizingRef.current.startX;
+                              const newW = Math.max(80, resizingRef.current.startWidth + dx);
+                              setColumnWidths(prev => ({ ...prev, [field]: newW }));
+                            };
+                            const onUp = () => {
+                              resizingRef.current = { active: false, field: null, startX: 0, startWidth: 0 };
+                              window.removeEventListener('mousemove', onMove);
+                              window.removeEventListener('mouseup', onUp);
+                            };
+                            window.addEventListener('mousemove', onMove);
+                            window.addEventListener('mouseup', onUp);
+                          }}
+                          style={{
+                            position: 'absolute',
+                            right: 0,
+                            top: 0,
+                            width: '12px',
+                            height: '100%',
+                            cursor: 'col-resize',
+                            userSelect: 'none'
+                          }}
+                          title="Drag to resize"
+                        />
                       </th>
                     ))}
                   </tr>
                 </thead>
                 <tbody>
-                  {rowData.map((row, rowIndex) => (
-                    <tr key={rowIndex} style={{
-                      backgroundColor: rowIndex % 2 === 0 ? '#f8f9fa' : 'white'
-                    }}>
-                      {columnDefs.map((col, colIndex) => {
-                        const cellValue = row[col.field] || '';
-                        const isUnknown = cellValue.toString().toLowerCase() === 'unknown';
-                        
-                        return (
-                          <td key={col.field} style={{
-                            padding: '12px 16px',
-                            border: '1px solid #e9ecef',
-                            backgroundColor: isUnknown ? '#ffebee' :
-                                           col.isFormulaColumn ? '#e8f5e8' :
-                                           col.isUnmapped ? '#fff8e1' :
-                                           col.isSpecificationColumn ? '#f0f8ff' :
-                                           rowIndex % 2 === 0 ? '#f8f9fa' : 'white',
-                            color: isUnknown ? '#c62828' : 'inherit',
-                            fontWeight: isUnknown || col.isFormulaColumn ? '500' : 'normal',
-                            borderLeft: col.isFormulaColumn ? '4px solid #4caf50' :
-                                      col.isUnmapped ? '4px solid #ff9800' :
-                                      col.isSpecificationColumn ? '4px solid #2196f3' : '1px solid #e9ecef'
-                          }}>
-                            {col.field === 'datasheet' && cellValue.startsWith('http') ? (
-                              <a href={cellValue} target="_blank" rel="noopener noreferrer">
-                                {cellValue}
-                              </a>
-                            ) : (
-                              <input
-                                type="text"
-                                value={cellValue}
-                                onChange={(e) => handleCellEdit(rowIndex, colIndex, e.target.value)}
-                                style={{
-                                  border: 'none',
-                                  background: 'transparent',
-                                  width: '100%',
-                                  fontSize: 'inherit',
-                                  fontFamily: 'inherit',
-                                  color: 'inherit',
-                                  fontWeight: 'inherit',
-                                  outline: 'none'
-                                }}
-                                onFocus={(e) => e.target.select()}
-                              />
-                            )}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))}
+                  {rowData.map((row, realIndex) => {
+                    return (
+                      <tr key={realIndex} style={{
+                        backgroundColor: realIndex % 2 === 0 ? '#f8f9fa' : 'white',
+                        height: `${rowHeight}px`
+                      }}>
+                        {columnDefs.map((col, colIndex) => {
+                          const raw = row[col.field];
+                          const cellValue = raw == null ? '' : String(raw);
+                          const isUnknown = cellValue.toLowerCase() === 'unknown';
+                          return (
+                            <td key={`${col.field}-${realIndex}`} style={{
+                              padding: '12px 16px',
+                              border: '1px solid #e9ecef',
+                              backgroundColor: isUnknown ? '#ffebee' : (realIndex % 2 === 0 ? '#f8f9fa' : 'white'),
+                              color: isUnknown ? '#c62828' : 'inherit',
+                              fontWeight: isUnknown ? '500' : 'normal',
+                              width: `${columnWidths[col.field] || (col.field === '__row_number__' ? 80 : 180)}px`
+                            }}>
+                              {col.field === 'datasheet' && cellValue.startsWith('http') ? (
+                                <a href={cellValue} target="_blank" rel="noopener noreferrer">{cellValue}</a>
+                              ) : (
+                                <input
+                                  type="text"
+                                  value={cellValue}
+                                  onChange={(e) => handleCellEdit(realIndex, colIndex, e.target.value)}
+                                  style={{
+                                    border: 'none',
+                                    background: 'transparent',
+                                    width: '100%',
+                                    fontSize: 'inherit',
+                                    fontFamily: 'inherit',
+                                    color: 'inherit',
+                                    fontWeight: 'inherit',
+                                    outline: 'none'
+                                  }}
+                                  onFocus={(e) => e.target.select()}
+                                />
+                              )}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
+            {/* Bottom pagination controls */}
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 1 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                <Typography variant="body2" color="text.secondary">Rows per page</Typography>
+                <Select size="small" value={pageSize} onChange={(e) => { const v = parseInt(e.target.value, 10); setPage(1); setPageSize(v); fetchPageData(1, v); }}>
+                  {[50,100,200,500,1000].map(sz => <MenuItem key={sz} value={sz}>{sz}</MenuItem>)}
+                </Select>
+                <Typography variant="body2" color="text.secondary">Page {page} of {Math.max(1, totalPages)}</Typography>
+              </Box>
+              <Pagination count={Math.max(1, totalPages)} page={page} onChange={(_, p) => { setPage(p); fetchPageData(p, pageSize); }} color="primary" size="small" shape="rounded" />
+            </Box>
           </Box>
         </Paper>
       </Box>
@@ -1032,9 +1803,32 @@ const EnhancedDataEditor = () => {
         availableColumns={columnDefs.filter(col => col.field && col.field !== '__row_number__').map(col => col.field || col.headerName).filter(Boolean)}
         onApplyFormulas={handleApplyFormulasSynchronized}
         initialRules={appliedFormulas}
-        columnExamples={{}}
-        columnFillStats={{}}
+        columnExamples={columnExamples}
+        columnFillStats={columnFillStats}
       />
+
+      {/* Save Template Dialog */}
+      <Dialog open={templateSaveDialogOpen} onClose={handleCloseSaveTemplateDialog} maxWidth="sm" fullWidth>
+        <DialogTitle>Save Template</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            Enter a name to save the current mapping, tag rules, and defaults as a reusable template.
+          </DialogContentText>
+          <TextField
+            fullWidth
+            margin="normal"
+            label="Template Name"
+            value={templateName}
+            onChange={(e) => setTemplateName(e.target.value)}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleCloseSaveTemplateDialog}>Cancel</Button>
+          <Button onClick={handleSaveTemplateSynchronized} variant="contained" disabled={templateSaving}>
+            {templateSaving ? 'Saving…' : 'Save'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       {/* Create Factwise ID Dialog */}
       <Dialog

@@ -160,6 +160,7 @@ const api = {
       default_values: mappingData.default_values || {},
       formula_rules: mappingData.formula_rules || null,
       factwise_rules: mappingData.factwise_rules || null,
+      force_persist: mappingData.force_persist === true,
     }),
 
   /**
@@ -219,16 +220,20 @@ const api = {
    * @param {number} pageSize - Page size
    * @param {boolean} enableSpecParsing - Enable specification parsing
    */
-  getMappedDataWithSpecs: (sessionId, page = 1, pageSize = 10, enableSpecParsing = false) => {
-    const _ts = Date.now();
+  getMappedDataWithSpecs: (sessionId, page = 1, pageSize = 10, enableSpecParsing = false, options = {}) => {
+    const _ts = options._ts || Date.now();
+    const params = {
+      session_id: sessionId,
+      page,
+      page_size: pageSize,
+      enable_spec_parsing: enableSpecParsing,
+      stable: options.stable !== undefined ? options.stable : true,
+      _ts,
+    };
+    if (options.force_fresh) params.force_fresh = 'true';
+    if (options._fresh) params._fresh = options._fresh;
     return axios.get(`${API_URL}/data/`, {
-      params: { 
-        session_id: sessionId,
-        page,
-        page_size: pageSize,
-        enable_spec_parsing: enableSpecParsing,
-        _ts
-      },
+      params,
       headers: { 
         'Cache-Control': 'no-cache, no-store, must-revalidate',
         'Pragma': 'no-cache',
@@ -1045,7 +1050,7 @@ const api = {
    * @param {string} secondColumn - Second column name
    * @param {string} operator - Operator to combine columns
    */
-  createFactwiseId: async (sessionId, firstColumn, secondColumn, operator = '_') => {
+  createFactwiseId: async (sessionId, firstColumn, secondColumn, operator = '_', strategy = 'fill_only_null') => {
     const effectiveSessionId = sessionId || await ensureSession();
     
     showGlobalLoader(true);
@@ -1054,7 +1059,8 @@ const api = {
         session_id: effectiveSessionId,
         first_column: firstColumn,
         second_column: secondColumn,
-        operator: operator
+        operator: operator,
+        strategy: strategy
       });
       
       // Just return immediately - no waiting for sync

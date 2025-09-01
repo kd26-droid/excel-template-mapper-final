@@ -129,20 +129,37 @@ class DataSynchronizer {
         throw new Error('Session validation failed before data fetch');
       }
       
-      // Step 2: Fetch data with specifications
-      const dataResponse = await api.getMappedDataWithSpecs(
-        this.sessionId, 
-        1, 
-        1000, 
-        enableSpecParsing
-      );
-      
-      if (!dataResponse.data) {
+      // Step 2: Fetch ALL pages with specifications (no 1000-row cap)
+      const firstPage = await api.getMappedDataWithSpecs(this.sessionId, 1, 1000, enableSpecParsing);
+      let aggregated = firstPage?.data || { headers: [], data: [], pagination: { page: 1, page_size: 1000, total_rows: 0, total_pages: 1 } };
+      const totalPages = Math.max(1, aggregated?.pagination?.total_pages || 1);
+      if (totalPages > 1) {
+        for (let p = 2; p <= totalPages; p++) {
+          const pageResp = await api.getMappedDataWithSpecs(this.sessionId, p, 1000, enableSpecParsing);
+          const pageData = pageResp?.data || {};
+          if (Array.isArray(pageData?.data)) {
+            // Ensure headers are consistent; fallback to first page headers
+            if (!aggregated.headers || aggregated.headers.length === 0) aggregated.headers = pageData.headers || [];
+            aggregated.data = aggregated.data.concat(pageData.data);
+          }
+          // Emit progress for consumers (e.g., UI progress bar)
+          this.emit('progress', { operation: 'fetchData', page: p, totalPages });
+        }
+        // Normalize pagination after aggregation
+        aggregated.pagination = {
+          page: 1,
+          page_size: aggregated?.pagination?.page_size || 1000,
+          total_rows: Array.isArray(aggregated.data) ? aggregated.data.length : (aggregated?.pagination?.total_rows || 0),
+          total_pages: 1,
+        };
+      }
+      // Sanity check aggregated result
+      if (!aggregated || !Array.isArray(aggregated.headers) || !Array.isArray(aggregated.data)) {
         throw new Error('No data received from API');
       }
       
       // Step 3: Validate data structure
-      const validationResult = this.validateDataStructure(dataResponse.data);
+      const validationResult = this.validateDataStructure(aggregated);
       if (!validationResult.isValid) {
         console.warn('⚠️ Data structure validation failed:', validationResult.errors);
         if (retryAttempt < maxRetries) {
@@ -153,10 +170,10 @@ class DataSynchronizer {
       
       // Step 4: Cache the validated data
       this.dataCache.set('lastFetchedData', {
-        data: dataResponse.data,
+        data: aggregated,
         timestamp: Date.now(),
-        headers: dataResponse.data.headers || [],
-        rowCount: dataResponse.data.data ? dataResponse.data.data.length : 0
+        headers: aggregated.headers || [],
+        rowCount: aggregated.data ? aggregated.data.length : 0
       });
       
       // Step 5: Cross-validate with mappings
@@ -171,13 +188,13 @@ class DataSynchronizer {
       console.log('✅ Data fetch completed successfully');
       this.emit('complete', { 
         operation: 'fetchData', 
-        dataCount: dataResponse.data.data ? dataResponse.data.data.length : 0,
-        headerCount: dataResponse.data.headers ? dataResponse.data.headers.length : 0
+        dataCount: Array.isArray(aggregated.data) ? aggregated.data.length : 0,
+        headerCount: Array.isArray(aggregated.headers) ? aggregated.headers.length : 0
       });
       
       return {
         success: true,
-        data: dataResponse.data,
+        data: aggregated,
         mappings: mappingsData,
         validation: validationResult,
         fromCache: false
@@ -221,17 +238,29 @@ class DataSynchronizer {
    */
   async executeSynchronizedOperation(operationType, operation, options = {}) {
     const operationId = `${operationType}_${Date.now()}`;
-    
+    const minLoaderMs = options.minLoaderMs != null ? options.minLoaderMs : 3000; // ensure loader shows at least 3s
+    const expectVersionAdvance = options.expectVersionAdvance !== false; // default true
+    let startTemplateVersion = 0;
+
     try {
       console.log(`🔄 Starting synchronized operation: ${operationType}`);
       this.emit('start', { operation: operationType, id: operationId });
-      
+
       // Add to sync queue
       this.syncQueue.push({ id: operationId, type: operationType, status: 'pending' });
-      
+
+      // Capture starting template version to detect fresh data
+      try {
+        const status = await api.getSessionStatus(this.sessionId);
+        startTemplateVersion = status.data?.template_version ?? 0;
+      } catch (e) {
+        console.warn('Could not read starting template version:', e.message);
+      }
+
+      const opStart = Date.now();
       // Execute the operation
       const result = await operation();
-      
+
       // Validate session after operation
       if (this.azureValidationEnabled) {
         console.log('🔍 Validating session after operation...');
@@ -240,23 +269,42 @@ class DataSynchronizer {
           throw new Error('Session became invalid after operation');
         }
       }
-      
-      // Wait for Azure backend to process
-      if (options.azureWaitTime) {
-        console.log(`⏰ Waiting ${options.azureWaitTime}ms for Azure processing...`);
-        await this.delay(options.azureWaitTime);
+
+      // Wait for Azure backend to process with bounded polling for version advance
+      const waitBudgetMs = Math.max(0, minLoaderMs - (Date.now() - opStart));
+      const pollTimeout = options.azureWaitTime != null ? options.azureWaitTime : waitBudgetMs;
+      if (expectVersionAdvance && pollTimeout > 0) {
+        const pollStart = Date.now();
+        let advanced = false;
+        while (Date.now() - pollStart < pollTimeout) {
+          try {
+            const st = await api.getSessionStatus(this.sessionId);
+            const tv = st.data?.template_version ?? 0;
+            if (tv > startTemplateVersion) {
+              advanced = true;
+              console.log('✅ Detected template version advance:', { from: startTemplateVersion, to: tv });
+              break;
+            }
+          } catch (e) {
+            // continue polling
+          }
+          await this.delay(300);
+        }
+        if (!advanced) {
+          console.warn('⏰ Version did not advance within poll window; proceeding with fetch');
+        }
       }
-      
-      // Fetch fresh data to validate operation success
+
+      // Fetch fresh data to validate operation success (fast mode, bounded)
       let validationData = null;
       if (options.validateWithFreshData !== false) {
         try {
-          validationData = await this.fetchDataWithValidation(true);
+          validationData = await this.fetchDataFast(12000);
         } catch (validationError) {
-          console.warn('Post-operation validation failed:', validationError);
+          console.warn('Post-operation fast validation failed:', validationError);
         }
       }
-      
+
       // Update sync queue
       const queueItem = this.syncQueue.find(item => item.id === operationId);
       if (queueItem) {
@@ -264,7 +312,7 @@ class DataSynchronizer {
         queueItem.result = result;
         queueItem.validationData = validationData;
       }
-      
+
       console.log(`✅ Synchronized operation completed: ${operationType}`);
       this.emit('complete', { 
         operation: operationType, 
@@ -272,26 +320,78 @@ class DataSynchronizer {
         result,
         validationData 
       });
-      
+
       return {
         success: true,
         result,
         validationData,
         operationId
       };
-      
+
     } catch (error) {
       console.error(`❌ Synchronized operation failed: ${operationType}`, error);
-      
+
       // Update sync queue with error
       const queueItem = this.syncQueue.find(item => item.id === operationId);
       if (queueItem) {
         queueItem.status = 'failed';
         queueItem.error = error.message;
       }
-      
+
       this.emit('error', { operation: operationType, id: operationId, error });
       throw error;
+    }
+  }
+
+  /**
+   * Fast data fetch with strict 3s budget. Returns cached data if server is slow.
+   * @param {number} budgetMs - Maximum milliseconds to wait for fresh data
+   */
+  async fetchDataFast(budgetMs = 3000) {
+    const started = Date.now();
+    this.emit('start', { operation: 'fetchDataFast' });
+    try {
+      // Fetch first page to discover total pages, then aggregate all
+      const firstPromise = api.getMappedDataWithSpecs(this.sessionId, 1, 1000, true, { force_fresh: true, _fresh: Date.now() });
+      const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Timed out fetching data')), budgetMs));
+      const firstResponse = await Promise.race([firstPromise, timeoutPromise]);
+      let aggregated = firstResponse.data;
+      const totalPages = Math.max(1, aggregated?.pagination?.total_pages || 1);
+      if (totalPages > 1) {
+        for (let p = 2; p <= totalPages; p++) {
+          const pageResp = await api.getMappedDataWithSpecs(this.sessionId, p, 1000, true, { force_fresh: true, _fresh: Date.now() });
+          if (Array.isArray(pageResp?.data?.data)) {
+            if (!aggregated.headers || aggregated.headers.length === 0) aggregated.headers = pageResp.data.headers || [];
+            aggregated.data = (aggregated.data || []).concat(pageResp.data.data);
+          }
+          // Emit progress for consumers during fast fetch
+          this.emit('progress', { operation: 'fetchDataFast', page: p, totalPages });
+        }
+        aggregated.pagination = {
+          page: 1,
+          page_size: aggregated?.pagination?.page_size || 1000,
+          total_rows: Array.isArray(aggregated.data) ? aggregated.data.length : (aggregated?.pagination?.total_rows || 0),
+          total_pages: 1,
+        };
+      }
+      const validation = this.validateDataStructure(aggregated);
+      this.dataCache.set('lastFetchedData', { data: aggregated, timestamp: Date.now(), headers: aggregated.headers || [], rowCount: (aggregated.data || []).length });
+      this.emit('complete', { operation: 'fetchDataFast', dataCount: (aggregated.data || []).length });
+      return { success: validation.isValid, data: aggregated, validation, fromCache: false };
+    } catch (error) {
+      console.warn('fetchDataFast failed:', error.message);
+      const cached = this.dataCache.get('lastFetchedData');
+      if (cached) {
+        this.emit('complete', { operation: 'fetchDataFast', dataCount: cached.rowCount, fromCache: true });
+        return { success: false, data: cached.data, validation: { isValid: true, errors: [], warnings: ['Using cached data'] }, fromCache: true };
+      }
+      this.emit('error', { operation: 'fetchDataFast', error });
+      throw error;
+    } finally {
+      const elapsed = Date.now() - started;
+      if (elapsed < 3000) {
+        await this.delay(3000 - elapsed); // ensure loader visible ~3s
+      }
     }
   }
 
@@ -315,8 +415,9 @@ class DataSynchronizer {
         );
         
         // Additional validation: check if FactWise ID column was actually created
-        await this.delay(3000); // Wait for backend processing
-        const validationData = await api.getMappedDataWithSpecs(this.sessionId, 1, 5, true);
+        // Wait longer for large datasets and validate against full headers
+        await this.delay(3000);
+        const validationData = await api.getMappedDataWithSpecs(this.sessionId, 1, 1000, true, { force_fresh: true, _fresh: Date.now() });
         
         const hasFactWiseColumn = validationData.data.headers?.some(h => 
           h.toLowerCase().includes('factwise') || h.toLowerCase().includes('item code')
@@ -329,7 +430,10 @@ class DataSynchronizer {
         return result;
       },
       {
-        azureWaitTime: 4000, // Wait 4 seconds for Azure processing
+        // Prolong loader/polling to handle 1000+ rows
+        minLoaderMs: 8000,
+        azureWaitTime: 8000,
+        expectVersionAdvance: true,
         validateWithFreshData: true
       }
     );
@@ -362,7 +466,8 @@ class DataSynchronizer {
         return result;
       },
       {
-        azureWaitTime: 5000, // Wait 5 seconds for formula processing
+        minLoaderMs: 3000,
+        expectVersionAdvance: true,
         validateWithFreshData: true
       }
     );
@@ -389,7 +494,8 @@ class DataSynchronizer {
         return result;
       },
       {
-        azureWaitTime: 3000, // Wait 3 seconds for template processing
+        minLoaderMs: 3000,
+        expectVersionAdvance: true,
         validateWithFreshData: true
       }
     );

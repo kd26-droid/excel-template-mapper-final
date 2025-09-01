@@ -329,6 +329,25 @@ def get_template_version(session_id):
         return SESSION_STORE[session_id].get('template_version', 0)
     return 0
 
+def _externalize_formula_rules(rules, session_info=None):
+    """Return a copy of formula rules with internal targets shown as external labels for UI.
+    Example: Tag_4 -> Tag, Specification_Name_1 -> 'Specification name' (already handled by converter).
+    """
+    try:
+        ext = []
+        for r in (rules or []):
+            rule = dict(r or {})
+            tcol = rule.get('target_column')
+            if isinstance(tcol, str) and tcol:
+                try:
+                    rule['target_column'] = convert_internal_to_external_name(tcol)
+                except Exception:
+                    pass
+            ext.append(rule)
+        return ext
+    except Exception:
+        return rules or []
+
 def build_snapshot(info: dict) -> dict:
     """Build canonical snapshot of session state."""
     return {
@@ -342,7 +361,7 @@ def build_snapshot(info: dict) -> dict:
             "spec_pairs_count": info.get("spec_pairs_count", 1),
             "customer_id_pairs_count": info.get("customer_id_pairs_count", 1),
         },
-        "formula_rules": info.get("formula_rules") or [],
+        "formula_rules": _externalize_formula_rules(info.get("formula_rules") or [], info),
         "factwise_rules": info.get("factwise_rules") or [],
     }
 
@@ -390,6 +409,16 @@ def get_session_consistent(session_id: str):
     data = cache.get(f"mapper:session:{session_id}")
     if data:
         logger.info(f"🔍 Session {session_id} found in cache")
+        # Cross-check file snapshot for newer version to avoid stale cache across workers
+        try:
+            file_snapshot = load_session_from_file(session_id)
+            if file_snapshot and file_snapshot.get('template_version', 0) > data.get('template_version', 0):
+                cache.set(f"mapper:session:{session_id}", file_snapshot, 86400)
+                SESSION_STORE[session_id] = file_snapshot
+                logger.info(f"🔄 Cache refreshed for session {session_id} from newer file snapshot")
+                return file_snapshot
+        except Exception:
+            pass
         return data
     
     # Fallback to old in-memory store
@@ -1045,14 +1074,24 @@ def upload_files(request):
 def get_headers(request, session_id):
     """Get headers from uploaded files."""
     try:
-        # Use universal session retrieval (works across multiple workers)
-        info = get_session(session_id)
+        # Use consistent session retrieval (cache->memory->file) for multi-worker
+        info = get_session_consistent(session_id)
         if not info:
             return Response({
                 'success': False,
                 'error': 'Session not found'
             }, status=status.HTTP_404_NOT_FOUND)
         mapper = BOMHeaderMapper()
+
+        # Cross-worker consistency: if file snapshot has newer template_version, refresh memory
+        try:
+            file_snapshot = load_session_from_file(session_id)
+            if file_snapshot and file_snapshot.get('template_version', 0) > info.get('template_version', 0):
+                SESSION_STORE[session_id] = file_snapshot
+                info = file_snapshot
+                logger.info(f"🔄 Refreshed in-memory session {session_id} from file (newer template_version)")
+        except Exception:
+            pass
         
         # Read client headers (support Azure Blob by resolving to local cache)
         client_headers = mapper.read_excel_headers(
@@ -1207,7 +1246,7 @@ def get_headers(request, session_id):
         # Generate template columns based on counts (for reference)
         template_columns = generate_template_columns(tags_count, spec_pairs_count, customer_id_pairs_count)
         
-        return Response({
+        return no_store(Response({
             'success': True,
             'client_headers': client_headers,
             'template_headers': template_headers_to_use,
@@ -1220,14 +1259,14 @@ def get_headers(request, session_id):
             },
             'client_file': info.get('original_client_name', ''),
             'template_file': info.get('original_template_name', '')
-        })
+        }))
         
     except Exception as e:
         logger.error(f"Error in get_headers: {e}")
-        return Response({
+        return no_store(Response({
             'success': False,
             'error': f'Failed to get headers: {str(e)}'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR))
 
 
 @api_view(['POST'])
@@ -1241,7 +1280,17 @@ def mapping_suggestions(request):
                 'error': 'Session ID is required'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        info = get_session(session_id)
+        # Use consistent session retrieval (cache -> memory -> file) for Azure multi-worker
+        info = get_session_consistent(session_id)
+        # If a newer file snapshot exists, refresh in-memory session (cross-worker sync)
+        try:
+            file_snapshot = load_session_from_file(session_id)
+            if file_snapshot and file_snapshot.get('template_version', 0) > info.get('template_version', 0):
+                SESSION_STORE[session_id] = file_snapshot
+                info = file_snapshot
+                logger.info(f"🔄 Refreshed in-memory session {session_id} from file (newer template_version) in download_file")
+        except Exception:
+            pass
         if not info:
             return Response({
                 'success': False,
@@ -1338,6 +1387,7 @@ def save_mappings(request):
         # If mappings array is empty, this likely means user is deleting columns
         # In this case, we should NOT overwrite existing mappings
         is_destructive_operation = False
+        force_persist = request.data.get('force_persist') in [True, 'true', 'True', '1', 1]
         if isinstance(mappings, list) and len(mappings) == 0:
             is_destructive_operation = True
             logger.warning(f"🔧 WARNING: Received empty mappings array - this is likely a destructive operation")
@@ -1346,7 +1396,7 @@ def save_mappings(request):
             logger.warning(f"🔧 WARNING: Received empty mappings.mappings array - this is likely a destructive operation")
         
         # If this is a destructive operation, preserve existing mappings
-        if is_destructive_operation:
+        if is_destructive_operation and not force_persist:
             existing_mappings = info.get("mappings", {})
             if existing_mappings and isinstance(existing_mappings, dict) and 'mappings' in existing_mappings:
                 logger.info(f"🔧 PRESERVING existing mappings from destructive operation: {len(existing_mappings['mappings'])} mappings")
@@ -1498,7 +1548,8 @@ def get_existing_mappings(request, session_id):
     try:
         print(f"🔍 PRINT DEBUG: get_existing_mappings called for session {session_id}")
         logger.info(f"🔍 DEBUG: get_existing_mappings called for session {session_id}")
-        session_data = get_session(session_id)
+        # Use consistent session retrieval to avoid stale/missing fields across workers
+        session_data = get_session_consistent(session_id)
         print(f"🔍 PRINT DEBUG: Retrieved session data with keys: {list(session_data.keys()) if session_data else 'None'}")
         logger.info(f"🔍 DEBUG: Retrieved session data with keys: {list(session_data.keys()) if session_data else 'None'}")
         if not session_data:
@@ -1506,6 +1557,15 @@ def get_existing_mappings(request, session_id):
                 'success': False,
                 'error': 'Session not found'
             }, status=status.HTTP_404_NOT_FOUND)
+        # Cross-worker refresh if file snapshot is newer
+        try:
+            file_snapshot = load_session_from_file(session_id)
+            if file_snapshot and file_snapshot.get('template_version', 0) > session_data.get('template_version', 0):
+                SESSION_STORE[session_id] = file_snapshot
+                session_data = file_snapshot
+                logger.info(f"🔄 Refreshed session {session_id} from file in get_existing_mappings")
+        except Exception:
+            pass
         mappings = session_data.get("mappings", {})
         default_values = session_data.get("default_values", {})
         
@@ -1581,19 +1641,19 @@ def get_existing_mappings(request, session_id):
         else:
             normalized_mappings = {'mappings': []}
 
-        return Response({
+        return no_store(Response({
             'success': True,
             'mappings': normalized_mappings,                # <— one shape
             'default_values': default_values,
             'session_metadata': session_metadata
-        })
+        }))
         
     except Exception as e:
         logger.error(f"Error in get_existing_mappings: {e}")
-        return Response({
+        return no_store(Response({
             'success': False,
             'error': f'Failed to get mappings: {str(e)}'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR))
 
 
 @api_view(['GET'])
@@ -1611,20 +1671,22 @@ def data_view(request):
                 'error': 'No session ID provided'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Check if session exists in memory, if not try to load from file
-        if session_id not in SESSION_STORE:
-            session_data = load_session_from_file(session_id)
-            if session_data:
-                SESSION_STORE[session_id] = session_data
-                logger.info(f"🔄 Restored session {session_id} from file")
-                logger.info(f"🔧 DEBUG: Restored session contains default_values: {session_data.get('default_values', {})}")
-            else:
-                return Response({
-                    'success': False,
-                    'error': 'Session not found. Please upload files again.'
-                }, status=status.HTTP_400_BAD_REQUEST)
-        
-        info = SESSION_STORE[session_id]
+        # Robust, multi-worker safe session retrieval (cache -> memory -> file)
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({
+                'success': False,
+                'error': 'Session not found. Please upload files again.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        # Cross-worker consistency: if file snapshot has newer template_version, refresh memory
+        try:
+            file_snapshot = load_session_from_file(session_id)
+            if file_snapshot and file_snapshot.get('template_version', 0) > info.get('template_version', 0):
+                SESSION_STORE[session_id] = file_snapshot
+                info = file_snapshot
+                logger.info(f"🔄 Refreshed in-memory session {session_id} from file (newer template_version)")
+        except Exception as _e:
+            pass
         logger.info(f"🔧 DEBUG: Processing session {session_id} for data view")
         
         # Always process fresh data - no caching
@@ -1658,7 +1720,10 @@ def data_view(request):
         enhanced_headers = info.get("enhanced_headers")
 
         template_just_applied = info.get("original_template_id") is not None
-        force_fresh_mapping = template_just_applied or request.GET.get('force_fresh', 'false').lower() == 'true'
+        # Only force fresh mapping if no enhanced data is present; otherwise use enhanced immediately
+        force_fresh_mapping = (template_just_applied and not (enhanced_data and enhanced_headers)) or request.GET.get('force_fresh', 'false').lower() == 'true'
+        # Stability option for consumers like DataEditor: avoid cleaning headers by page slice
+        stable_headers = request.GET.get('stable', 'false').lower() == 'true'
 
         using_enhanced = False
         if enhanced_data and enhanced_headers and not force_fresh_mapping:
@@ -1666,6 +1731,12 @@ def data_view(request):
             headers_to_use = enhanced_headers
             using_enhanced = True
             logger.info(f"🔧 DEBUG: Using enhanced data with {len(headers_to_use)} headers and {len(transformed_rows)} rows")
+            # Persist canonical headers to avoid worker drift
+            try:
+                info["current_template_headers"] = headers_to_use
+                save_session(session_id, info)
+            except Exception:
+                pass
         else:
             # fresh mapping
             mapping_result = apply_column_mappings(
@@ -1734,7 +1805,7 @@ def data_view(request):
             formula_result = apply_formula_rules(transformed_rows, headers_to_use, formula_rules, replace_existing=False, session_info=info)
             transformed_rows = formula_result['data']
             headers_to_use = formula_result['headers']
-            # Cache for next time
+            # Cache for next time and persist canonically across workers
             info['formula_enhanced_data'] = transformed_rows
             info['enhanced_headers'] = headers_to_use
             info['current_template_headers'] = headers_to_use
@@ -1828,7 +1899,7 @@ def data_view(request):
                     logger.warning(f"Factwise ID application failed: {e}")
                     import traceback
                     logger.warning(f"Traceback: {traceback.format_exc()}")
-        
+
         if not transformed_rows:
             return Response({
                 'success': False,
@@ -1836,6 +1907,108 @@ def data_view(request):
             }, status=status.HTTP_400_BAD_REQUEST)
         
         # List-to-dict conversion already done above before formula processing
+
+        # Normalize generic 'Tag' column: move any values into numbered Tag_N columns, then drop 'Tag'
+        try:
+            if isinstance(headers_to_use, list) and 'Tag' in headers_to_use and isinstance(transformed_rows, list) and len(transformed_rows) > 0:
+                tag_n_headers = [h for h in headers_to_use if isinstance(h, str) and h.startswith('Tag_')]
+                try:
+                    tag_n_headers.sort(key=lambda x: int(x.split('_')[1]))
+                except Exception:
+                    tag_n_headers.sort()
+                if isinstance(transformed_rows[0], dict):
+                    for row in transformed_rows:
+                        val = str(row.get('Tag', '') or '').strip()
+                        if not val:
+                            continue
+                        placed = False
+                        for tcol in tag_n_headers:
+                            cur = str(row.get(tcol, '') or '').strip()
+                            if not cur:
+                                row[tcol] = val
+                                placed = True
+                                break
+                        if not placed and tag_n_headers:
+                            last = tag_n_headers[-1]
+                            cur = str(row.get(last, '') or '').strip()
+                            if cur:
+                                parts = [p.strip() for p in cur.split(',')]
+                                if val not in parts:
+                                    row[last] = f"{cur}, {val}"
+                            else:
+                                row[last] = val
+                        row.pop('Tag', None)
+                else:
+                    tag_idx = headers_to_use.index('Tag')
+                    tag_n_indices = []
+                    for h in tag_n_headers:
+                        try:
+                            tag_n_indices.append(headers_to_use.index(h))
+                        except ValueError:
+                            pass
+                    for row in transformed_rows:
+                        val = ''
+                        if tag_idx < len(row):
+                            val = str(row[tag_idx] or '').strip()
+                        if not val:
+                            continue
+                        placed = False
+                        for idx in tag_n_indices:
+                            if idx < len(row):
+                                cur = str(row[idx] or '').strip()
+                                if not cur:
+                                    row[idx] = val
+                                    placed = True
+                                    break
+                        if not placed and tag_n_indices:
+                            last_idx = tag_n_indices[-1]
+                            if last_idx < len(row):
+                                cur = str(row[last_idx] or '').strip()
+                                if cur:
+                                    parts = [p.strip() for p in cur.split(',')]
+                                    if val not in parts:
+                                        row[last_idx] = f"{cur}, {val}"
+                                else:
+                                    row[last_idx] = val
+                    # Note: header removal occurs in cleaned headers step later
+                # remove generic Tag header now
+                headers_to_use = [h for h in headers_to_use if h != 'Tag']
+        except Exception:
+            pass
+
+        # Unconditional cleanup: drop Tag_N columns that are empty-only to prevent header growth
+        try:
+            if isinstance(headers_to_use, list) and headers_to_use and transformed_rows:
+                tag_headers = [h for h in headers_to_use if isinstance(h, str) and h.startswith('Tag_')]
+                # Build a set of Tag_N with any data
+                non_empty = set()
+                if isinstance(transformed_rows[0], dict):
+                    for h in tag_headers:
+                        for row in transformed_rows:
+                            if str(row.get(h, '') or '').strip():
+                                non_empty.add(h)
+                                break
+                else:
+                    for h in tag_headers:
+                        try:
+                            idx = headers_to_use.index(h)
+                        except ValueError:
+                            continue
+                        for row in transformed_rows:
+                            if idx < len(row) and str(row[idx] or '').strip():
+                                non_empty.add(h)
+                                break
+                # Remove Tag_N columns that are entirely empty
+                to_remove = [h for h in tag_headers if h not in non_empty]
+                if to_remove:
+                    headers_to_use = [h for h in headers_to_use if h not in to_remove]
+                    if isinstance(transformed_rows[0], dict):
+                        for row in transformed_rows:
+                            for h in to_remove:
+                                row.pop(h, None)
+                    # list-of-lists cleanup will be handled later with cleaned headers if needed
+        except Exception:
+            pass
         
         # Apply default values for unmapped fields
         default_values = info.get("default_values", {})
@@ -2019,46 +2192,55 @@ def data_view(request):
                 logger.info(f"🔧 CLEANUP: Removed blank column '{header}' with no data")
         
         # Update the variables to use cleaned versions
-        headers_to_use = cleaned_headers
-        external_headers = cleaned_external_headers
-        internal_to_external_mapping = cleaned_internal_to_external
+        if not stable_headers:
+            headers_to_use = cleaned_headers
+            external_headers = cleaned_external_headers
+            internal_to_external_mapping = cleaned_internal_to_external
+
+            # Also clean up the paginated_rows to only include data for kept columns
+            original_header_count = len([h for h in (info.get('current_template_headers', []) or info.get('enhanced_headers', []) or [])])
+            if len(cleaned_headers) < original_header_count:
+                logger.info(f"🔧 CLEANUP: Cleaning data rows to match {len(cleaned_headers)} cleaned headers")
+                cleaned_paginated_rows = []
+                original_headers = [h for h in headers_to_use]  # Keep original reference
+
+                for row in paginated_rows:
+                    if isinstance(row, dict):
+                        # Keep only fields that correspond to cleaned headers
+                        cleaned_row = {header: row.get(header, '') for header in cleaned_headers}
+                        cleaned_paginated_rows.append(cleaned_row)
+                    elif isinstance(row, list):
+                        # Keep only columns that correspond to cleaned headers indices
+                        cleaned_row = []
+                        original_headers_list = list(info.get('current_template_headers', [])) or headers_to_use
+                        for header in cleaned_headers:
+                            try:
+                                idx = original_headers_list.index(header)
+                                cleaned_row.append(row[idx] if idx < len(row) else '')
+                            except (ValueError, IndexError):
+                                cleaned_row.append('')
+                        cleaned_paginated_rows.append(cleaned_row)
+                    else:
+                        cleaned_paginated_rows.append(row)
+
+                paginated_rows = cleaned_paginated_rows
         
-        # Also clean up the paginated_rows to only include data for kept columns  
-        original_header_count = len([h for h in (info.get('current_template_headers', []) or info.get('enhanced_headers', []) or [])])
-        if len(cleaned_headers) < original_header_count:
-            logger.info(f"🔧 CLEANUP: Cleaning data rows to match {len(cleaned_headers)} cleaned headers")
-            cleaned_paginated_rows = []
-            original_headers = [h for h in headers_to_use]  # Keep original reference
-            
-            for row in paginated_rows:
-                if isinstance(row, dict):
-                    # Keep only fields that correspond to cleaned headers
-                    cleaned_row = {header: row.get(header, '') for header in cleaned_headers}
-                    cleaned_paginated_rows.append(cleaned_row)
-                elif isinstance(row, list):
-                    # Keep only columns that correspond to cleaned headers indices
-                    cleaned_row = []
-                    original_headers_list = list(info.get('current_template_headers', [])) or headers_to_use
-                    for header in cleaned_headers:
-                        try:
-                            idx = original_headers_list.index(header)
-                            cleaned_row.append(row[idx] if idx < len(row) else '')
-                        except (ValueError, IndexError):
-                            cleaned_row.append('')
-                    cleaned_paginated_rows.append(cleaned_row)
-                else:
-                    cleaned_paginated_rows.append(row)
-            
-            paginated_rows = cleaned_paginated_rows
-        
-        # Clear one-shot flag so future reads use enhanced branch
-        if template_just_applied:
-            info.pop('original_template_id', None)
-            save_session(session_id, info)
+        # Do not clear original_template_id; keep template-applied state for dashboard and restores
 
         # Include formula rules in response so frontend can display them
         formula_rules = info.get('formula_rules', [])
         
+        # FINAL SAFETY: ensure dict rows do not include stray keys not present in headers_to_use
+        try:
+            if isinstance(paginated_rows, list) and paginated_rows and isinstance(paginated_rows[0], dict):
+                allowed = set(headers_to_use)
+                cleaned = []
+                for row in paginated_rows:
+                    cleaned.append({k: v for k, v in row.items() if k in allowed})
+                paginated_rows = cleaned
+        except Exception:
+            pass
+
         return no_store(Response({
             'success': True,
             'headers': headers_to_use,
@@ -2121,6 +2303,15 @@ def session_status(request, session_id):
     """Get session status including template version for change tracking."""
     try:
         info = get_session_consistent(session_id)
+        # Cross-worker consistency: prefer file snapshot if newer
+        try:
+            file_snapshot = load_session_from_file(session_id)
+            if file_snapshot and file_snapshot.get('template_version', 0) > info.get('template_version', 0):
+                SESSION_STORE[session_id] = file_snapshot
+                info = file_snapshot
+                logger.info(f"🔄 STATUS: Refreshed in-memory session {session_id} from file (newer template_version)")
+        except Exception:
+            pass
         if not info:
             return no_store(Response({
                 'success': False,
@@ -2858,36 +3049,30 @@ def update_column_counts(request):
 
 
 def generate_template_columns(tags_count, spec_pairs_count, customer_id_pairs_count, existing_headers=None):
-    """Generate template column names with generic naming (no numbering) and preserve original order."""
-    columns = []
-    
-    # If we have existing headers from the original Excel file, use them as the base
-    if existing_headers and len(existing_headers) > 0:
-        # Start with the original headers, but filter out any numbered dynamic columns
-        # that might have been added previously
-        import re
-        dynamic_column_pattern = re.compile(r'^(Tag_|Specification_Name_|Specification_Value_|Customer_Identification_Name_|Customer_Identification_Value_)\d+$')
-        columns = [h for h in existing_headers if not dynamic_column_pattern.match(h)]
-    else:
-        # Basic mandatory columns (fallback if no existing headers)
-        basic_columns = ["Quantity", "Description", "Part Number", "Manufacturer"]
-        columns.extend(basic_columns)
-    
-    # Add dynamic columns at the end with generic names (no numbering)
-    # Tags - ALWAYS use "Tag" without numbering
-    for i in range(tags_count):
-        columns.append("Tag")
-    
-    # Specification Name/Value pairs
-    for i in range(spec_pairs_count):
-        columns.append("Specification name")
-        columns.append("Specification value")
-    
-    # Customer Identification Name/Value pairs  
-    for i in range(customer_id_pairs_count):
-        columns.append("Customer identification name")
-        columns.append("Customer identification value")
-    
+    """Generate internal numbered template headers in canonical order."""
+    columns = [
+        'Item code',
+        'Item name',
+        'Description',
+        'Item type',
+        'Measurement unit',
+        'Procurement entity name'
+    ]
+
+    # Tags
+    for i in range(1, max(int(tags_count or 0), 0) + 1):
+        columns.append(f'Tag_{i}')
+
+    # Specification pairs
+    for i in range(1, max(int(spec_pairs_count or 0), 0) + 1):
+        columns.append(f'Specification_Name_{i}')
+        columns.append(f'Specification_Value_{i}')
+
+    # Customer identification pairs
+    for i in range(1, max(int(customer_id_pairs_count or 0), 0) + 1):
+        columns.append(f'Customer_Identification_Name_{i}')
+        columns.append(f'Customer_Identification_Value_{i}')
+
     return columns
 
 
@@ -3020,6 +3205,18 @@ def save_mapping_template(request):
             spec_pairs_count = request.data.get('spec_pairs_count', 1) 
             customer_id_pairs_count = request.data.get('customer_id_pairs_count', 1)
         
+        # Normalize Tag formula targets to generic 'Tag' so templates don't hard-pin Tag_N
+        try:
+            normalized_formula_rules = []
+            for _r in (formula_rules or []):
+                r = dict(_r or {})
+                if (r or {}).get('column_type', 'Tag') == 'Tag':
+                    r['target_column'] = 'Tag'
+                normalized_formula_rules.append(r)
+            formula_rules = normalized_formula_rules
+        except Exception:
+            pass
+
         # Create template with backward compatibility
         try:
             debug_log(session_id, f"Saving template '{template_name}'", {
@@ -3039,7 +3236,7 @@ def save_mapping_template(request):
                 template_headers=template_headers,
                 source_headers=client_headers,
                 mappings=mappings,
-                formula_rules=formula_rules,  # Include formula rules
+                formula_rules=formula_rules,  # Include normalized formula rules
                 factwise_rules=factwise_rules,  # Include factwise ID rules
                 default_values=default_values,  # Include default values
                 tags_count=tags_count,
@@ -3396,7 +3593,14 @@ def apply_mapping_template(request):
             logger.debug(f"Mapped indices found - Tags: {mapped_tag_indices}, Spec: {mapped_spec_indices}, Customer: {mapped_customer_indices}")
             
             # Also consider formula_rules implied counts (distinct Tag_N targets)
-            fr = getattr(template, 'formula_rules', []) or []
+            # Normalize Tag rules to generic 'Tag' so they don't force-create Tag_N slots
+            fr_raw = getattr(template, 'formula_rules', []) or []
+            fr = []
+            for _r in fr_raw:
+                r = dict(_r or {})
+                if (r or {}).get('column_type', 'Tag') == 'Tag':
+                    r['target_column'] = 'Tag'
+                fr.append(r)
             logger.debug(f"Formula rules: {fr}")
             formula_tag_targets = [r.get('target_column') for r in fr if (r or {}).get('column_type', 'Tag') == 'Tag']
             formula_tag_indices = set()
@@ -3406,8 +3610,16 @@ def apply_mapping_template(request):
                     if idx:
                         formula_tag_indices.add(idx)
 
-            # Use maximum across template, mapped, and formula-derived (exact counts)
-            tags_count = max(template_tags_count, len(mapped_tag_indices), len(formula_tag_indices))
+            # Use the highest index actually referenced by mappings or Tag-specific formula targets.
+            # Avoid inflating counts from stored template_tags_count (which may carry old sessions).
+            mapped_tag_max = max(mapped_tag_indices) if mapped_tag_indices else 0
+            formula_tag_max = max(formula_tag_indices) if formula_tag_indices else 0
+            tags_count = max(mapped_tag_max, formula_tag_max)
+            # Ensure at least 1 Tag column if template declared any tags
+            if tags_count == 0 and template_tags_count > 0:
+                tags_count = min(template_tags_count, 1)
+
+            # For specs/customers, keep existing behavior by distinct counts
             spec_pairs_count = max(template_spec_pairs_count, len(mapped_spec_indices))
             customer_id_pairs_count = max(template_customer_id_pairs_count, len(mapped_customer_indices))
             
@@ -3505,6 +3717,39 @@ def apply_mapping_template(request):
                     new_format_list = [{"source": v, "target": k} for k, v in old_mappings.items()]
                 elif isinstance(old_mappings, list):
                     new_format_list = old_mappings
+
+            # NEW: If Tag formulas exist, reserve the next available Tag_N column for formulas
+            # and drop any direct mapping targeting exactly that reserved Tag_N (e.g., Tag_4)
+            try:
+                tag_formulas = [r for r in (getattr(template, 'formula_rules', []) or []) if (r or {}).get('column_type', 'Tag') == 'Tag']
+                if tag_formulas and isinstance(new_format_list, list):
+                    # Determine used Tag indices in direct mappings
+                    used_tag_indices = set()
+                    for m in new_format_list:
+                        tgt = (m or {}).get('target')
+                        if isinstance(tgt, str) and tgt.startswith('Tag_'):
+                            try:
+                                idx = int(tgt.split('_')[1])
+                                used_tag_indices.add(idx)
+                            except Exception:
+                                pass
+                    next_idx = (max(used_tag_indices) + 1) if used_tag_indices else 1
+                    reserved_tag = f'Tag_{next_idx}'
+                    # Filter out direct mappings to the reserved Tag_N
+                    filtered_list = [m for m in new_format_list if (m or {}).get('target') != reserved_tag]
+                    if len(filtered_list) != len(new_format_list):
+                        logger.info(f"🔧 DEBUG: Dropped direct mapping to reserved formula tag '{reserved_tag}' to keep it formula-only")
+                    new_format_list = filtered_list
+                    # IMPORTANT: Bump tags_count to allow formula engine to create the reserved Tag column
+                    try:
+                        current_cap = int(SESSION_STORE[session_id].get('tags_count', 0) or 0)
+                    except Exception:
+                        current_cap = 0
+                    if next_idx > current_cap:
+                        SESSION_STORE[session_id]['tags_count'] = next_idx
+                        logger.info(f"🔧 DEBUG: Increased tags_count cap to {next_idx} to allow formula Tag column creation")
+            except Exception as _e:
+                pass
             
             # Store mappings in new format to preserve duplicates
             new_format_mappings = {"mappings": new_format_list}
@@ -3516,7 +3761,7 @@ def apply_mapping_template(request):
             SESSION_STORE[session_id]["cached_mappings"] = new_format_list
             
             # Apply formula rules if they exist
-            formula_rules = getattr(template, 'formula_rules', []) or []
+            formula_rules = fr  # use normalized rules
             if formula_rules:
                 SESSION_STORE[session_id]["formula_rules"] = formula_rules
                 
@@ -3548,11 +3793,14 @@ def apply_mapping_template(request):
                     session_info=SESSION_STORE[session_id]
                 )
                 
-                # Don't cache enhanced data - process fresh each time
-                logger.info(f"Applied {len(formula_rules)} formula rules from template")
-                
-                # Store the enhanced data temporarily for default value application
-                SESSION_STORE[session_id]["temp_formula_result"] = formula_result
+                # Persist enhanced data immediately so Review and subsequent steps see Tag/Spec columns populated
+                logger.info(f"Applied {len(formula_rules)} formula rules from template; persisting enhanced data")
+                try:
+                    SESSION_STORE[session_id]["formula_enhanced_data"] = formula_result.get('data', [])
+                    SESSION_STORE[session_id]["enhanced_headers"] = formula_result.get('headers', mapping_result['headers'])
+                    save_session(session_id, SESSION_STORE[session_id])
+                except Exception as _e:
+                    logger.warning(f"Failed to persist formula-enhanced data: {_e}")
             
             # Apply factwise rules if they exist
             factwise_rules = getattr(template, 'factwise_rules', []) or []
@@ -3600,48 +3848,65 @@ def apply_mapping_template(request):
                                 continue  # Skip this factwise rule
                             
                             # Apply FactWise ID creation using template column data
-                            # Use the current mapped data to create FactWise IDs
+                            # Map directly into 'Item code' so it's available immediately after apply
                             factwise_id_column = []
                             first_col_idx = current_headers.index(first_column)
                             second_col_idx = current_headers.index(second_column)
+                            strategy = (rule.get("strategy") or "fill_only_null")
                             
                             logger.info(f"🔧 DEBUG: Template data indices - first_idx: {first_col_idx}, second_idx: {second_col_idx}")
                             
                             if first_col_idx >= 0 and second_col_idx >= 0:
                                 for row in current_data:
                                     if isinstance(row, dict):
-                                        # Dict format data
                                         first_val = str(row.get(first_column, "")).strip()
                                         second_val = str(row.get(second_column, "")).strip()
                                     else:
-                                        # List format data
                                         first_val = str(row[first_col_idx] if first_col_idx < len(row) else "").strip()
                                         second_val = str(row[second_col_idx] if second_col_idx < len(row) else "").strip()
-                                    
-                                    if first_val and second_val:
-                                        factwise_id = f"{first_val}{operator}{second_val}"
-                                    elif first_val:
-                                        factwise_id = first_val
-                                    elif second_val:
-                                        factwise_id = second_val
-                                    else:
-                                        factwise_id = ""
-                                    
+                                    factwise_id = f"{first_val}{operator}{second_val}" if first_val and second_val else (first_val or second_val or "")
                                     factwise_id_column.append(factwise_id)
                                 
-                                # Insert Factwise ID column at the beginning
-                                new_headers = ["Factwise ID"] + current_headers
+                                # Map into Item code (or create it if missing)
+                                new_headers = list(current_headers)
+                                item_idx = None
+                                for i_h, h in enumerate(new_headers):
+                                    if str(h).strip().lower().replace(" ", "_") == "item_code":
+                                        item_idx = i_h
+                                        new_headers[i_h] = "Item code"
+                                        break
                                 new_data_rows = []
+                                if item_idx is None:
+                                    new_headers = ["Item code"] + new_headers
+                                    for i, row in enumerate(current_data):
+                                        new_row = [factwise_id_column[i]] + list(row)
+                                        new_data_rows.append(new_row)
+                                else:
+                                    for i, row in enumerate(current_data):
+                                        if isinstance(row, list):
+                                            new_row = list(row)
+                                            while len(new_row) <= item_idx:
+                                                new_row.append("")
+                                            if strategy == 'override_all' or not str(new_row[item_idx] or '').strip():
+                                                new_row[item_idx] = factwise_id_column[i]
+                                            new_data_rows.append(new_row)
+                                        else:
+                                            # dict rows
+                                            new_row = dict(row)
+                                            if strategy == 'override_all' or not str(new_row.get('Item code', '') or '').strip():
+                                                new_row['Item code'] = factwise_id_column[i]
+                                            new_data_rows.append(new_row)
                                 
-                                for i, row in enumerate(current_data):
-                                    new_row = [factwise_id_column[i]] + list(row)
-                                    new_data_rows.append(new_row)
-                                
-                                # Update session with Factwise ID enhanced data
+                                # Update session with Item code-enhanced data
                                 SESSION_STORE[session_id]["formula_enhanced_data"] = new_data_rows
                                 SESSION_STORE[session_id]["enhanced_headers"] = new_headers
+                                try:
+                                    SESSION_STORE[session_id]["current_template_headers"] = new_headers
+                                except Exception:
+                                    pass
+                                save_session(session_id, SESSION_STORE[session_id])
                                 
-                                logger.info(f"🆔 Applied Factwise ID rule from template: {first_column} {operator} {second_column}")
+                                logger.info(f"🆔 Applied Factwise ID rule to 'Item code' from template: {first_column} {operator} {second_column}")
                     except Exception as factwise_error:
                         logger.warning(f"🆔 Failed to apply Factwise ID rule from template: {factwise_error}")
                         # Continue with other rules even if this one fails
@@ -3701,16 +3966,19 @@ def apply_mapping_template(request):
             # Increment template usage
             template.increment_usage()
             
-            return Response({
+            return no_store(Response({
                 'success': True,
                 'template_version': new_version,
                 'enhanced_headers': regenerated_headers,
-                'mappings': application_result.get('mappings', {}),
-                'mappings_new_format': application_result.get('mappings_new_format', []),
+                # Return filtered mappings to frontend to avoid applying direct mapping to reserved Tag_N
+                'mappings': {k: v for k, v in (application_result.get('mappings', {}) or {}).items() if not (isinstance(k, str) and k.startswith('Tag_') and k not in [m.get('target') for m in new_format_list])},
+                'mappings_new_format': new_format_list,
                 'default_values': default_values,
                 'column_counts': info['column_counts'],
                 'total_mapped': application_result.get('total_mapped', 0),
-            })
+                # Include formula rules to help frontends reflect tag rules immediately
+                'formula_rules': _externalize_formula_rules(SESSION_STORE.get(session_id, {}).get('formula_rules', []), SESSION_STORE.get(session_id, {})),
+            }))
         else:
             return Response({
                 'success': False,
@@ -3719,10 +3987,10 @@ def apply_mapping_template(request):
         
     except Exception as e:
         logger.error(f"Error in apply_mapping_template: {e}")
-        return Response({
+        return no_store(Response({
             'success': False,
             'error': f'Failed to apply template: {str(e)}'
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR))
 
 
 class BOMHeaderMappingView(APIView):
@@ -3826,52 +4094,108 @@ def apply_formula_rules(data_rows, headers, formula_rules, replace_existing=Fals
                 column_name = get_next_available_tag_column(session_info, used_column_names)
                 logger.info(f"🔧 DEBUG: Creating new Tag column '{column_name}' for rule {rule_index + 1}")
             
-            # Add the new column only if it doesn't already exist
-            if column_name not in new_headers:
-                new_headers.append(column_name)
-                new_columns.append(column_name)
-                used_column_names.add(column_name)
-                logger.info(f"🔧 DEBUG: Added Tag column '{column_name}' to headers")
-            else:
-                logger.info(f"🔧 DEBUG: Tag column '{column_name}' already exists, using existing one")
-                # Don't add to new_columns since it already exists
-            
-            # Apply sub-rules to each row (first match wins)
-            for row in modified_data:
-                if column_name not in row:
-                    row[column_name] = ''
-                
-                # Check each sub-rule until first match
+            # Evaluate matches first without mutating rows
+            tag_assignments = []  # list of (row_index, value)
+            for idx, row in enumerate(modified_data):
+                match_value = None
                 for sub_rule in sub_rules:
                     search_text = sub_rule.get('search_text', '')
                     output_value = sub_rule.get('output_value', '')
                     case_sensitive = sub_rule.get('case_sensitive', False)
-                    
                     if not search_text or not output_value:
                         continue
-                    
-                    # Convert to string to handle any data type inconsistencies
                     cell_value = str(row.get(source_column, ''))
-                    search_text = str(search_text) if search_text else ''
-                    output_value = str(output_value) if output_value else ''
-                    
-                    search_text_compare = search_text if case_sensitive else search_text.lower()
+                    search_text_compare = search_text if case_sensitive else str(search_text).lower()
                     cell_value_compare = cell_value if case_sensitive else cell_value.lower()
-                    
                     if search_text_compare in cell_value_compare:
-                        # Check if the column already has mapped data from duplicate mappings
-                        existing_value = row.get(column_name, '').strip()
-                        
-                        if existing_value and existing_value != output_value:
-                            # Column has mapped data - check if output_value is already part of existing_value
-                            # Split by comma and strip to handle various formats
-                            existing_values = [v.strip() for v in existing_value.split(',')]
-                            if output_value not in existing_values:  # Avoid duplicates
-                                row[column_name] = f"{existing_value}, {output_value}"
+                        match_value = str(output_value)
+                        break
+                if match_value is not None and str(match_value).strip() != '':
+                    tag_assignments.append((idx, match_value))
+
+            if tag_assignments:
+                # Try to fit matches into existing Tag columns first (per-row first empty slot)
+                existing_tag_cols = [h for h in new_headers if h.startswith('Tag_')]
+                # Sort by numeric index to preserve order
+                try:
+                    existing_tag_cols.sort(key=lambda x: int(x.split('_')[1]))
+                except Exception:
+                    existing_tag_cols.sort()
+
+                unresolved = []
+                # Ensure all existing tag columns are present in each row
+                for row in modified_data:
+                    for tcol in existing_tag_cols:
+                        if tcol not in row:
+                            row[tcol] = ''
+
+                for idx, value in tag_assignments:
+                    placed = False
+                    # Place into first empty existing Tag column for this row
+                    for tcol in existing_tag_cols:
+                        current = str(modified_data[idx].get(tcol, '') or '').strip()
+                        if not current:
+                            modified_data[idx][tcol] = value
+                            placed = True
+                            break
+                        # If already contains the value, treat as placed
+                        existing_values = [v.strip() for v in current.split(',')]
+                        if value in existing_values:
+                            placed = True
+                            break
+                    if not placed:
+                        unresolved.append((idx, value))
+
+                # If we still have unresolved assignments, create exactly one new Tag column
+                if unresolved:
+                    # Respect session tag cap if provided: do not create more Tag columns than tags_count
+                    tag_cap = 0
+                    try:
+                        if session_info and isinstance(session_info, dict):
+                            tag_cap = int(session_info.get('tags_count', 0) or 0)
+                    except Exception:
+                        tag_cap = 0
+
+                    if tag_cap and len(existing_tag_cols) >= tag_cap:
+                        # Do not add a new Tag column; fold unresolved values into the last Tag column
+                        target_fold_col = existing_tag_cols[-1] if existing_tag_cols else None
+                        if target_fold_col:
+                            for idx, value in unresolved:
+                                existing_value = str(modified_data[idx].get(target_fold_col, '')).strip()
+                                if existing_value and existing_value != value:
+                                    existing_values = [v.strip() for v in existing_value.split(',')]
+                                    if value not in existing_values:
+                                        modified_data[idx][target_fold_col] = f"{existing_value}, {value}"
+                                else:
+                                    modified_data[idx][target_fold_col] = value
                         else:
-                            # Column is empty or has same value - safe to set/replace
-                            row[column_name] = output_value
-                        break  # First match wins - stop checking other sub-rules
+                            # No existing Tag_N columns — initialize the chosen column_name without growing headers list
+                            for row in modified_data:
+                                if column_name not in row:
+                                    row[column_name] = ''
+                            for idx, value in unresolved:
+                                modified_data[idx][column_name] = value
+                    else:
+                        if column_name not in new_headers:
+                            new_headers.append(column_name)
+                            new_columns.append(column_name)
+                            used_column_names.add(column_name)
+                            logger.info(f"🔧 DEBUG: Added Tag column '{column_name}' to headers (needed for unresolved matches)")
+                        # Initialize column in all rows
+                        for row in modified_data:
+                            if column_name not in row:
+                                row[column_name] = ''
+                        # Apply unresolved assignments
+                        for idx, value in unresolved:
+                            existing_value = str(modified_data[idx].get(column_name, '')).strip()
+                            if existing_value and existing_value != value:
+                                existing_values = [v.strip() for v in existing_value.split(',')]
+                                if value not in existing_values:
+                                    modified_data[idx][column_name] = f"{existing_value}, {value}"
+                            else:
+                                modified_data[idx][column_name] = value
+            else:
+                logger.info(f"🔧 DEBUG: Skipped adding Tag column '{column_name}' (no matches)")
         
         elif column_type == 'Specification Value' and specification_name:
             # Try to use generic specification column names first
@@ -3889,57 +4213,53 @@ def apply_formula_rules(data_rows, headers, formula_rules, replace_existing=Fals
                     name_column = f"Specification_Name_{spec_counter}"
                     value_column = f"Specification_Value_{spec_counter}"
             
-            # Add the columns
-            new_headers.append(name_column)
-            new_columns.append(name_column)
-            used_column_names.add(name_column)
-            
-            new_headers.append(value_column)
-            new_columns.append(value_column)
-            used_column_names.add(value_column)
-            
-            spec_counter += 1
-            
-            # Apply sub-rules to each row (first match wins)
-            for row in modified_data:
-                if name_column not in row:
-                    row[name_column] = specification_name  # Static name for all cells
-                if value_column not in row:
-                    row[value_column] = ''
-                
-                # Check each sub-rule until first match
+            # Evaluate matches first without mutating rows
+            spec_assignments = []  # list of (row_index, value)
+            for idx, row in enumerate(modified_data):
+                match_value = None
                 for sub_rule in sub_rules:
                     search_text = sub_rule.get('search_text', '')
                     output_value = sub_rule.get('output_value', '')
                     case_sensitive = sub_rule.get('case_sensitive', False)
-                    
                     if not search_text or not output_value:
                         continue
-                    
-                    # Convert to string to handle any data type inconsistencies
                     cell_value = str(row.get(source_column, ''))
-                    search_text = str(search_text) if search_text else ''
-                    output_value = str(output_value) if output_value else ''
-                    
-                    search_text_compare = search_text if case_sensitive else search_text.lower()
+                    search_text_compare = search_text if case_sensitive else str(search_text).lower()
                     cell_value_compare = cell_value if case_sensitive else cell_value.lower()
-                    
                     if search_text_compare in cell_value_compare:
-                        # Check if the column already has mapped data from duplicate mappings
-                        existing_value = row.get(value_column, '').strip()
-                        
-                        if existing_value and existing_value != output_value:
-                            # Column has mapped data - check if output_value is already part of existing_value
-                            # Split by comma and strip to handle various formats
-                            existing_values = [v.strip() for v in existing_value.split(',')]
-                            if output_value not in existing_values:  # Avoid duplicates
-                                row[value_column] = f"{existing_value}, {output_value}"
-                        else:
-                            # Column is empty or has same value - safe to set/replace
-                            row[value_column] = output_value
-                        break  # First match wins - stop checking other sub-rules
-            
-            spec_counter += 1
+                        match_value = str(output_value)
+                        break
+                if match_value is not None and str(match_value).strip() != '':
+                    spec_assignments.append((idx, match_value))
+
+            # Only add spec columns if at least one row matched
+            if spec_assignments:
+                if name_column not in new_headers:
+                    new_headers.append(name_column)
+                    new_columns.append(name_column)
+                    used_column_names.add(name_column)
+                if value_column not in new_headers:
+                    new_headers.append(value_column)
+                    new_columns.append(value_column)
+                    used_column_names.add(value_column)
+                # Initialize columns
+                for row in modified_data:
+                    if name_column not in row:
+                        row[name_column] = specification_name
+                    if value_column not in row:
+                        row[value_column] = ''
+                # Apply assignments
+                for idx, value in spec_assignments:
+                    existing_value = str(modified_data[idx].get(value_column, '')).strip()
+                    if existing_value and existing_value != value:
+                        existing_values = [v.strip() for v in existing_value.split(',')]
+                        if value not in existing_values:
+                            modified_data[idx][value_column] = f"{existing_value}, {value}"
+                    else:
+                        modified_data[idx][value_column] = value
+                spec_counter += 1
+            else:
+                logger.info(f"🔧 DEBUG: Skipped adding specification columns '{name_column}/{value_column}' (no matches)")
     
     return {
         'data': modified_data,
@@ -4458,6 +4778,111 @@ def get_enhanced_data(request):
                 'error': 'No data available'
             }, status=status.HTTP_400_BAD_REQUEST)
         
+        # Normalize generic 'Tag' column: move its values into numbered Tag_N columns, then drop 'Tag'.
+        try:
+            if isinstance(headers_to_return, list) and 'Tag' in headers_to_return and isinstance(data_to_return, list) and len(data_to_return) > 0:
+                # Build ordered list of Tag_N headers
+                tag_n_headers = [h for h in headers_to_return if isinstance(h, str) and h.startswith('Tag_')]
+                try:
+                    tag_n_headers.sort(key=lambda x: int(x.split('_')[1]))
+                except Exception:
+                    tag_n_headers.sort()
+                if isinstance(data_to_return[0], dict):
+                    for row in data_to_return:
+                        val = str(row.get('Tag', '') or '').strip()
+                        if not val:
+                            continue
+                        placed = False
+                        for tcol in tag_n_headers:
+                            cur = str(row.get(tcol, '') or '').strip()
+                            if not cur:
+                                row[tcol] = val
+                                placed = True
+                                break
+                        if not placed and tag_n_headers:
+                            last = tag_n_headers[-1]
+                            cur = str(row.get(last, '') or '').strip()
+                            if cur:
+                                parts = [p.strip() for p in cur.split(',')]
+                                if val not in parts:
+                                    row[last] = f"{cur}, {val}"
+                            else:
+                                row[last] = val
+                        row.pop('Tag', None)
+                else:
+                    tag_idx = headers_to_return.index('Tag')
+                    # indices of Tag_N
+                    tag_n_indices = []
+                    for h in tag_n_headers:
+                        try:
+                            tag_n_indices.append(headers_to_return.index(h))
+                        except ValueError:
+                            pass
+                    for row in data_to_return:
+                        if tag_idx < len(row):
+                            val = str(row[tag_idx] or '').strip()
+                        else:
+                            val = ''
+                        if not val:
+                            continue
+                        placed = False
+                        for idx in tag_n_indices:
+                            if idx < len(row):
+                                cur = str(row[idx] or '').strip()
+                                if not cur:
+                                    row[idx] = val
+                                    placed = True
+                                    break
+                        if not placed and tag_n_indices:
+                            last_idx = tag_n_indices[-1]
+                            if last_idx < len(row):
+                                cur = str(row[last_idx] or '').strip()
+                                if cur:
+                                    parts = [p.strip() for p in cur.split(',')]
+                                    if val not in parts:
+                                        row[last_idx] = f"{cur}, {val}"
+                                else:
+                                    row[last_idx] = val
+                    # remove Tag column value; keep headers cleanup below
+                # Finally drop 'Tag' header
+                headers_to_return = [h for h in headers_to_return if h != 'Tag']
+        except Exception:
+            pass
+
+        # Cleanup: drop any Tag_N columns that are empty-only
+        try:
+            if isinstance(headers_to_return, list) and len(headers_to_return) > 0:
+                tag_n_headers = [h for h in headers_to_return if isinstance(h, str) and h.startswith('Tag_')]
+                def col_empty_only(col_name: str) -> bool:
+                    if not data_to_return:
+                        return True
+                    if isinstance(data_to_return[0], dict):
+                        for row in data_to_return:
+                            if str(row.get(col_name, '') or '').strip():
+                                return False
+                        return True
+                    else:
+                        if col_name not in headers_to_return:
+                            return True
+                        idx = headers_to_return.index(col_name)
+                        for row in data_to_return:
+                            if idx < len(row) and str(row[idx] or '').strip():
+                                return False
+                        return True
+                # Remove empty-only Tag_N headers
+                for h in list(tag_n_headers):
+                    if col_empty_only(h):
+                        if h in headers_to_return:
+                            headers_to_return.remove(h)
+                        if isinstance(data_to_return[0], dict):
+                            for row in data_to_return:
+                                row.pop(h, None)
+                        else:
+                            # list-of-lists: recompute index after header removal is tricky; skip for list rows
+                            pass
+        except Exception:
+            pass
+
         # Implement pagination
         total_rows = len(data_to_return)
         start_idx = (page - 1) * page_size
@@ -4824,10 +5249,15 @@ def apply_tag_template(request, template_id):
         
         logger.info(f"Applied tag template: {template.name}")
         
+        # Externalize internal target names for UI clarity
+        try:
+            rules_ext = _externalize_formula_rules(template.formula_rules, None)
+        except Exception:
+            rules_ext = template.formula_rules
         return Response({
             'success': True,
             'template_name': template.name,
-            'formula_rules': template.formula_rules,
+            'formula_rules': rules_ext,
             'message': f'Tag template "{template.name}" applied successfully'
         })
         

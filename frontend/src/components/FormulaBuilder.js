@@ -186,6 +186,7 @@ const FormulaBuilder = ({
   }, [validateRules]);
 
   useEffect(() => {
+    if (!open) return;
     if (initialRules.length > 0) {
       console.log('🔍 FormulaBuilder opened with initialRules:', initialRules);
       // Normalize rules and map template column names to available columns using fuzzy matching
@@ -205,7 +206,7 @@ const FormulaBuilder = ({
     } else {
       setFormulaRules([createEmptyRule()]);
     }
-  }, [initialRules, availableColumns]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [open, initialRules, availableColumns]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Helper function to find best column match using fuzzy matching
   const findBestColumnMatch = (targetColumn, availableColumns) => {

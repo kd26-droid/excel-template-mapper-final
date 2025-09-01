@@ -5,7 +5,8 @@ import Header from './components/Header';
 import Dashboard from './pages/Dashboard';
 import UploadFiles from './pages/UploadFiles';
 import ColumnMapping from './pages/ColumnMapping';
-import DataEditor from './pages/DataEditor';
+// Prefer the enhanced, Azure-friendly data editor with robust synchronization
+import EnhancedDataEditor from './components/EnhancedDataEditor';
 
 function App() {
   return (
@@ -18,7 +19,7 @@ function App() {
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/upload" element={<UploadFiles />} />
             <Route path="/mapping/:sessionId" element={<ColumnMapping />} />
-            <Route path="/editor/:sessionId" element={<DataEditor />} />
+            <Route path="/editor/:sessionId" element={<EnhancedDataEditor />} />
           </Routes>
         </Box>
       </Container>

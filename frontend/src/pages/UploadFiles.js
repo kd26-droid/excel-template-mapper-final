@@ -54,6 +54,8 @@ const UploadFiles = () => {
   
   const [userFile, setUserFile] = useState(null);
   const [templateFile, setTemplateFile] = useState(null);
+  const [persistedUserFileName, setPersistedUserFileName] = useState('');
+  const [persistedTemplateFileName, setPersistedTemplateFileName] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
@@ -108,10 +110,36 @@ const UploadFiles = () => {
     }
   }, [location.state]);
 
-  // Load available templates when component mounts
+  // Load available templates when component mounts and optionally restore previous upload
   useEffect(() => {
     loadAvailableTemplates();
     loadAvailableTagTemplates();
+
+    // Only restore previously uploaded file names if we are explicitly
+    // returning from ColumnMapping (flag set during navigate to mapping)
+    try {
+      const shouldRestore = sessionStorage.getItem('restoreUploadFromMapping') === 'true';
+      if (shouldRestore) {
+        const raw = sessionStorage.getItem('lastUploadedFiles');
+        if (raw) {
+          const saved = JSON.parse(raw);
+          setPersistedUserFileName(saved.clientFileName || '');
+          setPersistedTemplateFileName(saved.templateFileName || '');
+          if (saved.selectedClientSheet) setSelectedClientSheet(saved.selectedClientSheet);
+          if (saved.clientHeaderRow) setClientHeaderRow(saved.clientHeaderRow);
+          if (saved.selectedTemplateSheet) setSelectedTemplateSheet(saved.selectedTemplateSheet);
+          if (saved.templateHeaderRow) setTemplateHeaderRow(saved.templateHeaderRow);
+        }
+        // One-time restore
+        sessionStorage.removeItem('restoreUploadFromMapping');
+      } else {
+        // Visiting Upload fresh – clear any stale persisted info
+        sessionStorage.removeItem('lastUploadedFiles');
+        sessionStorage.removeItem('restoreUploadFromMapping');
+        setPersistedUserFileName('');
+        setPersistedTemplateFileName('');
+      }
+    } catch (_) {}
   }, []);
 
   const loadAvailableTemplates = async () => {
@@ -145,6 +173,7 @@ const UploadFiles = () => {
       let file = acceptedFiles[0];
       setError(null);
       setUserFile(file);
+      setPersistedUserFileName(file.name);
       
       // Read the file to extract sheet names and column headers for Excel files
       const reader = new FileReader();
@@ -172,6 +201,10 @@ const UploadFiles = () => {
         }
       };
       reader.readAsBinaryString(file);
+
+      // Do NOT persist to sessionStorage here.
+      // Persistence only happens on successful upload
+      // (so files only appear when coming back from mapping).
     }
   }, []);
 
@@ -180,6 +213,7 @@ const UploadFiles = () => {
       const file = acceptedFiles[0];
       setTemplateFile(file);
       setError(null);
+      setPersistedTemplateFileName(file.name);
       
       // Read the template file to extract sheet names
       const reader = new FileReader();
@@ -196,6 +230,8 @@ const UploadFiles = () => {
         }
       };
       reader.readAsBinaryString(file);
+
+      // Do NOT persist to sessionStorage here.
     }
   }, []);
 
@@ -296,7 +332,21 @@ const UploadFiles = () => {
 
 
   const handleUpload = async () => {
+    // Allow continuing with last uploaded session when no new files selected
     if (!userFile || !templateFile) {
+      try {
+        const raw = sessionStorage.getItem('lastUploadedFiles');
+        if (raw) {
+          const saved = JSON.parse(raw);
+          if (!userFile && !templateFile && saved?.clientFileName && saved?.templateFileName) {
+            if (saved?.sessionId) {
+              setSuccess(`Continuing with previously uploaded files: ${saved.clientFileName} + ${saved.templateFileName}`);
+              setTimeout(() => navigate(`/mapping/${saved.sessionId}`), 800);
+              return;
+            }
+          }
+        }
+      } catch (_) {}
       setError('Please select both a user file and a template file');
       return;
     }
@@ -343,6 +393,20 @@ const UploadFiles = () => {
           }
           setSuccess(successMessage);
           
+          // Persist last upload details for seamless back navigation
+          try {
+            sessionStorage.setItem('lastUploadedFiles', JSON.stringify({
+              clientFileName: userFile?.name,
+              templateFileName: templateFile?.name,
+              selectedClientSheet,
+              clientHeaderRow,
+              selectedTemplateSheet,
+              templateHeaderRow,
+              sessionId: response.data.session_id
+            }));
+            // Mark that we should restore when returning from ColumnMapping
+            sessionStorage.setItem('restoreUploadFromMapping', 'true');
+          } catch (_) {}
           setTimeout(() => {
             // Navigate to ColumnMapping and let it handle template application using its working logic
             navigate(`/mapping/${response.data.session_id}`, {
@@ -376,6 +440,20 @@ const UploadFiles = () => {
         // No template selected - normal upload
         response = await api.uploadFiles(formData);
         setSuccess('Files uploaded successfully!');
+        // Persist last upload details
+        try {
+          sessionStorage.setItem('lastUploadedFiles', JSON.stringify({
+            clientFileName: userFile?.name,
+            templateFileName: templateFile?.name,
+            selectedClientSheet,
+            clientHeaderRow,
+            selectedTemplateSheet,
+            templateHeaderRow,
+            sessionId: response.data.session_id
+          }));
+          // Mark that we should restore when returning from ColumnMapping
+          sessionStorage.setItem('restoreUploadFromMapping', 'true');
+        } catch (_) {}
         
         setTimeout(() => {
           navigate(`/mapping/${response.data.session_id}`);
@@ -462,16 +540,16 @@ const UploadFiles = () => {
                 <input {...getUserInputProps()} />
                 <CloudUploadIcon fontSize="large" color="primary" />
                 <Typography variant="body1" sx={{ mt: 2 }}>
-                  {userFile ? userFile.name : 'Drop your Excel file here or click to browse'}
+                  {userFile ? userFile.name : (persistedUserFileName || 'Drop your Excel file here or click to browse')}
                 </Typography>
                 <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
                   Supported: .xlsx, .xls
                 </Typography>
               </Box>
               
-              {userFile && (
+              {(userFile || persistedUserFileName) && (
                 <Typography variant="body2" sx={{ mt: 2, color: 'success.main' }}>
-                  ✓ Selected: {userFile.name}
+                  ✓ Selected: {userFile ? userFile.name : persistedUserFileName}
                 </Typography>
               )}
               
@@ -527,16 +605,16 @@ const UploadFiles = () => {
                 <input {...getTemplateInputProps()} />
                 <DescriptionIcon fontSize="large" color="secondary" />
                 <Typography variant="body1" sx={{ mt: 2 }}>
-                  {templateFile ? templateFile.name : 'Drop your FW Item Template here or click to browse'}
+                  {templateFile ? templateFile.name : (persistedTemplateFileName || 'Drop your FW Item Template here or click to browse')}
                 </Typography>
                 <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
                   Supported: .xlsx, .xls
                 </Typography>
               </Box>
               
-              {templateFile && (
+              {(templateFile || persistedTemplateFileName) && (
                 <Typography variant="body2" sx={{ mt: 2, color: 'success.main' }}>
-                  ✓ Selected: {templateFile.name}
+                  ✓ Selected: {templateFile ? templateFile.name : persistedTemplateFileName}
                 </Typography>
               )}
 
@@ -831,7 +909,7 @@ const UploadFiles = () => {
           variant="contained"
           size="large"
           onClick={handleUpload}
-          disabled={loading || !userFile || !templateFile}
+          disabled={loading}
           startIcon={loading ? <CircularProgress size={20} color="inherit" /> : (selectedTemplate ? <PlayArrowIcon /> : <CloudUploadIcon />)}
           sx={{ 
             minWidth: 200,
@@ -842,9 +920,11 @@ const UploadFiles = () => {
         >
           {loading 
             ? 'Uploading...' 
-            : selectedTemplate 
-              ? `Upload with ${selectedTemplate.name}` 
-              : 'Upload Files'
+            : (!userFile && !templateFile && persistedUserFileName && persistedTemplateFileName)
+              ? `Continue: ${persistedUserFileName} + ${persistedTemplateFileName}`
+              : (selectedTemplate 
+                ? `Upload with ${selectedTemplate.name}` 
+                : 'Upload Files')
           }
         </Button>
         

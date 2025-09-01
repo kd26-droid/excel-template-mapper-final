@@ -38,7 +38,8 @@ import {
   AutoAwesome as AutoAwesomeIcon,
   Badge as BadgeIcon,
   Close as CloseIcon,
-  Map as MapIcon
+  Map as MapIcon,
+  Refresh as RefreshIcon
 } from '@mui/icons-material';
 import api, { setGlobalLoaderCallback } from '../services/api';
 import FormulaBuilder from '../components/FormulaBuilder';
@@ -63,6 +64,8 @@ function applySnapshotToEditor(snapshot, { setColumnDefs, setRowData, setDynamic
 const DataEditor = () => {
   const { sessionId } = useParams();
   const navigate = useNavigate();
+
+  // Note: ensure no early returns here so the full editor renders
 
   // ─── STATE MANAGEMENT ───────────────────────────────────────────────────────
   const [loading, setLoading] = useState(true);
@@ -144,6 +147,14 @@ const DataEditor = () => {
     setSnackbar({ open: true, message, severity });
   }, []);
 
+  // Memoize available columns for FormulaBuilder to prevent unnecessary re-initialization
+  const availableFormulaColumns = useMemo(() => {
+    return columnDefs
+      .filter(col => col.field && col.field !== '__row_number__')
+      .map(col => col.field || col.headerName)
+      .filter(Boolean);
+  }, [columnDefs]);
+
   const closeSnackbar = useCallback(() => {
     setSnackbar(prev => ({ ...prev, open: false }));
   }, []);
@@ -212,223 +223,85 @@ const DataEditor = () => {
     };
   }, []);
 
-  // ─── DATA LOADING ──────────────────────────────────────────────────────────
-  const fetchData = useCallback(async () => {
+  // ─── DATA LOADING WITH AUTO-REFRESH ──────────────────────────────────────────────────────────
+  const fetchData = useCallback(async (opts = {}) => {
     try {
       setLoading(true);
       setError(null);
       
-      console.log('🔧 FETCH: Starting data fetch for session:', sessionId);
-
-      const response = await api.getMappedDataWithSpecs(sessionId, 1, 1000, true);
+      // 🎯 SIMPLE FRESHNESS GUARANTEE: Always get latest data
+      const freshDataToken = Date.now() + Math.random();
+      const response = await api.getMappedDataWithSpecs(sessionId, 1, 1000, true, { _fresh: freshDataToken, force_fresh: !!opts.forceFresh, stable: true });
       const { data } = response;
-
-      console.log('🔧 FETCH: Received data response', {
-        hasData: !!data,
-        hasHeaders: !!(data && data.headers),
-        headersCount: data && data.headers ? data.headers.length : 0,
-        hasFormulaRules: !!(data && data.formula_rules),
-        formulaRulesCount: data && data.formula_rules ? data.formula_rules.length : 0
-      });
       
-      // Track template version for forced re-mounting
-      const newTemplateVersion = data.template_version ?? 0;
-      if (newTemplateVersion !== templateVersion) {
-        console.log('🔄 Template version changed:', { from: templateVersion, to: newTemplateVersion });
-        setTemplateVersion(newTemplateVersion);
-        setGridKey(prev => prev + 1);
-      }
-
       if (!data || !data.headers || !Array.isArray(data.headers) || data.headers.length === 0) {
-        setError('No mapped data found. Please go back to Column Mapping and create mappings first.');
+        setError("No mapped data found. Please go back to Column Mapping and create mappings first.");
         return;
       }
+      
+      const finalHeaders = [...data.headers];
 
-      // Always detect formula columns from actual headers (more robust)
-      const detectedFormulaColumns = data.headers.filter(h => 
-        h.startsWith('Tag_') || 
-        h.startsWith('Specification_Name_') || 
-        h.startsWith('Specification_Value_') || 
-        h.startsWith('Customer_Identification_') ||
-        h === 'Tag' || 
-        h === 'Factwise ID' ||
-        (h.includes('Specification') && (h.includes('Name') || h.includes('Value'))) ||
-        (h.includes('Customer') && h.includes('Identification'))
-      );
-      
-      setFormulaColumns(detectedFormulaColumns);
-      
-      // CRITICAL FIX: Calculate actual column counts from headers to sync with ColumnMapping
-      const tagColumns = data.headers.filter(h => h.startsWith('Tag_') || h === 'Tag');
-      const specNameColumns = data.headers.filter(h => h.startsWith('Specification_Name_'));
-      const customerNameColumns = data.headers.filter(h => h.startsWith('Customer_Identification_Name_'));
-      
-      const actualColumnCounts = {
-        tags_count: Math.max(tagColumns.length, 1),
-        spec_pairs_count: Math.max(specNameColumns.length, 1),
-        customer_id_pairs_count: Math.max(customerNameColumns.length, 1)
-      };
-      
-      console.log('🔧 FETCH: Calculated column counts from headers:', {
-        tagColumns: tagColumns.length,
-        specColumns: specNameColumns.length,
-        customerColumns: customerNameColumns.length,
-        actualCounts: actualColumnCounts,
-        oldCounts: dynamicColumnCounts
-      });
-      
-      setDynamicColumnCounts(actualColumnCounts);
-      
-      if (data.formula_rules && Array.isArray(data.formula_rules) && data.formula_rules.length > 0) {
-        setAppliedFormulas(data.formula_rules);
-        setHasFormulas(true);
-      } else {
-        setAppliedFormulas([]);
-        setHasFormulas(detectedFormulaColumns.length > 0); // Keep true if we have formula columns
-      }
+      // Build column definitions from headers (including a row number column)
+      const cols = [{ headerName: '#', field: '__row_number__', width: 60 }];
+      finalHeaders.forEach(h => cols.push({ headerName: h, field: h }));
+      setColumnDefs(cols);
 
-      const columns = [
-        {
-          headerName: '#',
-          field: '__row_number__',
-          valueGetter: 'node.rowIndex + 1',
-          cellStyle: { 
-            backgroundColor: '#f8f9fa', 
-            fontWeight: 'bold',
-            textAlign: 'center',
-            borderRight: '2px solid #dee2e6',
-            color: '#6c757d',
-            padding: '12px'
-          },
-          headerClass: 'ag-header-row-number',
-          width: 80,
-          pinned: 'left',
-          editable: false,
-          filter: false,
-          sortable: false,
-          resizable: false,
-          suppressMovable: true,
-          suppressSizeToFit: true,
-          suppressAutoSize: true
-        },
-        ...data.headers.filter(col => col && col.trim() !== '').map((col, index) => {
-          // Compute display name locally from internal header
-          let displayName = col;
-          if (col.startsWith('Tag_') || col === 'Tag') {
-            displayName = 'Tag';
-          } else if (col.startsWith('Specification_Name_') || col === 'Specification name') {
-            displayName = 'Specification name';
-          } else if (col.startsWith('Specification_Value_') || col === 'Specification value') {
-            displayName = 'Specification value';
-          } else if (col.startsWith('Customer_Identification_Name_') || col === 'Customer identification name' || col === 'Custom identification name') {
-            displayName = 'Customer identification name';
-          } else if (col.startsWith('Customer_Identification_Value_') || col === 'Customer identification value' || col === 'Custom identification value') {
-            displayName = 'Customer identification value';
-          }
-          const isUnmapped = data.unmapped_columns && data.unmapped_columns.includes(displayName);
-          const isSpecificationColumn = displayName.toLowerCase().includes('specification');
-          // More robust formula column detection
-          const isFormulaColumn = detectedFormulaColumns.includes(col) || col.startsWith('Tag_') || col.startsWith('Specification_') || col.startsWith('Customer_Identification_') || col === 'Tag' || col.includes('Specification') || col.includes('Customer identification') || col.includes('Custom identification') || col === 'Factwise ID';
-          const columnWidth = calculateColumnWidth(displayName);
-          
-          return {
-            headerName: isUnmapped ? `${displayName} ⚠️` : isFormulaColumn ? getFormulaColumnIcon(col, displayName) : displayName,
-            field: col,  // Keep using unique field key for data access
-            width: columnWidth,
-            minWidth: 120,
-            maxWidth: 600,
-            resizable: true,
-            cellEditor: 'agTextCellEditor',
-            cellEditorPopup: true,
-            cellStyle: params => {
-              const baseStyle = {
-                borderRight: '1px solid #e9ecef',
-                borderBottom: '1px solid #e9ecef',
-                fontSize: '14px',
-                fontFamily: 'Segoe UI, Arial, sans-serif',
-                padding: '12px 16px',
-                lineHeight: '1.4'
-              };
-
-              if (params.value && params.value.toString().toLowerCase() === 'unknown') {
-                baseStyle.backgroundColor = '#ffebee';
-                baseStyle.color = '#c62828';
-                baseStyle.fontWeight = '500';
-              } else if (isFormulaColumn) {
-                baseStyle.backgroundColor = '#e8f5e8';
-                baseStyle.borderLeft = '4px solid #4caf50';
-                baseStyle.fontWeight = '500';
-              } else if (isUnmapped) {
-                baseStyle.backgroundColor = '#fff8e1';
-                baseStyle.borderLeft = '4px solid #ff9800';
-                baseStyle.color = '#e65100';
-              } else if (isSpecificationColumn && params.value) {
-                baseStyle.backgroundColor = '#f0f8ff';
-                baseStyle.borderLeft = '4px solid #2196f3';
-              } else if (params.node.data && params.node.data._changed && params.node.data._changed[col]) {
-                baseStyle.borderLeft = '3px solid #1976d2';
-                baseStyle.fontWeight = '500';
-              } else if (params.node.rowIndex % 2 === 0) {
-                baseStyle.backgroundColor = '#f8f9fa';
-              }
-
-              return baseStyle;
-            },
-            cellRenderer: col === 'datasheet' ? (params) => {
-              const url = params.value;
-              if (url && url.startsWith('http')) {
-                return <a href={url} target="_blank" rel="noopener noreferrer">{url}</a>;
-              }
-              return params.value || '';
-            } : undefined,
-            headerClass: isFormulaColumn ? 'ag-header-formula' : isUnmapped ? 'ag-header-unmapped' : isSpecificationColumn ? 'ag-header-specification' : 'ag-header-cell-excel',
-            headerTooltip: isFormulaColumn 
-              ? `${col} - Formula-generated column` 
-              : isUnmapped 
-                ? `${col} - Unmapped Column (No data source)` 
-                : isSpecificationColumn 
-                  ? `${col} - Specification Column` 
-                  : col,
-            tooltipField: col,
-            wrapText: false,
-            autoHeight: false,
-            suppressMovable: false,
-            suppressSizeToFit: true
-          };
-        })
-      ];
-
-      
-      setColumnDefs(columns);
+      // Populate row data
       setRowData(data.data || []);
-      setTotalRows(data.pagination?.total_rows || data.data?.length || 0);
+      const detectedColumns = finalHeaders.filter(h => 
+        h.startsWith("Tag_") || h.startsWith("Specification_") || h === "Tag" || h.includes("Specification")
+      );
+      setFormulaColumns(detectedColumns);
       
-      const unmapped = data.unmapped_columns || [];
-      const mapped = data.mapped_columns || [];
+      const unmapped = finalHeaders.filter(col => col.startsWith("Unmapped_"));
       setUnmappedColumns(unmapped);
-      setMappedColumns(mapped);
       
       const unknownCount = (data.data || []).reduce((total, row) => {
         return total + Object.values(row).filter(cell => 
-          cell && cell.toString().toLowerCase() === 'unknown'
+          cell && cell.toString().toLowerCase() === "unknown"
         ).length;
       }, 0);
       setUnknownCellsCount(unknownCount);
-      
-      if (unmapped.length > 0) {
-        setUnmappedDialogOpen(true);
+
+      // Record freshness markers
+      sessionStorage.setItem(`lastFetchTime_${sessionId}`, Date.now().toString());
+      if (typeof data.template_version === 'number') {
+        sessionStorage.setItem(`templateVersion_${sessionId}`, String(data.template_version));
       }
 
-      showSnackbar(`Loaded ${data.data?.length || 0} rows with ${data.headers.length} columns`, 'success');
+      showSnackbar(`Loaded ${data.data?.length || 0} rows with ${finalHeaders.length} columns`, "success");
 
+      // Return snapshot for callers that need immediate verification
+      return { headers: finalHeaders, rows: data.data || [] };
     } catch (err) {
-      console.error('Error fetching data:', err);
-      setError(err.response?.data?.error || 'Failed to load data. Please try again.');
+      console.error("Error fetching data:", err);
+      setError(err.response?.data?.error || "Failed to load data. Please try again.");
     } finally {
       setLoading(false);
     }
   }, [sessionId, calculateColumnWidth, showSnackbar]);
 
+  // Utility: refetch until required headers exist and some fields are non-empty
+  const refetchUntilStable = useCallback(async ({
+    requiredHeaders = [],
+    requiredNonEmptyHeaders = [],
+    maxAttempts = 8,
+    delayMs = 500
+  } = {}) => {
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const snap = await fetchData({ forceFresh: true });
+      const headers = snap?.headers || [];
+      const rows = snap?.rows || [];
+      const hasHeaders = requiredHeaders.every(h => headers.includes(h));
+      const nonEmptyOk = requiredNonEmptyHeaders.every(h => rows.some(r => {
+        const v = r[h];
+        return v !== null && v !== undefined && String(v).trim() !== '';
+      }));
+      if (hasHeaders && (!requiredNonEmptyHeaders.length || nonEmptyOk)) return true;
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+    return false;
+  }, [fetchData]);
   useEffect(() => {
     if (rowData.length > 0 && columnDefs.length > 0) {
       // Find first non-empty row (exclude row number column)
@@ -453,6 +326,9 @@ const DataEditor = () => {
       setFirstNonEmptyRowData(formattedRow);
     }
   }, [rowData, columnDefs]);
+
+  // Auto-refresh on focus/visibility is disabled to avoid unexpected reloads.
+  // The editor fetches once on mount/navigation and on manual refresh only.
 
   // ─── FORMULA FUNCTIONS ──────────────────────────────────────────────────────
   const handleOpenFormulaBuilder = useCallback(() => {
@@ -482,6 +358,7 @@ const DataEditor = () => {
     }
 
     try {
+      setGlobalLoading(true);
       // Determine strategy based on existing Item code values
       const itemCodeCol = columnDefs.find(c => (c.headerName || c.field).toLowerCase() === 'item code' || (c.headerName || c.field).toLowerCase() === 'item_code');
       let strategy = 'fill_only_null';
@@ -498,14 +375,28 @@ const DataEditor = () => {
       }
 
       console.log('🔧 FACTWISE: Creating Factwise ID with proper synchronization');
-      const response = await api.createFactwiseId(sessionId, firstColumn, secondColumn, operator);
+      const response = await api.createFactwiseId(sessionId, firstColumn, secondColumn, operator, strategy);
 
       if (response.data.success) {
         // The API now handles proper synchronization internally
-        setFactwiseIdRule({ firstColumn, secondColumn, operator });
-        
+        setFactwiseIdRule({ firstColumn, secondColumn, operator, strategy });
+
+        // Wait briefly for backend to settle template version, then fetch fresh
+        try {
+          const status = await api.getSessionStatus(sessionId);
+          const serverVersion = status.data?.template_version ?? 0;
+          await api.waitUntilFresh(sessionId, serverVersion, 5000).catch(() => null);
+        } catch (_) { /* proceed */ }
+
         console.log('🔧 FACTWISE: Refreshing data after successful creation');
-        await fetchData(); // This will get fresh data with new template version
+        showSnackbar('Finalizing FactWise ID…', 'info');
+        // Ensure Item code exists and Item name remains populated
+        await refetchUntilStable({
+          requiredHeaders: ['Item code', 'Item name'],
+          requiredNonEmptyHeaders: ['Item name'],
+          maxAttempts: 7,
+          delayMs: 500
+        });
         
         showSnackbar('Item code updated successfully!', 'success');
         handleCloseFactwiseIdDialog();
@@ -515,11 +406,14 @@ const DataEditor = () => {
     } catch (error) {
       console.error('Error creating Factwise ID:', error);
       showSnackbar('Failed to update Item code', 'error');
+    } finally {
+      setGlobalLoading(false);
     }
   }, [sessionId, firstColumn, secondColumn, operator, showSnackbar, fetchData, handleCloseFactwiseIdDialog, rowData, columnDefs]);
 
   const handleApplyFormulas = useCallback(async (formulaResult) => {
     try {
+      setGlobalLoading(true);
       setHasFormulas(true);
       
       // CRITICAL FIX: Update formula columns and column counts
@@ -558,8 +452,21 @@ const DataEditor = () => {
       setDynamicColumnCounts(newCounts);
       
       console.log('🔧 FORMULAS: Applied formulas with new template version');
-      // fetchData will automatically handle template version changes and re-mounting
-      await fetchData();
+
+      // Wait briefly for backend version advance, then refetch until columns appear
+      try {
+        const status = await api.getSessionStatus(sessionId);
+        const serverVersion = status.data?.template_version ?? 0;
+        await api.waitUntilFresh(sessionId, serverVersion, 5000).catch(() => null);
+      } catch (_) { /* proceed */ }
+
+      const expected = (formulaResult.new_columns || []).filter(Boolean);
+      await refetchUntilStable({
+        requiredHeaders: expected,
+        requiredNonEmptyHeaders: [],
+        maxAttempts: 7,
+        delayMs: 500
+      });
       
       showSnackbar(
         `Successfully applied formulas! Added ${formulaResult.new_columns?.length || 0} new columns.`,
@@ -568,6 +475,8 @@ const DataEditor = () => {
     } catch (error) {
       console.error('Error handling formula results:', error);
       showSnackbar('Error applying formulas', 'error');
+    } finally {
+      setGlobalLoading(false);
     }
   }, [showSnackbar, fetchData]);
 
@@ -581,7 +490,7 @@ const DataEditor = () => {
     try {
       setLoading(true);
       await api.clearFormulas(sessionId);
-      await fetchData(); // Re-fetch data after clearing formulas
+      await fetchData({ forceFresh: true }); // Re-fetch data after clearing formulas
       showSnackbar('All formula rules and generated columns have been removed.', 'success');
       handleCloseFormulaBuilder(); // Close the dialog after clearing
     } catch (error) {
@@ -615,11 +524,23 @@ const DataEditor = () => {
     try {
       setLoading(true);
       
+      // Record current version for synchronization
+      let prevVersion = 0;
+      try {
+        const status = await api.getSessionStatus(sessionId);
+        prevVersion = status.data?.template_version ?? 0;
+      } catch (_) {}
+
       // Apply the template mappings
-      await api.applyMappingTemplate(sessionId, template.id);
-      
-      // Initial refresh to get base mappings
-      await fetchData();
+      const applyResp = await api.applyMappingTemplate(sessionId, template.id);
+
+      // Wait for backend to persist and version to advance
+      try {
+        await api.waitUntilFresh(sessionId, prevVersion, 8000);
+      } catch (_) { /* proceed even if timeout */ }
+
+      // Refresh to get enriched data (avoid forceFresh to keep enhanced cache)
+      await fetchData({ forceFresh: false });
 
       // Rehydrate defaults into local state if present in response/template
       try {
@@ -655,8 +576,8 @@ const DataEditor = () => {
           });
           
           // Additional refresh for Factwise ID
-          await fetchData();
-        }
+          await fetchData({ forceFresh: false });
+      }
       }
 
       // Mark for ColumnMapping refresh
@@ -699,9 +620,29 @@ const DataEditor = () => {
     }
   }, [unknownCellsCount, showSnackbar]);
 
-  // Simplified template saving
+  // Simplified template saving (with overwrite option)
   const handleSaveTemplate = useCallback(async () => {
-    if (!templateName.trim()) {
+    // Check overwrite vs save-as-new
+    let originalTemplateId = null;
+    let originalTemplateName = '';
+    try {
+      const metaResp = await api.getExistingMappings(sessionId);
+      originalTemplateId = metaResp?.data?.session_metadata?.original_template_id || null;
+      originalTemplateName = metaResp?.data?.session_metadata?.template_name || '';
+    } catch (_) {}
+
+    // If overwrite selected, skip asking for name
+    let doOverwrite = false;
+    if (originalTemplateId) {
+      const choice = window.prompt(
+        `Template detected: "${originalTemplateName || 'Applied Template'}"\n\nChoose option:\n1 = Overwrite existing\n2 = Save as new\n3 = Cancel`,
+        '2'
+      );
+      if (choice === null || choice === '3') return;
+      if (choice === '1') doOverwrite = true;
+    }
+
+    if (!doOverwrite && !templateName.trim()) {
       showSnackbar('Please enter a template name', 'error');
       return;
     }
@@ -715,6 +656,25 @@ const DataEditor = () => {
 
     try {
       setTemplateSaving(true);
+      const opStart = Date.now();
+
+      // Overwrite path: update existing template directly
+      if (doOverwrite && originalTemplateId) {
+        let overwriteDescription = '';
+        try {
+          overwriteDescription = window.prompt('Optional: description for overwrite (leave blank to keep existing):', '') || '';
+        } catch (_) {}
+        const resp = await api.updateMappingTemplate(sessionId, originalTemplateId, 'overwrite', null, overwriteDescription);
+        const elapsed = Date.now() - opStart;
+        if (elapsed < 3000) await new Promise(r => setTimeout(r, 3000 - elapsed));
+        if (resp?.data?.success) {
+          showSnackbar('Template updated successfully!', 'success');
+        } else {
+          showSnackbar(resp?.data?.error || 'Failed to overwrite template', 'error');
+        }
+        setTemplateSaving(false);
+        return;
+      }
       
       // Create template data with mappings, tag rules, and factwise ID rule
       const templateData = {
@@ -988,6 +948,12 @@ const DataEditor = () => {
         Object.keys(default_values).length > 0 ? default_values : null, // default_values (internal keys)
         columnCounts // dynamic column counts
       );
+
+      // Ensure a minimum loader time of ~3s for consistent UX
+      const elapsed = Date.now() - opStart;
+      if (elapsed < 3000) {
+        await new Promise(r => setTimeout(r, 3000 - elapsed));
+      }
       
       // CRITICAL FIX: Apply default values immediately after template save
       if (saveResponse.data.default_values && Object.keys(saveResponse.data.default_values).length > 0) {
@@ -1114,12 +1080,13 @@ const DataEditor = () => {
       
       // For download: prune _number suffixes (Tag_1 → Tag, Tag_2 → Tag)
       const originalHeaders = dataColumnDefs.map(col => col.headerName || col.field);
-      const prunedHeaders = originalHeaders.map(header => {
-        // Remove _number suffix (e.g., Tag_1 → Tag, Specification_Name_2 → Specification_Name)
-        return header.replace(/_\d+$/, '');
+      const gridHeaders = originalHeaders.map(header => {
+        // 1) Remove trailing numeric suffix: Tag_1 -> Tag, Specification_Value_2 -> Specification_Value
+        let cleaned = header.replace(/_\d+$/, '');
+        // 2) Replace underscores with spaces: Specification_Value -> Specification Value
+        cleaned = cleaned.replace(/_/g, ' ');
+        return cleaned;
       });
-      
-      const gridHeaders = prunedHeaders;
       const columnKeys = dataColumnDefs.map(col => col.field);
       
       // Convert row data to array format matching headers
@@ -1274,34 +1241,81 @@ const DataEditor = () => {
   // ─── DATA LOADING ──────────────────────────────────────────────────────────
   const location = useLocation();
 
+  // Smart single-shot refresh on mount/navigation
+  const fetchOnceSmart = useCallback(async () => {
+    if (!sessionId) return;
+    try {
+      // If ColumnMapping just updated counts/mappings, wait briefly for backend version to advance
+      const comingFromMapping = (
+        sessionStorage.getItem('navigationFromDataEditor') === 'true' ||
+        sessionStorage.getItem('navigatedFromDataEditor') === 'true' ||
+        sessionStorage.getItem('recentColumnCountUpdate') === 'true'
+      );
+      if (comingFromMapping) {
+        try {
+          // Probe current server version
+          let status = await api.getSessionStatus(sessionId);
+          let serverVersion = status.data?.template_version ?? 0;
+          // Wait for at least one advance (if any in-flight)
+          await api.waitUntilFresh(sessionId, serverVersion, 5000).catch(() => null);
+          // Additional stabilization: require two quiet cycles (~1.2-1.6s)
+          let stableChecks = 0;
+          let lastVersion = (await api.getSessionStatus(sessionId)).data?.template_version ?? serverVersion;
+          for (let i = 0; i < 6; i++) {
+            await new Promise(r => setTimeout(r, 400));
+            status = await api.getSessionStatus(sessionId);
+            const v = status.data?.template_version ?? lastVersion;
+            if (v === lastVersion) {
+              stableChecks++;
+              if (stableChecks >= 2) break;
+            } else {
+              lastVersion = v;
+              stableChecks = 0;
+            }
+          }
+        } catch (_) {
+          // Non-fatal: proceed to fetch; stable=true ensures consistent headers
+        }
+      }
+      await fetchData({ forceFresh: true });
+    } finally {
+      // Clear one-shot navigation flags
+      sessionStorage.removeItem('navigationFromDataEditor');
+      sessionStorage.removeItem('navigatedFromDataEditor');
+      sessionStorage.removeItem('recentColumnCountUpdate');
+    }
+  }, [sessionId, fetchData]);
+
   useEffect(() => {
     const initializeData = async () => {
-      if (sessionId) {
-        const smartTagRulesFromDashboard = location.state?.smartTagFormulaRules;
+      if (!sessionId) return;
 
-        if (smartTagRulesFromDashboard && smartTagRulesFromDashboard.length > 0) {
-          try {
-            setLoading(true);
-            const response = await api.applyFormulas(sessionId, smartTagRulesFromDashboard);
-            if (response.data.success && response.data.snapshot) {
-              applySnapshotToEditor(response.data.snapshot, { setColumnDefs, setRowData, setDynamicColumnCounts, setHasFormulas });
-            }
-            setAppliedFormulas(smartTagRulesFromDashboard);
-            setHasFormulas(true);
-            showSnackbar('Smart Tag rules from Dashboard applied!', 'success');
-          } catch (err) {
-            console.error('Error applying smart tag rules from dashboard:', err);
-            showSnackbar('Failed to apply Smart Tag rules from Dashboard.', 'error');
-          } finally {
-            setLoading(false);
+      const smartTagRulesFromDashboard = location.state?.smartTagFormulaRules;
+      if (smartTagRulesFromDashboard && smartTagRulesFromDashboard.length > 0) {
+        try {
+          setLoading(true);
+          const response = await api.applyFormulas(sessionId, smartTagRulesFromDashboard);
+          if (response.data.success && response.data.snapshot) {
+            applySnapshotToEditor(response.data.snapshot, { setColumnDefs, setRowData, setDynamicColumnCounts, setHasFormulas });
           }
+          // Prefer server-confirmed rules with stable internal Tag_N targets
+          const serverRules = response?.data?.snapshot?.formula_rules;
+          setAppliedFormulas(Array.isArray(serverRules) && serverRules.length > 0 ? serverRules : smartTagRulesFromDashboard);
+          setHasFormulas(true);
+          showSnackbar('Smart Tag rules from Dashboard applied!', 'success');
+        } catch (err) {
+          console.error('Error applying smart tag rules from dashboard:', err);
+          showSnackbar('Failed to apply Smart Tag rules from Dashboard.', 'error');
+        } finally {
+          setLoading(false);
         }
-        fetchData();
       }
+      await fetchOnceSmart();
     };
     initializeData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, location.state, fetchData]);
+  }, [sessionId, location.state, fetchOnceSmart]);
+
 
   // ─── RENDER CONDITIONS ──────────────────────────────────────────────────────
   if (loading) {
@@ -1415,8 +1429,31 @@ const DataEditor = () => {
                 </Typography>
               </Box>
 
-              {/* Right - Download Icon */}
+              {/* Right - Refresh & Download Icons */}
               <Box sx={{ display: 'flex', gap: 1 }}>
+                <Tooltip title={loading ? 'Refreshing...' : 'Refresh Data'}>
+                  <span>
+                    <IconButton
+                      onClick={() => {
+                        console.log('🔄 MANUAL: Manual refresh triggered');
+                        fetchData();
+                      }}
+                      disabled={loading}
+                      sx={{ 
+                        color: 'white',
+                        backgroundColor: 'rgba(255,255,255,0.1)',
+                        '&:hover': { backgroundColor: 'rgba(255,255,255,0.2)' },
+                        '&:disabled': { 
+                          color: 'rgba(255,255,255,0.5)',
+                          backgroundColor: 'rgba(255,255,255,0.05)'
+                        }
+                      }}
+                    >
+                      {loading ? <CircularProgress size={24} color="inherit" /> : <RefreshIcon />}
+                    </IconButton>
+                  </span>
+                </Tooltip>
+                
                 <Tooltip title={downloadLoading ? 'Downloading...' : 'Download FactWise Output'}>
                   <span>
                     <IconButton
@@ -1599,12 +1636,7 @@ const DataEditor = () => {
                           fontWeight: 600,
                           color: '#2c3e50',
                           border: '1px solid #e9ecef',
-                          backgroundColor: col.isFormulaColumn ? '#e8f5e8' : 
-                                         col.isUnmapped ? '#fff8e1' : 
-                                         col.isSpecificationColumn ? '#f0f8ff' : '#f8f9fa',
-                          borderLeft: col.isFormulaColumn ? '4px solid #4caf50' :
-                                    col.isUnmapped ? '4px solid #ff9800' :
-                                    col.isSpecificationColumn ? '4px solid #2196f3' : '1px solid #e9ecef'
+                          backgroundColor: '#f8f9fa'
                         }}>
                           {col.headerName}
                         </th>
@@ -1625,16 +1657,9 @@ const DataEditor = () => {
                             <td key={col.field} style={{
                               padding: '12px 16px',
                               border: '1px solid #e9ecef',
-                              backgroundColor: isUnknown ? '#ffebee' :
-                                             col.isFormulaColumn ? '#e8f5e8' :
-                                             col.isUnmapped ? '#fff8e1' :
-                                             col.isSpecificationColumn ? '#f0f8ff' :
-                                             rowIndex % 2 === 0 ? '#f8f9fa' : 'white',
+                              backgroundColor: isUnknown ? '#ffebee' : (rowIndex % 2 === 0 ? '#f8f9fa' : 'white'),
                               color: isUnknown ? '#c62828' : 'inherit',
-                              fontWeight: isUnknown || col.isFormulaColumn ? '500' : 'normal',
-                              borderLeft: col.isFormulaColumn ? '4px solid #4caf50' :
-                                        col.isUnmapped ? '4px solid #ff9800' :
-                                        col.isSpecificationColumn ? '4px solid #2196f3' : '1px solid #e9ecef'
+                              fontWeight: isUnknown ? '500' : 'normal'
                             }}>
                               {col.field === 'datasheet' && cellValue.startsWith('http') ? (
                                 <a href={cellValue} target="_blank" rel="noopener noreferrer">
@@ -1891,7 +1916,7 @@ const DataEditor = () => {
         open={formulaBuilderOpen}
         onClose={handleCloseFormulaBuilder}
         sessionId={sessionId}
-        availableColumns={columnDefs.filter(col => col.field && col.field !== '__row_number__').map(col => col.field || col.headerName).filter(Boolean)}
+        availableColumns={availableFormulaColumns}
         onApplyFormulas={handleApplyFormulas}
         onClear={handleClearFormulas}
         initialRules={appliedFormulas}
