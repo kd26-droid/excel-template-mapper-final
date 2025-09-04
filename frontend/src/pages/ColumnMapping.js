@@ -392,6 +392,7 @@ export default function ColumnMapping() {
   const [showTemplateDialog, setShowTemplateDialog] = useState(false);
   const [templatesLoading, setTemplatesLoading] = useState(false);
   const [applyingTemplate, setApplyingTemplate] = useState(false);
+  const [applyingTemplateId, setApplyingTemplateId] = useState(null);
   const [syncNotice, setSyncNotice] = useState({ visible: false, message: 'Applying template… syncing latest changes…' });
   const [sessionVersion, setSessionVersion] = useState(0);
   const [statusPolling, setStatusPolling] = useState(false);
@@ -414,8 +415,8 @@ export default function ColumnMapping() {
 
   // Column count state
   const [columnCounts, setColumnCounts] = useState({
-    tags_count: 1,
-    spec_pairs_count: 1,
+    tags_count: 3,
+    spec_pairs_count: 3,
     customer_id_pairs_count: 1
   });
   const [templateColumns, setTemplateColumns] = useState([]);
@@ -495,6 +496,7 @@ export default function ColumnMapping() {
   const handleApplyTemplate = useCallback(async (template) => {
     try {
       setApplyingTemplate(true);
+      setApplyingTemplateId(template.id);
       setSyncNotice({ visible: true, message: 'Applying template… syncing latest changes…' });
       enhancedDebugLog('TEMPLATE_APPLY', 'Starting template application', {
         templateId: template.id,
@@ -701,6 +703,7 @@ export default function ColumnMapping() {
       showSnackbar('Failed to apply template', 'error');
     } finally {
       setApplyingTemplate(false);
+      setApplyingTemplateId(null);
       setSyncNotice(prev => ({ ...prev, visible: false }));
       setShowTemplateDialog(false);
     }
@@ -964,8 +967,8 @@ export default function ColumnMapping() {
         if (session_metadata && session_metadata.column_counts) {
           const { tags_count, spec_pairs_count, customer_id_pairs_count } = session_metadata.column_counts;
           const newCounts = {
-            tags_count: tags_count || 1,
-            spec_pairs_count: spec_pairs_count || 1,
+            tags_count: tags_count || 3,
+            spec_pairs_count: spec_pairs_count || 3,
             customer_id_pairs_count: customer_id_pairs_count || 1
           };
           
@@ -1558,8 +1561,8 @@ export default function ColumnMapping() {
                   const sourceIdx = parseInt(edge.source.replace('c-', ''));
                   const targetIdx = parseInt(edge.target.replace('t-', ''));
                   const sourceColumn = clientHeaders[sourceIdx];
-                  const targetColumn = targetHeaders[targetIdx];
-                  return sourceColumn && targetColumn ? { source: sourceColumn, target: targetColumn } : null;
+                  const targetLabel = (templateHeaders[targetIdx] || "").toString().trim();
+                  return sourceColumn && targetLabel ? { source: sourceColumn.trim(), target: targetLabel } : null;
                 }).filter(Boolean);
                 
                 // CRITICAL FIX: Only save if we have mappings to save
@@ -2649,9 +2652,8 @@ export default function ColumnMapping() {
           const sourceIdx = parseInt(edge.source.replace('c-', ''));
           const targetIdx = parseInt(edge.target.replace('t-', ''));
           const sourceColumn = clientHeaders[sourceIdx];
-          const targetNode = nodes.find(n => n.id === edge.target);
-          const targetColumn = targetNode ? targetNode.data.originalLabel : templateHeaders[targetIdx];
-          return sourceColumn && targetColumn ? { source: sourceColumn, target: targetColumn } : null;
+          const targetLabel = (templateHeaders[targetIdx] || "").toString().trim();
+          return sourceColumn && targetLabel ? { source: sourceColumn.trim(), target: targetLabel } : null;
         })
         .filter(Boolean);
       api.saveColumnMappings(sessionId, { mappings: mappingsToSave, default_values: nextDefaults });
@@ -3025,9 +3027,8 @@ export default function ColumnMapping() {
             const sourceIdx = parseInt(edge.source.replace('c-', ''));
             const targetIdx = parseInt(edge.target.replace('t-', ''));
             const sourceColumn = clientHeaders[sourceIdx];
-            const targetNode = nodes.find(n => n.id === edge.target);
-            const targetColumn = targetNode ? targetNode.data.originalLabel : templateHeaders[targetIdx];
-            return sourceColumn && targetColumn ? { source: sourceColumn, target: targetColumn } : null;
+            const targetLabel = (templateHeaders[targetIdx] || "").toString().trim();
+            return sourceColumn && targetLabel ? { source: sourceColumn.trim(), target: targetLabel } : null;
           })
           .filter(Boolean);
         api.saveColumnMappings(sessionId, { mappings: mappingsToSave, default_values: defaultValueMappings, force_persist: true });
@@ -4132,8 +4133,8 @@ export default function ColumnMapping() {
                   <button 
                     onClick={() => updateColumnCounts({
                       tags_count: Math.max(1, columnCounts.tags_count - 1),
-                      spec_pairs_count: columnCounts.spec_pairs_count || 0,
-                      customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
+                      spec_pairs_count: columnCounts.spec_pairs_count || 3,
+                      customer_id_pairs_count: columnCounts.customer_id_pairs_count || 1
                     })}
                     className="w-6 h-6 bg-red-200 hover:bg-red-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-red-700"
                     disabled={columnCounts.tags_count <= 1}
@@ -4144,8 +4145,8 @@ export default function ColumnMapping() {
                   <button 
                     onClick={() => updateColumnCounts({
                       tags_count: columnCounts.tags_count + 1,
-                      spec_pairs_count: columnCounts.spec_pairs_count || 0,
-                      customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
+                      spec_pairs_count: columnCounts.spec_pairs_count || 3,
+                      customer_id_pairs_count: columnCounts.customer_id_pairs_count || 1
                     })}
                     className="w-6 h-6 bg-green-200 hover:bg-green-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-green-700"
                   >
@@ -4160,7 +4161,7 @@ export default function ColumnMapping() {
                 <div className="flex items-center gap-2">
                   <button 
                     onClick={() => updateColumnCounts({
-                      tags_count: columnCounts.tags_count || 0,
+                      tags_count: columnCounts.tags_count || 3,
                       spec_pairs_count: Math.max(1, columnCounts.spec_pairs_count - 1),
                       customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
                     })}
@@ -4172,7 +4173,7 @@ export default function ColumnMapping() {
                   <span className="w-8 text-center text-sm font-semibold">{columnCounts.spec_pairs_count}</span>
                   <button 
                     onClick={() => updateColumnCounts({
-                      tags_count: columnCounts.tags_count || 0,
+                      tags_count: columnCounts.tags_count || 3,
                       spec_pairs_count: columnCounts.spec_pairs_count + 1,
                       customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
                     })}
@@ -4189,7 +4190,7 @@ export default function ColumnMapping() {
                 <div className="flex items-center gap-2">
                   <button 
                     onClick={() => updateColumnCounts({
-                      tags_count: columnCounts.tags_count || 0,
+                      tags_count: columnCounts.tags_count || 3,
                       spec_pairs_count: columnCounts.spec_pairs_count || 0,
                       customer_id_pairs_count: Math.max(1, columnCounts.customer_id_pairs_count - 1)
                     })}
@@ -4201,7 +4202,7 @@ export default function ColumnMapping() {
                   <span className="w-8 text-center text-sm font-semibold">{columnCounts.customer_id_pairs_count}</span>
                   <button 
                     onClick={() => updateColumnCounts({
-                      tags_count: columnCounts.tags_count || 0,
+                      tags_count: columnCounts.tags_count || 3,
                       spec_pairs_count: columnCounts.spec_pairs_count || 0,
                       customer_id_pairs_count: columnCounts.customer_id_pairs_count + 1
                     })}
@@ -4619,8 +4620,16 @@ export default function ColumnMapping() {
                 {availableTemplates.map((template) => (
                   <div
                     key={template.id}
-                    className="border border-gray-200 rounded-lg p-4 hover:border-green-400 cursor-pointer transition-colors"
-                    onClick={() => handleApplyTemplate(template)}
+                    className={`border border-gray-200 rounded-lg p-4 transition-colors ${
+                      applyingTemplate 
+                        ? 'cursor-not-allowed opacity-50' 
+                        : 'hover:border-green-400 cursor-pointer'
+                    }`}
+                    onClick={() => {
+                      if (!applyingTemplate) {
+                        handleApplyTemplate(template);
+                      }
+                    }}
                   >
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
@@ -4644,10 +4653,10 @@ export default function ColumnMapping() {
                           e.stopPropagation();
                           handleApplyTemplate(template);
                         }}
-                        disabled={applyingTemplate}
+                        disabled={applyingTemplate && applyingTemplateId === template.id}
                         className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
                       >
-                        {applyingTemplate ? 'Applying...' : 'Apply'}
+                        {applyingTemplate && applyingTemplateId === template.id ? 'Applying...' : 'Apply'}
                       </button>
                     </div>
                   </div>

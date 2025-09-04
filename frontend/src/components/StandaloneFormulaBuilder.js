@@ -102,8 +102,8 @@ const StandaloneFormulaBuilder = ({ open, onClose, onSave }) => {
             console.log('Calculated Column Fill Stats (header only):', stats);
           }
         } catch (e) {
-          console.error("Error parsing Excel file", e);
-          alert("Failed to parse the Excel file. Please ensure it's a valid .xlsx or .xls file.");
+          console.error("Error parsing file", e);
+          alert("Failed to parse the file. Please ensure it's a valid .xlsx, .xls, or .csv file.");
         }
       };
       reader.readAsBinaryString(file);
@@ -114,7 +114,8 @@ const StandaloneFormulaBuilder = ({ open, onClose, onSave }) => {
     onDrop,
     accept: {
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
-      'application/vnd.ms-excel': ['.xls']
+      'application/vnd.ms-excel': ['.xls'],
+      'text/csv': ['.csv']
     },
     maxFiles: 1
   });
@@ -202,10 +203,10 @@ const StandaloneFormulaBuilder = ({ open, onClose, onSave }) => {
               <input {...getInputProps()} />
               <CloudUploadIcon fontSize="large" color="primary" />
               <Typography variant="body1" sx={{ mt: 2 }}>
-                {factwiseFile ? factwiseFile.name : 'Drop your Factwise template here or click to browse'}
+                {factwiseFile ? factwiseFile.name : 'Drop your Factwise template (Excel or CSV) here or click to browse'}
               </Typography>
               <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                Supported: .xlsx, .xls
+                Supported: .xlsx, .xls, .csv
               </Typography>
             </Box>
             {factwiseFile && (

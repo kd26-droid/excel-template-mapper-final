@@ -53,9 +53,6 @@ const UploadFiles = () => {
   }, []);
   
   const [userFile, setUserFile] = useState(null);
-  const [templateFile, setTemplateFile] = useState(null);
-  const [persistedUserFileName, setPersistedUserFileName] = useState('');
-  const [persistedTemplateFileName, setPersistedTemplateFileName] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
@@ -65,10 +62,12 @@ const UploadFiles = () => {
   const [selectedClientSheet, setSelectedClientSheet] = useState('');
   const [clientHeaderRow, setClientHeaderRow] = useState(1);
   
-  // Template file sheet/header state
-  const [templateSheetNames, setTemplateSheetNames] = useState([]);
-  const [selectedTemplateSheet, setSelectedTemplateSheet] = useState('');
-  const [templateHeaderRow, setTemplateHeaderRow] = useState(1);
+  // Fixed Factwise template headers
+  const factwiseHeaders = [
+    'Item code', 'Item name', 'Description', 'Item type', 'Measurement unit',
+    'Notes', 'Internal notes', 'Custom identification name', 'Custom identification value',
+    'Procurement item', 'Sales item', 'Procurement entity name', 'Preferred vendor code'
+  ];
   
   // Template selection state
   const [selectedTemplate, setSelectedTemplate] = useState(null);
@@ -110,36 +109,14 @@ const UploadFiles = () => {
     }
   }, [location.state]);
 
-  // Load available templates when component mounts and optionally restore previous upload
+  // Load available templates when component mounts
   useEffect(() => {
     loadAvailableTemplates();
     loadAvailableTagTemplates();
-
-    // Only restore previously uploaded file names if we are explicitly
-    // returning from ColumnMapping (flag set during navigate to mapping)
-    try {
-      const shouldRestore = sessionStorage.getItem('restoreUploadFromMapping') === 'true';
-      if (shouldRestore) {
-        const raw = sessionStorage.getItem('lastUploadedFiles');
-        if (raw) {
-          const saved = JSON.parse(raw);
-          setPersistedUserFileName(saved.clientFileName || '');
-          setPersistedTemplateFileName(saved.templateFileName || '');
-          if (saved.selectedClientSheet) setSelectedClientSheet(saved.selectedClientSheet);
-          if (saved.clientHeaderRow) setClientHeaderRow(saved.clientHeaderRow);
-          if (saved.selectedTemplateSheet) setSelectedTemplateSheet(saved.selectedTemplateSheet);
-          if (saved.templateHeaderRow) setTemplateHeaderRow(saved.templateHeaderRow);
-        }
-        // One-time restore
-        sessionStorage.removeItem('restoreUploadFromMapping');
-      } else {
-        // Visiting Upload fresh – clear any stale persisted info
-        sessionStorage.removeItem('lastUploadedFiles');
-        sessionStorage.removeItem('restoreUploadFromMapping');
-        setPersistedUserFileName('');
-        setPersistedTemplateFileName('');
-      }
-    } catch (_) {}
+    
+    // Clear any stale persisted info when visiting upload page
+    sessionStorage.removeItem('lastUploadedFiles');
+    sessionStorage.removeItem('restoreUploadFromMapping');
   }, []);
 
   const loadAvailableTemplates = async () => {
@@ -173,13 +150,13 @@ const UploadFiles = () => {
       let file = acceptedFiles[0];
       setError(null);
       setUserFile(file);
-      setPersistedUserFileName(file.name);
       
-      // Read the file to extract sheet names and column headers for Excel files
+      // Read the file to extract sheet names and column headers for Excel/CSV files
       const reader = new FileReader();
       reader.onload = (evt) => {
         try {
           const data = evt.target.result;
+          // For CSV files, XLSX reads them as a single sheet
           const workbook = XLSX.read(data, { type: 'binary' });
           const sheets = workbook.SheetNames;
           setClientSheetNames(sheets);
@@ -196,8 +173,9 @@ const UploadFiles = () => {
             }
           }
         } catch (err) {
-          console.error('Error reading Excel file:', err);
-          setError('Error reading Excel file. Please make sure it\'s a valid Excel file.');
+          console.error('Error reading file:', err);
+          const fileType = file.name.toLowerCase().endsWith('.csv') ? 'CSV' : 'Excel';
+          setError(`Error reading ${fileType} file. Please make sure it's a valid ${fileType} file.`);
         }
       };
       reader.readAsBinaryString(file);
@@ -208,52 +186,18 @@ const UploadFiles = () => {
     }
   }, []);
 
-  const onDropTemplateFile = useCallback(acceptedFiles => {
-    if (acceptedFiles.length > 0) {
-      const file = acceptedFiles[0];
-      setTemplateFile(file);
-      setError(null);
-      setPersistedTemplateFileName(file.name);
-      
-      // Read the template file to extract sheet names
-      const reader = new FileReader();
-      reader.onload = (evt) => {
-        try {
-          const data = evt.target.result;
-          const workbook = XLSX.read(data, { type: 'binary' });
-          const sheets = workbook.SheetNames;
-          setTemplateSheetNames(sheets);
-          setSelectedTemplateSheet(sheets[0]); // Auto-select first sheet
-        } catch (err) {
-          console.error('Error reading template Excel file:', err);
-          setError('Error reading template Excel file. Please make sure it\'s a valid Excel file.');
-        }
-      };
-      reader.readAsBinaryString(file);
-
-      // Do NOT persist to sessionStorage here.
-    }
-  }, []);
 
   const { getRootProps: getUserRootProps, getInputProps: getUserInputProps, isDragActive: isUserDragActive } = 
     useDropzone({ 
       onDrop: onDropUserFile,
       accept: {
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
-        'application/vnd.ms-excel': ['.xls']
+        'application/vnd.ms-excel': ['.xls'],
+        'text/csv': ['.csv']
       },
       maxFiles: 1
     });
 
-  const { getRootProps: getTemplateRootProps, getInputProps: getTemplateInputProps, isDragActive: isTemplateDragActive } = 
-    useDropzone({ 
-      onDrop: onDropTemplateFile,
-      accept: {
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
-        'application/vnd.ms-excel': ['.xls']
-      },
-      maxFiles: 1
-    });
 
   // Filter templates based on search term
   const filteredTemplates = availableTemplates.filter(template =>
@@ -332,34 +276,16 @@ const UploadFiles = () => {
 
 
   const handleUpload = async () => {
-    // Allow continuing with last uploaded session when no new files selected
-    if (!userFile || !templateFile) {
-      try {
-        const raw = sessionStorage.getItem('lastUploadedFiles');
-        if (raw) {
-          const saved = JSON.parse(raw);
-          if (!userFile && !templateFile && saved?.clientFileName && saved?.templateFileName) {
-            if (saved?.sessionId) {
-              setSuccess(`Continuing with previously uploaded files: ${saved.clientFileName} + ${saved.templateFileName}`);
-              setTimeout(() => navigate(`/mapping/${saved.sessionId}`), 800);
-              return;
-            }
-          }
-        }
-      } catch (_) {}
-      setError('Please select both a user file and a template file');
+    if (!userFile) {
+      setError('Please select a client file');
       return;
     }
 
     if (clientSheetNames.length > 0 && !selectedClientSheet) {
-      setError('Please select a sheet from your client Excel file');
+      setError('Please select a sheet from your client file');
       return;
     }
 
-    if (templateSheetNames.length > 0 && !selectedTemplateSheet) {
-      setError('Please select a sheet from your template Excel file');
-      return;
-    }
 
     try {
       setLoading(true);
@@ -367,11 +293,9 @@ const UploadFiles = () => {
       
       const formData = new FormData();
       formData.append('clientFile', userFile);
-      formData.append('templateFile', templateFile);
       formData.append('sheetName', selectedClientSheet);
       formData.append('headerRow', clientHeaderRow.toString());
-      formData.append('templateSheetName', selectedTemplateSheet);
-      formData.append('templateHeaderRow', templateHeaderRow.toString());
+      formData.append('factwiseHeaders', JSON.stringify(factwiseHeaders));
       
       // Add formula rules if they exist and NO mapping template is selected
       // When a template is selected, it already contains the rules, so don't send them again
@@ -393,20 +317,6 @@ const UploadFiles = () => {
           }
           setSuccess(successMessage);
           
-          // Persist last upload details for seamless back navigation
-          try {
-            sessionStorage.setItem('lastUploadedFiles', JSON.stringify({
-              clientFileName: userFile?.name,
-              templateFileName: templateFile?.name,
-              selectedClientSheet,
-              clientHeaderRow,
-              selectedTemplateSheet,
-              templateHeaderRow,
-              sessionId: response.data.session_id
-            }));
-            // Mark that we should restore when returning from ColumnMapping
-            sessionStorage.setItem('restoreUploadFromMapping', 'true');
-          } catch (_) {}
           setTimeout(() => {
             // Navigate to ColumnMapping and let it handle template application using its working logic
             navigate(`/mapping/${response.data.session_id}`, {
@@ -440,20 +350,6 @@ const UploadFiles = () => {
         // No template selected - normal upload
         response = await api.uploadFiles(formData);
         setSuccess('Files uploaded successfully!');
-        // Persist last upload details
-        try {
-          sessionStorage.setItem('lastUploadedFiles', JSON.stringify({
-            clientFileName: userFile?.name,
-            templateFileName: templateFile?.name,
-            selectedClientSheet,
-            clientHeaderRow,
-            selectedTemplateSheet,
-            templateHeaderRow,
-            sessionId: response.data.session_id
-          }));
-          // Mark that we should restore when returning from ColumnMapping
-          sessionStorage.setItem('restoreUploadFromMapping', 'true');
-        } catch (_) {}
         
         setTimeout(() => {
           navigate(`/mapping/${response.data.session_id}`);
@@ -540,16 +436,16 @@ const UploadFiles = () => {
                 <input {...getUserInputProps()} />
                 <CloudUploadIcon fontSize="large" color="primary" />
                 <Typography variant="body1" sx={{ mt: 2 }}>
-                  {userFile ? userFile.name : (persistedUserFileName || 'Drop your Excel file here or click to browse')}
+                  {userFile ? userFile.name : 'Drop your Excel or CSV file here or click to browse'}
                 </Typography>
                 <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                  Supported: .xlsx, .xls
+                  Supported: .xlsx, .xls, .csv
                 </Typography>
               </Box>
               
-              {(userFile || persistedUserFileName) && (
+              {userFile && (
                 <Typography variant="body2" sx={{ mt: 2, color: 'success.main' }}>
-                  ✓ Selected: {userFile ? userFile.name : persistedUserFileName}
+                  ✓ Selected: {userFile.name}
                 </Typography>
               )}
               
@@ -586,67 +482,27 @@ const UploadFiles = () => {
             
             <Grid item xs={12} md={6}>
               <Typography variant="h6" gutterBottom>
-                FW Item Template
+                Factwise Template (Fixed)
               </Typography>
               
-              <Box 
-                {...getTemplateRootProps()} 
-                sx={{
-                  border: '2px dashed #ccc',
-                  borderRadius: 2,
-                  p: 4,
-                  textAlign: 'center',
-                  cursor: 'pointer',
-                  backgroundColor: isTemplateDragActive ? '#f0f8ff' : '#fafafa',
-                  transition: 'all 0.2s ease',
-                  '&:hover': { backgroundColor: '#f0f8ff' }
-                }}
-              >
-                <input {...getTemplateInputProps()} />
-                <DescriptionIcon fontSize="large" color="secondary" />
-                <Typography variant="body1" sx={{ mt: 2 }}>
-                  {templateFile ? templateFile.name : (persistedTemplateFileName || 'Drop your FW Item Template here or click to browse')}
+              <Box sx={{
+                border: '2px solid #4caf50',
+                borderRadius: 2,
+                p: 4,
+                textAlign: 'center',
+                backgroundColor: '#e8f5e8'
+              }}>
+                <CheckCircleIcon fontSize="large" color="success" />
+                <Typography variant="body1" sx={{ mt: 2, fontWeight: 600 }}>
+                  Standard Factwise Item Template
                 </Typography>
                 <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                  Supported: .xlsx, .xls
+                  {factwiseHeaders.length} predefined columns
+                </Typography>
+                <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+                  Item code, Item name, Description, Item type, etc.
                 </Typography>
               </Box>
-              
-              {(templateFile || persistedTemplateFileName) && (
-                <Typography variant="body2" sx={{ mt: 2, color: 'success.main' }}>
-                  ✓ Selected: {templateFile ? templateFile.name : persistedTemplateFileName}
-                </Typography>
-              )}
-
-              {templateSheetNames.length > 0 && (
-                <Grid container spacing={2} sx={{ mt: 2 }}>
-                  <Grid item xs={6}>
-                    <FormControl fullWidth size="small">
-                      <InputLabel>Sheet Name</InputLabel>
-                      <Select
-                        value={selectedTemplateSheet}
-                        label="Sheet Name"
-                        onChange={(e) => setSelectedTemplateSheet(e.target.value)}
-                      >
-                        {templateSheetNames.map(sheet => (
-                          <MenuItem key={sheet} value={sheet}>{sheet}</MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                  </Grid>
-                  <Grid item xs={6}>
-                    <TextField
-                      label="Header Row"
-                      type="number"
-                      size="small"
-                      fullWidth
-                      InputProps={{ inputProps: { min: 1 } }}
-                      value={templateHeaderRow}
-                      onChange={(e) => setTemplateHeaderRow(Number(e.target.value))}
-                    />
-                  </Grid>
-                </Grid>
-              )}
             </Grid>
           </Grid>
         </CardContent>
@@ -920,11 +776,9 @@ const UploadFiles = () => {
         >
           {loading 
             ? 'Uploading...' 
-            : (!userFile && !templateFile && persistedUserFileName && persistedTemplateFileName)
-              ? `Continue: ${persistedUserFileName} + ${persistedTemplateFileName}`
-              : (selectedTemplate 
+            : (selectedTemplate 
                 ? `Upload with ${selectedTemplate.name}` 
-                : 'Upload Files')
+                : 'Upload File')
           }
         </Button>
         

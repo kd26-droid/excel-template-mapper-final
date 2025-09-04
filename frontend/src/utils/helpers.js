@@ -72,14 +72,14 @@ export const stringToColor = (str) => {
 };
 
 /**
- * Validates an Excel file based on extension
+ * Validates a file based on extension (Excel or CSV)
  * @param {File} file - The file to validate
  * @returns {boolean} Whether the file is valid
  */
 export const isValidExcelFile = (file) => {
   if (!file) return false;
   
-  const validExtensions = ['.xlsx', '.xls'];
+  const validExtensions = ['.xlsx', '.xls', '.csv'];
   const fileName = file.name.toLowerCase();
   
   return validExtensions.some(ext => fileName.endsWith(ext));

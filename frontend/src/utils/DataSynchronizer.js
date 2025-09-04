@@ -132,6 +132,7 @@ class DataSynchronizer {
       // Step 2: Fetch ALL pages with specifications (no 1000-row cap)
       const firstPage = await api.getMappedDataWithSpecs(this.sessionId, 1, 1000, enableSpecParsing);
       let aggregated = firstPage?.data || { headers: [], data: [], pagination: { page: 1, page_size: 1000, total_rows: 0, total_pages: 1 } };
+      console.info("DATA VIEW HEADERS (DataSynchronizer):", Array.isArray(aggregated.headers) ? aggregated.headers.join(", ") : aggregated.headers);
       const totalPages = Math.max(1, aggregated?.pagination?.total_pages || 1);
       if (totalPages > 1) {
         for (let p = 2; p <= totalPages; p++) {
@@ -356,6 +357,7 @@ class DataSynchronizer {
       const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Timed out fetching data')), budgetMs));
       const firstResponse = await Promise.race([firstPromise, timeoutPromise]);
       let aggregated = firstResponse.data;
+      console.info("DATA VIEW HEADERS (fetchDataFast):", Array.isArray(aggregated.headers) ? aggregated.headers.join(", ") : aggregated.headers);
       const totalPages = Math.max(1, aggregated?.pagination?.total_pages || 1);
       if (totalPages > 1) {
         for (let p = 2; p <= totalPages; p++) {
