@@ -21,6 +21,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.views.decorators.cache import never_cache
 from openpyxl import Workbook
+from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill
 import numpy as np
 from collections import defaultdict
@@ -88,6 +89,33 @@ def _canon(s: str) -> str:
         .replace("_", "")        # Remove underscores
         .replace("-", "")        # Remove hyphens
     )
+
+def read_csv_with_encoding(file_path, header_row, **kwargs):
+    """
+    Helper function to read CSV files with proper encoding detection.
+    Tries multiple encodings to handle various CSV formats.
+    """
+    encodings_to_try = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1', 'windows-1252']
+    
+    for encoding in encodings_to_try:
+        try:
+            df = pd.read_csv(
+                file_path,
+                header=header_row,
+                encoding=encoding,
+                on_bad_lines='skip',
+                **kwargs
+            )
+            return df
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+        except Exception as e:
+            if encoding == encodings_to_try[-1]:
+                raise e
+            continue
+    
+    raise Exception("Could not read CSV file with any supported encoding")
+
 
 def generate_template_columns(tags_count=3, spec_pairs_count=3, customer_id_pairs_count=1):
     """
@@ -526,6 +554,50 @@ def save_session(session_id, session_data):
     logger.info(f"💾 Saved session {session_id} to cache, memory, and file")
 
 
+# Utility: Fast total row count without loading full DataFrame
+def _count_total_data_rows(file_path: str, sheet_name: Optional[str], header_row: int) -> int:
+    """Return total number of data rows after the header row.
+    Works for both CSV and Excel. For Excel, uses openpyxl read-only mode.
+    """
+    try:
+        p = Path(file_path)
+        if str(p).lower().endswith('.csv'):
+            # Count lines in a streaming fashion
+            with open(p, 'rb') as f:
+                # Count newline occurrences; this is approximate but sufficient
+                total_lines = 0
+                for _ in f:
+                    total_lines += 1
+            data_rows = max(0, total_lines - (header_row + 1))
+            return data_rows
+        else:
+            # Excel: use openpyxl to get max_row, then adjust for header row
+            wb = load_workbook(filename=str(p), read_only=True, data_only=True)
+            ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb[wb.sheetnames[0]]
+            max_row = ws.max_row or 0
+            # Try to trim trailing entirely empty rows
+            # Scan backward until a row with any non-empty cell is found
+            last_data_row = 0
+            for r in range(max_row, 0, -1):
+                has_val = False
+                for cell in ws.iter_rows(min_row=r, max_row=r, values_only=True):
+                    # cell is a tuple of values for that row
+                    if any(v is not None and str(v).strip() != '' for v in cell):
+                        has_val = True
+                        break
+                if has_val:
+                    last_data_row = r
+                    break
+            if last_data_row == 0:
+                return 0
+            data_rows = max(0, last_data_row - (header_row + 1))
+            return data_rows
+    except Exception as e:
+        logger.warning(f"Failed to count total data rows: {e}")
+        # Fallback: unknown
+        return 0
+
+
 # Use hybrid file manager from azure_storage module
 # This automatically handles Azure Blob Storage when available,
 # falls back to local storage for development
@@ -642,19 +714,68 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
         
         # Resolve local path if using Azure Blob Storage and read the client data
         client_local_path = hybrid_file_manager.get_file_path(client_file)
-        if str(client_local_path).lower().endswith('.csv'):
-            df = pd.read_csv(client_local_path, header=header_row)
-        else:
-            result = pd.read_excel(client_local_path, sheet_name=sheet_name, header=header_row)
-            
-            # Handle multiple sheets case
-            if isinstance(result, dict):
-                # If sheet_name is None, we get a dict with all sheets
-                # Use the first sheet
-                first_sheet_name = list(result.keys())[0]
-                df = result[first_sheet_name]
+
+        # Optional pagination inputs: derive from caller if present via context
+        offset = None
+        limit = None
+        try:
+            if session_id and SESSION_STORE.get(session_id, {}).get('__paginate__'):
+                hints = SESSION_STORE[session_id]['__paginate__']
+                offset = int(hints.get('offset')) if 'offset' in hints else None
+                limit = int(hints.get('limit')) if 'limit' in hints else None
+        except Exception:
+            offset = None
+            limit = None
+
+        # Helper to read only headers quickly
+        def _read_only_headers() -> list:
+            try:
+                if str(client_local_path).lower().endswith('.csv'):
+                    df0 = read_csv_with_encoding(client_local_path, header_row, nrows=0)
+                else:
+                    df0 = pd.read_excel(client_local_path, sheet_name=sheet_name, header=header_row, nrows=0)
+                return [str(c).strip() for c in df0.columns]
+            except Exception:
+                return []
+
+        # Read the DataFrame – full or paginated slice
+        if offset is None or limit is None:
+            if str(client_local_path).lower().endswith('.csv'):
+                df = read_csv_with_encoding(client_local_path, header_row)
             else:
-                df = result
+                result = pd.read_excel(client_local_path, sheet_name=sheet_name, header=header_row)
+                # Handle multiple sheets case
+                if isinstance(result, dict):
+                    first_sheet_name = list(result.keys())[0]
+                    df = result[first_sheet_name]
+                else:
+                    df = result
+        else:
+            # Paginated read: read only the requested slice efficiently
+            cols = _read_only_headers()
+            if str(client_local_path).lower().endswith('.csv'):
+                # Skip header_row+1 data rows plus the offset
+                skip_start = header_row + 1
+                skip_end = skip_start + max(0, int(offset))
+                skiprows = list(range(skip_start, skip_end)) if skip_end > skip_start else None
+                df = read_csv_with_encoding(
+                    client_local_path,
+                    header_row=None,
+                    names=cols if cols else None,
+                    skiprows=skiprows,
+                    nrows=int(limit)
+                )
+            else:
+                # Excel: set header=None and supply names; skip header_row + 1 + offset rows from top
+                skiprows = header_row + 1 + max(0, int(offset))
+                df = pd.read_excel(
+                    client_local_path,
+                    sheet_name=sheet_name,
+                    header=None,
+                    names=cols if cols else None,
+                    skiprows=skiprows,
+                    nrows=int(limit)
+                )
         
         # Clean column names
         df.columns = [str(col).strip() for col in df.columns]
@@ -1943,7 +2064,14 @@ def data_view(request):
             except Exception:
                 pass
         else:
-            # fresh mapping
+            # fresh mapping – process only requested page to avoid heavy work on large datasets
+            # Compute pagination window and pass hints to the mapper
+            start_idx = (page - 1) * page_size
+            # Provide pagination hints for apply_column_mappings
+            try:
+                SESSION_STORE.setdefault(session_id, {})['__paginate__'] = {'offset': start_idx, 'limit': page_size}
+            except Exception:
+                pass
             mapping_result = apply_column_mappings(
                 client_file=info["client_path"],
                 mappings=formatted_mappings,
@@ -1951,11 +2079,17 @@ def data_view(request):
                 header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0,
                 session_id=session_id
             )
+            # Clear pagination hint to avoid affecting other endpoints
+            try:
+                if '__paginate__' in SESSION_STORE.get(session_id, {}):
+                    del SESSION_STORE[session_id]['__paginate__']
+            except Exception:
+                pass
 
             transformed_rows = mapping_result['data']
             headers_to_use = mapping_result['headers']
             using_enhanced = False
-            logger.info(f"🔧 DEBUG: Using fresh mapped data with {len(headers_to_use)} headers and {len(transformed_rows)} rows")
+            logger.info(f"🔧 DEBUG: Using fresh mapped data (paginated) with {len(headers_to_use)} headers and {len(transformed_rows)} rows")
             
             # CRITICAL FIX: If we forced fresh mapping due to template application, we need to re-apply formulas
             # to ensure Tag columns are populated with the correct data from the original file
@@ -2010,11 +2144,11 @@ def data_view(request):
             formula_result = apply_formula_rules(transformed_rows, headers_to_use, formula_rules, replace_existing=False, session_info=info)
             transformed_rows = formula_result['data']
             headers_to_use = formula_result['headers']
-            # Cache for next time and persist canonically across workers
-            info['formula_enhanced_data'] = transformed_rows
+            # Persist canonically across workers but avoid storing large full datasets
             info['enhanced_headers'] = headers_to_use
             info['current_template_headers'] = headers_to_use
             info['version'] = info.get('version', 0) + 1
+            # Do NOT store full enhanced data here; data is paginated and can be recomputed per page
             save_session(session_id, info)
         
         # Apply factwise ID rules if they exist
@@ -2316,10 +2450,14 @@ def data_view(request):
                 logger.info(f"🔧 DEBUG: Session {session_id} - No transformed rows found")
         
         # Implement pagination
-        total_rows = len(transformed_rows)
-        start_idx = (page - 1) * page_size
-        end_idx = start_idx + page_size
-        paginated_rows = transformed_rows[start_idx:end_idx]
+        # We already paginated at read-time. Compute total_rows accurately for UI.
+        try:
+            client_local_path = hybrid_file_manager.get_file_path(info["client_path"])
+            total_rows = _count_total_data_rows(client_local_path, info.get("sheet_name"), info.get("header_row", 1) - 1 if info.get("header_row", 1) > 0 else 0)
+        except Exception:
+            # Fallback to current page length if counting fails
+            total_rows = start_idx + len(transformed_rows)
+        paginated_rows = transformed_rows
         
         # Use the headers we determined above (either enhanced or template headers)
         
@@ -2638,6 +2776,11 @@ def download_file(request, session_id=None):
                 session_id = request.data.get('session_id') or request.POST.get('session_id')
             else:
                 session_id = request.GET.get('session_id')
+
+        # Extract column order from request if provided
+        requested_column_order = None
+        if request.method == 'POST':
+            requested_column_order = request.data.get('column_order')
         
         if not session_id:
             return Response({
@@ -2662,12 +2805,29 @@ def download_file(request, session_id=None):
         # Always prefer rebuilding from current canonical headers to avoid stale snapshots
         enhanced_data = info.get("formula_enhanced_data")
         
-        if enhanced_data:
+        # If an old small snapshot is present while dataset is large, ignore it
+        try:
+            client_local_path = hybrid_file_manager.get_file_path(info["client_path"])
+            total_rows_est = _count_total_data_rows(
+                client_local_path,
+                info.get("sheet_name"),
+                info.get("header_row", 1) - 1 if info.get("header_row", 1) > 0 else 0
+            )
+        except Exception:
+            total_rows_est = 0
+
+        if enhanced_data and (total_rows_est == 0 or len(enhanced_data) >= total_rows_est):
             # Use formula-enhanced data for download
             transformed_rows = enhanced_data
             all_headers = info.get("current_template_headers") or info.get("enhanced_headers") or []
         else:
             # Fall back to regular mapped data
+            # Ensure no pagination hints leak into full export
+            try:
+                if '__paginate__' in SESSION_STORE.get(session_id, {}):
+                    del SESSION_STORE[session_id]['__paginate__']
+            except Exception:
+                pass
             mapping_result = apply_column_mappings(
                 client_file=info["client_path"],
                 mappings=mappings,
@@ -2675,8 +2835,73 @@ def download_file(request, session_id=None):
                 header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0,
                 session_id=session_id
             )
-            transformed_rows = mapping_result['data']
-            all_headers = mapping_result['headers']
+            # Convert to dict rows for downstream formula and Factwise operations
+            base_headers = mapping_result['headers']
+            transformed_rows = []
+            for row_list in mapping_result['data']:
+                row_dict = {}
+                for i, header in enumerate(base_headers):
+                    row_dict[header] = row_list[i] if i < len(row_list) else ""
+                transformed_rows.append(row_dict)
+
+            # Apply requested column order if provided
+            if requested_column_order and isinstance(requested_column_order, list):
+                # Use requested column order, but only include headers that exist in the data
+                ordered_headers = []
+                for header in requested_column_order:
+                    if header in base_headers:
+                        ordered_headers.append(header)
+
+                # Add any additional headers not in the requested order
+                for header in base_headers:
+                    if header not in ordered_headers:
+                        ordered_headers.append(header)
+
+                all_headers = ordered_headers
+                logger.info(f"🔧 DEBUG download_file: Applied requested column order to mapping result: {all_headers}")
+            else:
+                all_headers = list(base_headers)
+
+            # Apply formula rules if present to generate Tag/Specification/Customer columns
+            try:
+                formula_rules = info.get('formula_rules', []) or []
+                if formula_rules:
+                    formula_result = apply_formula_rules(transformed_rows, all_headers, formula_rules, replace_existing=False, session_info=info)
+                    transformed_rows = formula_result.get('data', transformed_rows)
+                    all_headers = formula_result.get('headers', all_headers)
+            except Exception as _fe:
+                logger.warning(f"Download: formula application skipped due to error: {_fe}")
+
+            # Apply Factwise ID rules if configured
+            try:
+                factwise_rules = info.get('factwise_rules', []) or []
+                for factwise_rule in factwise_rules:
+                    if factwise_rule.get("type") != "factwise_id":
+                        continue
+                    first_col = factwise_rule.get("first_column")
+                    second_col = factwise_rule.get("second_column")
+                    operator = factwise_rule.get("operator", "_")
+                    strategy = factwise_rule.get("strategy", "fill_only_null")
+
+                    # Ensure target column exists
+                    if 'Item code' not in all_headers:
+                        all_headers = ['Item code'] + all_headers
+                        for row in transformed_rows:
+                            row.setdefault('Item code', '')
+
+                    # Compute values row-wise
+                    for row in transformed_rows:
+                        first_val = str(row.get(first_col, "") or "").strip()
+                        second_val = str(row.get(second_col, "") or "").strip()
+                        factwise_id = (f"{first_val}{operator}{second_val}" if first_val and second_val else (first_val or second_val or ""))
+                        if strategy == 'override_all':
+                            row['Item code'] = factwise_id
+                        else:
+                            current_val = str(row.get('Item code', '') or '')
+                            if not current_val.strip():
+                                row['Item code'] = factwise_id
+            except Exception as _ie:
+                logger.warning(f"Download: factwise application skipped due to error: {_ie}")
 
         # Ensure default values are applied in the download path as well (parity with data_view)
         try:
@@ -2720,30 +2945,96 @@ def download_file(request, session_id=None):
                 'error': 'No data to download'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # For enhanced data, use headers that actually exist in the data
-        if enhanced_data and isinstance(transformed_rows, list) and transformed_rows and isinstance(transformed_rows[0], dict):
+        # For enhanced or dict data, use headers that actually exist in the data and normalize shape
+        if isinstance(transformed_rows, list) and transformed_rows and isinstance(transformed_rows[0], dict):
             # Get headers that actually exist in the enhanced data
             actual_headers = list(transformed_rows[0].keys()) if transformed_rows else []
             logger.info(f"🔧 DEBUG download_file: Enhanced data has headers: {actual_headers}")
             
-            # Use the canonical headers from session, but only include those that exist in the data
-            canonical_headers = info.get("current_template_headers") or info.get("enhanced_headers") or []
+            # Use the canonical headers from session if available, but only include those that exist in the data
+            canonical_headers = info.get("current_template_headers") or info.get("enhanced_headers") or all_headers or []
+
+            # CRITICAL FIX: Always enforce proper canonical order for downloads
+            # Reorder canonical_headers to follow the standard order: Item code first, then other standard headers, then Tags, etc.
+            if canonical_headers:
+                # Define the correct canonical order
+                correct_order = [
+                    "Item code", "Item name", "Description", "Item type", "Measurement unit",
+                    "Procurement entity name", "Notes", "Internal notes", "Procurement item",
+                    "Sales item", "Preferred vendor code"
+                ]
+
+                # Add Tag columns in correct order
+                tag_headers = sorted([h for h in canonical_headers if h.startswith('Tag_')],
+                                   key=lambda x: int(x.split('_')[1]) if '_' in x and x.split('_')[1].isdigit() else 0)
+                correct_order.extend(tag_headers)
+
+                # Add Specification columns in correct order
+                spec_name_headers = sorted([h for h in canonical_headers if h.startswith('Specification_Name_')],
+                                         key=lambda x: int(x.split('_')[2]) if len(x.split('_')) > 2 and x.split('_')[2].isdigit() else 0)
+                spec_value_headers = sorted([h for h in canonical_headers if h.startswith('Specification_Value_')],
+                                          key=lambda x: int(x.split('_')[2]) if len(x.split('_')) > 2 and x.split('_')[2].isdigit() else 0)
+
+                # Interleave spec names and values
+                for i in range(max(len(spec_name_headers), len(spec_value_headers))):
+                    if i < len(spec_name_headers):
+                        correct_order.append(spec_name_headers[i])
+                    if i < len(spec_value_headers):
+                        correct_order.append(spec_value_headers[i])
+
+                # Add Customer ID columns in correct order
+                customer_name_headers = sorted([h for h in canonical_headers if h.startswith('Customer_Identification_Name_')],
+                                             key=lambda x: int(x.split('_')[3]) if len(x.split('_')) > 3 and x.split('_')[3].isdigit() else 0)
+                customer_value_headers = sorted([h for h in canonical_headers if h.startswith('Customer_Identification_Value_')],
+                                              key=lambda x: int(x.split('_')[3]) if len(x.split('_')) > 3 and x.split('_')[3].isdigit() else 0)
+
+                # Interleave customer names and values
+                for i in range(max(len(customer_name_headers), len(customer_value_headers))):
+                    if i < len(customer_name_headers):
+                        correct_order.append(customer_name_headers[i])
+                    if i < len(customer_value_headers):
+                        correct_order.append(customer_value_headers[i])
+
+                # Add any remaining headers that weren't categorized
+                for header in canonical_headers:
+                    if header not in correct_order and header in actual_headers:
+                        correct_order.append(header)
+
+                # Filter to only headers that exist in the actual data and maintain order
+                canonical_headers = [h for h in correct_order if h in actual_headers]
+                logger.info(f"🔧 DEBUG download_file: Enforced canonical order: {canonical_headers}")
+
+            # CRITICAL FIX: Use requested column order if provided, otherwise use canonical order
+            if requested_column_order and isinstance(requested_column_order, list):
+                # Use requested column order, but only include headers that exist in the data
+                valid_headers = []
+                for header in requested_column_order:
+                    if header in actual_headers:
+                        valid_headers.append(header)
+
+                # Add any additional headers from data that aren't in the requested order
+                for header in actual_headers:
+                    if header not in valid_headers:
+                        valid_headers.append(header)
+
+                all_headers = valid_headers
+                logger.info(f"🔧 DEBUG download_file: Using requested column order: {all_headers}")
+            else:
+                # Fallback to canonical order
+                valid_headers = []
+                for header in canonical_headers:
+                    if header in actual_headers:
+                        valid_headers.append(header)
+
+                # Add any additional headers from data that aren't in canonical (shouldn't happen but defensive)
+                for header in actual_headers:
+                    if header not in valid_headers:
+                        valid_headers.append(header)
+
+                all_headers = valid_headers
+                logger.info(f"🔧 DEBUG download_file: Using canonical headers for enhanced data: {all_headers}")
             
-            # CRITICAL FIX: Only use headers that exist in both canonical and actual data
-            valid_headers = []
-            for header in canonical_headers:
-                if header in actual_headers:
-                    valid_headers.append(header)
-            
-            # Add any additional headers from data that aren't in canonical (shouldn't happen but defensive)
-            for header in actual_headers:
-                if header not in valid_headers:
-                    valid_headers.append(header)
-            
-            all_headers = valid_headers
-            logger.info(f"🔧 DEBUG download_file: Using valid headers for enhanced data: {all_headers}")
-            
-            # Convert enhanced data (dict format) to list format for consistency
+            # Convert dict format to list format for consistency
             converted_rows = []
             for row_dict in transformed_rows:
                 row_list = []
@@ -2894,7 +3185,7 @@ def download_original_file(request, session_id=None):
 
 @api_view(['GET'])
 def download_template_file(request, session_id=None):
-    """Download original uploaded template file."""
+    """Download FACTWISE.xlsx template file (always returns the standard FW template)."""
     try:
         # Support both URL path and query parameters for session_id
         if not session_id:
@@ -2906,33 +3197,25 @@ def download_template_file(request, session_id=None):
                 'error': 'Invalid session'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        info = SESSION_STORE[session_id]
-        template_path = info.get("template_path")
-        original_name = info.get("original_template_name")
-        
-        if not template_path:
+        # CRITICAL FIX: Always return FACTWISE.xlsx regardless of what template was uploaded
+        factwise_template_path = Path(settings.BASE_DIR) / 'FACTWISE.xlsx'
+
+        # Fallback to test_files directory if not found in root
+        if not factwise_template_path.exists():
+            factwise_template_path = Path(settings.BASE_DIR) / 'test_files' / 'FACTWISE.xlsx'
+
+        logger.info(f"🔍 FW Template download for session {session_id}: returning FACTWISE.xlsx from {factwise_template_path}")
+
+        if not factwise_template_path.exists():
             return Response({
                 'success': False,
-                'error': 'No template file found in session'
+                'error': 'FACTWISE.xlsx template file not found'
             }, status=status.HTTP_404_NOT_FOUND)
-        
-        # Resolve the file path using hybrid_file_manager
-        try:
-            resolved_template_path = hybrid_file_manager.get_file_path(template_path)
-        except Exception:
-            # Fallback to original path if resolution fails
-            resolved_template_path = template_path
-        
-        if not Path(resolved_template_path).exists():
-            return Response({
-                'success': False,
-                'error': 'Template file not found'
-            }, status=status.HTTP_404_NOT_FOUND)
-        
+
         response = FileResponse(
-            open(resolved_template_path, 'rb'),
+            open(factwise_template_path, 'rb'),
             as_attachment=True,
-            filename=original_name or 'template.xlsx'
+            filename='FACTWISE.xlsx'
         )
         
         return response
@@ -3074,7 +3357,7 @@ def dashboard_view(request):
                                 if Path(client_local_path).exists():
                                     logger.info(f"Session {session_id}: Resolved path exists, reading file")
                                     if str(client_local_path).lower().endswith('.csv'):
-                                        df = pd.read_csv(client_local_path, header=header_row)
+                                        df = read_csv_with_encoding(client_local_path, header_row)
                                     else:
                                         result = pd.read_excel(client_local_path, sheet_name=sheet_name, header=header_row)
                                         if isinstance(result, dict):
@@ -3091,7 +3374,7 @@ def dashboard_view(request):
                                     if Path(client_path).exists():
                                         logger.info(f"Session {session_id}: Original path exists, using it directly")
                                         if str(client_path).lower().endswith('.csv'):
-                                            df = pd.read_csv(client_path, header=header_row)
+                                            df = read_csv_with_encoding(client_path, header_row)
                                         else:
                                             result = pd.read_excel(client_path, sheet_name=sheet_name, header=header_row)
                                             if isinstance(result, dict):
@@ -3110,7 +3393,7 @@ def dashboard_view(request):
                                 if Path(client_path).exists():
                                     logger.info(f"Session {session_id}: Fallback: original path exists, reading directly")
                                     if str(client_path).lower().endswith('.csv'):
-                                        df = pd.read_csv(client_path, header=header_row)
+                                        df = read_csv_with_encoding(client_path, header_row)
                                     else:
                                         result = pd.read_excel(client_path, sheet_name=sheet_name, header=header_row)
                                         if isinstance(result, dict):
@@ -4666,7 +4949,12 @@ def apply_formulas(request):
         
         # Persist canonical state
         info['formula_rules'] = formula_rules
-        info['formula_enhanced_data'] = formula_result['data']
+        # Avoid persisting full enhanced data for very large datasets; compute per page instead
+        SMALL_DATA_THRESHOLD = 2000
+        if len(formula_result.get('data', [])) <= SMALL_DATA_THRESHOLD:
+            info['formula_enhanced_data'] = formula_result['data']
+        else:
+            info.pop('formula_enhanced_data', None)
         info['enhanced_headers'] = formula_result['headers']
         info['current_template_headers'] = formula_result['headers']
         
@@ -5788,8 +6076,14 @@ def create_factwise_id(request):
             "strategy": strategy
         }
         
-        # Update session with enhanced data/headers for immediate UI reflect
-        info["formula_enhanced_data"] = new_data_rows
+        # Update session headers for immediate UI reflect
+        # Avoid persisting full data for large datasets; data pages are recomputed on demand
+        SMALL_DATA_THRESHOLD = 2000
+        if len(new_data_rows) <= SMALL_DATA_THRESHOLD:
+            info["formula_enhanced_data"] = new_data_rows
+        else:
+            # Ensure any previous large cache is cleared
+            info.pop("formula_enhanced_data", None)
         info["enhanced_headers"] = new_headers
         # Persist canonical headers to avoid alternating states across requests
         try:
@@ -5835,7 +6129,10 @@ def create_factwise_id(request):
             # Continue anyway, but log the error
         
         # Save all updated data and headers before version bump
-        info["formula_enhanced_data"] = new_data_rows
+        if len(new_data_rows) <= SMALL_DATA_THRESHOLD:
+            info["formula_enhanced_data"] = new_data_rows
+        else:
+            info.pop("formula_enhanced_data", None)
         info["enhanced_headers"] = new_headers
         info["current_template_headers"] = new_headers
         save_session(session_id, info)

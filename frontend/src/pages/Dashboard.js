@@ -544,12 +544,15 @@ const Dashboard = () => {
   const handleDownloadTemplate = async (upload) => {
     const uploadId = upload.session_id;
     setDownloadingTemplate(prev => ({ ...prev, [uploadId]: true }));
-    
+
     try {
       // For FW Template, download the original template file
       await api.downloadFileEnhanced(uploadId, 'template');
+      console.log('Template download completed successfully');
     } catch (err) {
       console.error('Error downloading template file:', err);
+      // Show user-friendly error message
+      alert(`Failed to download template: ${err.message || 'Unknown error occurred'}`);
     } finally {
       setDownloadingTemplate(prev => ({ ...prev, [uploadId]: false }));
     }

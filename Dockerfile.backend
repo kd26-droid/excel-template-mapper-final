@@ -27,6 +27,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy backend source
 COPY backend/ .
 
+# Copy FACTWISE.xlsx template file for FW Template downloads
+COPY FACTWISE.xlsx /app/FACTWISE.xlsx
+
 # Create necessary directories
 RUN mkdir -p media/uploads temp_downloads uploaded_files logs static
 

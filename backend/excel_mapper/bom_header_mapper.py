@@ -205,7 +205,29 @@ class BOMHeaderMapper:
                 raise FileNotFoundError(f"File not found: {file_path}")
             
             if str(file_path).lower().endswith('.csv'):
-                df = pd.read_csv(file_path, header=header_row, nrows=1)
+                # For CSV files, try different encodings to handle various formats
+                encodings_to_try = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1', 'windows-1252']
+                
+                for encoding in encodings_to_try:
+                    try:
+                        df = pd.read_csv(
+                            file_path, 
+                            header=header_row, 
+                            nrows=1,
+                            encoding=encoding,
+                            on_bad_lines='skip'
+                        )
+                        break
+                    except (UnicodeDecodeError, UnicodeError):
+                        continue
+                    except Exception as e:
+                        # If it's not an encoding error, try the next encoding
+                        if encoding == encodings_to_try[-1]:
+                            raise e
+                        continue
+                else:
+                    # If all encodings failed, raise the last error
+                    raise Exception("Could not read CSV file with any supported encoding")
             else:
                 if sheet_name is None:
                     xl_file = pd.ExcelFile(file_path)
@@ -232,7 +254,27 @@ class BOMHeaderMapper:
                 raise FileNotFoundError(f"File not found: {file_path}")
             
             if str(file_path).lower().endswith('.csv'):
-                df = pd.read_csv(file_path, header=header_row, nrows=sample_rows)
+                # For CSV files, try different encodings to handle various formats
+                encodings_to_try = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1', 'windows-1252']
+                
+                for encoding in encodings_to_try:
+                    try:
+                        df = pd.read_csv(
+                            file_path,
+                            header=header_row,
+                            nrows=sample_rows,
+                            encoding=encoding,
+                            on_bad_lines='skip'
+                        )
+                        break
+                    except (UnicodeDecodeError, UnicodeError):
+                        continue
+                    except Exception as e:
+                        if encoding == encodings_to_try[-1]:
+                            raise e
+                        continue
+                else:
+                    raise Exception("Could not read CSV file with any supported encoding")
             else:
                 if sheet_name is None:
                     xl_file = pd.ExcelFile(file_path)

@@ -38,11 +38,8 @@ python manage.py migrate --verbosity 1
 
 # Start Gunicorn in the background
 echo "🌐 Starting Gunicorn server..."
-gunicorn excel_mapping.wsgi:application \
-    --bind=0.0.0.0:8000 \
-    --timeout 600 \
-    --workers 2 \
-    --daemon
+# Use config file to ensure single worker and consistent timeouts for session stability
+gunicorn -c gunicorn.conf.py excel_mapping.wsgi:application --daemon
 
 # Start SSH (for Azure Portal SSH)
 echo "🔐 Preparing SSH server..."

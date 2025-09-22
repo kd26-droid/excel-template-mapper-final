@@ -318,7 +318,7 @@ const EnhancedDataEditor = () => {
     try {
       setPageLoading(true);
       // Add timeout for large datasets - give more time for larger page sizes
-      const timeoutMs = size > 1000 ? 60000 : size > 500 ? 30000 : 15000;
+      const timeoutMs = size >= 5000 ? 120000 : (size > 1000 ? 60000 : (size > 500 ? 30000 : 15000));
       showSnackbar(size > 1000 ? `Loading ${size} rows, this may take a moment...` : '', 'info');
       
       const controller = new AbortController();
@@ -327,7 +327,8 @@ const EnhancedDataEditor = () => {
       const resp = await api.getMappedDataWithSpecs(sessionId, targetPage, size, true, { 
         force_fresh: true, 
         _fresh: Date.now(),
-        signal: controller.signal 
+        signal: controller.signal,
+        timeoutMs
       });
       clearTimeout(timeoutId);
       
@@ -1164,13 +1165,18 @@ const EnhancedDataEditor = () => {
   const handleDownloadConverted = useCallback(async () => {
     try {
       setDownloadLoading(true);
-      await api.downloadFileEnhanced(sessionId, 'converted');
+      // Extract column order from current columnDefs (excluding row number column)
+      const currentColumnOrder = columnDefs
+        .filter(col => col.field && col.field !== '__row_number__')
+        .map(col => col.field);
+
+      await api.downloadFileEnhanced(sessionId, 'converted', null, currentColumnOrder);
     } catch (e) {
       showSnackbar(e.message || 'Failed to download converted file', 'error');
     } finally {
       setDownloadLoading(false);
     }
-  }, [sessionId, showSnackbar]);
+  }, [sessionId, showSnackbar, columnDefs]);
 
   // No download-original per request
 

@@ -153,11 +153,29 @@ const UploadFiles = () => {
       
       // Read the file to extract sheet names and column headers for Excel/CSV files
       const reader = new FileReader();
+      const isCSV = file.name.toLowerCase().endsWith('.csv');
+      
       reader.onload = (evt) => {
         try {
           const data = evt.target.result;
-          // For CSV files, XLSX reads them as a single sheet
-          const workbook = XLSX.read(data, { type: 'binary' });
+          let workbook;
+          
+          if (isCSV) {
+            // For CSV files, use text reading with proper parsing options
+            workbook = XLSX.read(data, { 
+              type: 'string',
+              codepage: 65001, // UTF-8
+              raw: false,
+              dateNF: 'YYYY-MM-DD',
+              cellDates: true,
+              cellNF: false,
+              cellText: false
+            });
+          } else {
+            // For Excel files, use binary reading
+            workbook = XLSX.read(data, { type: 'binary' });
+          }
+          
           const sheets = workbook.SheetNames;
           setClientSheetNames(sheets);
           setSelectedClientSheet(sheets[0]); // Auto-select first sheet
@@ -165,20 +183,142 @@ const UploadFiles = () => {
           // Extract column headers from the first sheet
           if (sheets.length > 0) {
             const firstSheet = workbook.Sheets[sheets[0]];
-            const jsonData = XLSX.utils.sheet_to_json(firstSheet, { header: 1 });
-            // Parse headers for potential future use
-            if (jsonData.length > 0 && jsonData[0]) {
-              const headers = jsonData[0].filter(header => header && header.toString().trim() !== '');
+            const jsonData = XLSX.utils.sheet_to_json(firstSheet, { 
+              header: 1,
+              raw: false,
+              defval: '' // Default value for empty cells
+            });
+            
+            console.log('Raw sheet data:', jsonData);
+            
+            // Smart header detection: find the row with the most non-empty columns
+            let bestHeaderRow = 0;
+            let maxColumns = 0;
+            
+            // Check first 5 rows for potential headers
+            for (let i = 0; i < Math.min(5, jsonData.length); i++) {
+              if (jsonData[i]) {
+                const nonEmptyColumns = jsonData[i].filter(header => 
+                  header !== null && 
+                  header !== undefined && 
+                  header.toString().trim() !== ''
+                ).length;
+                
+                console.log(`Row ${i + 1} has ${nonEmptyColumns} non-empty columns:`, jsonData[i]);
+                
+                if (nonEmptyColumns > maxColumns) {
+                  maxColumns = nonEmptyColumns;
+                  bestHeaderRow = i;
+                }
+              }
+            }
+            
+            console.log(`Best header row detected: ${bestHeaderRow + 1} with ${maxColumns} columns`);
+            
+            // Parse headers from the best header row
+            if (jsonData.length > bestHeaderRow && jsonData[bestHeaderRow]) {
+              const headers = jsonData[bestHeaderRow].filter(header => 
+                header !== null && 
+                header !== undefined && 
+                header.toString().trim() !== ''
+              );
               console.log('Available columns:', headers);
+              console.log('Total columns found:', headers.length);
+              
+              if (headers.length === 0) {
+                console.warn('No valid headers found in the file');
+                setError('No valid column headers found in the file. Please check the file format and ensure it has proper headers.');
+                return;
+              }
+              
+              // Update the header row setting to the detected row
+              if (bestHeaderRow !== 0) {
+                setClientHeaderRow(bestHeaderRow + 1);
+                console.log(`Auto-detected header row: ${bestHeaderRow + 1}`);
+              }
+            } else {
+              console.warn('No data found in the file');
+              setError('The file appears to be empty or has no data.');
+              return;
             }
           }
         } catch (err) {
           console.error('Error reading file:', err);
           const fileType = file.name.toLowerCase().endsWith('.csv') ? 'CSV' : 'Excel';
-          setError(`Error reading ${fileType} file. Please make sure it's a valid ${fileType} file.`);
+          
+          // For CSV files, try fallback reading methods
+          if (isCSV && !err.message.includes('fallback attempted')) {
+            console.log('Attempting fallback CSV reading method...');
+            try {
+              // Fallback: try reading as binary for CSV files with encoding issues
+              const fallbackWorkbook = XLSX.read(evt.target.result, { 
+                type: 'string',
+                raw: true,
+                codepage: 1252 // Windows-1252 (common alternative)
+              });
+              
+              const fallbackSheets = fallbackWorkbook.SheetNames;
+              setClientSheetNames(fallbackSheets);
+              setSelectedClientSheet(fallbackSheets[0]);
+              
+              if (fallbackSheets.length > 0) {
+                const fallbackSheet = fallbackWorkbook.Sheets[fallbackSheets[0]];
+                const fallbackJsonData = XLSX.utils.sheet_to_json(fallbackSheet, { 
+                  header: 1,
+                  raw: false,
+                  defval: ''
+                });
+                
+                console.log('Fallback CSV data:', fallbackJsonData);
+                
+                if (fallbackJsonData.length > 0) {
+                  // Same smart header detection for fallback
+                  let bestHeaderRow = 0;
+                  let maxColumns = 0;
+                  
+                  for (let i = 0; i < Math.min(5, fallbackJsonData.length); i++) {
+                    if (fallbackJsonData[i]) {
+                      const nonEmptyColumns = fallbackJsonData[i].filter(header => 
+                        header !== null && 
+                        header !== undefined && 
+                        header.toString().trim() !== ''
+                      ).length;
+                      
+                      if (nonEmptyColumns > maxColumns) {
+                        maxColumns = nonEmptyColumns;
+                        bestHeaderRow = i;
+                      }
+                    }
+                  }
+                  
+                  if (maxColumns > 0) {
+                    if (bestHeaderRow !== 0) {
+                      setClientHeaderRow(bestHeaderRow + 1);
+                    }
+                    console.log('Fallback CSV parsing successful');
+                    return; // Success with fallback
+                  }
+                }
+              }
+              
+              throw new Error('Fallback parsing also failed');
+            } catch (fallbackErr) {
+              console.error('Fallback CSV reading also failed:', fallbackErr);
+              setError(`Error reading ${fileType} file. Please make sure it's a valid ${fileType} file with proper formatting. Both UTF-8 and Windows-1252 encoding attempts failed.`);
+              return;
+            }
+          }
+          
+          setError(`Error reading ${fileType} file. Please make sure it's a valid ${fileType} file with proper formatting.`);
         }
       };
-      reader.readAsBinaryString(file);
+      
+      // Use different reading methods for CSV vs Excel files
+      if (isCSV) {
+        reader.readAsText(file, 'UTF-8'); // Read CSV as text with UTF-8 encoding
+      } else {
+        reader.readAsBinaryString(file); // Read Excel as binary
+      }
 
       // Do NOT persist to sessionStorage here.
       // Persistence only happens on successful upload
@@ -193,7 +333,9 @@ const UploadFiles = () => {
       accept: {
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
         'application/vnd.ms-excel': ['.xls'],
-        'text/csv': ['.csv']
+        'text/csv': ['.csv'],
+        'application/csv': ['.csv'],
+        'text/plain': ['.csv']
       },
       maxFiles: 1
     });

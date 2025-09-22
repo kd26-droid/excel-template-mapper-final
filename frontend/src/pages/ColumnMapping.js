@@ -26,6 +26,7 @@ import {
   Library,
   X,
   Settings,
+  ArrowLeft,
 } from 'lucide-react';
 import {
   Dialog,
@@ -307,6 +308,25 @@ export default function ColumnMapping() {
   // Global loading state
   const [globalLoading, setGlobalLoading] = useState(false);
   useGlobalBlock(globalLoading);
+  
+  // Action-specific loading states
+  const [mappingActionLoading, setMappingActionLoading] = useState(false);
+  const [defaultValueLoading, setDefaultValueLoading] = useState(false);
+  const [columnCountLoading, setColumnCountLoading] = useState(false);
+  
+  // Mapping counter for loader frequency control
+  const mappingCounterRef = useRef(0);
+  
+  // Helper function to determine if we should show loader (every 3rd mapping)
+  const shouldShowMappingLoader = () => {
+    mappingCounterRef.current += 1;
+    return mappingCounterRef.current % 3 === 0;
+  };
+  
+  // Helper function to reset mapping counter
+  const resetMappingCounter = () => {
+    mappingCounterRef.current = 0;
+  };
   
   // Setup global loader callback
   useEffect(() => {
@@ -1326,6 +1346,7 @@ export default function ColumnMapping() {
 
   // A) Rebuild sequence for column count updates
   const updateColumnCounts = async (newCounts) => {
+    setColumnCountLoading(true);
     try {
       // Allow any just-applied state changes (like Clear All) to settle before snapshot
       await new Promise(r => setTimeout(r, 50));
@@ -1594,8 +1615,11 @@ export default function ColumnMapping() {
       console.error('❌ Error updating column counts:', error);
       isRebuildingRef.current = false;
     } finally {
+      // Wait for 1 second to show loading state
+      await new Promise(resolve => setTimeout(resolve, 1000));
       // reset suppression flag after handling one update cycle
       suppressRestoreRef.current = false;
+      setColumnCountLoading(false);
     }
   };
 
@@ -1619,6 +1643,7 @@ export default function ColumnMapping() {
       setIsInitializingMappings(true);
       isInitializingRef.current = true;
       autoApplyTriggeredRef.current = false; // Reset for new session
+      resetMappingCounter(); // Reset counter when loading new data
       // eslint-disable-next-line no-console
       console.log('🔧 DEBUG: loadData started - isInitializingMappings set to true');
       
@@ -2601,65 +2626,86 @@ export default function ColumnMapping() {
   // createEdge function is hoisted above as function declaration to avoid TDZ
 
   // Handle default value dialog
-  const handleSaveDefaultValue = () => {
+  const handleSaveDefaultValue = async () => {
     if (!selectedTemplateField || !defaultValueText.trim()) return;
     
-    // Save the default value mapping
-    setDefaultValueMappings(prev => ({
-      ...prev,
-      [selectedTemplateField.name]: defaultValueText.trim()
-    }));
+    setDefaultValueLoading(true);
     
-    // Update the specific template node to show the default value tag
-    setNodes(currentNodes => currentNodes.map(node => {
-      if (node.id === selectedTemplateField.id) {
-        return {
-          ...node,
-          data: {
-            ...node.data,
-            hasDefaultValue: true,
-            defaultValue: defaultValueText.trim()
-          }
-        };
-      }
-      return node;
-    }));
-    
-    // Close dialog and reset state
-    setShowDefaultValueDialog(false);
-    setSelectedTemplateField(null);
-    setDefaultValueText('');
-    
-    // eslint-disable-next-line no-console
-    console.log(`Set default value "${defaultValueText.trim()}" for field "${selectedTemplateField.name}"`);
+    try {
+      // Save the default value mapping
+      setDefaultValueMappings(prev => ({
+        ...prev,
+        [selectedTemplateField.name]: defaultValueText.trim()
+      }));
+      
+      // Update the specific template node to show the default value tag
+      setNodes(currentNodes => currentNodes.map(node => {
+        if (node.id === selectedTemplateField.id) {
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              hasDefaultValue: true,
+              defaultValue: defaultValueText.trim()
+            }
+          };
+        }
+        return node;
+      }));
+      
+      // Wait for 1 second to show loading state
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      // Close dialog and reset state
+      setShowDefaultValueDialog(false);
+      setSelectedTemplateField(null);
+      setDefaultValueText('');
+      
+      // eslint-disable-next-line no-console
+      console.log(`Set default value "${defaultValueText.trim()}" for field "${selectedTemplateField.name}"`);
+    } finally {
+      setDefaultValueLoading(false);
+    }
   };
 
-  const handleClearDefaultValue = () => {
+  const handleClearDefaultValue = async () => {
     if (!selectedTemplateField) return;
-    const field = selectedTemplateField.name;
-    let nextDefaults = {};
-    setDefaultValueMappings(prev => {
-      const next = { ...(prev || {}) };
-      delete next[field];
-      nextDefaults = next;
-      return next;
-    });
-    // Persist cleared defaults with current mappings
+    
+    setDefaultValueLoading(true);
+    
     try {
-      const mappingsToSave = edges
-        .filter(e => !(e?.data && e.data.isVirtual))
-        .map(edge => {
-          const sourceIdx = parseInt(edge.source.replace('c-', ''));
-          const targetIdx = parseInt(edge.target.replace('t-', ''));
-          const sourceColumn = clientHeaders[sourceIdx];
-          const targetLabel = (templateHeaders[targetIdx] || "").toString().trim();
-          return sourceColumn && targetLabel ? { source: sourceColumn.trim(), target: targetLabel } : null;
-        })
-        .filter(Boolean);
-      api.saveColumnMappings(sessionId, { mappings: mappingsToSave, default_values: nextDefaults });
-    } catch (_) {}
-    setShowDefaultValueDialog(false);
-    setDefaultValueText('');
+      const field = selectedTemplateField.name;
+      let nextDefaults = {};
+      setDefaultValueMappings(prev => {
+        const next = { ...(prev || {}) };
+        delete next[field];
+        nextDefaults = next;
+        return next;
+      });
+      
+      // Persist cleared defaults with current mappings
+      try {
+        const mappingsToSave = edges
+          .filter(e => !(e?.data && e.data.isVirtual))
+          .map(edge => {
+            const sourceIdx = parseInt(edge.source.replace('c-', ''));
+            const targetIdx = parseInt(edge.target.replace('t-', ''));
+            const sourceColumn = clientHeaders[sourceIdx];
+            const targetLabel = (templateHeaders[targetIdx] || "").toString().trim();
+            return sourceColumn && targetLabel ? { source: sourceColumn.trim(), target: targetLabel } : null;
+          })
+          .filter(Boolean);
+        api.saveColumnMappings(sessionId, { mappings: mappingsToSave, default_values: nextDefaults });
+      } catch (_) {}
+      
+      // Wait for 1 second to show loading state
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      setShowDefaultValueDialog(false);
+      setDefaultValueText('');
+    } finally {
+      setDefaultValueLoading(false);
+    }
   };
 
   const handleCancelDefaultValue = () => {
@@ -2707,7 +2753,7 @@ export default function ColumnMapping() {
   };
 
   // Enhanced node click handling for selection and mapping
-  const onNodeClick = useCallback((event, node) => {
+  const onNodeClick = useCallback(async (event, node) => {
     event.stopPropagation();
     
     if (node.id.startsWith('c-')) {
@@ -2722,53 +2768,69 @@ export default function ColumnMapping() {
         setNodes(prev => prev.map(n => ({ ...n, data: { ...n.data, isSelected: n.id === node.id } })));
       }
     } else if (node.id.startsWith('t-') && selectedSourceNode) {
-      // Target node clicked with source selected
-      const sourceIdx = parseInt(selectedSourceNode.replace('c-', ''));
-      const targetIdx = parseInt(node.id.replace('t-', ''));
+      // Target node clicked with source selected - check if we should show loader
+      const showLoader = shouldShowMappingLoader();
+      if (showLoader) {
+        setMappingActionLoading(true);
+      }
       
-      // Save state for undo
-      setMappingHistory(prev => [...prev, { nodes, edges }]);
-      
-      // Allow multiple connections from one source and multiple connections to same target
-      const newEdge = createEdge(sourceIdx, targetIdx, false);
-      setEdges(prev => addEdge(newEdge, prev));
-      
-      // Update node connection states
-      const sourceNode = nodes.find(n => n.id === selectedSourceNode);
-      
-      setNodes(prev => prev.map(n => {
-        if (n.id === selectedSourceNode) {
-          // Update source node with target node's label
-          const targetNode = prev.find(t => t.id === node.id);
-          return {
-            ...n,
-            data: {
-              ...n.data,
-              isSelected: false,
-              isConnected: true,
-              mappedFromLabel: targetNode ? targetNode.data.originalLabel : ''
-            }
-          };
+      try {
+        const sourceIdx = parseInt(selectedSourceNode.replace('c-', ''));
+        const targetIdx = parseInt(node.id.replace('t-', ''));
+        
+        // Save state for undo
+        setMappingHistory(prev => [...prev, { nodes, edges }]);
+        
+        // Allow multiple connections from one source and multiple connections to same target
+        const newEdge = createEdge(sourceIdx, targetIdx, false);
+        setEdges(prev => addEdge(newEdge, prev));
+        
+        // Update node connection states
+        const sourceNode = nodes.find(n => n.id === selectedSourceNode);
+        
+        setNodes(prev => prev.map(n => {
+          if (n.id === selectedSourceNode) {
+            // Update source node with target node's label
+            const targetNode = prev.find(t => t.id === node.id);
+            return {
+              ...n,
+              data: {
+                ...n.data,
+                isSelected: false,
+                isConnected: true,
+                mappedFromLabel: targetNode ? targetNode.data.originalLabel : ''
+              }
+            };
+          }
+          if (n.id === node.id) {
+            // Update target node with source node's label
+            return {
+              ...n,
+              data: {
+                ...n.data,
+                label: node.data.originalLabel,
+                mappedToLabel: sourceNode.data.originalLabel,
+                isConnected: true,
+                isSelected: false,
+                isFromTemplate: false, // Manual mapping overrides template
+                isSpecificationMapping: false // Manual mapping overrides specification
+              }
+            };
+          }
+          return n;
+        }));
+        
+        // Only wait and show loader on every 3rd mapping
+        if (showLoader) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
         }
-        if (n.id === node.id) {
-          // Update target node with source node's label
-          return {
-            ...n,
-            data: {
-              ...n.data,
-              label: node.data.originalLabel,
-              mappedToLabel: sourceNode.data.originalLabel,
-              isConnected: true,
-              isSelected: false,
-              isFromTemplate: false, // Manual mapping overrides template
-              isSpecificationMapping: false // Manual mapping overrides specification
-            }
-          };
+        
+        setSelectedSourceNode(null);
+      } finally {
+        if (showLoader) {
+          setMappingActionLoading(false);
         }
-        return n;
-      }));
-      
-      setSelectedSourceNode(null);
+      }
     } else if (node.id.startsWith('t-') && !selectedSourceNode) {
       // Template node clicked without source selected - check if unmapped
       const targetIdx = parseInt(node.id.replace('t-', ''));
@@ -2941,53 +3003,70 @@ export default function ColumnMapping() {
   // the requirement to maintain the exact order from the uploaded Excel file.
 
   // Handle new connections
-  const onConnect = useCallback((connection) => {
-    // Save state for undo
-    setMappingHistory(prev => [...prev, { nodes, edges }]);
+  const onConnect = useCallback(async (connection) => {
+    // Check if we should show loader (every 3rd mapping)
+    const showLoader = shouldShowMappingLoader();
+    if (showLoader) {
+      setMappingActionLoading(true);
+    }
     
-    // Allow multiple connections from one source and multiple connections to same target
-    const newEdge = createEdge(
-      parseInt(connection.source.replace('c-', '')),
-      parseInt(connection.target.replace('t-', '')),
-      false
-    );
-    setEdges(prevEdges => addEdge(newEdge, prevEdges));
-    
-    // Get source and target nodes
-    const sourceNode = nodes.find(n => n.id === connection.source);
-    const targetNode = nodes.find(n => n.id === connection.target);
-    
-    // Update node connection states
-    setNodes(prev => prev.map(node => {
-      if (node.id === connection.source) {
-        // Update source node with target node's label
-        return {
-          ...node,
-          data: {
-            ...node.data,
-            isConnected: true,
-            isFromTemplate: false, // Manual connection overrides template
-            isSpecificationMapping: false, // Manual connection overrides specification
-            mappedFromLabel: targetNode ? targetNode.data.originalLabel : ''
-          }
-        };
+    try {
+      // Save state for undo
+      setMappingHistory(prev => [...prev, { nodes, edges }]);
+      
+      // Allow multiple connections from one source and multiple connections to same target
+      const newEdge = createEdge(
+        parseInt(connection.source.replace('c-', '')),
+        parseInt(connection.target.replace('t-', '')),
+        false
+      );
+      setEdges(prevEdges => addEdge(newEdge, prevEdges));
+      
+      // Get source and target nodes
+      const sourceNode = nodes.find(n => n.id === connection.source);
+      const targetNode = nodes.find(n => n.id === connection.target);
+      
+      // Update node connection states
+      setNodes(prev => prev.map(node => {
+        if (node.id === connection.source) {
+          // Update source node with target node's label
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              isConnected: true,
+              isFromTemplate: false, // Manual connection overrides template
+              isSpecificationMapping: false, // Manual connection overrides specification
+              mappedFromLabel: targetNode ? targetNode.data.originalLabel : ''
+            }
+          };
+        }
+        if (node.id === connection.target) {
+          // Update target node with source node's label
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              isConnected: true,
+              isFromTemplate: false, // Manual connection overrides template
+              isSpecificationMapping: false, // Manual connection overrides specification
+              mappedToLabel: sourceNode ? sourceNode.data.originalLabel : ''
+            }
+          };
+        }
+        return node;
+      }));
+      
+      // Only wait and show loader on every 3rd mapping
+      if (showLoader) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
-      if (node.id === connection.target) {
-        // Update target node with source node's label
-        return {
-          ...node,
-          data: {
-            ...node.data,
-            isConnected: true,
-            isFromTemplate: false, // Manual connection overrides template
-            isSpecificationMapping: false, // Manual connection overrides specification
-            mappedToLabel: sourceNode ? sourceNode.data.originalLabel : ''
-          }
-        };
+    } finally {
+      if (showLoader) {
+        setMappingActionLoading(false);
       }
-      return node;
-    }));
-  }, [nodes, edges, setEdges, setNodes]);
+    }
+  }, [nodes, edges, setEdges, setNodes, shouldShowMappingLoader]);
 
   // Handle edge click for deletion
   const onEdgeClick = useCallback((event, edge) => {
@@ -3105,6 +3184,8 @@ export default function ColumnMapping() {
     // Clear default values as well (blue tags)
     setDefaultValueMappings({});
     mappingsCacheRef.current = [];
+    // Reset mapping counter when clearing all mappings
+    resetMappingCounter();
     setNodes(prev => prev.map(node => ({
       ...node,
       data: {
@@ -3152,6 +3233,8 @@ export default function ColumnMapping() {
         setMappingHistory(prev => prev.slice(0, -1));
         setSelectedSourceNode(null);
         setSelectedEdge(null);
+        // Reset counter when undoing to maintain consistent behavior
+        resetMappingCounter();
       } else {
         // eslint-disable-next-line no-console
         console.warn('Invalid state in mapping history, reinitializing nodes');
@@ -3159,6 +3242,7 @@ export default function ColumnMapping() {
         initializeNodes(clientHeaders, templateHeaders, null, [], defaultValueMappings, setIsInitializingMappings);
         setEdges([]);
         setMappingHistory([]);
+        resetMappingCounter();
       }
     } else {
       // eslint-disable-next-line no-console
@@ -3822,8 +3906,16 @@ export default function ColumnMapping() {
       {/* Clean Top Header - Just essentials */}
       <div className="bg-white shadow-xl border-b border-gray-200 px-8 py-4">
         <div className="flex justify-between items-center">
-          {/* Left side - Logo and Template Status */}
+          {/* Left side - Back button, Logo and Template Status */}
           <div className="flex items-center gap-4">
+            <button
+              onClick={() => navigate('/upload')}
+              className="flex items-center gap-2 px-4 py-2 text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg transition-colors"
+              title="Back to Upload Files"
+            >
+              <ArrowLeft size={20} />
+              <span className="text-sm font-medium">Back</span>
+            </button>
             <div className="w-12 h-12 bg-gradient-to-br from-blue-600 to-blue-800 rounded-xl flex items-center justify-center shadow-lg">
               <div className="w-6 h-6 bg-white rounded-md opacity-90"></div>
             </div>
@@ -4137,9 +4229,9 @@ export default function ColumnMapping() {
                       customer_id_pairs_count: columnCounts.customer_id_pairs_count || 1
                     })}
                     className="w-6 h-6 bg-red-200 hover:bg-red-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-red-700"
-                    disabled={columnCounts.tags_count <= 1}
+                    disabled={columnCounts.tags_count <= 1 || columnCountLoading}
                   >
-                    -
+                    {columnCountLoading ? '⏳' : '-'}
                   </button>
                   <span className="w-8 text-center text-sm font-semibold">{columnCounts.tags_count}</span>
                   <button 
@@ -4149,8 +4241,9 @@ export default function ColumnMapping() {
                       customer_id_pairs_count: columnCounts.customer_id_pairs_count || 1
                     })}
                     className="w-6 h-6 bg-green-200 hover:bg-green-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-green-700"
+                    disabled={columnCountLoading}
                   >
-                    +
+                    {columnCountLoading ? '⏳' : '+'}
                   </button>
                 </div>
               </div>
@@ -4166,9 +4259,9 @@ export default function ColumnMapping() {
                       customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
                     })}
                     className="w-6 h-6 bg-red-200 hover:bg-red-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-red-700"
-                    disabled={columnCounts.spec_pairs_count <= 1}
+                    disabled={columnCounts.spec_pairs_count <= 1 || columnCountLoading}
                   >
-                    -
+                    {columnCountLoading ? '⏳' : '-'}
                   </button>
                   <span className="w-8 text-center text-sm font-semibold">{columnCounts.spec_pairs_count}</span>
                   <button 
@@ -4178,8 +4271,9 @@ export default function ColumnMapping() {
                       customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
                     })}
                     className="w-6 h-6 bg-green-200 hover:bg-green-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-green-700"
+                    disabled={columnCountLoading}
                   >
-                    +
+                    {columnCountLoading ? '⏳' : '+'}
                   </button>
                 </div>
               </div>
@@ -4195,9 +4289,9 @@ export default function ColumnMapping() {
                       customer_id_pairs_count: Math.max(1, columnCounts.customer_id_pairs_count - 1)
                     })}
                     className="w-6 h-6 bg-red-200 hover:bg-red-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-red-700"
-                    disabled={columnCounts.customer_id_pairs_count <= 1}
+                    disabled={columnCounts.customer_id_pairs_count <= 1 || columnCountLoading}
                   >
-                    -
+                    {columnCountLoading ? '⏳' : '-'}
                   </button>
                   <span className="w-8 text-center text-sm font-semibold">{columnCounts.customer_id_pairs_count}</span>
                   <button 
@@ -4207,8 +4301,9 @@ export default function ColumnMapping() {
                       customer_id_pairs_count: columnCounts.customer_id_pairs_count + 1
                     })}
                     className="w-6 h-6 bg-green-200 hover:bg-green-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-green-700"
+                    disabled={columnCountLoading}
                   >
-                    +
+                    {columnCountLoading ? '⏳' : '+'}
                   </button>
                 </div>
               </div>
@@ -4490,17 +4585,24 @@ export default function ColumnMapping() {
                 {selectedTemplateField?.name && defaultValueMappings && Object.prototype.hasOwnProperty.call(defaultValueMappings, selectedTemplateField.name) && (
                   <button
                     onClick={handleClearDefaultValue}
-                    className="px-6 py-2 bg-red-50 text-red-600 hover:bg-red-100 rounded-lg font-medium transition-colors"
+                    disabled={defaultValueLoading}
+                    className="px-6 py-2 bg-red-50 text-red-600 hover:bg-red-100 rounded-lg font-medium transition-colors flex items-center gap-2 disabled:opacity-50"
                   >
-                    Clear Default
+                    {defaultValueLoading && (
+                      <div className="w-4 h-4 border-2 border-red-600 border-t-transparent rounded-full animate-spin"></div>
+                    )}
+                    {defaultValueLoading ? 'Clearing...' : 'Clear Default'}
                   </button>
                 )}
                 <button
                   onClick={handleSaveDefaultValue}
-                  disabled={!defaultValueText.trim()}
-                  className="px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:bg-gray-300 text-white rounded-lg font-medium transition-colors"
+                  disabled={!defaultValueText.trim() || defaultValueLoading}
+                  className="px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:bg-gray-300 text-white rounded-lg font-medium transition-colors flex items-center gap-2"
                 >
-                  Set Default Value
+                  {defaultValueLoading && (
+                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                  )}
+                  {defaultValueLoading ? 'Setting...' : 'Set Default Value'}
                 </button>
               </div>
           </div>
@@ -4676,7 +4778,7 @@ export default function ColumnMapping() {
       </Dialog>
 
       {/* Global Loader Overlay */}
-      <LoaderOverlay visible={globalLoading} label="Processing..." />
+      <LoaderOverlay visible={globalLoading || mappingActionLoading} label={mappingActionLoading ? "Creating mapping..." : "Processing..."} />
     </div>
   );
 }

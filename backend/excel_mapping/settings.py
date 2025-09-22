@@ -118,8 +118,10 @@ CORS_ALLOWED_ORIGIN_REGEXES = [pattern.strip() for pattern in raw_origin_regexes
 CORS_ALLOW_ALL_ORIGINS = DEBUG  # Only allow all origins in development
 
 # File Upload Configuration
-FILE_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024  # 50MB
-DATA_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024  # 50MB
+# Stream large uploads to disk early to avoid memory pressure
+# Keep thresholds modest; Nginx enforces the true max body size
+FILE_UPLOAD_MAX_MEMORY_SIZE = int(os.environ.get('FILE_UPLOAD_MAX_MEMORY_SIZE', str(10 * 1024 * 1024)))  # 10MB
+DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.environ.get('DATA_UPLOAD_MAX_MEMORY_SIZE', str(10 * 1024 * 1024)))  # 10MB
 FILE_UPLOAD_PERMISSIONS = 0o644
 
 # Media and Static Files

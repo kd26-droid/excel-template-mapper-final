@@ -240,7 +240,9 @@ const api = {
         'Expires': '0'
       },
       signal: options.signal,
-      timeout: pageSize > 1000 ? 60000 : pageSize > 500 ? 30000 : 15000
+      timeout: (options.timeoutMs != null)
+        ? options.timeoutMs
+        : (pageSize > 2000 ? 120000 : (pageSize > 1000 ? 60000 : (pageSize > 500 ? 30000 : 15000)))
     });
   },
     
@@ -268,10 +270,11 @@ const api = {
    * @param {string} sessionId - Session ID
    * @param {string} format - File format ('excel' or 'csv')
    */
-  downloadProcessedFile: (sessionId, format = 'excel') =>
+  downloadProcessedFile: (sessionId, format = 'excel', columnOrder = null) =>
     axios.post(`${API_URL}/download/`, {
-      session_id: sessionId, 
-      format: format
+      session_id: sessionId,
+      format: format,
+      column_order: columnOrder
     }, {
       responseType: 'blob'
     }),
@@ -283,6 +286,15 @@ const api = {
   downloadOriginalFile: (sessionId) =>
     axios.get(`${API_URL}/download/original/`, {
       params: { session_id: sessionId },
+      responseType: 'blob'
+    }),
+
+  /**
+   * Download original uploaded template file
+   * @param {string} sessionId - Session ID
+   */
+  downloadTemplateFile: (sessionId) =>
+    axios.get(`${API_URL}/download/${sessionId}/template/`, {
       responseType: 'blob'
     }),
 
@@ -716,17 +728,21 @@ const api = {
    * @param {string} sessionId - Session ID
    * @param {string} fileType - 'original' or 'converted'
    * @param {string} customFilename - Optional custom filename
+   * @param {Array} columnOrder - Optional column order array
    */
-  downloadFileEnhanced: async (sessionId, fileType = 'converted', customFilename = null) => {
+  downloadFileEnhanced: async (sessionId, fileType = 'converted', customFilename = null, columnOrder = null) => {
     try {
       let response;
       let defaultFilename;
-      
+
       if (fileType === 'original') {
         response = await api.downloadOriginalFile(sessionId);
         defaultFilename = `original_file_${sessionId}.xlsx`;
+      } else if (fileType === 'template') {
+        response = await api.downloadTemplateFile(sessionId);
+        defaultFilename = `template_file_${sessionId}.xlsx`;
       } else {
-        response = await api.downloadProcessedFile(sessionId);
+        response = await api.downloadProcessedFile(sessionId, 'excel', columnOrder);
         defaultFilename = `converted_file_${sessionId}.xlsx`;
       }
       
