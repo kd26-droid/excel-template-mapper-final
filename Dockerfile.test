@@ -1,0 +1,37 @@
+# Test Environment Dockerfile
+FROM python:3.9-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Set work directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    gcc \
+    g++ \
+    libffi-dev \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy test requirements
+COPY test_requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r test_requirements.txt
+
+# Copy test script
+COPY test_workflow.py .
+
+# Create test files directory
+RUN mkdir -p test_files
+
+# Set permissions
+RUN chmod +x test_workflow.py
+
+# Default command
+CMD ["python", "test_workflow.py"]

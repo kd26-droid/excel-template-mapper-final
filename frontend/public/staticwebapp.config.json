@@ -1,0 +1,23 @@
+{
+  "routes": [
+    {
+      "route": "/*",
+      "serve": "/index.html",
+      "statusCode": 200
+    }
+  ],
+  "responseOverrides": {
+    "400": {
+      "rewrite": "/index.html"
+    },
+    "401": {
+      "rewrite": "/index.html" 
+    },
+    "403": {
+      "rewrite": "/index.html"
+    },
+    "404": {
+      "rewrite": "/index.html"
+    }
+  }
+}
