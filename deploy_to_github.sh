@@ -89,6 +89,15 @@ if [[ "$FORCE_PUSH" == true && "$BRANCH_NAME" == "main" ]]; then
   echo "Copying current workspace to clean main..."
   git checkout "${TEMP_BRANCH}" -- . 2>/dev/null || true
 
+  # Check for secrets before staging
+  echo "Checking for secrets in files..."
+  if grep -r "AZURE_DOCUMENT_INTELLIGENCE_KEY=" . --include="*.yml" --include="*.yaml" --include="*.env" | grep -v "your-azure-form-recognizer-key-here"; then
+    echo "⚠️  WARNING: Found potential Azure secrets in files!"
+    echo "Please replace real secrets with placeholders before pushing to GitHub."
+    echo "Example: AZURE_DOCUMENT_INTELLIGENCE_KEY=your-azure-form-recognizer-key-here"
+    exit 1
+  fi
+
   # Stage and commit everything
   git add -A
   git commit -m "${COMMIT_MSG}"
@@ -112,6 +121,15 @@ else
   else
     echo "Creating and switching to new branch ${BRANCH_NAME}"
     git checkout -b "${BRANCH_NAME}"
+  fi
+
+  # Check for secrets before staging
+  echo "Checking for secrets in files..."
+  if grep -r "AZURE_DOCUMENT_INTELLIGENCE_KEY=" . --include="*.yml" --include="*.yaml" --include="*.env" | grep -v "your-azure-form-recognizer-key-here"; then
+    echo "⚠️  WARNING: Found potential Azure secrets in files!"
+    echo "Please replace real secrets with placeholders before pushing to GitHub."
+    echo "Example: AZURE_DOCUMENT_INTELLIGENCE_KEY=your-azure-form-recognizer-key-here"
+    exit 1
   fi
 
   # Stage and commit changes
