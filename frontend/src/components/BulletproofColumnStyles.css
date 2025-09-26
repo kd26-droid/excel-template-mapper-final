@@ -1,0 +1,161 @@
+/**
+ * 🛡️ BULLETPROOF COLUMN STYLES
+ * Enhanced visibility styles for critical columns
+ * Ensures Tag and FactWise columns are ALWAYS visible
+ */
+
+/* Enhanced Tag Column Styling */
+.ag-header-formula {
+  background: linear-gradient(135deg, #4caf50, #66bb6a) !important;
+  color: white !important;
+  font-weight: 700 !important;
+  text-shadow: 1px 1px 2px rgba(0,0,0,0.3) !important;
+  border: 2px solid #2e7d32 !important;
+  box-shadow: 0 2px 8px rgba(76, 175, 80, 0.4) !important;
+}
+
+.ag-header-formula:hover {
+  background: linear-gradient(135deg, #2e7d32, #4caf50) !important;
+  transform: translateY(-1px) !important;
+  box-shadow: 0 4px 12px rgba(76, 175, 80, 0.6) !important;
+}
+
+/* Enhanced FactWise Column Styling */
+.ag-header-factwise {
+  background: linear-gradient(135deg, #ff9800, #ffb74d) !important;
+  color: white !important;
+  font-weight: 700 !important;
+  text-shadow: 1px 1px 2px rgba(0,0,0,0.3) !important;
+  border: 2px solid #f57c00 !important;
+  box-shadow: 0 2px 8px rgba(255, 152, 0, 0.4) !important;
+}
+
+.ag-header-factwise:hover {
+  background: linear-gradient(135deg, #f57c00, #ff9800) !important;
+  transform: translateY(-1px) !important;
+  box-shadow: 0 4px 12px rgba(255, 152, 0, 0.6) !important;
+}
+
+/* Enhanced cell styles for Tag columns */
+.ag-row .ag-cell[col-id*="Tag"] {
+  background: rgba(76, 175, 80, 0.1) !important;
+  border-left: 4px solid #4caf50 !important;
+  border-right: 1px solid #4caf50 !important;
+  font-weight: 600 !important;
+  position: relative;
+}
+
+.ag-row .ag-cell[col-id*="Tag"]:hover {
+  background: rgba(76, 175, 80, 0.2) !important;
+  box-shadow: inset 0 0 10px rgba(76, 175, 80, 0.3) !important;
+}
+
+/* Enhanced cell styles for FactWise columns */
+.ag-row .ag-cell[col-id*="Item code"],
+.ag-row .ag-cell[col-id*="Factwise ID"] {
+  background: rgba(255, 152, 0, 0.1) !important;
+  border-left: 4px solid #ff9800 !important;
+  border-right: 1px solid #ff9800 !important;
+  font-weight: 600 !important;
+  position: relative;
+}
+
+.ag-row .ag-cell[col-id*="Item code"]:hover,
+.ag-row .ag-cell[col-id*="Factwise ID"]:hover {
+  background: rgba(255, 152, 0, 0.2) !important;
+  box-shadow: inset 0 0 10px rgba(255, 152, 0, 0.3) !important;
+}
+
+/* Critical column indicators */
+.ag-cell.critical-column::after {
+  content: '🛡️';
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+/* Guaranteed visibility animation */
+@keyframes guaranteedVisible {
+  0% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.7); }
+  70% { box-shadow: 0 0 0 4px rgba(76, 175, 80, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0); }
+}
+
+@keyframes guaranteedVisibleOrange {
+  0% { box-shadow: 0 0 0 0 rgba(255, 152, 0, 0.7); }
+  70% { box-shadow: 0 0 0 4px rgba(255, 152, 0, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(255, 152, 0, 0); }
+}
+
+.ag-header-formula.guaranteed {
+  animation: guaranteedVisible 2s infinite;
+}
+
+.ag-header-factwise.guaranteed {
+  animation: guaranteedVisibleOrange 2s infinite;
+}
+
+/* Emergency visibility styles */
+.critical-column-missing {
+  background: linear-gradient(45deg, #f44336, #ff5722) !important;
+  color: white !important;
+  font-weight: 900 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 1px !important;
+  animation: urgentFlash 1s infinite alternate !important;
+}
+
+@keyframes urgentFlash {
+  from { opacity: 1; }
+  to { opacity: 0.7; }
+}
+
+/* Success confirmation styles */
+.bulletproof-validated {
+  position: relative;
+}
+
+.bulletproof-validated::before {
+  content: '✅ Bulletproof';
+  position: absolute;
+  top: -20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #4caf50;
+  color: white;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: bold;
+  z-index: 1000;
+  pointer-events: none;
+}
+
+/* Print styles to ensure visibility even in exports */
+@media print {
+  .ag-header-formula,
+  .ag-header-factwise {
+    background: #000 !important;
+    color: #fff !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+}
+
+/* Pulse animation for critical health alerts */
+@keyframes pulse {
+  0% { 
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(255, 69, 0, 0.7);
+  }
+  70% { 
+    transform: scale(1.05);
+    box-shadow: 0 0 0 4px rgba(255, 69, 0, 0);
+  }
+  100% { 
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(255, 69, 0, 0);
+  }
+}

@@ -1,0 +1,37 @@
+# Core Django and web framework
+Django==4.2.7
+djangorestframework==3.14.0
+django-cors-headers==4.3.1
+
+# Database
+dj-database-url==2.1.0
+psycopg2-binary
+
+# Cache
+redis==5.0.1
+django-redis==5.4.0
+
+# File processing
+pandas==2.2.0
+openpyxl==3.1.2
+xlrd==2.0.1
+rapidfuzz==3.5.2
+
+# HTTP client
+requests==2.32.3
+
+# Environment and configuration
+python-decouple==3.8
+
+# Production deployment
+gunicorn==21.2.0
+whitenoise==6.6.0
+
+# Azure services
+azure-storage-blob==12.19.0
+azure-identity==1.15.0
+azure-ai-documentintelligence==1.0.0
+
+# PDF processing
+pdf2image==1.17.0
+Pillow==10.0.1

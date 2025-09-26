@@ -1,0 +1,63 @@
+# Backend-only Dockerfile for local development
+FROM python:3.9-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Set work directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    gcc \
+    g++ \
+    libffi-dev \
+    libssl-dev \
+    poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY backend/requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy backend source
+COPY backend/ .
+
+# Copy FACTWISE.xlsx template file for FW Template downloads
+COPY FACTWISE.xlsx /app/FACTWISE.xlsx
+
+# Create necessary directories
+RUN mkdir -p media/uploads temp_downloads uploaded_files logs static
+
+# Set permissions
+RUN chmod -R 755 media temp_downloads uploaded_files logs static
+
+# Set environment variables
+ENV PYTHONPATH=/app
+ENV DJANGO_SETTINGS_MODULE=excel_mapping.settings
+
+# Collect static files
+RUN python manage.py collectstatic --noinput --verbosity 2 || echo "Static files collection done"
+
+# Run database migrations
+RUN python manage.py migrate --verbosity 2 || echo "Migrations done"
+
+# Expose port
+EXPOSE 8000
+
+# Start command - using single worker for session persistence
+CMD ["gunicorn", "excel_mapping.wsgi:application", \
+     "--bind", "0.0.0.0:8000", \
+     "--workers", "1", \
+     "--timeout", "600", \
+     "--max-requests", "1000", \
+     "--max-requests-jitter", "100", \
+     "--preload", \
+     "--access-logfile", "-", \
+     "--error-logfile", "-", \
+     "--log-level", "info"]

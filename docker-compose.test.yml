@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    environment:
+      - BASE_URL=http://backend:8000
+    volumes:
+      - ./test_files:/app/test_files
+      - ./test_results:/app/test_results
+    networks:
+      - excel-mapper-network
+    depends_on:
+      - backend
+    profiles:
+      - testing
+
+networks:
+  excel-mapper-network:
+    external: true
