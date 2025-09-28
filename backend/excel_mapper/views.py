@@ -545,13 +545,37 @@ def save_session(session_id, session_data):
     Universal session saving that persists across multiple workers.
     Saves to cache (shared), memory, and file.
     """
-    # Save to shared cache first (critical for Azure multi-worker)
-    cache.set(f"mapper:session:{session_id}", session_data, 86400)
-    # Keep compatibility with existing in-memory store
-    SESSION_STORE[session_id] = session_data
-    # Persist to file/blob storage
-    save_session_to_file(session_id, session_data)
-    logger.info(f"💾 Saved session {session_id} to cache, memory, and file")
+    try:
+        # Preserve critical flags like source_type across partial updates
+        existing = None
+        try:
+            existing = SESSION_STORE.get(session_id)
+            if not existing:
+                existing = load_session_from_file(session_id)
+        except Exception:
+            existing = None
+
+        if existing and 'source_type' in existing and 'source_type' not in session_data:
+            session_data['source_type'] = existing['source_type']
+
+        # As a last resort, infer PDF sessions from database
+        if 'source_type' not in session_data:
+            try:
+                from .models import PDFSession
+                if PDFSession.objects.filter(session_id=session_id).exists():
+                    session_data['source_type'] = 'pdf'
+            except Exception:
+                pass
+
+        # Save to shared cache first (critical for Azure multi-worker)
+        cache.set(f"mapper:session:{session_id}", session_data, 86400)
+        # Keep compatibility with existing in-memory store
+        SESSION_STORE[session_id] = session_data
+        # Persist to file/blob storage
+        save_session_to_file(session_id, session_data)
+        logger.info(f"💾 Saved session {session_id} to cache, memory, and file")
+    except Exception as e:
+        logger.error(f"Failed to save session {session_id}: {e}")
 
 
 # Utility: Fast total row count without loading full DataFrame
@@ -986,6 +1010,234 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
     except Exception as e:
         logger.error(f"Error in apply_column_mappings: {e}")
         return {'headers': [], 'data': []}
+
+
+@api_view(['POST'])
+def update_session_data(request):
+    """
+    Update session data with corrected values while preserving structure
+    """
+    try:
+        session_id = request.data.get('session_id')
+        headers = request.data.get('headers', [])
+        data_rows = request.data.get('data', [])
+        try:
+            logger.info(f"📝 CORRECTION: Received update for session {session_id}: headers={len(headers)} rows={len(data_rows)}")
+            if headers:
+                logger.info(f"📝 CORRECTION: First 10 headers: {headers[:10]}")
+            if data_rows:
+                sample_keys = list(data_rows[0].keys()) if isinstance(data_rows[0], dict) else []
+                logger.info(f"📝 CORRECTION: First row keys: {sample_keys}")
+        except Exception:
+            pass
+
+        if not session_id:
+            return Response({
+                'success': False,
+                'error': 'No session ID provided'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if not headers or not data_rows:
+            return Response({
+                'success': False,
+                'error': 'Headers and data are required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Get session info
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({
+                'success': False,
+                'error': 'Session not found'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Build canonical template headers (full set) using session counts
+        tags_count = info.get('tags_count', 3)
+        spec_pairs_count = info.get('spec_pairs_count', 3)
+        customer_id_pairs_count = info.get('customer_id_pairs_count', 1)
+
+        base_headers = [
+            'Item code', 'Item name', 'Description', 'Item type', 'Measurement unit',
+            'Procurement entity name', 'Notes', 'Internal notes', 'Procurement item', 'Sales item', 'Preferred vendor code'
+        ]
+
+        canonical_headers = []
+        canonical_headers.extend(base_headers)
+        for i in range(1, max(1, int(tags_count)) + 1):
+            canonical_headers.append(f'Tag_{i}')
+        for i in range(1, max(1, int(spec_pairs_count)) + 1):
+            canonical_headers.append(f'Specification_Name_{i}')
+            canonical_headers.append(f'Specification_Value_{i}')
+        for i in range(1, max(1, int(customer_id_pairs_count)) + 1):
+            canonical_headers.append(f'Customer_Identification_Name_{i}')
+            canonical_headers.append(f'Customer_Identification_Value_{i}')
+
+        # Prefer the fuller header set between session headers and canonical
+        existing_headers = (
+            info.get('current_template_headers') or
+            info.get('enhanced_headers') or
+            info.get('mapped_headers') or
+            info.get('client_headers') or
+            canonical_headers
+        )
+        # If still empty, attempt to derive from any existing data rows
+        if not existing_headers:
+            try:
+                current_data = info.get('formula_enhanced_data') or info.get('mapped_data') or info.get('data')
+                if current_data and isinstance(current_data, list):
+                    if isinstance(current_data[0], dict):
+                        existing_headers = list(current_data[0].keys())
+            except Exception:
+                existing_headers = canonical_headers
+
+        # Build tolerant header mapping from uploaded headers to the current dataset's canonical headers.
+        def _norm(h: str) -> str:
+            try:
+                s = str(h or '').strip().lower()
+                s = s.replace('_', ' ')
+                s = ' '.join(s.split())
+                # Keep only alphanumerics and single spaces
+                filtered = ''.join(ch for ch in s if ch.isalnum() or ch == ' ')
+                return ' '.join(filtered.split())
+            except Exception:
+                return ''
+
+        # Use the larger set to avoid losing dynamic columns
+        chosen_headers = existing_headers or canonical_headers
+        if len(chosen_headers) < len(canonical_headers):
+            chosen_headers = canonical_headers
+        canonical_headers = list(chosen_headers)
+        # Map normalized canonical name -> canonical header
+        canon_lookup = {_norm(h): h for h in canonical_headers}
+
+        # Enumerated canonical targets (ordered by suffix) for generic incoming headers
+        import re
+        def _suffix_idx(name: str) -> int:
+            try:
+                m = re.search(r"(\d+)$", str(name or ''))
+                return int(m.group(1)) if m else 0
+            except Exception:
+                return 0
+
+        tag_targets = sorted([h for h in canonical_headers if isinstance(h, str) and h.strip().lower().startswith('tag_')], key=_suffix_idx)
+        spec_name_targets = sorted([h for h in canonical_headers if isinstance(h, str) and _norm(h).startswith('specification name')], key=_suffix_idx)
+        spec_value_targets = sorted([h for h in canonical_headers if isinstance(h, str) and _norm(h).startswith('specification value')], key=_suffix_idx)
+        cust_name_targets = sorted([h for h in canonical_headers if isinstance(h, str) and _norm(h).startswith('customer identification name')], key=_suffix_idx)
+        cust_value_targets = sorted([h for h in canonical_headers if isinstance(h, str) and _norm(h).startswith('customer identification value')], key=_suffix_idx)
+
+        tag_i = 0
+        specn_i = 0
+        specv_i = 0
+        custn_i = 0
+        custv_i = 0
+
+        # Build mapping from incoming header -> canonical header
+        header_map = {}
+        for h in headers:
+            hn = _norm(h)
+            mapped = None
+            if hn in canon_lookup:
+                mapped = canon_lookup[hn]
+            elif hn == 'tag' and tag_i < len(tag_targets):
+                mapped = tag_targets[tag_i]; tag_i += 1
+            elif hn == 'specification name' and specn_i < len(spec_name_targets):
+                mapped = spec_name_targets[specn_i]; specn_i += 1
+            elif hn == 'specification value' and specv_i < len(spec_value_targets):
+                mapped = spec_value_targets[specv_i]; specv_i += 1
+            elif hn == 'customer identification name' and custn_i < len(cust_name_targets):
+                mapped = cust_name_targets[custn_i]; custn_i += 1
+            elif hn == 'customer identification value' and custv_i < len(cust_value_targets):
+                mapped = cust_value_targets[custv_i]; custv_i += 1
+
+            if mapped:
+                header_map[h] = mapped
+
+        matching_headers = sorted(set(header_map.values())) if header_map else []
+        logger.info(f"📝 CORRECTION: Mapped {len(matching_headers)} headers to canonical; example: {matching_headers[:10]}")
+
+        if not matching_headers:
+            return Response({
+                'success': False,
+                'error': 'No matching headers found. Upload file must contain headers that exist in the current dataset.',
+                'details': {
+                    'received_headers': headers,
+                    'expected_headers': existing_headers
+                }
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        logger.info(f"🔄 Updating session {session_id} data with {len(data_rows)} rows and {len(matching_headers)} matching headers")
+
+        # FULL REPLACE: Build new dataset strictly from uploaded rows
+        # Normalize incoming rows using header_map first
+        normalized_rows = []
+        for r in data_rows:
+            try:
+                nr = {}
+                for in_h, val in r.items():
+                    mapped_h = header_map.get(in_h)
+                    if not mapped_h:
+                        # Fallback: direct canonical match by normalized name
+                        nh = _norm(in_h)
+                        mapped_h = canon_lookup.get(nh)
+                    if mapped_h:
+                        nr[mapped_h] = val
+                normalized_rows.append(nr)
+            except Exception:
+                normalized_rows.append({})
+
+        # Construct rows with all canonical headers in order and drop entirely blank rows
+        updated_rows = []
+        dropped_blank = 0
+        for nr in normalized_rows:
+            row_out = {h: nr.get(h, '') for h in canonical_headers}
+            # Determine if the row is entirely blank (ignore whitespace and common placeholders)
+            non_empty = False
+            for v in row_out.values():
+                s = '' if v is None else str(v).strip()
+                if s and s.lower() not in ('none', 'null', 'nan'):
+                    non_empty = True
+                    break
+            if non_empty:
+                updated_rows.append(row_out)
+            else:
+                dropped_blank += 1
+        logger.info(f"📝 CORRECTION: Built {len(updated_rows)} normalized rows with {len(canonical_headers)} canonical headers (dropped {dropped_blank} blank rows)")
+
+        # Update session info: persist updated rows as the active dataset for Data Editor
+        info['data'] = updated_rows
+        # Make the corrected dataset the primary enhanced data source so Data Editor renders it immediately
+        info['formula_enhanced_data'] = updated_rows
+        info['enhanced_headers'] = canonical_headers
+        # Clear any conflicting caches
+        if 'mapped_data' in info:
+            del info['mapped_data']
+
+        # Mark correction mode to bypass cleanup and prefer enhanced data
+        info['uploaded_via_correction'] = True
+        logger.info(f"📝 CORRECTION: Session {session_id} saved with uploaded_via_correction=True; template_version will increment")
+
+        # Update template version to trigger refresh
+        info['template_version'] = info.get('template_version', 0) + 1
+
+        # Save updated session
+        save_session(session_id, info)
+
+        logger.info(f"✅ Session {session_id} data updated successfully with {len(updated_rows)} rows")
+
+        return Response({
+            'success': True,
+            'message': f'Data updated successfully. {len(matching_headers)} columns updated across {len(updated_rows)} rows.',
+            'updated_rows': len(updated_rows),
+            'updated_columns': len(matching_headers),
+            'template_version': info['template_version']
+        })
+
+    except Exception as e:
+        logger.error(f"Error updating session data: {e}")
+        return Response({
+            'success': False,
+            'error': f'Failed to update session data: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['GET'])
@@ -1603,6 +1855,54 @@ def get_headers(request, session_id):
             else:
                 template_optionals.append(bool(template_optionals_map.get(str(h), False)))
         
+        # Prepare session metadata (robust PDF detection)
+        is_pdf_session = (info.get("source_type") == "pdf")
+        if not is_pdf_session:
+            try:
+                from .models import PDFSession as _PDFSession
+                is_pdf_session = _PDFSession.objects.filter(session_id=session_id).exists()
+            except Exception:
+                is_pdf_session = False
+
+        session_metadata = {
+            'is_from_pdf': is_pdf_session,
+            'header_confidence_scores': {},
+            'original_template_id': info.get('original_template_id'),
+            'template_applied': info.get('template_applied', False),
+            'template_name': info.get('template_name', ''),
+            'formula_rules': info.get('formula_rules', []),
+            'factwise_rules': info.get('factwise_rules', [])
+        }
+
+        # Get header confidence scores for PDF sessions
+        if is_pdf_session:
+            try:
+                from .models import PDFSession, PDFExtractionResult
+                pdf_session = PDFSession.objects.get(session_id=session_id)
+                pdf_extraction = PDFExtractionResult.objects.filter(pdf_session=pdf_session).order_by('-created_at').first()
+                if pdf_extraction and hasattr(pdf_extraction, 'confidence_scores') and pdf_extraction.confidence_scores:
+                    # Extract header-level confidence scores if available
+                    confidence_data = pdf_extraction.confidence_scores
+                    if isinstance(confidence_data, dict):
+                        # Check if we have header-specific confidence scores
+                        header_confidence = confidence_data.get('header_confidence', {})
+                        if header_confidence:
+                            session_metadata['header_confidence_scores'] = header_confidence
+                            logger.info(f"📊 Including header confidence scores for PDF session {session_id}: {header_confidence}")
+                        else:
+                            # Fallback: use overall confidence for all headers
+                            overall_confidence = confidence_data.get('overall_confidence', 0.9)
+                            session_metadata['header_confidence_scores'] = {header: overall_confidence for header in client_headers}
+                            logger.info(f"📊 Using overall confidence {overall_confidence} for all PDF headers in session {session_id}")
+                    else:
+                        # Legacy fallback: assume high confidence if no detailed scores
+                        session_metadata['header_confidence_scores'] = {header: 0.9 for header in client_headers}
+                        logger.info(f"📊 Using default confidence for PDF headers in session {session_id}")
+            except Exception as e:
+                logger.error(f"📊 Error getting PDF confidence scores for session {session_id}: {e}")
+                # Provide default confidence scores for PDF sessions even if we can't get detailed ones
+                session_metadata['header_confidence_scores'] = {header: 0.8 for header in client_headers}
+
         return no_store(Response({
             'success': True,
             'client_headers': client_headers,
@@ -1615,7 +1915,8 @@ def get_headers(request, session_id):
                 'customer_id_pairs_count': customer_id_pairs_count
             },
             'client_file': info.get('original_client_name', ''),
-            'template_file': info.get('original_template_name', '')
+            'template_file': info.get('original_template_name', ''),
+            'session_metadata': session_metadata
         }))
         
     except Exception as e:
@@ -1745,11 +2046,14 @@ def save_mappings(request):
         session_id = request.data.get('session_id')
         mappings = request.data.get('mappings', {})
         default_values = request.data.get('default_values', {})
+        header_corrections = request.data.get('header_corrections', {})
         
         logger.info(f"🔧 DEBUG: Received default_values: {default_values}")
         logger.info(f"🔧 DEBUG: Default values type: {type(default_values)}")
         logger.info(f"🔧 DEBUG: Received mappings: {mappings}")
         logger.info(f"🔧 DEBUG: Mappings type: {type(mappings)}")
+        logger.info(f"🔧 DEBUG: Received header_corrections: {header_corrections}")
+        logger.info(f"🔧 DEBUG: Header corrections type: {type(header_corrections)}")
         
         if not session_id:
             return Response({
@@ -1899,11 +2203,16 @@ def save_mappings(request):
         
         info["default_values"] = cleaned_default_values
         logger.info(f"🔧 DEBUG: Session {session_id} - Final saved default values: {cleaned_default_values}")
-        
+
+        # Store header corrections for PDF sessions
+        if header_corrections and isinstance(header_corrections, dict):
+            info["header_corrections"] = header_corrections
+            logger.info(f"🔧 DEBUG: Session {session_id} - Saved header corrections: {header_corrections}")
+
         # Mark template as modified if it was originally from a saved template
         if info.get("original_template_id"):
             info["template_modified"] = True
-        
+
         # Persist session using universal saving
         save_session(session_id, info)
         
@@ -1929,10 +2238,12 @@ def get_existing_mappings(request, session_id):
     try:
         print(f"🔍 PRINT DEBUG: get_existing_mappings called for session {session_id}")
         logger.info(f"🔍 DEBUG: get_existing_mappings called for session {session_id}")
+        print(f"🔍 PRINT DEBUG: Function start, about to get session data")
         # Use consistent session retrieval to avoid stale/missing fields across workers
         session_data = get_session_consistent(session_id)
         print(f"🔍 PRINT DEBUG: Retrieved session data with keys: {list(session_data.keys()) if session_data else 'None'}")
         logger.info(f"🔍 DEBUG: Retrieved session data with keys: {list(session_data.keys()) if session_data else 'None'}")
+        print(f"🔍 PRINT DEBUG: Session data source_type: {session_data.get('source_type') if session_data else 'No session'}")
         if not session_data:
             return Response({
                 'success': False,
@@ -1964,6 +2275,8 @@ def get_existing_mappings(request, session_id):
         logger.info(f"🔍 DEBUG: Session column counts - tags={tags_count}, spec={spec_pairs_count}, customer={customer_id_pairs_count}")
         logger.info(f"🔍 DEBUG: Default values keys: {list(default_values.keys()) if default_values else 'None'}")
         logger.info(f"🔍 DEBUG: Original template ID: {session_data.get('original_template_id')}")
+        logger.info(f"🔍 DEBUG: Session source_type: {session_data.get('source_type')}")
+        print(f"🔍 PRINT DEBUG: Session source_type: {session_data.get('source_type')}")
         
         # If column counts are missing but we have default values, derive them
         if (tags_count == 1 and spec_pairs_count == 1 and customer_id_pairs_count == 1 
@@ -1992,6 +2305,7 @@ def get_existing_mappings(request, session_id):
             'template_name': None,  # Will be filled if we have template
             'template_success': True,  # Assume success if template was applied
             'formula_rules': session_data.get("formula_rules", []),
+            'header_corrections': session_data.get("header_corrections", {}),
             'factwise_rules': session_data.get("factwise_rules", []),
             # IMPORTANT: Include column counts so frontend shows all dynamic columns
             'column_counts': {
@@ -2000,6 +2314,68 @@ def get_existing_mappings(request, session_id):
                 'customer_id_pairs_count': customer_id_pairs_count
             }
         }
+
+        # Add PDF metadata if session is from PDF (robust detection)
+        source_type = session_data.get("source_type")
+        is_pdf_session = (source_type == "pdf")
+        if not is_pdf_session:
+            try:
+                from .models import PDFSession as _PDFSession
+                is_pdf_session = _PDFSession.objects.filter(session_id=session_id).exists()
+            except Exception:
+                is_pdf_session = False
+        logger.info(f"🔍 DEBUG: Session {session_id} source_type: {source_type} | inferred_pdf={is_pdf_session}")
+
+        if is_pdf_session:
+            # Get header confidence scores from database (same logic as headers endpoint)
+            header_confidence_scores = {}
+            try:
+                from .models import PDFSession, PDFExtractionResult
+                pdf_session = PDFSession.objects.get(session_id=session_id)
+                pdf_extraction = PDFExtractionResult.objects.filter(pdf_session=pdf_session).order_by('-created_at').first()
+                extracted_headers_list = list(pdf_extraction.extracted_headers) if pdf_extraction and pdf_extraction.extracted_headers else []
+                if pdf_extraction and hasattr(pdf_extraction, 'confidence_scores') and pdf_extraction.confidence_scores:
+                    # Extract header-level confidence scores if available
+                    confidence_data = pdf_extraction.confidence_scores
+                    if isinstance(confidence_data, dict):
+                        # Check if we have header-specific confidence scores
+                        header_confidence = confidence_data.get('header_confidence', {})
+                        if header_confidence:
+                            header_confidence_scores = header_confidence
+                            logger.info(f"📊 MAPPINGS: Including header confidence scores for PDF session {session_id}: {header_confidence}")
+                        else:
+                            # Fallback: use overall confidence for all headers
+                            overall_confidence = confidence_data.get('overall_confidence', 0.9)
+                            headers_for_mapping = extracted_headers_list
+                            header_confidence_scores = {header: overall_confidence for header in headers_for_mapping}
+                            logger.info(f"📊 MAPPINGS: Using overall confidence {overall_confidence} for all PDF headers in session {session_id}")
+                    else:
+                        # Legacy fallback: assume high confidence if no detailed scores
+                        headers_for_mapping = extracted_headers_list
+                        header_confidence_scores = {header: 0.9 for header in headers_for_mapping}
+                        logger.info(f"📊 MAPPINGS: Using default confidence for PDF headers in session {session_id}")
+            except Exception as e:
+                logger.error(f"📊 MAPPINGS: Error getting PDF confidence scores for session {session_id}: {e}")
+                # Provide default confidence scores for PDF sessions even if we can't get detailed ones
+                try:
+                    # best-effort: reuse extracted headers if we already fetched them
+                    header_list_fallback = extracted_headers_list
+                except Exception:
+                    header_list_fallback = []
+                header_confidence_scores = {header: 0.8 for header in header_list_fallback}
+
+            logger.info(f"🔍 DEBUG: Final header confidence scores: {header_confidence_scores}")
+
+            # Add PDF metadata to session metadata
+            session_metadata.update({
+                'is_from_pdf': True,
+                'header_confidence_scores': header_confidence_scores,
+            })
+        else:
+            session_metadata.update({
+                'is_from_pdf': False,
+                'header_confidence_scores': {},
+            })
         
         # Get template name if template was applied
         if session_metadata['original_template_id']:
@@ -2035,6 +2411,113 @@ def get_existing_mappings(request, session_id):
             'success': False,
             'error': f'Failed to get mappings: {str(e)}'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR))
+
+
+def calculate_data_quality_metrics(data_rows, headers, header_confidence_scores, confidence_data):
+    """Calculate data quality metrics for frontend display."""
+    try:
+        total_cells = len(data_rows) * len(headers) if data_rows and headers else 0
+
+        if total_cells == 0:
+            return {
+                'total_cells': 0,
+                'high_quality_count': 0,
+                'medium_quality_count': 0,
+                'low_quality_count': 0,
+                'average_confidence': 0.0,
+                'header_quality': {},
+                'row_quality': []
+            }
+
+        # Get row-level confidence from PDF extraction if available
+        row_confidences = confidence_data.get('rows', {}) if confidence_data else {}
+        # Normalize row_confidences keys (accept 'row_0' style and numeric strings)
+        normalized_row_conf = {}
+        try:
+            for k, v in (row_confidences.items() if isinstance(row_confidences, dict) else []):
+                key_str = str(k)
+                if key_str.startswith('row_'):
+                    idx = key_str.split('row_')[-1]
+                    if idx.isdigit():
+                        normalized_row_conf[idx] = v
+                elif key_str.isdigit():
+                    normalized_row_conf[key_str] = v
+        except Exception:
+            normalized_row_conf = {}
+
+        # Calculate header quality metrics (column-centric)
+        header_quality = {}
+        for header in headers:
+            header_conf = header_confidence_scores.get(header, 0.8)  # Default to 0.8
+            header_quality[header] = {
+                'confidence': header_conf,
+                'quality_level': (
+                    'high' if header_conf > 0.8 else
+                    'medium' if header_conf > 0.6 else
+                    'low'
+                )
+            }
+
+        # Calculate overall quality metrics
+        high_quality_count = 0
+        medium_quality_count = 0
+        low_quality_count = 0
+        total_confidence = 0.0
+
+        # Calculate row-level quality
+        row_quality = []
+        for row_idx, row in enumerate(data_rows):
+            row_conf = normalized_row_conf.get(str(row_idx), 0.8)  # Default to 0.8
+
+            # Combine row confidence with header confidences for overall row quality
+            header_avg = sum(header_quality[h]['confidence'] for h in headers) / len(headers) if headers else 0.8
+            combined_confidence = (row_conf + header_avg) / 2
+
+            quality_level = (
+                'high' if combined_confidence > 0.8 else
+                'medium' if combined_confidence > 0.6 else
+                'low'
+            )
+
+            row_quality.append({
+                'index': row_idx,
+                'confidence': combined_confidence,
+                'quality_level': quality_level
+            })
+
+            # Count for totals
+            if quality_level == 'high':
+                high_quality_count += len(headers)
+            elif quality_level == 'medium':
+                medium_quality_count += len(headers)
+            else:
+                low_quality_count += len(headers)
+
+            total_confidence += combined_confidence * len(headers)
+
+        average_confidence = total_confidence / total_cells if total_cells > 0 else 0.0
+
+        return {
+            'total_cells': total_cells,
+            'high_quality_count': high_quality_count,
+            'medium_quality_count': medium_quality_count,
+            'low_quality_count': low_quality_count,
+            'average_confidence': round(average_confidence, 3),
+            'header_quality': header_quality,
+            'row_quality': row_quality
+        }
+
+    except Exception as e:
+        logger.error(f"Error calculating data quality metrics: {e}")
+        return {
+            'total_cells': 0,
+            'high_quality_count': 0,
+            'medium_quality_count': 0,
+            'low_quality_count': 0,
+            'average_confidence': 0.0,
+            'header_quality': {},
+            'row_quality': []
+        }
 
 
 @api_view(['GET'])
@@ -2077,6 +2560,54 @@ def data_view(request):
         except Exception as _e:
             pass
         logger.info(f"🔧 DEBUG: Processing session {session_id} for data view")
+
+        # If manual edits exist, serve them immediately without requiring mappings
+        edited_data = info.get('edited_data')
+        if isinstance(edited_data, list) and edited_data:
+            headers_to_use = info.get('enhanced_headers') or info.get('current_template_headers')
+            if not headers_to_use:
+                tags_count = int(info.get('tags_count', 3))
+                spec_pairs_count = int(info.get('spec_pairs_count', 3))
+                customer_id_pairs_count = int(info.get('customer_id_pairs_count', 1))
+                headers_to_use = [
+                    'Item code', 'Item name', 'Description', 'Item type', 'Measurement unit',
+                    'Procurement entity name', 'Notes', 'Internal notes', 'Procurement item', 'Sales item', 'Preferred vendor code'
+                ]
+                for i in range(1, tags_count + 1): headers_to_use.append(f'Tag_{i}')
+                for i in range(1, spec_pairs_count + 1): headers_to_use += [f'Specification_Name_{i}', f'Specification_Value_{i}']
+                for i in range(1, customer_id_pairs_count + 1): headers_to_use += [f'Customer_Identification_Name_{i}', f'Customer_Identification_Value_{i}']
+
+            # Build transformed rows from edited_data
+            transformed_rows = []
+            for r in edited_data:
+                if isinstance(r, dict):
+                    transformed_rows.append({h: r.get(h, '') for h in headers_to_use})
+
+            # Quality + metadata calculation as usual
+            final_headers = headers_to_use
+            final_data = transformed_rows
+            confidence_data = {}
+            header_confidence_scores = {}
+            quality_metrics = calculate_data_quality_metrics(final_data, final_headers, header_confidence_scores, confidence_data)
+
+            return no_store(Response({
+                'success': True,
+                'headers': final_headers,
+                'data': final_data,
+                'total_rows': len(final_data),
+                'formula_rules': info.get('formula_rules', []),
+                'template_version': info.get('template_version', 0),
+                'quality_metrics': quality_metrics,
+                'header_confidence_scores': header_confidence_scores,
+                'target_column_confidence_scores': header_confidence_scores,
+                'is_from_pdf': (info.get('source_type') == 'pdf'),
+                'pagination': {
+                    'page': page,
+                    'page_size': page_size,
+                    'total_rows': len(final_data),
+                    'total_pages': max(1, (len(final_data) + page_size - 1) // page_size)
+                }
+            }))
         
         # Always process fresh data - no caching
         mappings = info.get("mappings")
@@ -2104,18 +2635,51 @@ def data_view(request):
             formatted_mappings = mappings
             logger.info(f"🔧 DEBUG: Using existing dict mappings: {formatted_mappings}")
         
-        # Check if we have enhanced data from Factwise ID creation or formula application
+        # Prefer manually edited data first (permanent edits from the editor)
+        edited_data = info.get('edited_data')
         enhanced_data = info.get("formula_enhanced_data")
         enhanced_headers = info.get("enhanced_headers")
 
         template_just_applied = info.get("original_template_id") is not None
-        # Only force fresh mapping if no enhanced data is present; otherwise use enhanced immediately
-        force_fresh_mapping = (template_just_applied and not (enhanced_data and enhanced_headers)) or request.GET.get('force_fresh', 'false').lower() == 'true'
+        # Prefer enhanced data if present (e.g., user uploaded corrected CSV) even when force_fresh=true
+        force_fresh_param = request.GET.get('force_fresh', 'false').lower() == 'true'
+        if info.get('uploaded_via_correction') and enhanced_data and enhanced_headers:
+            force_fresh_mapping = False
+        else:
+            force_fresh_mapping = (template_just_applied and not (enhanced_data and enhanced_headers)) or (force_fresh_param and not (enhanced_data and enhanced_headers))
         # Stability option for consumers like DataEditor: avoid cleaning headers by page slice
         stable_headers = request.GET.get('stable', 'false').lower() == 'true'
 
         using_enhanced = False
-        if enhanced_data and enhanced_headers and not force_fresh_mapping:
+        # 1) Edited data takes top priority
+        if isinstance(edited_data, list) and edited_data:
+            headers_to_use = enhanced_headers or info.get('current_template_headers') or []
+            # If headers_to_use is empty, derive canonical headers from counts
+            if not headers_to_use:
+                tags_count = int(info.get('tags_count', 3))
+                spec_pairs_count = int(info.get('spec_pairs_count', 3))
+                customer_id_pairs_count = int(info.get('customer_id_pairs_count', 1))
+                headers_to_use = [
+                    'Item code', 'Item name', 'Description', 'Item type', 'Measurement unit',
+                    'Procurement entity name', 'Notes', 'Internal notes', 'Procurement item', 'Sales item', 'Preferred vendor code'
+                ]
+                for i in range(1, tags_count + 1): headers_to_use.append(f'Tag_{i}')
+                for i in range(1, spec_pairs_count + 1): headers_to_use += [f'Specification_Name_{i}', f'Specification_Value_{i}']
+                for i in range(1, customer_id_pairs_count + 1): headers_to_use += [f'Customer_Identification_Name_{i}', f'Customer_Identification_Value_{i}']
+            # Rebuild rows to include all headers in order
+            transformed_rows = []
+            for r in edited_data:
+                if isinstance(r, dict):
+                    transformed_rows.append({h: r.get(h, '') for h in headers_to_use})
+            using_enhanced = True
+            logger.info(f"🔧 DEBUG: Using edited data with {len(headers_to_use)} headers and {len(transformed_rows)} rows")
+            try:
+                info['enhanced_headers'] = headers_to_use
+                save_session(session_id, info)
+            except Exception:
+                pass
+        # 2) Otherwise use enhanced (correction / formula) data
+        elif enhanced_data and enhanced_headers and not force_fresh_mapping:
             transformed_rows = enhanced_data
             headers_to_use = enhanced_headers
             using_enhanced = True
@@ -2468,39 +3032,40 @@ def data_view(request):
         except Exception:
             pass
 
-        # Unconditional cleanup: drop Tag_N columns that are empty-only to prevent header growth
-        try:
-            if isinstance(headers_to_use, list) and headers_to_use and transformed_rows:
-                tag_headers = [h for h in headers_to_use if isinstance(h, str) and h.startswith('Tag_')]
-                # Build a set of Tag_N with any data
-                non_empty = set()
-                if isinstance(transformed_rows[0], dict):
-                    for h in tag_headers:
-                        for row in transformed_rows:
-                            if str(row.get(h, '') or '').strip():
-                                non_empty.add(h)
-                                break
-                else:
-                    for h in tag_headers:
-                        try:
-                            idx = headers_to_use.index(h)
-                        except ValueError:
-                            continue
-                        for row in transformed_rows:
-                            if idx < len(row) and str(row[idx] or '').strip():
-                                non_empty.add(h)
-                                break
-                # Remove Tag_N columns that are entirely empty
-                to_remove = [h for h in tag_headers if h not in non_empty]
-                if to_remove:
-                    headers_to_use = [h for h in headers_to_use if h not in to_remove]
+        # Avoid dropping Tag_N columns in correction mode (we want to keep full template footprint)
+        if not info.get('uploaded_via_correction'):
+            try:
+                if isinstance(headers_to_use, list) and headers_to_use and transformed_rows:
+                    tag_headers = [h for h in headers_to_use if isinstance(h, str) and h.startswith('Tag_')]
+                    # Build a set of Tag_N with any data
+                    non_empty = set()
                     if isinstance(transformed_rows[0], dict):
-                        for row in transformed_rows:
-                            for h in to_remove:
-                                row.pop(h, None)
-                    # list-of-lists cleanup will be handled later with cleaned headers if needed
-        except Exception:
-            pass
+                        for h in tag_headers:
+                            for row in transformed_rows:
+                                if str(row.get(h, '') or '').strip():
+                                    non_empty.add(h)
+                                    break
+                    else:
+                        for h in tag_headers:
+                            try:
+                                idx = headers_to_use.index(h)
+                            except ValueError:
+                                continue
+                            for row in transformed_rows:
+                                if idx < len(row) and str(row[idx] or '').strip():
+                                    non_empty.add(h)
+                                    break
+                    # Remove Tag_N columns that are entirely empty
+                    to_remove = [h for h in tag_headers if h not in non_empty]
+                    if to_remove:
+                        headers_to_use = [h for h in headers_to_use if h not in to_remove]
+                        if isinstance(transformed_rows[0], dict):
+                            for row in transformed_rows:
+                                for h in to_remove:
+                                    row.pop(h, None)
+                        # list-of-lists cleanup will be handled later with cleaned headers if needed
+            except Exception:
+                pass
         
         # Apply default values for unmapped fields
         default_values = info.get("default_values", {})
@@ -2653,7 +3218,19 @@ def data_view(request):
         template_norm = set()
         
         # Add core headers
-        core_headers = ["Item code","Item name","Description","Item type","Measurement unit","Procurement entity name"]
+        core_headers = [
+            "Item code",
+            "Item name",
+            "Description",
+            "Item type",
+            "Measurement unit",
+            "Procurement entity name",
+            "Notes",
+            "Internal notes",
+            "Procurement item",
+            "Sales item",
+            "Preferred vendor code",
+        ]
         for h in core_headers:
             template_norm.add(_canon(h))
         
@@ -2766,13 +3343,224 @@ def data_view(request):
         except Exception:
             pass
 
+        # Apply header corrections if they exist (for PDF sessions)
+        final_headers = headers_to_use
+        final_data = paginated_rows
+        header_corrections = info.get('header_corrections', {})
+        if header_corrections and isinstance(header_corrections, dict):
+            corrected_headers = []
+            header_mapping = {}
+            for header in headers_to_use:
+                # Find the corrected header name
+                corrected_header = header
+                for original, corrected in header_corrections.items():
+                    if header == original:
+                        corrected_header = corrected
+                        header_mapping[original] = corrected
+                        logger.info(f"🔧 DEBUG: Applied header correction: {original} -> {corrected}")
+                        break
+                corrected_headers.append(corrected_header)
+            final_headers = corrected_headers
+
+            # Update data rows to use corrected headers as keys
+            if header_mapping and final_data and isinstance(final_data, list) and len(final_data) > 0 and isinstance(final_data[0], dict):
+                corrected_data = []
+                for row in final_data:
+                    corrected_row = {}
+                    for key, value in row.items():
+                        corrected_key = header_mapping.get(key, key)
+                        corrected_row[corrected_key] = value
+                    corrected_data.append(corrected_row)
+                final_data = corrected_data
+                logger.info(f"🔧 DEBUG: Updated {len(final_data)} data rows with corrected headers")
+
+            logger.info(f"🔧 DEBUG: Final headers after corrections: {final_headers}")
+
+        # Get confidence data for quality metrics (robust PDF detection)
+        confidence_data = {}
+        header_confidence_scores = {}
+
+        is_pdf_session_flag = False
+        try:
+            is_pdf_session = (info.get('source_type') == 'pdf')
+            if not is_pdf_session:
+                try:
+                    from .models import PDFSession as _PDFSession
+                    is_pdf_session = _PDFSession.objects.filter(session_id=session_id).exists()
+                except Exception:
+                    is_pdf_session = False
+            is_pdf_session_flag = is_pdf_session
+
+            if is_pdf_session:
+                from .models import PDFSession, PDFExtractionResult
+                pdf_session = PDFSession.objects.get(session_id=session_id)
+                pdf_extraction = PDFExtractionResult.objects.filter(pdf_session=pdf_session).order_by('-created_at').first()
+                if pdf_extraction and getattr(pdf_extraction, 'confidence_scores', None):
+                    confidence_data = pdf_extraction.confidence_scores or {}
+                # Build header_confidence_scores aligned to final_headers
+                header_conf_map = {}
+                try:
+                    header_conf_map = (confidence_data.get('header_confidence') or {}) if isinstance(confidence_data, dict) else {}
+                except Exception:
+                    header_conf_map = {}
+                # Default overall fallback
+                overall_conf = 0.8
+                try:
+                    qm = confidence_data.get('quality_metrics') or {}
+                    overall_conf = float(qm.get('header_confidence') or qm.get('overall_confidence') or 0.8)
+                except Exception:
+                    overall_conf = 0.8
+
+                # Column confidence based on mapping: assign source header confidence to target columns
+                target_column_confidence = {}
+                try:
+                    # Build normalized header confidence for source headers (case-insensitive)
+                    def _norm(h: str) -> str:
+                        try:
+                            return ''.join(ch for ch in str(h or '').lower().strip() if ch.isalnum())
+                        except Exception:
+                            return ''
+                    norm_conf = {_norm(k): float(v) for k, v in (header_conf_map.items() if isinstance(header_conf_map, dict) else [])}
+                    # Pull mappings from session
+                    src_mappings = info.get('mappings')
+                    if isinstance(src_mappings, dict) and 'mappings' in src_mappings:
+                        mapping_list = src_mappings['mappings']
+                    elif isinstance(src_mappings, list):
+                        mapping_list = src_mappings
+                    else:
+                        # Old object format {target: source}
+                        mapping_list = [{'source': s, 'target': t} for t, s in (src_mappings or {}).items()]
+
+                    for m in (mapping_list or []):
+                        try:
+                            src = (m.get('source') or '').strip()
+                            tgt = (m.get('target') or '').strip()
+                            if not src or not tgt:
+                                continue
+                            # Only set if known; avoid defaulting to overall_conf here
+                            conf = norm_conf.get(_norm(src))
+                            if conf is None:
+                                continue
+                            prev = target_column_confidence.get(tgt)
+                            if prev is None or conf > prev:
+                                target_column_confidence[tgt] = conf
+                        except Exception:
+                            continue
+                except Exception:
+                    target_column_confidence = {}
+
+                # Build header_confidence_scores for final headers using mapping-based confidence
+                # If a column has no mapping-based confidence and is entirely blank, set 0.0 (not 80%)
+                header_confidence_scores = {}
+                try:
+                    # Determine blank columns in final_data
+                    all_blank = {h: True for h in final_headers}
+                    if isinstance(final_data, list) and final_data:
+                        if isinstance(final_data[0], dict):
+                            for row in final_data:
+                                for h in final_headers:
+                                    if not all_blank[h]:
+                                        continue
+                                    val = str(row.get(h, '') or '').strip()
+                                    if val:
+                                        all_blank[h] = False
+                        else:
+                            idx_map = {h: i for i, h in enumerate(final_headers)}
+                            for row in final_data:
+                                for h, i in idx_map.items():
+                                    if not all_blank[h]:
+                                        continue
+                                    if i is not None and i < len(row):
+                                        val = str(row[i] or '').strip()
+                                        if val:
+                                            all_blank[h] = False
+                    for h in final_headers:
+                        if h in target_column_confidence:
+                            header_confidence_scores[h] = float(target_column_confidence[h])
+                        elif all_blank.get(h, False):
+                            header_confidence_scores[h] = 0.0
+                        else:
+                            # Leave unset to avoid misleading defaults; frontend can fallback gracefully
+                            pass
+                except Exception:
+                    # Fallback: use mapping-only
+                    header_confidence_scores = {h: float(c) for h, c in target_column_confidence.items()}
+        except Exception as e:
+            logger.warning(f"Could not retrieve PDF confidence data: {e}")
+
+        # Calculate data quality metrics
+        quality_metrics = calculate_data_quality_metrics(
+            final_data,
+            final_headers,
+            header_confidence_scores,
+            confidence_data
+        )
+
+        # Enforce full canonical template headers in the response, regardless of data sparsity
+        try:
+            tags_count = int(info.get('tags_count', 3))
+            spec_pairs_count = int(info.get('spec_pairs_count', 3))
+            customer_id_pairs_count = int(info.get('customer_id_pairs_count', 1))
+
+            canonical_headers = [
+                'Item code', 'Item name', 'Description', 'Item type', 'Measurement unit',
+                'Procurement entity name', 'Notes', 'Internal notes', 'Procurement item', 'Sales item', 'Preferred vendor code'
+            ]
+            for i in range(1, tags_count + 1):
+                canonical_headers.append(f'Tag_{i}')
+            for i in range(1, spec_pairs_count + 1):
+                canonical_headers.append(f'Specification_Name_{i}')
+                canonical_headers.append(f'Specification_Value_{i}')
+            for i in range(1, customer_id_pairs_count + 1):
+                canonical_headers.append(f'Customer_Identification_Name_{i}')
+                canonical_headers.append(f'Customer_Identification_Value_{i}')
+
+            # Rebuild data rows to include all canonical headers in order
+            rebuilt_rows = []
+            if isinstance(final_data, list) and final_data:
+                if isinstance(final_data[0], dict):
+                    for row in final_data:
+                        rebuilt = {h: row.get(h, '') for h in canonical_headers}
+                        rebuilt_rows.append(rebuilt)
+                else:
+                    # list-of-lists -> dict rows using current final_headers index mapping
+                    idx_map = {h: i for i, h in enumerate(final_headers)}
+                    for row in final_data:
+                        rebuilt = {}
+                        for h in canonical_headers:
+                            i = idx_map.get(h)
+                            val = ''
+                            if i is not None and i < len(row):
+                                val = row[i] if row[i] is not None else ''
+                            rebuilt[h] = val
+                        rebuilt_rows.append(rebuilt)
+            else:
+                rebuilt_rows = []
+
+            final_headers = canonical_headers
+            final_data = rebuilt_rows
+
+            # Persist canonical headers to session to avoid drift across workers
+            try:
+                info['enhanced_headers'] = canonical_headers
+                save_session(session_id, info)
+            except Exception:
+                pass
+        except Exception as _e:
+            # Non-fatal; keep computed headers/data
+            pass
+
         return no_store(Response({
             'success': True,
-            'headers': headers_to_use,
-            'data': paginated_rows,
+            'headers': final_headers,
+            'data': final_data,
             'total_rows': total_rows,
             'formula_rules': formula_rules,
             'template_version': info.get('template_version', 0),
+            'quality_metrics': quality_metrics,
+            'header_confidence_scores': header_confidence_scores,
+            'target_column_confidence_scores': header_confidence_scores,
+            'is_from_pdf': is_pdf_session_flag,
             'pagination': {
                 'page': page,
                 'page_size': page_size,
@@ -2811,8 +3599,44 @@ def save_data(request):
                 'error': 'Session not found'
             }, status=status.HTTP_404_NOT_FOUND)
         
-        # Save edited data to session
-        info["edited_data"] = data
+        # Normalize payload: accept { rows: [...] } or raw list
+        rows_payload = None
+        try:
+            if isinstance(data, list):
+                rows_payload = data
+            elif isinstance(data, dict):
+                # common shapes: { rows: [...] } or { data: [...] }
+                rows_payload = data.get('rows') or data.get('data')
+        except Exception:
+            rows_payload = None
+
+        if not isinstance(rows_payload, list):
+            rows_payload = []
+
+        # Save edited data to session (as a list of row dicts)
+        info["edited_data"] = rows_payload
+
+        # Ensure Data Editor uses these rows immediately
+        info["formula_enhanced_data"] = rows_payload
+
+        # Ensure headers are preserved; prefer existing enhanced headers, else derive canonical/keys
+        enhanced_headers = info.get('enhanced_headers') or info.get('current_template_headers')
+        if not enhanced_headers:
+            # Derive canonical from session counts
+            tags_count = int(info.get('tags_count', 3))
+            spec_pairs_count = int(info.get('spec_pairs_count', 3))
+            customer_id_pairs_count = int(info.get('customer_id_pairs_count', 1))
+            enhanced_headers = [
+                'Item code', 'Item name', 'Description', 'Item type', 'Measurement unit',
+                'Procurement entity name', 'Notes', 'Internal notes', 'Procurement item', 'Sales item', 'Preferred vendor code'
+            ]
+            for i in range(1, tags_count + 1): enhanced_headers.append(f'Tag_{i}')
+            for i in range(1, spec_pairs_count + 1): enhanced_headers += [f'Specification_Name_{i}', f'Specification_Value_{i}']
+            for i in range(1, customer_id_pairs_count + 1): enhanced_headers += [f'Customer_Identification_Name_{i}', f'Customer_Identification_Value_{i}']
+        info['enhanced_headers'] = enhanced_headers
+
+        # Bypass cleanup/mapping; prefer edited data immediately
+        info['uploaded_via_correction'] = True
         save_session(session_id, info)
         
         return Response({

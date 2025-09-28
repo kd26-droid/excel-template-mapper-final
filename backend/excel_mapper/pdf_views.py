@@ -162,13 +162,36 @@ def process_pdf_ocr(request):
             # Convert to DataFrame format using requested alignment
             df = ocr_service.convert_to_dataframe(extraction_result, alignment_mode=alignment_mode)
 
+            # Derive header-level confidence scores aligned to DataFrame headers
+            # Fall back to overall/header confidence metric if detailed per-header scores are unavailable
+            header_confidence_scores = {}
+            try:
+                # Prefer header confidence metric from quality metrics
+                metrics = extraction_result.get('quality_metrics') or {}
+                overall_header_conf = metrics.get('header_confidence')
+                overall_conf = metrics.get('overall_confidence')
+
+                # Build a mapping for each header in the final DataFrame
+                if not df.empty:
+                    inferred_conf = overall_header_conf if isinstance(overall_header_conf, (int, float)) else overall_conf
+                    if inferred_conf is None:
+                        inferred_conf = 0.8  # safe default
+                    header_confidence_scores = {str(h): float(inferred_conf) for h in list(df.columns)}
+            except Exception as _e:
+                # Non-fatal; keep empty mapping
+                header_confidence_scores = {str(h): 0.8 for h in list(df.columns)} if not df.empty else {}
+
             # Save extraction results
             pdf_extraction = PDFExtractionResult.objects.create(
                 pdf_session=pdf_session,
                 page_numbers=list(range(1, pdf_session.total_pages + 1)),
                 extracted_headers=list(df.columns) if not df.empty else [],
                 extracted_data=df.values.tolist() if not df.empty else [],
-                confidence_scores=extraction_result['confidence_scores'],
+                # Augment confidence_scores with header_confidence mapped to final headers
+                confidence_scores={
+                    **(extraction_result.get('confidence_scores') or {}),
+                    'header_confidence': header_confidence_scores
+                },
                 quality_metrics=extraction_result['quality_metrics'],
                 table_count=extraction_result['table_count']
             )
@@ -244,6 +267,8 @@ def process_pdf_ocr(request):
                 'table_count': extraction_result['table_count'],
                 'quality_metrics': extraction_result['quality_metrics'],
                 'validation': validation_result,
+                # Provide header-level confidence scores for immediate UI use
+                'header_confidence_scores': header_confidence_scores,
                 'row_count': len(df) if not df.empty else 0,
                 'column_count': len(df.columns) if not df.empty else 0,
                 'status': 'completed',

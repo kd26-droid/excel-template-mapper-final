@@ -27,6 +27,9 @@ import {
   X,
   Settings,
   ArrowLeft,
+  Edit3,
+  Save,
+  X as Cancel,
 } from 'lucide-react';
 import {
   Dialog,
@@ -101,7 +104,40 @@ const CustomNode = ({ data, id }) => {
   const mappedFromLabel = data.mappedFromLabel || '';
   const isOptional = data.isOptional || false;
   const onDelete = data.onDelete;
-  
+
+  // Header editing state (for source nodes)
+  const [isEditing, setIsEditing] = React.useState(false);
+  const [editValue, setEditValue] = React.useState(data.originalLabel || '');
+  const isFromPDF = data.isFromPDF || false;
+  const isCorrected = data.isCorrected || false;
+  const onHeaderEdit = data.onHeaderEdit;
+
+  // Header editing functions
+  const handleEditStart = () => {
+    setIsEditing(true);
+    setEditValue(data.originalLabel || '');
+  };
+
+  const handleEditCancel = () => {
+    setIsEditing(false);
+    setEditValue(data.originalLabel || '');
+  };
+
+  const handleEditSave = () => {
+    if (editValue.trim() && editValue.trim() !== data.originalLabel && onHeaderEdit) {
+      onHeaderEdit(id, data.originalLabel, editValue.trim());
+    }
+    setIsEditing(false);
+  };
+
+  const handleKeyPress = (e) => {
+    if (e.key === 'Enter') {
+      handleEditSave();
+    } else if (e.key === 'Escape') {
+      handleEditCancel();
+    }
+  };
+
   // Pair grouping properties
   const isPairStart = data.isPairStart || false;
   const isPairEnd = data.isPairEnd || false;
@@ -183,25 +219,103 @@ const CustomNode = ({ data, id }) => {
         
         {/* Node content */}
         <div className="px-3 break-words text-center leading-tight" title={data.originalLabel}>
-          {data.originalLabel}
-          {/* AT / FW badges */}
-          {!isSource && data.atBadge && (
-            <div className="mt-1 inline-block text-[10px] px-2 py-0.5 rounded-full font-bold bg-amber-200 text-amber-800 border border-amber-400">
-              {data.atBadge}
+          {/* Source node content with editing for PDF headers */}
+          {isSource ? (
+            <div className="relative">
+              {isEditing ? (
+                // Edit mode for source nodes
+                <div className="flex flex-col gap-2">
+                  <input
+                    type="text"
+                    value={editValue}
+                    onChange={(e) => setEditValue(e.target.value)}
+                    onKeyDown={handleKeyPress}
+                    className="w-full px-2 py-1 text-sm border border-blue-300 rounded focus:outline-none focus:border-blue-500"
+                    autoFocus
+                  />
+                  <div className="flex gap-1 justify-center">
+                    <button
+                      onClick={handleEditSave}
+                      className="p-1 bg-green-500 text-white rounded hover:bg-green-600 transition-colors"
+                      title="Save changes"
+                    >
+                      <Save size={12} />
+                    </button>
+                    <button
+                      onClick={handleEditCancel}
+                      className="p-1 bg-gray-500 text-white rounded hover:bg-gray-600 transition-colors"
+                      title="Cancel editing"
+                    >
+                      <Cancel size={12} />
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                // Display mode for source nodes
+                <div className="flex flex-col items-center gap-1">
+                  <div className="flex items-center gap-2">
+                    <span className={isCorrected ? 'font-semibold text-blue-700' : ''}>
+                      {data.originalLabel}
+                    </span>
+                    {isFromPDF && (
+                      <button
+                        onClick={handleEditStart}
+                        className="p-1 text-blue-500 hover:text-blue-700 hover:bg-blue-100 rounded transition-colors"
+                        title="Edit header"
+                      >
+                        <Edit3 size={12} />
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Confidence score for PDF headers */}
+                  {isFromPDF && confidence && (
+                    <div className={`
+                      px-2 py-0.5 rounded-full text-xs font-bold
+                      ${confidence >= 0.8
+                        ? 'bg-green-100 text-green-700 border border-green-300'
+                        : confidence >= 0.6
+                        ? 'bg-yellow-100 text-yellow-700 border border-yellow-300'
+                        : 'bg-red-100 text-red-700 border border-red-300'
+                      }
+                    `}>
+                      {Math.round(confidence * 100)}%
+                    </div>
+                  )}
+
+                  {/* Corrected indicator */}
+                  {isCorrected && (
+                    <div className="text-xs px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full border border-blue-300 font-semibold">
+                      Corrected
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-          )}
-          {!isSource && data.fwBadge && (
-            <div className="mt-1 ml-1 inline-block text-[10px] px-2 py-0.5 rounded-full font-bold bg-purple-200 text-purple-800 border border-purple-400">
-              {data.fwBadge}
-            </div>
-          )}
-          {/* Pair indicator */}
-          {!isSource && pairType !== 'single' && (
-            <div className={`text-xs mt-1 font-semibold ${colorClasses.text}`}>
-              {pairType === 'specification' ? `Spec ${pairIndex}` : 
-               pairType === 'customer' ? `ID ${pairIndex}` : 
-               pairType === 'tag' ? `Tag ${pairIndex}` : `${pairIndex}`}
-            </div>
+          ) : (
+            // Target node content (unchanged)
+            <>
+              {data.originalLabel}
+              {/* AT / FW badges */}
+              {data.atBadge && (
+                <div className="mt-1 inline-block text-[10px] px-2 py-0.5 rounded-full font-bold bg-amber-200 text-amber-800 border border-amber-400">
+                  {data.atBadge}
+                </div>
+              )}
+              {data.fwBadge && (
+                <div className="mt-1 ml-1 inline-block text-[10px] px-2 py-0.5 rounded-full font-bold bg-purple-200 text-purple-800 border border-purple-400">
+                  {data.fwBadge}
+                </div>
+              )}
+              {/* Pair indicator */}
+              {pairType !== 'single' && (
+                <div className={`text-xs mt-1 font-semibold ${colorClasses.text}`}>
+                  {pairType === 'specification' ? `Spec ${pairIndex}` :
+                   pairType === 'customer' ? `ID ${pairIndex}` :
+                   pairType === 'tag' ? `Tag ${pairIndex}` : `${pairIndex}`}
+                </div>
+              )}
+            </>
           )}
         </div>
         
@@ -340,6 +454,11 @@ export default function ColumnMapping() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [sessionMetadata, setSessionMetadata] = useState({});
+
+  // Header correction state management
+  const [headerCorrections, setHeaderCorrections] = useState({}); // { originalHeader: correctedHeader }
+  const [headerConfidenceScores, setHeaderConfidenceScores] = useState({}); // { header: confidence }
+  const [isFromPDF, setIsFromPDF] = useState(false);
   
   // React Flow state
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
@@ -492,7 +611,57 @@ export default function ColumnMapping() {
     } catch (_) {}
     return false;
   }, [mappingHistory, edges]);
-  
+
+  // Header correction functions
+  const handleHeaderEdit = useCallback((nodeId, originalHeader, correctedHeader) => {
+    console.log('🖊️ Header edit:', { nodeId, originalHeader, correctedHeader });
+
+    // Update header corrections state
+    setHeaderCorrections(prev => ({
+      ...prev,
+      [originalHeader]: correctedHeader
+    }));
+
+    // Find all edges connected to this header (source node)
+    const affectedEdges = edges.filter(edge => edge.source === nodeId);
+
+    // Remove mappings for the edited header
+    const remainingEdges = edges.filter(edge => edge.source !== nodeId);
+
+    // Update edges state
+    setEdges(remainingEdges);
+
+    // Update source node label and mark as corrected
+    setNodes(prev => prev.map(node => {
+      if (node.id === nodeId) {
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            label: correctedHeader,
+            originalLabel: correctedHeader, // Update the displayed label
+            isConnected: false, // Reset connection status
+            mappedToLabel: '', // Clear mapped label
+            isCorrected: true // Mark as manually corrected
+          }
+        };
+      }
+      return node;
+    }));
+
+    // Update client headers array
+    setClientHeaders(prev => prev.map(header =>
+      header === originalHeader ? correctedHeader : header
+    ));
+
+    console.log(`✅ Header "${originalHeader}" corrected to "${correctedHeader}", ${affectedEdges.length} mappings removed`);
+  }, [edges, setEdges, setNodes]);
+
+  // Get effective headers (with corrections applied)
+  const getEffectiveClientHeaders = useCallback(() => {
+    return clientHeaders.map(header => headerCorrections[header] || header);
+  }, [clientHeaders, headerCorrections]);
+
   // Debug panel removed; keep lightweight console logging only
 
   // Template functions
@@ -893,6 +1062,57 @@ export default function ColumnMapping() {
         
         // Store session metadata for badge display and other features
         setSessionMetadata(session_metadata);
+
+        // Check if this session is from PDF and set confidence scores
+        if (session_metadata.is_from_pdf) {
+          console.log('📄 Session is from PDF upload');
+          console.log('📄 DEBUGGING: Setting isFromPDF to true');
+          setIsFromPDF(true);
+
+          // Set header confidence scores if available in session metadata
+          if (session_metadata.header_confidence_scores) {
+            console.log('📊 DEBUGGING: Setting header confidence scores from session:', session_metadata.header_confidence_scores);
+            setHeaderConfidenceScores(session_metadata.header_confidence_scores);
+          } else {
+            console.log('📊 DEBUGGING: No header_confidence_scores found in session_metadata');
+          }
+        } else {
+          console.log('📄 DEBUGGING: Session is NOT from PDF, is_from_pdf:', session_metadata.is_from_pdf);
+        }
+
+        console.log('📄 DEBUGGING: Full session_metadata:', session_metadata);
+
+        // Restore header corrections if they exist
+        if (session_metadata.header_corrections && Object.keys(session_metadata.header_corrections).length > 0) {
+          console.log('🔧 DEBUGGING: Restoring header corrections from session:', session_metadata.header_corrections);
+          setHeaderCorrections(session_metadata.header_corrections);
+
+          // Update client headers to show corrected headers
+          setClientHeaders(prev => prev.map(header =>
+            session_metadata.header_corrections[header] || header
+          ));
+
+          // Update nodes to reflect corrected headers
+          setNodes(prev => prev.map(node => {
+            if (node.id.startsWith('c-')) {
+              const originalHeader = node.data.originalLabel;
+              const correctedHeader = session_metadata.header_corrections[originalHeader];
+              if (correctedHeader) {
+                return {
+                  ...node,
+                  data: {
+                    ...node.data,
+                    label: correctedHeader,
+                    originalLabel: correctedHeader,
+                    isCorrected: true
+                  }
+                };
+              }
+            }
+            return node;
+          }));
+        }
+
         try {
           // Persist formula + factwise rules for robust re-application during fast Review
           const fRules = Array.isArray(session_metadata?.formula_rules) ? session_metadata.formula_rules : [];
@@ -1229,7 +1449,11 @@ export default function ColumnMapping() {
         originalLabel: header,
         type: 'source',
         headerType: 'client',
-        index: idx
+        index: idx,
+        isFromPDF: isFromPDF,
+        confidence: headerConfidenceScores[header] || null,
+        isCorrected: !!headerCorrections[header],
+        onHeaderEdit: handleHeaderEdit
       },
       draggable: false,
       style: { width: nodeWidth, height: nodeHeight }
@@ -1586,20 +1810,13 @@ export default function ColumnMapping() {
                   Object.entries(defaultValueMappings || {}).filter(([k]) => targetHeaders.includes(k))
                 );
 
-                // Get current edges from state for saving
+                // Get current edges from state for saving with header corrections
                 const currentEdges = edges;
-                // Exclude virtual edges (formula/factwise visual hints) from persistence
-                const mappingsToSave = currentEdges.filter(e => !(e?.data && e.data.isVirtual)).map(edge => {
-                  const sourceIdx = parseInt(edge.source.replace('c-', ''));
-                  const targetIdx = parseInt(edge.target.replace('t-', ''));
-                  const sourceColumn = clientHeaders[sourceIdx];
-                  const targetLabel = (templateHeaders[targetIdx] || "").toString().trim();
-                  return sourceColumn && targetLabel ? { source: sourceColumn.trim(), target: targetLabel } : null;
-                }).filter(Boolean);
-                
+                const payload = buildMappingData(currentEdges, filteredDefaultValues);
+
                 // CRITICAL FIX: During column count updates, allow saving even empty mappings to clear old state
                 // But prevent saving empty mappings in other scenarios
-                if (mappingsToSave.length === 0) {
+                if (payload.mappings.length === 0) {
                   // Check if this is a column count update scenario
                   const isColumnCountUpdate = sessionStorage.getItem('recentColumnCountUpdate') === 'true';
                   if (!isColumnCountUpdate) {
@@ -1610,13 +1827,13 @@ export default function ColumnMapping() {
                     debugLog('Column count update: allowing save of empty mappings to clear old state');
                   }
                 }
-                
-                // Update cache before saving
-                mappingsCacheRef.current = mappingsToSave;
-                const payload = { mappings: mappingsToSave, default_values: filteredDefaultValues };
+
+                // Update cache before saving - use the processed mappings from buildMappingData
+                mappingsCacheRef.current = payload.mappings;
                 debugLog('Forced save payload:', payload);
                 debugLog('defaultValueMappings in forced save (filtered):', filteredDefaultValues);
-                
+                debugLog('header corrections in forced save:', payload.header_corrections);
+
                 await api.saveColumnMappings(sessionId, payload);
                 console.log('💾 Forced save of mappings after column count update');
                 
@@ -1811,6 +2028,14 @@ export default function ColumnMapping() {
           console.error('❌ TEMPLATE HEADERS ARE EMPTY!');
         }
         
+        // Set PDF flags and header confidence from headers endpoint if available
+        if (session_metadata && session_metadata.is_from_pdf) {
+          setIsFromPDF(true);
+          if (session_metadata.header_confidence_scores && Object.keys(session_metadata.header_confidence_scores).length > 0) {
+            setHeaderConfidenceScores(session_metadata.header_confidence_scores);
+          }
+        }
+
         // ENHANCED: Extract template information from session metadata
         if (session_metadata.original_template_id) {
           setOriginalTemplateId(session_metadata.original_template_id);
@@ -2067,9 +2292,19 @@ export default function ColumnMapping() {
     if (fromPDF && ocrData && !loading && clientHeaders.length === 0) {
       console.log('📄 PDF OCR: Processing OCR data from PDF upload', ocrData);
 
+      // Set PDF flag
+      setIsFromPDF(true);
+
       // Extract headers from OCR data
       if (ocrData.headers && ocrData.headers.length > 0) {
         console.log('📋 PDF OCR: Setting client headers from OCR:', ocrData.headers);
+
+        // Set header confidence scores if available
+        if (ocrData.header_confidence_scores) {
+          console.log('📊 PDF OCR: Setting header confidence scores:', ocrData.header_confidence_scores);
+          setHeaderConfidenceScores(ocrData.header_confidence_scores);
+        }
+
         // The headers should already be set by the backend session, but we can verify
         // This will trigger a refresh of the headers if needed
         try { if (loadDataRef.current) loadDataRef.current(); } catch (_) {}
@@ -2592,18 +2827,55 @@ export default function ColumnMapping() {
     });
   };
 
+  // Build mapping data with header corrections for consistent backend saves
+  const buildMappingData = (edges, defaultValues = {}, additionalData = {}) => {
+    const sortedEdges = [...edges]
+      .filter(e => !(e?.data && e.data.isVirtual))
+      .sort((a, b) => {
+        const sourceA = parseInt(a.source.replace('c-', ''));
+        const sourceB = parseInt(b.source.replace('c-', ''));
+        return sourceA - sourceB;
+      });
+
+    const mappings = sortedEdges.map(edge => {
+      const sourceIdx = parseInt(edge.source.replace('c-', ''));
+      const targetIdx = parseInt(edge.target.replace('t-', ''));
+      const originalSourceColumn = clientHeaders[sourceIdx];
+      // Use corrected header if available, otherwise use original
+      const sourceColumn = headerCorrections[originalSourceColumn] || originalSourceColumn;
+
+      // Get target column name from the actual node data
+      const targetNode = nodes.find(n => n.id === edge.target);
+      const targetColumnFromIndex = templateHeaders[targetIdx];
+      const targetColumn = targetNode ? targetNode.data.originalLabel : targetColumnFromIndex;
+
+      return {
+        source: sourceColumn,
+        target: targetColumn
+      };
+    }).filter(mapping => mapping.source && mapping.target);
+
+    return {
+      mappings,
+      default_values: defaultValues,
+      header_corrections: headerCorrections,
+      ...additionalData
+    };
+  };
+
   // Save mappings to backend
   const saveMappings = async (mappingData) => {
     try {
-      enhancedDebugLog('SAVE_MAPPINGS', 'Starting mapping save operation', { 
-        sessionId, 
+      enhancedDebugLog('SAVE_MAPPINGS', 'Starting mapping save operation', {
+        sessionId,
         mappingDataKeys: Object.keys(mappingData),
         mappingsCount: mappingData.mappings?.length || 0,
         defaultValuesCount: Object.keys(mappingData.default_values || {}).length,
         formulaRulesCount: mappingData.formula_rules?.length || 0,
-        factwiseRulesCount: mappingData.factwise_rules?.length || 0
+        factwiseRulesCount: mappingData.factwise_rules?.length || 0,
+        headerCorrectionsCount: Object.keys(mappingData.header_corrections || {}).length
       });
-      
+
       // eslint-disable-next-line no-console
       console.log('🔧 DEBUG: saveMappings called with:', mappingData);
       
@@ -2728,17 +3000,8 @@ export default function ColumnMapping() {
       
       // Persist cleared defaults with current mappings
       try {
-        const mappingsToSave = edges
-          .filter(e => !(e?.data && e.data.isVirtual))
-          .map(edge => {
-            const sourceIdx = parseInt(edge.source.replace('c-', ''));
-            const targetIdx = parseInt(edge.target.replace('t-', ''));
-            const sourceColumn = clientHeaders[sourceIdx];
-            const targetLabel = (templateHeaders[targetIdx] || "").toString().trim();
-            return sourceColumn && targetLabel ? { source: sourceColumn.trim(), target: targetLabel } : null;
-          })
-          .filter(Boolean);
-        api.saveColumnMappings(sessionId, { mappings: mappingsToSave, default_values: nextDefaults });
+        const payload = buildMappingData(edges, nextDefaults);
+        api.saveColumnMappings(sessionId, payload);
       } catch (_) {}
       
       // Wait for 1 second to show loading state
@@ -3143,17 +3406,8 @@ export default function ColumnMapping() {
       }
       // Persist deletion for real edges immediately
       try {
-        const mappingsToSave = newEdges
-          .filter(e => !(e?.data && e.data.isVirtual))
-          .map(edge => {
-            const sourceIdx = parseInt(edge.source.replace('c-', ''));
-            const targetIdx = parseInt(edge.target.replace('t-', ''));
-            const sourceColumn = clientHeaders[sourceIdx];
-            const targetLabel = (templateHeaders[targetIdx] || "").toString().trim();
-            return sourceColumn && targetLabel ? { source: sourceColumn.trim(), target: targetLabel } : null;
-          })
-          .filter(Boolean);
-        api.saveColumnMappings(sessionId, { mappings: mappingsToSave, default_values: defaultValueMappings, force_persist: true });
+        const payload = buildMappingData(newEdges, defaultValueMappings, { force_persist: true });
+        api.saveColumnMappings(sessionId, payload);
       } catch (_) {}
       setEdges(newEdges);
       
@@ -3255,7 +3509,7 @@ export default function ColumnMapping() {
     // Clear saved mappings from sessionStorage
     sessionStorage.removeItem('currentMapping');
     // Persist cleared defaults and mappings permanently
-    try { api.saveColumnMappings(sessionId, { mappings: [], default_values: {}, force_persist: true }); } catch (_) {}
+    try { api.saveColumnMappings(sessionId, { mappings: [], default_values: {}, header_corrections: {}, force_persist: true }); } catch (_) {}
     // eslint-disable-next-line no-console
     console.log('Cleared all mappings and sessionStorage');
     // Also clear local undo history so Undo is disabled after Clear All
@@ -3332,6 +3586,43 @@ export default function ColumnMapping() {
       };
     }));
   }, [defaultValueMappings, setNodes]);
+
+  // Update nodes with confidence scores when they are loaded for PDF sessions
+  useEffect(() => {
+    if (isFromPDF && headerConfidenceScores && Object.keys(headerConfidenceScores).length > 0) {
+      console.log('🔄 CONFIDENCE: Updating nodes with confidence scores:', headerConfidenceScores);
+      setNodes(prev => prev.map(node => {
+        if (node.id.startsWith('c-')) {
+          const header = node.data.originalLabel;
+          const confidence = headerConfidenceScores[header];
+          if (confidence !== undefined) {
+            console.log(`🔄 CONFIDENCE: Setting confidence ${confidence} for header "${header}"`);
+            return {
+              ...node,
+              data: {
+                ...node.data,
+                confidence: confidence,
+                isFromPDF: true
+              }
+            };
+          }
+        }
+        return node;
+      }));
+    }
+  }, [headerConfidenceScores, isFromPDF, setNodes]);
+
+  // Ensure edit affordance is enabled for PDF sessions even before confidences arrive
+  useEffect(() => {
+    if (isFromPDF) {
+      setNodes(prev => prev.map(node => {
+        if (node.id.startsWith('c-') && !node.data?.isFromPDF) {
+          return { ...node, data: { ...node.data, isFromPDF: true } };
+        }
+        return node;
+      }));
+    }
+  }, [isFromPDF, setNodes]);
 
   // Add escape key handling
   useEffect(() => {
@@ -3478,25 +3769,14 @@ export default function ColumnMapping() {
           defaultValueMappingsCount: Object.keys(defaultValueMappings).length
         });
 
-        // F) Get target column name from node data (not index)
-        // IMPORTANT: Exclude virtual edges (formula/factwise visual hints)
-        const mappings = edges
-          .filter(edge => !(edge?.data && edge.data.isVirtual))
-          .map(edge => {
-            const sourceIdx = parseInt(edge.source.replace('c-', ''));
-            const targetNode = nodes.find(n => n.id === edge.target);
-            const sourceColumn = clientHeaders[sourceIdx];
-            const targetColumn = targetNode?.data?.originalLabel;
-            
-            if (!sourceColumn || !targetColumn) return null;
-            return { source: sourceColumn, target: targetColumn };
-          })
-          .filter(Boolean);
+        // Build mapping data with header corrections for consistent backend saves
+        const payload = buildMappingData(edges, defaultValueMappings);
 
-        enhancedDebugLog('AUTOSAVE', 'Computed mappings from edges', {
+        enhancedDebugLog('AUTOSAVE', 'Computed mappings from edges with header corrections', {
           totalEdges: edges.length,
-          validMappings: mappings.length,
-          mappings: mappings,
+          validMappings: payload.mappings.length,
+          mappings: payload.mappings,
+          headerCorrections: payload.header_corrections,
           edgeDetails: edges.map(edge => ({
             source: edge.source,
             target: edge.target,
@@ -3505,17 +3785,18 @@ export default function ColumnMapping() {
           }))
         });
 
-        console.log('🔧 DEBUG: Autosave - computed mappings:', mappings, 'edges:', edges);
+        console.log('🔧 DEBUG: Autosave - computed mappings:', payload.mappings, 'edges:', edges);
+        console.log('🔧 DEBUG: Autosave - header corrections:', payload.header_corrections);
 
         // CRITICAL FIX: Be more careful about when to skip autosave
         // Only skip if we have no mappings AND we're not in a rebuild scenario
-        if (mappings.length === 0 && !isRebuildingRef.current) {
+        if (payload.mappings.length === 0 && !isRebuildingRef.current) {
           // Check if this is during a column count update (rebuilding scenario)
           const isColumnCountUpdate = sessionStorage.getItem('recentColumnCountUpdate') === 'true';
 
           if (!isColumnCountUpdate) {
             enhancedDebugLog('AUTOSAVE', 'No mappings to save - skipping to prevent data loss', {
-              mappingsLength: mappings.length,
+              mappingsLength: payload.mappings.length,
               edgesLength: edges.length,
               isRebuilding: isRebuildingRef.current,
               isColumnCountUpdate
@@ -3530,24 +3811,20 @@ export default function ColumnMapping() {
         }
 
         // Store current mappings count for tracking
-        sessionStorage.setItem('previousMappingsCount', mappings.length.toString());
+        sessionStorage.setItem('previousMappingsCount', payload.mappings.length.toString());
 
         // Update cache for reliable restoration/guards (allow empty mappings too)
-        mappingsCacheRef.current = mappings;
+        mappingsCacheRef.current = payload.mappings;
         enhancedDebugLog('AUTOSAVE', 'Updated mappings cache', {
           cacheCount: mappingsCacheRef.current.length,
           mappings: mappingsCacheRef.current
         });
 
-        const payload = {
-          mappings,
-          default_values: defaultValueMappings
-        };
-
         enhancedDebugLog('AUTOSAVE', 'Preparing autosave payload', {
           payloadKeys: Object.keys(payload),
-          mappingsCount: mappings.length,
+          mappingsCount: payload.mappings.length,
           defaultValuesCount: Object.keys(defaultValueMappings).length,
+          headerCorrectionsCount: Object.keys(payload.header_corrections).length,
           payload: payload
         });
 
@@ -3558,8 +3835,9 @@ export default function ColumnMapping() {
         await api.saveColumnMappings(sessionId, payload);
         
         enhancedDebugLog('AUTOSAVE', 'Autosave completed successfully', {
-          mappingsSaved: mappings.length,
+          mappingsSaved: payload.mappings.length,
           defaultValuesSaved: Object.keys(defaultValueMappings).length,
+          headerCorrectionsSaved: Object.keys(payload.header_corrections).length,
           sessionId
         });
         
@@ -3612,20 +3890,7 @@ export default function ColumnMapping() {
     setError(null);
 
     try {
-      // Create mapping data structure for backend - send as ordered list to preserve relationships
-      // Sort edges by source index to ensure consistent ordering
-      // Exclude virtual edges (formula/factwise visual hints) from mappings sent to backend
-      const sortedEdges = [...edges]
-        .filter(e => !(e?.data && e.data.isVirtual))
-        .sort((a, b) => {
-          const sourceA = parseInt(a.source.replace('c-', ''));
-          const sourceB = parseInt(b.source.replace('c-', ''));
-          return sourceA - sourceB;
-        });
-      
-      // Send as ordered array of individual mappings to preserve source-target relationships
-      const targetHeaders = templateHeaders; // Always internal names from backend
-      
+      // Create mapping data structure for backend using centralized function
       // eslint-disable-next-line no-console
       console.log(`🔧 DEBUG: Mapping context:`);
       // eslint-disable-next-line no-console
@@ -3635,54 +3900,19 @@ export default function ColumnMapping() {
       // eslint-disable-next-line no-console
       console.log(`  - targetHeaders selected: templateHeaders (internal)`);
       // eslint-disable-next-line no-console
-      console.log(`  - targetHeaders: ${JSON.stringify(targetHeaders)}`);
+      console.log(`  - targetHeaders: ${JSON.stringify(templateHeaders)}`);
       // eslint-disable-next-line no-console
-      console.log(`  - edges count: ${sortedEdges.length}`);
-      
-      const mappingData = {
-        mappings: sortedEdges.map(edge => {
-          const sourceIdx = parseInt(edge.source.replace('c-', ''));
-          const targetIdx = parseInt(edge.target.replace('t-', ''));
-          const sourceColumn = clientHeaders[sourceIdx];
-          
-          // Get target column name from the actual node data instead of relying on index
-          // This fixes the issue where numbered fields like Tag_2 weren't mapping correctly
-          const targetNode = nodes.find(n => n.id === edge.target);
-          const targetColumnFromIndex = targetHeaders[targetIdx];
-          const targetColumn = targetNode ? targetNode.data.originalLabel : targetColumnFromIndex;
-          
-          // Always show debugging information
-          // eslint-disable-next-line no-console
-          console.log(`🔧 Processing edge: ${sourceColumn} -> ${targetColumn}`);
-          // eslint-disable-next-line no-console
-          console.log(`  - Edge target ID: ${edge.target}`);
-          // eslint-disable-next-line no-console
-          console.log(`  - Target index: ${targetIdx}`);
-          // eslint-disable-next-line no-console
-          console.log(`  - Target node found: ${!!targetNode}`);
-          // eslint-disable-next-line no-console
-          console.log(`  - Target node original label: ${targetNode?.data?.originalLabel}`);
-          // eslint-disable-next-line no-console
-          console.log(`  - Target from index [${targetIdx}]: ${targetColumnFromIndex}`);
-          // eslint-disable-next-line no-console
-          console.log(`  - Final target column: ${targetColumn}`);
-          // eslint-disable-next-line no-console
-          console.log(`  - targetHeaders length: ${targetHeaders.length}`);
-          
-          if (!targetColumn) {
-            // eslint-disable-next-line no-console
-            console.log(`  - Available target nodes: ${nodes.filter(n => n.id.startsWith('t-')).map(n => `${n.id}:${n.data?.originalLabel}`).join(', ')}`);
-          }
-          
-          return {
-            source: sourceColumn,
-            target: targetColumn,
-            targetNodeId: edge.target // Include for debugging
-          };
-        }),
-        // Include default value mappings for unmapped fields
-        default_values: defaultValueMappings
-      };
+      console.log(`  - edges count: ${edges.length}`);
+      // eslint-disable-next-line no-console
+      console.log(`  - header corrections: ${JSON.stringify(headerCorrections)}`);
+
+      const mappingData = buildMappingData(edges, defaultValueMappings);
+
+      // Add debugging information for each mapping
+      mappingData.mappings.forEach((mapping, index) => {
+        // eslint-disable-next-line no-console
+        console.log(`🔧 Processing mapping ${index + 1}: ${mapping.source} -> ${mapping.target}`);
+      });
 
       // eslint-disable-next-line no-console
       console.log('🔄 Sending mapping data to backend. Full context:', {
@@ -3690,6 +3920,7 @@ export default function ColumnMapping() {
         mappingData,
         clientHeaders,
         templateHeaders,
+        headerCorrections,
         edges
       });
       
@@ -3716,7 +3947,7 @@ export default function ColumnMapping() {
         mappings: edges.map(edge => {
           const sourceIdx = parseInt(edge.source.replace('c-', ''));
           const targetNode = nodes.find(n => n.id === edge.target);
-          const targetColumn = targetNode ? targetNode.data.originalLabel : targetHeaders[parseInt(edge.target.replace('t-', ''))];
+          const targetColumn = targetNode ? targetNode.data.originalLabel : templateHeaders[parseInt(edge.target.replace('t-', ''))];
           
           return {
             sourceColumn: clientHeaders[sourceIdx],

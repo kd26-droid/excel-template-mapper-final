@@ -1465,7 +1465,18 @@ const api = {
       console.error(`Error downloading ${fileType} file:`, error);
       throw new Error(`Failed to download ${fileType} file: ${error.response?.data?.error || error.message}`);
     }
-  }
+  },
+
+  /**
+   * Update session data with corrected values while preserving structure
+   * @param {string} sessionId - Session ID
+   * @param {Object} correctionData - Object containing headers and data arrays
+   */
+  updateSessionData: (sessionId, correctionData) =>
+    axios.post(`${API_URL}/update-session-data/`, {
+      session_id: sessionId,
+      ...correctionData
+    })
 };
 
 // ==========================================

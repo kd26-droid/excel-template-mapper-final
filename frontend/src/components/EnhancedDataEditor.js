@@ -48,6 +48,7 @@ import {
   Info as InfoIcon
 } from '@mui/icons-material';
 import api from '../services/api';
+import * as XLSX from 'xlsx';
 import FormulaBuilder from './FormulaBuilder';
 import { getDataSynchronizer, cleanupSynchronizer } from '../utils/DataSynchronizer';
 
@@ -92,6 +93,19 @@ const EnhancedDataEditor = () => {
   const [unmappedColumns, setUnmappedColumns] = useState([]);
   const [mappedColumns, setMappedColumns] = useState([]);
   const [unmappedDialogOpen, setUnmappedDialogOpen] = useState(false);
+
+  // Data quality state
+  const [qualityMetrics, setQualityMetrics] = useState(null);
+  const [headerConfidenceScores, setHeaderConfidenceScores] = useState({});
+  const [columnConfidenceScores, setColumnConfidenceScores] = useState({});
+  const [isFromPdf, setIsFromPdf] = useState(false);
+  const [showQualityPanel, setShowQualityPanel] = useState(true);
+
+  // Data correction upload state
+  const [correctionUploadDialogOpen, setCorrectionUploadDialogOpen] = useState(false);
+  const [correctionFile, setCorrectionFile] = useState(null);
+  const [correctionUploading, setCorrectionUploading] = useState(false);
+  const [correctionPreview, setCorrectionPreview] = useState(null);
 
   // Template saving state
   const [templateSaveDialogOpen, setTemplateSaveDialogOpen] = useState(false);
@@ -475,6 +489,37 @@ const EnhancedDataEditor = () => {
       const headers = payload.headers || [];
       const rows = Array.isArray(payload.data) ? payload.data : [];
       const pg = payload.pagination || { page: targetPage, total_pages: 1, total_rows: rows.length };
+
+      // Update quality metrics state
+      console.log('🔧 DEBUG: EnhancedDataEditor payload keys:', Object.keys(payload));
+      console.log('🔧 DEBUG: EnhancedDataEditor quality_metrics:', payload.quality_metrics);
+      console.log('🔧 DEBUG: EnhancedDataEditor header_confidence_scores:', payload.header_confidence_scores);
+      console.log('🔧 DEBUG: EnhancedDataEditor is_from_pdf:', payload.is_from_pdf);
+
+      if (payload.quality_metrics) {
+        console.log('🔧 DEBUG: Setting quality metrics:', payload.quality_metrics);
+        setQualityMetrics(payload.quality_metrics);
+      } else {
+        console.log('🔧 DEBUG: No quality_metrics in payload');
+      }
+      if (payload.header_confidence_scores) {
+        console.log('🔧 DEBUG: Setting header confidence scores:', payload.header_confidence_scores);
+        setHeaderConfidenceScores(payload.header_confidence_scores);
+      } else {
+        console.log('🔧 DEBUG: No header_confidence_scores in payload');
+      }
+      if (payload.target_column_confidence_scores) {
+        console.log('🔧 DEBUG: Setting target column confidence scores:', payload.target_column_confidence_scores);
+        setColumnConfidenceScores(payload.target_column_confidence_scores);
+      } else {
+        setColumnConfidenceScores(payload.header_confidence_scores || {});
+      }
+      if (payload.is_from_pdf !== undefined) {
+        console.log('🔧 DEBUG: Setting isFromPdf:', payload.is_from_pdf);
+        setIsFromPdf(payload.is_from_pdf);
+      } else {
+        console.log('🔧 DEBUG: No is_from_pdf in payload');
+      }
 
       // Initialize columns if not yet set or header count changed
       if (!columnDefs || columnDefs.length === 0 || columnDefs.filter(c => c.field && c.field !== '__row_number__').length !== headers.length) {
@@ -1379,6 +1424,117 @@ const EnhancedDataEditor = () => {
     }
   }, [sessionId, showSnackbar, columnDefs]);
 
+  const handleExportForCorrection = useCallback(async () => {
+    try {
+      setDownloadLoading(true);
+      // Export to Excel with visible columns
+      const headers = columnDefs
+        .filter(col => col.field && col.field !== '__row_number__')
+        .map(col => col.field);
+      const rows = rowData.map(row => {
+        const obj = {};
+        headers.forEach(h => { obj[h] = row[h]; });
+        return obj;
+      });
+      const ws = XLSX.utils.json_to_sheet(rows, { header: headers });
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Sheet1');
+      const filename = `data_for_correction_${sessionId}_${new Date().toISOString().split('T')[0]}.xlsx`;
+      XLSX.writeFile(wb, filename);
+      showSnackbar('Data exported for correction (Excel). Edit and re-upload the XLSX file.', 'success');
+    } catch (e) {
+      showSnackbar(e.message || 'Failed to export data for correction', 'error');
+    } finally {
+      setDownloadLoading(false);
+    }
+  }, [sessionId, columnDefs, rowData, showSnackbar]);
+
+  const handleCorrectionFileUpload = useCallback((event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    // Only allow Excel uploads
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    if (!['xlsx', 'xls'].includes(ext)) {
+      showSnackbar('Please upload an Excel file (.xlsx or .xls)', 'error');
+      return;
+    }
+
+    setCorrectionFile(file);
+
+    // Parse Excel for preview
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = new Uint8Array(e.target.result);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        const json = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: '' });
+        if (!json || json.length === 0) {
+          showSnackbar('The Excel file appears to be empty.', 'error');
+          return;
+        }
+        const headers = (json[0] || []).map(h => String(h || '').trim());
+        const rows = json.slice(1).map(arr => {
+          const obj = {};
+          headers.forEach((h, i) => { obj[h] = arr[i] || ''; });
+          return obj;
+        });
+        setCorrectionPreview({ headers, rows: rows.slice(0, 5) });
+      } catch (err) {
+        showSnackbar('Failed to parse Excel file.', 'error');
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  }, [showSnackbar]);
+
+  const handleCorrectionUpload = useCallback(async () => {
+    if (!correctionFile) return;
+
+    try {
+      setCorrectionUploading(true);
+
+      // Parse Excel and send to backend
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        try {
+          const data = new Uint8Array(e.target.result);
+          const workbook = XLSX.read(data, { type: 'array' });
+          const sheetName = workbook.SheetNames[0];
+          const sheet = workbook.Sheets[sheetName];
+          const json = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: '' });
+          const headers = (json[0] || []).map(h => String(h || '').trim());
+          const rows = json.slice(1).map(arr => {
+            const obj = {};
+            headers.forEach((h, i) => { obj[h] = arr[i] || ''; });
+            return obj;
+          });
+
+          const response = await api.updateSessionData(sessionId, { headers, data: rows });
+          if (response.data.success) {
+            showSnackbar('Data updated successfully! Refreshing...', 'success');
+            setCorrectionUploadDialogOpen(false);
+            setCorrectionFile(null);
+            setCorrectionPreview(null);
+            fetchDataSynchronized();
+          } else {
+            showSnackbar(response.data.error || 'Failed to update data', 'error');
+          }
+        } catch (error) {
+          const apiError = (error && error.response && error.response.data && (error.response.data.error || JSON.stringify(error.response.data))) || error.message;
+          showSnackbar('Failed to process file: ' + apiError, 'error');
+        } finally {
+          setCorrectionUploading(false);
+        }
+      };
+      reader.readAsArrayBuffer(correctionFile);
+    } catch (error) {
+      showSnackbar('Failed to upload corrections: ' + error.message, 'error');
+      setCorrectionUploading(false);
+    }
+  }, [correctionFile, sessionId, showSnackbar, fetchDataSynchronized]);
+
   // No download-original per request
 
   const handleRebuildColumns = useCallback(async () => {
@@ -1404,6 +1560,22 @@ const EnhancedDataEditor = () => {
   }, [sessionId, fetchDataSynchronized, showSnackbar]);
 
   // ─── CELL EDIT HANDLER ──────────────────────────────────────────────────────
+  // Debounced auto-save for cell edits
+  const saveTimerRef = useRef(null);
+  const scheduleAutoSave = useCallback((rows) => {
+    try { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); } catch (_) {}
+    saveTimerRef.current = setTimeout(async () => {
+      try {
+        await api.saveEditedData(sessionId, { rows });
+        setHasUnsavedChanges(false);
+        showSnackbar('Saved', 'success');
+      } catch (e) {
+        console.error('Auto-save failed:', e);
+        showSnackbar('Auto-save failed', 'error');
+      }
+    }, 800);
+  }, [sessionId, showSnackbar]);
+
   const handleCellEdit = useCallback((rowIndex, colIndex, newValue) => {
     const newRowData = [...rowData];
     const colKey = columnDefs[colIndex]?.field;
@@ -1418,9 +1590,10 @@ const EnhancedDataEditor = () => {
       if (wasUnknown !== nowUnknown) {
         setUnknownCellsCount(count => count + (nowUnknown ? 1 : -1));
       }
-      showSnackbar('Cell updated - changes not saved yet', 'info');
+      // Auto-save
+      scheduleAutoSave(newRowData);
     }
-  }, [rowData, columnDefs, showSnackbar]);
+  }, [rowData, columnDefs, scheduleAutoSave]);
 
   // ─── NAVIGATION HANDLERS ────────────────────────────────────────────────────
   const handleBackToMapping = useCallback(async () => {
@@ -1774,6 +1947,52 @@ const EnhancedDataEditor = () => {
                 </span>
               </Tooltip>
 
+              {/* Export for Correction functionality */}
+              {isFromPdf && (
+                <Tooltip title="Export current data for external correction">
+                  <span>
+                    <Button
+                      onClick={handleExportForCorrection}
+                      variant="contained"
+                      startIcon={<EditIcon />}
+                      disabled={downloadLoading || syncStatus.inProgress}
+                      sx={{
+                        backgroundColor: '#7b1fa2',
+                        color: 'white',
+                        '&:hover': { backgroundColor: '#6a1b9a' },
+                        textTransform: 'none',
+                        fontWeight: 600
+                      }}
+                    >
+                      Export for Correction
+                    </Button>
+                  </span>
+                </Tooltip>
+              )}
+
+              {/* Upload Corrected Data functionality */}
+              {isFromPdf && (
+                <Tooltip title="Upload corrected data to update existing rows">
+                  <span>
+                    <Button
+                      onClick={() => setCorrectionUploadDialogOpen(true)}
+                      variant="outlined"
+                      startIcon={<DownloadIcon sx={{ transform: 'rotate(180deg)' }} />}
+                      disabled={downloadLoading || syncStatus.inProgress}
+                      sx={{
+                        color: '#7b1fa2',
+                        borderColor: '#7b1fa2',
+                        '&:hover': { backgroundColor: 'rgba(123, 31, 162, 0.1)', borderColor: '#6a1b9a' },
+                        textTransform: 'none',
+                        fontWeight: 600
+                      }}
+                    >
+                      Upload Corrections
+                    </Button>
+                  </span>
+                </Tooltip>
+              )}
+
               {/* Download original removed per request */}
 
               <Tooltip title="Create FactWise ID - Synchronized column combination">
@@ -2034,6 +2253,80 @@ const EnhancedDataEditor = () => {
         </Container>
       </Paper>
 
+      {/* Data Quality Panel */}
+      {isFromPdf && showQualityPanel && (
+        <Box sx={{ p: 2, pb: 0 }}>
+          <Paper
+            elevation={1}
+            sx={{
+              p: 3,
+              mb: 2,
+              border: '1px solid #e3f2fd',
+              borderRadius: 2,
+              background: 'linear-gradient(135deg, #e3f2fd 0%, #f8f9fa 100%)'
+            }}
+          >
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+              <Typography variant="h6" sx={{ fontWeight: 600, color: '#1976d2' }}>
+                Column Quality
+              </Typography>
+              <IconButton
+                size="small"
+                onClick={() => setShowQualityPanel(false)}
+                sx={{ color: '#666' }}
+                title="Hide column quality"
+              >
+                <CloseIcon />
+              </IconButton>
+            </Box>
+
+            {/* Column-wise quality details */}
+            {qualityMetrics && (
+              <Box sx={{ mt: 3 }}>
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
+                  {getVisibleColumnDefs()
+                    .filter(col => col.field && col.field !== '__row_number__')
+                    .map(col => {
+                      const header = col.field;
+                      const hasColScore = columnConfidenceScores && Object.prototype.hasOwnProperty.call(columnConfidenceScores, header);
+                      const confRaw = hasColScore ? columnConfidenceScores[header]
+                        : (Object.prototype.hasOwnProperty.call(headerConfidenceScores || {}, header)
+                          ? headerConfidenceScores[header]
+                          : 0.0);
+                      const conf = (typeof confRaw === 'number' && !Number.isNaN(confRaw)) ? confRaw : 0.0;
+                      const quality = conf >= 0.8 ? 'high' : conf >= 0.6 ? 'medium' : 'low';
+                      return (
+                        <Chip
+                          key={header}
+                          label={`${header}: ${Math.round(conf * 100)}%`}
+                          size="small"
+                          sx={{
+                            bgcolor: (quality === 'high') ? '#e8f5e9' : (quality === 'medium') ? '#fff8e1' : '#ffebee',
+                            color: (quality === 'high') ? '#2e7d32' : (quality === 'medium') ? '#ef6c00' : '#c62828',
+                            border: '1px solid',
+                            borderColor: (quality === 'high') ? '#c8e6c9' : (quality === 'medium') ? '#ffe0b2' : '#ffcdd2'
+                          }}
+                        />
+                      );
+                    })}
+                </Box>
+              </Box>
+            )}
+
+            {/* Intentionally omit row-wise breakdown */}
+          </Paper>
+        </Box>
+      )}
+
+      {/* Toggle to reopen Column Quality when hidden */}
+      {isFromPdf && !showQualityPanel && (
+        <Box sx={{ px: 2, pb: 1 }}>
+          <Button variant="outlined" size="small" onClick={() => setShowQualityPanel(true)}>
+            Show Column Quality
+          </Button>
+        </Box>
+      )}
+
       {/* Main Grid Container */}
       <Box sx={{ flexGrow: 1, p: 2, overflow: 'hidden' }}>
         <Paper 
@@ -2198,9 +2491,12 @@ const EnhancedDataEditor = () => {
                       return String(mv || '').toLowerCase() === 'no';
                     })
                     .map((row, realIndex) => {
+                    // Neutral zebra striping; no quality-based highlighting
+                    const rowBackgroundColor = realIndex % 2 === 0 ? '#f8f9fa' : 'white';
+
                     return (
                       <tr key={realIndex} style={{
-                        backgroundColor: realIndex % 2 === 0 ? '#f8f9fa' : 'white',
+                        backgroundColor: rowBackgroundColor,
                         height: `${rowHeight}px`
                       }}>
                         {getVisibleColumnDefs().map((col, colIndex) => {
@@ -2212,7 +2508,7 @@ const EnhancedDataEditor = () => {
                             <td key={`${col.field}-${realIndex}`} style={{
                               padding: '12px 16px',
                               border: '1px solid #e9ecef',
-                              backgroundColor: isUnknown ? '#ffebee' : (realIndex % 2 === 0 ? '#f8f9fa' : 'white'),
+                              backgroundColor: isUnknown ? '#ffebee' : 'inherit',
                               color: isInvalidMpn ? '#d32f2f' : (isUnknown ? '#c62828' : 'inherit'),
                               fontWeight: isInvalidMpn ? '700' : (isUnknown ? '500' : 'normal'),
                               width: `${columnWidths[col.field] || (col.field === '__row_number__' ? 80 : 180)}px`
@@ -2418,6 +2714,101 @@ const EnhancedDataEditor = () => {
             startIcon={syncStatus.inProgress ? <CircularProgress size={20} /> : <BadgeIcon />}
           >
             {syncStatus.inProgress ? 'Creating...' : 'Create Synchronized ID'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Data Correction Upload Dialog */}
+      <Dialog
+        open={correctionUploadDialogOpen}
+        onClose={() => setCorrectionUploadDialogOpen(false)}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>
+          Upload Corrected Data (Excel)
+        </DialogTitle>
+        <DialogContent>
+          <DialogContentText sx={{ mb: 3 }}>
+            Upload an Excel file (.xlsx or .xls) with corrected data. The file should have the same headers as the exported data.
+            Only matching headers will be updated; unmatched columns are ignored.
+          </DialogContentText>
+
+          {/* File Upload */}
+          <Box sx={{ mb: 3 }}>
+            <input
+              accept=".xlsx,.xls"
+              style={{ display: 'none' }}
+              id="correction-file-upload"
+              type="file"
+              onChange={handleCorrectionFileUpload}
+            />
+            <label htmlFor="correction-file-upload">
+              <Button
+                variant="outlined"
+                component="span"
+                startIcon={<DownloadIcon sx={{ transform: 'rotate(180deg)' }} />}
+                sx={{ mb: 2 }}
+              >
+                Choose Excel File
+              </Button>
+            </label>
+            {correctionFile && (
+              <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+                Selected: {correctionFile.name}
+              </Typography>
+            )}
+          </Box>
+
+          {/* Preview */}
+          {correctionPreview && (
+            <Box sx={{ mb: 3 }}>
+              <Typography variant="h6" sx={{ mb: 2 }}>Data Preview (first 5 rows)</Typography>
+              <Box sx={{ border: '1px solid #ddd', borderRadius: 1, overflow: 'auto', maxHeight: 300 }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr style={{ backgroundColor: '#f5f5f5' }}>
+                      {correctionPreview.headers.map((header, index) => (
+                        <th key={index} style={{ padding: '8px', border: '1px solid #ddd', textAlign: 'left' }}>
+                          {header}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {correctionPreview.rows.map((row, rowIndex) => (
+                      <tr key={rowIndex}>
+                        {correctionPreview.headers.map((header, colIndex) => (
+                          <td key={colIndex} style={{ padding: '8px', border: '1px solid #ddd' }}>
+                            {row[header] || ''}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </Box>
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setCorrectionUploadDialogOpen(false);
+              setCorrectionFile(null);
+              setCorrectionPreview(null);
+            }}
+            disabled={correctionUploading}
+          >
+            Cancel
+          </Button>
+          <Button
+            onClick={handleCorrectionUpload}
+            variant="contained"
+            disabled={!correctionFile || correctionUploading}
+            startIcon={correctionUploading ? <CircularProgress size={16} /> : null}
+          >
+            {correctionUploading ? 'Uploading...' : 'Update Data'}
           </Button>
         </DialogActions>
       </Dialog>

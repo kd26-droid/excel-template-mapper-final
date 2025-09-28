@@ -132,6 +132,20 @@ class AzureOCRService:
                 'raw_result': None  # Store for debugging
             }
 
+            # Extract paragraph-level confidence scores for synthetic confidence calculation
+            paragraph_confidences = {}
+            if hasattr(result, 'paragraphs') and result.paragraphs:
+                logger.info(f"🔍 AZURE DEBUG: Found {len(result.paragraphs)} paragraphs with confidence scores")
+                for para in result.paragraphs:
+                    if hasattr(para, 'content') and hasattr(para, 'confidence'):
+                        paragraph_confidences[para.content.strip()] = para.confidence
+                        logger.info(f"🔍 AZURE DEBUG: Paragraph '{para.content[:50]}...' confidence: {para.confidence}")
+            else:
+                logger.info("🔍 AZURE DEBUG: No paragraphs with confidence found")
+
+            # Store paragraph confidences for later use
+            extraction_data['paragraph_confidences'] = paragraph_confidences
+
             if not result.tables:
                 logger.warning("No tables found in document")
                 return extraction_data
@@ -141,7 +155,7 @@ class AzureOCRService:
 
             # Process each table
             for table_idx, table in enumerate(result.tables):
-                table_data = self._extract_table_data(table, table_idx)
+                table_data = self._extract_table_data(table, table_idx, paragraph_confidences)
                 extraction_data['tables'].append(table_data)
 
                 # Combine data from all tables
@@ -164,13 +178,14 @@ class AzureOCRService:
             logger.error(f"Error processing analysis result: {e}")
             raise
 
-    def _extract_table_data(self, table, table_idx: int) -> Dict[str, any]:
+    def _extract_table_data(self, table, table_idx: int, paragraph_confidences: Dict[str, float] = None) -> Dict[str, any]:
         """
         Extract data from a single table
 
         Args:
             table: Table object from Azure result
             table_idx: Table index
+            paragraph_confidences: Dictionary of paragraph confidence scores
 
         Returns:
             Dictionary with table data
@@ -196,9 +211,23 @@ class AzureOCRService:
                 if row_idx not in cell_matrix:
                     cell_matrix[row_idx] = {}
 
+                # Debug: Log cell attributes to understand Azure response structure
+                if row_idx == 0 and col_idx == 0:  # Log first cell only to avoid spam
+                    cell_attrs = [attr for attr in dir(cell) if not attr.startswith('_')]
+                    logger.info(f"🔍 AZURE DEBUG: Cell attributes: {cell_attrs}")
+                    logger.info(f"🔍 AZURE DEBUG: Cell content: '{cell.content}'")
+                    if hasattr(cell, 'confidence'):
+                        logger.info(f"🔍 AZURE DEBUG: Cell confidence: {cell.confidence}")
+                    else:
+                        logger.info("🔍 AZURE DEBUG: Cell has NO confidence attribute")
+
+                # Calculate synthetic confidence based on paragraph matching
+                cell_content = cell.content or ''
+                synthetic_confidence = self._calculate_synthetic_confidence(cell_content, paragraph_confidences or {})
+
                 cell_matrix[row_idx][col_idx] = {
-                    'content': cell.content or '',
-                    'confidence': getattr(cell, 'confidence', 0.0),
+                    'content': cell_content,
+                    'confidence': synthetic_confidence,
                     'kind': getattr(cell, 'kind', 'content')
                 }
 
@@ -857,3 +886,62 @@ class AzureOCRService:
                 confidences = {h: 0.5 for h in headers}
 
             return 0, headers, confidences
+
+    def _calculate_synthetic_confidence(self, cell_content: str, paragraph_confidences: Dict[str, float]) -> float:
+        """
+        Calculate synthetic confidence score for a cell based on paragraph matches and text quality.
+
+        Since Azure table cells don't have confidence scores, we use:
+        1. Paragraph confidence scores (if text matches)
+        2. Text quality indicators (length, special chars, etc.)
+        3. Default reasonable confidence for headers
+
+        Args:
+            cell_content: Content of the table cell
+            paragraph_confidences: Dict mapping paragraph text to confidence scores
+
+        Returns:
+            Synthetic confidence score between 0.0 and 1.0
+        """
+        if not cell_content or not cell_content.strip():
+            return 0.0
+
+        cell_text = cell_content.strip()
+
+        # Try to find matching paragraph confidence
+        best_paragraph_confidence = None
+        for para_text, confidence in paragraph_confidences.items():
+            if cell_text in para_text or para_text in cell_text:
+                best_paragraph_confidence = confidence
+                break
+
+        # If we found a paragraph match, use that confidence
+        if best_paragraph_confidence is not None:
+            logger.debug(f"🔍 Using paragraph confidence {best_paragraph_confidence} for cell '{cell_text[:20]}...'")
+            return best_paragraph_confidence
+
+        # Calculate synthetic confidence based on text quality indicators
+        confidence_score = 0.7  # Base confidence for non-empty cells
+
+        # Boost confidence for header-like text
+        if any(indicator in cell_text.lower() for indicator in ['no.', 'name', 'id', 'description', 'status', 'category', 'type', 'unit']):
+            confidence_score += 0.15
+
+        # Boost confidence for well-formatted text
+        if len(cell_text) >= 3 and cell_text.replace(' ', '').replace('-', '').replace('_', '').isalnum():
+            confidence_score += 0.1
+
+        # Reduce confidence for very short or suspicious text
+        if len(cell_text) <= 2:
+            confidence_score -= 0.2
+
+        # Reduce confidence for text with many special characters
+        special_char_ratio = sum(1 for c in cell_text if not c.isalnum() and c != ' ') / len(cell_text)
+        if special_char_ratio > 0.3:
+            confidence_score -= 0.15
+
+        # Ensure confidence is in valid range
+        confidence_score = max(0.0, min(1.0, confidence_score))
+
+        logger.debug(f"🔍 Synthetic confidence {confidence_score} for cell '{cell_text[:20]}...'")
+        return confidence_score

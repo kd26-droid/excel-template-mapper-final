@@ -22,6 +22,7 @@ from .views import (
     download_original_file,
     download_template_file,
     download_grid_excel,
+    update_session_data,
 
     # Unified Template + Formula views (MappingTemplate based)
     save_mapping_template,
@@ -97,6 +98,7 @@ urlpatterns = [
     # Data management
     path('data/', data_view, name='get-mapped-data'),
     path('data/save/', save_data, name='save-edited-data'),
+    path('update-session-data/', update_session_data, name='update-session-data'),
 
     # Download endpoints
     path('download/', download_file, name='download-file'),
