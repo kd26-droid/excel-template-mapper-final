@@ -29,10 +29,8 @@ class SynchronizerTestSuite {
     this.results.push(result);
     
     const status = passed ? '✅ PASS' : '❌ FAIL';
-    console.log(`${status} - ${testName}: ${message}`);
     
     if (data) {
-      console.log('  Data:', data);
     }
   }
 
@@ -41,7 +39,6 @@ class SynchronizerTestSuite {
    */
   async setupTestSession() {
     try {
-      console.log('🚀 Setting up test session...');
       
       // For testing purposes, we'll assume you have a way to create test sessions
       // You may need to modify this based on your actual session creation method
@@ -380,7 +377,6 @@ class SynchronizerTestSuite {
    * Run all tests
    */
   async runAllTests() {
-    console.log('🧪 Starting DataSynchronizer Test Suite...\n');
     
     const tests = [
       'testSynchronizerInitialization',
@@ -416,27 +412,18 @@ class SynchronizerTestSuite {
     }
     
     // Print summary
-    console.log('\n📊 Test Results Summary:');
-    console.log(`✅ Passed: ${passedTests}/${totalTests}`);
-    console.log(`❌ Failed: ${totalTests - passedTests}/${totalTests}`);
-    console.log(`📈 Success Rate: ${Math.round((passedTests / totalTests) * 100)}%\n`);
     
     // Print detailed results
-    console.log('📋 Detailed Results:');
     this.results.forEach(result => {
       const status = result.passed ? '✅' : '❌';
-      console.log(`  ${status} ${result.test}: ${result.message}`);
       if (result.data && !result.passed) {
-        console.log(`    Data:`, result.data);
       }
     });
     
     const allPassed = passedTests === totalTests;
     
     if (allPassed) {
-      console.log('\n🎉 All tests passed! The DataSynchronizer is ready for deployment.');
     } else {
-      console.log('\n⚠️ Some tests failed. Please review the results and fix issues before deployment.');
     }
     
     return {
@@ -452,7 +439,6 @@ class SynchronizerTestSuite {
    * Run minimal smoke tests
    */
   async runSmokeTests() {
-    console.log('🔥 Running DataSynchronizer Smoke Tests...\n');
     
     const smokeTests = [
       'testSynchronizerInitialization',
@@ -474,12 +460,9 @@ class SynchronizerTestSuite {
     
     const allPassed = passedTests === smokeTests.length;
     
-    console.log(`\n🔥 Smoke Tests: ${passedTests}/${smokeTests.length} passed`);
     
     if (allPassed) {
-      console.log('✅ Smoke tests passed! Basic functionality is working.');
     } else {
-      console.log('❌ Smoke tests failed! Check basic functionality.');
     }
     
     return allPassed;

@@ -135,7 +135,6 @@ const Dashboard = () => {
       try {
         setLoading(true);
         const response = await api.getUploadDashboard();
-        console.log('🔧 DASHBOARD: Received uploads data:', response.data.uploads);
         setUploads(response.data.uploads || []);
         setError(null);
       } catch (err) {
@@ -371,7 +370,6 @@ const Dashboard = () => {
       );
       
       if (response.data.success) {
-        console.log('Tag template saved successfully:', response.data.template);
         
         // Refresh tag templates list
         loadTagTemplates();
@@ -443,7 +441,6 @@ const Dashboard = () => {
   const handleFormulasApplied = async (formulaResult) => {
     // Update the template with new formula rules
     // This would integrate with the template saving system
-    console.log('Applied formulas to template:', selectedTemplateForFormulas?.name, formulaResult);
     handleFormulaBuilderClose();
   };
 
@@ -548,7 +545,6 @@ const Dashboard = () => {
     try {
       // For FW Template, download the original template file
       await api.downloadFileEnhanced(uploadId, 'template');
-      console.log('Template download completed successfully');
     } catch (err) {
       console.error('Error downloading template file:', err);
       // Show user-friendly error message

@@ -25,7 +25,6 @@ class DataSynchronizer {
     // Event listeners for sync status
     this.listeners = new Map();
     
-    console.log('🔄 DataSynchronizer initialized for session:', sessionId);
   }
 
   /**
@@ -91,7 +90,6 @@ class DataSynchronizer {
    */
   async validateSession() {
     try {
-      console.log('🔍 Validating session:', this.sessionId);
       const response = await api.getExistingMappings(this.sessionId);
       const isValid = response.data && response.data.success !== false;
       
@@ -99,7 +97,6 @@ class DataSynchronizer {
         console.warn('⚠️ Session validation failed - session may be expired');
         this.emit('sessionInvalid', { sessionId: this.sessionId });
       } else {
-        console.log('✅ Session validation successful');
       }
       
       return isValid;
@@ -120,7 +117,6 @@ class DataSynchronizer {
     const maxRetries = this.maxRetries;
     
     try {
-      console.log(`🔄 Fetching data (attempt ${retryAttempt + 1}/${maxRetries + 1})`);
       this.emit('start', { operation: 'fetchData', attempt: retryAttempt + 1 });
       
       // Step 1: Validate session first
@@ -186,7 +182,6 @@ class DataSynchronizer {
         console.warn('Could not fetch mappings for cross-validation:', mappingsError);
       }
       
-      console.log('✅ Data fetch completed successfully');
       this.emit('complete', { 
         operation: 'fetchData', 
         dataCount: Array.isArray(aggregated.data) ? aggregated.data.length : 0,
@@ -206,7 +201,6 @@ class DataSynchronizer {
       
       if (retryAttempt < maxRetries) {
         const delay = this.azureRetryDelay * Math.pow(2, retryAttempt); // Exponential backoff
-        console.log(`⏰ Retrying in ${delay}ms...`);
         await this.delay(delay);
         return this.fetchDataWithValidation(enableSpecParsing, retryAttempt + 1);
       }
@@ -216,7 +210,6 @@ class DataSynchronizer {
       // Return cached data if available
       const cachedData = this.dataCache.get('lastFetchedData');
       if (cachedData && (Date.now() - cachedData.timestamp) < 300000) { // 5 minutes
-        console.log('📦 Returning cached data due to fetch failure');
         return {
           success: false,
           data: cachedData.data,
@@ -244,7 +237,6 @@ class DataSynchronizer {
     let startTemplateVersion = 0;
 
     try {
-      console.log(`🔄 Starting synchronized operation: ${operationType}`);
       this.emit('start', { operation: operationType, id: operationId });
 
       // Add to sync queue
@@ -264,7 +256,6 @@ class DataSynchronizer {
 
       // Validate session after operation
       if (this.azureValidationEnabled) {
-        console.log('🔍 Validating session after operation...');
         const sessionStillValid = await this.validateSession();
         if (!sessionStillValid) {
           throw new Error('Session became invalid after operation');
@@ -283,7 +274,6 @@ class DataSynchronizer {
             const tv = st.data?.template_version ?? 0;
             if (tv > startTemplateVersion) {
               advanced = true;
-              console.log('✅ Detected template version advance:', { from: startTemplateVersion, to: tv });
               break;
             }
           } catch (e) {
@@ -314,7 +304,6 @@ class DataSynchronizer {
         queueItem.validationData = validationData;
       }
 
-      console.log(`✅ Synchronized operation completed: ${operationType}`);
       this.emit('complete', { 
         operation: operationType, 
         id: operationId, 
@@ -463,7 +452,6 @@ class DataSynchronizer {
           h === 'Tag'
         ).length || 0;
         
-        console.log(`📊 Formula validation: Expected ${expectedColumns}, Found ${actualFormulaColumns}`);
         
         return result;
       },
@@ -545,7 +533,6 @@ class DataSynchronizer {
     
     // Check for formula rules if present
     if (data.formula_rules && Array.isArray(data.formula_rules) && data.formula_rules.length > 0) {
-      console.log(`📋 Found ${data.formula_rules.length} formula rules in data`);
     }
     
     // Check for unmapped columns
@@ -588,7 +575,6 @@ class DataSynchronizer {
    * Clear cache and reset synchronizer
    */
   reset() {
-    console.log('🔄 Resetting DataSynchronizer');
     this.dataCache.clear();
     this.syncQueue = [];
     this.syncInProgress = false;
@@ -609,7 +595,6 @@ class DataSynchronizer {
    * Clean up resources
    */
   destroy() {
-    console.log('🗑️ Destroying DataSynchronizer');
     this.stopSessionValidation();
     this.dataCache.clear();
     this.syncQueue = [];

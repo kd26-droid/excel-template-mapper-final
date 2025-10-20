@@ -17,6 +17,15 @@ RUN apt-get update && apt-get install -y \
     libffi-dev \
     libssl-dev \
     poppler-utils \
+    # OpenCV runtime deps
+    libgl1 \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    # Pillow image codecs and fonts
+    libjpeg62-turbo \
+    zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements

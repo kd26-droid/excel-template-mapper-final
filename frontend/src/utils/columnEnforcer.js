@@ -37,7 +37,6 @@ const CRITICAL_COLUMNS = {
  * @returns {Object} Analysis results
  */
 function analyzeHeaders(headers) {
-  console.log('🛡️ ANALYZER: Starting header analysis for', headers.length, 'headers');
   
   const analysis = {
     tags: [],
@@ -88,7 +87,6 @@ function analyzeHeaders(headers) {
     analysis.issues.push(`FactWise: Required ${CRITICAL_COLUMNS.factwise.minCount}, found ${analysis.factwise.length}`);
   }
   
-  console.log(`🛡️ ANALYZER: Results - Tags: ${analysis.tags.length}, FactWise: ${analysis.factwise.length}, Specs: ${analysis.specifications.length}, Regular: ${analysis.regular.length}`);
   
   if (!analysis.isValid) {
     console.error('🛡️ ANALYZER: VALIDATION FAILED:', analysis.issues);
@@ -103,7 +101,6 @@ function analyzeHeaders(headers) {
  * @returns {Array} Enforced headers with guaranteed critical columns
  */
 function enforceHeaders(headers) {
-  console.log('🛡️ ENFORCER: Starting header enforcement');
   
   const analysis = analyzeHeaders(headers);
   let enforcedHeaders = [...headers];
@@ -124,8 +121,6 @@ function enforceHeaders(headers) {
   }
   
   if (modified) {
-    console.log(`🛡️ ENFORCER: Headers modified from ${headers.length} to ${enforcedHeaders.length}`);
-    console.log('🛡️ ENFORCER: New headers:', enforcedHeaders.slice(-2));
   }
   
   return enforcedHeaders;
@@ -137,7 +132,6 @@ function enforceHeaders(headers) {
  * @returns {Array} AG Grid column definitions with guaranteed critical columns
  */
 function createEnforcedColumnDefs(headers) {
-  console.log('🛡️ COLUMN-CREATOR: Creating bulletproof column definitions');
   
   const enforcedHeaders = enforceHeaders(headers);
   const analysis = analyzeHeaders(enforcedHeaders);
@@ -228,7 +222,6 @@ function createEnforcedColumnDefs(headers) {
   const tagCols = cols.filter(c => c.columnType === 'tag').length;
   const factwiseCols = cols.filter(c => c.columnType === 'factwise').length;
   
-  console.log(`🛡️ COLUMN-CREATOR: Created ${cols.length - 1} columns (Tags: ${tagCols}, FactWise: ${factwiseCols})`);
   
   if (tagCols === 0 || factwiseCols === 0) {
     console.error('🛡️ COLUMN-CREATOR: CRITICAL FAILURE - Missing required columns!');
@@ -272,7 +265,6 @@ function validateDataStructure(rowData, columnDefs) {
  * @returns {Array} Fixed row data
  */
 function fixDataStructure(rowData, columnDefs) {
-  console.log('🛡️ DATA-FIXER: Fixing data structure alignment');
   
   const requiredFields = columnDefs.slice(1).map(col => col.field);
   
@@ -286,7 +278,6 @@ function fixDataStructure(rowData, columnDefs) {
     return fixedRow;
   });
   
-  console.log(`🛡️ DATA-FIXER: Fixed ${fixedData.length} rows with ${requiredFields.length} fields each`);
   return fixedData;
 }
 
@@ -297,8 +288,6 @@ function fixDataStructure(rowData, columnDefs) {
  * @returns {Object} Enforced column definitions and fixed data
  */
 function enforceColumnConsistency(headers, rowData) {
-  console.log('🛡️ MAIN-ENFORCER: Starting bulletproof column enforcement');
-  console.log('🛡️ MAIN-ENFORCER: Input - Headers:', headers?.length || 0, 'Rows:', rowData?.length || 0);
   
   try {
     // Step 1: Create bulletproof column definitions
@@ -314,8 +303,6 @@ function enforceColumnConsistency(headers, rowData) {
     const tagColumns = columnDefs.filter(c => c.columnType === 'tag');
     const factwiseColumns = columnDefs.filter(c => c.columnType === 'factwise');
     
-    console.log('🛡️ MAIN-ENFORCER: SUCCESS - Guaranteed columns created');
-    console.log(`🛡️ MAIN-ENFORCER: Tags: ${tagColumns.length}, FactWise: ${factwiseColumns.length}, Total: ${columnDefs.length - 1}`);
     
     return {
       columnDefs,

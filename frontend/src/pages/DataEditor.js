@@ -226,15 +226,28 @@ const DataEditor = () => {
   // ─── DATA LOADING WITH AUTO-REFRESH ──────────────────────────────────────────────────────────
   const fetchData = useCallback(async (opts = {}) => {
     try {
+      console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.log('🔍 [DATA_FETCH] Fetching data for DataEditor/Review');
+      console.log('🔍 [DATA_FETCH] Session ID:', sessionId);
+      console.log('🔍 [DATA_FETCH] Force fresh:', opts.forceFresh);
+
       setLoading(true);
       setError(null);
-      
+
       // 🎯 SIMPLE FRESHNESS GUARANTEE: Always get latest data
       const freshDataToken = Date.now() + Math.random();
       const response = await api.getMappedDataWithSpecs(sessionId, 1, 1000, true, { _fresh: freshDataToken, force_fresh: !!opts.forceFresh, stable: true });
       const { data } = response;
-      
+
+      console.log('🔍 [DATA_FETCH] Response received:', {
+        hasData: !!data,
+        headersCount: data?.headers?.length,
+        rowsCount: data?.data?.length,
+        headers: data?.headers
+      });
+
       if (!data || !data.headers || !Array.isArray(data.headers) || data.headers.length === 0) {
+        console.error('🔍 [DATA_FETCH] ❌ NO DATA FOUND - Response:', data);
         setError("No mapped data found. Please go back to Column Mapping and create mappings first.");
         return;
       }
@@ -269,12 +282,22 @@ const DataEditor = () => {
         sessionStorage.setItem(`templateVersion_${sessionId}`, String(data.template_version));
       }
 
+      console.log('🔍 [DATA_FETCH] ✅ Data loaded successfully');
+      console.log('🔍 [DATA_FETCH]   - Rows:', data.data?.length || 0);
+      console.log('🔍 [DATA_FETCH]   - Columns:', finalHeaders.length);
+      console.log('🔍 [DATA_FETCH]   - Formula columns:', detectedColumns);
+      console.log('🔍 [DATA_FETCH]   - Unmapped columns:', unmapped);
+      console.log('🔍 [DATA_FETCH]   - Unknown cells:', unknownCount);
+      console.log('🔍 [DATA_FETCH] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
       showSnackbar(`Loaded ${data.data?.length || 0} rows with ${finalHeaders.length} columns`, "success");
 
       // Return snapshot for callers that need immediate verification
       return { headers: finalHeaders, rows: data.data || [] };
     } catch (err) {
-      console.error("Error fetching data:", err);
+      console.error('🔍 [DATA_FETCH] ❌ ERROR fetching data:', err);
+      console.error('🔍 [DATA_FETCH]   - Error message:', err.message);
+      console.error('🔍 [DATA_FETCH]   - Response:', err.response?.data);
       setError(err.response?.data?.error || "Failed to load data. Please try again.");
     } finally {
       setLoading(false);
@@ -374,7 +397,6 @@ const DataEditor = () => {
         }
       }
 
-      console.log('🔧 FACTWISE: Creating Factwise ID with proper synchronization');
       const response = await api.createFactwiseId(sessionId, firstColumn, secondColumn, operator, strategy);
 
       if (response.data.success) {
@@ -388,7 +410,6 @@ const DataEditor = () => {
           await api.waitUntilFresh(sessionId, serverVersion, 5000).catch(() => null);
         } catch (_) { /* proceed */ }
 
-        console.log('🔧 FACTWISE: Refreshing data after successful creation');
         showSnackbar('Finalizing FactWise ID…', 'info');
         // Ensure Item code exists and Item name remains populated
         await refetchUntilStable({
@@ -441,7 +462,6 @@ const DataEditor = () => {
         customer_id_pairs_count: Math.max(dynamicColumnCounts.customer_id_pairs_count, Math.ceil(customerColumns.length / 2))
       };
       
-      console.log('🔧 FORMULA: Updated column counts', {
         old: dynamicColumnCounts,
         new: newCounts,
         tagColumns: tagColumns.length,
@@ -451,7 +471,6 @@ const DataEditor = () => {
       
       setDynamicColumnCounts(newCounts);
       
-      console.log('🔧 FORMULAS: Applied formulas with new template version');
 
       // Wait briefly for backend version advance, then refetch until columns appear
       try {
@@ -647,7 +666,6 @@ const DataEditor = () => {
       return;
     }
     
-    console.log('🔧 TEMPLATE: Starting template save process', {
       templateName: templateName.trim(),
       appliedFormulasCount: appliedFormulas.length,
       hasFactwiseIdRule: !!factwiseIdRule,
@@ -706,7 +724,6 @@ const DataEditor = () => {
       try {
         const mappingsResponse = await api.getExistingMappings(sessionId);
         existingDefaults = mappingsResponse.data?.default_values || {};
-        console.log('🔧 TEMPLATE: Retrieved session defaults for merging:', existingDefaults);
       } catch (e) {
         console.warn('🔧 TEMPLATE: Could not retrieve session defaults:', e.message);
       }
@@ -714,7 +731,6 @@ const DataEditor = () => {
       // Collect default values from unmapped columns AND custom values from dynamic tag columns
       let default_values = {};
       
-      console.log('🔧 TEMPLATE: Collecting default values', {
         unmappedColumns: unmappedColumns || [],
         columnDefsCount: columnDefs.length,
         rowDataCount: rowData.length,
@@ -727,7 +743,6 @@ const DataEditor = () => {
           // Set empty default values for unmapped columns
           default_values[col] = '';
         });
-        console.log('🔧 TEMPLATE: Added empty defaults for unmapped columns:', unmappedColumns);
       }
       
       // SMART template saving: Handle formula vs non-formula columns differently
@@ -735,7 +750,6 @@ const DataEditor = () => {
         col.field && (col.field.startsWith('Tag_') || col.field.startsWith('Specification_') || col.field.startsWith('Customer_Identification_') || col.field === 'Tag' || col.field.includes('Specification') || col.field.includes('Customer identification') || col.field.includes('Custom identification') || col.field === 'Factwise ID')
       );
       
-      console.log('🔧 TEMPLATE: Detected dynamic tag columns', {
         dynamicTagColumns: dynamicTagColumns.map(col => col.field),
         totalDynamicColumns: dynamicTagColumns.length,
         hasFormulaRules: appliedFormulas.length > 0
@@ -749,11 +763,9 @@ const DataEditor = () => {
             // Check if user has set a default value for this column - if so, preserve it
             if (existingDefaults && existingDefaults[col.field]) {
               default_values[col.field] = existingDefaults[col.field];
-              console.log(`🔧 SMART: Preserved user-set default value "${existingDefaults[col.field]}" for column "${col.field}"`);
             } else {
               // For formula-generated columns with no user default, save empty default to ensure column structure
               default_values[col.field] = '';
-              console.log(`🔧 SMART: Saved empty default for formula column "${col.field}" to preserve structure`);
             }
           } else {
             // No formula rules - this might be a manually filled column, preserve actual values
@@ -774,7 +786,6 @@ const DataEditor = () => {
               
               if (customValue) {
                 default_values[col.field] = customValue;
-                console.log(`🔧 MANUAL: Saved custom value "${customValue}" for non-formula column "${col.field}"`);
               }
             } else {
               // Even if empty, save empty default to ensure column exists
@@ -791,7 +802,6 @@ const DataEditor = () => {
         const mappingsResponse = await api.getExistingMappings(sessionId);
         if (mappingsResponse.data && mappingsResponse.data.mappings) {
           currentMappings = mappingsResponse.data.mappings;
-          console.log('🔧 TEMPLATE: Retrieved current mappings for template:', currentMappings);
         }
         
         // Get backend column counts
@@ -855,7 +865,6 @@ const DataEditor = () => {
             customer_id_pairs_count: Math.max(backendColumnCounts.customer_id_pairs_count || 1, actualCounts.customer_id_pairs_count)
           };
           
-          console.log('🔧 TEMPLATE: Calculated actual counts vs state', {
             actualCounts,
             dynamicColumnCountsState: dynamicColumnCounts,
             backendCounts: backendColumnCounts,
@@ -863,7 +872,6 @@ const DataEditor = () => {
           });
         }
         
-        console.log('🔧 TEMPLATE: Column count logic', {
           backend: backendColumnCounts,
           frontend: dynamicColumnCounts,
           final: columnCounts
@@ -914,15 +922,12 @@ const DataEditor = () => {
           customer_id_pairs_count: Math.max(maxCustomerPair, dynamicColumnCounts.customer_id_pairs_count, 1)
         };
         
-        console.log('🔧 TEMPLATE: Using calculated fallback counts:', columnCounts);
       }
       
       // CRITICAL FIX: Persist column counts in session before saving template
       if (columnCounts) {
-        console.log('🔧 TEMPLATE: Persisting column counts in session before template save:', columnCounts);
         try {
           await api.updateColumnCounts(sessionId, columnCounts);
-          console.log('🔧 TEMPLATE: Column counts persisted successfully');
         } catch (error) {
           console.warn('Failed to persist column counts:', error);
           // Continue with template save anyway
@@ -931,7 +936,6 @@ const DataEditor = () => {
       
       // Merge precedence: existing session defaults, then new computed defaults override empties
       default_values = { ...(existingDefaults || {}), ...(default_values || {}) };
-      console.log('🔧 TEMPLATE: Final merged default values:', {
         existingDefaultsCount: Object.keys(existingDefaults).length,
         computedDefaultsCount: Object.keys(default_values).length - Object.keys(existingDefaults).length,
         finalCount: Object.keys(default_values).length
@@ -957,7 +961,6 @@ const DataEditor = () => {
       
       // CRITICAL FIX: Apply default values immediately after template save
       if (saveResponse.data.default_values && Object.keys(saveResponse.data.default_values).length > 0) {
-        console.log('🔧 TEMPLATE: Applying default values immediately after save:', saveResponse.data.default_values);
         
         // Update the current data with default values for immediate display
         const updatedRowData = rowData.map(row => {
@@ -971,7 +974,6 @@ const DataEditor = () => {
         });
         
         setRowData(updatedRowData);
-        console.log('🔧 TEMPLATE: Updated row data with default values');
       }
       
       // Create detailed save message
@@ -1194,7 +1196,6 @@ const DataEditor = () => {
       customer_id_pairs_count: Math.max(maxCustomerPair, dynamicColumnCounts.customer_id_pairs_count, 1)
     };
     
-    console.log('🔧 REVIEW: Persisting ACTUAL column counts before navigation back to mapping:', {
       actualColumnCounts,
       tagColumnsFound: tagColumns.map(c => c.field),
       specColumnsFound: specColumns.map(c => c.field),
@@ -1204,7 +1205,6 @@ const DataEditor = () => {
     
     try {
       await api.updateColumnCounts(sessionId, actualColumnCounts);
-      console.log('🔧 REVIEW: Actual column counts persisted successfully');
     } catch (error) {
       console.warn('Failed to persist column counts before navigation:', error);
       // Continue with navigation anyway
@@ -1435,7 +1435,6 @@ const DataEditor = () => {
                   <span>
                     <IconButton
                       onClick={() => {
-                        console.log('🔄 MANUAL: Manual refresh triggered');
                         fetchData();
                       }}
                       disabled={loading}

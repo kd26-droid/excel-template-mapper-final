@@ -1,9 +1,13 @@
 # models.py
 
 from django.db import models
+from django.utils import timezone
 import json
 import uuid
 from rapidfuzz import fuzz
+import logging
+
+logger = logging.getLogger(__name__)
 
 class MappingTemplate(models.Model):
     name = models.CharField(max_length=200, unique=True)
@@ -93,24 +97,33 @@ class MappingTemplate(models.Model):
 
         # Process list-based mappings (both direct list and new_format)
         if mappings_to_process:
-            for mapping_item in mappings_to_process:
+            logger.info(f"🔍 [TEMPLATE_MATCH] Processing {len(mappings_to_process)} mappings")
+            for idx, mapping_item in enumerate(mappings_to_process):
                 template_col = mapping_item.get('target', '')
                 original_source_col = mapping_item.get('source', '')
-                
+
+                logger.info(f"🔍 [TEMPLATE_MATCH] Mapping {idx+1}/{len(mappings_to_process)}: '{original_source_col}' → '{template_col}'")
+
                 matched_source_col = None
                 confidence = 0.0
-                
+
                 # First try exact match
                 if original_source_col in new_source_headers:
                     matched_source_col = original_source_col
                     confidence = 1.0  # Perfect match
+                    logger.info(f"🔍 [TEMPLATE_MATCH]   ✅ EXACT match found: '{matched_source_col}'")
                 else:
                     # Try fuzzy matching
+                    logger.info(f"🔍 [TEMPLATE_MATCH]   ⚠️  No exact match, trying fuzzy matching...")
                     best_match, match_confidence = self._find_best_match(original_source_col, new_source_headers)
                     if best_match and match_confidence > 0.7:  # 70% confidence threshold
                         matched_source_col = best_match
                         confidence = match_confidence
-                
+                        logger.info(f"🔍 [TEMPLATE_MATCH]   ✅ FUZZY match found: '{matched_source_col}' (confidence: {confidence:.2f})")
+                    else:
+                        conf_str = f"{match_confidence:.2f}" if match_confidence is not None else "0.00"
+                        logger.warning(f"🔍 [TEMPLATE_MATCH]   ❌ NO match found (best: '{best_match}', confidence: {conf_str})")
+
                 # If we found a match, add to both formats
                 if matched_source_col:
                     # Add to new format (preserves duplicates)
@@ -332,6 +345,7 @@ class PDFSession(models.Model):
     source_type = models.CharField(max_length=10, default='pdf')
     file_name = models.CharField(max_length=255, blank=True)
     file_size = models.BigIntegerField(null=True, blank=True)
+    processing_metadata = models.JSONField(default=dict, blank=True)  # Store analysis results
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -362,17 +376,64 @@ class PDFPage(models.Model):
         return f"Page {self.page_number} of {self.pdf_session.session_id}"
 
 
+class PDFZone(models.Model):
+    """Model for storing user-defined zones in PDF pages"""
+    pdf_session = models.ForeignKey(PDFSession, on_delete=models.CASCADE, related_name='zones')
+    page_number = models.IntegerField()
+    zone_id = models.CharField(max_length=100)  # Unique identifier for the zone
+    zone_type = models.CharField(
+        max_length=20,
+        choices=[
+            ('header', 'Header'),
+            ('table', 'Table Data'),
+            ('text', 'Text')
+        ],
+        default='table'
+    )
+    coordinates = models.JSONField()  # {x, y, width, height} in pixels
+    processing_status = models.CharField(
+        max_length=20,
+        default='pending',
+        choices=[
+            ('pending', 'Pending'),
+            ('processing', 'Processing'),
+            ('completed', 'Completed'),
+            ('failed', 'Failed')
+        ]
+    )
+    continuation_of = models.ForeignKey(
+        'self',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='continuations'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'excel_mapper_pdf_zone'
+        ordering = ['page_number', 'zone_id']
+        unique_together = ['pdf_session', 'zone_id']
+
+    def __str__(self):
+        return f"Zone {self.zone_id} ({self.zone_type}) - Page {self.page_number}"
+
+
 class PDFExtractionResult(models.Model):
     """Model for storing OCR extraction results"""
     pdf_session = models.ForeignKey(PDFSession, on_delete=models.CASCADE, related_name='extractions')
-    page_numbers = models.JSONField()  # List of page numbers processed
-    extracted_headers = models.JSONField()  # List of detected headers
+
+    # Extracted content
+    extracted_headers = models.JSONField()  # List of detected headers with confidence
     extracted_data = models.JSONField()  # List of rows data
     confidence_scores = models.JSONField()  # Confidence scores for headers and data
     quality_metrics = models.JSONField(default=dict)  # Overall quality metrics
+
+    # Processing metadata
     table_count = models.IntegerField(default=0)  # Number of tables detected
     processing_time_seconds = models.FloatField(null=True, blank=True)
     azure_operation_id = models.CharField(max_length=100, blank=True)  # Azure OCR operation ID
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -579,3 +640,103 @@ class GlobalMpnCache(models.Model):
         count = invalid_entries.count()
         invalid_entries.delete()
         return count
+
+
+class ZoneIntegrityValidator:
+    """Validator for zone integrity and consistency"""
+
+    @staticmethod
+    def validate_zone_collection(zones):
+        """Validate a collection of zones for integrity issues"""
+        from django.utils import timezone
+
+        issues = []
+
+        # Check for overlapping header zones
+        header_zones = [z for z in zones if z.zone_type == 'header']
+        overlaps = ZoneIntegrityValidator._detect_zone_overlaps(header_zones)
+        if overlaps:
+            issues.append({
+                'type': 'header_overlap',
+                'severity': 'error',
+                'zones': [str(z.id) for z in overlaps],
+                'message': 'Header zones cannot overlap'
+            })
+
+        # Check for coverage gaps
+        coverage_gaps = ZoneIntegrityValidator._detect_coverage_gaps(zones)
+        if coverage_gaps:
+            issues.append({
+                'type': 'coverage_gap',
+                'severity': 'warning',
+                'gaps': coverage_gaps,
+                'message': 'Potential table content not covered by zones'
+            })
+
+        # Check for duplicate columns
+        duplicate_columns = ZoneIntegrityValidator._detect_duplicate_columns(zones)
+        if duplicate_columns:
+            issues.append({
+                'type': 'duplicate_columns',
+                'severity': 'warning',
+                'duplicates': duplicate_columns,
+                'message': 'Same headers detected across multiple pages'
+            })
+
+        return {
+            'valid': len([i for i in issues if i['severity'] == 'error']) == 0,
+            'issues': issues,
+            'validated_at': timezone.now().isoformat()
+        }
+
+    @staticmethod
+    def _detect_zone_overlaps(zones):
+        """Detect overlapping zones on the same page"""
+        overlaps = []
+        zones_by_page = {}
+
+        # Group zones by page
+        for zone in zones:
+            page = zone.page_number
+            if page not in zones_by_page:
+                zones_by_page[page] = []
+            zones_by_page[page].append(zone)
+
+        # Check for overlaps within each page
+        for page_zones in zones_by_page.values():
+            for i, zone1 in enumerate(page_zones):
+                for zone2 in page_zones[i+1:]:
+                    if ZoneIntegrityValidator._zones_overlap(zone1, zone2):
+                        overlaps.extend([zone1, zone2])
+
+        return overlaps
+
+    @staticmethod
+    def _zones_overlap(zone1, zone2):
+        """Check if two zones overlap"""
+        coords1 = zone1.pdf_coords
+        coords2 = zone2.pdf_coords
+
+        # Simple rectangle overlap check
+        return not (
+            coords1['x'] + coords1['width'] <= coords2['x'] or
+            coords2['x'] + coords2['width'] <= coords1['x'] or
+            coords1['y'] + coords1['height'] <= coords2['y'] or
+            coords2['y'] + coords2['height'] <= coords1['y']
+        )
+
+    @staticmethod
+    def _detect_coverage_gaps(zones):
+        """Detect potential gaps in table coverage"""
+        # This is a simplified implementation
+        # In a real scenario, this would analyze the PDF layout
+        gaps = []
+        # TODO: Implement sophisticated gap detection
+        return gaps
+
+    @staticmethod
+    def _detect_duplicate_columns(zones):
+        """Detect duplicate column headers across zones"""
+        duplicates = []
+        # TODO: Implement header similarity detection
+        return duplicates

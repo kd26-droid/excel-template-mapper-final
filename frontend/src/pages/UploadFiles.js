@@ -88,9 +88,16 @@ const UploadFiles = () => {
   const [tagTemplatesLoading, setTagTemplatesLoading] = useState(false);
   const [tagTemplateSearchTerm, setTagTemplateSearchTerm] = useState('');
 
-  // PDF alignment state - Always flatten data automatically
-  const pdfDataAlignment = 'flatten'; // Always 'flatten'
-  
+  // PDF alignment state - Use 'align' to keep exact headers AND align rows across pages
+  // 'align' = align rows from different pages to same row level + keep original headers (MFR stays MFR)
+  // 'preserve' = append rows sequentially (page 1 rows, then page 2 rows, etc.) + keep original headers
+  // 'flatten' = align rows across pages + rename headers (MFR → Manufacturer)
+  const pdfDataAlignment = 'align';
+
+  // PDF processing choice dialog state
+  const [pdfChoiceDialogOpen, setPdfChoiceDialogOpen] = useState(false);
+  const [pendingPdfSessionId, setPendingPdfSessionId] = useState(null);
+
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -165,7 +172,6 @@ const UploadFiles = () => {
         setClientSheetNames([]);
         setSelectedClientSheet('');
         setClientHeaderRow(1);
-        console.log('PDF file selected - will be processed by Azure OCR');
         return;
       }
 
@@ -203,7 +209,6 @@ const UploadFiles = () => {
               defval: '' // Default value for empty cells
             });
             
-            console.log('Raw sheet data:', jsonData);
             
             // Smart header detection: find the row with the most non-empty columns
             let bestHeaderRow = 0;
@@ -218,7 +223,6 @@ const UploadFiles = () => {
                   header.toString().trim() !== ''
                 ).length;
                 
-                console.log(`Row ${i + 1} has ${nonEmptyColumns} non-empty columns:`, jsonData[i]);
                 
                 if (nonEmptyColumns > maxColumns) {
                   maxColumns = nonEmptyColumns;
@@ -227,7 +231,6 @@ const UploadFiles = () => {
               }
             }
             
-            console.log(`Best header row detected: ${bestHeaderRow + 1} with ${maxColumns} columns`);
             
             // Parse headers from the best header row
             if (jsonData.length > bestHeaderRow && jsonData[bestHeaderRow]) {
@@ -236,8 +239,6 @@ const UploadFiles = () => {
                 header !== undefined && 
                 header.toString().trim() !== ''
               );
-              console.log('Available columns:', headers);
-              console.log('Total columns found:', headers.length);
               
               if (headers.length === 0) {
                 console.warn('No valid headers found in the file');
@@ -248,7 +249,6 @@ const UploadFiles = () => {
               // Update the header row setting to the detected row
               if (bestHeaderRow !== 0) {
                 setClientHeaderRow(bestHeaderRow + 1);
-                console.log(`Auto-detected header row: ${bestHeaderRow + 1}`);
               }
             } else {
               console.warn('No data found in the file');
@@ -262,7 +262,6 @@ const UploadFiles = () => {
           
           // For CSV files, try fallback reading methods
           if (isCSV && !err.message.includes('fallback attempted')) {
-            console.log('Attempting fallback CSV reading method...');
             try {
               // Fallback: try reading as binary for CSV files with encoding issues
               const fallbackWorkbook = XLSX.read(evt.target.result, { 
@@ -283,7 +282,6 @@ const UploadFiles = () => {
                   defval: ''
                 });
                 
-                console.log('Fallback CSV data:', fallbackJsonData);
                 
                 if (fallbackJsonData.length > 0) {
                   // Same smart header detection for fallback
@@ -309,7 +307,6 @@ const UploadFiles = () => {
                     if (bestHeaderRow !== 0) {
                       setClientHeaderRow(bestHeaderRow + 1);
                     }
-                    console.log('Fallback CSV parsing successful');
                     return; // Success with fallback
                   }
                 }
@@ -456,23 +453,12 @@ const UploadFiles = () => {
 
         // Upload PDF file to PDF OCR endpoint
         const response = await api.uploadPDF(formData);
-        setSuccess('PDF uploaded successfully! Processing with Azure OCR...');
+        setSuccess('PDF uploaded successfully! Choose processing method...');
 
-        // Process the PDF with OCR, including alignment preference
-        const ocrResponse = await api.processPDFOCR({
-          session_id: response.data.session_id,
-          data_alignment: pdfDataAlignment
-        });
-        setSuccess('PDF processed successfully! Proceeding to column mapping...');
-
-        setTimeout(() => {
-          navigate(`/mapping/${response.data.session_id}`, {
-            state: {
-              fromPDF: true,
-              ocrData: ocrResponse.data
-            }
-          });
-        }, 1500);
+        // Store session ID and show choice dialog
+        setPendingPdfSessionId(response.data.session_id);
+        setPdfChoiceDialogOpen(true);
+        setLoading(false);
 
         return;
       }
@@ -570,6 +556,50 @@ const UploadFiles = () => {
       }
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Handle PDF processing choice
+  const handlePdfProcessingChoice = async (useZonalMapping) => {
+    try {
+      setLoading(true);
+      setPdfChoiceDialogOpen(false);
+
+      if (useZonalMapping) {
+        setSuccess('Proceeding to zone selection for optimal results...');
+        setTimeout(() => {
+          navigate(`/pdf-zones/${pendingPdfSessionId}`, {
+            state: {
+              fromUpload: true,
+              pdfAlignment: pdfDataAlignment
+            }
+          });
+        }, 1000);
+      } else {
+        setSuccess('Processing with standard OCR...');
+
+        // Process the PDF with standard OCR
+        const ocrResponse = await api.processPDFOCR({
+          session_id: pendingPdfSessionId,
+          data_alignment: pdfDataAlignment
+        });
+        setSuccess('PDF processed successfully! Proceeding to column mapping...');
+
+        setTimeout(() => {
+          navigate(`/mapping/${pendingPdfSessionId}`, {
+            state: {
+              fromPDF: true,
+              ocrData: ocrResponse.data
+            }
+          });
+        }, 1500);
+      }
+    } catch (err) {
+      console.error('Error processing PDF:', err);
+      setError('Error processing PDF. Please try again.');
+    } finally {
+      setLoading(false);
+      setPendingPdfSessionId(null);
     }
   };
 
@@ -1105,6 +1135,84 @@ const UploadFiles = () => {
         
         <DialogActions sx={{ p: 3, pt: 1 }}>
           <Button onClick={handleCloseCompatibilityError}>
+            Cancel
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* PDF Processing Choice Dialog */}
+      <Dialog
+        open={pdfChoiceDialogOpen}
+        onClose={() => setPdfChoiceDialogOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <ScienceIcon color="primary" />
+            Choose PDF Processing Method
+          </Box>
+        </DialogTitle>
+        <DialogContent>
+          <Typography variant="body1" sx={{ mb: 3 }}>
+            How would you like to process your PDF? Choose the method that best fits your document:
+          </Typography>
+
+          <Grid container spacing={3}>
+            <Grid item xs={12} sm={6}>
+              <Card
+                sx={{
+                  cursor: 'pointer',
+                  border: '2px solid transparent',
+                  '&:hover': {
+                    border: '2px solid #1976d2',
+                    bgcolor: 'primary.50'
+                  }
+                }}
+                onClick={() => handlePdfProcessingChoice(false)}
+              >
+                <CardContent sx={{ textAlign: 'center', p: 3 }}>
+                  <PlayArrowIcon sx={{ fontSize: 48, color: 'success.main', mb: 2 }} />
+                  <Typography variant="h6" gutterBottom>
+                    Simple OCR
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    For standard documents with clear, linear layout. Faster processing with automatic table detection.
+                  </Typography>
+                </CardContent>
+              </Card>
+            </Grid>
+
+            <Grid item xs={12} sm={6}>
+              <Card
+                sx={{
+                  cursor: 'pointer',
+                  border: '2px solid transparent',
+                  '&:hover': {
+                    border: '2px solid #1976d2',
+                    bgcolor: 'primary.50'
+                  }
+                }}
+                onClick={() => handlePdfProcessingChoice(true)}
+              >
+                <CardContent sx={{ textAlign: 'center', p: 3 }}>
+                  <SearchIcon sx={{ fontSize: 48, color: 'warning.main', mb: 2 }} />
+                  <Typography variant="h6" gutterBottom>
+                    Zone Mapping
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    For complex BOMs or documents with irregular layouts. Manual zone selection for precise extraction.
+                  </Typography>
+                </CardContent>
+              </Card>
+            </Grid>
+          </Grid>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => setPdfChoiceDialogOpen(false)}
+            color="secondary"
+          >
             Cancel
           </Button>
         </DialogActions>

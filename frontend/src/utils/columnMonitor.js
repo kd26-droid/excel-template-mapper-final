@@ -12,7 +12,6 @@ const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://127.0.0.1:8000/api
  * @returns {Promise<Object>} Monitoring report
  */
 export async function monitorColumnHealth(sessionId) {
-  console.log('🔍 MONITOR: Checking column health for session', sessionId);
   
   try {
     const response = await fetch(`${API_BASE_URL}/monitor-columns/?session_id=${sessionId}`, {
@@ -37,8 +36,6 @@ export async function monitorColumnHealth(sessionId) {
     const report = result.monitoring_report;
     const health = report.health_score;
     
-    console.log(`🔍 MONITOR: Health check complete - ${health.overall_health}`);
-    console.log(`🔍 MONITOR: Tags: ${health.tag_columns}, FactWise: ${health.factwise_columns}`);
     
     // Log critical issues
     if (health.overall_health === 'NEEDS_ATTENTION') {
@@ -123,7 +120,6 @@ export async function emergencyColumnReset(sessionId) {
  * @returns {Object} Monitor control object with stop() method
  */
 export function startContinuousMonitoring(sessionId, onHealthChange, interval = 30000) {
-  console.log('🔍 MONITOR: Starting continuous monitoring for session', sessionId);
   
   let lastHealth = null;
   let monitoringActive = true;
@@ -136,7 +132,6 @@ export function startContinuousMonitoring(sessionId, onHealthChange, interval = 
       
       // Check if health status changed
       if (lastHealth !== healthData.health) {
-        console.log(`🔍 MONITOR: Health status changed: ${lastHealth} → ${healthData.health}`);
         lastHealth = healthData.health;
         
         if (onHealthChange) {
@@ -162,7 +157,6 @@ export function startContinuousMonitoring(sessionId, onHealthChange, interval = 
   
   return {
     stop: () => {
-      console.log('🔍 MONITOR: Stopping continuous monitoring');
       monitoringActive = false;
       clearInterval(monitorInterval);
     }

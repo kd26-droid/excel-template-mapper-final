@@ -188,7 +188,6 @@ const FormulaBuilder = ({
   useEffect(() => {
     if (!open) return;
     if (initialRules.length > 0) {
-      console.log('🔍 FormulaBuilder opened with initialRules:', initialRules);
       // Normalize rules and map template column names to available columns using fuzzy matching
       const normalizedAndMapped = initialRules.map(rawRule => {
         const rule = normalizeRule(rawRule);
@@ -355,46 +354,70 @@ const FormulaBuilder = ({
 
     try {
       setLoading(true);
-      
+
+      // CRITICAL FIX: Get current mappings BEFORE applying formulas
+      // This solves the timing issue where formulas are applied before mappings are saved
+      let currentMappings = null;
+      try {
+        const mappingsResponse = await api.getExistingMappings(sessionId);
+        if (mappingsResponse.data && mappingsResponse.data.mappings) {
+          // CRITICAL FIX: Extract the array from the nested structure
+          // Backend returns: {mappings: {mappings: [...]}} or {mappings: [...]}
+          const mappingsData = mappingsResponse.data.mappings;
+          if (mappingsData.mappings && Array.isArray(mappingsData.mappings)) {
+            // Nested format: {mappings: [...]}
+            currentMappings = mappingsData.mappings;
+          } else if (Array.isArray(mappingsData)) {
+            // Direct array format
+            currentMappings = mappingsData;
+          }
+        } else {
+        }
+      } catch (error) {
+        console.warn('🎯 TRACE-FB-ERROR: Could not retrieve current mappings:', error);
+        // Continue without mappings - backend will use session data as fallback
+      }
+
       // Check for column conflicts first (e.g., existing Tag columns)
       const conflictResponse = await api.checkColumnConflicts(sessionId, formulaRules);
-      
+
       if (conflictResponse.data.conflicts && conflictResponse.data.conflicts.length > 0) {
         const autoNumberingConflicts = conflictResponse.data.conflicts.filter(c => c.conflict_type === 'auto_numbering');
         const otherConflicts = conflictResponse.data.conflicts.filter(c => c.conflict_type !== 'auto_numbering');
-        
+
         let message = '';
-        
+
         if (autoNumberingConflicts.length > 0) {
           message += '🎯 Smart Tag Numbering:\n\n';
-          message += autoNumberingConflicts.map(c => 
+          message += autoNumberingConflicts.map(c =>
             `• "${c.column}" → "${c.suggested_name}" (${c.message})`
           ).join('\n');
         }
-        
+
         if (otherConflicts.length > 0) {
           if (message) message += '\n\n⚠️ Column Conflicts:\n\n';
           else message += '⚠️ Column Conflicts Detected:\n\n';
-          message += otherConflicts.map(c => 
+          message += otherConflicts.map(c =>
             `• "${c.column}" → "${c.suggested_name}" (${c.message})`
           ).join('\n');
         }
-        
+
         const hasRealConflicts = otherConflicts.length > 0;
         const title = hasRealConflicts ? 'Column Conflicts & Auto-Numbering' : 'Smart Tag Auto-Numbering';
-        const question = hasRealConflicts ? 
-          '\n\nDo you want to proceed with these changes?' : 
+        const question = hasRealConflicts ?
+          '\n\nDo you want to proceed with these changes?' :
           '\n\nProceed with smart numbering?';
-        
+
         const proceed = window.confirm(`${title}:\n\n${message}${question}`);
-        
+
         if (!proceed) {
           setLoading(false);
           return;
         }
       }
-      
-      const { data: res } = await api.applyFormulas(sessionId, formulaRules);
+
+      // Apply formulas with current mappings
+      const { data: res } = await api.applyFormulas(sessionId, formulaRules, currentMappings);
       if (res?.success && res?.snapshot) {
         // Apply snapshot immediately - parent component will handle this if applySnapshotToEditor is available
         if (onApplyFormulas) {
@@ -405,7 +428,7 @@ const FormulaBuilder = ({
           });
         }
       }
-      
+
       if (res.success) {
         showSnackbar(`Applied ${res.rules_applied} formula rules successfully!`, 'success');
         onClose();

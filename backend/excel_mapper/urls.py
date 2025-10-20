@@ -57,6 +57,18 @@ from .pdf_views import (
     get_pdf_session_status,
     cleanup_pdf_session,
     get_page_image,
+    get_pdf_session,
+    get_pdf_file,
+    analyze_pdf_complexity_endpoint,
+)
+
+# Zone management views (enabled with safe stubs)
+from .zone_views import (
+    create_or_update_zones,
+    get_zones,
+    process_zones,
+    get_zone_processing_status,
+    manage_zone_links,
 )
 from .mpn_views import (
     mpn_auth_status,
@@ -137,9 +149,18 @@ urlpatterns = [
     # PDF Processing endpoints
     path('pdf/upload/', upload_pdf, name='upload-pdf'),
     path('pdf/process/', process_pdf_ocr, name='process-pdf-ocr'),
+    path('pdf/analyze-complexity/', analyze_pdf_complexity_endpoint, name='analyze-pdf-complexity'),
     path('pdf/status/<str:session_id>/', get_pdf_session_status, name='get-pdf-session-status'),
     path('pdf/cleanup/', cleanup_pdf_session, name='cleanup-pdf-session'),
     path('pdf/page/<str:session_id>/<int:page_number>/', get_page_image, name='get-page-image'),
+    path('pdf/sessions/<str:session_id>/', get_pdf_session, name='get-pdf-session'),
+    path('pdf/sessions/<str:session_id>/file/', get_pdf_file, name='get-pdf-file'),
+
+    # PDF Zone Management endpoints (stubbed OK)
+    path('pdf/zones/<str:session_id>/', get_zones, name='zones-handler'),
+    path('pdf/zones/<str:session_id>/process/', process_zones, name='process-zones'),
+    path('pdf/zones/<str:session_id>/status/', get_zone_processing_status, name='get-zone-processing-status'),
+    path('pdf/continuations/<str:session_id>/link/', manage_zone_links, name='manage-zone-links'),
 
     # MPN Validation + OAuth
     path('mpn/auth/status/', mpn_auth_status, name='mpn-auth-status'),

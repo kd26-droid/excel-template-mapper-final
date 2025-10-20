@@ -21,6 +21,17 @@ export const setGlobalLoaderCallback = (callback) => {
   globalLoaderCallback = callback;
 };
 
+// Generic GET method for specific use cases
+const get = async (url, config = {}) => {
+  try {
+    const response = await axios.get(`${API_URL}${url}`, config);
+    return response;
+  } catch (error) {
+    console.error(`Failed to GET ${url}:`, error);
+    throw error;
+  }
+};
+
 const ensureSession = async () => {
   if (demoSessionId) return demoSessionId;
   
@@ -28,7 +39,6 @@ const ensureSession = async () => {
     const response = await axios.post(`${API_URL}/demo-session/`);
     if (response.data.success) {
       demoSessionId = response.data.session_id;
-      console.log('🎯 Created demo session:', demoSessionId);
       return demoSessionId;
     }
   } catch (error) {
@@ -38,6 +48,12 @@ const ensureSession = async () => {
 };
 
 const api = {
+  // ==========================================
+  // GENERIC HTTP METHODS
+  // ==========================================
+
+  get,
+
   // ==========================================
   // 1️⃣ FILE UPLOAD ENDPOINTS
   // ==========================================
@@ -52,7 +68,6 @@ const api = {
     
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        console.log(`🔄 Upload attempt ${attempt}/${maxRetries}`);
         const response = await axios.post(`${API_URL}/upload/`, formData, {
           headers: { 'Content-Type': 'multipart/form-data' },
           timeout: 120000 // 2 minute timeout
@@ -60,7 +75,6 @@ const api = {
         
         // Validate that upload was successful and has session_id
         if (response.data && response.data.session_id) {
-          console.log(`✅ Upload successful on attempt ${attempt}:`, response.data.session_id);
           
           // Wait a moment for file processing, then validate headers
           await new Promise(resolve => setTimeout(resolve, 2000));
@@ -70,17 +84,14 @@ const api = {
             const hasHeaders = headersCheck.data.client_headers.length > 0 || headersCheck.data.template_headers.length > 0;
             
             if (hasHeaders) {
-              console.log(`✅ Headers validation passed for session ${response.data.session_id}`);
               return response;
             } else {
-              console.log(`⚠️ Headers empty for session ${response.data.session_id}, retrying...`);
               if (attempt === maxRetries) {
                 throw new Error('Upload completed but file processing failed - headers are empty');
               }
               continue;
             }
           } catch (headerError) {
-            console.log(`⚠️ Header validation failed:`, headerError.message);
             if (attempt === maxRetries) {
               // Return the upload response even if header validation fails
               // The session exists, maybe headers will be populated later
@@ -98,7 +109,6 @@ const api = {
         
         if (attempt < maxRetries) {
           const delay = Math.pow(2, attempt) * 1000; // Exponential backoff
-          console.log(`⏰ Waiting ${delay}ms before retry...`);
           await new Promise(resolve => setTimeout(resolve, delay));
         }
       }
@@ -138,7 +148,6 @@ const api = {
         },
         timeout: 60000 // 1 minute timeout for file upload
       });
-      console.log('✅ PDF uploaded successfully');
       return response;
     } catch (error) {
       console.error('PDF upload failed:', error);
@@ -158,7 +167,6 @@ const api = {
       const response = await axios.post(`${API_URL}/pdf/process/`, data, {
         timeout: 120000 // 2 minute timeout for OCR processing
       });
-      console.log('✅ PDF OCR processing completed');
       return response;
     } catch (error) {
       console.error('PDF OCR processing failed:', error);
@@ -189,7 +197,6 @@ const api = {
   cleanupPDFSession: async (data) => {
     try {
       const response = await axios.post(`${API_URL}/pdf/cleanup/`, data);
-      console.log('✅ PDF session cleaned up');
       return response;
     } catch (error) {
       console.error('PDF cleanup failed:', error);
@@ -215,6 +222,133 @@ const api = {
   },
 
   // ==========================================
+  // 📋 PDF ZONE MANAGEMENT ENDPOINTS
+  // ==========================================
+
+  /**
+   * Get zones for a PDF session
+   * @param {string} sessionId - PDF session ID
+   */
+  getPDFZones: async (sessionId) => {
+    try {
+      const response = await axios.get(`${API_URL}/pdf/zones/${sessionId}/`, {
+        headers: {
+          'Cache-Control': 'no-cache, no-store, must-revalidate'
+        }
+      });
+      return response;
+    } catch (error) {
+      console.error('Failed to get PDF zones:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Create or update zones for a PDF session
+   * @param {string} sessionId - PDF session ID
+   * @param {Array} zones - Array of zone objects
+   */
+  createOrUpdatePDFZones: async (sessionId, zones) => {
+    try {
+      const response = await axios.post(`${API_URL}/pdf/zones/${sessionId}/`, {
+        zones: zones
+      });
+      return response;
+    } catch (error) {
+      console.error('Failed to create/update PDF zones:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Process PDF zones with enhancement and OCR
+   * @param {string} sessionId - PDF session ID
+   * @param {Array} zoneIds - Array of zone IDs to process
+   * @param {string} enhancePreset - Enhancement preset to use
+   */
+  processPDFZones: async (sessionId, zoneIds, enhancePreset = 'adaptive') => {
+    try {
+      showGlobalLoader(true);
+      const response = await axios.post(`${API_URL}/pdf/zones/${sessionId}/process/`, {
+        zone_ids: zoneIds
+        // enhance_preset intentionally omitted; backend picks best automatically
+      }, {
+        timeout: 120000 // 2 minutes for processing
+      });
+      return response;
+    } catch (error) {
+      console.error('❌ PDF zones processing failed:', error?.response?.data || error?.message || error);
+      throw error;
+    } finally {
+      showGlobalLoader(false);
+    }
+  },
+
+  /**
+   * Get processing status for PDF zones
+   * @param {string} sessionId - PDF session ID
+   */
+  getPDFZoneStatus: async (sessionId) => {
+    try {
+      const response = await axios.get(`${API_URL}/pdf/zones/${sessionId}/status/`);
+      return response;
+    } catch (error) {
+      console.error('Failed to get PDF zone status:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Link zones as continuation chain
+   * @param {string} sessionId - PDF session ID
+   * @param {Array} zoneIds - Array of zone IDs to link
+   */
+  linkPDFZones: async (sessionId, zoneIds) => {
+    try {
+      const response = await axios.post(`${API_URL}/pdf/continuations/${sessionId}/link/`, {
+        action: 'link',
+        zone_chain: zoneIds
+      });
+      return response;
+    } catch (error) {
+      console.error('Failed to link PDF zones:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Unlink zones continuation chain
+   * @param {string} sessionId - PDF session ID
+   * @param {Array} zoneIds - Array of zone IDs to unlink
+   */
+  unlinkPDFZones: async (sessionId, zoneIds) => {
+    try {
+      const response = await axios.post(`${API_URL}/pdf/continuations/${sessionId}/link/`, {
+        action: 'unlink',
+        zone_chain: zoneIds
+      });
+      return response;
+    } catch (error) {
+      console.error('Failed to unlink PDF zones:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Get PDF session details
+   * @param {string} sessionId - PDF session ID
+   */
+  getPDFSession: async (sessionId) => {
+    try {
+      const response = await axios.get(`${API_URL}/pdf/sessions/${sessionId}/`);
+      return response;
+    } catch (error) {
+      console.error('Failed to get PDF session:', error);
+      throw error;
+    }
+  },
+
+  // ==========================================
   // 2️⃣ HEADER AND MAPPING ENDPOINTS
   // ==========================================
 
@@ -224,12 +358,16 @@ const api = {
    */
   getHeaders: (sessionId) => {
     const _ts = Date.now();
+    const _rand = Math.random().toString(36).substr(2, 9);
+    const _mpn = 'mpn_validation_' + _ts;
     return axios.get(`${API_URL}/headers/${sessionId}/`, {
-      params: { _ts },
-      headers: { 
+      params: { _ts, _rand, _mpn, force_fresh: true, _bust: _ts },
+      headers: {
         'Cache-Control': 'no-cache, no-store, must-revalidate',
         'Pragma': 'no-cache',
-        'Expires': '0'
+        'Expires': '0',
+        'X-Cache-Bust': _ts.toString(),
+        'X-MPN-Request': 'force_refresh'
       }
     });
   },
@@ -315,6 +453,8 @@ const api = {
    */
   getMappedDataWithSpecs: (sessionId, page = 1, pageSize = 10, enableSpecParsing = false, options = {}) => {
     const _ts = options._ts || Date.now();
+    const _rand = Math.random().toString(36).substr(2, 9);
+    const _mpn = 'mpn_data_' + _ts;
     const params = {
       session_id: sessionId,
       page,
@@ -322,15 +462,20 @@ const api = {
       enable_spec_parsing: enableSpecParsing,
       stable: options.stable !== undefined ? options.stable : true,
       _ts,
+      _rand,
+      _mpn,
+      _bust: _ts,
     };
     if (options.force_fresh) params.force_fresh = 'true';
     if (options._fresh) params._fresh = options._fresh;
     return axios.get(`${API_URL}/data/`, {
       params,
-      headers: { 
+      headers: {
         'Cache-Control': 'no-cache, no-store, must-revalidate',
         'Pragma': 'no-cache',
-        'Expires': '0'
+        'Expires': '0',
+        'X-Cache-Bust': _ts.toString(),
+        'X-MPN-Data-Request': 'force_refresh'
       },
       signal: options.signal,
       timeout: (options.timeoutMs != null)
@@ -481,7 +626,6 @@ const api = {
         template_id: templateId
       });
       
-      console.log('✅ Template application request sent successfully');
       return resp;
     } finally {
       showGlobalLoader(false);
@@ -537,7 +681,6 @@ const api = {
       });
       
       // Return immediately - no sync waiting
-      console.log('✅ Column counts updated successfully');
       return response;
     } finally {
       showGlobalLoader(false);
@@ -725,7 +868,6 @@ const api = {
         const newVersion = response.data?.template_version ?? 0;
         
         if (newVersion > currentVersion) {
-          console.log('✅ Template version advanced:', { from: currentVersion, to: newVersion });
           return response.data;
         }
         
@@ -770,13 +912,11 @@ const api = {
         const hOk = !minHeaders || data.headers_count >= minHeaders || data.template_version > prevVersion + 1;
         
         if (vOk && hOk) {
-          console.log('✅ Fresh headers ready:', { version: data.template_version, headers: data.headers_count, attempts });
           return data;
         }
         
         // If version advanced but headers not ready, still consider it success after a few attempts
         if (vOk && attempts > 5) {
-          console.log('✅ Version advanced, accepting result:', { version: data.template_version, attempts });
           return data;
         }
         
@@ -792,7 +932,6 @@ const api = {
     try {
       const { data } = await api.getSessionStatus(sessionId);
       if (data?.template_version > prevVersion) {
-        console.log('✅ Operation succeeded despite timeout');
         return data;
       }
     } catch (e) {
@@ -865,7 +1004,6 @@ const api = {
       document.body.removeChild(link);
       window.URL.revokeObjectURL(url);
       
-      console.log(`Successfully downloaded ${fileType} file: ${filename}`);
       return { success: true, filename };
       
     } catch (error) {
@@ -899,7 +1037,6 @@ const api = {
         await api.downloadOriginalFile(sessionId);
         originalAvailable = true;
       } catch (e) {
-        console.log('Original file not available:', e.message);
       }
       
       try {
@@ -907,7 +1044,6 @@ const api = {
         const mappingResponse = await api.getExistingMappings(sessionId);
         convertedAvailable = mappingResponse.data.mappings && Object.keys(mappingResponse.data.mappings).length > 0;
       } catch (e) {
-        console.log('Converted file not available:', e.message);
       }
       
       return {
@@ -1216,7 +1352,6 @@ const api = {
       });
       
       // Just return immediately - no waiting for sync
-      console.log('✅ Factwise ID request sent successfully');
       return resp;
     } finally {
       showGlobalLoader(false);
@@ -1251,17 +1386,24 @@ const api = {
    * Apply formula rules to session data and create new tag columns (with proper sync)
    * @param {string} sessionId - Session ID
    * @param {Array} formulaRules - Array of formula rule objects
+   * @param {Array} mappings - Optional current mappings to help backend determine Tag column assignment
    */
-  applyFormulas: async (sessionId, formulaRules) => {
+  applyFormulas: async (sessionId, formulaRules, mappings = null) => {
     const effectiveSessionId = sessionId || await ensureSession();
-    
-    // Apply the formulas
-    const response = await axios.post(`${API_URL}/formulas/apply/`, {
+
+    const payload = {
       session_id: effectiveSessionId,
       formula_rules: formulaRules
-    });
-    
-    console.log('✅ Formula rules applied successfully');
+    };
+
+    // Include mappings if provided - helps backend assign Tag columns correctly
+    if (mappings !== null) {
+      payload.mappings = mappings;
+    }
+
+    // Apply the formulas
+    const response = await axios.post(`${API_URL}/formulas/apply/`, payload);
+
     return response;
   },
 
@@ -1537,5 +1679,18 @@ axios.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
+// Add complexity analysis to the api object
+api.analyzePDFComplexity = async (sessionId) => {
+  try {
+    const response = await axios.post(`${API_URL}/pdf/analyze-complexity/`, {
+      session_id: sessionId
+    });
+    return response;
+  } catch (error) {
+    console.error('Failed to analyze PDF complexity:', error);
+    throw error;
+  }
+};
 
 export default api;

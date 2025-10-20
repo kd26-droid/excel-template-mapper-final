@@ -25,7 +25,6 @@ function applySnapshotToEditor(snapshot, stateFunctions) {
   } = stateFunctions;
 
   try {
-    console.log('🔄 Applying snapshot to editor:', snapshot);
 
     // Update column counts
     const counts = snapshot.counts || {};
@@ -35,12 +34,10 @@ function applySnapshotToEditor(snapshot, stateFunctions) {
         spec_pairs_count: counts.spec_pairs_count || 1,
         customer_id_pairs_count: counts.customer_id_pairs_count || 1
       });
-      console.log('✅ Updated dynamic column counts:', counts);
     }
 
     // Create column definitions from headers
     const headers = snapshot.headers || [];
-    console.log(`🔧 SNAPSHOT: Processing ${headers.length} headers:`, headers.slice(0, 5));
     
     if (setColumnDefs && headers.length > 0) {
       const cols = [
@@ -128,12 +125,10 @@ function applySnapshotToEditor(snapshot, stateFunctions) {
         
         // Log important columns for debugging
         if (columnType === 'tag' || columnType === 'factwise') {
-          console.log(`🔧 SNAPSHOT: Created ${columnType} column: "${displayName}" (field: ${h})`);
         }
       });
       
       // Log column type summary
-      console.log(`🔧 SNAPSHOT: Column summary - Tags: ${tagColumns}, Specs: ${specColumns}, Customers: ${customerColumns}, FactWise: ${factwiseColumns}, Total: ${cols.length - 1}`);
       
       // Verify all headers have corresponding columns
       const expectedFields = new Set(headers);
@@ -146,11 +141,9 @@ function applySnapshotToEditor(snapshot, stateFunctions) {
         console.error(`🔧 SNAPSHOT: Missing fields:`, missingFields);
         console.error(`🔧 SNAPSHOT: Extra fields:`, extraFields);
       } else {
-        console.log(`🔧 SNAPSHOT: Perfect field alignment - all ${headers.length} headers have columns`);
       }
       
       setColumnDefs(cols);
-      console.log(`✅ Updated column definitions: ${cols.length - 1} columns`);
     }
 
     // Update formula-related state
@@ -176,7 +169,6 @@ function applySnapshotToEditor(snapshot, stateFunctions) {
         h.includes('Customer identification')
       );
       setFormulaColumns(detectedFormulaColumns);
-      console.log(`✅ Updated formula columns: ${detectedFormulaColumns.length} columns`);
     }
 
     // Update factwise ID rule if present
@@ -190,11 +182,9 @@ function applySnapshotToEditor(snapshot, stateFunctions) {
           operator: factwiseRule.operator || '_',
           strategy: factwiseRule.strategy || 'fill_only_null'
         });
-        console.log('✅ Updated factwise ID rule:', factwiseRule);
       }
     }
 
-    console.log('🎉 Snapshot applied successfully to editor');
 
   } catch (error) {
     console.error('❌ Error applying snapshot to editor:', error);
@@ -214,9 +204,7 @@ async function applySnapshotAndFetchData(snapshot, stateFunctions, fetchDataCall
     
     // Fetch fresh data if callback provided
     if (fetchDataCallback && typeof fetchDataCallback === 'function') {
-      console.log('🔄 Fetching fresh data after snapshot application...');
       await fetchDataCallback();
-      console.log('✅ Fresh data fetched successfully');
     }
   } catch (error) {
     console.error('❌ Error in applySnapshotAndFetchData:', error);

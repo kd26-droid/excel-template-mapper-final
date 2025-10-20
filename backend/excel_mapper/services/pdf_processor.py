@@ -289,3 +289,165 @@ class PDFProcessor:
         except Exception as e:
             logger.error(f"Error detecting table regions: {e}")
             return []
+
+    def crop_zone_from_image(self, image_path: str, coordinates: Dict[str, int]) -> Image.Image:
+        """
+        Crop a specific zone from a page image
+
+        Args:
+            image_path: Path to page image
+            coordinates: Dict with x, y, width, height in pixels
+
+        Returns:
+            PIL Image of the cropped zone
+        """
+        try:
+            image = Image.open(image_path)
+
+            # Extract coordinates
+            x = coordinates.get('x', 0)
+            y = coordinates.get('y', 0)
+            width = coordinates.get('width', image.width)
+            height = coordinates.get('height', image.height)
+
+            # Calculate crop box (left, top, right, bottom)
+            left = x
+            top = y
+            right = x + width
+            bottom = y + height
+
+            # Ensure coordinates are within image bounds
+            left = max(0, min(left, image.width))
+            top = max(0, min(top, image.height))
+            right = max(0, min(right, image.width))
+            bottom = max(0, min(bottom, image.height))
+
+            # Crop the image
+            cropped = image.crop((left, top, right, bottom))
+
+            logger.debug(f"Cropped zone: ({left}, {top}, {right}, {bottom}) from {image.width}x{image.height}")
+
+            return cropped
+
+        except Exception as e:
+            logger.error(f"Error cropping zone from image: {e}")
+            raise
+
+    def enhance_zone_image(self, image: Image.Image, preset: str = 'adaptive') -> Image.Image:
+        """
+        Enhance a cropped zone image to improve OCR/table detection.
+
+        Presets:
+        - 'none': return original image
+        - 'basic': grayscale + CLAHE + light sharpen
+        - 'adaptive' (default): grayscale + CLAHE + adaptive threshold + morphology + de-noise + sharpen
+
+        Args:
+            image: PIL Image for the zone
+            preset: enhancement preset name
+
+        Returns:
+            Enhanced PIL Image (8-bit single channel or 3-channel)
+        """
+        try:
+            if image is None:
+                return image
+
+            import numpy as np
+            import cv2
+
+            # Convert PIL -> OpenCV (BGR)
+            img = np.array(image)
+            if img.ndim == 2:
+                gray = img
+            else:
+                gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+
+            # Auto-select best preset if requested or unspecified
+            if preset is None or preset == 'auto':
+                preset = self._choose_enhancement_preset(gray)
+
+            # Contrast Limited Adaptive Histogram Equalization (CLAHE)
+            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+            eq = clahe.apply(gray)
+
+            if preset == 'basic':
+                # Light unsharp masking
+                blur = cv2.GaussianBlur(eq, (0, 0), sigmaX=1.0)
+                sharp = cv2.addWeighted(eq, 1.5, blur, -0.5, 0)
+                return Image.fromarray(sharp)
+
+            # 'adaptive' preset
+            # Adaptive threshold to clean background and enhance text/lines
+            th = cv2.adaptiveThreshold(eq, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                       cv2.THRESH_BINARY, 31, 10)
+
+            # Morphology to strengthen grid lines and separate text
+            # Use small kernels to avoid over-connecting characters
+            kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 1))
+            kernel_v = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 3))
+            morph_h = cv2.morphologyEx(th, cv2.MORPH_CLOSE, kernel_h, iterations=1)
+            morph_v = cv2.morphologyEx(th, cv2.MORPH_CLOSE, kernel_v, iterations=1)
+            morph = cv2.bitwise_or(morph_h, morph_v)
+
+            # Denoise small speckles
+            morph = cv2.medianBlur(morph, 3)
+
+            # Optional slight sharpening on inverted text for clarity
+            inv = 255 - morph
+            blur = cv2.GaussianBlur(inv, (0, 0), sigmaX=1.0)
+            sharp_inv = cv2.addWeighted(inv, 1.4, blur, -0.4, 0)
+            enhanced = 255 - sharp_inv
+
+            return Image.fromarray(enhanced)
+
+        except Exception as e:
+            logger.error(f"Error enhancing zone image (preset={preset}): {e}")
+            # Fail-safe: return original
+            return image
+
+    def _choose_enhancement_preset(self, gray_img) -> str:
+        """
+        Heuristically select an enhancement preset based on image quality metrics.
+
+        Metrics:
+        - Sharpness: variance of Laplacian
+        - Contrast: stddev of intensities
+        - Dynamic range: P95 - P5 percentiles
+        """
+        import numpy as np
+        import cv2
+
+        try:
+            # Ensure uint8 grayscale
+            if gray_img.dtype != np.uint8:
+                gray = cv2.normalize(gray_img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            else:
+                gray = gray_img
+
+            # Sharpness via Laplacian variance
+            var_lap = cv2.Laplacian(gray, cv2.CV_64F).var()
+
+            # Contrast via stddev and percentile range
+            stddev = float(np.std(gray))
+            p5, p95 = np.percentile(gray, [5, 95])
+            dyn_range = float(p95 - p5)
+
+            # Simple rules of thumb (tuned conservatively)
+            # Low sharpness OR low contrast -> adaptive
+            if var_lap < 80 or stddev < 25 or dyn_range < 35:
+                logger.info(f"🧮 Enhance:auto -> adaptive | varLap={var_lap:.1f} std={stddev:.1f} dyn={dyn_range:.1f}")
+                return 'adaptive'
+
+            # Good sharpness and contrast -> basic
+            if var_lap >= 150 and stddev >= 35 and dyn_range >= 45:
+                logger.info(f"🧮 Enhance:auto -> basic | varLap={var_lap:.1f} std={stddev:.1f} dyn={dyn_range:.1f}")
+                return 'basic'
+
+            # Mid-case -> basic (safer than none)
+            logger.info(f"🧮 Enhance:auto -> basic(mid) | varLap={var_lap:.1f} std={stddev:.1f} dyn={dyn_range:.1f}")
+            return 'basic'
+        except Exception:
+            # On failure, default to adaptive
+            logger.info("🧮 Enhance:auto -> adaptive (metrics error)")
+            return 'adaptive'

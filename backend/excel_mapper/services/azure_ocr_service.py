@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class AzureOCRService:
-    """Service for extracting tables from images using Azure Document Intelligence"""
+    """Enhanced service for extracting tables from images using Azure Document Intelligence with zone processing"""
 
     def __init__(self):
         self.endpoint = getattr(settings, 'AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT')
@@ -29,15 +29,395 @@ class AzureOCRService:
         self.client = DocumentIntelligenceClient(
             endpoint=self.endpoint,
             credential=AzureKeyCredential(self.key),
-            api_version="2024-07-31-preview"
+            api_version="2024-11-30"  # Latest GA version with improved table extraction
         )
 
-        # Configuration
+        # Configuration with premium OCR model
         self.config = getattr(settings, 'PDF_CONFIG', {
-            'ocr_model': 'prebuilt-layout',
+            'ocr_model': 'prebuilt-read',  # Premium model for better accuracy
             'confidence_threshold': 0.7,
             'processing_timeout_seconds': 300,
+            'enable_high_resolution': True,  # Enable high-resolution mode
+            'features': ['OCR_HIGH_RESOLUTION']  # Premium OCR features
         })
+
+    def analyze_zone(self, zone_image_bytes: bytes, zone_metadata: Dict = None) -> Dict[str, any]:
+        """
+        Analyze a cropped zone image for table extraction
+
+        Args:
+            zone_image_bytes: Enhanced zone image as bytes
+            zone_metadata: Zone information including coordinates, type, etc.
+
+        Returns:
+            Dictionary with zone-specific extraction results
+        """
+        try:
+            logger.info(f"Starting Azure OCR analysis for zone: {zone_metadata.get('zone_id', 'unknown')}")
+
+            # Analyze the zone image
+            poller = self.client.begin_analyze_document(
+                model_id=self.config['ocr_model'],
+                body=zone_image_bytes,
+                content_type="application/octet-stream"
+            )
+
+            # Wait for completion with timeout
+            result = poller.result()
+
+            # Process results with zone context
+            extraction_result = self._process_zone_analysis_result(result, zone_metadata)
+
+            logger.info(f"Zone OCR completed. Found {extraction_result['table_count']} tables")
+            return extraction_result
+
+        except HttpResponseError as e:
+            logger.error(f"Azure API error for zone analysis: {e}")
+            raise Exception(f"Azure OCR zone analysis error: {e.message}")
+        except Exception as e:
+            logger.error(f"Error in zone OCR analysis: {e}")
+            raise
+
+    def _process_zone_analysis_result(self, result: AnalyzeResult, zone_metadata: Dict = None) -> Dict[str, any]:
+        """
+        Process Azure Document Intelligence analysis result for a specific zone
+
+        Args:
+            result: AnalyzeResult from Azure
+            zone_metadata: Zone information for context
+
+        Returns:
+            Structured extraction data with zone context
+        """
+        try:
+            zone_id = zone_metadata.get('zone_id', 'unknown') if zone_metadata else 'unknown'
+            zone_type = zone_metadata.get('zone_type', 'table') if zone_metadata else 'table'
+
+            extraction_data = {
+                'zone_id': zone_id,
+                'zone_type': zone_type,
+                'zone_metadata': zone_metadata,
+                'tables': [],
+                'table_count': 0,
+                'extracted_headers': [],
+                'extracted_data': [],
+                'confidence_scores': {},
+                'quality_metrics': {},
+                'processing_metadata': {
+                    'ocr_model': self.config['ocr_model'],
+                    'timestamp': time.time()
+                }
+            }
+
+            # Extract paragraph-level confidence scores
+            paragraph_confidences = {}
+            if hasattr(result, 'paragraphs') and result.paragraphs:
+                for para in result.paragraphs:
+                    if hasattr(para, 'content') and hasattr(para, 'confidence'):
+                        paragraph_confidences[para.content.strip()] = para.confidence
+
+            extraction_data['paragraph_confidences'] = paragraph_confidences
+
+            if not result.tables:
+                logger.warning(f"No tables found in zone {zone_id}")
+                return extraction_data
+
+            extraction_data['table_count'] = len(result.tables)
+            logger.info(f"Processing {len(result.tables)} tables in zone {zone_id}")
+
+            # Process each table with zone context
+            for table_idx, table in enumerate(result.tables):
+                table_data = self._extract_zone_table_data(table, table_idx, paragraph_confidences, zone_metadata)
+                extraction_data['tables'].append(table_data)
+
+                # Combine data from all tables in zone
+                if table_data['headers']:
+                    extraction_data['extracted_headers'].extend(table_data['headers'])
+
+                if table_data['data']:
+                    extraction_data['extracted_data'].extend(table_data['data'])
+
+                # Merge confidence scores
+                extraction_data['confidence_scores'].update(table_data['confidence_scores'])
+
+            # Calculate zone-specific quality metrics
+            extraction_data['quality_metrics'] = self._calculate_zone_quality_metrics(extraction_data)
+
+            return extraction_data
+
+        except Exception as e:
+            logger.error(f"Error processing zone analysis result: {e}")
+            raise
+
+    def _extract_zone_table_data(self, table, table_idx: int, paragraph_confidences: Dict[str, float], zone_metadata: Dict = None) -> Dict[str, any]:
+        """
+        Extract data from a table within a specific zone
+
+        Args:
+            table: Table object from Azure result
+            table_idx: Table index within zone
+            paragraph_confidences: Confidence scores from paragraphs
+            zone_metadata: Zone context information
+
+        Returns:
+            Dictionary with zone table data
+        """
+        try:
+            zone_type = zone_metadata.get('zone_type', 'table') if zone_metadata else 'table'
+
+            table_data = {
+                'zone_table_id': f"{zone_metadata.get('zone_id', 'unknown')}_table_{table_idx}",
+                'table_id': f"table_{table_idx}",
+                'row_count': table.row_count,
+                'column_count': table.column_count,
+                'headers': [],
+                'data': [],
+                'confidence_scores': {},
+                'cells': [],
+                'zone_context': zone_metadata
+            }
+
+            # Build cell matrix with zone-aware confidence scoring
+            cell_matrix = {}
+            for cell in table.cells:
+                row_idx = cell.row_index
+                col_idx = cell.column_index
+
+                if row_idx not in cell_matrix:
+                    cell_matrix[row_idx] = {}
+
+                cell_content = cell.content or ''
+
+                # Zone-aware confidence calculation
+                if zone_type == 'header':
+                    # Headers should have higher base confidence
+                    synthetic_confidence = self._calculate_header_zone_confidence(cell_content, paragraph_confidences)
+                else:
+                    # Regular table data confidence
+                    synthetic_confidence = self._calculate_synthetic_confidence(cell_content, paragraph_confidences)
+
+                cell_matrix[row_idx][col_idx] = {
+                    'content': cell_content,
+                    'confidence': synthetic_confidence,
+                    'kind': getattr(cell, 'kind', 'content'),
+                    'zone_type': zone_type
+                }
+
+            # Header detection with zone context
+            if zone_type == 'header':
+                # For header zones, treat the entire zone as headers
+                headers = self._extract_headers_from_header_zone(cell_matrix, table.column_count)
+                header_confidences = {h: 0.9 for h in headers}  # High confidence for explicitly selected headers
+                header_row_idx = 0
+                data_rows = []  # No data rows in header zones
+                row_confidences = {}
+            else:
+                # Regular table processing
+                header_row_idx, headers, header_confidences = self._detect_headers(cell_matrix, table.column_count, table.row_count)
+
+                # Extract data rows (skip header row)
+                data_rows = []
+                row_confidences = {}
+
+                for row_idx in range(table.row_count):
+                    if row_idx == header_row_idx:
+                        continue  # Skip the header row
+                    if row_idx in cell_matrix:
+                        row_data = []
+                        row_confidence_sum = 0.0
+                        valid_cells = 0
+
+                        for col_idx in range(table.column_count):
+                            if col_idx in cell_matrix[row_idx]:
+                                cell = cell_matrix[row_idx][col_idx]
+                                content = cell['content'].strip()
+                                row_data.append(content)
+                                row_confidence_sum += cell['confidence']
+                                valid_cells += 1
+                            else:
+                                row_data.append('')
+
+                        data_rows.append(row_data)
+
+                        # Calculate average confidence for this row
+                        avg_confidence = row_confidence_sum / valid_cells if valid_cells > 0 else 0.0
+                        row_confidences[f'row_{row_idx}'] = avg_confidence
+
+            table_data['headers'] = headers
+            table_data['data'] = data_rows
+            table_data['confidence_scores']['headers'] = header_confidences
+            table_data['confidence_scores']['rows'] = row_confidences
+            table_data['header_row_index'] = header_row_idx
+
+            return table_data
+
+        except Exception as e:
+            logger.error(f"Error extracting zone table data: {e}")
+            raise
+
+    def _extract_headers_from_header_zone(self, cell_matrix: Dict, column_count: int) -> List[str]:
+        """
+        Extract headers from a zone specifically designated as a header zone
+
+        Args:
+            cell_matrix: Matrix of cells
+            column_count: Number of columns
+
+        Returns:
+            List of header strings
+        """
+        headers = []
+
+        # For header zones, we may have multi-row headers
+        # Combine text from all rows to form complete headers
+        for col_idx in range(column_count):
+            header_parts = []
+
+            # Collect text from all rows for this column
+            for row_idx in sorted(cell_matrix.keys()):
+                if col_idx in cell_matrix[row_idx]:
+                    content = cell_matrix[row_idx][col_idx]['content'].strip()
+                    if content:
+                        header_parts.append(content)
+
+            # Combine header parts
+            if header_parts:
+                # Join with space, but remove duplicates
+                combined_header = ' '.join(header_parts)
+                headers.append(combined_header)
+            else:
+                headers.append(f'Column_{col_idx + 1}')
+
+        return headers
+
+    def _calculate_header_zone_confidence(self, cell_content: str, paragraph_confidences: Dict[str, float]) -> float:
+        """
+        Calculate confidence for cells in header zones (higher base confidence)
+
+        Args:
+            cell_content: Content of the cell
+            paragraph_confidences: Paragraph confidence mapping
+
+        Returns:
+            Confidence score between 0.0 and 1.0
+        """
+        if not cell_content or not cell_content.strip():
+            return 0.0
+
+        # Start with higher base confidence for header zones
+        base_confidence = 0.85
+
+        # Check for paragraph matches
+        cell_text = cell_content.strip()
+        for para_text, confidence in paragraph_confidences.items():
+            if cell_text in para_text or para_text in cell_text:
+                return max(confidence, base_confidence)
+
+        # Header-specific confidence adjustments
+        confidence_score = base_confidence
+
+        # Boost for typical header words
+        header_words = ['item', 'product', 'name', 'description', 'quantity', 'price', 'code', 'id', 'number', 'type', 'category']
+        if any(word in cell_text.lower() for word in header_words):
+            confidence_score += 0.1
+
+        # Ensure valid range
+        return max(0.0, min(1.0, confidence_score))
+
+    def _calculate_zone_quality_metrics(self, extraction_data: Dict[str, any]) -> Dict[str, any]:
+        """
+        Calculate quality metrics specific to zone processing
+
+        Args:
+            extraction_data: Zone extraction results
+
+        Returns:
+            Zone-specific quality metrics
+        """
+        try:
+            metrics = {
+                'zone_id': extraction_data.get('zone_id'),
+                'zone_type': extraction_data.get('zone_type'),
+                'overall_confidence': 0.0,
+                'header_confidence': 0.0,
+                'data_confidence': 0.0,
+                'zone_completeness': 0.0,
+                'zone_structure_score': 0.0,
+                'zone_ocr_readiness': 0.0
+            }
+
+            if not extraction_data['tables']:
+                return metrics
+
+            # Calculate zone-specific confidence scores
+            total_header_confidence = 0.0
+            total_data_confidence = 0.0
+            header_count = 0
+            data_count = 0
+
+            for table in extraction_data['tables']:
+                # Header confidence
+                if 'headers' in table['confidence_scores']:
+                    for conf in table['confidence_scores']['headers'].values():
+                        total_header_confidence += conf
+                        header_count += 1
+
+                # Data confidence
+                if 'rows' in table['confidence_scores']:
+                    for conf in table['confidence_scores']['rows'].values():
+                        total_data_confidence += conf
+                        data_count += 1
+
+            metrics['header_confidence'] = total_header_confidence / header_count if header_count > 0 else 0.0
+            metrics['data_confidence'] = total_data_confidence / data_count if data_count > 0 else 0.0
+            metrics['overall_confidence'] = (metrics['header_confidence'] + metrics['data_confidence']) / 2
+
+            # Zone completeness (specific to zone type)
+            zone_type = extraction_data.get('zone_type', 'table')
+            if zone_type == 'header':
+                # For header zones, completeness is about having meaningful headers
+                total_headers = sum(len(table['headers']) for table in extraction_data['tables'])
+                meaningful_headers = sum(1 for table in extraction_data['tables']
+                                       for header in table['headers']
+                                       if header.strip() and not header.startswith('Column_'))
+                metrics['zone_completeness'] = meaningful_headers / total_headers if total_headers > 0 else 0.0
+            else:
+                # For table zones, completeness is about filled cells
+                total_cells = 0
+                filled_cells = 0
+                for table in extraction_data['tables']:
+                    for row in table['data']:
+                        for cell in row:
+                            total_cells += 1
+                            if str(cell).strip():
+                                filled_cells += 1
+                metrics['zone_completeness'] = filled_cells / total_cells if total_cells > 0 else 0.0
+
+            # Zone structure score
+            if extraction_data['tables']:
+                # For zones, structure consistency within the zone
+                consistent_structure = True
+                expected_columns = extraction_data['tables'][0]['column_count']
+
+                for table in extraction_data['tables']:
+                    if table['column_count'] != expected_columns:
+                        consistent_structure = False
+                        break
+
+                metrics['zone_structure_score'] = 1.0 if consistent_structure else 0.5
+
+            # OCR readiness score (quality of the zone for OCR)
+            metrics['zone_ocr_readiness'] = min(1.0,
+                (metrics['overall_confidence'] * 0.4) +
+                (metrics['zone_completeness'] * 0.3) +
+                (metrics['zone_structure_score'] * 0.3)
+            )
+
+            return metrics
+
+        except Exception as e:
+            logger.error(f"Error calculating zone quality metrics: {e}")
+            return metrics
 
     def analyze_pdf_file(self, file_path: str) -> Dict[str, any]:
         """
@@ -355,6 +735,115 @@ class AzureOCRService:
             logger.error(f"Error calculating quality metrics: {e}")
             return metrics
 
+    def validate_zone_extraction_quality(self, extraction_data: Dict[str, any]) -> Dict[str, any]:
+        """
+        Validate the quality of zone-specific extraction results
+
+        Args:
+            extraction_data: Zone extraction results
+
+        Returns:
+            Zone-specific validation results with recommendations
+        """
+        try:
+            quality_metrics = extraction_data.get('quality_metrics', {})
+            zone_type = extraction_data.get('zone_type', 'table')
+            zone_id = extraction_data.get('zone_id', 'unknown')
+            threshold = self.config['confidence_threshold']
+
+            validation = {
+                'zone_id': zone_id,
+                'zone_type': zone_type,
+                'is_valid': True,
+                'warnings': [],
+                'errors': [],
+                'recommendations': [],
+                'quality_grade': 'A'  # A, B, C, D, F
+            }
+
+            # Zone-specific validation rules
+            overall_conf = quality_metrics.get('overall_confidence', 0.0)
+
+            if zone_type == 'header':
+                # Header zones should have high confidence and meaningful headers
+                header_conf = quality_metrics.get('header_confidence', 0.0)
+                completeness = quality_metrics.get('zone_completeness', 0.0)
+
+                if header_conf < 0.8:
+                    validation['warnings'].append(f"Header zone confidence low ({header_conf:.2f} < 0.8)")
+                    validation['recommendations'].append("Review header text extraction - consider manual correction")
+
+                if completeness < 0.7:
+                    validation['warnings'].append(f"Header completeness low ({completeness:.2f} < 0.7)")
+                    validation['recommendations'].append("Check if all important headers were captured in zone")
+
+                # Grade header zones
+                if header_conf >= 0.9 and completeness >= 0.8:
+                    validation['quality_grade'] = 'A'
+                elif header_conf >= 0.8 and completeness >= 0.7:
+                    validation['quality_grade'] = 'B'
+                elif header_conf >= 0.6 and completeness >= 0.5:
+                    validation['quality_grade'] = 'C'
+                elif header_conf >= 0.4:
+                    validation['quality_grade'] = 'D'
+                else:
+                    validation['quality_grade'] = 'F'
+                    validation['is_valid'] = False
+                    validation['errors'].append("Header zone quality too low for reliable use")
+
+            else:
+                # Table zones validation
+                data_conf = quality_metrics.get('data_confidence', 0.0)
+                completeness = quality_metrics.get('zone_completeness', 0.0)
+                structure_score = quality_metrics.get('zone_structure_score', 0.0)
+
+                if data_conf < threshold:
+                    validation['warnings'].append(f"Table data confidence low ({data_conf:.2f} < {threshold})")
+                    validation['recommendations'].append("Review extracted table data for accuracy")
+
+                if completeness < 0.5:
+                    validation['warnings'].append(f"Table completeness low ({completeness:.2f} < 0.5)")
+                    validation['recommendations'].append("Check for missing data in table zone")
+
+                if structure_score < 0.8:
+                    validation['warnings'].append(f"Table structure inconsistent ({structure_score:.2f} < 0.8)")
+                    validation['recommendations'].append("Verify table boundaries and alignment")
+
+                # Grade table zones
+                avg_score = (data_conf + completeness + structure_score) / 3
+                if avg_score >= 0.85:
+                    validation['quality_grade'] = 'A'
+                elif avg_score >= 0.7:
+                    validation['quality_grade'] = 'B'
+                elif avg_score >= 0.55:
+                    validation['quality_grade'] = 'C'
+                elif avg_score >= 0.4:
+                    validation['quality_grade'] = 'D'
+                else:
+                    validation['quality_grade'] = 'F'
+                    validation['is_valid'] = False
+                    validation['errors'].append("Table zone quality too low for reliable use")
+
+            # OCR readiness check
+            ocr_readiness = quality_metrics.get('zone_ocr_readiness', 0.0)
+            if ocr_readiness < 0.6:
+                validation['warnings'].append(f"Zone OCR readiness low ({ocr_readiness:.2f} < 0.6)")
+                validation['recommendations'].append("Consider image enhancement or zone reselection")
+
+            return validation
+
+        except Exception as e:
+            logger.error(f"Error validating zone extraction quality: {e}")
+            return {
+                'zone_id': extraction_data.get('zone_id', 'unknown'),
+                'zone_type': extraction_data.get('zone_type', 'unknown'),
+                'is_valid': False,
+                'warnings': [],
+                'errors': [f"Validation error: {str(e)}"],
+                'recommendations': ["Manual review required due to validation error"],
+                'quality_grade': 'F'
+            }
+
     def validate_extraction_quality(self, extraction_data: Dict[str, any]) -> Dict[str, any]:
         """
         Validate the quality of extraction results
@@ -510,10 +999,11 @@ class AzureOCRService:
 
             # First pass: collect all unique headers maintaining order
             for table_idx, table in enumerate(extraction_data['tables']):
-                # Apply normalization per mode
+                # Apply normalization ONLY in 'flatten' mode, not in 'align' or 'preserve'
                 if alignment_mode == 'flatten':
                     table_headers = [_normalize_header_name(h) for h in table['headers']]
                 else:
+                    # Keep original headers without renaming
                     table_headers = table['headers']
                 table_headers_list.append(table_headers)
                 logger.info(f"Table {table_idx + 1} headers: {table_headers}")
@@ -547,7 +1037,7 @@ class AzureOCRService:
             logger.info(f"Total unique headers: {len(combined_headers)}")
 
             # Combine data from all tables
-            if alignment_mode == 'flatten':
+            if alignment_mode in ('flatten', 'align'):
                 # Overlay rows by position across tables to align columns on same row index
                 # 1) Determine maximum number of rows among tables
                 table_rows_counts = [len(t['data']) for t in extraction_data['tables']]
@@ -579,8 +1069,12 @@ class AzureOCRService:
 
                 # 3) Fill row records from each table
                 for table_idx, table in enumerate(extraction_data['tables']):
-                    table_headers = [_normalize_header_name(h) for h in table['headers']]
-                    logger.info(f"Flatten mode: processing table {table_idx + 1} with headers: {table_headers}")
+                    # Only normalize headers in 'flatten' mode, not 'align' mode
+                    if alignment_mode == 'flatten':
+                        table_headers = [_normalize_header_name(h) for h in table['headers']]
+                    else:
+                        table_headers = table['headers']
+                    logger.info(f"{alignment_mode.capitalize()} mode: processing table {table_idx + 1} with headers: {table_headers}")
                     for row_idx, row in enumerate(table['data']):
                         if row_idx >= max_rows:
                             break
@@ -945,3 +1439,108 @@ class AzureOCRService:
 
         logger.debug(f"🔍 Synthetic confidence {confidence_score} for cell '{cell_text[:20]}...'")
         return confidence_score
+
+    def extract_table_from_image(self, image) -> Dict[str, any]:
+        """
+        Simple method to extract table data from a PIL Image
+        Used for zone-based extraction
+
+        Args:
+            image: PIL Image object
+
+        Returns:
+            Dict with headers and rows
+        """
+        try:
+            from io import BytesIO
+
+            # Convert PIL Image to bytes
+            buffer = BytesIO()
+            image.save(buffer, format='PNG')
+            image_bytes = buffer.getvalue()
+
+            # Analyze with Azure
+            logger.info("🔷 Azure OCR: begin analyze (prebuilt-layout) for zone image")
+            poller = self.client.begin_analyze_document(
+                model_id=self.config['ocr_model'],
+                body=image_bytes,
+                content_type="application/octet-stream"
+            )
+
+            result = poller.result()
+            logger.info("🔷 Azure OCR: analysis completed")
+
+            # Extract tables
+            if not result.tables or len(result.tables) == 0:
+                logger.warning(f"No tables detected by Azure OCR. Tables found: {len(result.tables) if result.tables else 0}")
+                logger.info(f"Attempting to extract as structured text instead...")
+
+                # Fallback: Try to extract text line by line and treat as a simple table
+                # This handles cases where Azure doesn't recognize table structure
+                lines = []
+                if result.paragraphs:
+                    for para in result.paragraphs:
+                        if para.content and para.content.strip():
+                            lines.append(para.content.strip())
+
+                if lines:
+                    # Treat first line as headers, rest as data
+                    # Try to split by common delimiters
+                    first_line = lines[0]
+                    logger.info(f"First line text: '{first_line}'")
+                    logger.info(f"Total lines: {len(lines)}")
+
+                    # Try tab, pipe, or multiple spaces as delimiters
+                    if '\t' in first_line:
+                        headers = [h.strip() for h in first_line.split('\t') if h.strip()]
+                        rows = [[cell.strip() for cell in line.split('\t') if cell.strip()] for line in lines[1:]]
+                    elif '|' in first_line:
+                        headers = [h.strip() for h in first_line.split('|') if h.strip()]
+                        rows = [[cell.strip() for cell in line.split('|') if cell.strip()] for line in lines[1:]]
+                    else:
+                        # Split by multiple spaces (2 or more)
+                        import re
+                        headers = [h for h in re.split(r'\s{2,}', first_line) if h.strip()]
+                        rows = [[cell for cell in re.split(r'\s{2,}', line) if cell.strip()] for line in lines[1:]]
+
+                    logger.info(f"📝 Fallback (text lines): headers={len(headers)} sample={headers[:8]} | rows={len(rows)}")
+                    return {'headers': headers, 'rows': rows}
+
+                return {'headers': [], 'rows': []}
+
+            # Use first table
+            table = result.tables[0]
+            logger.info(f"📊 Azure tables detected: count={len(result.tables)} | first_table rc={table.row_count} cc={table.column_count}")
+
+            # Build cell matrix
+            cell_matrix = {}
+            for cell in table.cells:
+                row_idx = cell.row_index
+                col_idx = cell.column_index
+
+                if row_idx not in cell_matrix:
+                    cell_matrix[row_idx] = {}
+
+                cell_matrix[row_idx][col_idx] = cell.content or ''
+
+            # Extract headers (assume first row)
+            headers = []
+            if 0 in cell_matrix:
+                for col_idx in range(table.column_count):
+                    headers.append(cell_matrix[0].get(col_idx, f'Column{col_idx+1}'))
+
+            # Extract data rows
+            rows = []
+            for row_idx in range(1, table.row_count):
+                if row_idx in cell_matrix:
+                    row = []
+                    for col_idx in range(table.column_count):
+                        row.append(cell_matrix[row_idx].get(col_idx, ''))
+                    rows.append(row)
+
+            logger.info(f"📤 Azure table extraction: headers={len(headers)} sample={headers[:8]} | rows={len(rows)}")
+            return {'headers': headers, 'rows': rows}
+
+        except Exception as e:
+            logger.error(f"Error extracting table from image: {e}")
+            return {'headers': [], 'rows': []}

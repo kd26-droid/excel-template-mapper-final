@@ -352,7 +352,6 @@ const EnhancedDataEditor = () => {
       
       synchronizer.current.addEventListener('complete', (data) => {
         setSyncStatus({ inProgress: false, operation: null });
-        console.log('🔄 Sync operation completed:', data.operation);
         setSyncProgress(100);
       });
       
@@ -491,34 +490,23 @@ const EnhancedDataEditor = () => {
       const pg = payload.pagination || { page: targetPage, total_pages: 1, total_rows: rows.length };
 
       // Update quality metrics state
-      console.log('🔧 DEBUG: EnhancedDataEditor payload keys:', Object.keys(payload));
-      console.log('🔧 DEBUG: EnhancedDataEditor quality_metrics:', payload.quality_metrics);
-      console.log('🔧 DEBUG: EnhancedDataEditor header_confidence_scores:', payload.header_confidence_scores);
-      console.log('🔧 DEBUG: EnhancedDataEditor is_from_pdf:', payload.is_from_pdf);
 
       if (payload.quality_metrics) {
-        console.log('🔧 DEBUG: Setting quality metrics:', payload.quality_metrics);
         setQualityMetrics(payload.quality_metrics);
       } else {
-        console.log('🔧 DEBUG: No quality_metrics in payload');
       }
       if (payload.header_confidence_scores) {
-        console.log('🔧 DEBUG: Setting header confidence scores:', payload.header_confidence_scores);
         setHeaderConfidenceScores(payload.header_confidence_scores);
       } else {
-        console.log('🔧 DEBUG: No header_confidence_scores in payload');
       }
       if (payload.target_column_confidence_scores) {
-        console.log('🔧 DEBUG: Setting target column confidence scores:', payload.target_column_confidence_scores);
         setColumnConfidenceScores(payload.target_column_confidence_scores);
       } else {
         setColumnConfidenceScores(payload.header_confidence_scores || {});
       }
       if (payload.is_from_pdf !== undefined) {
-        console.log('🔧 DEBUG: Setting isFromPdf:', payload.is_from_pdf);
         setIsFromPdf(payload.is_from_pdf);
       } else {
-        console.log('🔧 DEBUG: No is_from_pdf in payload');
       }
 
       // Initialize columns if not yet set or header count changed
@@ -599,13 +587,11 @@ const EnhancedDataEditor = () => {
       setLoading(true);
       setError(null);
       
-      console.log('🚀 Initializing Enhanced Data Editor for session:', sessionId);
       
       // Check for smart tag rules from dashboard
       const smartTagRulesFromDashboard = location.state?.smartTagFormulaRules;
       
       if (smartTagRulesFromDashboard && smartTagRulesFromDashboard.length > 0) {
-        console.log('📋 Applying smart tag rules from dashboard...');
         await synchronizer.current.applyFormulasSynchronized(smartTagRulesFromDashboard);
         setAppliedFormulas(smartTagRulesFromDashboard);
         setHasFormulas(true);
@@ -629,7 +615,6 @@ const EnhancedDataEditor = () => {
     }
     
     try {
-      console.log('🔄 Fetching data with synchronization...');
       
       // Fetch with extended budget to warm caches and validate session
       const syncResult = await synchronizer.current.fetchDataFast(12000);
@@ -911,6 +896,11 @@ const EnhancedDataEditor = () => {
       const hLower = headers.map(h => String(h || '').toLowerCase());
       const hasTag = headers.some(h => typeof h === 'string' && (h.startsWith('Tag_') || h === 'Tag'));
       const needTags = Array.isArray(meta?.formula_rules) && meta.formula_rules.some(r => (r?.column_type || 'Tag') === 'Tag');
+      let tagValuesOk = true;
+      if (needTags && hasTag && Array.isArray(rows) && rows.length > 0) {
+        const tagHeaders = headers.filter(h => typeof h === 'string' && (h.startsWith('Tag_') || h === 'Tag'));
+        tagValuesOk = rows.some(r => r && tagHeaders.some(h => String((r || {})[h] ?? '').trim() !== ''));
+      }
 
       let itemOk = true;
       const needFactwise = Array.isArray(meta?.factwise_rules) && meta.factwise_rules.some(r => r?.type === 'factwise_id');
@@ -928,7 +918,7 @@ const EnhancedDataEditor = () => {
       }
 
       // If we need tags and factwise, require both; otherwise require whichever is needed
-      if (needTags && !hasTag) return false;
+      if (needTags && (!hasTag || !tagValuesOk)) return false;
       if (needFactwise && !itemOk) return false;
       return true;
     } catch (_) {
@@ -1161,6 +1151,11 @@ const EnhancedDataEditor = () => {
         if (template.formula_rules && template.formula_rules.length > 0) {
           setHasFormulas(true);
           setAppliedFormulas(template.formula_rules);
+          // Immediately materialize Tag rules so Tag_N values appear without manual apply
+          try {
+            await synchronizer.current.applyFormulasSynchronized(template.formula_rules);
+            await fetchDataSynchronized();
+          } catch (_) {}
         }
         
         // Handle factwise ID rule if present
@@ -1609,10 +1604,8 @@ const EnhancedDataEditor = () => {
       customer_id_pairs_count: dynamicColumnCounts.customer_id_pairs_count
     };
     
-    console.log('🔄 Persisting column counts before navigation:', columnCounts);
     try {
       await api.updateColumnCounts(sessionId, columnCounts);
-      console.log('✅ Column counts persisted successfully');
     } catch (error) {
       console.warn('Failed to persist column counts:', error);
     }
@@ -2564,7 +2557,15 @@ const EnhancedDataEditor = () => {
         open={formulaBuilderOpen}
         onClose={handleCloseFormulaBuilder}
         sessionId={sessionId}
-        availableColumns={columnDefs.filter(col => col.field && col.field !== '__row_number__').map(col => col.field || col.headerName).filter(Boolean)}
+        availableColumns={columnDefs.filter(col => {
+          // Show ALL columns except system columns
+          // This allows formulas to check any column (source data, Tags, Specifications, etc.)
+          // and enables advanced use cases like conditional tagging and cascading rules
+          if (!col.field || col.field === '__row_number__') return false;
+
+          // Include everything else - all data columns, Tag columns, Specification columns, etc.
+          return true;
+        }).map(col => col.field || col.headerName).filter(Boolean)}
         onApplyFormulas={handleApplyFormulasSynchronized}
         initialRules={appliedFormulas}
         columnExamples={columnExamples}

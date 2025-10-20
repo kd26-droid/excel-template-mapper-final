@@ -579,7 +579,6 @@ export default function ColumnMapping() {
   function debugLog(...args) {
     try {
       // eslint-disable-next-line no-console
-      console.log('🟦 CM', new Date().toISOString(), ...args);
     } catch (_) {}
   }
   function warnLog(...args) {
@@ -614,7 +613,6 @@ export default function ColumnMapping() {
 
   // Header correction functions
   const handleHeaderEdit = useCallback((nodeId, originalHeader, correctedHeader) => {
-    console.log('🖊️ Header edit:', { nodeId, originalHeader, correctedHeader });
 
     // Update header corrections state
     setHeaderCorrections(prev => ({
@@ -654,7 +652,6 @@ export default function ColumnMapping() {
       header === originalHeader ? correctedHeader : header
     ));
 
-    console.log(`✅ Header "${originalHeader}" corrected to "${correctedHeader}", ${affectedEdges.length} mappings removed`);
   }, [edges, setEdges, setNodes]);
 
   // Get effective headers (with corrections applied)
@@ -687,6 +684,7 @@ export default function ColumnMapping() {
       setApplyingTemplate(true);
       setApplyingTemplateId(template.id);
       setSyncNotice({ visible: true, message: 'Applying template… syncing latest changes…' });
+      // [TAGFLOW] Frontend apply start
       enhancedDebugLog('TEMPLATE_APPLY', 'Starting template application', {
         templateId: template.id,
         templateName: template.name,
@@ -739,6 +737,34 @@ export default function ColumnMapping() {
           setUseDynamicTemplate(true);
         }
 
+        // If formula rules exist, immediately materialize them so Tag_N values appear without manual apply
+        try {
+          const rules = Array.isArray(response?.data?.formula_rules) ? response.data.formula_rules : (template.formula_rules || []);
+          if (rules && rules.length > 0) {
+            // Let DataEditor materialize after navigation; but also try to materialize here if in session
+            // Best-effort apply; ignore failures and continue
+            try {
+              // CRITICAL FIX: Get current mappings to send with formula apply
+              let currentMappings = null;
+              try {
+                const mappingsResponse = await api.getExistingMappings(sessionId);
+                if (mappingsResponse.data && mappingsResponse.data.mappings) {
+                  const mappingsData = mappingsResponse.data.mappings;
+                  if (mappingsData.mappings && Array.isArray(mappingsData.mappings)) {
+                    currentMappings = mappingsData.mappings;
+                  } else if (Array.isArray(mappingsData)) {
+                    currentMappings = mappingsData;
+                  }
+                }
+              } catch (err) {
+                console.warn('[TAGFLOW][FE] Could not fetch mappings:', err);
+              }
+              await api.applyFormulas(sessionId, rules, currentMappings);
+            } catch (e) {
+            }
+          }
+        } catch (_) {}
+
         // Load default values if available
         if (response.data.default_values) {
           setExistingDefaultValues(response.data.default_values);
@@ -749,17 +775,27 @@ export default function ColumnMapping() {
           });
         }
 
+        // CRITICAL FIX: Get client headers from response early for both paths
+        let clientHeadersFromResponse = clientHeaders;
+        if (response.data.client_headers && Array.isArray(response.data.client_headers) && response.data.client_headers.length > 0) {
+          clientHeadersFromResponse = response.data.client_headers;
+          setClientHeaders(clientHeadersFromResponse);
+          enhancedDebugLog('TEMPLATE_APPLY', 'Updated client headers from response', {
+            clientHeaders: clientHeadersFromResponse
+          });
+        }
+
         // CRITICAL FIX: Update column counts FIRST, then apply mappings after rebuild completes
         if (response.data.column_counts) {
           enhancedDebugLog('TEMPLATE_APPLY', 'Updating column counts from template', {
             columnCounts: response.data.column_counts
           });
-          
+
           // Prepare data for after rebuild
           const headersToUse = response.data.enhanced_headers || templateHeaders;
           const defaultValuesToUse = response.data.default_values || {};
           let mappingsToApply = response.data.mappings_new_format || [];
-          
+
           // If no new format mappings, convert old format
           if (mappingsToApply.length === 0 && response.data.mappings) {
             if (typeof response.data.mappings === 'object') {
@@ -769,24 +805,22 @@ export default function ColumnMapping() {
               }));
             }
           }
-          
+
           // If still no mappings, try loading from backend as fallback
           if (mappingsToApply.length === 0) {
-            console.log('🔄 Loading mappings from backend as fallback for template application...');
             try {
-              const mappingsResult = await checkExistingMappings(clientHeaders, headersToUse, null);
+              const mappingsResult = await checkExistingMappings(clientHeadersFromResponse, headersToUse, null);
               mappingsToApply = mappingsResult?.mappings || [];
             } catch (error) {
               console.warn('Error loading mappings fallback:', error);
             }
           }
-          
-          console.log('🔄 Template mappings prepared for application after rebuild:', mappingsToApply);
-          
+
           // Store data to apply after rebuild completes
           const dataToApplyAfterRebuild = {
             mappings: mappingsToApply,
             headers: headersToUse,
+            clientHeaders: clientHeadersFromResponse,
             defaultValues: defaultValuesToUse
           };
           
@@ -798,10 +832,9 @@ export default function ColumnMapping() {
             try {
               // First, ensure default values are applied to nodes
               if (Object.keys(dataToApplyAfterRebuild.defaultValues).length > 0) {
-                console.log('🔄 Ensuring default values are applied to nodes:', dataToApplyAfterRebuild.defaultValues);
                 setNodes(currentNodes => currentNodes.map(node => {
                   if (!node.id.startsWith('t-')) return node; // Only update template nodes
-                  
+
                   const fieldName = node.data.originalLabel;
                   if (dataToApplyAfterRebuild.defaultValues[fieldName]) {
                     return {
@@ -816,15 +849,21 @@ export default function ColumnMapping() {
                   return node;
                 }));
               }
-              
-              // Then apply mappings
+
+              // Then apply mappings - CRITICAL: Use clientHeaders from dataToApplyAfterRebuild
               if (dataToApplyAfterRebuild.mappings.length > 0) {
-                console.log('🔄 Applying template mappings after rebuild completion:', dataToApplyAfterRebuild.mappings);
-                console.log('🔄 Using headers for mapping:', dataToApplyAfterRebuild.headers);
-                applyExistingMappingsToFlow(dataToApplyAfterRebuild.mappings, clientHeaders, dataToApplyAfterRebuild.headers, null);
-                console.log('✅ Template mappings applied successfully to create visual edges');
+                console.log('🔧 PDF Template Fix: Applying mappings with client headers', {
+                  mappings: dataToApplyAfterRebuild.mappings,
+                  clientHeaders: dataToApplyAfterRebuild.clientHeaders,
+                  templateHeaders: dataToApplyAfterRebuild.headers
+                });
+                applyExistingMappingsToFlow(
+                  dataToApplyAfterRebuild.mappings,
+                  dataToApplyAfterRebuild.clientHeaders,
+                  dataToApplyAfterRebuild.headers,
+                  null
+                );
               } else {
-                console.log('⚠️ No mappings found to create visual edges - checking if we should clear the update flag');
                 // If no mappings to restore and this is a column count update, clear the flag
                 sessionStorage.removeItem('recentColumnCountUpdate');
               }
@@ -832,6 +871,32 @@ export default function ColumnMapping() {
               console.error('Error applying template data:', error);
             }
           }, 300); // Wait for rebuild timeouts (100 + 100 + buffer)
+        } else {
+          // No column counts change - apply mappings immediately
+          enhancedDebugLog('TEMPLATE_APPLY', 'No column counts, applying mappings directly', {});
+
+          const headersToUse = response.data.enhanced_headers || templateHeaders;
+          let mappingsToApply = response.data.mappings_new_format || [];
+
+          // If no new format mappings, convert old format
+          if (mappingsToApply.length === 0 && response.data.mappings) {
+            if (typeof response.data.mappings === 'object') {
+              mappingsToApply = Object.entries(response.data.mappings).map(([target, source]) => ({
+                source,
+                target
+              }));
+            }
+          }
+
+          // Apply mappings directly
+          if (mappingsToApply.length > 0) {
+            console.log('🔧 PDF Template Fix: Applying mappings directly (no column count change)', {
+              mappings: mappingsToApply,
+              clientHeaders: clientHeadersFromResponse,
+              templateHeaders: headersToUse
+            });
+            applyExistingMappingsToFlow(mappingsToApply, clientHeadersFromResponse, headersToUse, null);
+          }
         }
 
         // Wait briefly for backend version to advance (bounded to ~3s total)
@@ -856,7 +921,20 @@ export default function ColumnMapping() {
           // Proactively apply formula rules once if present
           if (hasTagRules) {
             try {
-              await api.applyFormulas(sessionId, rules);
+              // CRITICAL FIX: Get current mappings to send with formula apply
+              let currentMappings = null;
+              try {
+                const mappingsResponse = await api.getExistingMappings(sessionId);
+                if (mappingsResponse.data && mappingsResponse.data.mappings) {
+                  const mappingsData = mappingsResponse.data.mappings;
+                  if (mappingsData.mappings && Array.isArray(mappingsData.mappings)) {
+                    currentMappings = mappingsData.mappings;
+                  } else if (Array.isArray(mappingsData)) {
+                    currentMappings = mappingsData;
+                  }
+                }
+              } catch (err) { /* ignore */ }
+              await api.applyFormulas(sessionId, rules, currentMappings);
             } catch (_) { /* non-fatal */ }
           }
 
@@ -875,7 +953,6 @@ export default function ColumnMapping() {
         // Update template version to mark template application completion
         setTemplateVersion(prev => prev + 1);
         setExpectedTemplateVersion(prev => prev + 1);
-        console.log('✅ UI: Template version synchronized after template application');
 
         enhancedDebugLog('TEMPLATE_APPLY', 'Template application completed successfully', {
           templateName: template.name,
@@ -956,7 +1033,6 @@ export default function ColumnMapping() {
   // C) Reconcile edges with current nodes (universal safety net)
   function reconcileEdgesWithNodes() {
     // eslint-disable-next-line no-console
-    console.log('🔧 DEBUG: Starting edge reconciliation');
     
     // Build set of current node IDs
     const currentNodeIds = new Set(nodes.map(n => n.id));
@@ -966,7 +1042,6 @@ export default function ColumnMapping() {
       const isValid = currentNodeIds.has(edge.source) && currentNodeIds.has(edge.target);
       if (!isValid) {
         // eslint-disable-next-line no-console
-        console.log(`🗑️ Dropping orphan edge: ${edge.source} -> ${edge.target}`);
       }
       return isValid;
     });
@@ -1065,26 +1140,19 @@ export default function ColumnMapping() {
 
         // Check if this session is from PDF and set confidence scores
         if (session_metadata.is_from_pdf) {
-          console.log('📄 Session is from PDF upload');
-          console.log('📄 DEBUGGING: Setting isFromPDF to true');
           setIsFromPDF(true);
 
           // Set header confidence scores if available in session metadata
           if (session_metadata.header_confidence_scores) {
-            console.log('📊 DEBUGGING: Setting header confidence scores from session:', session_metadata.header_confidence_scores);
             setHeaderConfidenceScores(session_metadata.header_confidence_scores);
           } else {
-            console.log('📊 DEBUGGING: No header_confidence_scores found in session_metadata');
           }
         } else {
-          console.log('📄 DEBUGGING: Session is NOT from PDF, is_from_pdf:', session_metadata.is_from_pdf);
         }
 
-        console.log('📄 DEBUGGING: Full session_metadata:', session_metadata);
 
         // Restore header corrections if they exist
         if (session_metadata.header_corrections && Object.keys(session_metadata.header_corrections).length > 0) {
-          console.log('🔧 DEBUGGING: Restoring header corrections from session:', session_metadata.header_corrections);
           setHeaderCorrections(session_metadata.header_corrections);
 
           // Update client headers to show corrected headers
@@ -1414,19 +1482,8 @@ export default function ColumnMapping() {
     updateColumnCounts(newCounts);
   }
 
-  // Function declaration for initializeNodes - hoisted to avoid TDZ  
+  // Function declaration for initializeNodes - hoisted to avoid TDZ
   function initializeNodes(clientHdrs, templateHdrs, aiMappings = null, factwiseRules = [], defaultValues = {}, setIsInitializingMappings = null) {
-    // eslint-disable-next-line no-console
-    console.log('🔧 DEBUG: initializeNodes called with setIsInitializingMappings:', !!setIsInitializingMappings);
-    // eslint-disable-next-line no-console
-    console.log('🔧 Initializing nodes with:', { 
-      clientHdrs: clientHdrs, 
-      clientCount: clientHdrs?.length || 0,
-      templateHdrs: templateHdrs, 
-      templateCount: templateHdrs?.length || 0,
-      aiMappings: aiMappings,
-      factwiseRules: factwiseRules
-    });
     
     const nodeHeight = 90;
     const nodeWidth = 200; // Add missing nodeWidth
@@ -1589,7 +1646,6 @@ export default function ColumnMapping() {
         cacheCount: (mappingsCacheRef.current||[]).length 
       });
       // eslint-disable-next-line no-console
-      console.log('🔧 DEBUG: Starting column count update sequence');
       debugLog('REBUILD/DELETE start', { newCounts: safeNewCounts, edgesCount: edges.length, cacheCount: (mappingsCacheRef.current||[]).length });
       
       // A1) Set rebuild guard
@@ -1613,7 +1669,6 @@ export default function ColumnMapping() {
           source: m.sourceLabel,
           target: m.targetLabel
         }));
-        console.log('🔧 DEBUG: Updated cache with current mappings before rebuild:', mappingsCacheRef.current);
       }
       
       enhancedDebugLog('COLUMN_COUNT_UPDATE', 'Snapshot existing mappings from live edges', { 
@@ -1634,7 +1689,6 @@ export default function ColumnMapping() {
           restoredMappings: existingMappings 
         });
         // eslint-disable-next-line no-console
-        console.log('🔧 DEBUG: Preserved mappings from cache (fallback):', existingMappings);
       }
 
       // Fallback to backend if both snapshot and cache are empty (unless suppressed)
@@ -1720,17 +1774,11 @@ export default function ColumnMapping() {
         const forceVersion = Math.max(response.data.template_version || 0, Date.now() / 1000);
         sessionStorage.setItem(`templateVersion_${sessionId}`, Math.floor(forceVersion).toString());
         sessionStorage.setItem(`lastColumnUpdate_${sessionId}`, Date.now().toString());
-        
-        console.log('🔄 SYNC: Set column count update flag for DataEditor synchronization', {
-          templateVersion: Math.floor(forceVersion),
-          timestamp: Date.now()
-        });
-        
+
         setColumnCounts(newCounts);
         
         // Update template version to indicate a change occurred
         setExpectedTemplateVersion(prev => prev + 1);
-        console.log('🔄 UI: Expected template version incremented after column count update');
         
         if (response.data.enhanced_headers) {
           // A3) Apply new headers from backend (canonical)
@@ -1791,7 +1839,6 @@ export default function ColumnMapping() {
               
               // Update template version to mark rebuild completion (before save attempt)
               setTemplateVersion(prev => prev + 1);
-              console.log('✅ UI: Template version incremented after successful column count rebuild');
               
               // A8) Force-save mappings after dynamic rebuild to avoid autosave gap
               try {
@@ -1835,7 +1882,6 @@ export default function ColumnMapping() {
                 debugLog('header corrections in forced save:', payload.header_corrections);
 
                 await api.saveColumnMappings(sessionId, payload);
-                console.log('💾 Forced save of mappings after column count update');
                 
               } catch (saveError) {
                 console.error('❌ Forced save failed:', saveError);
@@ -1880,7 +1926,6 @@ export default function ColumnMapping() {
       autoApplyTriggeredRef.current = false; // Reset for new session
       resetMappingCounter(); // Reset counter when loading new data
       // eslint-disable-next-line no-console
-      console.log('🔧 DEBUG: loadData started - isInitializingMappings set to true');
       
       // 🔥 CRITICAL FIX: Check navigation state first
       const comingFromDataEditor = sessionStorage.getItem('navigatedFromDataEditor');
@@ -1898,15 +1943,11 @@ export default function ColumnMapping() {
                                    parsedMapping.mappings.length > 0;
             
             if (hasValidMappings) {
-              console.log('🔄 Restoring mappings from review session:', parsedMapping.mappings.length, 'mappings');
               savedMappingData = parsedMapping;
             } else {
               console.warn('🚫 SessionStorage mappings corrupted/empty, will fall back to backend data');
-              console.log('🔧 DEBUG: Mappings data in sessionStorage:', parsedMapping.mappings);
-              console.log('🔧 DEBUG: Full sessionStorage object:', parsedMapping);
               // Force complete state rebuild when sessionStorage is corrupted
               if (comingFromDataEditor === 'true') {
-                console.log('🔧 DEBUG: Corrupted sessionStorage + DataEditor navigation detected - will force aggressive state restore');
                 sessionStorage.setItem('forceAggressiveRestore', 'true');
               }
               // Don't use corrupted sessionStorage data - let it fall through to backend fetch
@@ -1927,7 +1968,6 @@ export default function ColumnMapping() {
       const lastTemplateApplied = sessionStorage.getItem('lastTemplateApplied');
       if (templateAppliedInDataEditor === 'true' && lastTemplateApplied) {
         // eslint-disable-next-line no-console
-        console.log('🔧 DEBUG: Template was applied in DataEditor, clearing flags and refreshing');
         sessionStorage.removeItem('templateAppliedInDataEditor');
         sessionStorage.removeItem('lastTemplateApplied');
 
@@ -1937,23 +1977,18 @@ export default function ColumnMapping() {
       
       // CRITICAL FIX: Always reload session state when coming from DataEditor
       if (comingFromDataEditor === 'true') {
-        console.log('🔧 DEBUG: Returning from DataEditor, ensuring fresh session state');
         sessionStorage.removeItem('navigatedFromDataEditor');
         // DON'T clear mappings cache - let backend restore them properly
-        console.log('🔧 DEBUG: Preserving mappings cache for proper restoration from backend');
       }
       
       try {
         // Get headers from API
         // eslint-disable-next-line no-console
-        console.log('🔍 Fetching headers for session:', sessionId);
         const response = await api.getHeaders(sessionId);
         // eslint-disable-next-line no-console
-        console.log('🔍 Raw API response:', response);
         
         const { data } = response;
         // eslint-disable-next-line no-console
-        console.log('🔍 Response data:', data);
         
         const { 
           client_headers = [], 
@@ -1965,16 +2000,7 @@ export default function ColumnMapping() {
           template_file = '',
           template_optionals = []
         } = data;
-        
-        // eslint-disable-next-line no-console
-        console.log('🔍 Extracted headers:', { 
-          client_headers: client_headers, 
-          template_headers: template_headers, 
-          template_columns: template_columns,
-          column_counts: column_counts,
-          session_metadata: session_metadata 
-        });
-        
+
         // Validate headers
         if (!Array.isArray(client_headers)) {
           // eslint-disable-next-line no-console
@@ -2007,17 +2033,7 @@ export default function ColumnMapping() {
         if (template_columns && Array.isArray(template_columns)) {
           setTemplateColumns(template_columns);
         }
-        
-        // eslint-disable-next-line no-console
-        console.log('✅ Headers set successfully:', {
-          clientCount: validClientHeaders.length,
-          templateCount: validTemplateHeaders.length,
-          clientHeaders: validClientHeaders,
-          templateHeaders: validTemplateHeaders,
-          columnCounts: column_counts,
-          templateColumns: template_columns
-        });
-        
+
         // DEBUG: Additional validation
         if (client_headers.length === 0) {
           // eslint-disable-next-line no-console
@@ -2040,19 +2056,16 @@ export default function ColumnMapping() {
         if (session_metadata.original_template_id) {
           setOriginalTemplateId(session_metadata.original_template_id);
           // eslint-disable-next-line no-console
-          console.log('🔍 Found original template ID from session metadata:', session_metadata.original_template_id);
         }
         
         if (session_metadata.template_applied) {
           setTemplateApplied(true);
           // eslint-disable-next-line no-console
-          console.log('🔍 Template was applied during upload');
         }
         
         if (session_metadata.template_name) {
           setAppliedTemplateName(session_metadata.template_name);
           // eslint-disable-next-line no-console
-          console.log('🔍 Applied template name:', session_metadata.template_name);
         }
         
         // 🔥 CRITICAL FIX: Regenerate dynamic template headers if backend didn't include them
@@ -2090,13 +2103,7 @@ export default function ColumnMapping() {
               finalTemplateHeaders.push(`Customer_Identification_Name_${i}`);
               finalTemplateHeaders.push(`Customer_Identification_Value_${i}`);
             }
-            
-            console.log('🔧 REGENERATED dynamic template headers:', {
-              original: template_headers.length,
-              regenerated: finalTemplateHeaders.length,
-              headers: finalTemplateHeaders
-            });
-            
+
             // Update the state with regenerated headers
             setTemplateHeaders(finalTemplateHeaders);
           }
@@ -2107,7 +2114,6 @@ export default function ColumnMapping() {
         if (savedMappingData && savedMappingData.mappings) {
           try {
             // Use saved mappings from review session - preserve exact mapping relationships
-            console.log('🔄 Using saved mappings from review session instead of backend');
             normalizedMappings = savedMappingData.mappings
               .filter(mapping => mapping && mapping.source && mapping.target) // Filter out invalid mappings
               .map(mapping => ({
@@ -2116,12 +2122,10 @@ export default function ColumnMapping() {
                 confidence: mapping.confidence || 'saved',
                 isFromTemplate: mapping.isFromTemplate || false
               }));
-            console.log('🔄 Restored mappings:', normalizedMappings);
             
             // 🔥 AUTO-REFRESH FIX: If coming from DataEditor and sessionStorage mappings are corrupted (empty), auto-refresh
             if (comingFromDataEditor === 'true' && normalizedMappings.length === 0) {
               console.warn('🔄 CRITICAL: Coming from DataEditor but restored 0 mappings from sessionStorage!');
-              console.log('🔄 AUTO-REFRESH: Corrupted sessionStorage detected - refreshing page to load from backend');
               // Clear the navigation flag to prevent infinite refresh loop
               sessionStorage.removeItem('navigatedFromDataEditor');
               // Force page refresh to bypass corrupted sessionStorage
@@ -2136,14 +2140,11 @@ export default function ColumnMapping() {
           }
         } else {
           // Fallback to backend mappings if no saved session data
-          console.log('🔄 No saved mappings from review, fetching from backend');
           const result = await checkExistingMappings(client_headers, finalTemplateHeaders, setIsInitializingMappings);
           normalizedMappings = result.mappings;
-          console.log('🔧 DEBUG: Backend fetch complete, normalized mappings count:', normalizedMappings?.length || 0);
           
           // CRITICAL FIX: When coming from DataEditor, ensure we have the most recent mappings
           if (comingFromDataEditor === 'true') {
-            console.log('🔧 DEBUG: Coming from DataEditor - will force complete state rebuild after node initialization');
             // DON'T clear nodes/edges here - let the normal flow handle it properly
             // The issue was clearing nodes before they were properly recreated
           }
@@ -2151,43 +2152,26 @@ export default function ColumnMapping() {
 
         // Initialize nodes AFTER we have session metadata for badges
         const headersToUse = finalTemplateHeaders;
-        console.log('📝 About to initialize nodes with:', {
-          clientHeadersLength: client_headers.length,
-          originalTemplateHeadersLength: template_headers.length,
-          finalTemplateHeadersLength: finalTemplateHeaders.length,
-          templateColumnsLength: template_columns.length,
-          headersToUseLength: headersToUse.length,
-          clientHeaders: client_headers,
-          originalTemplateHeaders: template_headers,
-          finalTemplateHeaders: finalTemplateHeaders,
-          templateColumns: template_columns,
-          headersToUse: headersToUse,
-          normalizedMappingsCount: normalizedMappings?.length || 0
-        });
         const factwiseRules = session_metadata?.factwise_rules || [];
         initializeNodes(client_headers, headersToUse, session_metadata?.formula_rules || [], factwiseRules, defaultValueMappings, setIsInitializingMappings);
         
         // CRITICAL FIX: Apply existing mappings AFTER nodes are initialized
         if (normalizedMappings && normalizedMappings.length > 0) {
           try {
-            console.log('🔄 Applying existing mappings after node initialization:', normalizedMappings);
             applyExistingMappingsToFlow(normalizedMappings, client_headers, headersToUse, setIsInitializingMappings);
             
             // AGGRESSIVE FIX: Force state restoration when coming from DataEditor with corrupted sessionStorage
             const forceAggressiveRestore = sessionStorage.getItem('forceAggressiveRestore');
             if (forceAggressiveRestore === 'true') {
-              console.log('🔥 AGGRESSIVE RESTORE: Forcing complete UI state rebuild after corrupted sessionStorage');
               sessionStorage.removeItem('forceAggressiveRestore');
               
               // Force template version update with delay to ensure UI catches the change
               setTimeout(() => {
-                console.log('🔥 AGGRESSIVE RESTORE: Phase 1 - Template version update');
                 setTemplateVersion(prev => prev + 2);  // +2 to ensure change is noticed
                 setExpectedTemplateVersion(prev => prev + 2);
                 
                 // Phase 2: Force state synchronization
                 setTimeout(() => {
-                  console.log('🔥 AGGRESSIVE RESTORE: Phase 2 - Forcing state sync');
                   // Force re-render of mappings by updating the flow state
                   setNodes(currentNodes => [...currentNodes]);
                   setEdges(currentEdges => [...currentEdges]);
@@ -2196,7 +2180,6 @@ export default function ColumnMapping() {
                   if (defaultValueMappings && Object.keys(defaultValueMappings).length > 0) {
                     const refreshedDefaults = { ...defaultValueMappings };
                     setDefaultValueMappings(refreshedDefaults);
-                    console.log('🔥 AGGRESSIVE RESTORE: Refreshed default values');
                   }
                 }, 300);
               }, 400);
@@ -2210,47 +2193,38 @@ export default function ColumnMapping() {
             // Initial load complete - synchronize template version
             setTemplateVersion(prev => prev + 1);
             setExpectedTemplateVersion(prev => prev + 1);
-            console.log('✅ UI: Template version synchronized after mapping application error');
           }
         } else {
           // No existing mappings, just end initialization
-          console.log('🔄 No existing mappings to apply, ending initialization');
           setIsInitializingMappings(false);
           isInitializingRef.current = false;
           
           // Initial load complete - synchronize template version
           setTemplateVersion(prev => prev + 1);
           setExpectedTemplateVersion(prev => prev + 1);
-          console.log('✅ UI: Template version synchronized after initial load');
         }
         
         // CRITICAL FIX: When coming from DataEditor, force a complete UI state refresh
         if (comingFromDataEditor === 'true') {
-          console.log('🔧 DEBUG: DataEditor navigation detected - forcing complete UI state refresh');
           
           // Increased delay to ensure nodes and mappings are fully created before forcing refresh
           setTimeout(() => {
-            console.log('🔧 DEBUG: DataEditor navigation - Phase 1: Forcing template version update');
             setTemplateVersion(prev => prev + 1);
             setExpectedTemplateVersion(prev => prev + 1);
             
             // Additional delay to ensure template version update is processed
             setTimeout(() => {
-              console.log('🔧 DEBUG: DataEditor navigation - Phase 2: Re-applying default values');
               
               // Force re-application of default values if they exist
               if (defaultValueMappings && Object.keys(defaultValueMappings).length > 0) {
-                console.log('🔧 DEBUG: Re-applying default values after DataEditor navigation:', defaultValueMappings);
                 
                 // Force trigger the useEffect that applies default values to nodes
                 // by creating a new object reference
                 const refreshedDefaults = { ...defaultValueMappings };
                 setDefaultValueMappings(refreshedDefaults);
                 
-                console.log('🔧 DEBUG: Triggered default values refresh for DataEditor navigation');
               }
               
-              console.log('🔧 DEBUG: DataEditor navigation fix complete - UI should be restored');
             }, 200);
           }, 300);
         }
@@ -2290,18 +2264,15 @@ export default function ColumnMapping() {
     const ocrData = location.state?.ocrData;
 
     if (fromPDF && ocrData && !loading && clientHeaders.length === 0) {
-      console.log('📄 PDF OCR: Processing OCR data from PDF upload', ocrData);
 
       // Set PDF flag
       setIsFromPDF(true);
 
       // Extract headers from OCR data
       if (ocrData.headers && ocrData.headers.length > 0) {
-        console.log('📋 PDF OCR: Setting client headers from OCR:', ocrData.headers);
 
         // Set header confidence scores if available
         if (ocrData.header_confidence_scores) {
-          console.log('📊 PDF OCR: Setting header confidence scores:', ocrData.header_confidence_scores);
           setHeaderConfidenceScores(ocrData.header_confidence_scores);
         }
 
@@ -2314,7 +2285,6 @@ export default function ColumnMapping() {
       if (ocrData.quality_metrics) {
         const metrics = ocrData.quality_metrics;
         const confidence = Math.round(metrics.overall_confidence * 100);
-        console.log(`📊 PDF OCR: Quality metrics - ${confidence}% confidence, ${ocrData.row_count} rows extracted`);
       }
     }
   }, [location.state, loading, clientHeaders.length]);
@@ -2324,7 +2294,6 @@ export default function ColumnMapping() {
     const autoApplyTemplate = location.state?.autoApplyTemplate;
     
     if (autoApplyTemplate && !loading && clientHeaders.length > 0 && templateHeaders.length > 0 && !autoApplyTriggeredRef.current) {
-      console.log('🔧 AUTO_APPLY: Detected template from Dashboard/Upload:', autoApplyTemplate.name);
       autoApplyTriggeredRef.current = true;
       
       // Small delay to ensure page is fully loaded
@@ -2393,28 +2362,28 @@ export default function ColumnMapping() {
 
   // Apply existing mappings to the React Flow
   const applyExistingMappingsToFlow = (mappings, clientHdrs, templateHdrs, setIsInitializingMappings = null) => {
-    // eslint-disable-next-line no-console
-    console.log('🔧 DEBUG: applyExistingMappingsToFlow called with mappings:', mappings);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🔍 [EDGE_CREATE] Starting applyExistingMappingsToFlow');
+    console.log('🔍 [EDGE_CREATE] Inputs:', {
+      mappingsCount: Array.isArray(mappings) ? mappings.length : (mappings?.mappings ? mappings.mappings.length : 'unknown'),
+      clientHdrsCount: clientHdrs?.length,
+      templateHdrsCount: templateHdrs?.length
+    });
+    console.log('🔍 [EDGE_CREATE] Client headers:', clientHdrs);
+    console.log('🔍 [EDGE_CREATE] Template headers:', templateHdrs);
+    console.log('🔍 [EDGE_CREATE] Mappings:', mappings);
+
     const newEdges = [];
     const mappingPairs = [];
-    
-    // eslint-disable-next-line no-console
-    console.log('🔍 Applying existing mappings:', mappings);
-    // eslint-disable-next-line no-console
-    console.log('🔍 Client headers:', clientHdrs);
-    // eslint-disable-next-line no-console
-    console.log('🔍 Template headers:', templateHdrs);
-    
+
     // CRITICAL FIX: Validate inputs to prevent crashes
     if (!mappings || !clientHdrs || !templateHdrs) {
-      // eslint-disable-next-line no-console
-      console.warn('🔍 WARNING: Invalid inputs to applyExistingMappingsToFlow:', { mappings, clientHdrs, templateHdrs });
+      console.error('🔍 [EDGE_CREATE] ❌ INVALID INPUTS:', { mappings, clientHdrs, templateHdrs });
       return;
     }
-    
+
     if (!Array.isArray(clientHdrs) || !Array.isArray(templateHdrs)) {
-      // eslint-disable-next-line no-console
-      console.warn('🔍 WARNING: Headers must be arrays:', { clientHdrs, templateHdrs });
+      console.error('🔍 [EDGE_CREATE] ❌ Headers must be arrays:', { clientHdrs, templateHdrs });
       return;
     }
     
@@ -2514,7 +2483,6 @@ export default function ColumnMapping() {
     
     // Handle direct array format (from template application)
     if (Array.isArray(mappings)) {
-      console.log('🔍 Processing direct array mapping format');
       mappings.forEach(mapping => {
         const sourceCol = mapping.source;
         const templateCol = mapping.target;
@@ -2532,7 +2500,6 @@ export default function ColumnMapping() {
         const targetMatch = findBestTargetColumn(sourceCol, templateCol, templateHdrs, usedTargets);
         
         if (sourceIdx >= 0 && targetMatch) {
-          console.log(`🔍 Mapping: ${sourceCol} -> ${targetMatch.targetCol} (source idx: ${sourceIdx}, target idx: ${targetMatch.targetIdx}, confidence: ${targetMatch.confidence})`);
           const edge = createEdge(sourceIdx, targetMatch.targetIdx, false, null, true); // true = from template
           newEdges.push(edge);
           mappingPairs.push({ sourceIdx, targetIdx: targetMatch.targetIdx, sourceCol, templateCol: targetMatch.targetCol });
@@ -2543,8 +2510,8 @@ export default function ColumnMapping() {
         }
       });
     } else if (mappings && mappings.mappings && Array.isArray(mappings.mappings)) {
-      console.log('🔍 Processing nested mapping format');
-      mappings.mappings.forEach(mapping => {
+      console.log(`🔍 [EDGE_CREATE] Processing ${mappings.mappings.length} mappings (new format)`);
+      mappings.mappings.forEach((mapping, index) => {
         const sourceCol = mapping.source;
         const templateCol = mapping.target;
 
@@ -2552,27 +2519,38 @@ export default function ColumnMapping() {
         try {
           if (templateCol === 'Tag' && Array.isArray(sessionMetadata?.formula_rules)) {
             const hasTagFormula = sessionMetadata.formula_rules.some(r => (r || {}).column_type === 'Tag');
-            if (hasTagFormula) return; // skip this mapping
+            if (hasTagFormula) {
+              console.log(`🔍 [EDGE_CREATE] Mapping ${index + 1}: SKIPPED (Tag formula exists)`);
+              return; // skip this mapping
+            }
           }
         } catch (_) { /* no-op */ }
-        
+
         const sourceIdx = clientHdrs.indexOf(sourceCol);
         const targetMatch = findBestTargetColumn(sourceCol, templateCol, templateHdrs, usedTargets);
-        
+
+        console.log(`🔍 [EDGE_CREATE] Mapping ${index + 1}/${mappings.mappings.length}: '${sourceCol}' → '${templateCol}'`);
+        console.log(`🔍 [EDGE_CREATE]   - Source '${sourceCol}' index: ${sourceIdx} (in ${clientHdrs.length} client headers)`);
+        console.log(`🔍 [EDGE_CREATE]   - Target '${templateCol}' match:`, targetMatch);
+
         if (sourceIdx >= 0 && targetMatch) {
-          console.log(`🔍 Mapping: ${sourceCol} -> ${targetMatch.targetCol} (source idx: ${sourceIdx}, target idx: ${targetMatch.targetIdx}, confidence: ${targetMatch.confidence})`);
           const edge = createEdge(sourceIdx, targetMatch.targetIdx, false, null, true); // true = from template
           newEdges.push(edge);
           mappingPairs.push({ sourceIdx, targetIdx: targetMatch.targetIdx, sourceCol, templateCol: targetMatch.targetCol });
           // Mark this target as used
           usedTargets.add(targetMatch.targetCol);
+          console.log(`🔍 [EDGE_CREATE]   ✅ SUCCESS: Created edge c-${sourceIdx} → t-${targetMatch.targetIdx}`);
         } else {
-          console.warn(`🔍 WARNING: Could not map ${sourceCol} -> ${templateCol} (source idx: ${sourceIdx}, target match: ${targetMatch ? 'found' : 'not found'})`);
+          console.error(`🔍 [EDGE_CREATE]   ❌ FAILED to create edge`);
+          console.error(`🔍 [EDGE_CREATE]      - sourceIdx: ${sourceIdx} ${sourceIdx < 0 ? '(NOT FOUND IN CLIENT HEADERS!)' : ''}`);
+          console.error(`🔍 [EDGE_CREATE]      - targetMatch: ${targetMatch ? JSON.stringify(targetMatch) : 'NULL (NOT FOUND IN TEMPLATE HEADERS!)'}`);
+          if (sourceIdx < 0) {
+            console.error(`🔍 [EDGE_CREATE]      - Available client headers:`, clientHdrs);
+          }
         }
       });
     } else {
       // Handle old format for backward compatibility
-      console.log('🔍 Processing old mapping format');
       Object.entries(mappings || {}).forEach(([templateCol, sourceCol]) => {
         // Guard for old format
         try {
@@ -2585,7 +2563,6 @@ export default function ColumnMapping() {
         const targetMatch = findBestTargetColumn(sourceCol, templateCol, templateHdrs, usedTargets);
         
         if (sourceIdx >= 0 && targetMatch) {
-          console.log(`🔍 Mapping: ${sourceCol} -> ${targetMatch.targetCol} (source idx: ${sourceIdx}, target idx: ${targetMatch.targetIdx}, confidence: ${targetMatch.confidence})`);
           const edge = createEdge(sourceIdx, targetMatch.targetIdx, false, null, true); // true = from template
           newEdges.push(edge);
           mappingPairs.push({ sourceIdx, targetIdx: targetMatch.targetIdx, sourceCol, templateCol: targetMatch.targetCol });
@@ -2597,7 +2574,6 @@ export default function ColumnMapping() {
       });
     }
     
-    console.log(`🔍 Created ${newEdges.length} edges from existing mappings`);
     // Update cache with normalized pairs for future restoration/guards
     try {
       const normalized = mappingPairs
@@ -2610,9 +2586,15 @@ export default function ColumnMapping() {
       console.warn('Failed to update mappings cache from applied mappings:', e);
     }
     
+    console.log('🔍 [EDGE_CREATE] ━━━ Summary ━━━');
+    console.log(`🔍 [EDGE_CREATE] Total edges created: ${newEdges.length}`);
+    console.log(`🔍 [EDGE_CREATE] Total mapping pairs: ${mappingPairs.length}`);
+    console.log(`🔍 [EDGE_CREATE] Edges:`, newEdges.map(e => `${e.source} → ${e.target}`));
+    console.log('🔍 [EDGE_CREATE] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
     // Set the edges
     setEdges(newEdges);
-    
+
     // Update node connection states
     setTimeout(() => {
       setNodes(prev => {
@@ -2661,21 +2643,15 @@ export default function ColumnMapping() {
     // Save to mapping history
     setTimeout(() => {
       setMappingHistory([{ nodes, edges: newEdges }]);
-      console.log('Applied existing mappings to flow');
       
       // Set flag to false after mappings are applied
       if (setIsInitializingMappings) {
-        console.log('🔧 DEBUG: Setting isInitializingMappings to false after applying mappings');
         setIsInitializingMappings(false);
         isInitializingRef.current = false;
-        console.log('🔧 DEBUG: Initialization complete (applyExistingMappingsToFlow), autosave enabled');
         
         // Mappings applied successfully - synchronize template version
         setTemplateVersion(prev => prev + 1);
         setExpectedTemplateVersion(prev => prev + 1);
-        console.log('✅ UI: Template version synchronized after applying existing mappings');
-        console.log('🔧 DEBUG: Edges count after mapping application:', newEdges.length);
-        console.log('🔧 DEBUG: Final edges state will be set in next render cycle');
       }
     }, 750); // Increased from 500ms to 750ms to ensure proper UI synchronization when coming from DataEditor
 
@@ -2877,7 +2853,6 @@ export default function ColumnMapping() {
       });
 
       // eslint-disable-next-line no-console
-      console.log('🔧 DEBUG: saveMappings called with:', mappingData);
       
       // Log detailed mapping information
       if (mappingData.mappings && Array.isArray(mappingData.mappings)) {
@@ -2922,7 +2897,6 @@ export default function ColumnMapping() {
       });
       
       // eslint-disable-next-line no-console
-      console.log('✅ Mappings saved successfully:', response.data);
       return response;
     } catch (error) {
       enhancedDebugLog('SAVE_MAPPINGS', 'Save operation failed', {
@@ -2977,7 +2951,6 @@ export default function ColumnMapping() {
       setDefaultValueText('');
       
       // eslint-disable-next-line no-console
-      console.log(`Set default value "${defaultValueText.trim()}" for field "${selectedTemplateField.name}"`);
     } finally {
       setDefaultValueLoading(false);
     }
@@ -3048,7 +3021,6 @@ export default function ColumnMapping() {
     setTemplateSuccess(false);
     
     // eslint-disable-next-line no-console
-    console.log('Cleared template mappings');
   };
 
   const isCompleteMapping = () => {
@@ -3146,17 +3118,7 @@ export default function ColumnMapping() {
         // Unmapped template field clicked - open default value dialog
         const targetHeaders = (useDynamicTemplate && templateColumns.length > 0) ? templateColumns : templateHeaders;
         const templateFieldName = targetHeaders[targetIdx];
-        
-        // eslint-disable-next-line no-console
-        console.log('🔧 DEBUG Default Value Dialog:', {
-          targetIdx,
-          useDynamicTemplate,
-          templateColumnsLength: templateColumns.length,
-          templateHeadersLength: templateHeaders.length,
-          targetHeaders: targetHeaders,
-          templateFieldName
-        });
-        
+
         if (templateFieldName) {
           setSelectedTemplateField({ id: node.id, name: templateFieldName, index: targetIdx });
           setDefaultValueText(defaultValueMappings[templateFieldName] || '');
@@ -3198,27 +3160,23 @@ export default function ColumnMapping() {
       const { user_columns, template_columns, ai_suggestions, specification_opportunity, session_metadata } = data;
       
       // eslint-disable-next-line no-console
-      console.log('AI Mapping Response:', data);
       
       // ENHANCED: Extract template information from session metadata if available
       if (session_metadata && session_metadata.original_template_id) {
         setOriginalTemplateId(session_metadata.original_template_id);
         // eslint-disable-next-line no-console
-        console.log('🔍 Updated original template ID from mapping suggestions:', session_metadata.original_template_id);
       }
       
       // Handle specification opportunity
       if (specification_opportunity && specification_opportunity.detected) {
         // setSpecificationOpportunity(specification_opportunity);
         // eslint-disable-next-line no-console
-        console.log('Specification opportunity detected:', specification_opportunity);
       }
       
       // COMMENTED OUT: Handle specification overflow - show alert
       // if (specification_overflow && specification_overflow.detected) {
       //   setSpecificationOverflow(specification_overflow);
       //   setShowSpecOverflowAlert(true);
-      //   console.log('Specification overflow detected:', specification_overflow);
       // }
       
       // SIMPLE edge creation - direct straight arrows
@@ -3511,7 +3469,6 @@ export default function ColumnMapping() {
     // Persist cleared defaults and mappings permanently
     try { api.saveColumnMappings(sessionId, { mappings: [], default_values: {}, header_corrections: {}, force_persist: true }); } catch (_) {}
     // eslint-disable-next-line no-console
-    console.log('Cleared all mappings and sessionStorage');
     // Also clear local undo history so Undo is disabled after Clear All
     setMappingHistory([]);
   };
@@ -3524,7 +3481,6 @@ export default function ColumnMapping() {
       // Ensure we have valid state to restore
       if (lastState && lastState.nodes && Array.isArray(lastState.nodes)) {
         // eslint-disable-next-line no-console
-        console.log('Restoring state:', lastState);
         setNodes(lastState.nodes);
         setEdges(lastState.edges || []);
         setMappingHistory(prev => prev.slice(0, -1));
@@ -3543,7 +3499,6 @@ export default function ColumnMapping() {
       }
     } else {
       // eslint-disable-next-line no-console
-      console.log('No mapping history to undo');
     }
   };
 
@@ -3565,12 +3520,10 @@ export default function ColumnMapping() {
   useEffect(() => {
     const ready = edges.length > 0 && templateVersion >= expectedTemplateVersion;
     setIsReady(ready);
-    console.log('\ud83d\udee1\ufe0f UI Readiness check:', { ready, templateVersion, expectedTemplateVersion, edgesCount: edges.length });
   }, [edges.length, templateVersion, expectedTemplateVersion]);
 
   // Ensure default value tags are applied to nodes when defaultValueMappings changes
   useEffect(() => {
-    console.log('🔄 Syncing default value tags to nodes:', defaultValueMappings);
     setNodes(currentNodes => currentNodes.map(node => {
       if (!node.id.startsWith('t-')) return node; // Only update template nodes
       const fieldName = node.data?.originalLabel;
@@ -3590,13 +3543,11 @@ export default function ColumnMapping() {
   // Update nodes with confidence scores when they are loaded for PDF sessions
   useEffect(() => {
     if (isFromPDF && headerConfidenceScores && Object.keys(headerConfidenceScores).length > 0) {
-      console.log('🔄 CONFIDENCE: Updating nodes with confidence scores:', headerConfidenceScores);
       setNodes(prev => prev.map(node => {
         if (node.id.startsWith('c-')) {
           const header = node.data.originalLabel;
           const confidence = headerConfidenceScores[header];
           if (confidence !== undefined) {
-            console.log(`🔄 CONFIDENCE: Setting confidence ${confidence} for header "${header}"`);
             return {
               ...node,
               data: {
@@ -3689,20 +3640,12 @@ export default function ColumnMapping() {
       };
       
       sessionStorage.setItem('currentMapping', JSON.stringify(mappingForRestore));
-      // eslint-disable-next-line no-console
-      console.log('🔄 Auto-saved mappings to sessionStorage with template info:', {
-        sessionId,
-        originalTemplateId,
-        templateApplied,
-        appliedTemplateName
-      });
     }
   }, [edges, clientHeaders, templateHeaders, sessionId, originalTemplateId, templateApplied, appliedTemplateName, templateSuccess]);
 
   // Debug logging for isInitializingMappings flag
   useEffect(() => {
     // eslint-disable-next-line no-console
-    console.log('🔧 DEBUG: isInitializingMappings changed to:', isInitializingMappings);
     isInitializingRef.current = isInitializingMappings;
   }, [isInitializingMappings]);
 
@@ -3716,7 +3659,6 @@ export default function ColumnMapping() {
         isInitializingRef: isInitializingRef.current
       });
       // eslint-disable-next-line no-console
-      console.log('🔧 DEBUG: Autosave blocked - rebuilding:', isRebuildingRef.current, 'initializing state:', isInitializingMappings, 'initializing ref:', isInitializingRef.current);
       return;
     }
     if (!sessionId || clientHeaders.length === 0) {
@@ -3735,7 +3677,6 @@ export default function ColumnMapping() {
         mightBeLoading: true
       });
       // eslint-disable-next-line no-console
-      console.log('🔧 DEBUG: No edges yet, skipping autosave - might still be loading');
       return;
     }
 
@@ -3746,7 +3687,6 @@ export default function ColumnMapping() {
         edgesLength: edges.length
       });
       // eslint-disable-next-line no-console
-      console.log('🔧 DEBUG: Still loading, skipping autosave');
       return;
     }
 
@@ -3759,7 +3699,6 @@ export default function ColumnMapping() {
     });
 
     // eslint-disable-next-line no-console
-    console.log('🔧 DEBUG: Autosave triggered - isInitializingMappings:', isInitializingMappings, 'isInitializingRef:', isInitializingRef.current, 'edges count:', edges.length);
 
     const timer = setTimeout(async () => {
       try {
@@ -3770,7 +3709,11 @@ export default function ColumnMapping() {
         });
 
         // Build mapping data with header corrections for consistent backend saves
-        const payload = buildMappingData(edges, defaultValueMappings);
+        // CRITICAL FIX: Preserve formula_rules and factwise_rules from session to prevent autosave from clearing them
+        const payload = buildMappingData(edges, defaultValueMappings, {
+          formula_rules: sessionMetadata?.formula_rules || null,
+          factwise_rules: sessionMetadata?.factwise_rules || null
+        });
 
         enhancedDebugLog('AUTOSAVE', 'Computed mappings from edges with header corrections', {
           totalEdges: edges.length,
@@ -3785,8 +3728,6 @@ export default function ColumnMapping() {
           }))
         });
 
-        console.log('🔧 DEBUG: Autosave - computed mappings:', payload.mappings, 'edges:', edges);
-        console.log('🔧 DEBUG: Autosave - header corrections:', payload.header_corrections);
 
         // CRITICAL FIX: Be more careful about when to skip autosave
         // Only skip if we have no mappings AND we're not in a rebuild scenario
@@ -3801,10 +3742,8 @@ export default function ColumnMapping() {
               isRebuilding: isRebuildingRef.current,
               isColumnCountUpdate
             });
-            console.log('🔧 DEBUG: No mappings to save, skipping autosave to prevent data loss');
             return;
           } else {
-            console.log('🔧 DEBUG: Column count update detected - allowing autosave even with no mappings to clear old state');
             // Clear the flag after handling
             sessionStorage.removeItem('recentColumnCountUpdate');
           }
@@ -3828,9 +3767,6 @@ export default function ColumnMapping() {
           payload: payload
         });
 
-        console.log('🔧 DEBUG: Sending payload to backend:', payload);
-        console.log('🔧 DEBUG: defaultValueMappings state:', defaultValueMappings);
-        console.log('🔧 DEBUG: Object.keys(defaultValueMappings):', Object.keys(defaultValueMappings));
 
         await api.saveColumnMappings(sessionId, payload);
         
@@ -3842,7 +3778,6 @@ export default function ColumnMapping() {
         });
         
         // eslint-disable-next-line no-console
-        console.log('🔧 DEBUG: Autosaved mappings by label');
       } catch (e) {
         enhancedDebugLog('AUTOSAVE', 'Autosave failed with error', {
           error: e.message,
@@ -3892,42 +3827,14 @@ export default function ColumnMapping() {
     try {
       // Create mapping data structure for backend using centralized function
       // eslint-disable-next-line no-console
-      console.log(`🔧 DEBUG: Mapping context:`);
       // eslint-disable-next-line no-console
-      console.log(`  - useDynamicTemplate: ${useDynamicTemplate}`);
       // eslint-disable-next-line no-console
-      console.log(`  - templateColumns.length: ${templateColumns.length}`);
       // eslint-disable-next-line no-console
-      console.log(`  - targetHeaders selected: templateHeaders (internal)`);
       // eslint-disable-next-line no-console
-      console.log(`  - targetHeaders: ${JSON.stringify(templateHeaders)}`);
       // eslint-disable-next-line no-console
-      console.log(`  - edges count: ${edges.length}`);
       // eslint-disable-next-line no-console
-      console.log(`  - header corrections: ${JSON.stringify(headerCorrections)}`);
 
       const mappingData = buildMappingData(edges, defaultValueMappings);
-
-      // Add debugging information for each mapping
-      mappingData.mappings.forEach((mapping, index) => {
-        // eslint-disable-next-line no-console
-        console.log(`🔧 Processing mapping ${index + 1}: ${mapping.source} -> ${mapping.target}`);
-      });
-
-      // eslint-disable-next-line no-console
-      console.log('🔄 Sending mapping data to backend. Full context:', {
-        sessionId,
-        mappingData,
-        clientHeaders,
-        templateHeaders,
-        headerCorrections,
-        edges
-      });
-      
-      // eslint-disable-next-line no-console
-      console.log('🔧 DEBUG: mappingData.default_values:', mappingData.default_values);
-      // eslint-disable-next-line no-console
-      console.log('🔧 DEBUG: Object.keys(mappingData.default_values):', Object.keys(mappingData.default_values));
 
       const response = await api.saveColumnMappings(sessionId, mappingData);
 
@@ -3935,8 +3842,8 @@ export default function ColumnMapping() {
       try {
         const rules = Array.isArray(formulaRulesRef.current) ? formulaRulesRef.current : [];
         if (rules.length > 0) {
-          console.log(`🔧 REVIEW: Re-applying ${rules.length} formula rules before navigating to editor`);
-          await api.applyFormulas(sessionId, rules);
+          // CRITICAL FIX: Pass mappings that were just saved
+          await api.applyFormulas(sessionId, rules, mappingData.mappings);
         }
       } catch (e) {
         console.warn('Formula re-apply skipped/failed:', e?.message || e);
@@ -3970,7 +3877,6 @@ export default function ColumnMapping() {
       
       sessionStorage.setItem('currentMapping', JSON.stringify(mappingForRestore));
       
-      console.log('✅ Enhanced mapping preservation completed:', mappingForRestore);
 
       // CRITICAL FIX: Actively wait for fresh mapped data and expected columns on Azure
       const waitOk = await waitForReviewReadiness({
@@ -3981,7 +3887,6 @@ export default function ColumnMapping() {
         formulaRules: Array.isArray(formulaRulesRef.current) ? formulaRulesRef.current : [],
         enforceFactwiseFilled: Array.isArray(factwiseRulesRef.current) && factwiseRulesRef.current.length > 0,
       });
-      console.log('🔧 DEBUG: Review readiness check result:', waitOk);
 
       // Detect MPN column from first page (Tag_*/Specification_Value_* only) and hint the editor
       try {
@@ -4030,7 +3935,6 @@ export default function ColumnMapping() {
         if (best && bestScore >= 0.3) {
           // Store hint for the editor
           sessionStorage.setItem(`mpnAutoColumn_${sessionId}`, best);
-          console.log('🔎 Auto-detected MPN column for editor:', best, 'score:', bestScore);
         }
       } catch (e) {
         console.warn('MPN auto-detect (review) skipped:', e?.message || e);
@@ -4052,11 +3956,6 @@ export default function ColumnMapping() {
       const finalVersion = response?.data?.template_version || Date.now();
       sessionStorage.setItem(`templateVersion_${sessionId}`, finalVersion.toString());
       sessionStorage.setItem(`lastMappingUpdate_${sessionId}`, Date.now().toString());
-      
-      console.log('🔄 SYNC: Set navigation flags for DataEditor synchronization', {
-        templateVersion: finalVersion,
-        timestamp: Date.now()
-      });
 
       // Navigate to editor on success (defer a tick to ensure flags persisted)
       // If readiness timed out, still navigate but EnhancedDataEditor will refresh.
@@ -4132,7 +4031,6 @@ export default function ColumnMapping() {
         }
 
         if (headerOk && formulasOk && factwiseOk) {
-          console.log('✅ Review readiness: headers/formula/factwise checks passed', { headerCount: headers.length });
           try { closeSnackbar(); } catch (_) {}
           return true;
         }
@@ -4140,8 +4038,20 @@ export default function ColumnMapping() {
         // If formulas expected but not visible yet, try to re-apply once
         if (expectFormulas && !formulasOk && !appliedOnce && Array.isArray(formulaRules) && formulaRules.length > 0) {
           try {
-            console.log('🔁 Re-applying formula rules during readiness wait');
-            await api.applyFormulas(sessionId, formulaRules);
+            // CRITICAL FIX: Get current mappings to send with formula apply
+            let currentMappings = null;
+            try {
+              const mappingsResponse = await api.getExistingMappings(sessionId);
+              if (mappingsResponse.data && mappingsResponse.data.mappings) {
+                const mappingsData = mappingsResponse.data.mappings;
+                if (mappingsData.mappings && Array.isArray(mappingsData.mappings)) {
+                  currentMappings = mappingsData.mappings;
+                } else if (Array.isArray(mappingsData)) {
+                  currentMappings = mappingsData;
+                }
+              }
+            } catch (err) { /* ignore */ }
+            await api.applyFormulas(sessionId, formulaRules, currentMappings);
             appliedOnce = true;
           } catch (e) {
             console.warn('Formula re-apply during readiness failed:', e?.message || e);
