@@ -1,5 +1,3 @@
-
-
 services:
   redis:
     image: redis:7-alpine
@@ -17,6 +15,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
+    command: python manage.py runserver 0.0.0.0:8000
     ports:
       - "8000:8000"
     environment:
@@ -27,40 +26,34 @@ services:
       - DATABASE_URL=sqlite:///db.sqlite3
       - CORS_ALLOWED_ORIGINS=http://localhost:3000
       - REDIS_URL=redis://redis:6379/1
-      # Azure OCR credentials are provided via env_file below
     env_file:
       - ./backend/.env
     volumes:
       - ./backend:/app
-      - ./backend/media:/app/media
-      - ./backend/temp_downloads:/app/temp_downloads
-      - ./backend/uploaded_files:/app/uploaded_files
-      - ./backend/logs:/app/logs
     networks:
       - excel-mapper-network
     depends_on:
       - redis
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health/"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
 
   frontend:
     build:
-      context: .
-      dockerfile: Dockerfile.frontend.local
+      context: ./frontend
+      dockerfile: Dockerfile.dev
     ports:
-      - "3000:80"
+      - "3000:3000"
+    environment:
+      - CHOKIDAR_USEPOLLING=true
+      - REACT_APP_API_BASE_URL=http://localhost:8000/api
+      - WDS_SOCKET_PORT=3000
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
     depends_on:
       - backend
     networks:
       - excel-mapper-network
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:80/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+    stdin_open: true
+    tty: true
 
 networks:
   excel-mapper-network:

@@ -13,6 +13,7 @@ from rest_framework.response import Response
 from rest_framework import status
 
 from .services.digikey_service import DigiKeyClient
+from .services.mouser_service import MouserClient
 from .views import get_session_consistent, save_session, apply_column_mappings
 
 logger = logging.getLogger(__name__)
@@ -84,9 +85,16 @@ def mpn_validate(request):
     Payload: { session_id, mpn_header?: string, manufacturer_header?: string }
     """
     try:
+        logger.info("=" * 80)
+        logger.info("🔍 MPN_VALIDATION_START: Beginning MPN validation request")
+        logger.info("=" * 80)
+
         session_id = request.data.get('session_id')
         if not session_id:
+            logger.error("❌ MPN_VALIDATION_ERROR: No session_id provided")
             return Response({ 'success': False, 'error': 'session_id required' }, status=status.HTTP_400_BAD_REQUEST)
+
+        logger.info(f"📋 MPN_VALIDATION_SESSION: session_id={session_id}")
 
         info = get_session_consistent(session_id)
         if not info:
@@ -109,10 +117,15 @@ def mpn_validate(request):
 
         # Determine MPN header
         mpn_header = request.data.get('mpn_header')
+        logger.info(f"📌 MPN_VALIDATION_HEADER: Requested mpn_header='{mpn_header}'")
         if not mpn_header:
             mpn_header = detect_mpn_header(headers)
+            logger.info(f"📌 MPN_VALIDATION_HEADER: Auto-detected mpn_header='{mpn_header}'")
         if not mpn_header or mpn_header not in headers:
+            logger.error(f"❌ MPN_VALIDATION_ERROR: MPN column '{mpn_header}' not found in headers: {headers}")
             return Response({ 'success': False, 'error': 'MPN column not found' }, status=status.HTTP_400_BAD_REQUEST)
+
+        logger.info(f"✅ MPN_VALIDATION_HEADER: Using mpn_header='{mpn_header}'")
 
         manufacturer_header = request.data.get('manufacturer_header')
         if manufacturer_header and manufacturer_header not in headers:
@@ -194,6 +207,29 @@ def mpn_validate(request):
         # Combine cached and API results
         results_map = {**cached_results, **api_results}
 
+        # ========== MOUSER VALIDATION (same MPNs) ==========
+        logger.info("=" * 80)
+        logger.info("🔍 MOUSER_VALIDATION_START: Beginning Mouser validation")
+        logger.info("=" * 80)
+        mouser_results_map = {}
+        try:
+            mouser_client = MouserClient()
+            if mouser_client.api_key:
+                logger.info(f"📊 MOUSER_VALIDATION: Validating {len(mpns)} MPNs via Mouser API")
+                for raw_mpn in mpns:
+                    norm_mpn = mouser_client.normalize_mpn(raw_mpn)
+                    if norm_mpn:
+                        result = mouser_client.validate_mpn(raw_mpn)
+                        if result:
+                            mouser_results_map[norm_mpn] = result
+                logger.info(f"✅ MOUSER_VALIDATION: Completed for {len(mouser_results_map)} MPNs")
+                logger.info(f"📋 MOUSER_VALIDATION_STATS: Valid={sum(1 for r in mouser_results_map.values() if r.get('valid'))}, Invalid={sum(1 for r in mouser_results_map.values() if not r.get('valid'))}")
+            else:
+                logger.warning("⚠️ MOUSER_VALIDATION: MOUSER_API_KEY not configured, skipping Mouser validation")
+        except Exception as e:
+            logger.warning(f"⚠️ MOUSER_VALIDATION: Failed (non-critical): {e}")
+        logger.info("=" * 80)
+
         # Add new columns with validation results to the data
         validation_columns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN']
 
@@ -205,17 +241,37 @@ def mpn_validate(request):
         if has_valid_results:
             validation_columns.append('Category')
 
+        # Add Mouser columns if we have Mouser results
+        if mouser_results_map:
+            mouser_columns = ['MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'Mouser Canonical MPN']
+            has_valid_mouser_results = any(r.get('valid') for r in mouser_results_map.values())
+            if has_valid_mouser_results:
+                mouser_columns.append('Mouser Category')
+            validation_columns.extend(mouser_columns)
+            logger.info(f"📊 MOUSER_VALIDATION_COLUMNS: Adding {len(mouser_columns)} Mouser columns: {mouser_columns}")
+
+        logger.info(f"📊 MPN_VALIDATION_COLUMNS: Adding {len(validation_columns)} columns: {validation_columns}")
+
         # Add columns if they don't exist
+        columns_added = []
         for col in validation_columns:
             if col not in headers:
                 headers.append(col)
+                columns_added.append(col)
+
+        logger.info(f"✅ MPN_VALIDATION_COLUMNS: Added {len(columns_added)} new columns: {columns_added}")
+        logger.info(f"📋 MPN_VALIDATION_HEADERS: Total headers after adding columns ({len(headers)}): {headers}")
 
         # Update rows with validation data
+        logger.info(f"🔍 MPN_DATA_POPULATION: Starting to populate {len(dict_rows)} rows with DigiKey data from {len(results_map)} results")
         for i, d in enumerate(dict_rows):
             raw_mpn = d.get(mpn_header, '')
             norm_mpn = client.normalize_mpn(raw_mpn)
             validation_result = results_map.get(norm_mpn, {})
             lifecycle = validation_result.get('lifecycle') or {}
+
+            if i == 0:  # Log first row for debugging
+                logger.info(f"🔍 MPN_DATA_ROW_0: raw_mpn='{raw_mpn}', norm_mpn='{norm_mpn}', has_result={bool(validation_result)}, valid={validation_result.get('valid', False)}")
 
             # Ensure row has enough columns
             while len(rows[i]) < len(headers):
@@ -232,6 +288,9 @@ def mpn_validate(request):
             is_valid = validation_result.get('valid', False)
 
             rows[i][mpn_valid_idx] = 'Yes' if is_valid else 'No'
+
+            if i == 0:  # Log first row data assignment
+                logger.info(f"🔍 MPN_DATA_ROW_0_ASSIGN: Setting rows[0][{mpn_valid_idx}] = '{rows[i][mpn_valid_idx]}'")
 
             if is_valid:
                 # Only populate detailed data for valid MPNs
@@ -259,6 +318,43 @@ def mpn_validate(request):
                     category_idx = headers.index('Category')
                     rows[i][category_idx] = ''
 
+            # Populate Mouser data if we have Mouser results
+            if mouser_results_map:
+                mouser_norm_mpn = mouser_client.normalize_mpn(raw_mpn)
+                mouser_result = mouser_results_map.get(mouser_norm_mpn, {})
+                mouser_lifecycle = mouser_result.get('lifecycle') or {}
+
+                # Get Mouser column indices
+                if 'MPN valid (Mouser)' in headers:
+                    mouser_valid_idx = headers.index('MPN valid (Mouser)')
+                    mouser_status_idx = headers.index('Mouser Status')
+                    mpnr_idx = headers.index('MPNR')
+                    mouser_canonical_idx = headers.index('Mouser Canonical MPN')
+
+                    mouser_is_valid = mouser_result.get('valid', False)
+                    rows[i][mouser_valid_idx] = 'Yes' if mouser_is_valid else 'No'
+
+                    if mouser_is_valid:
+                        # Only populate detailed data for valid MPNs
+                        rows[i][mouser_status_idx] = mouser_lifecycle.get('status') or 'Unknown'
+                        rows[i][mpnr_idx] = mouser_result.get('mouser_part_number') or ''
+                        rows[i][mouser_canonical_idx] = mouser_result.get('canonical_mpn') or ''
+
+                        # Only add category if column exists and MPN is valid
+                        if 'Mouser Category' in headers:
+                            mouser_category_idx = headers.index('Mouser Category')
+                            rows[i][mouser_category_idx] = mouser_result.get('category') or ''
+                    else:
+                        # For invalid MPNs, show empty/unknown values
+                        rows[i][mouser_status_idx] = 'Unknown'
+                        rows[i][mpnr_idx] = ''
+                        rows[i][mouser_canonical_idx] = ''
+
+                        # Leave category empty for invalid MPNs
+                        if 'Mouser Category' in headers:
+                            mouser_category_idx = headers.index('Mouser Category')
+                            rows[i][mouser_category_idx] = ''
+
         # Update the session with enhanced data
         enhanced_result = {
             'headers': headers,
@@ -267,6 +363,8 @@ def mpn_validate(request):
 
         # Save enhanced data back to session
         info['enhanced_data'] = enhanced_result
+        info['enhanced_headers'] = headers  # CRITICAL: data_view looks for this key!
+        logger.info(f"💾 MPN_VALIDATION_HEADERS_SAVED: Saved enhanced_headers with {len(headers)} headers to session")
 
         # Persist results in session
         mpn_validation = info.get('mpn_validation') or {}
@@ -275,11 +373,14 @@ def mpn_validate(request):
             'site': client.site,
             'lang': client.lang,
             'currency': client.currency,
-            'results': { **(mpn_validation.get('results') or {}), **results_map },
+            'digikey_results': { **(mpn_validation.get('digikey_results') or {}), **results_map },
+            'mouser_results': { **(mpn_validation.get('mouser_results') or {}), **mouser_results_map },
             'validation_columns_added': validation_columns
         })
         info['mpn_validation'] = mpn_validation
         save_session(session_id, info)
+
+        logger.info(f"💾 SESSION_SAVE: Saved DigiKey results: {len(results_map)}, Mouser results: {len(mouser_results_map)}")
 
         # Summary with optimized cache reporting
         total_unique = len(seen_norm)
@@ -289,6 +390,16 @@ def mpn_validate(request):
 
         invalid = sum(1 for r in results_map.values() if not r.get('valid'))
         valid = total_results - invalid
+
+        logger.info("=" * 80)
+        logger.info(f"✅ MPN_VALIDATION_SUCCESS: Completed MPN validation")
+        logger.info(f"   📊 Total unique MPNs: {total_unique}")
+        logger.info(f"   💾 Cache hits: {cache_hits}")
+        logger.info(f"   🌐 API calls: {api_calls}")
+        logger.info(f"   ✅ Valid: {valid}")
+        logger.info(f"   ❌ Invalid: {invalid}")
+        logger.info(f"   📋 Columns added: {validation_columns}")
+        logger.info("=" * 80)
 
         return Response({
             'success': True,

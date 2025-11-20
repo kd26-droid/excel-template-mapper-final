@@ -2691,6 +2691,8 @@ def data_view(request):
         enhanced_data = info.get("formula_enhanced_data")
         enhanced_headers = info.get("enhanced_headers")
 
+        logger.info(f"🔍 DATA_VIEW_START: edited_data={len(edited_data) if edited_data else 0}, formula_enhanced_data={bool(enhanced_data)}, enhanced_headers={len(enhanced_headers) if enhanced_headers else 0}")
+
         template_just_applied = info.get("original_template_id") is not None
         # Prefer enhanced data if present (e.g., user uploaded corrected CSV) even when force_fresh=true
         force_fresh_param = request.GET.get('force_fresh', 'false').lower() == 'true'
@@ -2702,8 +2704,34 @@ def data_view(request):
         stable_headers = request.GET.get('stable', 'false').lower() == 'true'
 
         using_enhanced = False
-        # 1) Edited data takes top priority
-        if isinstance(edited_data, list) and edited_data:
+
+        # 1) FIRST PRIORITY: Check if we have MPN-enhanced data (has both enhanced_data and enhanced_headers)
+        mpn_enhanced_data = info.get('enhanced_data')
+        logger.info(f"🔍 DATA_VIEW_MPN_CHECK: mpn_enhanced_data exists={bool(mpn_enhanced_data)}, has headers={bool(mpn_enhanced_data.get('headers') if mpn_enhanced_data else False)}, header count in mpn_enhanced_data={len(mpn_enhanced_data.get('headers', [])) if mpn_enhanced_data else 0}, enhanced_headers from session={len(enhanced_headers) if enhanced_headers else 0}")
+        if mpn_enhanced_data and mpn_enhanced_data.get('headers') and mpn_enhanced_data.get('data') and enhanced_headers:
+            logger.info(f"📊 DATA_VIEW: Using MPN-enhanced data with {len(enhanced_headers)} headers")
+            mpn_data_rows = mpn_enhanced_data['data']
+            mpn_headers = mpn_enhanced_data['headers']
+
+            # CRITICAL: Convert list-of-lists to dict format using mpn_headers as keys
+            if mpn_data_rows and isinstance(mpn_data_rows[0], list):
+                logger.info(f"🔄 DATA_VIEW_MPN_CONVERT: Converting {len(mpn_data_rows)} rows from list-of-lists to dict using {len(mpn_headers)} headers")
+                logger.info(f"🔍 DATA_VIEW_MPN_HEADERS: {mpn_headers}")
+                transformed_rows = []
+                for row_idx, row_list in enumerate(mpn_data_rows):
+                    row_dict = {}
+                    for idx, header in enumerate(mpn_headers):
+                        row_dict[header] = row_list[idx] if idx < len(row_list) else ''
+                    transformed_rows.append(row_dict)
+                    if row_idx == 0:  # Log first row
+                        logger.info(f"🔍 DATA_VIEW_ROW_0: MPN valid={row_dict.get('MPN valid')}, DKPN={row_dict.get('DKPN')}, MPN valid (Mouser)={row_dict.get('MPN valid (Mouser)')}, MPNR={row_dict.get('MPNR')}")
+            else:
+                transformed_rows = mpn_data_rows
+
+            headers_to_use = enhanced_headers
+            using_enhanced = True
+        # 2) Edited data takes second priority (but should include MPN columns if they exist)
+        elif isinstance(edited_data, list) and edited_data:
             headers_to_use = enhanced_headers or info.get('current_template_headers') or []
             # If headers_to_use is empty, derive canonical headers from counts
             if not headers_to_use:
@@ -2728,8 +2756,8 @@ def data_view(request):
                 save_session(session_id, info)
             except Exception:
                 pass
-        # 2) Otherwise use enhanced (correction / formula) data
-        elif enhanced_data and enhanced_headers and not force_fresh_mapping:
+        # 3) Otherwise use enhanced (correction / formula) data
+        elif enhanced_data and enhanced_headers and not force_fresh_mapping and not mpn_enhanced_data:
             transformed_rows = enhanced_data
             headers_to_use = enhanced_headers
             using_enhanced = True
@@ -2819,11 +2847,12 @@ def data_view(request):
             transformed_rows = dict_rows
 
         # Inject MPN validation columns with multiple canonical MPNs if available
+        # SKIP this if we're using MPN-enhanced data (it already has the columns populated)
         try:
             mpn_validation = info.get('mpn_validation') or {}
             mpn_header = mpn_validation.get('column')
             results_map = mpn_validation.get('results') or {}
-            if mpn_header and isinstance(transformed_rows, list) and transformed_rows:
+            if mpn_header and isinstance(transformed_rows, list) and transformed_rows and not using_enhanced:
                 from .services.digikey_service import DigiKeyClient
                 client_norm = DigiKeyClient.normalize_mpn
 
@@ -2901,10 +2930,13 @@ def data_view(request):
             logger.warning(f"MPN validation injection skipped: {_me}")
 
         # IMPORTANT: apply formulas only if we did NOT use the enhanced branch
+        logger.info(f"🔍 DATA_VIEW_FORMULA_CHECK: formula_rules={bool(formula_rules)}, has_transformed_rows={bool(transformed_rows)}, using_enhanced={using_enhanced}, will_apply_formulas={formula_rules and transformed_rows and not using_enhanced}")
         if formula_rules and transformed_rows and not using_enhanced:
+            logger.info(f"⚠️ DATA_VIEW_FORMULA: Applying formulas, current headers_to_use={len(headers_to_use)}")
             formula_result = apply_formula_rules(transformed_rows, headers_to_use, formula_rules, replace_existing=False, session_info=info)
             transformed_rows = formula_result['data']
             headers_to_use = formula_result['headers']
+            logger.info(f"⚠️ DATA_VIEW_FORMULA: After formulas, headers_to_use={len(headers_to_use)}, OVERWRITING enhanced_headers!")
             # Persist canonically across workers but avoid storing large full datasets
             info['enhanced_headers'] = headers_to_use
             info['current_template_headers'] = headers_to_use
@@ -3306,8 +3338,28 @@ def data_view(request):
             for i in range(1, customer_id_pairs_count + 1):
                 template_norm.add(_canon(f"Customer_Identification_Name_{i}"))
                 template_norm.add(_canon(f"Customer_Identification_Value_{i}"))
-        
-        
+
+            # Add MPN validation columns if they exist in session
+            mpn_validation = session_info.get('mpn_validation', {})
+            if mpn_validation.get('digikey_results') or mpn_validation.get('mouser_results') or mpn_validation.get('results'):
+                # Add DigiKey columns
+                template_norm.add(_canon('MPN valid'))
+                template_norm.add(_canon('MPN Status'))
+                template_norm.add(_canon('EOL Status'))
+                template_norm.add(_canon('Discontinued'))
+                template_norm.add(_canon('DKPN'))
+                template_norm.add(_canon('Canonical MPN'))
+                template_norm.add(_canon('Category'))
+
+                # Add Mouser columns if present
+                if mpn_validation.get('mouser_results'):
+                    template_norm.add(_canon('MPN valid (Mouser)'))
+                    template_norm.add(_canon('Mouser Status'))
+                    template_norm.add(_canon('MPNR'))
+                    template_norm.add(_canon('Mouser Canonical MPN'))
+                    template_norm.add(_canon('Mouser Category'))
+
+
         for i, header in enumerate(headers_to_use):
             header_canon = _canon(header)
             is_template_column = header_canon in template_norm
@@ -3579,7 +3631,10 @@ def data_view(request):
 
             # Add MPN validation columns if they exist
             mpn_validation = info.get('mpn_validation', {})
-            if mpn_validation.get('column') and mpn_validation.get('results'):
+            # Check for BOTH digikey_results and mouser_results (new structure) OR results (old structure)
+            has_mpn_results = (mpn_validation.get('digikey_results') or mpn_validation.get('mouser_results') or mpn_validation.get('results'))
+            if mpn_validation.get('column') and has_mpn_results:
+                logger.info(f"🔍 DATA_VIEW_CANONICAL: Adding MPN columns to canonical_headers, has_digikey={bool(mpn_validation.get('digikey_results'))}, has_mouser={bool(mpn_validation.get('mouser_results'))}")
                 # Add base MPN validation columns
                 base_mpn_columns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'Category']
                 for mpn_col in base_mpn_columns:
@@ -3593,8 +3648,17 @@ def data_view(request):
                     if canonical_mpn_col not in canonical_headers:
                         canonical_headers.append(canonical_mpn_col)
 
+                # Add Mouser columns if Mouser validation was performed
+                if mpn_validation.get('mouser_results'):
+                    logger.info(f"🔍 DATA_VIEW_CANONICAL: Adding Mouser columns to canonical_headers")
+                    mouser_columns = ['MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'Mouser Canonical MPN', 'Mouser Category']
+                    for mouser_col in mouser_columns:
+                        if mouser_col not in canonical_headers:
+                            canonical_headers.append(mouser_col)
+
             # Rebuild data rows to include all canonical headers in order
             rebuilt_rows = []
+            logger.info(f"🔍 DATA_VIEW_REBUILD: final_data has {len(final_data)} rows, format={'dict' if (final_data and isinstance(final_data[0], dict)) else 'list'}, final_headers has {len(final_headers)} items, canonical_headers has {len(canonical_headers)} items")
             if isinstance(final_data, list) and final_data:
                 if isinstance(final_data[0], dict):
                     for row in final_data:
@@ -3858,8 +3922,15 @@ def download_file(request, session_id=None):
             }, status=status.HTTP_400_BAD_REQUEST)
         
         # Always prefer rebuilding from current canonical headers to avoid stale snapshots
-        enhanced_data = info.get("formula_enhanced_data")
-        
+        # Check for MPN-enhanced data first, then fall back to formula_enhanced_data
+        enhanced_data_result = info.get("enhanced_data")
+        if enhanced_data_result and enhanced_data_result.get('data'):
+            enhanced_data = enhanced_data_result.get('data')
+            use_mpn_enhanced = True
+        else:
+            enhanced_data = info.get("formula_enhanced_data")
+            use_mpn_enhanced = False
+
         # If an old small snapshot is present while dataset is large, ignore it
         try:
             client_local_path = hybrid_file_manager.get_file_path(info["client_path"])
@@ -3872,16 +3943,27 @@ def download_file(request, session_id=None):
             total_rows_est = 0
 
         if enhanced_data and (total_rows_est == 0 or len(enhanced_data) >= total_rows_est):
-            # Use formula-enhanced data for download
+            # Use formula-enhanced or MPN-enhanced data for download
             transformed_rows = enhanced_data
-            base_headers = info.get("current_template_headers") or info.get("enhanced_headers") or []
+            # Use enhanced_headers if MPN-enhanced, otherwise use current_template_headers
+            if use_mpn_enhanced:
+                base_headers = info.get("enhanced_headers") or []
+                logger.info(f"🔧 DOWNLOAD: Using MPN-enhanced data with {len(base_headers)} headers")
+            else:
+                base_headers = info.get("current_template_headers") or info.get("enhanced_headers") or []
+                logger.info(f"🔧 DOWNLOAD: Using formula-enhanced data with {len(base_headers)} headers")
 
             # Inject MPN validation columns for enhanced data path as well
             try:
                 mpn_validation = info.get('mpn_validation') or {}
                 mpn_header = mpn_validation.get('column')
+                # Check for new dual structure (digikey_results/mouser_results) or old structure (results)
+                digikey_results_map = mpn_validation.get('digikey_results') or {}
+                mouser_results_map = mpn_validation.get('mouser_results') or {}
                 results_map = mpn_validation.get('results') or {}
-                if mpn_header and isinstance(transformed_rows, list) and transformed_rows:
+
+                # Only inject if not using MPN-enhanced data (which already has the columns)
+                if mpn_header and isinstance(transformed_rows, list) and transformed_rows and not use_mpn_enhanced:
                     from .services.digikey_service import DigiKeyClient
                     client_norm = DigiKeyClient.normalize_mpn
 

@@ -204,8 +204,13 @@ const EnhancedDataEditor = () => {
 
   // Helper function to identify MPN validation columns
   const isMpnValidationColumn = useCallback((columnName) => {
-    const mpnValidationColumns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'Category'];
-    return mpnValidationColumns.includes(columnName) ||
+    // DigiKey columns
+    const digikeyColumns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'Category'];
+    // Mouser columns
+    const mouserColumns = ['MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'Mouser Canonical MPN', 'Mouser Category'];
+
+    return digikeyColumns.includes(columnName) ||
+           mouserColumns.includes(columnName) ||
            columnName === 'Canonical MPN' ||
            /^Canonical MPN \d+$/.test(columnName);
   }, []);
@@ -218,8 +223,8 @@ const EnhancedDataEditor = () => {
       // Always show row number column
       if (col.field === '__row_number__') return true;
 
-      // Filter MPN columns based on toggle
-      if (isMpnValidationColumn(col.field)) {
+      // Filter MPN columns based on toggle - check both field and headerName
+      if (isMpnValidationColumn(col.field) || isMpnValidationColumn(col.headerName)) {
         return showMpnColumns;
       }
 
@@ -249,12 +254,20 @@ const EnhancedDataEditor = () => {
   // MPN column tooltip meanings
   const getMpnColumnTooltip = useCallback((columnName) => {
     const mpnTooltips = {
+      // DigiKey columns
       'MPN valid': 'Whether this part exists in Digi-Key database (Yes/No)',
       'MPN Status': 'Current production status: Active (good), NRND (being phased out), Obsolete (discontinued)',
       'EOL Status': 'End-of-Life flag: Yes (discontinued), No (still in production)',
       'Discontinued': 'Whether Digi-Key has stopped stocking this part (Yes/No)',
       'DKPN': 'Digi-Key part number for ordering (ends with -ND)',
-      'Canonical MPN': 'Official manufacturer part number format (standardized)'
+      'Category': 'Product category from Digi-Key',
+      'Canonical MPN': 'Official manufacturer part number format (standardized)',
+      // Mouser columns
+      'MPN valid (Mouser)': 'Whether this part exists in Mouser database (Yes/No)',
+      'Mouser Status': 'Current production status from Mouser',
+      'MPNR': 'Mouser part number for ordering',
+      'Mouser Canonical MPN': 'Official manufacturer part number from Mouser (standardized)',
+      'Mouser Category': 'Product category from Mouser'
     };
 
     // Handle numbered canonical MPN columns
@@ -667,9 +680,9 @@ const EnhancedDataEditor = () => {
         }
 
         // Check if MPN validation columns already exist (including all canonical MPN variants)
-        const baseMpnValidationColumns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN'];
+        const baseMpnValidationColumns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'MPN valid (Mouser)', 'Mouser Status', 'MPNR'];
         const canonicalMpnColumns = viewHeaders.filter(header =>
-          header === 'Canonical MPN' || /^Canonical MPN \d+$/.test(header)
+          header === 'Canonical MPN' || /^Canonical MPN \d+$/.test(header) || header === 'Mouser Canonical MPN'
         );
         const hasMpnValidation = baseMpnValidationColumns.some(col => viewHeaders.includes(col)) || canonicalMpnColumns.length > 0;
         if (hasMpnValidation) {
@@ -755,7 +768,7 @@ const EnhancedDataEditor = () => {
           const isUnmapped = data.unmapped_columns && data.unmapped_columns.includes(displayName);
           const isSpecificationColumn = displayName.toLowerCase().includes('specification');
           const isFormulaColumn = detectedFormulaColumns.includes(col) || col.startsWith('Tag_') || col.startsWith('Specification_') || col.startsWith('Customer_Identification_') || col === 'Tag' || col.includes('Specification') || col.includes('Customer identification') || col.includes('Custom identification') || col === 'Factwise ID';
-          const isMpnValidationColumn = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN'].includes(col) ||
+          const isMpnValidationColumn = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'Mouser Canonical MPN', 'Mouser Category', 'Category'].includes(col) ||
             col === 'Canonical MPN' || /^Canonical MPN \d+$/.test(col);
           const columnWidth = Math.max(180, Math.min(400, displayName.length * 10 + 40));
           
@@ -2097,6 +2110,13 @@ const EnhancedDataEditor = () => {
                     onClick={async () => {
                       try {
                         if (!mpnColumn) return;
+                        console.log("================================================================================");
+                        console.log("🔍 MPN_VALIDATION_FRONTEND_START: User clicked Validate MPNs button");
+                        console.log("================================================================================");
+                        console.log("📋 MPN_VALIDATION_FRONTEND: sessionId=", sessionId);
+                        console.log("📋 MPN_VALIDATION_FRONTEND: mpnColumn=", mpnColumn);
+                        console.log("📋 MPN_VALIDATION_FRONTEND: mpnManufacturerColumn=", mpnManufacturerColumn);
+
                         // Store original column before validation (in case mpnColumn changes after validation)
                         if (!originalMpnColumn && !isMpnValidationColumn(mpnColumn)) {
                           setOriginalMpnColumn(mpnColumn);
@@ -2112,19 +2132,37 @@ const EnhancedDataEditor = () => {
                           });
                         }, 500);
 
+                        console.log("🌐 MPN_VALIDATION_FRONTEND: Calling API validateMPNs...");
+
                         // Server handles OAuth silently; just call validate
-                        await api.validateMPNs(sessionId, mpnColumn, mpnManufacturerColumn);
+                        const apiResponse = await api.validateMPNs(sessionId, mpnColumn, mpnManufacturerColumn);
+
+                        console.log("✅ MPN_VALIDATION_FRONTEND: API response received:", apiResponse);
 
                         clearInterval(progressInterval);
                         setMpnValidationProgress(100);
 
+                        console.log("🔄 MPN_VALIDATION_FRONTEND: Fetching updated data...");
                         await fetchDataSynchronized();
+
+                        console.log("✅ MPN_VALIDATION_FRONTEND: Data fetched, validation complete");
                         setMpnValidationCompleted(true);
                         showSnackbar('MPN validation complete', 'success');
+
+                        console.log("================================================================================");
+                        console.log("✅ MPN_VALIDATION_FRONTEND_COMPLETE");
+                        console.log("================================================================================");
 
                         // Reset progress after a short delay
                         setTimeout(() => setMpnValidationProgress(0), 1000);
                       } catch (e) {
+                        console.error("================================================================================");
+                        console.error("❌ MPN_VALIDATION_FRONTEND_ERROR: Validation failed");
+                        console.error("❌ Error:", e);
+                        console.error("❌ Response:", e?.response);
+                        console.error("❌ Response data:", e?.response?.data);
+                        console.error("================================================================================");
+
                         const msg = e?.response?.data?.error || e.message || 'Unknown error';
                         if (e?.response?.status === 403) {
                           showSnackbar('MPN validation not configured by admin. Please complete Digi‑Key setup on the server.', 'error');
