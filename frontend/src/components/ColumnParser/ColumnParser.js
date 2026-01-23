@@ -12,7 +12,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import './ColumnParser.css';
 
-const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:8000/api';
+const API_BASE = process.env.REACT_APP_API_BASE_URL || '/api';
 
 const ColumnParser = ({ sessionId, onClose, onApply }) => {
   // Steps: 1=select, 2=mark boundaries, 3=label, 4=preview
