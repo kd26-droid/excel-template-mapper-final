@@ -43,6 +43,13 @@ import {
 } from '@mui/icons-material';
 import api, { setGlobalLoaderCallback } from '../services/api';
 import FormulaBuilder from '../components/FormulaBuilder';
+import ColumnParser from '../components/ColumnParser/ColumnParser';
+import TestComponent from '../components/TestComponent';
+
+// Force include ColumnParser in bundle - DATAEDITOR_MARKER_UNIQUE_12345
+console.log('ColumnParser component:', typeof ColumnParser);
+console.log('TestComponent:', typeof TestComponent);
+console.log('DATAEDITOR_MARKER_UNIQUE_12345');
 
 // Helper function to apply snapshot to editor state
 function applySnapshotToEditor(snapshot, { setColumnDefs, setRowData, setDynamicColumnCounts, setHasFormulas }) {
@@ -109,6 +116,7 @@ const DataEditor = () => {
 
   // Formula Builder state
   const [formulaBuilderOpen, setFormulaBuilderOpen] = useState(false);
+  const [columnParserOpen, setColumnParserOpen] = useState(false);
   const [hasFormulas, setHasFormulas] = useState(false);
   const [formulaColumns, setFormulaColumns] = useState([]);
   const [appliedFormulas, setAppliedFormulas] = useState([]);
@@ -1502,12 +1510,30 @@ const DataEditor = () => {
                 </span>
               </Tooltip>
 
+              <Tooltip title="Parse Column - Extract data from complex columns like Vendor Parts">
+                <Button
+                  onClick={() => setColumnParserOpen(true)}
+                  variant="contained"
+                  startIcon={<AutoAwesomeIcon />}
+                  sx={{
+                    backgroundColor: '#0891b2',
+                    color: 'white',
+                    '&:hover': { backgroundColor: '#0e7490' },
+                    textTransform: 'none',
+                    fontWeight: 600
+                  }}
+                  disabled={loading}
+                >
+                  Parse Column
+                </Button>
+              </Tooltip>
+
               <Tooltip title="Create Factwise ID - Combine two columns to create a unique identifier">
                 <Button
                   onClick={handleOpenFactwiseIdDialog}
                   variant="contained"
                   startIcon={<BadgeIcon />}
-                  sx={{ 
+                  sx={{
                     backgroundColor: '#2e7d32',
                     color: 'white',
                     '&:hover': { backgroundColor: '#1b5e20' },
@@ -1923,6 +1949,18 @@ const DataEditor = () => {
         columnFillStats={formulaColumnFillStats}
       />
 
+      {/* Column Parser Dialog */}
+      {columnParserOpen && (
+        <ColumnParser
+          sessionId={sessionId}
+          onClose={() => setColumnParserOpen(false)}
+          onApply={(result) => {
+            showSnackbar(`Parser applied! Added ${result.new_headers_count} new columns.`, 'success');
+            fetchData(); // Refresh data
+          }}
+        />
+      )}
+
       {/* Create Factwise ID Dialog */}
       <Dialog
         open={factwiseIdDialogOpen}
@@ -2185,3 +2223,4 @@ const DataEditor = () => {
 };
 
 export default DataEditor;
+// BUILD MARKER: 1769162887

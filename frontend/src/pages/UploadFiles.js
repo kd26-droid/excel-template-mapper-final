@@ -60,14 +60,13 @@ const UploadFiles = () => {
   const [clientSheetNames, setClientSheetNames] = useState([]);
   const [selectedClientSheet, setSelectedClientSheet] = useState('');
   const [clientHeaderRow, setClientHeaderRow] = useState(1);
-  
-  // Fixed Factwise template headers
-  const factwiseHeaders = [
-    'Item code', 'Item name', 'Description', 'Item type', 'Measurement unit',
-    'Notes', 'Internal notes', 'Custom identification name', 'Custom identification value',
-    'Procurement item', 'Sales item', 'Procurement entity name', 'Preferred vendor code'
-  ];
-  
+
+  // Template file state
+  const [templateFile, setTemplateFile] = useState(null);
+  const [templateSheetNames, setTemplateSheetNames] = useState([]);
+  const [selectedTemplateSheet, setSelectedTemplateSheet] = useState('');
+  const [templateHeaderRow, setTemplateHeaderRow] = useState(1);
+
   // Template selection state
   const [selectedTemplate, setSelectedTemplate] = useState(null);
   const [availableTemplates, setAvailableTemplates] = useState([]);
@@ -352,6 +351,61 @@ const UploadFiles = () => {
       maxFiles: 1
     });
 
+  // Template file drop handler
+  const onDropTemplateFile = useCallback(acceptedFiles => {
+    if (acceptedFiles.length > 0) {
+      const file = acceptedFiles[0];
+      setError(null);
+      setTemplateFile(file);
+
+      const reader = new FileReader();
+      const isCSV = file.name.toLowerCase().endsWith('.csv');
+
+      reader.onload = (evt) => {
+        try {
+          const data = evt.target.result;
+          let workbook;
+
+          if (isCSV) {
+            workbook = XLSX.read(data, {
+              type: 'string',
+              codepage: 65001,
+              raw: false
+            });
+          } else {
+            workbook = XLSX.read(data, { type: 'binary' });
+          }
+
+          const sheets = workbook.SheetNames;
+          setTemplateSheetNames(sheets);
+          setSelectedTemplateSheet(sheets[0]);
+          setTemplateHeaderRow(1);
+        } catch (err) {
+          console.error('Error reading template file:', err);
+          setError('Error reading template file. Please make sure it\'s a valid Excel or CSV file.');
+        }
+      };
+
+      if (isCSV) {
+        reader.readAsText(file, 'UTF-8');
+      } else {
+        reader.readAsBinaryString(file);
+      }
+    }
+  }, []);
+
+  const { getRootProps: getTemplateRootProps, getInputProps: getTemplateInputProps, isDragActive: isTemplateDragActive } =
+    useDropzone({
+      onDrop: onDropTemplateFile,
+      accept: {
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+        'application/vnd.ms-excel': ['.xls'],
+        'text/csv': ['.csv'],
+        'application/csv': ['.csv'],
+        'text/plain': ['.csv']
+      },
+      maxFiles: 1
+    });
 
   // Filter templates based on search term
   const filteredTemplates = availableTemplates.filter(template =>
@@ -437,8 +491,19 @@ const UploadFiles = () => {
 
     const isPDF = userFile.name.toLowerCase().endsWith('.pdf');
 
+    // Template file is required for non-PDF files
+    if (!isPDF && !templateFile) {
+      setError('Please select a template file');
+      return;
+    }
+
     if (!isPDF && clientSheetNames.length > 0 && !selectedClientSheet) {
       setError('Please select a sheet from your client file');
+      return;
+    }
+
+    if (!isPDF && templateSheetNames.length > 0 && !selectedTemplateSheet) {
+      setError('Please select a sheet from your template file');
       return;
     }
 
@@ -468,7 +533,9 @@ const UploadFiles = () => {
       formData.append('clientFile', userFile);
       formData.append('sheetName', selectedClientSheet);
       formData.append('headerRow', clientHeaderRow.toString());
-      formData.append('factwiseHeaders', JSON.stringify(factwiseHeaders));
+      formData.append('templateFile', templateFile);
+      formData.append('templateSheetName', selectedTemplateSheet);
+      formData.append('templateHeaderRow', templateHeaderRow.toString());
 
       // Add formula rules if they exist and NO mapping template is selected
       // When a template is selected, it already contains the rules, so don't send them again
@@ -701,27 +768,67 @@ const UploadFiles = () => {
             
             <Grid item xs={12} md={6}>
               <Typography variant="h6" gutterBottom>
-                Factwise Template (Fixed)
+                Template File <span style={{ color: '#d32f2f' }}>*</span>
               </Typography>
-              
-              <Box sx={{
-                border: '2px solid #4caf50',
-                borderRadius: 2,
-                p: 4,
-                textAlign: 'center',
-                backgroundColor: '#e8f5e8'
-              }}>
-                <CheckCircleIcon fontSize="large" color="success" />
-                <Typography variant="body1" sx={{ mt: 2, fontWeight: 600 }}>
-                  Standard Factwise Item Template
+
+              <Box
+                {...getTemplateRootProps()}
+                sx={{
+                  border: '2px dashed #ccc',
+                  borderRadius: 2,
+                  p: 4,
+                  textAlign: 'center',
+                  cursor: 'pointer',
+                  backgroundColor: isTemplateDragActive ? '#f0f8ff' : '#fafafa',
+                  transition: 'all 0.2s ease',
+                  '&:hover': { backgroundColor: '#f0f8ff' }
+                }}
+              >
+                <input {...getTemplateInputProps()} />
+                <CloudUploadIcon fontSize="large" color="primary" />
+                <Typography variant="body1" sx={{ mt: 2 }}>
+                  {templateFile ? templateFile.name : 'Drop your template file here or click to browse'}
                 </Typography>
                 <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                  {factwiseHeaders.length} predefined columns
-                </Typography>
-                <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
-                  Item code, Item name, Description, Item type, etc.
+                  Supported: .xlsx, .xls, .csv
                 </Typography>
               </Box>
+
+              {templateFile && (
+                <Typography variant="body2" sx={{ mt: 2, color: 'success.main' }}>
+                  ✓ Selected: {templateFile.name}
+                </Typography>
+              )}
+
+              {templateSheetNames.length > 0 && (
+                <Grid container spacing={2} sx={{ mt: 2 }}>
+                  <Grid item xs={6}>
+                    <FormControl fullWidth size="small">
+                      <InputLabel>Sheet Name</InputLabel>
+                      <Select
+                        value={selectedTemplateSheet}
+                        label="Sheet Name"
+                        onChange={(e) => setSelectedTemplateSheet(e.target.value)}
+                      >
+                        {templateSheetNames.map(sheet => (
+                          <MenuItem key={sheet} value={sheet}>{sheet}</MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  </Grid>
+                  <Grid item xs={6}>
+                    <TextField
+                      label="Header Row"
+                      type="number"
+                      size="small"
+                      fullWidth
+                      InputProps={{ inputProps: { min: 1 } }}
+                      value={templateHeaderRow}
+                      onChange={(e) => setTemplateHeaderRow(Number(e.target.value))}
+                    />
+                  </Grid>
+                </Grid>
+              )}
             </Grid>
           </Grid>
         </CardContent>

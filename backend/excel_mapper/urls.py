@@ -80,6 +80,14 @@ from .mpn_views import (
     mpn_restore_from_cache,
 )
 
+# Column Parser views
+from .parser_views import (
+    parser_analyze_column,
+    parser_preview,
+    parser_apply,
+    parser_get_columns,
+)
+
 urlpatterns = [
     # Health check
     path('health/', health_check, name='health-check'),
@@ -174,4 +182,10 @@ urlpatterns = [
     # MPN Cache Management
     path('mpn/cache/stats/', mpn_cache_stats, name='mpn-cache-stats'),
     path('mpn/cache/cleanup/', mpn_cache_cleanup, name='mpn-cache-cleanup'),
+
+    # Column Parser endpoints
+    path('parser/columns/<str:session_id>/', parser_get_columns, name='parser-get-columns'),
+    path('parser/analyze/', parser_analyze_column, name='parser-analyze-column'),
+    path('parser/preview/', parser_preview, name='parser-preview'),
+    path('parser/apply/', parser_apply, name='parser-apply'),
 ]

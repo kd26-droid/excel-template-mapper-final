@@ -149,232 +149,33 @@ def generate_template_columns(tags_count=3, spec_pairs_count=3, customer_id_pair
 
 # Utility: normalize template/display headers to internal numbered headers
 def normalize_headers_to_internal(headers: list, existing_headers: Optional[list] = None) -> list:
-    """Convert any external/display dynamic headers to internal numbered forms.
-    - Tag → Tag_1, Tag_2, ...
-    - Specification name/value → Specification_Name_N / Specification_Value_N
-    - Customer identification name/value → Customer_Identification_Name_N / Customer_Identification_Value_N
-    Keeps already-internal names unchanged.
+    """
+    UPDATED: Preserve user's original template column names without converting to numbered format.
+
+    This function now:
+    - Preserves original column names like "Tag", "Specification Name", "Specification Value" as-is
+    - Only recognizes explicitly numbered patterns (Tag_1, Specification_Name_1, etc.) as dynamic columns
+    - Does NOT convert "Specification Name" to "Specification_Name_1" anymore
+
+    This prevents conflicts between user's template columns and dynamically added numbered columns.
     """
     logger.debug(f"🔄 normalize_headers_to_internal called with {len(headers)} headers")
     logger.debug(f"Input headers: {headers}")
     logger.debug(f"Existing headers: {existing_headers}")
-    
+
     if not headers or not isinstance(headers, list):
         logger.warning(f"Invalid headers input: {headers}")
         return headers
-    
-    # Build maps for existing numbered headers to preserve their indices
-    tag_map = {}
-    spec_name_map = {}
-    spec_value_map = {}
-    cust_name_map = {}
-    cust_value_map = {}
-    
-    if existing_headers:
-        for h in existing_headers:
-            if h.startswith('Tag_'):
-                try:
-                    idx = int(h.split('_')[1])
-                    tag_map[idx] = h
-                    logger.debug(f"Found existing Tag_{idx}: {h}")
-                except (IndexError, ValueError):
-                    logger.warning(f"Could not parse Tag index from: {h}")
-            elif h.startswith('Specification_Name_'):
-                try:
-                    idx = int(h.split('_')[2])
-                    spec_name_map[idx] = h
-                    logger.debug(f"Found existing Specification_Name_{idx}: {h}")
-                except (IndexError, ValueError):
-                    logger.warning(f"Could not parse Specification_Name index from: {h}")
-            elif h.startswith('Specification_Value_'):
-                try:
-                    idx = int(h.split('_')[2])
-                    spec_value_map[idx] = h
-                    logger.debug(f"Found existing Specification_Value_{idx}: {h}")
-                except (IndexError, ValueError):
-                    logger.warning(f"Could not parse Specification_Value index from: {h}")
-            elif h.startswith('Customer_Identification_Name_'):
-                try:
-                    idx = int(h.split('_')[2])
-                    cust_name_map[idx] = h
-                    logger.debug(f"Found existing Customer_Identification_Name_{idx}: {h}")
-                except (IndexError, ValueError):
-                    logger.warning(f"Could not parse Customer_Identification_Name index from: {h}")
-            elif h.startswith('Customer_Identification_Value_'):
-                try:
-                    idx = int(h.split('_')[2])
-                    cust_value_map[idx] = h
-                    logger.debug(f"Found existing Customer_Identification_Value_{idx}: {h}")
-                except (IndexError, ValueError):
-                    logger.warning(f"Could not parse Customer_Identification_Value index from: {h}")
-    
-    next_tag_idx = max(tag_map.keys()) + 1 if tag_map else 1
-    next_spec_idx = max(spec_name_map.keys()) + 1 if spec_name_map else 1
-    next_cust_idx = max(cust_name_map.keys()) + 1 if cust_name_map else 1
-    
-    logger.debug(f"Next available indices - Tag: {next_tag_idx}, Spec: {next_spec_idx}, Customer: {next_cust_idx}")
-    
+
+    # UPDATED: Simply return headers as-is, preserving user's original column names
+    # Only strip whitespace from each header
     normalized = []
-    
-    def norm(s: str) -> str:
-        return str(s or '').strip().lower()
-    
     for h in headers:
-        h_str = str(h)
-        h_norm = norm(h_str)
-        logger.debug(f"Processing header: '{h_str}' (normalized: '{h_norm}')")
-        
-        # Tag handling
-        if h_norm == 'tag':
-            # Find an existing Tag_N or assign a new one
-            assigned = False
-            for i in range(1, next_tag_idx):
-                if i not in tag_map:
-                    normalized.append(f'Tag_{i}')
-                    tag_map[i] = f'Tag_{i}'
-                    assigned = True
-                    logger.debug(f"Assigned Tag_{i} to '{h_str}'")
-                    break
-            if not assigned:
-                normalized.append(f'Tag_{next_tag_idx}')
-                tag_map[next_tag_idx] = f'Tag_{next_tag_idx}'
-                logger.debug(f"Assigned new Tag_{next_tag_idx} to '{h_str}'")
-                next_tag_idx += 1
-            continue
-            
-        if h_str.startswith('Tag_'):
-            normalized.append(h_str)
-            try:
-                num = int(h_str.split('_')[1])
-                tag_map[num] = h_str
-                next_tag_idx = max(next_tag_idx, num + 1)
-                logger.debug(f"Preserved existing Tag_{num}: {h_str}")
-            except Exception:
-                logger.warning(f"Could not parse Tag index from: {h_str}")
-            continue
-            
-        # Specification name handling
-        if h_norm in ['specification name', 'spec name', 'specification_name']:
-            # Find an existing Spec_Name_N or assign a new one
-            assigned = False
-            for i in range(1, next_spec_idx):
-                if i not in spec_name_map:
-                    normalized.append(f'Specification_Name_{i}')
-                    spec_name_map[i] = f'Specification_Name_{i}'
-                    assigned = True
-                    logger.debug(f"Assigned Specification_Name_{i} to '{h_str}'")
-                    break
-            if not assigned:
-                normalized.append(f'Specification_Name_{next_spec_idx}')
-                spec_name_map[next_spec_idx] = f'Specification_Name_{next_spec_idx}'
-                logger.debug(f"Assigned new Specification_Name_{next_spec_idx} to '{h_str}'")
-                next_spec_idx += 1
-            continue
-            
-        if h_str.startswith('Specification_Name_'):
-            normalized.append(h_str)
-            try:
-                num = int(h_str.split('_')[2])
-                spec_name_map[num] = h_str
-                next_spec_idx = max(next_spec_idx, num + 1)
-                logger.debug(f"Preserved existing Specification_Name_{num}: {h_str}")
-            except Exception:
-                logger.warning(f"Could not parse Specification_Name index from: {h_str}")
-            continue
-            
-        # Specification value handling
-        if h_norm in ['specification value', 'spec value', 'specification_value']:
-            # Find an existing Spec_Value_N or assign a new one
-            assigned = False
-            for i in range(1, next_spec_idx):
-                if i not in spec_value_map:
-                    normalized.append(f'Specification_Value_{i}')
-                    spec_value_map[i] = f'Specification_Value_{i}'
-                    assigned = True
-                    logger.debug(f"Assigned Specification_Value_{i} to '{h_str}'")
-                    break
-            if not assigned:
-                normalized.append(f'Specification_Value_{next_spec_idx}')
-                spec_value_map[next_spec_idx] = f'Specification_Value_{next_spec_idx}'
-                logger.debug(f"Assigned new Specification_Value_{next_spec_idx} to '{h_str}'")
-                next_spec_idx += 1
-            continue
-            
-        if h_str.startswith('Specification_Value_'):
-            normalized.append(h_str)
-            try:
-                num = int(h_str.split('_')[2])
-                spec_value_map[num] = h_str
-                next_spec_idx = max(next_spec_idx, num + 1)
-                logger.debug(f"Preserved existing Specification_Value_{num}: {h_str}")
-            except Exception:
-                logger.warning(f"Could not parse Specification_Value index from: {h_str}")
-            continue
-            
-        # Customer identification name handling
-        if h_norm in ['customer identification name', 'customer id name', 'customer_id_name']:
-            # Find an existing Customer_Identification_Name_N or assign a new one
-            assigned = False
-            for i in range(1, next_cust_idx):
-                if i not in cust_name_map:
-                    normalized.append(f'Customer_Identification_Name_{i}')
-                    cust_name_map[i] = f'Customer_Identification_Name_{i}'
-                    assigned = True
-                    logger.debug(f"Assigned Customer_Identification_Name_{i} to '{h_str}'")
-                    break
-            if not assigned:
-                normalized.append(f'Customer_Identification_Name_{next_cust_idx}')
-                cust_name_map[next_cust_idx] = f'Customer_Identification_Name_{next_cust_idx}'
-                logger.debug(f"Assigned new Customer_Identification_Name_{next_cust_idx} to '{h_str}'")
-                next_cust_idx += 1
-            continue
-            
-        if h_str.startswith('Customer_Identification_Name_'):
-            normalized.append(h_str)
-            try:
-                num = int(h_str.split('_')[2])
-                cust_name_map[num] = h_str
-                next_cust_idx = max(next_cust_idx, num + 1)
-                logger.debug(f"Preserved existing Customer_Identification_Name_{num}: {h_str}")
-            except Exception:
-                logger.warning(f"Could not parse Customer_Identification_Name index from: {h_str}")
-            continue
-            
-        # Customer identification value handling
-        if h_norm in ['customer identification value', 'customer id value', 'customer_id_value']:
-            # Find an existing Customer_Identification_Value_N or assign a new one
-            assigned = False
-            for i in range(1, next_cust_idx):
-                if i not in cust_value_map:
-                    normalized.append(f'Customer_Identification_Value_{i}')
-                    cust_value_map[i] = f'Customer_Identification_Value_{i}'
-                    assigned = True
-                    logger.debug(f"Assigned Customer_Identification_Value_{i} to '{h_str}'")
-                    break
-            if not assigned:
-                normalized.append(f'Customer_Identification_Value_{next_cust_idx}')
-                cust_value_map[next_cust_idx] = f'Customer_Identification_Value_{next_cust_idx}'
-                logger.debug(f"Assigned new Customer_Identification_Value_{next_cust_idx} to '{h_str}'")
-                next_cust_idx += 1
-            continue
-            
-        if h_str.startswith('Customer_Identification_Value_'):
-            normalized.append(h_str)
-            try:
-                num = int(h_str.split('_')[2])
-                cust_value_map[num] = h_str
-                next_cust_idx = max(next_cust_idx, num + 1)
-                logger.debug(f"Preserved existing Customer_Identification_Value_{num}: {h_str}")
-            except Exception:
-                logger.warning(f"Could not parse Customer_Identification_Value index from: {h_str}")
-            continue
-        
-        # Non-dynamic header - keep as is
+        h_str = str(h).strip() if h is not None else ''
         normalized.append(h_str)
-        logger.debug(f"Kept non-dynamic header as-is: '{h_str}'")
-    
-    logger.info(f"✅ Header normalization complete: {len(headers)} → {len(normalized)}")
-    logger.debug(f"Final normalized headers: {normalized}")
+        logger.debug(f"Preserved header as-is: '{h_str}'")
+
+    logger.info(f"🔄 normalize_headers_to_internal: Preserved {len(normalized)} headers without conversion")
     return normalized
 
 # In-memory store for each session
@@ -645,33 +446,9 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
             # to prevent flip-flopping between operation-specific snapshots.
             canonical_headers = info.get("current_template_headers")
             if canonical_headers and isinstance(canonical_headers, list) and len(canonical_headers) > 0:
-                
-                # CRITICAL FIX: Ensure ALL standard headers are always included
-                # The current_template_headers might only contain dynamic headers
-                # Include both core Factwise headers AND standard template fields
-                standard_headers = [
-                    # Core Factwise headers
-                    "Item code", "Item name", "Description", "Item type", "Measurement unit", "Procurement entity name",
-                    # Standard template fields that should behave like core headers when mapped
-                    "Notes", "Internal notes", "Procurement item", "Sales item", "Preferred vendor code"
-                ]
-                
-                # Check if standard headers are already present
-                has_standard = any(h in canonical_headers for h in standard_headers)
-                
-                if not has_standard:
-                    # Prepend standard headers to the canonical headers
-                    canonical_headers = standard_headers + canonical_headers
-                    logger.info(f"🔧 CRITICAL FIX: Added missing standard headers to canonical headers")
+                # Use the canonical headers from the uploaded template file directly
                 template_headers = normalize_headers_to_internal(canonical_headers)
-                logger.info(f"🔍 Using {len(template_headers)} canonical template headers from session (with core headers)")
-            elif 'tags_count' in info or 'spec_pairs_count' in info or 'customer_id_pairs_count' in info:
-                # Dynamic template columns when counts provided
-                tags_count = info.get('tags_count', 3)
-                spec_pairs_count = info.get('spec_pairs_count', 3)
-                customer_id_pairs_count = info.get('customer_id_pairs_count', 1)
-                template_headers = generate_template_columns(tags_count, spec_pairs_count, customer_id_pairs_count)
-                logger.info(f"🔍 Generated {len(template_headers)} dynamic template columns")
+                logger.info(f"🔍 Using {len(template_headers)} canonical template headers from session")
             else:
                 # Fallback to reading from template file
                 template_headers = SESSION_STORE[session_id].get("template_headers", [])
@@ -843,16 +620,29 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
         df_canon = {_canon(c): c for c in df.columns}
         
         # Normalize mapping_list targets to the exact template header spelling
+        # === DETAILED LOGGING FOR DEBUGGING ===
+        logger.info(f"📊 APPLY_MAPPINGS: Processing {len(mapping_list)} mappings")
+        logger.info(f"📊 TEMPLATE HEADERS AVAILABLE: {template_headers}")
+
         normalized_list = []
         for m in mapping_list:
             t_raw = m.get("target", "")
             s_raw = m.get("source", "")
             # Snap target to real template header if found, otherwise keep original
             t = canon_to_template.get(_canon(t_raw), t_raw)
-            logger.debug(f"🔧 Target normalization: '{t_raw}' -> '{t}'")
+            if t_raw != t:
+                logger.info(f"📊 MAPPING NORMALIZED: '{s_raw}' -> '{t_raw}' (normalized to '{t}')")
+            else:
+                logger.info(f"📊 MAPPING: '{s_raw}' -> '{t}'")
             normalized_list.append({"source": s_raw, "target": t})
         mapping_list = normalized_list
-        
+
+        # Log all mappings grouped by target type
+        template_mappings = [m for m in mapping_list if not any(m['target'].endswith(f'_{i}') for i in range(1, 100))]
+        dynamic_mappings = [m for m in mapping_list if any(m['target'].endswith(f'_{i}') for i in range(1, 100))]
+        logger.info(f"📊 TEMPLATE COLUMN MAPPINGS: {template_mappings}")
+        logger.info(f"📊 DYNAMIC COLUMN MAPPINGS: {dynamic_mappings}")
+
         # Build column order - ALWAYS preserve original template column order
         mapping_dict = {}  # target -> list of mappings for that target
         
@@ -1291,21 +1081,12 @@ def upload_files(request):
     try:
         # Extract form data
         client_file = request.FILES.get('clientFile')
-        template_file = request.FILES.get('templateFile')  # May be None for fixed template
+        template_file = request.FILES.get('templateFile')
         sheet_name = request.data.get('sheetName')
         header_row = int(request.data.get('headerRow', 1))
         template_sheet_name = request.data.get('templateSheetName')
         template_header_row = int(request.data.get('templateHeaderRow', 1))
         use_template_id = request.data.get('useTemplateId')
-        
-        # Extract fixed Factwise headers if provided
-        factwise_headers_json = request.data.get('factwiseHeaders')
-        factwise_headers = []
-        if factwise_headers_json:
-            try:
-                factwise_headers = json.loads(factwise_headers_json)
-            except json.JSONDecodeError:
-                logger.warning(f"Invalid factwiseHeaders JSON: {factwise_headers_json}")
         
         # Extract formula rules if provided
         formula_rules_json = request.data.get('formulaRules')
@@ -1316,20 +1097,17 @@ def upload_files(request):
             except json.JSONDecodeError:
                 logger.warning(f"Invalid formula rules JSON: {formula_rules_json}")
         
-        # Validation - allow fixed template mode (no template_file)
+        # Validation - both client file and template file are required
         if not client_file:
             return Response({
                 'success': False,
                 'error': 'Client file is required'
             }, status=status.HTTP_400_BAD_REQUEST)
-        
-        # If no template file but factwise headers provided, use fixed template mode
-        is_fixed_template_mode = not template_file and factwise_headers
-        
-        if not template_file and not is_fixed_template_mode:
+
+        if not template_file:
             return Response({
                 'success': False,
-                'error': 'Either template file or fixed Factwise headers are required'
+                'error': 'Template file is required'
             }, status=status.HTTP_400_BAD_REQUEST)
         
         # Validate file types
@@ -1342,38 +1120,25 @@ def upload_files(request):
                 'error': f'Only Excel (.xlsx, .xls) and CSV files are supported for client file'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Validate template file if provided
-        if template_file:
-            template_ext = Path(template_file.name).suffix.lower()
-            if template_ext not in allowed_extensions:
-                return Response({
-                    'success': False,
-                    'error': f'Only Excel (.xlsx, .xls) and CSV files are supported for template file'
-                }, status=status.HTTP_400_BAD_REQUEST)
-        
+        # Validate template file
+        template_ext = Path(template_file.name).suffix.lower()
+        if template_ext not in allowed_extensions:
+            return Response({
+                'success': False,
+                'error': f'Only Excel (.xlsx, .xls) and CSV files are supported for template file'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
         # Save uploaded files
         client_path, client_original_name = hybrid_file_manager.save_upload_file(client_file, "client")
-        
-        # Handle template file or fixed template mode
-        if template_file:
-            template_path, template_original_name = hybrid_file_manager.save_upload_file(template_file, "template")
-        else:
-            # Fixed template mode - create a virtual template with factwise headers
-            template_path = None
-            template_original_name = "Fixed Factwise Template"
-        
+        template_path, template_original_name = hybrid_file_manager.save_upload_file(template_file, "template")
+
         # Generate session ID
         session_id = str(uuid.uuid4())
-        
-        # Set default column counts for fixed template mode
-        if is_fixed_template_mode:
-            default_tags_count = 3
-            default_spec_pairs_count = 3
-            default_customer_id_pairs_count = 1
-        else:
-            default_tags_count = 3
-            default_spec_pairs_count = 3
-            default_customer_id_pairs_count = 1
+
+        # Set default column counts
+        default_tags_count = 3
+        default_spec_pairs_count = 3
+        default_customer_id_pairs_count = 1
         
         # Store session data using universal session saving
         session_data = {
@@ -1391,8 +1156,6 @@ def upload_files(request):
             "original_template_id": None,
             "template_modified": False,
             "formula_rules": formula_rules if formula_rules else [],
-            "is_fixed_template_mode": is_fixed_template_mode,
-            "factwise_headers": factwise_headers if is_fixed_template_mode else None,
             "tags_count": default_tags_count,
             "spec_pairs_count": default_spec_pairs_count,
             "customer_id_pairs_count": default_customer_id_pairs_count
@@ -1707,6 +1470,14 @@ def get_headers(request, session_id):
             sheet_name=info.get("template_sheet_name"),
             header_row=info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0
         )
+
+        # CRITICAL: Always store template_headers in session after reading from file
+        # This ensures updateColumnCounts has access to the base template headers
+        if template_headers and not info.get('template_headers'):
+            info['template_headers'] = template_headers
+            save_session(session_id, info)
+            logger.info(f"🔍 get_headers: Stored template_headers in session: {len(template_headers)} columns")
+
         # Try to read optional/mandatory annotations from rows above headers (substring match)
         template_optionals_map = {}
         try:
@@ -1751,26 +1522,28 @@ def get_headers(request, session_id):
         customer_id_pairs_count = info.get('customer_id_pairs_count', 1)
         
         # Helper functions for robust special-column detection (case/trim tolerant)
+        # FIXED: Only match NUMBERED dynamic columns (Tag_1, etc.), not user's original columns
+        import re
         def _norm(h: str) -> str:
             try:
                 return str(h or '').strip().lower()
             except Exception:
                 return ''
         def _is_tag(h: str) -> bool:
-            h_norm = _norm(h)
-            return h_norm == 'tag' or h_norm.startswith('tag_')
+            # Only match Tag_N pattern where N is a number
+            return bool(re.match(r'^tag_\d+$', _norm(h)))
         def _is_spec_name(h: str) -> bool:
-            h_norm = _norm(h)
-            return h_norm == 'specification name' or h_norm.startswith('specification_name_')
+            # Only match Specification_Name_N pattern
+            return bool(re.match(r'^specification_name_\d+$', _norm(h)))
         def _is_spec_value(h: str) -> bool:
-            h_norm = _norm(h)
-            return h_norm == 'specification value' or h_norm.startswith('specification_value_')
+            # Only match Specification_Value_N pattern
+            return bool(re.match(r'^specification_value_\d+$', _norm(h)))
         def _is_cust_name(h: str) -> bool:
-            h_norm = _norm(h)
-            return h_norm == 'customer identification name' or h_norm.startswith('customer_identification_name_')
+            # Only match Customer_Identification_Name_N pattern
+            return bool(re.match(r'^customer_identification_name_\d+$', _norm(h)))
         def _is_cust_value(h: str) -> bool:
-            h_norm = _norm(h)
-            return h_norm == 'customer identification value' or h_norm.startswith('customer_identification_value_')
+            # Only match Customer_Identification_Value_N pattern
+            return bool(re.match(r'^customer_identification_value_\d+$', _norm(h)))
 
         # Prefer enhanced headers if present to preserve dynamically added columns (e.g., Tag_4)
         if enhanced_headers and isinstance(enhanced_headers, list) and len(enhanced_headers) > 0:
@@ -1864,9 +1637,8 @@ def get_headers(request, session_id):
             info['template_headers'] = template_headers
             save_session(session_id, info)
         
-        # CRITICAL FIX: template_headers should always include ALL headers (core + dynamic + MPN validation)
-        # The frontend expects template_headers to be the complete set, not just dynamic ones
-        complete_template_headers = generate_template_columns(tags_count, spec_pairs_count, customer_id_pairs_count)
+        # Use template headers from the uploaded template file (not hardcoded defaults)
+        complete_template_headers = list(template_headers_to_use) if template_headers_to_use else list(template_headers)
 
         # Add MPN validation columns if MPN validation has been performed
         try:
@@ -1903,8 +1675,8 @@ def get_headers(request, session_id):
         except Exception as e:
             logger.warning(f"MPN validation column injection in headers API skipped: {e}")
         
-        # Generate template columns based on counts (for reference)
-        template_columns = generate_template_columns(tags_count, spec_pairs_count, customer_id_pairs_count)
+        # Use template columns from uploaded file (same as complete_template_headers)
+        template_columns = list(complete_template_headers)
         
         # Compute template_optionals aligned to the headers being returned
         def is_special_optional(h: str) -> bool:
@@ -2022,51 +1794,36 @@ def mapping_suggestions(request):
                 'error': 'Session not found'
             }, status=status.HTTP_404_NOT_FOUND)
         mapper = BOMHeaderMapper()
-        
-        # Handle fixed template mode
-        if info.get('is_fixed_template_mode') and info.get('factwise_headers'):
-            # Use fixed factwise headers as template
-            template_headers = info['factwise_headers']
-            
-            # Get client headers for mapping
-            client_headers = mapper.read_excel_headers(
-                file_path=hybrid_file_manager.get_file_path(info["client_path"]),
-                sheet_name=info["sheet_name"],
-                header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0
-            )
-            
-            # Create mock mapping results for fixed template
-            mapping_results = []
-            for template_header in template_headers:
-                mapping_results.append({
-                    'template_header': template_header,
-                    'mapped_client_header': None,
-                    'confidence': 0
-                })
-        else:
-            # Get mapping suggestions from files
-            mapping_results = mapper.map_headers_to_template(
-                client_file=hybrid_file_manager.get_file_path(info["client_path"]),
-                template_file=hybrid_file_manager.get_file_path(info["template_path"]),
-                client_sheet_name=info["sheet_name"],
-                template_sheet_name=info.get("template_sheet_name"),
-                client_header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0,
-                template_header_row=info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0
-            )
-            
-            # Get template headers from file
-            template_headers = mapper.read_excel_headers(
-                file_path=hybrid_file_manager.get_file_path(info["template_path"]),
-                sheet_name=info.get("template_sheet_name"),
-                header_row=info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0
-            )
-            
-            # Get client headers from file
-            client_headers = mapper.read_excel_headers(
-                file_path=hybrid_file_manager.get_file_path(info["client_path"]),
-                sheet_name=info["sheet_name"],
-                header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0
-            )
+
+        # Get mapping suggestions from files
+        mapping_results = mapper.map_headers_to_template(
+            client_file=hybrid_file_manager.get_file_path(info["client_path"]),
+            template_file=hybrid_file_manager.get_file_path(info["template_path"]),
+            client_sheet_name=info["sheet_name"],
+            template_sheet_name=info.get("template_sheet_name"),
+            client_header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0,
+            template_header_row=info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0
+        )
+
+        # Get template headers from file
+        template_headers = mapper.read_excel_headers(
+            file_path=hybrid_file_manager.get_file_path(info["template_path"]),
+            sheet_name=info.get("template_sheet_name"),
+            header_row=info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0
+        )
+
+        # Store template headers in session for later use
+        info['template_headers'] = template_headers
+        info['current_template_headers'] = template_headers
+        save_session(session_id, info)
+        logger.info(f"🔍 Stored template_headers in session: {template_headers}")
+
+        # Get client headers from file
+        client_headers = mapper.read_excel_headers(
+            file_path=hybrid_file_manager.get_file_path(info["client_path"]),
+            sheet_name=info["sheet_name"],
+            header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0
+        )
         
         # Prepare AI suggestions in format expected by frontend
         ai_suggestions = {}
@@ -2216,18 +1973,29 @@ def save_mappings(request):
                 
                 # CRITICAL FIX: Handle both external and internal names properly
                 # If target is already an internal name (e.g., Tag_1), preserve it
-                # If target is an external name (e.g., Tag), convert it to internal name
+                # If target is an external name (e.g., Tag), check if it exists in template first
+
+                # Get template headers to check if target exists as-is
+                template_headers = info.get('template_headers', []) or []
+                enhanced_headers = info.get('enhanced_headers', []) or info.get('current_template_headers', []) or []
+                all_headers = list(set(template_headers + enhanced_headers))
+
                 if target.startswith(('Tag_', 'Specification_Name_', 'Specification_Value_', 'Customer_Identification_Name_', 'Customer_Identification_Value_')):
                     # Target is already an internal name, just track it
                     used_columns.add(target)
+                elif target in all_headers:
+                    # Target exists as-is in the template headers - DO NOT CONVERT
+                    # This preserves user's original column names like "Specification value", "Tag", etc.
+                    logger.info(f"📊 SAVE_MAPPINGS: Preserving target '{target}' as-is (exists in template headers)")
+                    pass  # Keep converted_mapping['target'] unchanged
                 elif target in ['Tag', 'Specification name', 'Specification value', 'Customer identification name', 'Customer identification value']:
-                    # Target is an external name, convert it to internal name
+                    # Target is an external name that doesn't exist in template - convert to internal name
                     internal_name = convert_external_to_internal_name(target, info, used_columns)
                     converted_mapping['target'] = internal_name
                     used_columns.add(internal_name)
+                    logger.info(f"📊 SAVE_MAPPINGS: Converted '{target}' -> '{internal_name}' (not in template headers)")
                 else:
                     # Regular column mapping, no conversion needed
-                
                     pass
                 converted_mappings.append(converted_mapping)
             
@@ -2614,21 +2382,18 @@ def data_view(request):
         except Exception as _e:
             pass
 
+        # === DETAILED LOGGING FOR DATA_VIEW ===
+        logger.info(f"📊 DATA_VIEW: Session {session_id}")
+        logger.info(f"📊 DATA_VIEW: template_headers = {info.get('template_headers')}")
+        logger.info(f"📊 DATA_VIEW: enhanced_headers = {info.get('enhanced_headers')}")
+        logger.info(f"📊 DATA_VIEW: current_template_headers = {info.get('current_template_headers')}")
+        logger.info(f"📊 DATA_VIEW: column_counts = {info.get('column_counts')}")
+        logger.info(f"📊 DATA_VIEW: mappings count = {len(info.get('mappings', []))}")
+
         # If manual edits exist, serve them immediately without requiring mappings
         edited_data = info.get('edited_data')
         if isinstance(edited_data, list) and edited_data:
-            headers_to_use = info.get('enhanced_headers') or info.get('current_template_headers')
-            if not headers_to_use:
-                tags_count = int(info.get('tags_count', 3))
-                spec_pairs_count = int(info.get('spec_pairs_count', 3))
-                customer_id_pairs_count = int(info.get('customer_id_pairs_count', 1))
-                headers_to_use = [
-                    'Item code', 'Item name', 'Description', 'Item type', 'Measurement unit',
-                    'Procurement entity name', 'Notes', 'Internal notes', 'Procurement item', 'Sales item', 'Preferred vendor code'
-                ]
-                for i in range(1, tags_count + 1): headers_to_use.append(f'Tag_{i}')
-                for i in range(1, spec_pairs_count + 1): headers_to_use += [f'Specification_Name_{i}', f'Specification_Value_{i}']
-                for i in range(1, customer_id_pairs_count + 1): headers_to_use += [f'Customer_Identification_Name_{i}', f'Customer_Identification_Value_{i}']
+            headers_to_use = info.get('enhanced_headers') or info.get('current_template_headers') or info.get('template_headers') or []
 
             # Build transformed rows from edited_data
             transformed_rows = []
@@ -2732,19 +2497,7 @@ def data_view(request):
             using_enhanced = True
         # 2) Edited data takes second priority (but should include MPN columns if they exist)
         elif isinstance(edited_data, list) and edited_data:
-            headers_to_use = enhanced_headers or info.get('current_template_headers') or []
-            # If headers_to_use is empty, derive canonical headers from counts
-            if not headers_to_use:
-                tags_count = int(info.get('tags_count', 3))
-                spec_pairs_count = int(info.get('spec_pairs_count', 3))
-                customer_id_pairs_count = int(info.get('customer_id_pairs_count', 1))
-                headers_to_use = [
-                    'Item code', 'Item name', 'Description', 'Item type', 'Measurement unit',
-                    'Procurement entity name', 'Notes', 'Internal notes', 'Procurement item', 'Sales item', 'Preferred vendor code'
-                ]
-                for i in range(1, tags_count + 1): headers_to_use.append(f'Tag_{i}')
-                for i in range(1, spec_pairs_count + 1): headers_to_use += [f'Specification_Name_{i}', f'Specification_Value_{i}']
-                for i in range(1, customer_id_pairs_count + 1): headers_to_use += [f'Customer_Identification_Name_{i}', f'Customer_Identification_Value_{i}']
+            headers_to_use = enhanced_headers or info.get('current_template_headers') or info.get('template_headers') or []
             # Rebuild rows to include all headers in order
             transformed_rows = []
             for r in edited_data:
@@ -3036,9 +2789,15 @@ def data_view(request):
         
         # List-to-dict conversion already done above before formula processing
 
-        # Normalize generic 'Tag' column: move any values into numbered Tag_N columns, then drop 'Tag'
+        # FIXED: Only normalize 'Tag' column if it's NOT in the user's original template headers
+        # If user's template has 'Tag' column, keep it separate from Tag_1, Tag_2, etc.
         try:
-            if isinstance(headers_to_use, list) and 'Tag' in headers_to_use and isinstance(transformed_rows, list) and len(transformed_rows) > 0:
+            original_template_headers = info.get('template_headers', []) or []
+            tag_is_in_original_template = 'Tag' in original_template_headers
+
+            if not tag_is_in_original_template and isinstance(headers_to_use, list) and 'Tag' in headers_to_use and isinstance(transformed_rows, list) and len(transformed_rows) > 0:
+                # Only do this redistribution if 'Tag' is NOT in the original template
+                logger.info(f"📊 DATA_VIEW: 'Tag' is NOT in original template, redistributing to Tag_N columns")
                 tag_n_headers = [h for h in headers_to_use if isinstance(h, str) and h.startswith('Tag_')]
                 try:
                     tag_n_headers.sort(key=lambda x: int(x.split('_')[1]))
@@ -3066,41 +2825,9 @@ def data_view(request):
                             else:
                                 row[last] = val
                         row.pop('Tag', None)
-                else:
-                    tag_idx = headers_to_use.index('Tag')
-                    tag_n_indices = []
-                    for h in tag_n_headers:
-                        try:
-                            tag_n_indices.append(headers_to_use.index(h))
-                        except ValueError:
-                            pass
-                    for row in transformed_rows:
-                        val = ''
-                        if tag_idx < len(row):
-                            val = str(row[tag_idx] or '').strip()
-                        if not val:
-                            continue
-                        placed = False
-                        for idx in tag_n_indices:
-                            if idx < len(row):
-                                cur = str(row[idx] or '').strip()
-                                if not cur:
-                                    row[idx] = val
-                                    placed = True
-                                    break
-                        if not placed and tag_n_indices:
-                            last_idx = tag_n_indices[-1]
-                            if last_idx < len(row):
-                                cur = str(row[last_idx] or '').strip()
-                                if cur:
-                                    parts = [p.strip() for p in cur.split(',')]
-                                    if val not in parts:
-                                        row[last_idx] = f"{cur}, {val}"
-                                else:
-                                    row[last_idx] = val
-                    # Note: header removal occurs in cleaned headers step later
-                # remove generic Tag header now
-                headers_to_use = [h for h in headers_to_use if h != 'Tag']
+            elif tag_is_in_original_template:
+                logger.info(f"📊 DATA_VIEW: 'Tag' IS in original template, keeping it separate from Tag_N columns")
+                # DO NOT redistribute or remove 'Tag' column - user wants it as a separate column
         except Exception:
             pass
 
@@ -3601,10 +3328,12 @@ def data_view(request):
             spec_pairs_count = int(info.get('spec_pairs_count', 3))
             customer_id_pairs_count = int(info.get('customer_id_pairs_count', 1))
 
-            canonical_headers = [
-                'Item code', 'Item name', 'Description', 'Item type', 'Measurement unit',
-                'Procurement entity name', 'Notes', 'Internal notes', 'Procurement item', 'Sales item', 'Preferred vendor code'
-            ]
+            # Use template headers from uploaded file as base
+            base_headers = info.get('template_headers') or info.get('current_template_headers') or []
+            # Filter out dynamic columns from base
+            canonical_headers = [h for h in base_headers if not (
+                h.startswith('Tag_') or h.startswith('Specification_') or h.startswith('Customer_Identification_')
+            )]
             for i in range(1, tags_count + 1):
                 canonical_headers.append(f'Tag_{i}')
 
@@ -3692,6 +3421,45 @@ def data_view(request):
             # Non-fatal; keep computed headers/data
             pass
 
+        # =========================================================================
+        # MERGE PARSER COLUMNS (if parser was applied)
+        # =========================================================================
+        parser_columns = info.get('parser_columns')
+        if parser_columns and parser_columns.get('headers') and parser_columns.get('data'):
+            try:
+                parser_headers = parser_columns['headers']
+                parser_data = parser_columns['data']  # List of lists, one per row
+
+                logger.info(f"📊 DATA_VIEW: Merging {len(parser_headers)} parser columns into response")
+
+                # Add parser headers to final_headers
+                final_headers = list(final_headers) + parser_headers
+
+                # Merge parser data into each row
+                merged_final_data = []
+                for i, row in enumerate(final_data):
+                    if isinstance(row, dict):
+                        # Add parser values to the dict
+                        new_row = dict(row)
+                        if i < len(parser_data):
+                            for j, parser_header in enumerate(parser_headers):
+                                if j < len(parser_data[i]):
+                                    new_row[parser_header] = parser_data[i][j] if parser_data[i][j] is not None else ''
+                                else:
+                                    new_row[parser_header] = ''
+                        else:
+                            # Pad with empty values
+                            for parser_header in parser_headers:
+                                new_row[parser_header] = ''
+                        merged_final_data.append(new_row)
+                    else:
+                        merged_final_data.append(row)
+
+                final_data = merged_final_data
+                logger.info(f"📊 DATA_VIEW: Final headers count after parser merge: {len(final_headers)}")
+            except Exception as parser_merge_err:
+                logger.error(f"📊 DATA_VIEW: Error merging parser columns: {parser_merge_err}")
+
         return no_store(Response({
             'success': True,
             'headers': final_headers,
@@ -3762,19 +3530,7 @@ def save_data(request):
         info["formula_enhanced_data"] = rows_payload
 
         # Ensure headers are preserved; prefer existing enhanced headers, else derive canonical/keys
-        enhanced_headers = info.get('enhanced_headers') or info.get('current_template_headers')
-        if not enhanced_headers:
-            # Derive canonical from session counts
-            tags_count = int(info.get('tags_count', 3))
-            spec_pairs_count = int(info.get('spec_pairs_count', 3))
-            customer_id_pairs_count = int(info.get('customer_id_pairs_count', 1))
-            enhanced_headers = [
-                'Item code', 'Item name', 'Description', 'Item type', 'Measurement unit',
-                'Procurement entity name', 'Notes', 'Internal notes', 'Procurement item', 'Sales item', 'Preferred vendor code'
-            ]
-            for i in range(1, tags_count + 1): enhanced_headers.append(f'Tag_{i}')
-            for i in range(1, spec_pairs_count + 1): enhanced_headers += [f'Specification_Name_{i}', f'Specification_Value_{i}']
-            for i in range(1, customer_id_pairs_count + 1): enhanced_headers += [f'Customer_Identification_Name_{i}', f'Customer_Identification_Value_{i}']
+        enhanced_headers = info.get('enhanced_headers') or info.get('current_template_headers') or info.get('template_headers') or []
         info['enhanced_headers'] = enhanced_headers
 
         # Bypass cleanup/mapping; prefer edited data immediately
@@ -4236,7 +3992,47 @@ def download_file(request, session_id=None):
                                             row[idx] = default_value
         except Exception as _e:
             logger.warning(f"Download default application skipped due to error: {_e}")
-        
+
+        # =========================================================================
+        # MERGE PARSER COLUMNS FOR DOWNLOAD (same logic as data_view)
+        # =========================================================================
+        parser_columns = info.get('parser_columns')
+        if parser_columns and parser_columns.get('headers') and parser_columns.get('data'):
+            try:
+                parser_headers = parser_columns['headers']
+                parser_data = parser_columns['data']
+
+                logger.info(f"📊 DOWNLOAD: Merging {len(parser_headers)} parser columns")
+
+                # Add parser headers to all_headers
+                all_headers = list(all_headers) + parser_headers
+
+                # Merge parser data into each row
+                if isinstance(transformed_rows, list) and transformed_rows:
+                    if isinstance(transformed_rows[0], dict):
+                        # Dict rows - add keys
+                        for i, row in enumerate(transformed_rows):
+                            if i < len(parser_data):
+                                for j, parser_header in enumerate(parser_headers):
+                                    if j < len(parser_data[i]):
+                                        row[parser_header] = parser_data[i][j] if parser_data[i][j] is not None else ''
+                                    else:
+                                        row[parser_header] = ''
+                            else:
+                                for parser_header in parser_headers:
+                                    row[parser_header] = ''
+                    else:
+                        # List rows - extend each row
+                        for i, row in enumerate(transformed_rows):
+                            if i < len(parser_data):
+                                transformed_rows[i] = list(row) + list(parser_data[i])
+                            else:
+                                transformed_rows[i] = list(row) + [''] * len(parser_headers)
+
+                logger.info(f"📊 DOWNLOAD: Total headers after parser merge: {len(all_headers)}")
+            except Exception as parser_err:
+                logger.error(f"📊 DOWNLOAD: Error merging parser columns: {parser_err}")
+
         if not transformed_rows:
             return Response({
                 'success': False,
@@ -4252,15 +4048,13 @@ def download_file(request, session_id=None):
             # Use the canonical headers from session if available, but only include those that exist in the data
             canonical_headers = info.get("current_template_headers") or info.get("enhanced_headers") or all_headers or []
 
-            # CRITICAL FIX: Always enforce proper canonical order for downloads
-            # Reorder canonical_headers to follow the standard order: Item code first, then other standard headers, then Tags, etc.
+            # Use template headers for ordering, adding dynamic columns
             if canonical_headers:
-                # Define the correct canonical order
-                correct_order = [
-                    "Item code", "Item name", "Description", "Item type", "Measurement unit",
-                    "Procurement entity name", "Notes", "Internal notes", "Procurement item",
-                    "Sales item", "Preferred vendor code"
-                ]
+                # Get base headers from template (non-dynamic columns)
+                base_headers = info.get('template_headers') or []
+                correct_order = [h for h in base_headers if not (
+                    h.startswith('Tag_') or h.startswith('Specification_') or h.startswith('Customer_Identification_')
+                )]
 
                 # Add Tag columns in correct order
                 tag_headers = sorted([h for h in canonical_headers if h.startswith('Tag_')],
@@ -4836,41 +4630,76 @@ def update_column_counts(request):
         except Exception:
             base_headers = []
 
+        # FIXED: Only match NUMBERED dynamic columns (Tag_1, etc.), not user's original columns
+        import re
         def _norm(h: str) -> str:
             try:
                 return str(h or '').strip().lower()
             except Exception:
                 return ''
-        def _is_tag(h: str) -> bool:
-            h_norm = _norm(h)
-            return h_norm == 'tag' or h_norm.startswith('tag_')
-        def _is_spec_name(h: str) -> bool:
-            h_norm = _norm(h)
-            return h_norm == 'specification name' or h_norm.startswith('specification_name_')
-        def _is_spec_value(h: str) -> bool:
-            h_norm = _norm(h)
-            return h_norm == 'specification value' or h_norm.startswith('specification_value_')
-        def _is_cust_name(h: str) -> bool:
-            h_norm = _norm(h)
-            return h_norm == 'customer identification name' or h_norm.startswith('customer_identification_name_')
-        def _is_cust_value(h: str) -> bool:
-            h_norm = _norm(h)
-            return h_norm == 'customer identification value' or h_norm.startswith('customer_identification_value_')
+        def _is_dynamic_tag(h: str) -> bool:
+            return bool(re.match(r'^tag_\d+$', _norm(h)))
+        def _is_dynamic_spec_name(h: str) -> bool:
+            return bool(re.match(r'^specification_name_\d+$', _norm(h)))
+        def _is_dynamic_spec_value(h: str) -> bool:
+            return bool(re.match(r'^specification_value_\d+$', _norm(h)))
+        def _is_dynamic_cust_name(h: str) -> bool:
+            return bool(re.match(r'^customer_identification_name_\d+$', _norm(h)))
+        def _is_dynamic_cust_value(h: str) -> bool:
+            return bool(re.match(r'^customer_identification_value_\d+$', _norm(h)))
 
-        # FIXED: Use generate_template_columns to ensure core headers are ALWAYS included
-        # This function always starts with the 6 core headers, preventing them from disappearing
-        regenerated_headers = generate_template_columns(
-            tags_count, 
-            spec_pairs_count, 
-            customer_id_pairs_count
-        )
+        # Use uploaded template headers as base, add dynamic columns if needed
+        # Filter out ONLY numbered dynamic columns (Tag_1, Specification_Name_1, etc.)
+        # Keep user's original columns like "Tag", "Specification Name", etc.
+
+        # === DETAILED LOGGING FOR DEBUGGING ===
+        logger.info(f"📊 UPDATE_COLUMN_COUNTS: Session {session_id}")
+        logger.info(f"📊 ORIGINAL TEMPLATE HEADERS (from uploaded file): {base_headers}")
+
+        static_headers = [h for h in base_headers if not (_is_dynamic_tag(h) or _is_dynamic_spec_name(h) or _is_dynamic_spec_value(h) or _is_dynamic_cust_name(h) or _is_dynamic_cust_value(h))]
+
+        # Log which headers are kept vs filtered
+        filtered_out = [h for h in base_headers if h not in static_headers]
+        logger.info(f"📊 STATIC HEADERS (template cols kept): {static_headers}")
+        logger.info(f"📊 FILTERED OUT (old dynamic cols removed): {filtered_out}")
+
+        # Build regenerated headers from user's template + dynamic columns
+        regenerated_headers = list(static_headers)
+
+        # Add dynamic Tag columns
+        dynamic_tags = []
+        for i in range(1, tags_count + 1):
+            dynamic_tags.append(f"Tag_{i}")
+            regenerated_headers.append(f"Tag_{i}")
+
+        # Add dynamic Specification pairs
+        dynamic_specs = []
+        for i in range(1, spec_pairs_count + 1):
+            dynamic_specs.append(f"Specification_Name_{i}")
+            dynamic_specs.append(f"Specification_Value_{i}")
+            regenerated_headers.append(f"Specification_Name_{i}")
+            regenerated_headers.append(f"Specification_Value_{i}")
+
+        # Add dynamic Customer Identification pairs
+        dynamic_cust = []
+        for i in range(1, customer_id_pairs_count + 1):
+            dynamic_cust.append(f"Customer_Identification_Name_{i}")
+            dynamic_cust.append(f"Customer_Identification_Value_{i}")
+            regenerated_headers.append(f"Customer_Identification_Name_{i}")
+            regenerated_headers.append(f"Customer_Identification_Value_{i}")
+
+        logger.info(f"📊 DYNAMIC TAGS ADDED: {dynamic_tags}")
+        logger.info(f"📊 DYNAMIC SPECS ADDED: {dynamic_specs}")
+        logger.info(f"📊 DYNAMIC CUST ADDED: {dynamic_cust}")
+        logger.info(f"📊 FINAL COMBINED HEADERS: {regenerated_headers}")
+        logger.info(f"📊 TOTAL: {len(static_headers)} template + {len(dynamic_tags)} tags + {len(dynamic_specs)} specs + {len(dynamic_cust)} cust = {len(regenerated_headers)} total")
 
         # Compute template_optionals for the canonical headers (Tags/Spec/Customer always optional)
         def is_special_optional(h: str) -> bool:
             h_lower = (h or '').lower()
-            return (h == 'Tag' or h.startswith('Tag_') or 
-                   'specification' in h_lower or 
-                   'customer identification' in h_lower or 
+            return (h == 'Tag' or h.startswith('Tag_') or
+                   'specification' in h_lower or
+                   'customer identification' in h_lower or
                    'customer_identification' in h_lower)
 
         template_optionals = [True if is_special_optional(h) else False for h in regenerated_headers]
@@ -4911,21 +4740,22 @@ def update_column_counts(request):
 
 
 def generate_template_columns(tags_count, spec_pairs_count, customer_id_pairs_count, existing_headers=None):
-    """Generate internal numbered template headers in canonical order with all standard fields."""
-    columns = [
-        'Item code',
-        'Item name',
-        'Description',
-        'Item type',
-        'Measurement unit',
-        'Procurement entity name'
-    ]
+    """Generate template headers using existing headers as base, adding dynamic columns."""
+    # Helper functions to identify dynamic column types
+    def _norm(h):
+        return str(h or '').strip().lower()
+    def _is_dynamic(h):
+        h_norm = _norm(h)
+        return (h_norm == 'tag' or h_norm.startswith('tag_') or
+                h_norm.startswith('specification_') or 'specification' in h_norm or
+                h_norm.startswith('customer_identification_') or 'customer identification' in h_norm)
 
-    # Add standard template fields that should always be present
-    columns.extend([
-        'Notes', 'Internal notes',
-        'Procurement item', 'Sales item', 'Preferred vendor code'
-    ])
+    # Use existing headers as base, filtering out old dynamic columns
+    if existing_headers and isinstance(existing_headers, list) and len(existing_headers) > 0:
+        columns = [h for h in existing_headers if not _is_dynamic(h)]
+    else:
+        # Fallback to empty list if no existing headers
+        columns = []
 
     # Tags
     for i in range(1, max(int(tags_count or 0), 0) + 1):
@@ -5060,31 +4890,15 @@ def save_mapping_template(request):
                 header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0
             )
 
-            # CRITICAL FIX: Always generate the complete template structure for saving
-            # Never rely on current_template_headers alone as it may be incomplete
-            # Generate the full template with core headers + dynamic counts
-            
-            # Get column counts first
+            # Use template headers from session (from uploaded template file)
+            template_headers = info.get('current_template_headers') or info.get('template_headers') or []
+
+            # Get column counts
             tags_count = request.data.get('tags_count') or info.get('tags_count', 1)
-            spec_pairs_count = request.data.get('spec_pairs_count') or info.get('spec_pairs_count', 1) 
+            spec_pairs_count = request.data.get('spec_pairs_count') or info.get('spec_pairs_count', 1)
             customer_id_pairs_count = request.data.get('customer_id_pairs_count') or info.get('customer_id_pairs_count', 1)
-            
-            # Generate complete template with core + dynamic headers
-            template_headers = generate_template_columns(tags_count, spec_pairs_count, customer_id_pairs_count)
-            logger.info(f"🔧 CRITICAL FIX: Generated complete template structure for save_mapping_template ({len(template_headers)} headers): {template_headers}")
-            
-            # Verify we have standard headers
-            standard_headers_check = [
-                # Core Factwise headers
-                "Item code", "Item name", "Description", "Item type", "Measurement unit", "Procurement entity name",
-                # Standard template fields that should behave like core headers when mapped
-                "Notes", "Internal notes", "Procurement item", "Sales item", "Preferred vendor code"
-            ]
-            missing_standard = [h for h in standard_headers_check if h not in template_headers]
-            if missing_standard:
-                logger.error(f"🚨 CRITICAL ERROR: Missing standard headers in generated template: {missing_standard}")
-            else:
-                logger.info(f"✅ All standard headers present in saved template")
+
+            logger.info(f"🔧 Using template headers from uploaded file for save_mapping_template ({len(template_headers)} headers): {template_headers}")
         else:
             # Standalone template - use empty headers
             client_headers = []
@@ -6939,9 +6753,15 @@ def get_enhanced_data(request):
                 'error': 'No data available'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Normalize generic 'Tag' column: move its values into numbered Tag_N columns, then drop 'Tag'.
+        # FIXED: Only normalize 'Tag' column if it's NOT in the user's original template headers
+        # If user's template has 'Tag' column, keep it separate from Tag_1, Tag_2, etc.
         try:
-            if isinstance(headers_to_return, list) and 'Tag' in headers_to_return and isinstance(data_to_return, list) and len(data_to_return) > 0:
+            original_template_headers = info.get('template_headers', []) or []
+            tag_is_in_original_template = 'Tag' in original_template_headers
+
+            if not tag_is_in_original_template and isinstance(headers_to_return, list) and 'Tag' in headers_to_return and isinstance(data_to_return, list) and len(data_to_return) > 0:
+                # Only do this redistribution if 'Tag' is NOT in the original template
+                logger.info(f"📊 SAVE_DATA: 'Tag' is NOT in original template, redistributing to Tag_N columns")
                 # Build ordered list of Tag_N headers
                 tag_n_headers = [h for h in headers_to_return if isinstance(h, str) and h.startswith('Tag_')]
                 try:
@@ -7007,6 +6827,9 @@ def get_enhanced_data(request):
                     # remove Tag column value; keep headers cleanup below
                 # Finally drop 'Tag' header
                 headers_to_return = [h for h in headers_to_return if h != 'Tag']
+            elif tag_is_in_original_template:
+                logger.info(f"📊 SAVE_DATA: 'Tag' IS in original template, keeping it separate from Tag_N columns")
+                # DO NOT redistribute or remove 'Tag' column - user wants it as a separate column
         except Exception:
             pass
 

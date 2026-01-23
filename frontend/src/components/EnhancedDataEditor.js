@@ -50,6 +50,7 @@ import {
 import api from '../services/api';
 import * as XLSX from 'xlsx';
 import FormulaBuilder from './FormulaBuilder';
+import ColumnParser from './ColumnParser/ColumnParser';
 import { getDataSynchronizer, cleanupSynchronizer } from '../utils/DataSynchronizer';
 
 const EnhancedDataEditor = () => {
@@ -130,6 +131,7 @@ const EnhancedDataEditor = () => {
 
   // Formula Builder state
   const [formulaBuilderOpen, setFormulaBuilderOpen] = useState(false);
+  const [columnParserOpen, setColumnParserOpen] = useState(false);
   const [hasFormulas, setHasFormulas] = useState(false);
   const [formulaColumns, setFormulaColumns] = useState([]);
   // Column examples and fill stats for FormulaBuilder dropdowns
@@ -1913,6 +1915,26 @@ const EnhancedDataEditor = () => {
                 </span>
               </Tooltip>
 
+              <Tooltip title="Parse Column - Extract data from complex columns like Vendor Parts">
+                <span>
+                  <Button
+                    onClick={() => setColumnParserOpen(true)}
+                    variant="contained"
+                    startIcon={<AutoAwesomeIcon />}
+                    disabled={syncStatus.inProgress}
+                    sx={{
+                      backgroundColor: '#0891b2',
+                      color: 'white',
+                      '&:hover': { backgroundColor: '#0e7490' },
+                      textTransform: 'none',
+                      fontWeight: 600
+                    }}
+                  >
+                    Parse Column
+                  </Button>
+                </span>
+              </Tooltip>
+
               <Tooltip title="Save current state as a reusable template">
                 <span>
                   <Button
@@ -2609,6 +2631,18 @@ const EnhancedDataEditor = () => {
         columnExamples={columnExamples}
         columnFillStats={columnFillStats}
       />
+
+      {/* Column Parser Dialog */}
+      {columnParserOpen && (
+        <ColumnParser
+          sessionId={sessionId}
+          onClose={() => setColumnParserOpen(false)}
+          onApply={(result) => {
+            showSnackbar(`Parser applied! Added ${result.new_headers_count} new columns.`, 'success');
+            fetchDataSynchronized(); // Refresh data
+          }}
+        />
+      )}
 
       {/* Save Template Dialog */}
       <Dialog open={templateSaveDialogOpen} onClose={handleCloseSaveTemplateDialog} maxWidth="sm" fullWidth>

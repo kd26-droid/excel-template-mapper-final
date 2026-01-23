@@ -104,6 +104,7 @@ const CustomNode = ({ data, id }) => {
   const mappedFromLabel = data.mappedFromLabel || '';
   const isOptional = data.isOptional || false;
   const onDelete = data.onDelete;
+  const isDynamic = data.isDynamic || false;  // true for dynamically added columns (Tag_1, etc.)
 
   // Header editing state (for source nodes)
   const [isEditing, setIsEditing] = React.useState(false);
@@ -293,21 +294,33 @@ const CustomNode = ({ data, id }) => {
               )}
             </div>
           ) : (
-            // Target node content (unchanged)
+            // Target node content
             <>
               {data.originalLabel}
-              {/* AT / FW badges */}
-              {data.atBadge && (
-                <div className="mt-1 inline-block text-[10px] px-2 py-0.5 rounded-full font-bold bg-amber-200 text-amber-800 border border-amber-400">
-                  {data.atBadge}
-                </div>
-              )}
-              {data.fwBadge && (
-                <div className="mt-1 ml-1 inline-block text-[10px] px-2 py-0.5 rounded-full font-bold bg-purple-200 text-purple-800 border border-purple-400">
-                  {data.fwBadge}
-                </div>
-              )}
-              {/* Pair indicator */}
+              {/* Source indicator badge - Template (from Excel) vs Dynamic (added via UI) */}
+              <div className="mt-1 flex flex-wrap justify-center gap-1">
+                {isDynamic ? (
+                  <span className="text-[9px] px-1.5 py-0.5 rounded-full font-semibold bg-cyan-100 text-cyan-700 border border-cyan-300">
+                    Dynamic
+                  </span>
+                ) : (
+                  <span className="text-[9px] px-1.5 py-0.5 rounded-full font-semibold bg-slate-100 text-slate-600 border border-slate-300">
+                    Template
+                  </span>
+                )}
+                {/* AT / FW badges */}
+                {data.atBadge && (
+                  <span className="text-[9px] px-1.5 py-0.5 rounded-full font-bold bg-amber-200 text-amber-800 border border-amber-400">
+                    {data.atBadge}
+                  </span>
+                )}
+                {data.fwBadge && (
+                  <span className="text-[9px] px-1.5 py-0.5 rounded-full font-bold bg-purple-200 text-purple-800 border border-purple-400">
+                    {data.fwBadge}
+                  </span>
+                )}
+              </div>
+              {/* Pair indicator for dynamic columns */}
               {pairType !== 'single' && (
                 <div className={`text-xs mt-1 font-semibold ${colorClasses.text}`}>
                   {pairType === 'specification' ? `Spec ${pairIndex}` :
@@ -1378,33 +1391,43 @@ export default function ColumnMapping() {
 
   function isPairStartUpdated(fieldName, nextFieldName) {
     if (!nextFieldName) return false;
-    
+
     const fieldNum = getFieldNumber(fieldName);
     const nextFieldNum = getFieldNumber(nextFieldName);
-    
+
+    // Only match numbered dynamic columns (Specification_Name_1, etc.)
     return (
-      (fieldName.includes('Specification_Name_') && nextFieldName.includes('Specification_Value_') && fieldNum === nextFieldNum) ||
-      (fieldName.includes('Customer_Identification_Name_') && nextFieldName.includes('Customer_Identification_Value_') && fieldNum === nextFieldNum)
+      (/^Specification_Name_\d+$/i.test(fieldName) && /^Specification_Value_\d+$/i.test(nextFieldName) && fieldNum === nextFieldNum) ||
+      (/^Customer_Identification_Name_\d+$/i.test(fieldName) && /^Customer_Identification_Value_\d+$/i.test(nextFieldName) && fieldNum === nextFieldNum)
     );
   }
 
   function isPairEndUpdated(fieldName, prevFieldName) {
     if (!prevFieldName) return false;
-    
+
     const fieldNum = getFieldNumber(fieldName);
     const prevFieldNum = getFieldNumber(prevFieldName);
     
+    // Only match numbered dynamic columns (Specification_Value_1, etc.)
     return (
-      (fieldName.includes('Specification_Value_') && prevFieldName.includes('Specification_Name_') && fieldNum === prevFieldNum) ||
-      (fieldName.includes('Customer_Identification_Value_') && prevFieldName.includes('Customer_Identification_Name_') && fieldNum === prevFieldNum)
+      (/^Specification_Value_\d+$/i.test(fieldName) && /^Specification_Name_\d+$/i.test(prevFieldName) && fieldNum === prevFieldNum) ||
+      (/^Customer_Identification_Value_\d+$/i.test(fieldName) && /^Customer_Identification_Name_\d+$/i.test(prevFieldName) && fieldNum === prevFieldNum)
     );
   }
 
+  // FIXED: Only match NUMBERED dynamic columns (Tag_1, Specification_Name_1, etc.)
+  // NOT user's original template columns like "Tag", "Specification Name", etc.
   function getPairTypeUpdated(fieldName) {
-    if (fieldName.includes('Specification')) return 'specification';
-    if (fieldName.includes('Customer_Identification') || fieldName.includes('Customer Identification')) return 'customer';
-    if (fieldName.includes('Tag_')) return 'tag';
+    // Use regex to match only numbered patterns
+    if (/^Specification_(Name|Value)_\d+$/i.test(fieldName)) return 'specification';
+    if (/^Customer_Identification_(Name|Value)_\d+$/i.test(fieldName)) return 'customer';
+    if (/^Tag_\d+$/i.test(fieldName)) return 'tag';
     return 'single';
+  }
+
+  // Helper to check if a column is a dynamic (numbered) column
+  function isDynamicColumn(fieldName) {
+    return /^(Tag_\d+|Specification_(Name|Value)_\d+|Customer_Identification_(Name|Value)_\d+)$/i.test(fieldName);
   }
 
   function getPairIndexUpdated(fieldName) {
@@ -1425,8 +1448,8 @@ export default function ColumnMapping() {
     if (templateOptionals && templateOptionals.length > idx) {
       return !!templateOptionals[idx];
     }
-    // Default logic for numbered dynamic fields
-    return (fieldName.includes('Tag_') || fieldName.includes('Specification') || fieldName.includes('Customer_Identification'));
+    // Default logic: only NUMBERED dynamic fields are optional by default
+    return isDynamicColumn(fieldName);
   }
 
   function handleDeleteOptionalFieldUpdated(nodeId, nodes, edges, columnCounts, updateColumnCounts) {
@@ -1595,6 +1618,7 @@ export default function ColumnMapping() {
           hasDefaultValue: hasDefaultValue,
           defaultValue: defaultValue,
           atBadge: tagBadges.get(header) || null,
+          isDynamic: isDynamicColumn(header),  // true for Tag_1, Specification_Name_1, etc.
         },
         draggable: false,
         style: { 
@@ -2068,46 +2092,8 @@ export default function ColumnMapping() {
           // eslint-disable-next-line no-console
         }
         
-        // 🔥 CRITICAL FIX: Regenerate dynamic template headers if backend didn't include them
+        // Use template headers from uploaded template file (no regeneration needed)
         let finalTemplateHeaders = [...template_headers];
-        if (column_counts && Object.keys(column_counts).length > 0) {
-          const expectedHeadersCount = 6 + // Base headers: Item code, Item name, Description, Item type, Measurement unit, Procurement entity name
-                                      (column_counts.tags_count || 0) +
-                                      (column_counts.spec_pairs_count || 0) * 2 +
-                                      (column_counts.customer_id_pairs_count || 0) * 2;
-          
-          if (template_headers.length < expectedHeadersCount) {
-            console.warn('🚨 Backend missing dynamic template headers!', {
-              received: template_headers.length,
-              expected: expectedHeadersCount,
-              columnCounts: column_counts
-            });
-            
-            // Regenerate missing dynamic headers
-            const baseHeaders = ['Item code', 'Item name', 'Description', 'Item type', 'Measurement unit', 'Procurement entity name'];
-            finalTemplateHeaders = [...baseHeaders];
-            
-            // Add Tag columns
-            for (let i = 1; i <= (column_counts.tags_count || 0); i++) {
-              finalTemplateHeaders.push(`Tag_${i}`);
-            }
-            
-            // Add Specification pairs
-            for (let i = 1; i <= (column_counts.spec_pairs_count || 0); i++) {
-              finalTemplateHeaders.push(`Specification_Name_${i}`);
-              finalTemplateHeaders.push(`Specification_Value_${i}`);
-            }
-            
-            // Add Customer ID pairs
-            for (let i = 1; i <= (column_counts.customer_id_pairs_count || 0); i++) {
-              finalTemplateHeaders.push(`Customer_Identification_Name_${i}`);
-              finalTemplateHeaders.push(`Customer_Identification_Value_${i}`);
-            }
-
-            // Update the state with regenerated headers
-            setTemplateHeaders(finalTemplateHeaders);
-          }
-        }
         
         // 🔥 CRITICAL FIX: Use saved mappings from review session if available, otherwise fetch from backend
         let normalizedMappings = [];
@@ -2824,6 +2810,14 @@ export default function ColumnMapping() {
       const targetNode = nodes.find(n => n.id === edge.target);
       const targetColumnFromIndex = templateHeaders[targetIdx];
       const targetColumn = targetNode ? targetNode.data.originalLabel : targetColumnFromIndex;
+
+      // DEBUG LOGGING
+      console.log(`📊 BUILD_MAPPING: edge ${edge.source} -> ${edge.target}`);
+      console.log(`📊 BUILD_MAPPING: sourceIdx=${sourceIdx}, targetIdx=${targetIdx}`);
+      console.log(`📊 BUILD_MAPPING: sourceColumn='${sourceColumn}'`);
+      console.log(`📊 BUILD_MAPPING: targetNode found=${!!targetNode}, originalLabel='${targetNode?.data?.originalLabel}'`);
+      console.log(`📊 BUILD_MAPPING: targetColumnFromIndex='${targetColumnFromIndex}'`);
+      console.log(`📊 BUILD_MAPPING: FINAL targetColumn='${targetColumn}'`);
 
       return {
         source: sourceColumn,

@@ -469,8 +469,6 @@ def process_pdf_ocr(request):
                         'original_template_id': None,
                         'template_modified': False,
                         'formula_rules': [],
-                        'is_fixed_template_mode': False,
-                        'factwise_headers': None,
                         'tags_count': 3,
                         'spec_pairs_count': 3,
                         'customer_id_pairs_count': 1,
