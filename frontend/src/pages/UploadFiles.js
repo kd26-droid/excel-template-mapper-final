@@ -97,6 +97,15 @@ const UploadFiles = () => {
   const [pdfChoiceDialogOpen, setPdfChoiceDialogOpen] = useState(false);
   const [pendingPdfSessionId, setPendingPdfSessionId] = useState(null);
 
+  // Primary column cleanup dialog state
+  const [primaryColumnDialogOpen, setPrimaryColumnDialogOpen] = useState(false);
+  const [primaryColumnSessionId, setPrimaryColumnSessionId] = useState(null);
+  const [primaryColumnHeaders, setPrimaryColumnHeaders] = useState([]);
+  const [selectedPrimaryColumn, setSelectedPrimaryColumn] = useState('');
+  const [cleanupLoading, setCleanupLoading] = useState(false);
+  const [cleanupResult, setCleanupResult] = useState(null);
+  const [pendingNavigateState, setPendingNavigateState] = useState(null);
+
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -457,7 +466,7 @@ const UploadFiles = () => {
       setCompatibilityErrorOpen(false);
       setSuccess('Files uploaded. Proceeding to manual mapping due to template compatibility issues.');
       setTimeout(() => {
-        navigate(`/mapping/${pendingSessionId}`);
+        showPrimaryColumnDialog(pendingSessionId);
       }, 1500);
     }
   };
@@ -482,6 +491,61 @@ const UploadFiles = () => {
     setCompatibilityErrorData(null);
   };
 
+  // Primary column cleanup helpers
+  const showPrimaryColumnDialog = async (sessionId, navState = null) => {
+    try {
+      const headersResp = await api.getHeaders(sessionId);
+      const headers = headersResp.data.client_headers || [];
+      if (headers.length === 0) {
+        // No headers found, just navigate
+        navigate(`/mapping/${sessionId}`, navState ? { state: navState } : undefined);
+        return;
+      }
+      setPrimaryColumnHeaders(headers);
+      setPrimaryColumnSessionId(sessionId);
+      setPendingNavigateState(navState);
+      setCleanupResult(null);
+      setSelectedPrimaryColumn('');
+      setCleanupLoading(false);
+      setPrimaryColumnDialogOpen(true);
+    } catch (err) {
+      console.error('Failed to fetch headers for cleanup dialog:', err);
+      // On error, just navigate normally
+      navigate(`/mapping/${sessionId}`, navState ? { state: navState } : undefined);
+    }
+  };
+
+  const handleSkipCleanup = () => {
+    setPrimaryColumnDialogOpen(false);
+    const sid = primaryColumnSessionId;
+    const navState = pendingNavigateState;
+    setPrimaryColumnSessionId(null);
+    setPendingNavigateState(null);
+    navigate(`/mapping/${sid}`, navState ? { state: navState } : undefined);
+  };
+
+  const handleCleanup = async () => {
+    if (!selectedPrimaryColumn) return;
+    try {
+      setCleanupLoading(true);
+      const result = await api.cleanupRows(primaryColumnSessionId, selectedPrimaryColumn);
+      setCleanupResult(result.data);
+      setCleanupLoading(false);
+
+      // Brief delay to show result, then navigate
+      setTimeout(() => {
+        setPrimaryColumnDialogOpen(false);
+        const sid = primaryColumnSessionId;
+        const navState = pendingNavigateState;
+        setPrimaryColumnSessionId(null);
+        setPendingNavigateState(null);
+        navigate(`/mapping/${sid}`, navState ? { state: navState } : undefined);
+      }, 2000);
+    } catch (err) {
+      setCleanupLoading(false);
+      setError('Failed to clean up rows: ' + (err.response?.data?.error || err.message));
+    }
+  };
 
   const handleUpload = async () => {
     if (!userFile) {
@@ -558,13 +622,11 @@ const UploadFiles = () => {
           setSuccess(successMessage);
           
           setTimeout(() => {
-            // Navigate to ColumnMapping and let it handle template application using its working logic
-            navigate(`/mapping/${response.data.session_id}`, {
-              state: { 
-                autoApplyTemplate: selectedTemplate,
-                fromUpload: true,
-                smartTagFormulaRules: formulaRules
-              }
+            // Show primary column dialog before navigating
+            showPrimaryColumnDialog(response.data.session_id, {
+              autoApplyTemplate: selectedTemplate,
+              fromUpload: true,
+              smartTagFormulaRules: formulaRules
             });
           }, 1500);
           
@@ -590,9 +652,9 @@ const UploadFiles = () => {
         // No template selected - normal upload
         response = await api.uploadFiles(formData);
         setSuccess('Files uploaded successfully!');
-        
+
         setTimeout(() => {
-          navigate(`/mapping/${response.data.session_id}`);
+          showPrimaryColumnDialog(response.data.session_id);
         }, 1500);
       }
       
@@ -1321,6 +1383,54 @@ const UploadFiles = () => {
             color="secondary"
           >
             Cancel
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Primary Column Cleanup Dialog */}
+      <Dialog
+        open={primaryColumnDialogOpen}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <ScienceIcon color="primary" />
+          <Typography variant="h6" fontWeight="600">Select Primary Column</Typography>
+        </DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Select the column that should always have data. Rows where this column is empty
+            will be removed (cleans up merged cells, notes, and junk rows).
+          </Typography>
+          <FormControl fullWidth sx={{ mt: 1 }}>
+            <InputLabel>Primary Column</InputLabel>
+            <Select
+              value={selectedPrimaryColumn}
+              label="Primary Column"
+              onChange={(e) => setSelectedPrimaryColumn(e.target.value)}
+            >
+              {primaryColumnHeaders.map(h => (
+                <MenuItem key={h} value={h}>{h}</MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          {cleanupResult && (
+            <Alert severity="success" sx={{ mt: 2 }}>
+              Removed {cleanupResult.rows_deleted} empty rows ({cleanupResult.total_rows_before} → {cleanupResult.total_rows_after} rows)
+            </Alert>
+          )}
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={handleSkipCleanup} color="inherit">
+            Skip
+          </Button>
+          <Button
+            onClick={handleCleanup}
+            variant="contained"
+            disabled={!selectedPrimaryColumn || cleanupLoading}
+            startIcon={cleanupLoading ? <CircularProgress size={16} /> : null}
+          >
+            {cleanupLoading ? 'Cleaning...' : 'Clean & Continue'}
           </Button>
         </DialogActions>
       </Dialog>

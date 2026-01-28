@@ -27,7 +27,14 @@ import {
   Select,
   MenuItem,
   Container,
-  LinearProgress
+  LinearProgress,
+  Collapse,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow
 } from '@mui/material';
 import { Pagination } from '@mui/material';
 import {
@@ -45,7 +52,10 @@ import {
   Map as MapIcon,
   Refresh as RefreshIcon,
   Sync as SyncIcon,
-  Info as InfoIcon
+  Info as InfoIcon,
+  ExpandMore as ExpandMoreIcon,
+  ExpandLess as ExpandLessIcon,
+  DeleteSweep as DeleteSweepIcon
 } from '@mui/icons-material';
 import api from '../services/api';
 import * as XLSX from 'xlsx';
@@ -193,6 +203,15 @@ const EnhancedDataEditor = () => {
     spec_pairs_count: 1,
     customer_id_pairs_count: 1
   });
+
+  // Cleanup info banner state
+  const [cleanupInfo, setCleanupInfo] = useState(null);
+  const [showDeletedRows, setShowDeletedRows] = useState(false);
+
+  // Parser MPN validation state
+  const [hasParserMpnColumns, setHasParserMpnColumns] = useState(false);
+  const [parserMpnValidating, setParserMpnValidating] = useState(false);
+  const [parserMpnValidationCompleted, setParserMpnValidationCompleted] = useState(false);
 
   // MPN validation UI state
   const [mpnColumn, setMpnColumn] = useState(null);
@@ -548,7 +567,9 @@ const EnhancedDataEditor = () => {
             suppressAutoSize: true
           },
           ...headers.map(col => ({
-            headerName: (col.startsWith('Tag_') || col === 'Tag') ? 'Tag'
+            headerName: /^MPN_\d+_DigiKey_Valid$/.test(col) ? col.replace(/^MPN_(\d+)_DigiKey_Valid$/, 'MPN $1 — DigiKey Valid')
+                      : /^MPN_\d+_Canonical$/.test(col) ? col.replace(/^MPN_(\d+)_Canonical$/, 'MPN $1 — Canonical')
+                      : (col.startsWith('Tag_') || col === 'Tag') ? 'Tag'
                       : (col.startsWith('Specification_Name_') || col === 'Specification name') ? 'Specification name'
                       : (col.startsWith('Specification_Value_') || col === 'Specification value') ? 'Specification value'
                       : (col.startsWith('Customer_Identification_Name_') || col === 'Customer identification name' || col === 'Custom identification name') ? 'Customer identification name'
@@ -656,6 +677,32 @@ const EnhancedDataEditor = () => {
         throw new Error('No mapped data found. Please go back to Column Mapping and create mappings first.');
       }
 
+      // Read cleanup info if available
+      if (data.cleanup_info) {
+        setCleanupInfo(data.cleanup_info);
+      }
+
+      // Detect parser MPN columns (Specification_Name_* with value "MPN")
+      try {
+        const specNameCols = (data.headers || []).filter(h => /^Specification_Name_\d+$/.test(h));
+        let foundParserMpn = false;
+        if (specNameCols.length > 0 && data.data && data.data.length > 0) {
+          for (const snCol of specNameCols) {
+            const firstRow = data.data[0];
+            if (firstRow && String(firstRow[snCol] || '').trim().toUpperCase() === 'MPN') {
+              foundParserMpn = true;
+              break;
+            }
+          }
+        }
+        setHasParserMpnColumns(foundParserMpn);
+        // Check if parser MPN validation already done
+        const parserValidCols = (data.headers || []).filter(h => /^MPN_\d+_DigiKey_Valid$/.test(h));
+        if (parserValidCols.length > 0) {
+          setParserMpnValidationCompleted(true);
+        }
+      } catch (_) {}
+
       // Prune completely blank Specification pairs ONLY when we have full dataset
       const hasAllRows = !data.pagination || (data.pagination.total_pages || 1) <= 1 || (Array.isArray(data.data) && data.pagination?.total_rows === data.data.length);
       const { headers: viewHeaders, rows: viewRows } = hasAllRows
@@ -755,7 +802,11 @@ const EnhancedDataEditor = () => {
         },
         ...viewHeaders.filter(col => col && col.trim() !== '').map((col, index) => {
           let displayName = col;
-          if (col.startsWith('Tag_') || col === 'Tag') {
+          if (/^MPN_\d+_DigiKey_Valid$/.test(col)) {
+            displayName = col.replace(/^MPN_(\d+)_DigiKey_Valid$/, 'MPN $1 — DigiKey Valid');
+          } else if (/^MPN_\d+_Canonical$/.test(col)) {
+            displayName = col.replace(/^MPN_(\d+)_Canonical$/, 'MPN $1 — Canonical');
+          } else if (col.startsWith('Tag_') || col === 'Tag') {
             displayName = 'Tag';
           } else if (col.startsWith('Specification_Name_') || col === 'Specification name') {
             displayName = 'Specification name';
@@ -996,7 +1047,9 @@ const EnhancedDataEditor = () => {
                 suppressAutoSize: true
               },
               ...data.headers.filter(col => col && col.trim() !== '').map((col) => ({
-                headerName: (col.startsWith('Tag_') || col === 'Tag') ? 'Tag'
+                headerName: /^MPN_\d+_DigiKey_Valid$/.test(col) ? col.replace(/^MPN_(\d+)_DigiKey_Valid$/, 'MPN $1 — DigiKey Valid')
+                            : /^MPN_\d+_Canonical$/.test(col) ? col.replace(/^MPN_(\d+)_Canonical$/, 'MPN $1 — Canonical')
+                            : (col.startsWith('Tag_') || col === 'Tag') ? 'Tag'
                             : (col.startsWith('Specification_Name_') || col === 'Specification name') ? 'Specification name'
                             : (col.startsWith('Specification_Value_') || col === 'Specification value') ? 'Specification value'
                             : (col.startsWith('Customer_Identification_Name_') || col === 'Customer identification name' || col === 'Custom identification name') ? 'Customer identification name'
@@ -1757,10 +1810,98 @@ const EnhancedDataEditor = () => {
         />
       )}
       
+      {/* Cleanup Info Banner with Deleted Rows Detail */}
+      {cleanupInfo && cleanupInfo.rows_deleted > 0 && (
+        <Box sx={{ borderRadius: 0 }}>
+          <Alert
+            severity="warning"
+            icon={<DeleteSweepIcon />}
+            sx={{ borderRadius: 0, cursor: 'pointer' }}
+            action={
+              cleanupInfo.deleted_rows_preview && cleanupInfo.deleted_rows_preview.length > 0 ? (
+                <IconButton size="small" onClick={() => setShowDeletedRows(!showDeletedRows)}>
+                  {showDeletedRows ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+                </IconButton>
+              ) : null
+            }
+            onClick={() => {
+              if (cleanupInfo.deleted_rows_preview && cleanupInfo.deleted_rows_preview.length > 0) {
+                setShowDeletedRows(!showDeletedRows);
+              }
+            }}
+          >
+            <strong>{cleanupInfo.rows_deleted} row{cleanupInfo.rows_deleted !== 1 ? 's' : ''} removed</strong> — column "{cleanupInfo.primary_column}" was empty ({cleanupInfo.total_rows_before} → {cleanupInfo.total_rows_after} rows)
+            {cleanupInfo.deleted_rows_preview && cleanupInfo.deleted_rows_preview.length > 0 && (
+              <Typography variant="caption" sx={{ ml: 1, opacity: 0.7 }}>
+                {showDeletedRows ? 'Click to hide' : 'Click to see deleted rows'}
+              </Typography>
+            )}
+          </Alert>
+          <Collapse in={showDeletedRows}>
+            {cleanupInfo.deleted_rows_preview && cleanupInfo.deleted_rows_preview.length > 0 && (
+              <TableContainer sx={{ maxHeight: 300, bgcolor: '#fff8e1', borderBottom: '2px solid #ff9800' }}>
+                <Table size="small" stickyHeader>
+                  <TableHead>
+                    <TableRow>
+                      <TableCell sx={{ fontWeight: 'bold', bgcolor: '#fff3e0', whiteSpace: 'nowrap' }}>Row #</TableCell>
+                      {Object.keys(cleanupInfo.deleted_rows_preview[0])
+                        .filter(k => k !== '_original_row')
+                        .map(col => (
+                          <TableCell
+                            key={col}
+                            sx={{
+                              fontWeight: 'bold',
+                              bgcolor: col === cleanupInfo.primary_column ? '#ffccbc' : '#fff3e0',
+                              whiteSpace: 'nowrap',
+                              maxWidth: 200
+                            }}
+                          >
+                            {col}
+                            {col === cleanupInfo.primary_column && (
+                              <Chip label="EMPTY" size="small" color="error" sx={{ ml: 0.5, height: 16, fontSize: '0.6rem' }} />
+                            )}
+                          </TableCell>
+                        ))}
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {cleanupInfo.deleted_rows_preview.map((row, idx) => (
+                      <TableRow key={idx} sx={{ '&:nth-of-type(odd)': { bgcolor: '#fff8e1' } }}>
+                        <TableCell sx={{ fontWeight: 'bold', color: '#e65100', whiteSpace: 'nowrap' }}>
+                          {row._original_row || idx + 1}
+                        </TableCell>
+                        {Object.keys(row)
+                          .filter(k => k !== '_original_row')
+                          .map(col => (
+                            <TableCell
+                              key={col}
+                              sx={{
+                                maxWidth: 200,
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                                bgcolor: col === cleanupInfo.primary_column ? '#ffebee' : 'inherit',
+                                color: !row[col] && col === cleanupInfo.primary_column ? '#d32f2f' : 'inherit',
+                                fontStyle: !row[col] && col === cleanupInfo.primary_column ? 'italic' : 'normal'
+                              }}
+                            >
+                              {row[col] || (col === cleanupInfo.primary_column ? '(empty)' : '')}
+                            </TableCell>
+                          ))}
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+            )}
+          </Collapse>
+        </Box>
+      )}
+
       {/* Enhanced Header */}
-      <Paper 
-        elevation={3} 
-        sx={{ 
+      <Paper
+        elevation={3}
+        sx={{
           borderRadius: 0,
           background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
           color: 'white',
@@ -2219,6 +2360,67 @@ const EnhancedDataEditor = () => {
                   </Button>
                 </span>
               </Tooltip>
+
+              {/* Validate Parser Spec MPNs Button */}
+              {hasParserMpnColumns && (
+                <Tooltip title={parserMpnValidationCompleted ? 'Parser MPNs already validated' : 'Validate all MPN values from Column Parser'}>
+                  <span>
+                    <Button
+                      onClick={async () => {
+                        try {
+                          setParserMpnValidating(true);
+                          showSnackbar('Validating parser MPNs...', 'info');
+                          const resp = await api.validateParserSpecMPNs(sessionId);
+                          if (resp.data.success) {
+                            const { valid = 0, invalid = 0, unverified = 0, new_columns = 0 } = resp.data;
+                            const parts = [];
+                            if (valid) parts.push(`${valid} verified`);
+                            if (invalid) parts.push(`${invalid} not found`);
+                            if (unverified) parts.push(`${unverified} unverified`);
+                            showSnackbar(`MPN Validation: ${parts.join(', ')} — scroll right for "MPN — DigiKey Valid" columns`, 'success');
+                            setParserMpnValidationCompleted(true);
+                            await fetchDataSynchronized();
+                            // Auto-scroll grid to the right to show new validation columns
+                            setTimeout(() => {
+                              const gridContainer = document.querySelector('.data-grid-container, [class*="tableContainer"], table');
+                              if (gridContainer && gridContainer.scrollWidth > gridContainer.clientWidth) {
+                                gridContainer.scrollLeft = gridContainer.scrollWidth;
+                              }
+                            }, 500);
+                          } else {
+                            showSnackbar(resp.data.error || 'Validation failed', 'error');
+                          }
+                        } catch (err) {
+                          showSnackbar('Parser MPN validation failed: ' + (err.response?.data?.error || err.message), 'error');
+                        } finally {
+                          setParserMpnValidating(false);
+                        }
+                      }}
+                      variant="contained"
+                      disabled={parserMpnValidating || parserMpnValidationCompleted}
+                      sx={{
+                        backgroundColor: parserMpnValidationCompleted ? '#2e7d32' : '#7b1fa2',
+                        color: 'white',
+                        border: '2px solid rgba(255,255,255,0.3)',
+                        textTransform: 'none',
+                        fontWeight: 600,
+                        '&:hover': {
+                          backgroundColor: parserMpnValidationCompleted ? '#1b5e20' : '#6a1b9a',
+                          border: '2px solid rgba(255,255,255,0.5)'
+                        },
+                        '&:disabled': {
+                          backgroundColor: parserMpnValidationCompleted ? '#2e7d32' : 'rgba(255,255,255,0.1)',
+                          color: parserMpnValidationCompleted ? 'white' : 'rgba(255,255,255,0.4)',
+                          border: '2px solid rgba(255,255,255,0.1)'
+                        }
+                      }}
+                      startIcon={parserMpnValidating ? <CircularProgress size={16} sx={{ color: 'white' }} /> : <CheckIcon />}
+                    >
+                      {parserMpnValidating ? 'Validating Parser MPNs…' : parserMpnValidationCompleted ? 'Parser MPNs Validated' : 'Validate Parser MPNs'}
+                    </Button>
+                  </span>
+                </Tooltip>
+              )}
 
               <Tooltip title={
                 !mpnValidationCompleted

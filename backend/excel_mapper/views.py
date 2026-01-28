@@ -1404,6 +1404,125 @@ def upload_files(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+@api_view(['POST'])
+def cleanup_rows(request):
+    """
+    Remove rows where the primary column is empty.
+    Overwrites the client file so all downstream processing uses clean data.
+    """
+    try:
+        session_id = request.data.get('session_id')
+        primary_column = request.data.get('primary_column')
+
+        if not session_id or not primary_column:
+            return Response({'success': False, 'error': 'session_id and primary_column required'}, status=400)
+
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Session not found'}, status=404)
+
+        client_path = hybrid_file_manager.get_file_path(info['client_path'])
+        sheet_name = info.get('sheet_name')
+        header_row = info.get('header_row', 1)
+        actual_header_row = header_row - 1 if header_row > 0 else 0
+        ext = Path(str(client_path)).suffix.lower()
+
+        deleted_rows_preview = []  # Store deleted row data for user review
+
+        if ext == '.csv':
+            # CSV handling
+            df = read_csv_with_encoding(str(client_path), actual_header_row)
+            if primary_column not in df.columns:
+                return Response({'success': False, 'error': f'Column "{primary_column}" not found'}, status=400)
+
+            total_before = len(df)
+            mask = df[primary_column].notna() & (df[primary_column].astype(str).str.strip() != '')
+            df_deleted = df[~mask]
+            df_clean = df[mask].reset_index(drop=True)
+            rows_deleted = total_before - len(df_clean)
+
+            # Capture deleted rows with original row numbers (1-based, after header)
+            csv_headers = list(df.columns)
+            for orig_idx, (_, row) in enumerate(df_deleted.iterrows()):
+                row_dict = {'_original_row': orig_idx + actual_header_row + 2}  # +2 for 1-based + header
+                for col in csv_headers[:10]:  # First 10 columns max
+                    val = row[col]
+                    row_dict[str(col)] = str(val) if pd.notna(val) and str(val).strip() else ''
+                deleted_rows_preview.append(row_dict)
+
+            df_clean.to_csv(str(client_path), index=False)
+        else:
+            # Excel handling
+            wb = load_workbook(str(client_path), data_only=True)
+            ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
+
+            all_rows = list(ws.iter_rows(values_only=True))
+            if len(all_rows) <= actual_header_row:
+                return Response({'success': False, 'error': 'No data rows found'}, status=400)
+
+            headers = [str(h) if h is not None else f'Column_{i}' for i, h in enumerate(all_rows[actual_header_row])]
+            if primary_column not in headers:
+                return Response({'success': False, 'error': f'Column "{primary_column}" not found in headers: {headers[:10]}'}, status=400)
+
+            col_idx = headers.index(primary_column)
+            header_rows = all_rows[:actual_header_row + 1]
+            data_rows = all_rows[actual_header_row + 1:]
+            total_before = len(data_rows)
+
+            kept_rows = []
+            for row_num, row in enumerate(data_rows):
+                val = row[col_idx] if col_idx < len(row) else None
+                if val is not None and str(val).strip() != '':
+                    kept_rows.append(row)
+                else:
+                    # Capture deleted row with original row number
+                    row_dict = {'_original_row': actual_header_row + 2 + row_num}  # 1-based Excel row
+                    for i, h in enumerate(headers[:10]):  # First 10 columns max
+                        cell_val = row[i] if i < len(row) else None
+                        row_dict[h] = str(cell_val) if cell_val is not None and str(cell_val).strip() else ''
+                    deleted_rows_preview.append(row_dict)
+
+            rows_deleted = total_before - len(kept_rows)
+
+            # Rewrite the Excel file
+            new_wb = Workbook()
+            new_ws = new_wb.active
+            if sheet_name:
+                new_ws.title = sheet_name
+
+            for row in header_rows:
+                new_ws.append([v for v in row])
+            for row in kept_rows:
+                new_ws.append([v for v in row])
+
+            new_wb.save(str(client_path))
+
+        # Store cleanup metadata in session (limit preview to 50 rows to avoid bloating session)
+        # Only update if rows were actually deleted, or if no prior cleanup exists
+        if rows_deleted > 0 or not info.get('rows_deleted'):
+            info['primary_column'] = primary_column
+            info['rows_deleted'] = (info.get('rows_deleted', 0) or 0) + rows_deleted
+            info['total_rows_before'] = info.get('total_rows_before') or total_before
+            info['total_rows_after'] = total_before - rows_deleted
+            info['deleted_rows_preview'] = (info.get('deleted_rows_preview') or []) + deleted_rows_preview[:50]
+        save_session(session_id, info)
+
+        logger.info(f"CLEANUP: Removed {rows_deleted}/{total_before} rows where '{primary_column}' was empty for session {session_id}")
+
+        return Response({
+            'success': True,
+            'primary_column': primary_column,
+            'rows_deleted': rows_deleted,
+            'total_rows_before': total_before,
+            'total_rows_after': total_before - rows_deleted,
+            'deleted_rows_preview': deleted_rows_preview[:50]
+        })
+
+    except Exception as e:
+        logger.error(f"Error in cleanup_rows: {e}\n{traceback.format_exc()}")
+        return Response({'success': False, 'error': str(e)}, status=500)
+
+
 @api_view(['GET'])
 @never_cache
 def get_headers(request, session_id):
@@ -2419,6 +2538,13 @@ def data_view(request):
                 'header_confidence_scores': header_confidence_scores,
                 'target_column_confidence_scores': header_confidence_scores,
                 'is_from_pdf': (info.get('source_type') in ['pdf', 'pdf_zonal']),
+                'cleanup_info': {
+                    'primary_column': info.get('primary_column'),
+                    'rows_deleted': info.get('rows_deleted', 0),
+                    'total_rows_before': info.get('total_rows_before'),
+                    'total_rows_after': info.get('total_rows_after'),
+                    'deleted_rows_preview': info.get('deleted_rows_preview', []),
+                } if info.get('rows_deleted') else None,
                 'pagination': {
                     'page': page,
                     'page_size': page_size,
@@ -3471,6 +3597,13 @@ def data_view(request):
             'header_confidence_scores': header_confidence_scores,
             'target_column_confidence_scores': header_confidence_scores,
             'is_from_pdf': is_pdf_session_flag,
+            'cleanup_info': {
+                'primary_column': info.get('primary_column'),
+                'rows_deleted': info.get('rows_deleted', 0),
+                'total_rows_before': info.get('total_rows_before'),
+                'total_rows_after': info.get('total_rows_after'),
+                'deleted_rows_preview': info.get('deleted_rows_preview', []),
+            } if info.get('rows_deleted') else None,
             'pagination': {
                 'page': page,
                 'page_size': page_size,

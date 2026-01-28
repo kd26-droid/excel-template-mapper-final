@@ -10,6 +10,7 @@ from .views import (
     session_status,
     rebuild_template,
     upload_files,
+    cleanup_rows,
     get_headers,
     mapping_suggestions,
     BOMHeaderMappingView,
@@ -78,6 +79,7 @@ from .mpn_views import (
     mpn_admin_exchange_code,
     mpn_batch_validate_eol,
     mpn_restore_from_cache,
+    mpn_validate_parser_specs,
 )
 
 # Column Parser views
@@ -105,8 +107,9 @@ urlpatterns = [
     path('debug-session/', debug_session, name='debug-session'),
     path('system-diagnostics/', system_diagnostics, name='system-diagnostics'),
 
-    # File upload
+    # File upload & cleanup
     path('upload/', upload_files, name='upload-files'),
+    path('cleanup-rows/', cleanup_rows, name='cleanup-rows'),
 
     # Headers and mapping
     path('headers/<str:session_id>/', get_headers, name='get-headers'),
@@ -178,6 +181,7 @@ urlpatterns = [
     path('mpn/restore-from-cache/', mpn_restore_from_cache, name='mpn-restore-from-cache'),
     path('mpn/admin/exchange-code/', mpn_admin_exchange_code, name='mpn-admin-exchange-code'),
     path('mpn/batch-validate-eol/', mpn_batch_validate_eol, name='mpn-batch-validate-eol'),
+    path('mpn/validate-parser-specs/', mpn_validate_parser_specs, name='mpn-validate-parser-specs'),
 
     # MPN Cache Management
     path('mpn/cache/stats/', mpn_cache_stats, name='mpn-cache-stats'),

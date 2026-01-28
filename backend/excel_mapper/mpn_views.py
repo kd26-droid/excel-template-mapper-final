@@ -668,3 +668,187 @@ def mpn_restore_from_cache(request):
     except Exception as e:
         logger.error(f"MPN cache restore failed: {e}")
         return Response({ 'success': False, 'error': str(e) }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+def mpn_validate_parser_specs(request):
+    """Validate MPNs from parser Specification columns.
+    Scans Specification_Name_* columns for 'MPN', then validates
+    all corresponding Specification_Value_* columns.
+    Payload: { session_id }
+    """
+    try:
+        session_id = request.data.get('session_id')
+        if not session_id:
+            return Response({'success': False, 'error': 'session_id required'}, status=400)
+
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Session not found'}, status=404)
+
+        parser_columns = info.get('parser_columns')
+        if not parser_columns or not parser_columns.get('headers') or not parser_columns.get('data'):
+            return Response({'success': False, 'error': 'No parser columns found. Run Column Parser first.'}, status=400)
+
+        parser_headers = parser_columns['headers']
+        parser_data = parser_columns['data']
+
+        logger.info(f"🔍 PARSER_MPN_VALIDATE: Starting parser spec MPN validation for session {session_id}")
+        logger.info(f"   Parser headers: {parser_headers}")
+        logger.info(f"   Parser data rows: {len(parser_data)}")
+
+        # Find Specification_Name columns that contain "MPN"
+        mpn_spec_indices = []
+        for h in parser_headers:
+            match = re.match(r'^Specification_Name_(\d+)$', h)
+            if match:
+                spec_idx = int(match.group(1))
+                header_idx = parser_headers.index(h)
+                # Check if ANY row has "MPN" as value
+                for row in parser_data:
+                    val = str(row[header_idx]).strip().upper() if header_idx < len(row) and row[header_idx] else ''
+                    if val == 'MPN':
+                        mpn_spec_indices.append(spec_idx)
+                        break
+
+        if not mpn_spec_indices:
+            return Response({'success': False, 'error': 'No Specification_Name columns with value "MPN" found'}, status=400)
+
+        logger.info(f"   Found MPN spec indices: {mpn_spec_indices}")
+
+        # For each MPN spec, collect all value columns and extract unique MPNs
+        all_mpn_values = {}  # normalized -> raw
+        value_column_map = {}  # spec_idx -> list of header names
+
+        for spec_idx in mpn_spec_indices:
+            value_cols = []
+            for h in parser_headers:
+                match = re.match(rf'^Specification_Value_{spec_idx}_(\d+)$', h)
+                if match:
+                    value_cols.append(h)
+            value_column_map[spec_idx] = value_cols
+
+            for vc in value_cols:
+                vc_idx = parser_headers.index(vc)
+                logged_first = False
+                for row in parser_data:
+                    val = str(row[vc_idx]).strip() if vc_idx < len(row) and row[vc_idx] else ''
+                    if val:
+                        if not logged_first:
+                            logger.info(f"   Sample value in {vc}: '{val}'")
+                            logged_first = True
+                        client = DigiKeyClient()
+                        norm = client.normalize_mpn(val)
+                        if norm and norm not in all_mpn_values:
+                            all_mpn_values[norm] = val
+
+        logger.info(f"   Total unique MPNs across parser columns: {len(all_mpn_values)}")
+        # Log first 5 MPNs for debugging
+        sample_mpns = list(all_mpn_values.items())[:5]
+        for norm, raw in sample_mpns:
+            logger.info(f"   Sample MPN: raw='{raw}', norm='{norm}'")
+
+        if not all_mpn_values:
+            return Response({'success': True, 'message': 'No MPN values found in parser columns', 'validated': 0})
+
+        # Instant validation: cache-only, no API calls during request
+        from .models import GlobalMpnCache
+        client = DigiKeyClient()
+        results_map = {}
+        cache_hits = 0
+        uncached_count = 0
+
+        for norm, raw in all_mpn_values.items():
+            cached = GlobalMpnCache.get_cached_result(
+                mpn_norm=norm, manufacturer_id=None,
+                site=client.site, lang=client.lang, currency=client.currency
+            )
+            if cached:
+                results_map[norm] = cached
+                cache_hits += 1
+            else:
+                uncached_count += 1
+
+        logger.info(f"   Instant cache lookup: {cache_hits} hits, {uncached_count} uncached (marked Pending)")
+
+        # Add validation columns with clear MPN names
+        new_headers_added = []
+        # Map value column index to a readable MPN number
+        vc_to_mpn_num = {}
+        mpn_counter = 1
+        for spec_idx in mpn_spec_indices:
+            for vc in value_column_map[spec_idx]:
+                vc_to_mpn_num[vc] = mpn_counter
+                valid_header = f'MPN_{mpn_counter}_DigiKey_Valid'
+                canonical_header = f'MPN_{mpn_counter}_Canonical'
+                if valid_header not in parser_headers:
+                    parser_headers.append(valid_header)
+                    new_headers_added.append(valid_header)
+                if canonical_header not in parser_headers:
+                    parser_headers.append(canonical_header)
+                    new_headers_added.append(canonical_header)
+                mpn_counter += 1
+
+        logger.info(f"   Added {len(new_headers_added)} validation columns: {new_headers_added[:10]}...")
+
+        # Populate validation data in each row
+        total_valid = 0
+        total_invalid = 0
+        total_unverified = 0
+        for i, row in enumerate(parser_data):
+            while len(row) < len(parser_headers):
+                row.append('')
+
+            for spec_idx in mpn_spec_indices:
+                for vc in value_column_map[spec_idx]:
+                    mpn_num = vc_to_mpn_num[vc]
+                    vc_idx = parser_headers.index(vc)
+                    val = str(row[vc_idx]).strip() if vc_idx < len(row) and row[vc_idx] else ''
+                    norm = client.normalize_mpn(val) if val else ''
+                    dk_result = results_map.get(norm)
+
+                    valid_idx = parser_headers.index(f'MPN_{mpn_num}_DigiKey_Valid')
+                    canonical_idx = parser_headers.index(f'MPN_{mpn_num}_Canonical')
+
+                    if not val:
+                        row[valid_idx] = ''
+                        row[canonical_idx] = ''
+                    elif dk_result is not None:
+                        is_valid = dk_result.get('valid', False)
+                        row[valid_idx] = 'Yes' if is_valid else 'No'
+                        row[canonical_idx] = dk_result.get('canonical_mpn', '') if is_valid else val
+                        if is_valid:
+                            total_valid += 1
+                        else:
+                            total_invalid += 1
+                    else:
+                        # Uncached: show raw MPN as canonical, mark Unverified
+                        row[valid_idx] = 'Unverified'
+                        row[canonical_idx] = val.upper()
+                        total_unverified += 1
+                        total_unverified += 1
+
+        # Save back to session
+        parser_columns['headers'] = parser_headers
+        parser_columns['data'] = parser_data
+        info['parser_columns'] = parser_columns
+        save_session(session_id, info)
+
+        logger.info(f"✅ PARSER_MPN_VALIDATE: Done. Valid={total_valid}, Invalid={total_invalid}, Unverified={total_unverified}, New columns={len(new_headers_added)}")
+
+        return Response({
+            'success': True,
+            'total_unique_mpns': len(all_mpn_values),
+            'cache_hits': cache_hits,
+            'valid': total_valid,
+            'invalid': total_invalid,
+            'unverified': total_unverified,
+            'new_columns': len(new_headers_added),
+            'spec_indices_validated': mpn_spec_indices
+        })
+
+    except Exception as e:
+        logger.error(f"Parser MPN validation failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return Response({'success': False, 'error': str(e)}, status=500)

@@ -152,9 +152,29 @@ def parse_cell_single_pattern(cell_value, pattern_config):
 
     # Process each extraction for each group
     for extraction in extractions:
-        ext_type = extraction.get('type', 'before')
-        char1 = extraction.get('char1', '')
-        char2 = extraction.get('char2', '')
+        # Support both formats:
+        #   Backend format: {type, char1, char2}
+        #   Frontend format: {start, end}
+        if 'type' in extraction:
+            ext_type = extraction['type']
+            char1 = extraction.get('char1', '')
+            char2 = extraction.get('char2', '')
+        else:
+            # Convert frontend format (start/end) to backend format
+            start = extraction.get('start', 0)
+            end = extraction.get('end', '')
+            if start == 0 or start == '0':
+                ext_type = 'before'
+                char1 = str(end) if end else ''
+                char2 = ''
+            elif end == '' or end is None or end == 'end':
+                ext_type = 'after'
+                char1 = str(start)
+                char2 = ''
+            else:
+                ext_type = 'between'
+                char1 = str(start)
+                char2 = str(end)
         output_type = extraction.get('output_type', 'spec')
         spec_name = extraction.get('spec_name', '')
 

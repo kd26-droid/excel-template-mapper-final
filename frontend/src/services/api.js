@@ -118,6 +118,16 @@ const api = {
   },
 
   /**
+   * Clean up rows where the primary column is empty
+   */
+  cleanupRows: (sessionId, primaryColumn) => {
+    return axios.post(`${API_URL}/cleanup-rows/`, {
+      session_id: sessionId,
+      primary_column: primaryColumn
+    }, { timeout: 60000 });
+  },
+
+  /**
    * Upload files with optional template application
    * @param {FormData} formData - File upload data
    * @param {number} templateId - Optional template ID to apply immediately
@@ -1165,6 +1175,13 @@ const api = {
     if (mpnHeader) payload.mpn_header = mpnHeader;
     if (manufacturerHeader) payload.manufacturer_header = manufacturerHeader;
     return axios.post(`${API_URL}/mpn/validate/`, payload, { timeout: 120000 });
+  },
+
+  /**
+   * Validate MPNs from parser Specification columns
+   */
+  validateParserSpecMPNs: (sessionId) => {
+    return axios.post(`${API_URL}/mpn/validate-parser-specs/`, { session_id: sessionId }, { timeout: 300000 });
   },
 
   /**
