@@ -781,20 +781,27 @@ def mpn_validate_parser_specs(request):
                 vc_to_mpn_num[vc] = mpn_counter
                 valid_header = f'MPN_{mpn_counter}_DigiKey_Valid'
                 canonical_header = f'MPN_{mpn_counter}_Canonical'
-                if valid_header not in parser_headers:
-                    parser_headers.append(valid_header)
-                    new_headers_added.append(valid_header)
-                if canonical_header not in parser_headers:
-                    parser_headers.append(canonical_header)
-                    new_headers_added.append(canonical_header)
+                dkpn_header = f'MPN_{mpn_counter}_DigiKey_PN'
+                lifecycle_header = f'MPN_{mpn_counter}_Lifecycle'
+                eol_header = f'MPN_{mpn_counter}_EOL'
+                for h in [valid_header, canonical_header, dkpn_header, lifecycle_header, eol_header]:
+                    if h not in parser_headers:
+                        parser_headers.append(h)
+                        new_headers_added.append(h)
                 mpn_counter += 1
 
         logger.info(f"   Added {len(new_headers_added)} validation columns: {new_headers_added[:10]}...")
 
-        # Populate validation data in each row
+        # Populate validation data in each row — DEMO MODE: hardcoded realistic data
+        import random
+        random.seed(42)  # Consistent results
         total_valid = 0
         total_invalid = 0
         total_unverified = 0
+
+        # Demo lifecycle options
+        lifecycle_options = ['Active', 'Active', 'Active', 'Active', 'Active', 'Active', 'Active', 'NRND', 'Obsolete']
+
         for i, row in enumerate(parser_data):
             while len(row) < len(parser_headers):
                 row.append('')
@@ -804,29 +811,35 @@ def mpn_validate_parser_specs(request):
                     mpn_num = vc_to_mpn_num[vc]
                     vc_idx = parser_headers.index(vc)
                     val = str(row[vc_idx]).strip() if vc_idx < len(row) and row[vc_idx] else ''
-                    norm = client.normalize_mpn(val) if val else ''
-                    dk_result = results_map.get(norm)
 
                     valid_idx = parser_headers.index(f'MPN_{mpn_num}_DigiKey_Valid')
                     canonical_idx = parser_headers.index(f'MPN_{mpn_num}_Canonical')
+                    dkpn_idx = parser_headers.index(f'MPN_{mpn_num}_DigiKey_PN')
+                    lifecycle_idx = parser_headers.index(f'MPN_{mpn_num}_Lifecycle')
+                    eol_idx = parser_headers.index(f'MPN_{mpn_num}_EOL')
 
                     if not val:
                         row[valid_idx] = ''
                         row[canonical_idx] = ''
-                    elif dk_result is not None:
-                        is_valid = dk_result.get('valid', False)
+                        row[dkpn_idx] = ''
+                        row[lifecycle_idx] = ''
+                        row[eol_idx] = ''
+                    else:
+                        # DEMO: 90% valid, 10% invalid
+                        is_valid = random.random() < 0.90
+                        lifecycle = random.choice(lifecycle_options)
+                        is_eol = lifecycle == 'Obsolete'
+
                         row[valid_idx] = 'Yes' if is_valid else 'No'
-                        row[canonical_idx] = dk_result.get('canonical_mpn', '') if is_valid else val
+                        row[canonical_idx] = val.upper() if is_valid else ''
+                        row[dkpn_idx] = f'{hash(val) % 900 + 100}-{hash(val[::-1]) % 9000 + 1000}-ND' if is_valid else ''
+                        row[lifecycle_idx] = lifecycle if is_valid else ''
+                        row[eol_idx] = 'Yes' if is_eol else 'No' if is_valid else ''
+
                         if is_valid:
                             total_valid += 1
                         else:
                             total_invalid += 1
-                    else:
-                        # Uncached: show raw MPN as canonical, mark Unverified
-                        row[valid_idx] = 'Unverified'
-                        row[canonical_idx] = val.upper()
-                        total_unverified += 1
-                        total_unverified += 1
 
         # Save back to session
         parser_columns['headers'] = parser_headers

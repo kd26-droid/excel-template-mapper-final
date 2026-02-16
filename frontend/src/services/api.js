@@ -1635,6 +1635,17 @@ const api = {
     axios.post(`${API_URL}/update-session-data/`, {
       session_id: sessionId,
       ...correctionData
+    }),
+
+  // Project Management
+  getProjects: (search = '') =>
+    axios.get(`${API_URL}/projects/`, { params: { search } }),
+
+  createProject: (projectName, projectCode, description = '') =>
+    axios.post(`${API_URL}/projects/`, {
+      project_name: projectName,
+      project_code: projectCode,
+      description: description
     })
 };
 

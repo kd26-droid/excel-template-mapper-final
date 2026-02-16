@@ -642,6 +642,40 @@ class GlobalMpnCache(models.Model):
         return count
 
 
+class Project(models.Model):
+    """
+    Model for storing projects that data can be exported to.
+    """
+    project_code = models.CharField(max_length=50, unique=True)
+    project_name = models.CharField(max_length=255)
+    description = models.TextField(blank=True, null=True)
+    status = models.CharField(max_length=20, default='ONGOING', choices=[
+        ('ONGOING', 'Ongoing'),
+        ('COMPLETED', 'Completed'),
+        ('ARCHIVED', 'Archived'),
+    ])
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at']
+        db_table = 'excel_mapper_project'
+
+    def __str__(self):
+        return f"{self.project_code} ({self.project_name})"
+
+    def to_dict(self):
+        return {
+            'project_id': self.id,
+            'project_code': self.project_code,
+            'project_name': self.project_name,
+            'description': self.description or '',
+            'status': self.status,
+            'created_at': self.created_at.isoformat(),
+            'updated_at': self.updated_at.isoformat(),
+        }
+
+
 class ZoneIntegrityValidator:
     """Validator for zone integrity and consistency"""
 

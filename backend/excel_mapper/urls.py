@@ -49,6 +49,9 @@ from .views import (
     # MPN Cache management
     mpn_cache_stats,
     mpn_cache_cleanup,
+
+    # Project management
+    project_list_create,
 )
 
 # PDF processing views
@@ -186,6 +189,9 @@ urlpatterns = [
     # MPN Cache Management
     path('mpn/cache/stats/', mpn_cache_stats, name='mpn-cache-stats'),
     path('mpn/cache/cleanup/', mpn_cache_cleanup, name='mpn-cache-cleanup'),
+
+    # Project Management
+    path('projects/', project_list_create, name='project-list-create'),
 
     # Column Parser endpoints
     path('parser/columns/<str:session_id>/', parser_get_columns, name='parser-get-columns'),

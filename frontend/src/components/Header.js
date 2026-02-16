@@ -10,7 +10,7 @@ const Header = () => {
       <Toolbar>
         <TableChartIcon sx={{ mr: 2 }} />
         <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
-          Excel Template Mapper - v8.1 TEST
+          Excel Template Mapper - v10
         </Typography>
         <Box>
           <Button

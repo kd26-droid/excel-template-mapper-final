@@ -34,7 +34,17 @@ import {
   TableCell,
   TableContainer,
   TableHead,
-  TableRow
+  TableRow,
+  Checkbox,
+  FormControlLabel,
+  Radio,
+  RadioGroup,
+  FormLabel,
+  Divider,
+  Grid,
+  Autocomplete,
+  ListItemButton,
+  ListItemIcon
 } from '@mui/material';
 import { Pagination } from '@mui/material';
 import {
@@ -55,7 +65,10 @@ import {
   Info as InfoIcon,
   ExpandMore as ExpandMoreIcon,
   ExpandLess as ExpandLessIcon,
-  DeleteSweep as DeleteSweepIcon
+  DeleteSweep as DeleteSweepIcon,
+  FolderOpen as FolderOpenIcon,
+  AccountTree as AccountTreeIcon,
+  Search as SearchIcon
 } from '@mui/icons-material';
 import api from '../services/api';
 import * as XLSX from 'xlsx';
@@ -187,6 +200,29 @@ const EnhancedDataEditor = () => {
   }, [columnDefs, rowsSample]);
   const [appliedFormulas, setAppliedFormulas] = useState([]);
   const [defaultValues, setDefaultValues] = useState({});
+
+  // Export to Project state
+  const [exportProjectDialogOpen, setExportProjectDialogOpen] = useState(false);
+  const [exportProjectMode, setExportProjectMode] = useState('NEW'); // 'NEW' or 'EXISTING'
+  const [exportProjectName, setExportProjectName] = useState('');
+  const [exportProjectLoading, setExportProjectLoading] = useState(false);
+  const [exportProjectSelectedColumns, setExportProjectSelectedColumns] = useState({});
+  const [exportProjectSelectAll, setExportProjectSelectAll] = useState(true);
+  const [selectedExistingProject, setSelectedExistingProject] = useState(null);
+  const [exportProjectFullScreenLoading, setExportProjectFullScreenLoading] = useState(false);
+  const [exportProjectLabel, setExportProjectLabel] = useState('');
+
+  // Mock existing projects
+  const existingProjects = useMemo(() => [
+    { project_id: 1, project_code: 'PRJ-2024-001', project_name: 'Alpha Robotics BOM Integration', description: 'Main robotics project for Alpha client', status: 'ONGOING' },
+    { project_id: 2, project_code: 'PRJ-2024-002', project_name: 'Beta Electronics PCB Assembly', description: 'PCB assembly for Beta Electronics Q4', status: 'ONGOING' },
+    { project_id: 3, project_code: 'PRJ-2024-003', project_name: 'Gamma Automotive Sensor Module', description: 'Sensor module design for Gamma automotive', status: 'ONGOING' },
+    { project_id: 4, project_code: 'PRJ-2024-004', project_name: 'Delta Medical Device Components', description: 'Medical device component sourcing', status: 'ONGOING' },
+    { project_id: 5, project_code: 'PRJ-2024-005', project_name: 'Epsilon IoT Gateway Board', description: 'IoT gateway board production run', status: 'COMPLETED' },
+    { project_id: 6, project_code: 'PRJ-2025-001', project_name: 'Zeta Power Supply Unit', description: 'Power supply unit for data centers', status: 'ONGOING' },
+    { project_id: 7, project_code: 'PRJ-2025-002', project_name: 'Eta Communications Module', description: 'RF communications module design', status: 'ONGOING' },
+    { project_id: 8, project_code: 'PRJ-2025-003', project_name: 'Theta Industrial Controller', description: 'Industrial PLC controller board', status: 'ONGOING' },
+  ], []);
 
   // Create Factwise ID state
   const [factwiseIdDialogOpen, setFactwiseIdDialogOpen] = useState(false);
@@ -1487,6 +1523,60 @@ const EnhancedDataEditor = () => {
     }
   }, [sessionId, showSnackbar, columnDefs]);
 
+  const handleExportToProject = useCallback(() => {
+    const cols = {};
+    columnDefs
+      .filter(col => col.field && col.field !== '__row_number__')
+      .forEach(col => { cols[col.field] = true; });
+    setExportProjectSelectedColumns(cols);
+    setExportProjectSelectAll(true);
+    setExportProjectName(`Project Export - ${new Date().toLocaleDateString()}`);
+    setExportProjectMode('NEW');
+    setSelectedExistingProject(null);
+    setExportProjectDialogOpen(true);
+  }, [columnDefs]);
+
+  const handleExportProjectConfirm = useCallback(async () => {
+    const selectedCols = Object.entries(exportProjectSelectedColumns)
+      .filter(([, selected]) => selected)
+      .map(([field]) => field);
+
+    if (selectedCols.length === 0) {
+      showSnackbar('Please select at least one column to export', 'warning');
+      return;
+    }
+
+    if (exportProjectMode === 'EXISTING' && !selectedExistingProject) {
+      showSnackbar('Please select an existing project', 'warning');
+      return;
+    }
+
+    const label = exportProjectMode === 'NEW'
+      ? exportProjectName
+      : `${selectedExistingProject.project_code} - ${selectedExistingProject.project_name}`;
+
+    // Close dialog, show full-screen loader (no file download)
+    setExportProjectDialogOpen(false);
+    setExportProjectLabel(label);
+    setExportProjectFullScreenLoading(true);
+
+    // Simulate export process
+    setTimeout(() => {
+      setExportProjectFullScreenLoading(false);
+      showSnackbar(`Exported to project "${label}" successfully`, 'success');
+    }, 7000);
+  }, [showSnackbar, exportProjectSelectedColumns, exportProjectMode, exportProjectName, selectedExistingProject]);
+
+  const handleExportProjectToggleSelectAll = useCallback(() => {
+    const newVal = !exportProjectSelectAll;
+    setExportProjectSelectAll(newVal);
+    setExportProjectSelectedColumns(prev => {
+      const updated = {};
+      Object.keys(prev).forEach(key => { updated[key] = newVal; });
+      return updated;
+    });
+  }, [exportProjectSelectAll]);
+
   const handleExportForCorrection = useCallback(async () => {
     try {
       setDownloadLoading(true);
@@ -2112,6 +2202,26 @@ const EnhancedDataEditor = () => {
                     }}
                   >
                     Download File
+                  </Button>
+                </span>
+              </Tooltip>
+
+              <Tooltip title="Export data to project">
+                <span>
+                  <Button
+                    onClick={handleExportToProject}
+                    variant="contained"
+                    startIcon={<FolderOpenIcon />}
+                    disabled={downloadLoading || syncStatus.inProgress}
+                    sx={{
+                      backgroundColor: '#e65100',
+                      color: 'white',
+                      '&:hover': { backgroundColor: '#bf360c' },
+                      textTransform: 'none',
+                      fontWeight: 600
+                    }}
+                  >
+                    Export to Project
                   </Button>
                 </span>
               </Tooltip>
@@ -3087,6 +3197,360 @@ const EnhancedDataEditor = () => {
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* Export to Project Dialog */}
+      <Dialog
+        open={exportProjectDialogOpen}
+        onClose={() => { if (!exportProjectLoading) setExportProjectDialogOpen(false); }}
+        maxWidth="sm"
+        fullWidth
+        PaperProps={{
+          sx: { borderRadius: '12px', overflow: 'hidden' }
+        }}
+      >
+        <DialogTitle sx={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          backgroundColor: '#f8f9fa',
+          borderBottom: '1px solid #e0e0e0',
+          py: 2
+        }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            <FolderOpenIcon sx={{ color: '#e65100' }} />
+            <Typography variant="h6" sx={{ fontWeight: 600, fontSize: '18px' }}>
+              Export to Project
+            </Typography>
+          </Box>
+          {!exportProjectLoading && (
+            <IconButton onClick={() => setExportProjectDialogOpen(false)} size="small">
+              <CloseIcon />
+            </IconButton>
+          )}
+        </DialogTitle>
+
+        <DialogContent sx={{ px: 3, py: 3 }}>
+          {/* Export Mode Selection */}
+          <FormControl component="fieldset" sx={{ mb: 2, width: '100%' }}>
+            <FormLabel component="legend" sx={{ fontSize: '14px', fontWeight: 500, mb: 0.5 }}>
+              Export to
+            </FormLabel>
+            <RadioGroup
+              row
+              value={exportProjectMode}
+              onChange={(e) => setExportProjectMode(e.target.value)}
+            >
+              <FormControlLabel
+                value="NEW"
+                control={<Radio sx={{ py: 0.5 }} />}
+                label="New Project"
+              />
+              <FormControlLabel
+                value="EXISTING"
+                control={<Radio sx={{ py: 0.5 }} />}
+                label="Existing Project"
+              />
+            </RadioGroup>
+          </FormControl>
+
+          <Divider sx={{ mb: 2 }} />
+
+          {/* Project Name */}
+          {exportProjectMode === 'NEW' && (
+            <Box sx={{ mb: 2 }}>
+              <Typography variant="body2" sx={{ color: 'text.secondary', mb: 0.5, fontWeight: 500 }}>
+                Project Name
+              </Typography>
+              <TextField
+                fullWidth
+                size="small"
+                value={exportProjectName}
+                onChange={(e) => setExportProjectName(e.target.value)}
+                placeholder="Enter project name..."
+                sx={{ '& .MuiOutlinedInput-root': { borderRadius: '8px' } }}
+              />
+            </Box>
+          )}
+
+          {exportProjectMode === 'EXISTING' && (
+            <Box sx={{ mb: 2 }}>
+              <Typography variant="body2" sx={{ color: 'text.secondary', mb: 0.5, fontWeight: 500 }}>
+                Select Project
+              </Typography>
+              <Autocomplete
+                fullWidth
+                options={existingProjects}
+                value={selectedExistingProject}
+                getOptionLabel={(option) =>
+                  option ? `${option.project_code} (${option.project_name})` : ''
+                }
+                isOptionEqualToValue={(option, value) =>
+                  option?.project_id === value?.project_id
+                }
+                onChange={(e, newValue) => {
+                  setSelectedExistingProject(newValue);
+                }}
+                renderOption={(props, option) => (
+                  <li {...props} key={option.project_id}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, width: '100%', py: 0.5 }}>
+                      <AccountTreeIcon sx={{ color: '#e65100', fontSize: 20, flexShrink: 0 }} />
+                      <Box sx={{ minWidth: 0, flex: 1 }}>
+                        <Typography variant="body2" sx={{ fontWeight: 600, fontSize: '14px' }}>
+                          {option.project_name}
+                        </Typography>
+                        <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: '12px' }}>
+                          {option.project_code}
+                        </Typography>
+                      </Box>
+                      <Chip
+                        label={option.status}
+                        size="small"
+                        sx={{
+                          fontSize: '11px',
+                          height: '22px',
+                          backgroundColor: option.status === 'ONGOING' ? '#e8f5e9' : '#f5f5f5',
+                          color: option.status === 'ONGOING' ? '#2e7d32' : '#757575',
+                          fontWeight: 500,
+                          flexShrink: 0
+                        }}
+                      />
+                    </Box>
+                  </li>
+                )}
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    size="small"
+                    placeholder="Search by project name or code..."
+                    sx={{ '& .MuiOutlinedInput-root': { borderRadius: '8px' } }}
+                    InputProps={{
+                      ...params.InputProps,
+                      startAdornment: (
+                        <>
+                          <SearchIcon sx={{ color: 'text.secondary', fontSize: 20, mr: 0.5 }} />
+                          {params.InputProps.startAdornment}
+                        </>
+                      ),
+                    }}
+                  />
+                )}
+                noOptionsText="No projects found"
+                ListboxProps={{ style: { maxHeight: '300px' } }}
+                sx={{ '& .MuiAutocomplete-listbox': { py: 0.5 } }}
+              />
+              {selectedExistingProject && (
+                <Box sx={{
+                  mt: 1.5,
+                  p: 1.5,
+                  backgroundColor: '#fff3e0',
+                  borderRadius: '8px',
+                  border: '1px solid #ffe0b2',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 1.5
+                }}>
+                  <AccountTreeIcon sx={{ color: '#e65100', fontSize: 24 }} />
+                  <Box>
+                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                      {selectedExistingProject.project_code}
+                    </Typography>
+                    <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                      {selectedExistingProject.project_name}
+                      {selectedExistingProject.description ? ` — ${selectedExistingProject.description}` : ''}
+                    </Typography>
+                  </Box>
+                </Box>
+              )}
+            </Box>
+          )}
+
+          <Divider sx={{ mb: 2 }} />
+
+          {/* Fields to Export Section */}
+          <Box sx={{ mb: 1 }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
+              <Typography variant="body2" sx={{ color: 'text.secondary', fontWeight: 500 }}>
+                Fields to be exported
+              </Typography>
+              <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                <Checkbox
+                  checked={exportProjectSelectAll}
+                  indeterminate={
+                    !exportProjectSelectAll &&
+                    Object.values(exportProjectSelectedColumns).some(v => v)
+                  }
+                  onChange={handleExportProjectToggleSelectAll}
+                  size="small"
+                  sx={{ color: '#2e7d32', '&.Mui-checked': { color: '#2e7d32' } }}
+                />
+                <Typography variant="body2" sx={{ fontWeight: 500, fontSize: '13px' }}>
+                  SELECT ALL
+                </Typography>
+              </Box>
+            </Box>
+
+            <Box sx={{
+              maxHeight: '280px',
+              overflowY: 'auto',
+              border: '1px solid #e0e0e0',
+              borderRadius: '8px',
+              backgroundColor: '#fafafa'
+            }}>
+              <Grid container>
+                {Object.entries(exportProjectSelectedColumns).map(([field, checked], idx) => {
+                  const colDef = columnDefs.find(c => c.field === field);
+                  const label = colDef?.headerName || field;
+                  return (
+                    <Grid item xs={6} key={field}>
+                      <Box sx={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        px: 1.5,
+                        py: 0.25,
+                        borderBottom: '1px solid #f0f0f0',
+                        '&:hover': { backgroundColor: '#f5f5f5' }
+                      }}>
+                        <Checkbox
+                          checked={checked}
+                          size="small"
+                          sx={{ color: '#2e7d32', '&.Mui-checked': { color: '#2e7d32' } }}
+                          onChange={(e) => {
+                            const newChecked = e.target.checked;
+                            setExportProjectSelectedColumns(prev => ({
+                              ...prev,
+                              [field]: newChecked
+                            }));
+                            // Update select all state
+                            const allVals = { ...exportProjectSelectedColumns, [field]: newChecked };
+                            setExportProjectSelectAll(Object.values(allVals).every(v => v));
+                          }}
+                        />
+                        <Typography variant="body2" sx={{
+                          fontSize: '13px',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap'
+                        }}>
+                          {label}
+                        </Typography>
+                      </Box>
+                    </Grid>
+                  );
+                })}
+              </Grid>
+            </Box>
+
+            <Typography variant="caption" sx={{ color: 'text.secondary', mt: 0.5, display: 'block' }}>
+              {Object.values(exportProjectSelectedColumns).filter(v => v).length} of{' '}
+              {Object.keys(exportProjectSelectedColumns).length} columns selected
+            </Typography>
+          </Box>
+        </DialogContent>
+
+        <DialogActions sx={{
+          px: 3,
+          py: 2,
+          backgroundColor: '#f8f9fa',
+          borderTop: '1px solid #e0e0e0',
+          gap: 1
+        }}>
+          <Button
+            variant="outlined"
+            color="error"
+            onClick={() => setExportProjectDialogOpen(false)}
+            disabled={exportProjectLoading}
+            sx={{ textTransform: 'none', borderRadius: '8px' }}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            onClick={handleExportProjectConfirm}
+            disabled={
+              exportProjectLoading ||
+              (exportProjectMode === 'NEW' && !exportProjectName.trim()) ||
+              Object.values(exportProjectSelectedColumns).every(v => !v)
+            }
+            startIcon={exportProjectLoading ? <CircularProgress size={18} sx={{ color: '#c4c4c8' }} /> : <FolderOpenIcon />}
+            sx={{
+              backgroundColor: '#e65100',
+              '&:hover': { backgroundColor: '#bf360c' },
+              textTransform: 'none',
+              borderRadius: '8px',
+              fontWeight: 600
+            }}
+          >
+            {exportProjectLoading ? 'Exporting...' : 'Export'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Export to Project Full-Screen Loader with Blur */}
+      {exportProjectFullScreenLoading && (
+        <Box sx={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backdropFilter: 'blur(8px)',
+          backgroundColor: 'rgba(0, 0, 0, 0.4)',
+          zIndex: 9999,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 3
+        }}>
+          <Box sx={{
+            backgroundColor: 'white',
+            borderRadius: '16px',
+            padding: '40px 60px',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            gap: 2.5,
+            boxShadow: '0 8px 32px rgba(0,0,0,0.2)'
+          }}>
+            <Box sx={{
+              position: 'relative',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center'
+            }}>
+              <CircularProgress
+                size={80}
+                thickness={3}
+                sx={{ color: '#e65100' }}
+              />
+              <FolderOpenIcon sx={{
+                position: 'absolute',
+                fontSize: 36,
+                color: '#e65100'
+              }} />
+            </Box>
+            <Typography variant="h5" sx={{ fontWeight: 600, color: '#333' }}>
+              Exporting to Project
+            </Typography>
+            <Typography variant="body1" sx={{ color: 'text.secondary', textAlign: 'center', maxWidth: 400 }}>
+              {exportProjectLabel}
+            </Typography>
+            <LinearProgress sx={{
+              width: 300,
+              height: 6,
+              borderRadius: 3,
+              backgroundColor: '#ffe0b2',
+              '& .MuiLinearProgress-bar': {
+                backgroundColor: '#e65100',
+                borderRadius: 3
+              }
+            }} />
+            <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+              Please wait while your data is being exported...
+            </Typography>
+          </Box>
+        </Box>
+      )}
 
       {/* Snackbar for notifications */}
       <Snackbar

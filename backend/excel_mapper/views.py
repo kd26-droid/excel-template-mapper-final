@@ -32,7 +32,7 @@ import tempfile
 import shutil
 
 from .bom_header_mapper import BOMHeaderMapper
-from .models import MappingTemplate, TagTemplate, PDFSession, PDFExtractionResult
+from .models import MappingTemplate, TagTemplate, PDFSession, PDFExtractionResult, Project
 try:
     # Prefer relative import; fall back gracefully on any import error
     from .azure_storage import hybrid_file_manager
@@ -8052,3 +8052,51 @@ def mpn_cache_cleanup(request):
             'success': False,
             'error': str(e)
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# ─── PROJECT MANAGEMENT ──────────────────────────────────────────────────────
+
+@api_view(['GET', 'POST'])
+def project_list_create(request):
+    """List existing projects or create a new one."""
+    if request.method == 'GET':
+        search = request.GET.get('search', '').strip()
+        from django.db.models import Q
+        projects = Project.objects.filter(status='ONGOING')
+        if search:
+            projects = projects.filter(
+                Q(project_name__icontains=search) |
+                Q(project_code__icontains=search)
+            )
+        projects = projects.order_by('-updated_at')[:50]
+        return Response({
+            'success': True,
+            'projects': [p.to_dict() for p in projects]
+        })
+
+    elif request.method == 'POST':
+        project_name = request.data.get('project_name', '').strip()
+        project_code = request.data.get('project_code', '').strip()
+        description = request.data.get('description', '').strip()
+
+        if not project_name or not project_code:
+            return Response({
+                'success': False,
+                'error': 'Project name and project code are required.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if Project.objects.filter(project_code=project_code).exists():
+            return Response({
+                'success': False,
+                'error': f'Project with code "{project_code}" already exists.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        project = Project.objects.create(
+            project_name=project_name,
+            project_code=project_code,
+            description=description,
+        )
+        return Response({
+            'success': True,
+            'project': project.to_dict()
+        }, status=status.HTTP_201_CREATED)
