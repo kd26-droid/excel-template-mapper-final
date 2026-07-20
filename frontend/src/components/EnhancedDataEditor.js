@@ -44,7 +44,9 @@ import {
   Grid,
   Autocomplete,
   ListItemButton,
-  ListItemIcon
+  ListItemIcon,
+  ListItemText,
+  Menu
 } from '@mui/material';
 import { Pagination } from '@mui/material';
 import {
@@ -68,7 +70,11 @@ import {
   DeleteSweep as DeleteSweepIcon,
   FolderOpen as FolderOpenIcon,
   AccountTree as AccountTreeIcon,
-  Search as SearchIcon
+  Search as SearchIcon,
+  KeyboardArrowDown as KeyboardArrowDownIcon,
+  MoreVert as MoreVertIcon,
+  Build as BuildIcon,
+  VerifiedUser as VerifiedUserIcon
 } from '@mui/icons-material';
 import api from '../services/api';
 import * as XLSX from 'xlsx';
@@ -209,19 +215,14 @@ const EnhancedDataEditor = () => {
   const [exportProjectSelectedColumns, setExportProjectSelectedColumns] = useState({});
   const [exportProjectSelectAll, setExportProjectSelectAll] = useState(true);
   const [selectedExistingProject, setSelectedExistingProject] = useState(null);
-  const [exportProjectFullScreenLoading, setExportProjectFullScreenLoading] = useState(false);
-  const [exportProjectLabel, setExportProjectLabel] = useState('');
+  const [exportProjectSuccess, setExportProjectSuccess] = useState(false);
 
   // Mock existing projects
   const existingProjects = useMemo(() => [
-    { project_id: 1, project_code: 'PRJ-2024-001', project_name: 'Alpha Robotics BOM Integration', description: 'Main robotics project for Alpha client', status: 'ONGOING' },
-    { project_id: 2, project_code: 'PRJ-2024-002', project_name: 'Beta Electronics PCB Assembly', description: 'PCB assembly for Beta Electronics Q4', status: 'ONGOING' },
-    { project_id: 3, project_code: 'PRJ-2024-003', project_name: 'Gamma Automotive Sensor Module', description: 'Sensor module design for Gamma automotive', status: 'ONGOING' },
-    { project_id: 4, project_code: 'PRJ-2024-004', project_name: 'Delta Medical Device Components', description: 'Medical device component sourcing', status: 'ONGOING' },
-    { project_id: 5, project_code: 'PRJ-2024-005', project_name: 'Epsilon IoT Gateway Board', description: 'IoT gateway board production run', status: 'COMPLETED' },
-    { project_id: 6, project_code: 'PRJ-2025-001', project_name: 'Zeta Power Supply Unit', description: 'Power supply unit for data centers', status: 'ONGOING' },
-    { project_id: 7, project_code: 'PRJ-2025-002', project_name: 'Eta Communications Module', description: 'RF communications module design', status: 'ONGOING' },
-    { project_id: 8, project_code: 'PRJ-2025-003', project_name: 'Theta Industrial Controller', description: 'Industrial PLC controller board', status: 'ONGOING' },
+    { project_id: 'P000328', project_code: 'P000328', project_name: 'DXN-PRJ-100', status: 'ONGOING' },
+    { project_id: 'P000326', project_code: 'P000326', project_name: 'DXN-BC-001', status: 'ONGOING' },
+    { project_id: 'P000325', project_code: 'P000325', project_name: 'DXN-ETQ-001', status: 'ONGOING' },
+    { project_id: 'P000324', project_code: 'P000324', project_name: 'DXN-ELEC-100', status: 'ONGOING' },
   ], []);
 
   // Create Factwise ID state
@@ -243,6 +244,11 @@ const EnhancedDataEditor = () => {
   // Cleanup info banner state
   const [cleanupInfo, setCleanupInfo] = useState(null);
   const [showDeletedRows, setShowDeletedRows] = useState(false);
+
+  // Toolbar dropdown menu anchors
+  const [toolsMenuAnchor, setToolsMenuAnchor] = useState(null);
+  const [mpnMenuAnchor, setMpnMenuAnchor] = useState(null);
+  const [moreMenuAnchor, setMoreMenuAnchor] = useState(null);
 
   // Parser MPN validation state
   const [hasParserMpnColumns, setHasParserMpnColumns] = useState(false);
@@ -1533,10 +1539,11 @@ const EnhancedDataEditor = () => {
     setExportProjectName(`Project Export - ${new Date().toLocaleDateString()}`);
     setExportProjectMode('NEW');
     setSelectedExistingProject(null);
+    setExportProjectSuccess(false);
     setExportProjectDialogOpen(true);
   }, [columnDefs]);
 
-  const handleExportProjectConfirm = useCallback(async () => {
+  const handleExportProjectConfirm = useCallback(() => {
     const selectedCols = Object.entries(exportProjectSelectedColumns)
       .filter(([, selected]) => selected)
       .map(([field]) => field);
@@ -1551,21 +1558,13 @@ const EnhancedDataEditor = () => {
       return;
     }
 
-    const label = exportProjectMode === 'NEW'
-      ? exportProjectName
-      : `${selectedExistingProject.project_code} - ${selectedExistingProject.project_name}`;
-
-    // Close dialog, show full-screen loader (no file download)
-    setExportProjectDialogOpen(false);
-    setExportProjectLabel(label);
-    setExportProjectFullScreenLoading(true);
-
-    // Simulate export process
+    // Show loader for 3 seconds, then success
+    setExportProjectLoading(true);
     setTimeout(() => {
-      setExportProjectFullScreenLoading(false);
-      showSnackbar(`Exported to project "${label}" successfully`, 'success');
-    }, 7000);
-  }, [showSnackbar, exportProjectSelectedColumns, exportProjectMode, exportProjectName, selectedExistingProject]);
+      setExportProjectLoading(false);
+      setExportProjectSuccess(true);
+    }, 3000);
+  }, [showSnackbar, exportProjectSelectedColumns, exportProjectMode, selectedExistingProject]);
 
   const handleExportProjectToggleSelectAll = useCallback(() => {
     const newVal = !exportProjectSelectAll;
@@ -2119,474 +2118,264 @@ const EnhancedDataEditor = () => {
               </Box>
             </Box>
 
-            {/* Second Row - Action Buttons */}
-            <Box sx={{ 
-              display: 'flex', 
-              gap: 2, 
+            {/* Second Row - Clean Grouped Action Bar */}
+            <Box sx={{
+              display: 'flex',
+              gap: 1.5,
               justifyContent: 'center',
+              alignItems: 'center',
               flexWrap: 'wrap'
             }}>
-              <Tooltip title="Add Tags - Automatically tag your components with synchronization">
-                <span>
-                  <Button
-                    onClick={handleOpenFormulaBuilder}
-                    variant="contained"
-                    startIcon={<AutoAwesomeIcon />}
-                    disabled={syncStatus.inProgress}
-                    sx={{ 
-                      backgroundColor: '#9c27b0',
-                      color: 'white',
-                      '&:hover': { backgroundColor: '#7b1fa2' },
-                      textTransform: 'none',
-                      fontWeight: 600
-                    }}
-                  >
-                    Add Tags
-                  </Button>
-                </span>
-              </Tooltip>
+              {/* PRIMARY: Download File */}
+              <Button
+                onClick={handleDownloadConverted}
+                variant="contained"
+                startIcon={<DownloadIcon />}
+                disabled={downloadLoading || syncStatus.inProgress}
+                sx={{
+                  backgroundColor: '#1565c0',
+                  color: 'white',
+                  '&:hover': { backgroundColor: '#0d47a1' },
+                  textTransform: 'none',
+                  fontWeight: 600,
+                  borderRadius: '8px',
+                  px: 2.5
+                }}
+              >
+                Download
+              </Button>
 
-              <Tooltip title="Parse Column - Extract data from complex columns like Vendor Parts">
-                <span>
-                  <Button
-                    onClick={() => setColumnParserOpen(true)}
-                    variant="contained"
-                    startIcon={<AutoAwesomeIcon />}
-                    disabled={syncStatus.inProgress}
-                    sx={{
-                      backgroundColor: '#0891b2',
-                      color: 'white',
-                      '&:hover': { backgroundColor: '#0e7490' },
-                      textTransform: 'none',
-                      fontWeight: 600
-                    }}
-                  >
-                    Parse Column
-                  </Button>
-                </span>
-              </Tooltip>
+              {/* PRIMARY: Export to Project */}
+              <Button
+                onClick={handleExportToProject}
+                variant="contained"
+                startIcon={<FolderOpenIcon />}
+                disabled={downloadLoading || syncStatus.inProgress}
+                sx={{
+                  backgroundColor: '#e65100',
+                  color: 'white',
+                  '&:hover': { backgroundColor: '#bf360c' },
+                  textTransform: 'none',
+                  fontWeight: 600,
+                  borderRadius: '8px',
+                  px: 2.5
+                }}
+              >
+                Export to Project
+              </Button>
 
-              <Tooltip title="Save current state as a reusable template">
-                <span>
-                  <Button
-                    onClick={handleOpenSaveTemplateDialog}
-                    variant="contained"
-                    startIcon={<TemplateIcon />}
-                    disabled={syncStatus.inProgress}
-                    sx={{
-                      backgroundColor: '#6a1b9a',
-                      color: 'white',
-                      '&:hover': { backgroundColor: '#4a148c' },
-                      textTransform: 'none',
-                      fontWeight: 600
-                    }}
-                  >
-                    Save Template
-                  </Button>
-                </span>
-              </Tooltip>
+              {/* Divider */}
+              <Divider orientation="vertical" flexItem sx={{ borderColor: 'rgba(255,255,255,0.3)', mx: 0.5 }} />
 
-              <Tooltip title="Download processed file">
-                <span>
-                  <Button
-                    onClick={handleDownloadConverted}
-                    variant="contained"
-                    startIcon={<DownloadIcon />}
-                    disabled={downloadLoading || syncStatus.inProgress}
-                    sx={{
-                      backgroundColor: '#1565c0',
-                      color: 'white',
-                      '&:hover': { backgroundColor: '#0d47a1' },
-                      textTransform: 'none',
-                      fontWeight: 600
-                    }}
-                  >
-                    Download File
-                  </Button>
-                </span>
-              </Tooltip>
+              {/* TOOLS dropdown */}
+              <Button
+                onClick={(e) => setToolsMenuAnchor(e.currentTarget)}
+                variant="outlined"
+                endIcon={<KeyboardArrowDownIcon />}
+                startIcon={<BuildIcon />}
+                sx={{
+                  color: 'white',
+                  borderColor: 'rgba(255,255,255,0.5)',
+                  '&:hover': { backgroundColor: 'rgba(255,255,255,0.1)', borderColor: 'white' },
+                  textTransform: 'none',
+                  fontWeight: 600,
+                  borderRadius: '8px'
+                }}
+              >
+                Tools
+              </Button>
+              <Menu
+                anchorEl={toolsMenuAnchor}
+                open={Boolean(toolsMenuAnchor)}
+                onClose={() => setToolsMenuAnchor(null)}
+                PaperProps={{ sx: { borderRadius: '10px', mt: 1, minWidth: 220, boxShadow: '0 8px 32px rgba(0,0,0,0.2)' } }}
+              >
+                <MenuItem onClick={() => { setToolsMenuAnchor(null); handleOpenFormulaBuilder(); }} disabled={syncStatus.inProgress}>
+                  <ListItemIcon><AutoAwesomeIcon sx={{ color: '#9c27b0' }} /></ListItemIcon>
+                  <ListItemText>Add Tags</ListItemText>
+                </MenuItem>
+                <MenuItem onClick={() => { setToolsMenuAnchor(null); setColumnParserOpen(true); }} disabled={syncStatus.inProgress}>
+                  <ListItemIcon><AutoAwesomeIcon sx={{ color: '#0891b2' }} /></ListItemIcon>
+                  <ListItemText>Parse Column</ListItemText>
+                </MenuItem>
+                <MenuItem onClick={() => { setToolsMenuAnchor(null); handleOpenFactwiseIdDialog(); }} disabled={syncStatus.inProgress}>
+                  <ListItemIcon><BadgeIcon sx={{ color: '#2e7d32' }} /></ListItemIcon>
+                  <ListItemText>Create FactWise ID</ListItemText>
+                </MenuItem>
+                <Divider />
+                <MenuItem onClick={() => { setToolsMenuAnchor(null); handleOpenSaveTemplateDialog(); }} disabled={syncStatus.inProgress}>
+                  <ListItemIcon><TemplateIcon sx={{ color: '#6a1b9a' }} /></ListItemIcon>
+                  <ListItemText>Save Template</ListItemText>
+                </MenuItem>
+                <MenuItem onClick={() => { setToolsMenuAnchor(null); sessionStorage.setItem('navigatedFromDataEditor', 'true'); navigate(`/mapping/${sessionId}`); }}>
+                  <ListItemIcon><MapIcon sx={{ color: '#2196f3' }} /></ListItemIcon>
+                  <ListItemText>View Column Mapping</ListItemText>
+                </MenuItem>
+              </Menu>
 
-              <Tooltip title="Export data to project">
-                <span>
-                  <Button
-                    onClick={handleExportToProject}
-                    variant="contained"
-                    startIcon={<FolderOpenIcon />}
-                    disabled={downloadLoading || syncStatus.inProgress}
-                    sx={{
-                      backgroundColor: '#e65100',
-                      color: 'white',
-                      '&:hover': { backgroundColor: '#bf360c' },
-                      textTransform: 'none',
-                      fontWeight: 600
-                    }}
-                  >
-                    Export to Project
-                  </Button>
-                </span>
-              </Tooltip>
-
-              {/* Export for Correction functionality */}
-              {isFromPdf && (
-                <Tooltip title="Export current data for external correction">
-                  <span>
-                    <Button
-                      onClick={handleExportForCorrection}
-                      variant="contained"
-                      startIcon={<EditIcon />}
-                      disabled={downloadLoading || syncStatus.inProgress}
-                      sx={{
-                        backgroundColor: '#7b1fa2',
-                        color: 'white',
-                        '&:hover': { backgroundColor: '#6a1b9a' },
-                        textTransform: 'none',
-                        fontWeight: 600
-                      }}
+              {/* MPN VALIDATION dropdown */}
+              <Button
+                onClick={(e) => setMpnMenuAnchor(e.currentTarget)}
+                variant="outlined"
+                endIcon={<KeyboardArrowDownIcon />}
+                startIcon={mpnValidating ? <CircularProgress size={16} sx={{ color: 'white' }} /> : <VerifiedUserIcon />}
+                sx={{
+                  color: 'white',
+                  borderColor: mpnValidationCompleted ? '#4caf50' : 'rgba(255,255,255,0.5)',
+                  backgroundColor: mpnValidationCompleted ? 'rgba(76,175,80,0.15)' : 'transparent',
+                  '&:hover': { backgroundColor: mpnValidationCompleted ? 'rgba(76,175,80,0.25)' : 'rgba(255,255,255,0.1)', borderColor: 'white' },
+                  textTransform: 'none',
+                  fontWeight: 600,
+                  borderRadius: '8px'
+                }}
+              >
+                MPN
+              </Button>
+              <Menu
+                anchorEl={mpnMenuAnchor}
+                open={Boolean(mpnMenuAnchor)}
+                onClose={() => setMpnMenuAnchor(null)}
+                PaperProps={{ sx: { borderRadius: '10px', mt: 1, minWidth: 280, boxShadow: '0 8px 32px rgba(0,0,0,0.2)' } }}
+              >
+                {/* MPN Column selector inline */}
+                <Box sx={{ px: 2, py: 1 }}>
+                  <Typography variant="caption" sx={{ color: 'text.secondary', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                    MPN Column
+                  </Typography>
+                  <FormControl size="small" fullWidth sx={{ mt: 0.5 }}>
+                    <Select
+                      value={mpnColumn || ''}
+                      onChange={(e) => setMpnColumn(e.target.value || null)}
+                      displayEmpty
+                      sx={{ borderRadius: '8px', fontSize: '14px' }}
                     >
-                      Export for Correction
-                    </Button>
-                  </span>
-                </Tooltip>
-              )}
-
-              {/* Upload Corrected Data functionality */}
-              {isFromPdf && (
-                <Tooltip title="Upload corrected data to update existing rows">
-                  <span>
-                    <Button
-                      onClick={() => setCorrectionUploadDialogOpen(true)}
-                      variant="outlined"
-                      startIcon={<DownloadIcon sx={{ transform: 'rotate(180deg)' }} />}
-                      disabled={downloadLoading || syncStatus.inProgress}
-                      sx={{
-                        color: '#7b1fa2',
-                        borderColor: '#7b1fa2',
-                        '&:hover': { backgroundColor: 'rgba(123, 31, 162, 0.1)', borderColor: '#6a1b9a' },
-                        textTransform: 'none',
-                        fontWeight: 600
-                      }}
-                    >
-                      Upload Corrections
-                    </Button>
-                  </span>
-                </Tooltip>
-              )}
-
-              {/* Download original removed per request */}
-
-              <Tooltip title="Create FactWise ID - Synchronized column combination">
-                <span>
-                  <Button
-                    onClick={handleOpenFactwiseIdDialog}
-                    variant="contained"
-                    startIcon={<BadgeIcon />}
-                    disabled={syncStatus.inProgress}
-                    sx={{ 
-                      backgroundColor: '#2e7d32',
-                      color: 'white',
-                      '&:hover': { backgroundColor: '#1b5e20' },
-                      textTransform: 'none',
-                      fontWeight: 600
-                    }}
-                  >
-                    Create FactWise ID
-                  </Button>
-                </span>
-              </Tooltip>
-
-              <Tooltip title="View visual column mapping representation">
-                <Button
-                  onClick={() => {
-                    sessionStorage.setItem('navigatedFromDataEditor', 'true');
-                    navigate(`/mapping/${sessionId}`);
+                      <MenuItem value=""><em>Auto-detect</em></MenuItem>
+                      {columnDefs
+                        .filter(col => col.field && col.field !== '__row_number__')
+                        .map(col => (
+                          <MenuItem key={col.field} value={col.field}>
+                            {col.headerName || col.field}
+                          </MenuItem>
+                        ))}
+                    </Select>
+                  </FormControl>
+                </Box>
+                <Divider sx={{ my: 0.5 }} />
+                <MenuItem
+                  onClick={async () => {
+                    setMpnMenuAnchor(null);
+                    try {
+                      if (!mpnColumn) return;
+                      if (!originalMpnColumn && !isMpnValidationColumn(mpnColumn)) {
+                        setOriginalMpnColumn(mpnColumn);
+                      }
+                      setMpnValidating(true);
+                      setMpnValidationProgress(0);
+                      const progressInterval = setInterval(() => {
+                        setMpnValidationProgress(prev => prev >= 85 ? prev : Math.min(85, prev + Math.random() * 15));
+                      }, 500);
+                      const apiResponse = await api.validateMPNs(sessionId, mpnColumn, mpnManufacturerColumn);
+                      clearInterval(progressInterval);
+                      setMpnValidationProgress(100);
+                      await fetchDataSynchronized();
+                      setMpnValidationCompleted(true);
+                      showSnackbar('MPN validation complete', 'success');
+                      setTimeout(() => setMpnValidationProgress(0), 1000);
+                    } catch (e) {
+                      const msg = e?.response?.data?.error || e.message || 'Unknown error';
+                      if (e?.response?.status === 403) {
+                        showSnackbar('MPN validation not configured. Complete Digi-Key setup on server.', 'error');
+                      } else {
+                        showSnackbar(`MPN validation failed: ${msg}`, 'error');
+                      }
+                    } finally {
+                      setMpnValidating(false);
+                    }
                   }}
-                  variant="outlined"
-                  startIcon={<MapIcon />}
-                  sx={{
-                    color: '#2196f3',
-                    borderColor: '#2196f3',
-                    '&:hover': {
-                      backgroundColor: 'rgba(33,150,243,0.1)',
-                      borderColor: '#2196f3'
-                    },
-                    textTransform: 'none',
-                    fontWeight: 600
-                  }}
+                  disabled={!mpnColumn || mpnValidating || syncStatus.inProgress}
                 >
-                  View Column Mapping
-                </Button>
-              </Tooltip>
-
-              {/* MPN Validation Section */}
-              <Tooltip title="Select MPN column for validation">
-                <FormControl size="small" sx={{ minWidth: 200 }}>
-                  <InputLabel
-                    id="mpn-col-label"
-                    sx={{
-                      color: 'rgba(255,255,255,0.9)',
-                      '&.Mui-focused': { color: 'white' }
-                    }}
-                  >
-                    MPN column
-                  </InputLabel>
-                  <Select
-                    labelId="mpn-col-label"
-                    value={mpnColumn || ''}
-                    label="MPN column"
-                    onChange={(e) => setMpnColumn(e.target.value || null)}
-                    sx={{
-                      color: 'white',
-                      backgroundColor: 'rgba(255,255,255,0.1)',
-                      borderRadius: 1,
-                      '&:hover': { backgroundColor: 'rgba(255,255,255,0.15)' },
-                      '& .MuiOutlinedInput-notchedOutline': {
-                        borderColor: 'rgba(255,255,255,0.6)'
-                      },
-                      '&:hover .MuiOutlinedInput-notchedOutline': {
-                        borderColor: 'rgba(255,255,255,0.8)'
-                      },
-                      '&.Mui-focused .MuiOutlinedInput-notchedOutline': {
-                        borderColor: 'white'
-                      },
-                      '& .MuiSvgIcon-root': {
-                        color: 'white'
-                      }
-                    }}
-                    MenuProps={{
-                      PaperProps: {
-                        sx: {
-                          bgcolor: '#424242',
-                          '& .MuiMenuItem-root': {
-                            color: 'white',
-                            '&:hover': { bgcolor: 'rgba(255,255,255,0.1)' },
-                            '&.Mui-selected': { bgcolor: 'rgba(255,255,255,0.2)' }
-                          }
-                        }
-                      }
-                    }}
-                  >
-                    <MenuItem value=""><em>Auto-detect</em></MenuItem>
-                    {columnDefs
-                      .filter(col => col.field && col.field !== '__row_number__')
-                      .map(col => (
-                        <MenuItem key={col.field} value={col.field}>
-                          {col.headerName || col.field}
-                        </MenuItem>
-                      ))}
-                  </Select>
-                </FormControl>
-              </Tooltip>
-
-              <Tooltip title={mpnColumn ? `Validate MPNs in column: ${mpnColumn}` : 'Select an MPN column first'}>
-                <span>
-                  <Button
+                  <ListItemIcon><CheckIcon sx={{ color: '#f57c00' }} /></ListItemIcon>
+                  <ListItemText>{mpnValidating ? 'Validating MPNs...' : 'Validate MPNs'}</ListItemText>
+                </MenuItem>
+                {hasParserMpnColumns && (
+                  <MenuItem
                     onClick={async () => {
+                      setMpnMenuAnchor(null);
                       try {
-                        if (!mpnColumn) return;
-                        console.log("================================================================================");
-                        console.log("🔍 MPN_VALIDATION_FRONTEND_START: User clicked Validate MPNs button");
-                        console.log("================================================================================");
-                        console.log("📋 MPN_VALIDATION_FRONTEND: sessionId=", sessionId);
-                        console.log("📋 MPN_VALIDATION_FRONTEND: mpnColumn=", mpnColumn);
-                        console.log("📋 MPN_VALIDATION_FRONTEND: mpnManufacturerColumn=", mpnManufacturerColumn);
-
-                        // Store original column before validation (in case mpnColumn changes after validation)
-                        if (!originalMpnColumn && !isMpnValidationColumn(mpnColumn)) {
-                          setOriginalMpnColumn(mpnColumn);
-                        }
-                        setMpnValidating(true);
-                        setMpnValidationProgress(0);
-
-                        // Simulate progress updates
-                        const progressInterval = setInterval(() => {
-                          setMpnValidationProgress(prev => {
-                            if (prev >= 85) return prev; // Cap at 85% until completion
-                            return Math.min(85, prev + Math.random() * 15);
-                          });
-                        }, 500);
-
-                        console.log("🌐 MPN_VALIDATION_FRONTEND: Calling API validateMPNs...");
-
-                        // Server handles OAuth silently; just call validate
-                        const apiResponse = await api.validateMPNs(sessionId, mpnColumn, mpnManufacturerColumn);
-
-                        console.log("✅ MPN_VALIDATION_FRONTEND: API response received:", apiResponse);
-
-                        clearInterval(progressInterval);
-                        setMpnValidationProgress(100);
-
-                        console.log("🔄 MPN_VALIDATION_FRONTEND: Fetching updated data...");
-                        await fetchDataSynchronized();
-
-                        console.log("✅ MPN_VALIDATION_FRONTEND: Data fetched, validation complete");
-                        setMpnValidationCompleted(true);
-                        showSnackbar('MPN validation complete', 'success');
-
-                        console.log("================================================================================");
-                        console.log("✅ MPN_VALIDATION_FRONTEND_COMPLETE");
-                        console.log("================================================================================");
-
-                        // Reset progress after a short delay
-                        setTimeout(() => setMpnValidationProgress(0), 1000);
-                      } catch (e) {
-                        console.error("================================================================================");
-                        console.error("❌ MPN_VALIDATION_FRONTEND_ERROR: Validation failed");
-                        console.error("❌ Error:", e);
-                        console.error("❌ Response:", e?.response);
-                        console.error("❌ Response data:", e?.response?.data);
-                        console.error("================================================================================");
-
-                        const msg = e?.response?.data?.error || e.message || 'Unknown error';
-                        if (e?.response?.status === 403) {
-                          showSnackbar('MPN validation not configured by admin. Please complete Digi‑Key setup on the server.', 'error');
+                        setParserMpnValidating(true);
+                        showSnackbar('Validating parser MPNs...', 'info');
+                        const resp = await api.validateParserSpecMPNs(sessionId);
+                        if (resp.data.success) {
+                          const { valid = 0, invalid = 0, unverified = 0 } = resp.data;
+                          const parts = [];
+                          if (valid) parts.push(`${valid} verified`);
+                          if (invalid) parts.push(`${invalid} not found`);
+                          if (unverified) parts.push(`${unverified} unverified`);
+                          showSnackbar(`MPN Validation: ${parts.join(', ')}`, 'success');
+                          setParserMpnValidationCompleted(true);
+                          await fetchDataSynchronized();
                         } else {
-                          showSnackbar(`MPN validation failed: ${msg}`, 'error');
+                          showSnackbar(resp.data.error || 'Validation failed', 'error');
                         }
+                      } catch (err) {
+                        showSnackbar('Parser MPN validation failed: ' + (err.response?.data?.error || err.message), 'error');
                       } finally {
-                        setMpnValidating(false);
+                        setParserMpnValidating(false);
                       }
                     }}
-                    variant="contained"
-                    disabled={!mpnColumn || mpnValidating || syncStatus.inProgress}
-                    sx={{
-                      backgroundColor: '#f57c00',
-                      color: 'white',
-                      border: '2px solid rgba(255,255,255,0.3)',
-                      '&:hover': {
-                        backgroundColor: '#ef6c00',
-                        border: '2px solid rgba(255,255,255,0.5)'
-                      },
-                      textTransform: 'none',
-                      fontWeight: 600,
-                      '&:disabled': {
-                        backgroundColor: 'rgba(255,255,255,0.1)',
-                        color: 'rgba(255,255,255,0.4)',
-                        border: '2px solid rgba(255,255,255,0.1)'
-                      }
-                    }}
-                    startIcon={mpnValidating ? <CircularProgress size={16} sx={{ color: 'white' }} /> : <CheckIcon />}
+                    disabled={parserMpnValidating || parserMpnValidationCompleted}
                   >
-                    {mpnValidating ? 'Validating MPNs…' : 'Validate MPNs'}
-                  </Button>
-                </span>
-              </Tooltip>
-
-              {/* Validate Parser Spec MPNs Button */}
-              {hasParserMpnColumns && (
-                <Tooltip title={parserMpnValidationCompleted ? 'Parser MPNs already validated' : 'Validate all MPN values from Column Parser'}>
-                  <span>
-                    <Button
-                      onClick={async () => {
-                        try {
-                          setParserMpnValidating(true);
-                          showSnackbar('Validating parser MPNs...', 'info');
-                          const resp = await api.validateParserSpecMPNs(sessionId);
-                          if (resp.data.success) {
-                            const { valid = 0, invalid = 0, unverified = 0, new_columns = 0 } = resp.data;
-                            const parts = [];
-                            if (valid) parts.push(`${valid} verified`);
-                            if (invalid) parts.push(`${invalid} not found`);
-                            if (unverified) parts.push(`${unverified} unverified`);
-                            showSnackbar(`MPN Validation: ${parts.join(', ')} — scroll right for "MPN — DigiKey Valid" columns`, 'success');
-                            setParserMpnValidationCompleted(true);
-                            await fetchDataSynchronized();
-                            // Auto-scroll grid to the right to show new validation columns
-                            setTimeout(() => {
-                              const gridContainer = document.querySelector('.data-grid-container, [class*="tableContainer"], table');
-                              if (gridContainer && gridContainer.scrollWidth > gridContainer.clientWidth) {
-                                gridContainer.scrollLeft = gridContainer.scrollWidth;
-                              }
-                            }, 500);
-                          } else {
-                            showSnackbar(resp.data.error || 'Validation failed', 'error');
-                          }
-                        } catch (err) {
-                          showSnackbar('Parser MPN validation failed: ' + (err.response?.data?.error || err.message), 'error');
-                        } finally {
-                          setParserMpnValidating(false);
-                        }
-                      }}
-                      variant="contained"
-                      disabled={parserMpnValidating || parserMpnValidationCompleted}
-                      sx={{
-                        backgroundColor: parserMpnValidationCompleted ? '#2e7d32' : '#7b1fa2',
-                        color: 'white',
-                        border: '2px solid rgba(255,255,255,0.3)',
-                        textTransform: 'none',
-                        fontWeight: 600,
-                        '&:hover': {
-                          backgroundColor: parserMpnValidationCompleted ? '#1b5e20' : '#6a1b9a',
-                          border: '2px solid rgba(255,255,255,0.5)'
-                        },
-                        '&:disabled': {
-                          backgroundColor: parserMpnValidationCompleted ? '#2e7d32' : 'rgba(255,255,255,0.1)',
-                          color: parserMpnValidationCompleted ? 'white' : 'rgba(255,255,255,0.4)',
-                          border: '2px solid rgba(255,255,255,0.1)'
-                        }
-                      }}
-                      startIcon={parserMpnValidating ? <CircularProgress size={16} sx={{ color: 'white' }} /> : <CheckIcon />}
-                    >
-                      {parserMpnValidating ? 'Validating Parser MPNs…' : parserMpnValidationCompleted ? 'Parser MPNs Validated' : 'Validate Parser MPNs'}
-                    </Button>
-                  </span>
-                </Tooltip>
-              )}
-
-              <Tooltip title={
-                !mpnValidationCompleted
-                  ? "Complete MPN validation first"
-                  : mpnFilterInvalidOnly
-                    ? "Show all rows"
-                    : "Show only rows with invalid MPNs"
-              }>
-                <span>
-                  <Button
-                    onClick={() => setMpnFilterInvalidOnly(v => !v)}
-                    variant="contained"
-                    disabled={!mpnValidationCompleted}
-                    sx={{
-                      backgroundColor: mpnFilterInvalidOnly ? '#2e7d32' : '#1565c0',
-                      color: 'white',
-                      border: '2px solid rgba(255,255,255,0.3)',
-                      '&:hover': {
-                        backgroundColor: mpnFilterInvalidOnly ? '#1b5e20' : '#0d47a1',
-                        border: '2px solid rgba(255,255,255,0.5)'
-                      },
-                      '&:disabled': {
-                        backgroundColor: 'rgba(255,255,255,0.1)',
-                        color: 'rgba(255,255,255,0.4)',
-                        border: '2px solid rgba(255,255,255,0.1)'
-                      },
-                      textTransform: 'none',
-                      fontWeight: 600
-                    }}
-                    startIcon={mpnFilterInvalidOnly ? <CheckIcon /> : <ErrorIcon />}
-                  >
-                    {mpnFilterInvalidOnly ? 'Show All Rows' : 'Filter Invalid MPNs'}
-                  </Button>
-                </span>
-              </Tooltip>
-
-              <Tooltip title={showMpnColumns ? "Hide MPN validation columns" : "Show MPN validation columns"}>
-                <Button
-                  onClick={() => setShowMpnColumns(v => !v)}
-                  variant="contained"
-                  sx={{
-                    backgroundColor: showMpnColumns ? '#795548' : '#4caf50',
-                    color: 'white',
-                    border: '2px solid rgba(255,255,255,0.3)',
-                    '&:hover': {
-                      backgroundColor: showMpnColumns ? '#5d4037' : '#388e3c',
-                      border: '2px solid rgba(255,255,255,0.5)'
-                    },
-                    textTransform: 'none',
-                    fontWeight: 600
-                  }}
-                  startIcon={showMpnColumns ? <InfoIcon /> : <InfoIcon />}
+                    <ListItemIcon><CheckIcon sx={{ color: parserMpnValidationCompleted ? '#2e7d32' : '#7b1fa2' }} /></ListItemIcon>
+                    <ListItemText>{parserMpnValidating ? 'Validating...' : parserMpnValidationCompleted ? 'Parser MPNs Validated' : 'Validate Parser MPNs'}</ListItemText>
+                  </MenuItem>
+                )}
+                <Divider sx={{ my: 0.5 }} />
+                <MenuItem
+                  onClick={() => { setMpnMenuAnchor(null); setMpnFilterInvalidOnly(v => !v); }}
+                  disabled={!mpnValidationCompleted}
                 >
-                  {showMpnColumns ? 'Hide MPN Columns' : 'Show MPN Columns'}
-                </Button>
-              </Tooltip>
+                  <ListItemIcon>{mpnFilterInvalidOnly ? <CheckIcon sx={{ color: '#2e7d32' }} /> : <ErrorIcon sx={{ color: '#f44336' }} />}</ListItemIcon>
+                  <ListItemText>{mpnFilterInvalidOnly ? 'Show All Rows' : 'Filter Invalid MPNs'}</ListItemText>
+                </MenuItem>
+                <MenuItem onClick={() => { setMpnMenuAnchor(null); setShowMpnColumns(v => !v); }}>
+                  <ListItemIcon><InfoIcon sx={{ color: showMpnColumns ? '#795548' : '#4caf50' }} /></ListItemIcon>
+                  <ListItemText>{showMpnColumns ? 'Hide MPN Columns' : 'Show MPN Columns'}</ListItemText>
+                </MenuItem>
+              </Menu>
+
+              {/* MORE dropdown (PDF corrections, etc.) */}
+              {isFromPdf && (
+                <>
+                  <Tooltip title="More actions">
+                    <IconButton
+                      onClick={(e) => setMoreMenuAnchor(e.currentTarget)}
+                      sx={{
+                        color: 'white',
+                        border: '1px solid rgba(255,255,255,0.5)',
+                        borderRadius: '8px',
+                        '&:hover': { backgroundColor: 'rgba(255,255,255,0.1)' }
+                      }}
+                    >
+                      <MoreVertIcon />
+                    </IconButton>
+                  </Tooltip>
+                  <Menu
+                    anchorEl={moreMenuAnchor}
+                    open={Boolean(moreMenuAnchor)}
+                    onClose={() => setMoreMenuAnchor(null)}
+                    PaperProps={{ sx: { borderRadius: '10px', mt: 1, minWidth: 220, boxShadow: '0 8px 32px rgba(0,0,0,0.2)' } }}
+                  >
+                    <MenuItem onClick={() => { setMoreMenuAnchor(null); handleExportForCorrection(); }} disabled={downloadLoading || syncStatus.inProgress}>
+                      <ListItemIcon><EditIcon sx={{ color: '#7b1fa2' }} /></ListItemIcon>
+                      <ListItemText>Export for Correction</ListItemText>
+                    </MenuItem>
+                    <MenuItem onClick={() => { setMoreMenuAnchor(null); setCorrectionUploadDialogOpen(true); }} disabled={downloadLoading || syncStatus.inProgress}>
+                      <ListItemIcon><DownloadIcon sx={{ color: '#7b1fa2', transform: 'rotate(180deg)' }} /></ListItemIcon>
+                      <ListItemText>Upload Corrections</ListItemText>
+                    </MenuItem>
+                  </Menu>
+                </>
+              )}
             </Box>
 
             {/* MPN Validation Progress Bar */}
@@ -3229,328 +3018,281 @@ const EnhancedDataEditor = () => {
           )}
         </DialogTitle>
 
-        <DialogContent sx={{ px: 3, py: 3 }}>
-          {/* Export Mode Selection */}
-          <FormControl component="fieldset" sx={{ mb: 2, width: '100%' }}>
-            <FormLabel component="legend" sx={{ fontSize: '14px', fontWeight: 500, mb: 0.5 }}>
-              Export to
-            </FormLabel>
-            <RadioGroup
-              row
-              value={exportProjectMode}
-              onChange={(e) => setExportProjectMode(e.target.value)}
-            >
-              <FormControlLabel
-                value="NEW"
-                control={<Radio sx={{ py: 0.5 }} />}
-                label="New Project"
-              />
-              <FormControlLabel
-                value="EXISTING"
-                control={<Radio sx={{ py: 0.5 }} />}
-                label="Existing Project"
-              />
-            </RadioGroup>
-          </FormControl>
-
-          <Divider sx={{ mb: 2 }} />
-
-          {/* Project Name */}
-          {exportProjectMode === 'NEW' && (
-            <Box sx={{ mb: 2 }}>
-              <Typography variant="body2" sx={{ color: 'text.secondary', mb: 0.5, fontWeight: 500 }}>
-                Project Name
+        {exportProjectLoading ? (
+          <DialogContent sx={{ px: 4, py: 8, textAlign: 'center' }}>
+            <CircularProgress size={56} sx={{ color: '#e65100', mb: 3 }} />
+            <Typography variant="h6" sx={{ fontWeight: 600, color: '#333' }}>
+              Exporting to Project...
+            </Typography>
+            <Typography variant="body2" sx={{ color: 'text.secondary', mt: 1 }}>
+              Please wait
+            </Typography>
+          </DialogContent>
+        ) : exportProjectSuccess ? (
+          <>
+            <DialogContent sx={{ px: 4, py: 5, textAlign: 'center' }}>
+              <Box sx={{
+                width: 80,
+                height: 80,
+                borderRadius: '50%',
+                backgroundColor: '#e8f5e9',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                margin: '0 auto 24px'
+              }}>
+                <CheckCircleIcon sx={{ fontSize: 48, color: '#2e7d32' }} />
+              </Box>
+              <Typography variant="h5" sx={{ fontWeight: 700, color: '#2e7d32', mb: 1.5 }}>
+                Exported Successfully
               </Typography>
-              <TextField
-                fullWidth
-                size="small"
-                value={exportProjectName}
-                onChange={(e) => setExportProjectName(e.target.value)}
-                placeholder="Enter project name..."
-                sx={{ '& .MuiOutlinedInput-root': { borderRadius: '8px' } }}
-              />
-            </Box>
-          )}
-
-          {exportProjectMode === 'EXISTING' && (
-            <Box sx={{ mb: 2 }}>
-              <Typography variant="body2" sx={{ color: 'text.secondary', mb: 0.5, fontWeight: 500 }}>
-                Select Project
+              <Typography variant="body1" sx={{ color: 'text.secondary', mb: 1 }}>
+                Data has been exported to project
               </Typography>
-              <Autocomplete
-                fullWidth
-                options={existingProjects}
-                value={selectedExistingProject}
-                getOptionLabel={(option) =>
-                  option ? `${option.project_code} (${option.project_name})` : ''
-                }
-                isOptionEqualToValue={(option, value) =>
-                  option?.project_id === value?.project_id
-                }
-                onChange={(e, newValue) => {
-                  setSelectedExistingProject(newValue);
+              <Typography variant="h6" sx={{ fontWeight: 600, color: '#333' }}>
+                {exportProjectMode === 'NEW'
+                  ? exportProjectName
+                  : `${selectedExistingProject?.project_code} — ${selectedExistingProject?.project_name}`}
+              </Typography>
+              <Typography variant="body2" sx={{ color: 'text.secondary', mt: 2 }}>
+                {Object.values(exportProjectSelectedColumns).filter(v => v).length} columns exported
+              </Typography>
+            </DialogContent>
+            <DialogActions sx={{ px: 3, py: 2, justifyContent: 'center', backgroundColor: '#f8f9fa', borderTop: '1px solid #e0e0e0' }}>
+              <Button
+                variant="contained"
+                onClick={() => setExportProjectDialogOpen(false)}
+                sx={{
+                  backgroundColor: '#2e7d32',
+                  '&:hover': { backgroundColor: '#1b5e20' },
+                  textTransform: 'none',
+                  borderRadius: '8px',
+                  fontWeight: 600,
+                  px: 4
                 }}
-                renderOption={(props, option) => (
-                  <li {...props} key={option.project_id}>
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, width: '100%', py: 0.5 }}>
-                      <AccountTreeIcon sx={{ color: '#e65100', fontSize: 20, flexShrink: 0 }} />
-                      <Box sx={{ minWidth: 0, flex: 1 }}>
-                        <Typography variant="body2" sx={{ fontWeight: 600, fontSize: '14px' }}>
-                          {option.project_name}
-                        </Typography>
-                        <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: '12px' }}>
-                          {option.project_code}
-                        </Typography>
-                      </Box>
-                      <Chip
-                        label={option.status}
+              >
+                Done
+              </Button>
+            </DialogActions>
+          </>
+        ) : (
+          <>
+            <DialogContent sx={{ px: 3, py: 3 }}>
+              {/* Export Mode Selection */}
+              <FormControl component="fieldset" sx={{ mb: 2, width: '100%' }}>
+                <FormLabel component="legend" sx={{ fontSize: '14px', fontWeight: 500, mb: 0.5 }}>
+                  Export to
+                </FormLabel>
+                <RadioGroup
+                  row
+                  value={exportProjectMode}
+                  onChange={(e) => setExportProjectMode(e.target.value)}
+                >
+                  <FormControlLabel
+                    value="NEW"
+                    control={<Radio sx={{ py: 0.5 }} />}
+                    label="New Project"
+                  />
+                  <FormControlLabel
+                    value="EXISTING"
+                    control={<Radio sx={{ py: 0.5 }} />}
+                    label="Existing Project"
+                  />
+                </RadioGroup>
+              </FormControl>
+
+              <Divider sx={{ mb: 2 }} />
+
+              {/* Project Name */}
+              {exportProjectMode === 'NEW' && (
+                <Box sx={{ mb: 2 }}>
+                  <Typography variant="body2" sx={{ color: 'text.secondary', mb: 0.5, fontWeight: 500 }}>
+                    Project Name
+                  </Typography>
+                  <TextField
+                    fullWidth
+                    size="small"
+                    value={exportProjectName}
+                    onChange={(e) => setExportProjectName(e.target.value)}
+                    placeholder="Enter project name..."
+                    sx={{ '& .MuiOutlinedInput-root': { borderRadius: '8px' } }}
+                  />
+                </Box>
+              )}
+
+              {exportProjectMode === 'EXISTING' && (
+                <Box sx={{ mb: 2 }}>
+                  <Typography variant="body2" sx={{ color: 'text.secondary', mb: 0.5, fontWeight: 500 }}>
+                    Select Project
+                  </Typography>
+                  <Autocomplete
+                    fullWidth
+                    options={existingProjects}
+                    value={selectedExistingProject}
+                    getOptionLabel={(option) =>
+                      option ? `${option.project_code} (${option.project_name})` : ''
+                    }
+                    isOptionEqualToValue={(option, value) =>
+                      option?.project_id === value?.project_id
+                    }
+                    onChange={(_, newValue) => {
+                      setSelectedExistingProject(newValue);
+                    }}
+                    renderOption={(props, option) => (
+                      <li {...props} key={option.project_id}>
+                        <Box sx={{ display: 'flex', alignItems: 'center', width: '100%', py: 0.5 }}>
+                          <Typography variant="body2" sx={{ fontWeight: 600, fontSize: '14px', color: '#1565c0', minWidth: 90 }}>
+                            {option.project_code}
+                          </Typography>
+                          <Typography variant="body2" sx={{ fontSize: '14px', ml: 3, flex: 1 }}>
+                            {option.project_name}
+                          </Typography>
+                        </Box>
+                      </li>
+                    )}
+                    renderInput={(params) => (
+                      <TextField
+                        {...params}
                         size="small"
-                        sx={{
-                          fontSize: '11px',
-                          height: '22px',
-                          backgroundColor: option.status === 'ONGOING' ? '#e8f5e9' : '#f5f5f5',
-                          color: option.status === 'ONGOING' ? '#2e7d32' : '#757575',
-                          fontWeight: 500,
-                          flexShrink: 0
+                        placeholder="Search by project name or code..."
+                        sx={{ '& .MuiOutlinedInput-root': { borderRadius: '8px' } }}
+                        InputProps={{
+                          ...params.InputProps,
+                          startAdornment: (
+                            <>
+                              <SearchIcon sx={{ color: 'text.secondary', fontSize: 20, mr: 0.5 }} />
+                              {params.InputProps.startAdornment}
+                            </>
+                          ),
                         }}
                       />
-                    </Box>
-                  </li>
-                )}
-                renderInput={(params) => (
-                  <TextField
-                    {...params}
-                    size="small"
-                    placeholder="Search by project name or code..."
-                    sx={{ '& .MuiOutlinedInput-root': { borderRadius: '8px' } }}
-                    InputProps={{
-                      ...params.InputProps,
-                      startAdornment: (
-                        <>
-                          <SearchIcon sx={{ color: 'text.secondary', fontSize: 20, mr: 0.5 }} />
-                          {params.InputProps.startAdornment}
-                        </>
-                      ),
-                    }}
+                    )}
+                    noOptionsText="No projects found"
+                    ListboxProps={{ style: { maxHeight: '300px' } }}
                   />
-                )}
-                noOptionsText="No projects found"
-                ListboxProps={{ style: { maxHeight: '300px' } }}
-                sx={{ '& .MuiAutocomplete-listbox': { py: 0.5 } }}
-              />
-              {selectedExistingProject && (
-                <Box sx={{
-                  mt: 1.5,
-                  p: 1.5,
-                  backgroundColor: '#fff3e0',
-                  borderRadius: '8px',
-                  border: '1px solid #ffe0b2',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 1.5
-                }}>
-                  <AccountTreeIcon sx={{ color: '#e65100', fontSize: 24 }} />
-                  <Box>
-                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                      {selectedExistingProject.project_code}
-                    </Typography>
-                    <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                      {selectedExistingProject.project_name}
-                      {selectedExistingProject.description ? ` — ${selectedExistingProject.description}` : ''}
+                </Box>
+              )}
+
+              <Divider sx={{ mb: 2 }} />
+
+              {/* Fields to Export Section */}
+              <Box sx={{ mb: 1 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
+                  <Typography variant="body2" sx={{ color: 'text.secondary', fontWeight: 500 }}>
+                    Fields to be exported
+                  </Typography>
+                  <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                    <Checkbox
+                      checked={exportProjectSelectAll}
+                      indeterminate={
+                        !exportProjectSelectAll &&
+                        Object.values(exportProjectSelectedColumns).some(v => v)
+                      }
+                      onChange={handleExportProjectToggleSelectAll}
+                      size="small"
+                      sx={{ color: '#2e7d32', '&.Mui-checked': { color: '#2e7d32' } }}
+                    />
+                    <Typography variant="body2" sx={{ fontWeight: 500, fontSize: '13px' }}>
+                      SELECT ALL
                     </Typography>
                   </Box>
                 </Box>
-              )}
-            </Box>
-          )}
 
-          <Divider sx={{ mb: 2 }} />
+                <Box sx={{
+                  maxHeight: '280px',
+                  overflowY: 'auto',
+                  border: '1px solid #e0e0e0',
+                  borderRadius: '8px',
+                  backgroundColor: '#fafafa'
+                }}>
+                  <Grid container>
+                    {Object.entries(exportProjectSelectedColumns).map(([field, checked]) => {
+                      const colDef = columnDefs.find(c => c.field === field);
+                      const label = colDef?.headerName || field;
+                      return (
+                        <Grid item xs={6} key={field}>
+                          <Box sx={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            px: 1.5,
+                            py: 0.25,
+                            borderBottom: '1px solid #f0f0f0',
+                            '&:hover': { backgroundColor: '#f5f5f5' }
+                          }}>
+                            <Checkbox
+                              checked={checked}
+                              size="small"
+                              sx={{ color: '#2e7d32', '&.Mui-checked': { color: '#2e7d32' } }}
+                              onChange={(e) => {
+                                const newChecked = e.target.checked;
+                                setExportProjectSelectedColumns(prev => ({
+                                  ...prev,
+                                  [field]: newChecked
+                                }));
+                                const allVals = { ...exportProjectSelectedColumns, [field]: newChecked };
+                                setExportProjectSelectAll(Object.values(allVals).every(v => v));
+                              }}
+                            />
+                            <Typography variant="body2" sx={{
+                              fontSize: '13px',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap'
+                            }}>
+                              {label}
+                            </Typography>
+                          </Box>
+                        </Grid>
+                      );
+                    })}
+                  </Grid>
+                </Box>
 
-          {/* Fields to Export Section */}
-          <Box sx={{ mb: 1 }}>
-            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
-              <Typography variant="body2" sx={{ color: 'text.secondary', fontWeight: 500 }}>
-                Fields to be exported
-              </Typography>
-              <Box sx={{ display: 'flex', alignItems: 'center' }}>
-                <Checkbox
-                  checked={exportProjectSelectAll}
-                  indeterminate={
-                    !exportProjectSelectAll &&
-                    Object.values(exportProjectSelectedColumns).some(v => v)
-                  }
-                  onChange={handleExportProjectToggleSelectAll}
-                  size="small"
-                  sx={{ color: '#2e7d32', '&.Mui-checked': { color: '#2e7d32' } }}
-                />
-                <Typography variant="body2" sx={{ fontWeight: 500, fontSize: '13px' }}>
-                  SELECT ALL
+                <Typography variant="caption" sx={{ color: 'text.secondary', mt: 0.5, display: 'block' }}>
+                  {Object.values(exportProjectSelectedColumns).filter(v => v).length} of{' '}
+                  {Object.keys(exportProjectSelectedColumns).length} columns selected
                 </Typography>
               </Box>
-            </Box>
+            </DialogContent>
 
-            <Box sx={{
-              maxHeight: '280px',
-              overflowY: 'auto',
-              border: '1px solid #e0e0e0',
-              borderRadius: '8px',
-              backgroundColor: '#fafafa'
+            <DialogActions sx={{
+              px: 3,
+              py: 2,
+              backgroundColor: '#f8f9fa',
+              borderTop: '1px solid #e0e0e0',
+              gap: 1
             }}>
-              <Grid container>
-                {Object.entries(exportProjectSelectedColumns).map(([field, checked], idx) => {
-                  const colDef = columnDefs.find(c => c.field === field);
-                  const label = colDef?.headerName || field;
-                  return (
-                    <Grid item xs={6} key={field}>
-                      <Box sx={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        px: 1.5,
-                        py: 0.25,
-                        borderBottom: '1px solid #f0f0f0',
-                        '&:hover': { backgroundColor: '#f5f5f5' }
-                      }}>
-                        <Checkbox
-                          checked={checked}
-                          size="small"
-                          sx={{ color: '#2e7d32', '&.Mui-checked': { color: '#2e7d32' } }}
-                          onChange={(e) => {
-                            const newChecked = e.target.checked;
-                            setExportProjectSelectedColumns(prev => ({
-                              ...prev,
-                              [field]: newChecked
-                            }));
-                            // Update select all state
-                            const allVals = { ...exportProjectSelectedColumns, [field]: newChecked };
-                            setExportProjectSelectAll(Object.values(allVals).every(v => v));
-                          }}
-                        />
-                        <Typography variant="body2" sx={{
-                          fontSize: '13px',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap'
-                        }}>
-                          {label}
-                        </Typography>
-                      </Box>
-                    </Grid>
-                  );
-                })}
-              </Grid>
-            </Box>
-
-            <Typography variant="caption" sx={{ color: 'text.secondary', mt: 0.5, display: 'block' }}>
-              {Object.values(exportProjectSelectedColumns).filter(v => v).length} of{' '}
-              {Object.keys(exportProjectSelectedColumns).length} columns selected
-            </Typography>
-          </Box>
-        </DialogContent>
-
-        <DialogActions sx={{
-          px: 3,
-          py: 2,
-          backgroundColor: '#f8f9fa',
-          borderTop: '1px solid #e0e0e0',
-          gap: 1
-        }}>
-          <Button
-            variant="outlined"
-            color="error"
-            onClick={() => setExportProjectDialogOpen(false)}
-            disabled={exportProjectLoading}
-            sx={{ textTransform: 'none', borderRadius: '8px' }}
-          >
-            Cancel
-          </Button>
-          <Button
-            variant="contained"
-            onClick={handleExportProjectConfirm}
-            disabled={
-              exportProjectLoading ||
-              (exportProjectMode === 'NEW' && !exportProjectName.trim()) ||
-              Object.values(exportProjectSelectedColumns).every(v => !v)
-            }
-            startIcon={exportProjectLoading ? <CircularProgress size={18} sx={{ color: '#c4c4c8' }} /> : <FolderOpenIcon />}
-            sx={{
-              backgroundColor: '#e65100',
-              '&:hover': { backgroundColor: '#bf360c' },
-              textTransform: 'none',
-              borderRadius: '8px',
-              fontWeight: 600
-            }}
-          >
-            {exportProjectLoading ? 'Exporting...' : 'Export'}
-          </Button>
-        </DialogActions>
+              <Button
+                variant="outlined"
+                color="error"
+                onClick={() => setExportProjectDialogOpen(false)}
+                sx={{ textTransform: 'none', borderRadius: '8px' }}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="contained"
+                onClick={handleExportProjectConfirm}
+                disabled={
+                  (exportProjectMode === 'NEW' && !exportProjectName.trim()) ||
+                  (exportProjectMode === 'EXISTING' && !selectedExistingProject) ||
+                  Object.values(exportProjectSelectedColumns).every(v => !v)
+                }
+                startIcon={<FolderOpenIcon />}
+                sx={{
+                  backgroundColor: '#e65100',
+                  '&:hover': { backgroundColor: '#bf360c' },
+                  textTransform: 'none',
+                  borderRadius: '8px',
+                  fontWeight: 600
+                }}
+              >
+                Export
+              </Button>
+            </DialogActions>
+          </>
+        )}
       </Dialog>
-
-      {/* Export to Project Full-Screen Loader with Blur */}
-      {exportProjectFullScreenLoading && (
-        <Box sx={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backdropFilter: 'blur(8px)',
-          backgroundColor: 'rgba(0, 0, 0, 0.4)',
-          zIndex: 9999,
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          gap: 3
-        }}>
-          <Box sx={{
-            backgroundColor: 'white',
-            borderRadius: '16px',
-            padding: '40px 60px',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            gap: 2.5,
-            boxShadow: '0 8px 32px rgba(0,0,0,0.2)'
-          }}>
-            <Box sx={{
-              position: 'relative',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center'
-            }}>
-              <CircularProgress
-                size={80}
-                thickness={3}
-                sx={{ color: '#e65100' }}
-              />
-              <FolderOpenIcon sx={{
-                position: 'absolute',
-                fontSize: 36,
-                color: '#e65100'
-              }} />
-            </Box>
-            <Typography variant="h5" sx={{ fontWeight: 600, color: '#333' }}>
-              Exporting to Project
-            </Typography>
-            <Typography variant="body1" sx={{ color: 'text.secondary', textAlign: 'center', maxWidth: 400 }}>
-              {exportProjectLabel}
-            </Typography>
-            <LinearProgress sx={{
-              width: 300,
-              height: 6,
-              borderRadius: 3,
-              backgroundColor: '#ffe0b2',
-              '& .MuiLinearProgress-bar': {
-                backgroundColor: '#e65100',
-                borderRadius: 3
-              }
-            }} />
-            <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-              Please wait while your data is being exported...
-            </Typography>
-          </Box>
-        </Box>
-      )}
 
       {/* Snackbar for notifications */}
       <Snackbar
