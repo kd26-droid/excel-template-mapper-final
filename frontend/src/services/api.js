@@ -1178,6 +1178,18 @@ const api = {
   },
 
   /**
+   * Split multi-MPN cells into one row per MPN before validation
+   * @param {string} sessionId
+   * @param {string} mpnHeader optional selected MPN column name
+   */
+  splitMPNCells: (sessionId, mpnHeader = null, splitOptions = null) => {
+    const payload = { session_id: sessionId };
+    if (mpnHeader) payload.mpn_header = mpnHeader;
+    if (splitOptions) payload.split_options = splitOptions;
+    return axios.post(`${API_URL}/mpn/split-cells/`, payload, { timeout: 120000 });
+  },
+
+  /**
    * Validate MPNs from parser Specification columns
    */
   validateParserSpecMPNs: (sessionId) => {

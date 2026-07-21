@@ -50,6 +50,493 @@ def detect_mpn_header(headers: List[str]) -> Optional[str]:
     return None
 
 
+DEFAULT_MPN_SPLIT_OPTIONS = {
+    'strip_alpha_prefix': True,
+    'alpha_prefix_min_length': 5,
+    'strip_numeric_prefix': True,
+    'numeric_prefix_length': 5,
+    'extra_prefixes': ['AGILE'],
+}
+
+
+DEFAULT_MANUFACTURER_ALIASES = {
+    'NIC': 'NIC COMPONENTS',
+}
+
+
+DEFAULT_MANUFACTURER_DISCARD_TOKENS = {
+    'COMPONENT',
+    'COMPONENTS',
+}
+
+
+def normalize_mpn_split_options(options=None):
+    raw = options if isinstance(options, dict) else {}
+    normalized = dict(DEFAULT_MPN_SPLIT_OPTIONS)
+    normalized.update({k: v for k, v in raw.items() if k in normalized})
+    try:
+        normalized['alpha_prefix_min_length'] = max(1, int(normalized['alpha_prefix_min_length']))
+    except (TypeError, ValueError):
+        normalized['alpha_prefix_min_length'] = DEFAULT_MPN_SPLIT_OPTIONS['alpha_prefix_min_length']
+    try:
+        normalized['numeric_prefix_length'] = max(1, int(normalized['numeric_prefix_length']))
+    except (TypeError, ValueError):
+        normalized['numeric_prefix_length'] = DEFAULT_MPN_SPLIT_OPTIONS['numeric_prefix_length']
+    normalized['strip_alpha_prefix'] = bool(normalized['strip_alpha_prefix'])
+    normalized['strip_numeric_prefix'] = bool(normalized['strip_numeric_prefix'])
+    normalized['extra_prefixes'] = [
+        str(prefix).strip().upper()
+        for prefix in (normalized.get('extra_prefixes') or [])
+        if str(prefix).strip()
+    ]
+    return normalized
+
+
+def build_prefix_pattern(options=None) -> str:
+    split_options = normalize_mpn_split_options(options)
+    prefixes = []
+    if split_options['strip_alpha_prefix']:
+        prefixes.append(rf"[A-Za-z]{{{split_options['alpha_prefix_min_length']},}}")
+    if split_options['strip_numeric_prefix']:
+        prefixes.append(rf"\d{{{split_options['numeric_prefix_length']}}}")
+    prefixes.extend(re.escape(prefix) for prefix in split_options['extra_prefixes'])
+    if not prefixes:
+        return r"(?!x)x"
+    return rf"(?:{'|'.join(prefixes)})"
+
+
+def looks_like_combined_mpn_cell(value, options=None) -> bool:
+    """Detect BOM cells that contain several supplier-prefixed MPNs in one value."""
+    return len(split_combined_mpn_cell(value, options)) > 1
+
+
+def split_combined_mpn_cell(value, options=None) -> List[str]:
+    """Split BOM-style multi-MPN cells while preserving MPNs that contain spaces."""
+    text = str(value or '').strip()
+    if not text:
+        return []
+
+    starts = []
+    prefix_pattern = build_prefix_pattern(options)
+    for match in re.finditer(rf"(?=(?:^|\s){prefix_pattern}[- ])", text):
+        start = match.start()
+        if start < len(text) and text[start].isspace():
+            start += 1
+        starts.append(start)
+
+    if len(starts) > 1:
+        parts = []
+        starts = sorted(set(starts))
+        for index, start in enumerate(starts):
+            end = starts[index + 1] if index + 1 < len(starts) else len(text)
+            part = text[start:end].strip()
+            if part:
+                parts.append(part)
+        return parts
+
+    # Conservative fallback for visibly separated lists. Avoid splitting on
+    # ordinary spaces because some real MPNs contain spaces.
+    if any(separator in text for separator in [",", ";", "|", "\n"]):
+        parts = [p.strip() for p in re.split(r"[,;|\n]+", text) if p.strip()]
+        if len(parts) > 1:
+            return parts
+
+    return [text]
+
+
+def normalize_split_mpn(part, options=None) -> str:
+    """Remove supplier/vendor prefixes from a split MPN candidate."""
+    text = str(part or '').strip()
+    text = re.sub(r"\s+", " ", text)
+    prefix_pattern = build_prefix_pattern(options)
+    return re.sub(rf"^{prefix_pattern}[-\s]+", "", text, flags=re.IGNORECASE).strip()
+
+
+MANUFACTURER_JOIN_WORDS = {
+    'AG',
+    'CO',
+    'COMPONENT',
+    'COMPONENTS',
+    'CONNECTIVITY',
+    'CORP',
+    'CORPORATION',
+    'DEVICES',
+    'ELECTRIC',
+    'ELECTRONIC',
+    'ELECTRONICS',
+    'GMBH',
+    'INC',
+    'INDUSTRIES',
+    'INSTRUMENTS',
+    'INTERNATIONAL',
+    'LIMITED',
+    'LLC',
+    'LTD',
+    'MICROELECTRONICS',
+    'SEMICONDUCTOR',
+    'SEMICONDUCTORS',
+    'SYSTEMS',
+    'TECHNOLOGIES',
+    'TECHNOLOGY',
+}
+
+
+KNOWN_MANUFACTURER_PHRASES = [
+    'INFINEON TECHNOLOGIES AG',
+    'ON SEMICONDUCTOR',
+    'NIC COMPONENTS',
+    'TEXAS INSTRUMENTS',
+    'ANALOG DEVICES',
+    'MICROCHIP TECHNOLOGY',
+    'NXP SEMICONDUCTORS',
+    'VISHAY DALE',
+    'VISHAY INTERTECHNOLOGY',
+    'TE CONNECTIVITY',
+    'BOURNS INC',
+    'KEMET ELECTRONICS',
+    'TDK CORPORATION',
+    'MURATA ELECTRONICS',
+    'SAMSUNG ELECTRO-MECHANICS',
+    'PANASONIC ELECTRONIC COMPONENTS',
+]
+
+
+def normalize_manufacturer_options(options=None):
+    raw = options if isinstance(options, dict) else {}
+    aliases = dict(DEFAULT_MANUFACTURER_ALIASES)
+    raw_aliases = raw.get('aliases') or raw.get('manufacturer_aliases') or {}
+    if isinstance(raw_aliases, dict):
+        iterable_aliases = raw_aliases.items()
+    elif isinstance(raw_aliases, list):
+        iterable_aliases = [
+            (item.get('from'), item.get('to'))
+            for item in raw_aliases
+            if isinstance(item, dict)
+        ]
+    else:
+        iterable_aliases = []
+    for source, target in iterable_aliases:
+        source_text = str(source or '').strip().upper()
+        target_text = str(target or '').strip()
+        if source_text:
+            aliases[source_text] = target_text
+
+    discard_tokens = set(DEFAULT_MANUFACTURER_DISCARD_TOKENS)
+    for token in raw.get('discard_tokens') or raw.get('manufacturer_discard_tokens') or []:
+        token_text = str(token or '').strip().upper()
+        if token_text:
+            discard_tokens.add(token_text)
+
+    return {
+        'aliases': {str(k).upper(): str(v).strip() for k, v in aliases.items()},
+        'discard_tokens': discard_tokens,
+    }
+
+
+def serialize_manufacturer_options(options):
+    return {
+        'aliases': options.get('aliases') or {},
+        'discard_tokens': sorted(options.get('discard_tokens') or []),
+    }
+
+
+def normalize_manufacturer_name(value, options=None) -> str:
+    manufacturer_options = normalize_manufacturer_options(options)
+    text = re.sub(r"\s+", " ", str(value or '').strip())
+    if not text:
+        return ''
+    alias_value = manufacturer_options['aliases'].get(text.upper())
+    if alias_value is not None:
+        return alias_value
+    if text.upper() in manufacturer_options['discard_tokens']:
+        return ''
+    return text
+
+
+def split_manufacturer_cell(value, expected_count: int, options=None) -> List[str]:
+    """Split a manufacturer list into one manufacturer per split MPN."""
+    text = str(value or '').strip()
+    if not text:
+        return []
+
+    delimiter_parts = [p.strip() for p in re.split(r"[,;|\n]+", text) if p.strip()]
+    if len(delimiter_parts) == expected_count:
+        return [name for name in (normalize_manufacturer_name(p, options) for p in delimiter_parts) if name]
+
+    original_tokens = re.findall(r"[A-Za-z0-9&.+/-]+", text)
+    upper_tokens = [token.upper() for token in original_tokens]
+    if not upper_tokens:
+        return []
+
+    manufacturer_options = normalize_manufacturer_options(options)
+    aliases = manufacturer_options['aliases']
+    discard_tokens = manufacturer_options['discard_tokens']
+    phrase_tokens = [
+        (phrase, phrase.split())
+        for phrase in sorted(KNOWN_MANUFACTURER_PHRASES, key=lambda item: len(item.split()), reverse=True)
+    ]
+
+    manufacturers = []
+    index = 0
+    while index < len(upper_tokens):
+        token = upper_tokens[index]
+        if token in aliases:
+            alias_value = aliases[token]
+            index += 1
+            while index < len(upper_tokens) and upper_tokens[index] in discard_tokens:
+                index += 1
+            if alias_value:
+                manufacturers.append(alias_value)
+            continue
+
+        if token in discard_tokens:
+            index += 1
+            continue
+
+        matched = None
+        for phrase, parts in phrase_tokens:
+            if upper_tokens[index:index + len(parts)] == parts:
+                matched = len(parts)
+                break
+
+        if matched:
+            manufacturers.append(' '.join(original_tokens[index:index + matched]))
+            index += matched
+            continue
+
+        current = [original_tokens[index]]
+        index += 1
+        while index < len(upper_tokens) and upper_tokens[index] in MANUFACTURER_JOIN_WORDS:
+            current.append(original_tokens[index])
+            index += 1
+        normalized = normalize_manufacturer_name(' '.join(current), options)
+        if normalized:
+            manufacturers.append(normalized)
+
+    if len(manufacturers) == expected_count:
+        return manufacturers
+
+    if len(manufacturers) > expected_count and expected_count > 0:
+        return manufacturers[:expected_count - 1] + [' '.join(manufacturers[expected_count - 1:])]
+
+    return []
+
+
+def _normalized_header(header) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(header or '').lower()).strip()
+
+
+def _spec_column_key(header, kind: str) -> Optional[str]:
+    normalized = _normalized_header(header)
+    match = re.match(rf"^specification {kind}(?: (\d+))?$", normalized)
+    if match:
+        return match.group(1) or 'base'
+    return None
+
+
+def find_manufacturer_columns(headers: List[str]):
+    """Find mapped columns that should carry the per-MPN manufacturer value."""
+    direct_indices = []
+    tag_indices = []
+    spec_pairs = {}
+
+    for index, header in enumerate(headers):
+        normalized = _normalized_header(header)
+        if normalized in {'tag'} or re.match(r"^tag \d+$", normalized):
+            tag_indices.append(index)
+        if 'manufacturer' in normalized and 'equivalent' not in normalized and 'part' not in normalized:
+            direct_indices.append(index)
+
+        name_key = _spec_column_key(header, 'name')
+        value_key = _spec_column_key(header, 'value')
+        if name_key:
+            spec_pairs.setdefault(name_key, {})['name'] = index
+        if value_key:
+            spec_pairs.setdefault(value_key, {})['value'] = index
+
+    return direct_indices, tag_indices, spec_pairs
+
+
+def manufacturer_context_for_row(row, direct_indices, tag_indices, spec_pairs):
+    """Return the manufacturer text and columns to update for this row."""
+    candidates = []
+    update_indices = set()
+
+    for index in direct_indices:
+        if index < len(row):
+            value = str(row[index] or '').strip()
+            if value:
+                candidates.append(value)
+                update_indices.add(index)
+
+    for pair in spec_pairs.values():
+        name_index = pair.get('name')
+        value_index = pair.get('value')
+        if name_index is None or value_index is None:
+            continue
+        spec_name = str(row[name_index] if name_index < len(row) else '').strip().lower()
+        if spec_name in {'manufacturer', 'mfr', 'manufacturer name'}:
+            value = str(row[value_index] if value_index < len(row) else '').strip()
+            if value:
+                candidates.append(value)
+                update_indices.add(value_index)
+
+    if not candidates:
+        return '', []
+
+    manufacturer_text = max(candidates, key=len)
+    for index in tag_indices:
+        if index < len(row) and str(row[index] or '').strip() == manufacturer_text:
+            update_indices.add(index)
+
+    return manufacturer_text, sorted(update_indices)
+
+
+@api_view(['POST'])
+def mpn_split_cells(request):
+    """Expand rows where the MPN column contains multiple MPNs in one cell."""
+    try:
+        session_id = request.data.get('session_id')
+        if not session_id:
+            return Response({'success': False, 'error': 'session_id required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+
+        mapping = info.get('mappings')
+        if not mapping:
+            return Response({'success': False, 'error': 'No mappings found'}, status=status.HTTP_400_BAD_REQUEST)
+
+        result = apply_column_mappings(
+            client_file=info['client_path'],
+            mappings=mapping if isinstance(mapping, dict) else {'mappings': mapping},
+            sheet_name=info['sheet_name'],
+            header_row=info['header_row'] - 1 if info['header_row'] > 0 else 0,
+            session_id=session_id
+        )
+        headers = result.get('headers') or []
+        rows = result.get('data') or []
+
+        mpn_header = request.data.get('mpn_header')
+        if not mpn_header or mpn_header not in headers:
+            mpn_header = detect_mpn_header(headers)
+        if not mpn_header or mpn_header not in headers:
+            return Response({'success': False, 'error': 'MPN column not found'}, status=status.HTTP_400_BAD_REQUEST)
+
+        split_options = request.data.get('split_options') or {}
+        mpn_split_options = normalize_mpn_split_options(split_options.get('mpn') or split_options)
+        manufacturer_options = normalize_manufacturer_options(split_options.get('manufacturer') or split_options)
+
+        mpn_index = headers.index(mpn_header)
+        original_header = 'Original MPN Cell'
+        output_headers = list(headers)
+        if original_header not in output_headers:
+            output_headers.append(original_header)
+        original_index = output_headers.index(original_header)
+        direct_mfr_indices, tag_indices, spec_pairs = find_manufacturer_columns(output_headers)
+
+        output_rows = []
+        split_rows = 0
+        created_rows = 0
+        max_parts = 1
+        normalized_mpns = 0
+        paired_manufacturer_rows = 0
+
+        for row in rows:
+            expanded_row = list(row) + [''] * (len(output_headers) - len(row))
+            raw_value = expanded_row[mpn_index] if mpn_index < len(expanded_row) else ''
+            parts = split_combined_mpn_cell(raw_value, mpn_split_options)
+            if len(parts) <= 1:
+                normalized_value = normalize_split_mpn(raw_value, mpn_split_options)
+                if normalized_value != str(raw_value or '').strip():
+                    normalized_mpns += 1
+                expanded_row[mpn_index] = normalized_value
+                output_rows.append(expanded_row)
+                continue
+
+            manufacturer_text, manufacturer_update_indices = manufacturer_context_for_row(
+                expanded_row,
+                direct_mfr_indices,
+                tag_indices,
+                spec_pairs
+            )
+            manufacturers = split_manufacturer_cell(manufacturer_text, len(parts), manufacturer_options)
+
+            split_rows += 1
+            max_parts = max(max_parts, len(parts))
+            for part_index, part in enumerate(parts):
+                new_row = list(expanded_row)
+                normalized_part = normalize_split_mpn(part, mpn_split_options)
+                if normalized_part != str(part or '').strip():
+                    normalized_mpns += 1
+                new_row[mpn_index] = normalized_part
+                if manufacturers:
+                    for manufacturer_index in manufacturer_update_indices:
+                        new_row[manufacturer_index] = manufacturers[part_index]
+                    paired_manufacturer_rows += 1
+                new_row[original_index] = raw_value
+                output_rows.append(new_row)
+                created_rows += 1
+
+        enhanced_result = {
+            'headers': output_headers,
+            'data': output_rows,
+        }
+
+        if split_rows == 0 and normalized_mpns == 0:
+            return Response({
+                'success': True,
+                'message': 'No multi-MPN cells found',
+                'mpn_header': mpn_header,
+                'split_rows': 0,
+                'created_rows': len(rows),
+                'headers': output_headers,
+                'data': output_rows,
+            })
+
+        info['enhanced_data'] = enhanced_result
+        info['edited_data'] = enhanced_result
+        info['enhanced_headers'] = output_headers
+        info['current_template_headers'] = output_headers
+        info['mpn_split'] = {
+            'column': mpn_header,
+            'split_rows': split_rows,
+            'created_rows': created_rows,
+            'max_parts': max_parts,
+            'normalized_mpns': normalized_mpns,
+            'paired_manufacturer_rows': paired_manufacturer_rows,
+            'split_options': {
+                'mpn': mpn_split_options,
+                'manufacturer': serialize_manufacturer_options(manufacturer_options),
+            },
+        }
+        save_session(session_id, info)
+
+        response_message = (
+            f'Split {split_rows} rows into {created_rows} MPN rows'
+            if split_rows > 0
+            else f'Cleaned {normalized_mpns} MPN values'
+        )
+
+        return Response({
+            'success': True,
+            'message': response_message,
+            'mpn_header': mpn_header,
+            'split_rows': split_rows,
+            'created_rows': created_rows,
+            'total_rows': len(output_rows),
+            'max_parts': max_parts,
+            'normalized_mpns': normalized_mpns,
+            'paired_manufacturer_rows': paired_manufacturer_rows,
+            'headers': output_headers,
+            'data': output_rows,
+        })
+    except Exception as e:
+        logger.error(f"MPN split failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 @api_view(['GET'])
 def mpn_auth_status(request):
     client = DigiKeyClient()
@@ -105,15 +592,21 @@ def mpn_validate(request):
         if not mapping:
             return Response({ 'success': False, 'error': 'No mappings found' }, status=status.HTTP_400_BAD_REQUEST)
 
-        result = apply_column_mappings(
-            client_file=info['client_path'],
-            mappings=mapping if isinstance(mapping, dict) else { 'mappings': mapping },
-            sheet_name=info['sheet_name'],
-            header_row=info['header_row'] - 1 if info['header_row'] > 0 else 0,
-            session_id=session_id
-        )
-        headers = result['headers']
-        rows = result['data']
+        current_data = info.get('enhanced_data')
+        if current_data and current_data.get('headers') and current_data.get('data'):
+            headers = current_data['headers']
+            rows = current_data['data']
+            logger.info("MPN_VALIDATION_DATA: Using current enhanced/split session data")
+        else:
+            result = apply_column_mappings(
+                client_file=info['client_path'],
+                mappings=mapping if isinstance(mapping, dict) else { 'mappings': mapping },
+                sheet_name=info['sheet_name'],
+                header_row=info['header_row'] - 1 if info['header_row'] > 0 else 0,
+                session_id=session_id
+            )
+            headers = result['headers']
+            rows = result['data']
 
         # Determine MPN header
         mpn_header = request.data.get('mpn_header')
@@ -121,6 +614,13 @@ def mpn_validate(request):
         if not mpn_header:
             mpn_header = detect_mpn_header(headers)
             logger.info(f"📌 MPN_VALIDATION_HEADER: Auto-detected mpn_header='{mpn_header}'")
+        if mpn_header and mpn_header not in headers:
+            fallback_header = detect_mpn_header(headers)
+            logger.warning(
+                f"MPN_VALIDATION_HEADER: Requested mpn_header='{mpn_header}' not found; "
+                f"falling back to auto-detected mpn_header='{fallback_header}'"
+            )
+            mpn_header = fallback_header
         if not mpn_header or mpn_header not in headers:
             logger.error(f"❌ MPN_VALIDATION_ERROR: MPN column '{mpn_header}' not found in headers: {headers}")
             return Response({ 'success': False, 'error': 'MPN column not found' }, status=status.HTTP_400_BAD_REQUEST)
@@ -147,6 +647,15 @@ def mpn_validate(request):
         skipped_empty = 0
         for d in dict_rows:
             raw = d.get(mpn_header, '')
+            if looks_like_combined_mpn_cell(raw):
+                return Response({
+                    'success': False,
+                    'error': (
+                        f'MPN column "{mpn_header}" contains multiple MPNs in a single cell. '
+                        'Split Manufacturer Equivalent part into one row per MPN before validation.'
+                    ),
+                    'code': 'combined_mpn_cell'
+                }, status=status.HTTP_400_BAD_REQUEST)
             norm = client.normalize_mpn(raw)
             if not norm:
                 skipped_empty += 1

@@ -74,7 +74,8 @@ import {
   KeyboardArrowDown as KeyboardArrowDownIcon,
   MoreVert as MoreVertIcon,
   Build as BuildIcon,
-  VerifiedUser as VerifiedUserIcon
+  VerifiedUser as VerifiedUserIcon,
+  ContentCut as ContentCutIcon
 } from '@mui/icons-material';
 import api from '../services/api';
 import * as XLSX from 'xlsx';
@@ -227,6 +228,7 @@ const EnhancedDataEditor = () => {
 
   // Create Factwise ID state
   const [factwiseIdDialogOpen, setFactwiseIdDialogOpen] = useState(false);
+  const [factwiseStrategyDialogOpen, setFactwiseStrategyDialogOpen] = useState(false);
   const [firstColumn, setFirstColumn] = useState('');
   const [secondColumn, setSecondColumn] = useState('');
   const [operator, setOperator] = useState('_');
@@ -264,6 +266,17 @@ const EnhancedDataEditor = () => {
   const [mpnValidationCompleted, setMpnValidationCompleted] = useState(false);
   const [mpnFilterInvalidOnly, setMpnFilterInvalidOnly] = useState(false);
   const [showMpnColumns, setShowMpnColumns] = useState(true);
+  const [mpnSplitting, setMpnSplitting] = useState(false);
+  const [mpnSplitDialogOpen, setMpnSplitDialogOpen] = useState(false);
+  const [mpnSplitOptions, setMpnSplitOptions] = useState({
+    stripAlphaPrefix: true,
+    alphaPrefixMinLength: 5,
+    stripNumericPrefix: true,
+    numericPrefixLength: 5,
+    extraPrefixes: 'AGILE',
+    manufacturerAliases: 'NIC=NIC COMPONENTS\nCOMPONENTS=',
+    manufacturerDiscardTokens: 'COMPONENT\nCOMPONENTS'
+  });
 
   // Helper function to identify MPN validation columns
   const isMpnValidationColumn = useCallback((columnName) => {
@@ -1120,28 +1133,13 @@ const EnhancedDataEditor = () => {
   }, [sessionId, isDatasetFresh, showSnackbar, fetchPageData, page, pageSize]);
 
   // ─── ENHANCED FACTWISE ID CREATION ──────────────────────────────────────────
-  const handleCreateFactwiseIdSynchronized = useCallback(async () => {
+  const runCreateFactwiseIdSynchronized = useCallback(async (strategy = 'fill_only_null') => {
     if (!firstColumn || !secondColumn) {
       showSnackbar('Please select both columns for creating Factwise ID', 'error');
       return;
     }
 
     try {
-      // Determine strategy
-      const itemCodeCol = columnDefs.find(c => (c.headerName || c.field).toLowerCase() === 'item code' || (c.headerName || c.field).toLowerCase() === 'item_code');
-      let strategy = 'fill_only_null';
-      if (itemCodeCol) {
-        const hasExisting = rowData.some(r => {
-          const v = r[itemCodeCol.field];
-          return v !== null && v !== undefined && String(v).trim() !== '';
-        });
-        if (hasExisting) {
-          const choice = window.prompt('Current values exist in "Item Code". Type:\n1 to Fill only null\n2 to Override all\n3 to Cancel');
-          if (choice === '3' || choice === null) return;
-          if (choice === '2') strategy = 'override_all';
-        }
-      }
-
       setLoading(true);
       
       const syncResult = await synchronizer.current.createFactWiseIdSynchronized(
@@ -1175,7 +1173,30 @@ const EnhancedDataEditor = () => {
     } finally {
       setLoading(false);
     }
-  }, [firstColumn, secondColumn, operator, showSnackbar, fetchDataSynchronized, columnDefs, rowData, updateDataIntegrity]);
+  }, [firstColumn, secondColumn, operator, showSnackbar, fetchDataSynchronized, updateDataIntegrity]);
+
+  const handleCreateFactwiseIdSynchronized = useCallback(async () => {
+    if (!firstColumn || !secondColumn) {
+      showSnackbar('Please select both columns for creating Factwise ID', 'error');
+      return;
+    }
+
+    const itemCodeCol = columnDefs.find(c => {
+      const name = String(c.headerName || c.field || '').toLowerCase();
+      return name === 'item code' || name === 'item_code';
+    });
+    const hasExisting = itemCodeCol && rowData.some(r => {
+      const v = r[itemCodeCol.field];
+      return v !== null && v !== undefined && String(v).trim() !== '';
+    });
+
+    if (hasExisting) {
+      setFactwiseStrategyDialogOpen(true);
+      return;
+    }
+
+    await runCreateFactwiseIdSynchronized('fill_only_null');
+  }, [firstColumn, secondColumn, columnDefs, rowData, showSnackbar, runCreateFactwiseIdSynchronized]);
 
   // ─── ENHANCED FORMULA APPLICATION ───────────────────────────────────────────
   const handleApplyFormulasSynchronized = useCallback(async (formulaResult) => {
@@ -1337,6 +1358,7 @@ const EnhancedDataEditor = () => {
 
   const handleCloseFactwiseIdDialog = useCallback(() => {
     setFactwiseIdDialogOpen(false);
+    setFactwiseStrategyDialogOpen(false);
     setFirstColumn('');
     setSecondColumn('');
     setOperator('_');
@@ -1477,6 +1499,24 @@ const EnhancedDataEditor = () => {
       const counts = dynamicColumnCounts || { tags_count: 1, spec_pairs_count: 1, customer_id_pairs_count: 1 };
       const defaults = defaultValues || {};
       const rules = Array.isArray(appliedFormulas) ? appliedFormulas : [];
+      let currentMappings = null;
+      let currentFactwiseRules = null;
+
+      try {
+        const existing = await api.getExistingMappings(sessionId);
+        currentMappings = existing?.data?.mappings || null;
+        currentFactwiseRules = existing?.data?.session_metadata?.factwise_rules || null;
+      } catch (_) {}
+
+      if ((!currentFactwiseRules || currentFactwiseRules.length === 0) && factwiseIdRule) {
+        currentFactwiseRules = [{
+          type: 'factwise_id',
+          first_column: factwiseIdRule.firstColumn,
+          second_column: factwiseIdRule.secondColumn,
+          operator: factwiseIdRule.operator || '_',
+          strategy: factwiseIdRule.strategy || 'fill_only_null'
+        }];
+      }
 
       // Include MPN validation metadata if completed
       const mpnValidationMetadata = mpnValidationCompleted ? {
@@ -1489,9 +1529,9 @@ const EnhancedDataEditor = () => {
         sessionId,
         templateName.trim(),
         `Saved from Data Editor (${rules.length} tag rules${mpnValidationCompleted ? ', MPN validated' : ''})`,
-        null,
+        currentMappings,
         rules,
-        null,
+        currentFactwiseRules,
         Object.keys(defaults).length > 0 ? defaults : null,
         counts,
         mpnValidationMetadata
@@ -1509,7 +1549,7 @@ const EnhancedDataEditor = () => {
     } finally {
       setTemplateSaving(false);
     }
-  }, [sessionId, templateName, dynamicColumnCounts, defaultValues, appliedFormulas, mpnValidationCompleted, originalMpnColumn, mpnColumn, mpnManufacturerColumn, showSnackbar, handleCloseSaveTemplateDialog]);
+  }, [sessionId, templateName, dynamicColumnCounts, defaultValues, appliedFormulas, factwiseIdRule, mpnValidationCompleted, originalMpnColumn, mpnColumn, mpnManufacturerColumn, showSnackbar, handleCloseSaveTemplateDialog]);
 
   // ─── DOWNLOAD HANDLERS ─────────────────────────────────────────────────────
   const handleDownloadConverted = useCallback(async () => {
@@ -1600,6 +1640,79 @@ const EnhancedDataEditor = () => {
       setDownloadLoading(false);
     }
   }, [sessionId, columnDefs, rowData, showSnackbar]);
+
+  const buildMpnSplitOptionsPayload = useCallback(() => {
+    const parseLines = (value) => String(value || '')
+      .split(/\r?\n|,/)
+      .map(item => item.trim())
+      .filter(Boolean);
+
+    const aliases = {};
+    parseLines(mpnSplitOptions.manufacturerAliases).forEach(line => {
+      const separatorIndex = line.indexOf('=');
+      if (separatorIndex === -1) return;
+      const source = line.slice(0, separatorIndex).trim();
+      const target = line.slice(separatorIndex + 1).trim();
+      if (source) aliases[source] = target;
+    });
+
+    return {
+      mpn: {
+        strip_alpha_prefix: Boolean(mpnSplitOptions.stripAlphaPrefix),
+        alpha_prefix_min_length: Number(mpnSplitOptions.alphaPrefixMinLength) || 5,
+        strip_numeric_prefix: Boolean(mpnSplitOptions.stripNumericPrefix),
+        numeric_prefix_length: Number(mpnSplitOptions.numericPrefixLength) || 5,
+        extra_prefixes: parseLines(mpnSplitOptions.extraPrefixes)
+      },
+      manufacturer: {
+        aliases,
+        discard_tokens: parseLines(mpnSplitOptions.manufacturerDiscardTokens)
+      }
+    };
+  }, [mpnSplitOptions]);
+
+  const handleOpenMpnSplitDialog = useCallback(() => {
+    setToolsMenuAnchor(null);
+    setMpnSplitDialogOpen(true);
+  }, []);
+
+  const handleSplitMPNCells = useCallback(async () => {
+    try {
+      setMpnSplitting(true);
+      setMpnSplitDialogOpen(false);
+      const headers = columnDefs
+        .filter(col => col.field && col.field !== '__row_number__')
+        .map(col => col.field);
+      const selectedHeader = mpnColumn || detectMpnColumn(headers);
+
+      if (!selectedHeader) {
+        showSnackbar('Select an MPN column first', 'warning');
+        return;
+      }
+
+      const response = await api.splitMPNCells(sessionId, selectedHeader, buildMpnSplitOptionsPayload());
+      if (response.data?.success) {
+        const splitRows = response.data.split_rows || 0;
+        const totalRowsAfterSplit = response.data.total_rows || response.data.created_rows || 0;
+        if (splitRows > 0) {
+          const normalized = response.data.normalized_mpns || 0;
+          const paired = response.data.paired_manufacturer_rows || 0;
+          showSnackbar(`Split ${splitRows} rows into ${totalRowsAfterSplit} rows. Cleaned ${normalized} MPNs and paired ${paired} manufacturers.`, 'success');
+        } else {
+          showSnackbar('No multi-MPN cells found in the selected column', 'info');
+        }
+        setMpnColumn(response.data.mpn_header || selectedHeader);
+        await fetchDataSynchronized();
+      } else {
+        showSnackbar(response.data?.error || 'Failed to split MPN cells', 'error');
+      }
+    } catch (error) {
+      const message = error.response?.data?.error || error.message || 'Failed to split MPN cells';
+      showSnackbar(message, 'error');
+    } finally {
+      setMpnSplitting(false);
+    }
+  }, [columnDefs, mpnColumn, detectMpnColumn, sessionId, buildMpnSplitOptionsPayload, showSnackbar, fetchDataSynchronized]);
 
   const handleCorrectionFileUpload = useCallback((event) => {
     const file = event.target.files[0];
@@ -2198,6 +2311,12 @@ const EnhancedDataEditor = () => {
                   <ListItemIcon><AutoAwesomeIcon sx={{ color: '#0891b2' }} /></ListItemIcon>
                   <ListItemText>Parse Column</ListItemText>
                 </MenuItem>
+                <MenuItem onClick={handleOpenMpnSplitDialog} disabled={syncStatus.inProgress || mpnSplitting}>
+                  <ListItemIcon>
+                    {mpnSplitting ? <CircularProgress size={18} /> : <ContentCutIcon sx={{ color: '#f57c00' }} />}
+                  </ListItemIcon>
+                  <ListItemText>{mpnSplitting ? 'Splitting MPNs...' : 'Split MPN Cells'}</ListItemText>
+                </MenuItem>
                 <MenuItem onClick={() => { setToolsMenuAnchor(null); handleOpenFactwiseIdDialog(); }} disabled={syncStatus.inProgress}>
                   <ListItemIcon><BadgeIcon sx={{ color: '#2e7d32' }} /></ListItemIcon>
                   <ListItemText>Create FactWise ID</ListItemText>
@@ -2745,6 +2864,111 @@ const EnhancedDataEditor = () => {
         />
       )}
 
+      {/* MPN Split Rules Dialog */}
+      <Dialog open={mpnSplitDialogOpen} onClose={() => setMpnSplitDialogOpen(false)} maxWidth="md" fullWidth>
+        <DialogTitle>Split MPN Cells</DialogTitle>
+        <DialogContent>
+          <DialogContentText sx={{ mb: 2 }}>
+            Configure how supplier prefixes and manufacturer names should be cleaned while expanding one row into one row per MPN.
+          </DialogContentText>
+
+          <Grid container spacing={2}>
+            <Grid item xs={12} md={6}>
+              <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 700 }}>
+                MPN Prefix Rules
+              </Typography>
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    checked={mpnSplitOptions.stripAlphaPrefix}
+                    onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, stripAlphaPrefix: e.target.checked }))}
+                  />
+                }
+                label="Strip alphabetic prefixes"
+              />
+              <TextField
+                fullWidth
+                size="small"
+                type="number"
+                label="Minimum alphabetic prefix length"
+                value={mpnSplitOptions.alphaPrefixMinLength}
+                onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, alphaPrefixMinLength: e.target.value }))}
+                sx={{ mt: 1 }}
+                inputProps={{ min: 1 }}
+              />
+              <FormControlLabel
+                sx={{ mt: 1 }}
+                control={
+                  <Checkbox
+                    checked={mpnSplitOptions.stripNumericPrefix}
+                    onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, stripNumericPrefix: e.target.checked }))}
+                  />
+                }
+                label="Strip numeric prefixes"
+              />
+              <TextField
+                fullWidth
+                size="small"
+                type="number"
+                label="Numeric prefix length"
+                value={mpnSplitOptions.numericPrefixLength}
+                onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, numericPrefixLength: e.target.value }))}
+                sx={{ mt: 1 }}
+                inputProps={{ min: 1 }}
+              />
+              <TextField
+                fullWidth
+                multiline
+                minRows={3}
+                label="Always strip these prefixes"
+                value={mpnSplitOptions.extraPrefixes}
+                onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, extraPrefixes: e.target.value }))}
+                sx={{ mt: 2 }}
+                helperText="One per line or comma separated"
+              />
+            </Grid>
+
+            <Grid item xs={12} md={6}>
+              <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 700 }}>
+                Manufacturer Rules
+              </Typography>
+              <TextField
+                fullWidth
+                multiline
+                minRows={6}
+                label="Aliases"
+                value={mpnSplitOptions.manufacturerAliases}
+                onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, manufacturerAliases: e.target.value }))}
+                helperText="Use SOURCE=TARGET. Empty target discards the source."
+              />
+              <TextField
+                fullWidth
+                multiline
+                minRows={4}
+                label="Discard Tokens"
+                value={mpnSplitOptions.manufacturerDiscardTokens}
+                onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, manufacturerDiscardTokens: e.target.value }))}
+                sx={{ mt: 2 }}
+                helperText="One per line or comma separated"
+              />
+            </Grid>
+          </Grid>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setMpnSplitDialogOpen(false)} disabled={mpnSplitting}>
+            Cancel
+          </Button>
+          <Button
+            onClick={handleSplitMPNCells}
+            variant="contained"
+            startIcon={mpnSplitting ? <CircularProgress size={16} /> : <ContentCutIcon />}
+            disabled={mpnSplitting}
+          >
+            {mpnSplitting ? 'Splitting...' : 'Split Rows'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       {/* Save Template Dialog */}
       <Dialog open={templateSaveDialogOpen} onClose={handleCloseSaveTemplateDialog} maxWidth="sm" fullWidth>
         <DialogTitle>Save Template</DialogTitle>
@@ -2888,6 +3112,42 @@ const EnhancedDataEditor = () => {
             startIcon={syncStatus.inProgress ? <CircularProgress size={20} /> : <BadgeIcon />}
           >
             {syncStatus.inProgress ? 'Creating...' : 'Create Synchronized ID'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={factwiseStrategyDialogOpen}
+        onClose={() => setFactwiseStrategyDialogOpen(false)}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle>Item Code Already Has Values</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            Choose how to apply the new FactWise ID.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setFactwiseStrategyDialogOpen(false)}>
+            Cancel
+          </Button>
+          <Button
+            onClick={async () => {
+              setFactwiseStrategyDialogOpen(false);
+              await runCreateFactwiseIdSynchronized('fill_only_null');
+            }}
+          >
+            Fill Empty
+          </Button>
+          <Button
+            variant="contained"
+            onClick={async () => {
+              setFactwiseStrategyDialogOpen(false);
+              await runCreateFactwiseIdSynchronized('override_all');
+            }}
+          >
+            Override All
           </Button>
         </DialogActions>
       </Dialog>

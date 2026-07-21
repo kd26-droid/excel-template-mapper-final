@@ -5756,6 +5756,31 @@ def apply_mapping_template(request):
                 SESSION_STORE[session_id]["enhanced_headers"] = mapping_result['headers']
                 save_session(session_id, SESSION_STORE[session_id])
             
+            # Apply default values before Factwise rules so defaulted columns can
+            # participate in Item code generation during template reuse.
+            default_values = getattr(template, 'default_values', {}) or {}
+            if default_values:
+                SESSION_STORE[session_id]["default_values"] = default_values
+                current_data = SESSION_STORE[session_id].get("formula_enhanced_data") or SESSION_STORE[session_id].get("mapped_data")
+                current_headers = SESSION_STORE[session_id].get("enhanced_headers") or SESSION_STORE[session_id].get("mapped_headers")
+                if current_data and current_headers:
+                    for row in current_data:
+                        for field_name, default_value in default_values.items():
+                            if field_name not in current_headers:
+                                continue
+                            field_index = current_headers.index(field_name)
+                            if isinstance(row, list):
+                                while len(row) <= field_index:
+                                    row.append("")
+                                if row[field_index] is None or str(row[field_index]).strip() == "":
+                                    row[field_index] = default_value
+                            elif isinstance(row, dict):
+                                if field_name not in row or row[field_name] is None or str(row[field_name]).strip() == "":
+                                    row[field_name] = default_value
+                    SESSION_STORE[session_id]["formula_enhanced_data"] = current_data
+                    SESSION_STORE[session_id]["mapped_data"] = current_data
+                    save_session(session_id, SESSION_STORE[session_id])
+
             # Apply factwise rules if they exist
             factwise_rules = getattr(template, 'factwise_rules', []) or []
             if factwise_rules:
@@ -5895,8 +5920,9 @@ def apply_mapping_template(request):
                     SESSION_STORE[session_id]["formula_enhanced_data"] = current_data
                     SESSION_STORE[session_id]["mapped_data"] = current_data
             
-            # Final save before template application completion
-            info['mappings'] = application_result.get('mappings') or info.get('mappings')
+            # Final save before template application completion. Keep the new-format
+            # mapping list so duplicate/dynamic mappings survive template reuse.
+            info['mappings'] = new_format_mappings or info.get('mappings')
             info['enhanced_headers'] = regenerated_headers
             info['default_values'] = default_values or info.get('default_values', {})
             # Store MPN validation metadata from template if available
@@ -7552,25 +7578,43 @@ def create_factwise_id(request):
         else:
             formatted_mappings = mappings
         
-        # Get the current data - PREFER formula-enhanced data if available to preserve Tag/Spec/Customer columns
+        def normalize_current_dataset(raw_data, raw_headers):
+            if not raw_data or not raw_headers or not isinstance(raw_headers, list):
+                return None, None
+            headers_list = list(raw_headers)
+            data_list = raw_data.get('data') if isinstance(raw_data, dict) and 'data' in raw_data else raw_data
+            if not isinstance(data_list, list) or not data_list:
+                return headers_list, []
+            if isinstance(data_list[0], dict):
+                normalized_rows = []
+                for row in data_list:
+                    normalized_rows.append([row.get(h, "") for h in headers_list])
+                return headers_list, normalized_rows
+            return headers_list, data_list
+
+        # Get the current data - prefer edited/enhanced/session data so default values,
+        # MPN splits, formulas, and prior grid edits are preserved when recomputing Item code.
         headers = None
         data_rows = None
-        enhanced_data = info.get("formula_enhanced_data")
-        enhanced_headers = info.get("enhanced_headers")
 
-        if enhanced_data and enhanced_headers and isinstance(enhanced_headers, list) and len(enhanced_headers) > 0:
-            # Normalize enhanced data to list-of-lists for consistent processing
-            headers = list(enhanced_headers)
-            if isinstance(enhanced_data[0], dict):
-                normalized_rows = []
-                for row in enhanced_data:
-                    normalized_row = []
-                    for h in headers:
-                        normalized_row.append(row.get(h, ""))
-                    normalized_rows.append(normalized_row)
-                data_rows = normalized_rows
-            else:
-                data_rows = enhanced_data
+        current_sources = [
+            (info.get("edited_data"), info.get("enhanced_headers") or info.get("current_template_headers")),
+            (info.get("enhanced_data"), None),
+            (info.get("formula_enhanced_data"), info.get("enhanced_headers")),
+            (info.get("mapped_data"), info.get("mapped_headers")),
+        ]
+
+        for raw_data, raw_headers in current_sources:
+            if isinstance(raw_data, dict):
+                raw_headers = raw_data.get('headers') or raw_headers
+            candidate_headers, candidate_rows = normalize_current_dataset(raw_data, raw_headers)
+            if candidate_headers and candidate_rows is not None:
+                headers = candidate_headers
+                data_rows = candidate_rows
+                break
+
+        if headers is not None and data_rows is not None:
+            logger.info(f"🆔 Using current session data for Factwise ID: {len(headers)} headers, {len(data_rows)} rows")
         else:
             # Fall back to fresh mapped data if no enhanced data exists
             mapping_result = apply_column_mappings(
@@ -7589,6 +7633,22 @@ def create_factwise_id(request):
             
             headers = mapping_result['headers']
             data_rows = mapping_result['data']
+
+        # Apply stored default values before creating Factwise IDs. This keeps
+        # defaulted Tag/spec fields usable as Factwise inputs even if the grid
+        # has not been explicitly saved as edited rows.
+        default_values = info.get("default_values", {}) or {}
+        if default_values and headers and data_rows:
+            header_index = {h: i for i, h in enumerate(headers)}
+            for field_name, default_value in default_values.items():
+                if field_name not in header_index or default_value is None or str(default_value).strip() == "":
+                    continue
+                field_idx = header_index[field_name]
+                for row in data_rows:
+                    while len(row) <= field_idx:
+                        row.append("")
+                    if row[field_idx] is None or str(row[field_idx]).strip() == "":
+                        row[field_idx] = str(default_value).strip()
         
         # Helper function to convert external names to internal names
         def convert_external_to_internal_name(external_name):
