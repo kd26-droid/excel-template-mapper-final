@@ -7,22 +7,213 @@ import tempfile
 import logging
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Any
 
+import pandas as pd
 from django.http import JsonResponse, HttpResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from django.core.files.storage import default_storage
 from django.core.files.base import ContentFile
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, parser_classes
+from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from rest_framework import status
 
 from .models import PDFSession, PDFPage, PDFExtractionResult
 from .services.pdf_processor import PDFProcessor
 from .services.azure_ocr_service import AzureOCRService
+from .services.native_pdf_service import NativePDFService
 
 logger = logging.getLogger(__name__)
+
+
+ALLOWED_TEMPLATE_EXTENSIONS = {'.xlsx', '.xls', '.csv'}
+
+
+def _parse_positive_int(value, default=1):
+    try:
+        parsed = int(value)
+        return parsed if parsed > 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def get_default_pdf_template_metadata() -> Dict[str, Any]:
+    """Return the legacy built-in template metadata for PDF sessions."""
+    from django.conf import settings
+
+    factwise_template_path = Path(settings.BASE_DIR) / 'FACTWISE.xlsx'
+    if not factwise_template_path.exists():
+        factwise_template_path = Path(settings.BASE_DIR) / 'test_files' / 'FACTWISE.xlsx'
+
+    return {
+        'template_path': str(factwise_template_path),
+        'original_template_name': 'FACTWISE.xlsx',
+        'template_sheet_name': 'Templates',
+        'template_header_row': 1,
+        'uses_uploaded_template': False,
+    }
+
+
+def get_pdf_template_metadata(pdf_session: PDFSession) -> Dict[str, Any]:
+    """Resolve uploaded template metadata stored on a PDF session, or fallback."""
+    metadata = pdf_session.processing_metadata or {}
+    template_metadata = metadata.get('template_mapping') or {}
+    if template_metadata.get('template_path'):
+        return {
+            **get_default_pdf_template_metadata(),
+            **template_metadata,
+            'uses_uploaded_template': bool(template_metadata.get('uses_uploaded_template', True)),
+        }
+    return get_default_pdf_template_metadata()
+
+
+def build_pdf_mapping_session_data(
+    *,
+    pdf_session: PDFSession,
+    session_id: str,
+    client_path: str,
+    source_type: str,
+    client_headers: list,
+) -> Dict[str, Any]:
+    """Build session data consumed by the normal column-mapping endpoints."""
+    template_metadata = get_pdf_template_metadata(pdf_session)
+    uses_uploaded_template = bool(template_metadata.get('uses_uploaded_template'))
+
+    session_data = {
+        'session_id': session_id,
+        'client_path': client_path,
+        'template_path': template_metadata['template_path'],
+        'original_client_name': pdf_session.file_name,
+        'original_template_name': template_metadata.get('original_template_name', 'FACTWISE.xlsx'),
+        'sheet_name': 'PDF_Data',
+        'header_row': 1,
+        'template_sheet_name': template_metadata.get('template_sheet_name'),
+        'template_header_row': template_metadata.get('template_header_row', 1),
+        'created': datetime.utcnow().isoformat(),
+        'mappings': None,
+        'edited_data': None,
+        'original_template_id': None,
+        'template_modified': False,
+        'formula_rules': [],
+        'tags_count': 0 if uses_uploaded_template else 3,
+        'spec_pairs_count': 0 if uses_uploaded_template else 3,
+        'customer_id_pairs_count': 0 if uses_uploaded_template else 1,
+        'template_version': 0,
+        'source_type': source_type,
+        'client_headers': client_headers,
+        'template_source': 'uploaded' if uses_uploaded_template else 'default',
+    }
+
+    if uses_uploaded_template:
+        try:
+            from .views import hybrid_file_manager
+            from .bom_header_mapper import BOMHeaderMapper
+
+            mapper = BOMHeaderMapper()
+            template_headers = mapper.read_excel_headers(
+                file_path=hybrid_file_manager.get_file_path(template_metadata['template_path']),
+                sheet_name=template_metadata.get('template_sheet_name'),
+                header_row=template_metadata.get('template_header_row', 1) - 1
+            )
+            if template_headers:
+                session_data['template_headers'] = template_headers
+                session_data['current_template_headers'] = template_headers
+        except Exception as e:
+            logger.warning(f"Could not pre-read uploaded PDF template headers: {e}")
+
+    return session_data
+
+
+def _summarize_extraction(name: str, extraction_result: Dict[str, Any], df=None) -> Dict[str, Any]:
+    headers = list(df.columns) if df is not None and not df.empty else extraction_result.get('extracted_headers', [])
+    data = df.values.tolist() if df is not None and not df.empty else extraction_result.get('extracted_data', [])
+    quality = extraction_result.get('quality_metrics') or {}
+    return {
+        'name': name,
+        'method': extraction_result.get('method', name),
+        'headers': headers,
+        'row_count': len(data),
+        'column_count': len(headers),
+        'table_count': extraction_result.get('table_count', 0),
+        'quality_metrics': quality,
+        'sample_rows': data[:3],
+    }
+
+
+def decide_best_pdf_extraction(native_summary: Dict[str, Any], azure_summary: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Deterministic decider for native-vs-Azure extraction.
+
+    The return shape is intentionally LLM-friendly, so an LLM judge can replace
+    this function later without changing the endpoint contract.
+    """
+    def score(summary):
+        quality = summary.get('quality_metrics') or {}
+        row_count = summary.get('row_count', 0)
+        column_count = summary.get('column_count', 0)
+        empty_ratio = quality.get('empty_cell_ratio')
+        if empty_ratio is None:
+            completeness = quality.get('completeness_score', 0.5)
+            empty_ratio = 1 - completeness
+
+        base = float(quality.get('overall_confidence') or 0)
+        row_score = min(row_count / 50, 1.0)
+        col_score = 1.0 if column_count >= 3 else column_count / 3
+        sparsity_score = max(0.0, 1.0 - float(empty_ratio or 0.0))
+        return round((0.45 * base) + (0.30 * row_score) + (0.15 * col_score) + (0.10 * sparsity_score), 4)
+
+    native_score = score(native_summary)
+    azure_score = score(azure_summary)
+
+    if native_summary.get('row_count', 0) and native_score >= azure_score:
+        winner = 'native'
+    elif azure_summary.get('row_count', 0):
+        winner = 'azure'
+    else:
+        winner = 'native' if native_score >= azure_score else 'azure'
+
+    reasons = []
+    if native_summary.get('row_count', 0) > azure_summary.get('row_count', 0) * 2:
+        reasons.append('Native extracted substantially more rows.')
+    if azure_summary.get('row_count', 0) > native_summary.get('row_count', 0) * 2:
+        reasons.append('Azure extracted substantially more rows.')
+    if native_summary.get('column_count') == azure_summary.get('column_count') and native_summary.get('row_count') == azure_summary.get('row_count'):
+        reasons.append('Both outputs are similar; native is preferred on ties to avoid OCR cost and latency.')
+    if not reasons:
+        reasons.append('Winner selected by combined confidence, row count, column count, and sparsity score.')
+
+    return {
+        'winner': winner,
+        'confidence': max(native_score, azure_score),
+        'scores': {
+            'native': native_score,
+            'azure': azure_score,
+        },
+        'reason': ' '.join(reasons),
+        'needs_review': abs(native_score - azure_score) < 0.08,
+        'review_notes': [] if abs(native_score - azure_score) >= 0.08 else ['Native and Azure scores are close; manual review is recommended.'],
+    }
+
+
+def create_mapping_session_from_dataframe(pdf_session: PDFSession, session_id: str, df: pd.DataFrame, source_type: str):
+    from .views import hybrid_file_manager, save_session
+
+    hybrid_file_manager.local_temp_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = hybrid_file_manager.local_temp_dir / f"pdf_client_{session_id}.csv"
+    df.to_csv(str(csv_path), index=False, header=False)
+
+    session_data = build_pdf_mapping_session_data(
+        pdf_session=pdf_session,
+        session_id=session_id,
+        client_path=str(csv_path),
+        source_type=source_type,
+        client_headers=list(df.columns) if not df.empty else []
+    )
+    save_session(session_id, session_data)
+    return session_data
 
 
 def analyze_pdf_complexity(pdf_path: str, total_pages: int) -> dict:
@@ -206,6 +397,7 @@ def get_pdf_file(request, session_id):
 
 
 @api_view(['POST'])
+@parser_classes([MultiPartParser, FormParser])
 def upload_pdf(request):
     """
     Handle PDF file upload and create processing session
@@ -215,10 +407,30 @@ def upload_pdf(request):
             return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
 
         uploaded_file = request.FILES['file']
+        template_file = request.FILES.get('templateFile')
+        template_metadata = None
 
         # Validate file type
         if not uploaded_file.name.lower().endswith('.pdf'):
             return Response({'error': 'File must be a PDF'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if template_file:
+            template_ext = Path(template_file.name).suffix.lower()
+            if template_ext not in ALLOWED_TEMPLATE_EXTENSIONS:
+                return Response({
+                    'error': 'Only Excel (.xlsx, .xls) and CSV files are supported for template file'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            from .views import hybrid_file_manager
+
+            template_path, template_original_name = hybrid_file_manager.save_upload_file(template_file, "template")
+            template_metadata = {
+                'template_path': template_path,
+                'original_template_name': template_original_name,
+                'template_sheet_name': request.data.get('templateSheetName') or None,
+                'template_header_row': _parse_positive_int(request.data.get('templateHeaderRow'), 1),
+                'uses_uploaded_template': True,
+            }
 
         # Generate session ID
         session_id = str(uuid.uuid4())
@@ -247,7 +459,8 @@ def upload_pdf(request):
             total_pages=validation_result['page_count'],
             file_name=uploaded_file.name,
             file_size=uploaded_file.size,
-            processing_status='pending'
+            processing_status='pending',
+            processing_metadata={'template_mapping': template_metadata} if template_metadata else {}
         )
 
         # Convert PDF to images
@@ -275,6 +488,7 @@ def upload_pdf(request):
                 'total_pages': validation_result['page_count'],
                 'file_name': uploaded_file.name,
                 'file_size': uploaded_file.size,
+                'template_file': template_metadata.get('original_template_name') if template_metadata else None,
                 'pages': page_info,
                 'status': 'ready_for_processing'
             }, status=status.HTTP_201_CREATED)
@@ -338,9 +552,9 @@ def process_pdf_ocr(request):
             # 'align' = align rows across pages + keep original headers (recommended for multi-page PDFs)
             # 'preserve' = append rows sequentially + keep original headers
             # 'flatten' = align rows across pages + normalize headers (e.g., MFR → Manufacturer)
-            alignment_mode = request.data.get('data_alignment', 'align')
+            alignment_mode = request.data.get('data_alignment', 'preserve')
             if alignment_mode not in ('preserve', 'flatten', 'align'):
-                alignment_mode = 'align'
+                alignment_mode = 'preserve'
 
             # Convert to DataFrame format using requested alignment
             df = ocr_service.convert_to_dataframe(extraction_result, alignment_mode=alignment_mode)
@@ -430,55 +644,17 @@ def process_pdf_ocr(request):
             pdf_session.save()
 
             # Create compatible session for column mapping interface
-            from .views import save_session
-            import tempfile
-            import os
-
             try:
                 # Create a temporary CSV file with the extracted data
                 if not df.empty:
-                    temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False)
-                    # CRITICAL: Save WITHOUT headers to avoid header row appearing as data in Review page
-                    # The headers are stored separately in PDFExtractionResult.extracted_headers
-                    # and applied when reading the CSV in apply_column_mappings (line 784)
-                    df.to_csv(temp_file.name, index=False, header=False)
-                    temp_file.close()
-
-                    # Get the default FACTWISE.xlsx template path
-                    from django.conf import settings
-                    from pathlib import Path
-
-                    factwise_template_path = Path(settings.BASE_DIR) / 'FACTWISE.xlsx'
-                    if not factwise_template_path.exists():
-                        factwise_template_path = Path(settings.BASE_DIR) / 'test_files' / 'FACTWISE.xlsx'
-
-                    # Create session data compatible with the existing system
-                    session_data = {
-                        'session_id': session_id,
-                        'client_path': temp_file.name,
-                        'template_path': str(factwise_template_path),
-                        'original_client_name': pdf_session.file_name,
-                        'original_template_name': 'FACTWISE.xlsx',
-                        'sheet_name': 'PDF_Data',
-                        'header_row': 1,  # Keep as 1 for compatibility, handled specially in apply_column_mappings
-                        'template_sheet_name': 'Templates',
-                        'template_header_row': 1,
-                        'created': datetime.utcnow().isoformat(),
-                        'mappings': None,
-                        'edited_data': None,
-                        'original_template_id': None,
-                        'template_modified': False,
-                        'formula_rules': [],
-                        'tags_count': 3,
-                        'spec_pairs_count': 3,
-                        'customer_id_pairs_count': 1,
-                        'template_version': 0,
-                        'source_type': 'pdf',
-                        'client_headers': list(df.columns) if not df.empty else []
-                    }
-
-                    # Save using the existing session management system
-                    save_session(session_id, session_data)
+                    # Save WITHOUT headers to avoid the header row appearing as
+                    # data in the Review page. Headers live in PDFExtractionResult.
+                    session_data = create_mapping_session_from_dataframe(
+                        pdf_session=pdf_session,
+                        session_id=session_id,
+                        df=df,
+                        source_type='pdf'
+                    )
 
                     logger.info(f"Created compatible session for PDF: {session_id}")
 
@@ -514,6 +690,153 @@ def process_pdf_ocr(request):
     except Exception as e:
         logger.error(f"Error in PDF OCR processing: {e}")
         return Response({'error': f'Processing failed: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+def process_pdf_compare(request):
+    """
+    Run native PDF extraction and Azure OCR, then choose the better result.
+    """
+    try:
+        session_id = request.data.get('session_id')
+        if not session_id:
+            return Response({'error': 'Session ID required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            pdf_session = PDFSession.objects.get(session_id=session_id)
+        except PDFSession.DoesNotExist:
+            return Response({'error': 'Invalid session ID'}, status=status.HTTP_404_NOT_FOUND)
+
+        if pdf_session.processing_status != 'completed':
+            return Response({'error': 'PDF not ready for processing'}, status=status.HTTP_400_BAD_REQUEST)
+
+        pdf_session.processing_status = 'processing'
+        pdf_session.save()
+
+        alignment_mode = request.data.get('data_alignment', 'preserve')
+        if alignment_mode not in ('preserve', 'flatten', 'align'):
+            alignment_mode = 'preserve'
+
+        native_result = None
+        native_df = pd.DataFrame()
+        native_error = None
+        azure_result = None
+        azure_df = pd.DataFrame()
+        azure_error = None
+
+        try:
+            native_service = NativePDFService()
+            native_result = native_service.analyze_pdf_file(pdf_session.original_pdf_path)
+            native_df = native_service.convert_to_dataframe(native_result)
+        except Exception as e:
+            native_error = str(e)
+            logger.warning(f"Native PDF extraction failed for {session_id}: {e}")
+
+        try:
+            azure_service = AzureOCRService()
+            azure_result = azure_service.analyze_pdf_file(pdf_session.original_pdf_path)
+            azure_df = azure_service.convert_to_dataframe(azure_result, alignment_mode=alignment_mode)
+        except Exception as e:
+            azure_error = str(e)
+            logger.warning(f"Azure PDF extraction failed for {session_id}: {e}")
+
+        native_summary = _summarize_extraction('native', native_result or {}, native_df)
+        azure_summary = _summarize_extraction('azure', azure_result or {}, azure_df)
+        if native_error:
+            native_summary['error'] = native_error
+        if azure_error:
+            azure_summary['error'] = azure_error
+
+        if native_df.empty and azure_df.empty:
+            pdf_session.processing_status = 'failed'
+            pdf_session.save()
+            return Response({
+                'error': 'Both native and Azure extraction failed or returned no data',
+                'native': native_summary,
+                'azure': azure_summary,
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        decision = decide_best_pdf_extraction(native_summary, azure_summary)
+        winner = decision['winner']
+        if winner == 'native' and native_df.empty:
+            winner = 'azure'
+            decision['winner'] = 'azure'
+            decision['reason'] += ' Native result was empty, so Azure was used.'
+        elif winner == 'azure' and azure_df.empty:
+            winner = 'native'
+            decision['winner'] = 'native'
+            decision['reason'] += ' Azure result was empty, so native was used.'
+
+        chosen_result = native_result if winner == 'native' else azure_result
+        chosen_df = native_df if winner == 'native' else azure_df
+
+        header_confidence_scores = {}
+        try:
+            overall_header_conf = (chosen_result.get('quality_metrics') or {}).get('header_confidence')
+            overall_conf = (chosen_result.get('quality_metrics') or {}).get('overall_confidence', 0.8)
+            inferred_conf = overall_header_conf if isinstance(overall_header_conf, (int, float)) else overall_conf
+            header_confidence_scores = {str(h): float(inferred_conf) for h in list(chosen_df.columns)}
+        except Exception:
+            header_confidence_scores = {str(h): 0.8 for h in list(chosen_df.columns)}
+
+        extraction = PDFExtractionResult.objects.create(
+            pdf_session=pdf_session,
+            extracted_headers=list(chosen_df.columns),
+            extracted_data=chosen_df.values.tolist(),
+            confidence_scores={
+                **((chosen_result or {}).get('confidence_scores') or {}),
+                'header_confidence': header_confidence_scores,
+                'compare_decision': decision,
+            },
+            quality_metrics={
+                **((chosen_result or {}).get('quality_metrics') or {}),
+                'compare_decision': decision,
+                'native_summary': native_summary,
+                'azure_summary': azure_summary,
+            },
+            table_count=(chosen_result or {}).get('table_count', 0)
+        )
+
+        create_mapping_session_from_dataframe(
+            pdf_session=pdf_session,
+            session_id=session_id,
+            df=chosen_df,
+            source_type=f'pdf_compare_{winner}'
+        )
+
+        pdf_session.processing_metadata = {
+            **(pdf_session.processing_metadata or {}),
+            'compare_decision': decision,
+            'native_summary': native_summary,
+            'azure_summary': azure_summary,
+        }
+        pdf_session.processing_status = 'completed'
+        pdf_session.save()
+
+        return Response({
+            'session_id': session_id,
+            'extraction_id': extraction.id,
+            'headers': list(chosen_df.columns),
+            'data': chosen_df.values.tolist(),
+            'row_count': len(chosen_df),
+            'column_count': len(chosen_df.columns),
+            'table_count': (chosen_result or {}).get('table_count', 0),
+            'status': 'completed',
+            'alignment_mode': alignment_mode,
+            'decision': decision,
+            'native': native_summary,
+            'azure': azure_summary,
+            'header_confidence_scores': header_confidence_scores,
+        }, status=status.HTTP_200_OK)
+
+    except Exception as e:
+        try:
+            pdf_session.processing_status = 'failed'
+            pdf_session.save()
+        except Exception:
+            pass
+        logger.error(f"Error in PDF compare processing: {e}", exc_info=True)
+        return Response({'error': f'Compare processing failed: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['GET'])

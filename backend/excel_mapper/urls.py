@@ -58,6 +58,7 @@ from .views import (
 from .pdf_views import (
     upload_pdf,
     process_pdf_ocr,
+    process_pdf_compare,
     get_pdf_session_status,
     cleanup_pdf_session,
     get_page_image,
@@ -164,6 +165,7 @@ urlpatterns = [
     # PDF Processing endpoints
     path('pdf/upload/', upload_pdf, name='upload-pdf'),
     path('pdf/process/', process_pdf_ocr, name='process-pdf-ocr'),
+    path('pdf/process-compare/', process_pdf_compare, name='process-pdf-compare'),
     path('pdf/analyze-complexity/', analyze_pdf_complexity_endpoint, name='analyze-pdf-complexity'),
     path('pdf/status/<str:session_id>/', get_pdf_session_status, name='get-pdf-session-status'),
     path('pdf/cleanup/', cleanup_pdf_session, name='cleanup-pdf-session'),

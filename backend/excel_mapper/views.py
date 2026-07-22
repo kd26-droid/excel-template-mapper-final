@@ -532,7 +532,7 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
 
         # Read the DataFrame – full or paginated slice
         # CRITICAL FIX: Special handling for PDF sessions where CSV has no headers
-        is_pdf_session = session_id and session_id in SESSION_STORE and SESSION_STORE[session_id].get("source_type") in ["pdf", "pdf_zonal"]
+        is_pdf_session = session_id and session_id in SESSION_STORE and str(SESSION_STORE[session_id].get("source_type", "")).startswith("pdf")
         pdf_headers = None
 
         if is_pdf_session:
@@ -1426,12 +1426,69 @@ def cleanup_rows(request):
         header_row = info.get('header_row', 1)
         actual_header_row = header_row - 1 if header_row > 0 else 0
         ext = Path(str(client_path)).suffix.lower()
+        is_pdf_session = str(info.get('source_type', '')).startswith('pdf')
 
         deleted_rows_preview = []  # Store deleted row data for user review
 
+        if is_pdf_session and not os.path.exists(str(client_path)):
+            try:
+                pdf_session = PDFSession.objects.get(session_id=session_id)
+                pdf_extraction = PDFExtractionResult.objects.filter(pdf_session=pdf_session).order_by('-created_at').first()
+                if not pdf_extraction:
+                    return Response({'success': False, 'error': 'PDF extraction data not found for cleanup'}, status=400)
+
+                pdf_headers = list(pdf_extraction.extracted_headers or info.get('client_headers') or [])
+                pdf_rows = pdf_extraction.extracted_data or []
+                restored_df = pd.DataFrame(pdf_rows)
+
+                if restored_df.empty and not pdf_rows:
+                    return Response({'success': False, 'error': 'PDF extracted rows not found for cleanup'}, status=400)
+
+                if pdf_headers:
+                    if len(pdf_headers) < restored_df.shape[1]:
+                        pdf_headers.extend([f'Column_{i+1}' for i in range(len(pdf_headers), restored_df.shape[1])])
+                    while restored_df.shape[1] < len(pdf_headers):
+                        restored_df[restored_df.shape[1]] = ''
+                    restored_df = restored_df.iloc[:, :len(pdf_headers)]
+                    restored_df.columns = pdf_headers[:restored_df.shape[1]]
+
+                hybrid_file_manager.local_temp_dir.mkdir(parents=True, exist_ok=True)
+                rebuilt_path = hybrid_file_manager.local_temp_dir / f"pdf_client_{session_id}.csv"
+                restored_df.to_csv(str(rebuilt_path), index=False, header=False)
+                info['client_path'] = str(rebuilt_path)
+                if pdf_headers:
+                    info['client_headers'] = pdf_headers
+                client_path = rebuilt_path
+                ext = '.csv'
+                logger.info(f"CLEANUP: Rebuilt missing PDF client CSV for {session_id}: {rebuilt_path}")
+            except Exception as e:
+                logger.error(f"CLEANUP: Could not rebuild missing PDF client CSV for {session_id}: {e}")
+                return Response({'success': False, 'error': f'Could not rebuild PDF data for cleanup: {str(e)}'}, status=500)
+
         if ext == '.csv':
-            # CSV handling
-            df = read_csv_with_encoding(str(client_path), actual_header_row)
+            # CSV handling. PDF extraction CSVs are intentionally saved without
+            # headers, so use PDFExtractionResult/session headers instead.
+            if is_pdf_session:
+                pdf_headers = info.get('client_headers') or []
+                try:
+                    pdf_session = PDFSession.objects.get(session_id=session_id)
+                    pdf_extraction = PDFExtractionResult.objects.filter(pdf_session=pdf_session).order_by('-created_at').first()
+                    if pdf_extraction and pdf_extraction.extracted_headers:
+                        pdf_headers = pdf_extraction.extracted_headers
+                except Exception as e:
+                    logger.warning(f"CLEANUP: Could not load PDF extraction headers for {session_id}: {e}")
+
+                if not pdf_headers:
+                    return Response({'success': False, 'error': 'PDF extracted headers not found for cleanup'}, status=400)
+
+                df = pd.read_csv(str(client_path), header=None, dtype=str, keep_default_na=False)
+                if len(pdf_headers) < df.shape[1]:
+                    pdf_headers = list(pdf_headers) + [f'Column_{i+1}' for i in range(len(pdf_headers), df.shape[1])]
+                df = df.iloc[:, :len(pdf_headers)]
+                df.columns = pdf_headers[:df.shape[1]]
+            else:
+                df = read_csv_with_encoding(str(client_path), actual_header_row)
+
             if primary_column not in df.columns:
                 return Response({'success': False, 'error': f'Column "{primary_column}" not found'}, status=400)
 
@@ -1443,14 +1500,15 @@ def cleanup_rows(request):
 
             # Capture deleted rows with original row numbers (1-based, after header)
             csv_headers = list(df.columns)
-            for orig_idx, (_, row) in enumerate(df_deleted.iterrows()):
-                row_dict = {'_original_row': orig_idx + actual_header_row + 2}  # +2 for 1-based + header
+            original_row_base = 1 if is_pdf_session else actual_header_row + 2
+            for orig_idx, row in df_deleted.iterrows():
+                row_dict = {'_original_row': int(orig_idx) + original_row_base}
                 for col in csv_headers[:10]:  # First 10 columns max
                     val = row[col]
                     row_dict[str(col)] = str(val) if pd.notna(val) and str(val).strip() else ''
                 deleted_rows_preview.append(row_dict)
 
-            df_clean.to_csv(str(client_path), index=False)
+            df_clean.to_csv(str(client_path), index=False, header=not is_pdf_session)
         else:
             # Excel handling.
             # Use pandas to read so both .xlsx (openpyxl) and legacy .xls (xlrd)
@@ -1575,7 +1633,7 @@ def get_headers(request, session_id):
         
         # Read client headers (support Azure Blob by resolving to local cache)
         # For PDF sessions, get headers from PDF extraction data instead of CSV file
-        if info.get("source_type") in ["pdf", "pdf_zonal"]:
+        if str(info.get("source_type", "")).startswith("pdf"):
             try:
                 from .models import PDFSession, PDFExtractionResult
                 pdf_session = PDFSession.objects.get(session_id=session_id)
@@ -1839,7 +1897,7 @@ def get_headers(request, session_id):
                 template_optionals.append(bool(template_optionals_map.get(str(h), False)))
         
         # Prepare session metadata (robust PDF detection)
-        is_pdf_session = (info.get("source_type") in ["pdf", "pdf_zonal"])
+        is_pdf_session = str(info.get("source_type", "")).startswith("pdf")
         if not is_pdf_session:
             try:
                 from .models import PDFSession as _PDFSession
@@ -2286,7 +2344,7 @@ def get_existing_mappings(request, session_id):
 
         # Add PDF metadata if session is from PDF (robust detection)
         source_type = session_data.get("source_type")
-        is_pdf_session = (source_type in ["pdf", "pdf_zonal"])
+        is_pdf_session = str(source_type or "").startswith("pdf")
         if not is_pdf_session:
             try:
                 from .models import PDFSession as _PDFSession
@@ -2563,7 +2621,7 @@ def data_view(request):
                 'quality_metrics': quality_metrics,
                 'header_confidence_scores': header_confidence_scores,
                 'target_column_confidence_scores': header_confidence_scores,
-                'is_from_pdf': (info.get('source_type') in ['pdf', 'pdf_zonal']),
+                'is_from_pdf': str(info.get('source_type', '')).startswith('pdf'),
                 'cleanup_info': {
                     'primary_column': info.get('primary_column'),
                     'rows_deleted': info.get('rows_deleted', 0),
@@ -3356,7 +3414,7 @@ def data_view(request):
 
         is_pdf_session_flag = False
         try:
-            is_pdf_session = (info.get('source_type') in ['pdf', 'pdf_zonal'])
+            is_pdf_session = str(info.get('source_type', '')).startswith('pdf')
             if not is_pdf_session:
                 try:
                     from .models import PDFSession as _PDFSession
@@ -5369,7 +5427,7 @@ def apply_mapping_template(request):
         # CRITICAL FIX: For PDF sessions, use PDF extracted headers instead of CSV headers
         # PDF CSV files don't have headers (header_row=1 but the file starts with data)
         source_type = info.get('source_type', 'excel')
-        if source_type in ['pdf', 'pdf_zonal']:
+        if str(source_type).startswith('pdf'):
             # Get PDF extracted headers from database
             try:
                 pdf_session = PDFSession.objects.get(session_id=session_id)
@@ -6255,7 +6313,7 @@ def apply_formula_rules(data_rows, headers, formula_rules, replace_existing=Fals
                         # CRITICAL FIX: Never enforce tag cap for dynamic formula additions
                         # Tags added via "Add Tags" button should always create new columns, not merge
                         # Only enforce cap during initial template mapping (not via formulas)
-                        is_pdf_session = session_info and session_info.get('source_type') in ['pdf', 'pdf_zonal']
+                        is_pdf_session = session_info and str(session_info.get('source_type', '')).startswith('pdf')
                         tag_cap = 0
                         # Never enforce cap for formula additions - they should always create new columns
                         enforce_cap = False

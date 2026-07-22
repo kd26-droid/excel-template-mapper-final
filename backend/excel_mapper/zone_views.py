@@ -366,51 +366,19 @@ def process_zones(request, session_id):
 
         # Create session for column mapping flow
         from .views import save_session
-        from datetime import datetime
-        from django.conf import settings
-        from pathlib import Path
-        import tempfile
         import pandas as pd
 
-        # Create temporary CSV with extracted data
         if all_data_rows:
             df = pd.DataFrame(all_data_rows, columns=headers)
-            temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False)
-            # CRITICAL FIX: Write CSV WITHOUT headers for PDF zonal flow
-            # The downstream reader (views.py:793) reads with header=None and applies headers from PDF extraction
-            # Writing headers here would cause them to appear as the first data row
-            df.to_csv(temp_file.name, index=False, header=False)
-            temp_file.close()
 
-            # Get FACTWISE template path
-            factwise_template_path = Path(settings.BASE_DIR) / 'FACTWISE.xlsx'
-            if not factwise_template_path.exists():
-                factwise_template_path = Path(settings.BASE_DIR) / 'test_files' / 'FACTWISE.xlsx'
+            from .pdf_views import create_mapping_session_from_dataframe
 
-            # Create session data
-            session_data = {
-                'session_id': session_id,
-                'client_path': temp_file.name,
-                'template_path': str(factwise_template_path),
-                'original_client_name': pdf_session.file_name,
-                'original_template_name': 'FACTWISE.xlsx',
-                'sheet_name': 'PDF_Data',
-                'header_row': 1,  # Note: Ignored for pdf_zonal - headers come from PDF extraction
-                'template_sheet_name': 'Templates',
-                'template_header_row': 1,
-                'created': datetime.utcnow().isoformat(),
-                'mappings': None,
-                'edited_data': None,
-                'original_template_id': None,
-                'template_modified': False,
-                'formula_rules': [],
-                'tags_count': 3,
-                'spec_pairs_count': 3,
-                'customer_id_pairs_count': 1,
-                'template_version': 0,
-                'source_type': 'pdf_zonal',  # Critical: This triggers special PDF CSV reading logic
-                'client_headers': headers  # Store headers explicitly for PDF extraction
-            }
+            session_data = create_mapping_session_from_dataframe(
+                pdf_session=pdf_session,
+                session_id=session_id,
+                df=df,
+                source_type='pdf_zonal',
+            )
 
             save_session(session_id, session_data)
 
