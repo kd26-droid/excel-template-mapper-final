@@ -393,7 +393,7 @@ class DataSynchronizer {
    * @param {string} operator - Operator
    * @param {string} strategy - Creation strategy
    */
-  async createFactWiseIdSynchronized(firstColumn, secondColumn, operator, strategy) {
+  async createFactWiseIdSynchronized(firstColumn, secondColumn, operator, strategy, options = {}) {
     return this.executeSynchronizedOperation(
       'createFactWiseId',
       async () => {
@@ -402,17 +402,15 @@ class DataSynchronizer {
           firstColumn, 
           secondColumn, 
           operator, 
-          strategy
+          strategy,
+          options
         );
         
-        // Additional validation: check if FactWise ID column was actually created
-        // Wait longer for large datasets and validate against full headers
-        await this.delay(3000);
-        const validationData = await api.getMappedDataWithSpecs(this.sessionId, 1, 1000, true, { force_fresh: true, _fresh: Date.now() });
-        
-        const hasFactWiseColumn = validationData.data.headers?.some(h => 
-          h.toLowerCase().includes('factwise') || h.toLowerCase().includes('item code')
-        );
+        const returnedHeaders = result?.data?.enhanced_headers || [];
+        const hasFactWiseColumn = returnedHeaders.some(h => {
+          const header = String(h || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+          return header === 'itemcode' || header.includes('factwise');
+        });
         
         if (!hasFactWiseColumn) {
           throw new Error('FactWise ID column was not created successfully');

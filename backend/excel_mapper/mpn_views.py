@@ -110,6 +110,20 @@ def looks_like_combined_mpn_cell(value, options=None) -> bool:
     return len(split_combined_mpn_cell(value, options)) > 1
 
 
+def _looks_like_mpn_candidate(value: str) -> bool:
+    text = str(value or '').strip()
+    if not text:
+        return False
+    # Descriptions often contain commas and plain words. Real part numbers almost
+    # always contain a digit, or a compact alphanumeric code with separators.
+    if not re.search(r"\d", text):
+        return False
+    words = re.findall(r"[A-Za-z]{3,}", text)
+    if len(words) >= 3:
+        return False
+    return bool(re.search(r"[A-Za-z0-9]", text))
+
+
 def split_combined_mpn_cell(value, options=None) -> List[str]:
     """Split BOM-style multi-MPN cells while preserving MPNs that contain spaces."""
     text = str(value or '').strip()
@@ -138,7 +152,7 @@ def split_combined_mpn_cell(value, options=None) -> List[str]:
     # ordinary spaces because some real MPNs contain spaces.
     if any(separator in text for separator in [",", ";", "|", "\n"]):
         parts = [p.strip() for p in re.split(r"[,;|\n]+", text) if p.strip()]
-        if len(parts) > 1:
+        if len(parts) > 1 and all(_looks_like_mpn_candidate(part) for part in parts):
             return parts
 
     return [text]
@@ -227,9 +241,23 @@ def normalize_manufacturer_options(options=None):
         if token_text:
             discard_tokens.add(token_text)
 
+    known_phrases = set(KNOWN_MANUFACTURER_PHRASES)
+    for phrase in raw.get('known_phrases') or raw.get('manufacturer_phrases') or []:
+        phrase_text = re.sub(r"\s+", " ", str(phrase or '').strip()).upper()
+        if phrase_text:
+            known_phrases.add(phrase_text)
+    for source, target in aliases.items():
+        source_text = re.sub(r"\s+", " ", str(source or '').strip()).upper()
+        target_text = re.sub(r"\s+", " ", str(target or '').strip()).upper()
+        if source_text:
+            known_phrases.add(source_text)
+        if target_text:
+            known_phrases.add(target_text)
+
     return {
         'aliases': {str(k).upper(): str(v).strip() for k, v in aliases.items()},
         'discard_tokens': discard_tokens,
+        'known_phrases': known_phrases,
     }
 
 
@@ -237,6 +265,7 @@ def serialize_manufacturer_options(options):
     return {
         'aliases': options.get('aliases') or {},
         'discard_tokens': sorted(options.get('discard_tokens') or []),
+        'known_phrases': sorted(options.get('known_phrases') or []),
     }
 
 
@@ -271,9 +300,14 @@ def split_manufacturer_cell(value, expected_count: int, options=None) -> List[st
     manufacturer_options = normalize_manufacturer_options(options)
     aliases = manufacturer_options['aliases']
     discard_tokens = manufacturer_options['discard_tokens']
+    alias_phrases = [
+        (phrase, phrase.split(), aliases.get(phrase))
+        for phrase in sorted(aliases.keys(), key=lambda item: len(item.split()), reverse=True)
+        if len(phrase.split()) > 1
+    ]
     phrase_tokens = [
         (phrase, phrase.split())
-        for phrase in sorted(KNOWN_MANUFACTURER_PHRASES, key=lambda item: len(item.split()), reverse=True)
+        for phrase in sorted(manufacturer_options.get('known_phrases') or KNOWN_MANUFACTURER_PHRASES, key=lambda item: len(item.split()), reverse=True)
     ]
 
     manufacturers = []
@@ -291,6 +325,20 @@ def split_manufacturer_cell(value, expected_count: int, options=None) -> List[st
 
         if token in discard_tokens:
             index += 1
+            continue
+
+        matched_alias = None
+        for phrase, parts, alias_value in alias_phrases:
+            if upper_tokens[index:index + len(parts)] == parts:
+                matched_alias = (len(parts), alias_value)
+                break
+        if matched_alias:
+            matched_len, alias_value = matched_alias
+            index += matched_len
+            while index < len(upper_tokens) and upper_tokens[index] in discard_tokens:
+                index += 1
+            if alias_value:
+                manufacturers.append(alias_value)
             continue
 
         matched = None
@@ -357,7 +405,7 @@ def find_manufacturer_columns(headers: List[str]):
     return direct_indices, tag_indices, spec_pairs
 
 
-def manufacturer_context_for_row(row, direct_indices, tag_indices, spec_pairs):
+def manufacturer_context_for_row(row, direct_indices, tag_indices, spec_pairs, forced_update_indices=None):
     """Return the manufacturer text and columns to update for this row."""
     candidates = []
     update_indices = set()
@@ -385,6 +433,8 @@ def manufacturer_context_for_row(row, direct_indices, tag_indices, spec_pairs):
         return '', []
 
     manufacturer_text = max(candidates, key=len)
+    for index in forced_update_indices or []:
+        update_indices.add(index)
     for index in tag_indices:
         if index < len(row) and str(row[index] or '').strip() == manufacturer_text:
             update_indices.add(index)
@@ -427,6 +477,7 @@ def mpn_split_cells(request):
         split_options = request.data.get('split_options') or {}
         mpn_split_options = normalize_mpn_split_options(split_options.get('mpn') or split_options)
         manufacturer_options = normalize_manufacturer_options(split_options.get('manufacturer') or split_options)
+        pair_manufacturers = str(request.data.get('pair_manufacturers', True)).lower() not in ['false', '0', 'no', 'off']
 
         mpn_index = headers.index(mpn_header)
         original_header = 'Original MPN Cell'
@@ -434,7 +485,15 @@ def mpn_split_cells(request):
         if original_header not in output_headers:
             output_headers.append(original_header)
         original_index = output_headers.index(original_header)
-        direct_mfr_indices, tag_indices, spec_pairs = find_manufacturer_columns(output_headers)
+        direct_mfr_indices, tag_indices, spec_pairs = find_manufacturer_columns(output_headers) if pair_manufacturers else ([], [], {})
+        requested_manufacturer_header = request.data.get('manufacturer_header')
+        forced_mfr_indices = []
+        if pair_manufacturers and requested_manufacturer_header in output_headers:
+            requested_index = output_headers.index(requested_manufacturer_header)
+            forced_mfr_indices = [requested_index]
+            if requested_index not in direct_mfr_indices:
+                direct_mfr_indices.append(requested_index)
+            direct_mfr_indices = sorted(set(direct_mfr_indices))
 
         output_rows = []
         split_rows = 0
@@ -455,13 +514,18 @@ def mpn_split_cells(request):
                 output_rows.append(expanded_row)
                 continue
 
-            manufacturer_text, manufacturer_update_indices = manufacturer_context_for_row(
-                expanded_row,
-                direct_mfr_indices,
-                tag_indices,
-                spec_pairs
-            )
-            manufacturers = split_manufacturer_cell(manufacturer_text, len(parts), manufacturer_options)
+            if pair_manufacturers:
+                manufacturer_text, manufacturer_update_indices = manufacturer_context_for_row(
+                    expanded_row,
+                    direct_mfr_indices,
+                    tag_indices,
+                    spec_pairs,
+                    forced_mfr_indices
+                )
+                manufacturers = split_manufacturer_cell(manufacturer_text, len(parts), manufacturer_options)
+            else:
+                manufacturers = []
+                manufacturer_update_indices = []
 
             split_rows += 1
             max_parts = max(max_parts, len(parts))
@@ -651,8 +715,8 @@ def mpn_validate(request):
                 return Response({
                     'success': False,
                     'error': (
-                        f'MPN column "{mpn_header}" contains multiple MPNs in a single cell. '
-                        'Split Manufacturer Equivalent part into one row per MPN before validation.'
+                        f'MPN column "{mpn_header}" appears to contain multiple MPNs in one cell based on supplier-prefix or delimiter patterns. '
+                        'Plain spaces inside one MPN are allowed. Split the column into one row per MPN before validation.'
                     ),
                     'code': 'combined_mpn_cell'
                 }, status=status.HTTP_400_BAD_REQUEST)

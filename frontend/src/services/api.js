@@ -1143,9 +1143,11 @@ const api = {
    * @param {string} sessionId
    * @param {string} mpnHeader optional selected MPN column name
    */
-  splitMPNCells: (sessionId, mpnHeader = null, splitOptions = null) => {
+  splitMPNCells: (sessionId, mpnHeader = null, splitOptions = null, manufacturerHeader = null, pairManufacturers = true) => {
     const payload = { session_id: sessionId };
     if (mpnHeader) payload.mpn_header = mpnHeader;
+    if (manufacturerHeader) payload.manufacturer_header = manufacturerHeader;
+    payload.pair_manufacturers = pairManufacturers;
     if (splitOptions) payload.split_options = splitOptions;
     return axios.post(`${API_URL}/mpn/split-cells/`, payload, { timeout: 120000 });
   },
@@ -1328,7 +1330,7 @@ const api = {
    * @param {string} secondColumn - Second column name
    * @param {string} operator - Operator to combine columns
    */
-  createFactwiseId: async (sessionId, firstColumn, secondColumn, operator = '_', strategy = 'fill_only_null') => {
+  createFactwiseId: async (sessionId, firstColumn, secondColumn, operator = '_', strategy = 'fill_only_null', options = {}) => {
     const effectiveSessionId = sessionId || await ensureSession();
     
     showGlobalLoader(true);
@@ -1338,7 +1340,12 @@ const api = {
         first_column: firstColumn,
         second_column: secondColumn,
         operator: operator,
-        strategy: strategy
+        strategy: strategy,
+        generation_mode: options.generationMode || 'columns',
+        serial_prefix: options.serialPrefix || '',
+        serial_start: options.serialStart ?? 1,
+        serial_padding: options.serialPadding ?? 0,
+        serial_increment: options.serialIncrement !== false
       });
       
       // Just return immediately - no waiting for sync
@@ -1544,30 +1551,20 @@ const api = {
    * @param {string} sessionId - Session ID
    * @param {string} fileType - File type ('original', 'converted', or 'template')
    */
-  downloadFileEnhanced: async (sessionId, fileType = 'converted') => {
+  downloadFileEnhanced: async (sessionId, fileType = 'converted', customFilename = null, columnOrder = null, workbookId = null) => {
     try {
-      let endpoint;
-      switch (fileType) {
-        case 'original':
-          endpoint = `${API_URL}/download/${sessionId}/original/`;
-          break;
-        case 'template':
-          endpoint = `${API_URL}/download/${sessionId}/template/`;
-          break;
-        case 'converted':
-        default:
-          endpoint = `${API_URL}/download/${sessionId}/converted/`;
-          break;
+      let response;
+      if (fileType === 'original') {
+        response = await api.downloadOriginalFile(sessionId);
+      } else if (fileType === 'template') {
+        response = await api.downloadTemplateFile(sessionId);
+      } else {
+        response = await api.downloadProcessedFile(sessionId, 'excel', columnOrder);
       }
-      
-      const response = await axios.get(endpoint, {
-        responseType: 'blob',
-        timeout: 60000 // 1 minute timeout for downloads
-      });
 
       // Get filename from response headers
       const contentDisposition = response.headers['content-disposition'];
-      let filename = `download_${sessionId}.xlsx`;
+      let filename = customFilename || `download_${sessionId}.xlsx`;
       
       if (contentDisposition) {
         const filenameMatch = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);

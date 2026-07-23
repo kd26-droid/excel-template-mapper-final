@@ -4204,14 +4204,33 @@ def download_file(request, session_id=None):
                 'error': 'No mappings found'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Always prefer rebuilding from current canonical headers to avoid stale snapshots
-        # Check for MPN-enhanced data first, then fall back to formula_enhanced_data
+        def _download_rows(value):
+            if isinstance(value, dict):
+                rows = value.get('data') or value.get('rows')
+                return rows if isinstance(rows, list) else []
+            return value if isinstance(value, list) else []
+
+        # Prefer the same live snapshots the editor mutates. Older enhanced_data
+        # can lag behind manual edits/FactWise ID creation, so it is a fallback.
+        edited_rows = _download_rows(info.get("edited_data"))
+        formula_rows = _download_rows(info.get("formula_enhanced_data"))
         enhanced_data_result = info.get("enhanced_data")
-        if enhanced_data_result and enhanced_data_result.get('data'):
-            enhanced_data = enhanced_data_result.get('data')
+        enhanced_rows = _download_rows(enhanced_data_result)
+
+        if edited_rows:
+            enhanced_data = edited_rows
+            use_mpn_enhanced = False
+            logger.info(f"DOWNLOAD: Using edited data with {len(enhanced_data)} rows")
+        elif formula_rows:
+            enhanced_data = formula_rows
+            use_mpn_enhanced = False
+            logger.info(f"DOWNLOAD: Using formula-enhanced data with {len(enhanced_data)} rows")
+        elif enhanced_rows:
+            enhanced_data = enhanced_rows
             use_mpn_enhanced = True
+            logger.info(f"DOWNLOAD: Using enhanced data fallback with {len(enhanced_data)} rows")
         else:
-            enhanced_data = info.get("formula_enhanced_data")
+            enhanced_data = []
             use_mpn_enhanced = False
 
         # If an old small snapshot is present while dataset is large, ignore it
@@ -4463,6 +4482,7 @@ def download_file(request, session_id=None):
                     second_col = factwise_rule.get("second_column")
                     operator = factwise_rule.get("operator", "_")
                     strategy = factwise_rule.get("strategy", "fill_only_null")
+                    generation_mode = factwise_rule.get("generation_mode", "columns")
 
                     # Ensure target column exists
                     if 'Item code' not in all_headers:
@@ -4471,10 +4491,24 @@ def download_file(request, session_id=None):
                             row.setdefault('Item code', '')
 
                     # Compute values row-wise
-                    for row in transformed_rows:
-                        first_val = str(row.get(first_col, "") or "").strip()
-                        second_val = str(row.get(second_col, "") or "").strip()
-                        factwise_id = (f"{first_val}{operator}{second_val}" if first_val and second_val else (first_val or second_val or ""))
+                    for row_index, row in enumerate(transformed_rows):
+                        if generation_mode == 'serial':
+                            try:
+                                start_number = int(factwise_rule.get("serial_start", 1))
+                            except Exception:
+                                start_number = 1
+                            try:
+                                padding = max(0, int(factwise_rule.get("serial_padding", 0)))
+                            except Exception:
+                                padding = 0
+                            increment_each_row = str(factwise_rule.get("serial_increment", True)).lower() not in ['false', '0', 'no', 'off']
+                            current_number = start_number + row_index if increment_each_row else start_number
+                            suffix = str(current_number).zfill(padding) if padding > 0 else str(current_number)
+                            factwise_id = f"{factwise_rule.get('serial_prefix', '') or ''}{suffix}"
+                        else:
+                            first_val = str(row.get(first_col, "") or "").strip()
+                            second_val = str(row.get(second_col, "") or "").strip()
+                            factwise_id = (f"{first_val}{operator}{second_val}" if first_val and second_val else (first_val or second_val or ""))
                         if strategy == 'override_all':
                             row['Item code'] = factwise_id
                         else:
@@ -4744,13 +4778,16 @@ def download_file(request, session_id=None):
             output_file = output_dir / filename
             df.to_excel(output_file, index=False, engine='openpyxl')
             content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        
+
         response = FileResponse(
             open(output_file, 'rb'),
             as_attachment=True,
             filename=filename,
             content_type=content_type
         )
+        response['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+        response['Pragma'] = 'no-cache'
+        response['Expires'] = '0'
         
         return response
         
@@ -7881,12 +7918,20 @@ def create_factwise_id(request):
         second_column = request.data.get('second_column')
         operator = request.data.get('operator', '_')
         strategy = request.data.get('strategy', 'fill_only_null')
+        generation_mode = request.data.get('generation_mode', 'columns')
+        serial_prefix = request.data.get('serial_prefix', '')
+        serial_start = request.data.get('serial_start', 1)
+        serial_padding = request.data.get('serial_padding', 0)
+        serial_increment = request.data.get('serial_increment', True)
         
         info = get_session_consistent(session_id)
         if not session_id or not info:
             return no_store(Response({'success': False, 'error': 'Invalid session'}, status=400))
         
-        if not first_column or not second_column:
+        if generation_mode == 'serial':
+            first_column = first_column or ''
+            second_column = second_column or ''
+        elif not first_column or not second_column:
             return no_store(Response({
                 'success': False,
                 'error': 'Both first_column and second_column are required'
@@ -8034,51 +8079,67 @@ def create_factwise_id(request):
             # If no exact match, return the original name (might be a regular column)
             return external_name
         
-        # Convert external names to internal names
-        first_column_internal = convert_external_to_internal_name(first_column)
-        second_column_internal = convert_external_to_internal_name(second_column)
-        
-        logger.info(f"  First column: '{first_column}' -> '{first_column_internal}'")
-        logger.info(f"  Second column: '{second_column}' -> '{second_column_internal}'")
-        logger.info(f"  Available headers: {headers}")
-        
-        # Find column indices using internal names
         first_col_idx = -1
         second_col_idx = -1
-        for i, header in enumerate(headers):
-            if header == first_column_internal:
-                first_col_idx = i
-            elif header == second_column_internal:
-                second_col_idx = i
-        
-        if first_col_idx == -1 or second_col_idx == -1:
-            missing_columns = []
-            if first_col_idx == -1:
-                missing_columns.append(first_column)
-            if second_col_idx == -1:
-                missing_columns.append(second_column)
+        if generation_mode != 'serial':
+            # Convert external names to internal names
+            first_column_internal = convert_external_to_internal_name(first_column)
+            second_column_internal = convert_external_to_internal_name(second_column)
+
+            logger.info(f"  First column: '{first_column}' -> '{first_column_internal}'")
+            logger.info(f"  Second column: '{second_column}' -> '{second_column_internal}'")
+            logger.info(f"  Available headers: {headers}")
+
+            # Find column indices using internal names
+            for i, header in enumerate(headers):
+                if header == first_column_internal:
+                    first_col_idx = i
+                elif header == second_column_internal:
+                    second_col_idx = i
             
-            return Response({
-                'success': False,
-                'error': f'Columns not found: {", ".join(missing_columns)}'
-            }, status=status.HTTP_400_BAD_REQUEST)
+            if first_col_idx == -1 or second_col_idx == -1:
+                missing_columns = []
+                if first_col_idx == -1:
+                    missing_columns.append(first_column)
+                if second_col_idx == -1:
+                    missing_columns.append(second_column)
+
+                return Response({
+                    'success': False,
+                    'error': f'Columns not found: {", ".join(missing_columns)}'
+                }, status=status.HTTP_400_BAD_REQUEST)
         
         # Create Factwise ID values
         factwise_id_column = []
-        for row in data_rows:
-            first_val = str(row[first_col_idx]) if first_col_idx < len(row) and row[first_col_idx] is not None else ""
-            second_val = str(row[second_col_idx]) if second_col_idx < len(row) and row[second_col_idx] is not None else ""
+        if generation_mode == 'serial':
+            try:
+                start_number = int(serial_start)
+            except Exception:
+                start_number = 1
+            try:
+                padding = max(0, int(serial_padding))
+            except Exception:
+                padding = 0
+            increment_each_row = str(serial_increment).lower() not in ['false', '0', 'no', 'off']
+            for row_index, _row in enumerate(data_rows):
+                current_number = start_number + row_index if increment_each_row else start_number
+                suffix = str(current_number).zfill(padding) if padding > 0 else str(current_number)
+                factwise_id_column.append(f"{serial_prefix or ''}{suffix}")
+        else:
+            for row in data_rows:
+                first_val = str(row[first_col_idx]) if first_col_idx < len(row) and row[first_col_idx] is not None else ""
+                second_val = str(row[second_col_idx]) if second_col_idx < len(row) and row[second_col_idx] is not None else ""
 
-            if first_val and second_val:
-                factwise_id = f"{first_val}{operator}{second_val}"
-            elif first_val:
-                factwise_id = first_val
-            elif second_val:
-                factwise_id = second_val
-            else:
-                factwise_id = ""
+                if first_val and second_val:
+                    factwise_id = f"{first_val}{operator}{second_val}"
+                elif first_val:
+                    factwise_id = first_val
+                elif second_val:
+                    factwise_id = second_val
+                else:
+                    factwise_id = ""
 
-            factwise_id_column.append(factwise_id)
+                factwise_id_column.append(factwise_id)
 
         # Helper to normalize header names
         def norm(s: str) -> str:
@@ -8111,6 +8172,11 @@ def create_factwise_id(request):
                     if current_val is None or str(current_val).strip() == "":
                         new_row[item_idx] = factwise_id_column[i]
                 new_data_rows.append(new_row)
+
+        new_row_dicts = [
+            {header: (row[idx] if idx < len(row) else "") for idx, header in enumerate(new_headers)}
+            for row in new_data_rows
+        ]
         
         # Store Factwise ID rule for template saving and reuse
         factwise_id_rule = {
@@ -8118,7 +8184,12 @@ def create_factwise_id(request):
             "first_column": first_column,
             "second_column": second_column,
             "operator": operator,
-            "strategy": strategy
+            "strategy": strategy,
+            "generation_mode": generation_mode,
+            "serial_prefix": serial_prefix,
+            "serial_start": serial_start,
+            "serial_padding": serial_padding,
+            "serial_increment": serial_increment
         }
         
         # Update session headers for immediate UI reflect
@@ -8130,6 +8201,14 @@ def create_factwise_id(request):
             # Ensure any previous large cache is cleared
             info.pop("formula_enhanced_data", None)
         info["enhanced_headers"] = new_headers
+        if info.get("edited_data"):
+            info["edited_data"] = new_row_dicts
+        if isinstance(info.get("enhanced_data"), dict) and info["enhanced_data"].get("data"):
+            info["enhanced_data"] = {
+                **info["enhanced_data"],
+                "headers": new_headers,
+                "data": new_data_rows,
+            }
         # Persist canonical headers to avoid alternating states across requests
         try:
             info["current_template_headers"] = new_headers
@@ -8179,6 +8258,14 @@ def create_factwise_id(request):
         else:
             info.pop("formula_enhanced_data", None)
         info["enhanced_headers"] = new_headers
+        if info.get("edited_data"):
+            info["edited_data"] = new_row_dicts
+        if isinstance(info.get("enhanced_data"), dict) and info["enhanced_data"].get("data"):
+            info["enhanced_data"] = {
+                **info["enhanced_data"],
+                "headers": new_headers,
+                "data": new_data_rows,
+            }
         info["current_template_headers"] = new_headers
         save_session(session_id, info)
         

@@ -18,6 +18,7 @@ import {
   Dialog,
   DialogTitle,
   DialogContent,
+  DialogContentText,
   DialogActions,
   Chip,
   Container,
@@ -53,6 +54,7 @@ const UploadFiles = () => {
   const sheetJoinDraftDbName = 'excel-template-mapper-drafts';
   const sheetJoinDraftStoreName = 'files';
   const sheetJoinBomDraftKey = 'sheet-join-bom-draft';
+  const sheetJoinComparisonListKey = 'sheet-join-comparison-history';
   const [globalLoading, setGlobalLoading] = useState(false);
   useGlobalBlock(globalLoading);
   
@@ -145,6 +147,14 @@ const UploadFiles = () => {
   const [sheetJoinPreviewFilter, setSheetJoinPreviewFilter] = useState('all');
   const sheetJoinPreviewRowsPerPage = 50;
   const [sheetJoinToastOpen, setSheetJoinToastOpen] = useState(false);
+  const [sheetJoinLegacyHeaderWarning, setSheetJoinLegacyHeaderWarning] = useState(false);
+  const [savedSheetJoinComparisons, setSavedSheetJoinComparisons] = useState([]);
+  const [activeSheetJoinComparisonId, setActiveSheetJoinComparisonId] = useState(null);
+  const [sheetJoinSaveDialogOpen, setSheetJoinSaveDialogOpen] = useState(false);
+  const [sheetJoinSaveName, setSheetJoinSaveName] = useState('');
+  const [sheetJoinSaveLoading, setSheetJoinSaveLoading] = useState(false);
+  const [sheetJoinDuplicateDialogOpen, setSheetJoinDuplicateDialogOpen] = useState(false);
+  const [pendingSheetJoinDuplicate, setPendingSheetJoinDuplicate] = useState(null);
 
   const navigate = useNavigate();
   const location = useLocation();
@@ -214,7 +224,39 @@ const UploadFiles = () => {
     request.onerror = () => reject(request.error);
   }), [sheetJoinDraftDbName, sheetJoinDraftStoreName]);
 
-  const saveSheetJoinDraft = useCallback(async (preview) => {
+  const loadSavedSheetJoinComparisons = useCallback(() => {
+    try {
+      const raw = localStorage.getItem(sheetJoinComparisonListKey);
+      const list = raw ? JSON.parse(raw) : [];
+      setSavedSheetJoinComparisons(Array.isArray(list) ? list : []);
+    } catch (err) {
+      setSavedSheetJoinComparisons([]);
+    }
+  }, [sheetJoinComparisonListKey]);
+
+  useEffect(() => {
+    loadSavedSheetJoinComparisons();
+  }, [loadSavedSheetJoinComparisons]);
+
+  const getUniqueSheetJoinComparisonName = useCallback((baseName, ignoreId = null) => {
+    const cleanBase = (baseName || 'Comparison').trim();
+    const existingNames = new Set(
+      savedSheetJoinComparisons
+        .filter(item => item.id !== ignoreId)
+        .map(item => String(item.name || '').trim().toLowerCase())
+    );
+    if (!existingNames.has(cleanBase.toLowerCase())) return cleanBase;
+
+    let index = 2;
+    let candidate = `${cleanBase} copy`;
+    while (existingNames.has(candidate.toLowerCase())) {
+      candidate = `${cleanBase} copy ${index}`;
+      index += 1;
+    }
+    return candidate;
+  }, [savedSheetJoinComparisons]);
+
+  const saveSheetJoinDraft = useCallback(async (preview, comparisonName = '', options = {}) => {
     if (!preview?.headers?.length) return null;
     const rows = preview.rows.map(row => {
       const cleanRow = {};
@@ -230,7 +272,13 @@ const UploadFiles = () => {
     const blob = new Blob([arrayBuffer], {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     });
-    const filename = `sheet_join_bom_${new Date().toISOString().replace(/[:.]/g, '-')}.xlsx`;
+    const savedAt = new Date().toISOString();
+    const safeName = comparisonName
+      ? comparisonName.replace(/[\\/:*?"<>|]+/g, '_').replace(/\s+/g, ' ').trim()
+      : 'sheet_join_bom';
+    const filename = `${safeName || 'sheet_join_bom'}_${savedAt.replace(/[:.]/g, '-')}.xlsx`;
+    const comparisonId = options.overrideId || `sheet-join-comparison-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const draftKey = comparisonName ? comparisonId : sheetJoinBomDraftKey;
 
     const db = await openSheetJoinDraftDb();
     await new Promise((resolve, reject) => {
@@ -238,25 +286,55 @@ const UploadFiles = () => {
       tx.objectStore(sheetJoinDraftStoreName).put({
         blob,
         filename,
-        savedAt: new Date().toISOString(),
+        comparisonName,
+        savedAt,
         headers: preview.headers,
-        rowCount: rows.length
-      }, sheetJoinBomDraftKey);
+        rowCount: rows.length,
+        baseHeaders: preview.config?.baseHeaders || [],
+        detailHeaders: preview.config?.detailHeaders || [],
+        previewHeaders: preview.headers,
+        previewRows: preview.rows,
+        previewSummary: preview.summary,
+        previewConfig: preview.config
+      }, draftKey);
       tx.oncomplete = resolve;
       tx.onerror = () => reject(tx.error);
     });
     db.close();
 
-    localStorage.setItem(sheetJoinBomDraftKey, JSON.stringify({
-      filename,
-      savedAt: new Date().toISOString(),
-      rowCount: rows.length
-    }));
+    if (comparisonName) {
+      const nextMeta = {
+        id: comparisonId,
+        name: comparisonName,
+        filename,
+        savedAt,
+        rowCount: rows.length,
+        baseSheet: preview.config.baseSheet,
+        detailSheet: preview.config.detailSheet,
+        baseKey: preview.config.baseKey,
+        detailKey: preview.config.detailKey
+      };
+      const existingRaw = localStorage.getItem(sheetJoinComparisonListKey);
+      const existing = existingRaw ? JSON.parse(existingRaw) : [];
+      const existingList = Array.isArray(existing) ? existing : [];
+      const nextList = [
+        nextMeta,
+        ...existingList.filter(item => item.id !== comparisonId)
+      ].slice(0, 25);
+      localStorage.setItem(sheetJoinComparisonListKey, JSON.stringify(nextList));
+      setSavedSheetJoinComparisons(nextList);
+    } else {
+      localStorage.setItem(sheetJoinBomDraftKey, JSON.stringify({
+        filename,
+        savedAt,
+        rowCount: rows.length
+      }));
+    }
 
-    return { blob, filename, workbook };
-  }, [openSheetJoinDraftDb, sheetJoinBomDraftKey, sheetJoinDraftStoreName]);
+    return { blob, filename, workbook, comparisonName, id: comparisonId };
+  }, [openSheetJoinDraftDb, sheetJoinBomDraftKey, sheetJoinComparisonListKey, sheetJoinDraftStoreName]);
 
-  const applySheetJoinDraftToUpload = useCallback((draft) => {
+  const applySheetJoinDraftToUpload = useCallback((draft, activeComparisonId = null) => {
     if (!draft?.blob || !draft?.filename) return;
     const file = new File([draft.blob], draft.filename, { type: draft.blob.type });
     const reader = new FileReader();
@@ -272,6 +350,7 @@ const UploadFiles = () => {
       setSheetJoinDialogOpen(false);
       setSheetJoinStage('match');
       setSheetJoinPreview(null);
+      setActiveSheetJoinComparisonId(activeComparisonId);
       setSuccess('Related sheet data is saved as your new BOM/client file. Add the FW template when ready and continue normally.');
     };
     reader.readAsBinaryString(file);
@@ -294,7 +373,7 @@ const UploadFiles = () => {
         applySheetJoinDraftToUpload(draft);
       }
     } catch (err) {
-      console.warn('Failed to restore sheet comparison draft:', err);
+      console.warn('Failed to restore sheet merge draft:', err);
     }
   }, [applySheetJoinDraftToUpload, openSheetJoinDraftDb, sheetJoinBomDraftKey, sheetJoinDraftStoreName, userFile]);
 
@@ -365,23 +444,29 @@ const UploadFiles = () => {
   }, []);
 
   const sanitizeSheetJoinConfig = useCallback((config) => {
-    const baseHeaders = getSheetHeaders(config.baseSheet, config.baseHeaderRow);
-    const detailHeaders = getSheetHeaders(config.detailSheet, config.detailHeaderRow);
+    const baseHeaders = getSheetHeaders(config.baseSheet, config.baseHeaderRow).length
+      ? getSheetHeaders(config.baseSheet, config.baseHeaderRow)
+      : (config.baseHeaders || []);
+    const detailHeaders = getSheetHeaders(config.detailSheet, config.detailHeaderRow).length
+      ? getSheetHeaders(config.detailSheet, config.detailHeaderRow)
+      : (config.detailHeaders || []);
     const baseKey = baseHeaders.includes(config.baseKey) ? config.baseKey : guessKeyColumn(baseHeaders);
     const detailKey = detailHeaders.includes(config.detailKey) ? config.detailKey : guessKeyColumn(detailHeaders);
     const detailColumns = (config.detailColumns || []).filter(column => detailHeaders.includes(column) && column !== detailKey);
-    const copiedBaseColumns = (config.copiedBaseColumns || []).filter(column => baseHeaders.includes(column));
+    const selectedDetailColumns = detailColumns.length ? detailColumns : defaultDetailColumns(detailHeaders, detailKey);
 
     return {
       ...config,
       baseKey,
       detailKey,
-      detailColumns: detailColumns.length ? detailColumns : defaultDetailColumns(detailHeaders, detailKey),
-      copiedBaseColumns: copiedBaseColumns.length ? copiedBaseColumns : defaultCopiedBaseColumns(baseHeaders),
-      uniqueIdBaseColumn: baseHeaders.includes(config.uniqueIdBaseColumn) ? config.uniqueIdBaseColumn : baseKey,
-      uniqueIdDetailColumn: detailHeaders.includes(config.uniqueIdDetailColumn)
-        ? config.uniqueIdDetailColumn
-        : (detailColumns[0] || detailKey)
+      detailColumns: selectedDetailColumns,
+      copiedBaseColumns: defaultCopiedBaseColumns(baseHeaders),
+      uniqueIdMode: 'auto',
+      uniqueIdBaseColumn: baseKey,
+      uniqueIdDetailColumn: selectedDetailColumns[0] || detailKey,
+      uniqueIdPattern: '{base}_{detail}',
+      baseHeaders,
+      detailHeaders
     };
   }, [defaultCopiedBaseColumns, defaultDetailColumns, getSheetHeaders, guessKeyColumn]);
 
@@ -392,7 +477,6 @@ const UploadFiles = () => {
     const baseRows = getSheetRecords(cleanConfig.baseSheet, cleanConfig.baseHeaderRow);
     const detailRows = getSheetRecords(cleanConfig.detailSheet, cleanConfig.detailHeaderRow);
     const selectedDetailColumns = cleanConfig.detailColumns.filter(column => detailHeaders.includes(column) && column !== cleanConfig.detailKey);
-    const copiedBaseColumns = cleanConfig.copiedBaseColumns.filter(column => baseHeaders.includes(column));
     const singleGroupedColumnName = cleanConfig.relationshipName.trim();
 
     const normalize = value => String(value || '').replace(/\u00a0/g, ' ').trim().toLowerCase();
@@ -482,7 +566,7 @@ const UploadFiles = () => {
             row.__sheetJoinStatus = 'matched';
             row[generatedIdHeader] = makeId(baseRow, detailRow);
             baseHeaders.forEach(header => {
-              row[header] = copiedBaseColumns.includes(header) || matchIndex === 0 ? (baseRow[header] ?? '') : '';
+              row[header] = baseRow[header] ?? '';
             });
             selectedDetailColumns.forEach(column => {
               row[detailHeaderMap[column]] = detailRow[column] ?? '';
@@ -507,7 +591,11 @@ const UploadFiles = () => {
     const orphanDetailKeys = [...detailKeys].filter(key => !baseKeys.has(key)).length;
 
     return {
-      config: cleanConfig,
+      config: {
+        ...cleanConfig,
+        baseHeaders,
+        detailHeaders
+      },
       headers,
       rows,
       summary: {
@@ -526,6 +614,8 @@ const UploadFiles = () => {
       setError(null);
       setUserFile(file);
       setSheetJoinSetup(null);
+      setActiveSheetJoinComparisonId(null);
+      setSheetJoinLegacyHeaderWarning(false);
       setSheetJoinDialogOpen(false);
       
       // Read the file to extract sheet names and column headers for Excel/CSV files
@@ -884,6 +974,7 @@ const UploadFiles = () => {
       uniqueIdPattern: sheetJoinSetup?.uniqueIdPattern || '{base}_{detail}',
       copiedBaseColumns: sheetJoinSetup?.copiedBaseColumns || defaultCopiedColumnSelection
     });
+    setSheetJoinLegacyHeaderWarning(false);
     setSheetJoinStage('match');
     setSheetJoinPreview(null);
     setSheetJoinDialogOpen(true);
@@ -901,9 +992,20 @@ const UploadFiles = () => {
   };
 
   const handlePreviewSheetJoin = () => {
+    const baseRows = getSheetRecords(sheetJoinConfig.baseSheet, sheetJoinConfig.baseHeaderRow);
+    const detailRows = getSheetRecords(sheetJoinConfig.detailSheet, sheetJoinConfig.detailHeaderRow);
+    if ((!baseRows.length || !detailRows.length) && sheetJoinPreview?.rows?.length) {
+      setSheetJoinVisibleColumns(sheetJoinPreview.headers);
+      setSheetJoinPreviewFilter('all');
+      setSheetJoinPreviewPage(0);
+      setSheetJoinStage('preview');
+      return;
+    }
+
     const preview = buildSheetJoinPreview(sheetJoinConfig);
     setSheetJoinConfig(preview.config);
     setSheetJoinPreview(preview);
+    setSheetJoinLegacyHeaderWarning(false);
     setSheetJoinVisibleColumns(preview.headers);
     setSheetJoinPreviewFilter('all');
     setSheetJoinPreviewPage(0);
@@ -931,8 +1033,8 @@ const UploadFiles = () => {
     });
     const worksheet = XLSX.utils.json_to_sheet(exportRows, { header: sheetJoinPreview.headers });
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Compare_Preview');
-    XLSX.writeFile(workbook, `${sheetJoinConfig.relationshipName || 'sheet_compare'}_preview.xlsx`);
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Merge_Preview');
+    XLSX.writeFile(workbook, `${sheetJoinConfig.relationshipName || 'sheet_merge'}_preview.xlsx`);
   };
 
   const handleSheetJoinColumnResize = (header, event) => {
@@ -980,12 +1082,163 @@ const UploadFiles = () => {
     setSheetJoinToastOpen(true);
   };
 
+  const getSavedSheetJoinDraft = useCallback(async (comparisonId) => {
+    const db = await openSheetJoinDraftDb();
+    try {
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(sheetJoinDraftStoreName, 'readonly');
+        const request = tx.objectStore(sheetJoinDraftStoreName).get(comparisonId);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    } finally {
+      db.close();
+    }
+  }, [openSheetJoinDraftDb, sheetJoinDraftStoreName]);
+
+  const handleOpenSavedComparison = useCallback(async (comparison) => {
+    try {
+      const draft = await getSavedSheetJoinDraft(comparison.id);
+      if (!draft?.previewHeaders?.length) {
+        setError('Saved merge book data was not found. Please recreate the merge.');
+        return;
+      }
+      const storedConfig = draft.previewConfig || sheetJoinConfig;
+      const uniqueList = (values) => [...new Set((values || []).filter(Boolean))];
+      const workbookBaseHeaders = getSheetHeaders(storedConfig.baseSheet, storedConfig.baseHeaderRow);
+      const workbookDetailHeaders = getSheetHeaders(storedConfig.detailSheet, storedConfig.detailHeaderRow);
+      const fallbackDetailHeaders = uniqueList([
+        storedConfig.detailKey,
+        ...(storedConfig.detailColumns || [])
+      ]);
+      const fallbackBaseHeaders = uniqueList(
+        storedConfig.copiedBaseColumns?.length
+          ? storedConfig.copiedBaseColumns
+          : (draft.previewHeaders || []).filter(header =>
+              header !== 'Generated Row ID' &&
+              !(storedConfig.detailColumns || []).includes(header)
+            )
+      );
+      const previewConfig = {
+        ...storedConfig,
+        baseHeaders: workbookBaseHeaders.length
+          ? workbookBaseHeaders
+          : (draft.baseHeaders?.length ? draft.baseHeaders : (storedConfig.baseHeaders?.length ? storedConfig.baseHeaders : fallbackBaseHeaders)),
+        detailHeaders: workbookDetailHeaders.length
+          ? workbookDetailHeaders
+          : (draft.detailHeaders?.length ? draft.detailHeaders : (storedConfig.detailHeaders?.length ? storedConfig.detailHeaders : fallbackDetailHeaders))
+      };
+      setSheetJoinLegacyHeaderWarning(!workbookDetailHeaders.length && !draft.detailHeaders?.length && !storedConfig.detailHeaders?.length);
+      const preview = {
+        headers: draft.previewHeaders,
+        rows: draft.previewRows || [],
+        summary: draft.previewSummary || {
+          outputRows: draft.rowCount || 0,
+          matchedBaseRows: 0,
+          unmatchedBaseRows: 0,
+          orphanDetailKeys: 0
+        },
+        config: previewConfig
+      };
+      setSheetJoinConfig(preview.config);
+      setSheetJoinPreview(preview);
+      setSheetJoinVisibleColumns(preview.headers);
+      setSheetJoinPreviewPage(0);
+      setSheetJoinPreviewFilter('all');
+      setSheetJoinStage('preview');
+      setSheetJoinDialogOpen(true);
+    } catch (err) {
+      setError('Failed to open saved merge book: ' + (err.message || err));
+    }
+  }, [getSavedSheetJoinDraft, getSheetHeaders, sheetJoinConfig]);
+
+  const handleContinueSavedComparison = useCallback(async (comparison) => {
+    try {
+      const draft = await getSavedSheetJoinDraft(comparison.id);
+      if (!draft?.blob) {
+        setError('Saved merge book was not found. Please recreate the merge.');
+        return;
+      }
+      applySheetJoinDraftToUpload(draft, comparison.id);
+    } catch (err) {
+      setError('Failed to continue with saved merge book: ' + (err.message || err));
+    }
+  }, [applySheetJoinDraftToUpload, getSavedSheetJoinDraft]);
+
+  const saveNamedSheetJoinComparison = useCallback(async (preview, name, options = {}) => {
+    await saveSheetJoinDraft(preview, name, options);
+    handleSaveSheetJoinSetup();
+    setSheetJoinSaveDialogOpen(false);
+    setSheetJoinSaveName('');
+    setPendingSheetJoinDuplicate(null);
+    setSheetJoinDuplicateDialogOpen(false);
+    setSuccess('Merge book saved. You can reopen it from the saved merge books on Upload.');
+  }, [saveSheetJoinDraft, handleSaveSheetJoinSetup]);
+
+  const handleSaveComparisonWithName = async () => {
+    if (!sheetJoinSaveName.trim()) {
+      setError('Merge book name is required');
+      return;
+    }
+    const preview = sheetJoinPreview || buildSheetJoinPreview(sheetJoinConfig);
+    const requestedName = sheetJoinSaveName.trim();
+    const duplicate = savedSheetJoinComparisons.find(item =>
+      String(item.name || '').trim().toLowerCase() === requestedName.toLowerCase()
+    );
+    if (duplicate) {
+      setPendingSheetJoinDuplicate({ preview, name: requestedName, existing: duplicate });
+      setSheetJoinDuplicateDialogOpen(true);
+      return;
+    }
+
+    try {
+      setSheetJoinSaveLoading(true);
+      await saveNamedSheetJoinComparison(preview, requestedName);
+    } catch (err) {
+      setError('Failed to save merge book: ' + (err.message || err));
+    } finally {
+      setSheetJoinSaveLoading(false);
+    }
+  };
+
+  const handleOverrideSavedComparison = async () => {
+    if (!pendingSheetJoinDuplicate) return;
+    try {
+      setSheetJoinSaveLoading(true);
+      await saveNamedSheetJoinComparison(
+        pendingSheetJoinDuplicate.preview,
+        pendingSheetJoinDuplicate.name,
+        { overrideId: pendingSheetJoinDuplicate.existing.id }
+      );
+      if (activeSheetJoinComparisonId === pendingSheetJoinDuplicate.existing.id) {
+        setActiveSheetJoinComparisonId(null);
+      }
+    } catch (err) {
+      setError('Failed to override merge book: ' + (err.message || err));
+    } finally {
+      setSheetJoinSaveLoading(false);
+    }
+  };
+
+  const handleSaveComparisonAsCopy = async () => {
+    if (!pendingSheetJoinDuplicate) return;
+    const copyName = getUniqueSheetJoinComparisonName(pendingSheetJoinDuplicate.name);
+    try {
+      setSheetJoinSaveLoading(true);
+      await saveNamedSheetJoinComparison(pendingSheetJoinDuplicate.preview, copyName);
+    } catch (err) {
+      setError('Failed to save merge book copy: ' + (err.message || err));
+    } finally {
+      setSheetJoinSaveLoading(false);
+    }
+  };
+
   const handleContinueWithBomMapping = async () => {
     const preview = sheetJoinPreview || buildSheetJoinPreview(sheetJoinConfig);
     try {
       const draft = await saveSheetJoinDraft(preview);
       if (draft) {
-        applySheetJoinDraftToUpload(draft);
+        applySheetJoinDraftToUpload(draft, null);
       }
     } catch (err) {
       setError('Failed to save generated BOM file: ' + (err.message || err));
@@ -999,7 +1252,7 @@ const UploadFiles = () => {
     }
 
     try {
-      setSuccess('Applying sheet comparison before mapping...');
+      setSuccess('Applying sheet merge before mapping...');
       const response = await api.applySheetJoin({
         session_id: sessionId,
         base_sheet: sheetJoinSetup.baseSheet,
@@ -1019,10 +1272,10 @@ const UploadFiles = () => {
         preview_headers: sheetJoinSetup.previewHeaders,
         preview_rows: sheetJoinSetup.previewRows
       });
-      setSuccess(`Sheet comparison applied: ${response.data.rows} rows ready for mapping.`);
+      setSuccess(`Sheet merge applied: ${response.data.rows} rows ready for mapping.`);
       setTimeout(() => showPrimaryColumnDialog(sessionId, navState), 800);
     } catch (err) {
-      setError('Failed to apply sheet comparison: ' + (err.response?.data?.error || err.message));
+      setError('Failed to apply sheet merge: ' + (err.response?.data?.error || err.message));
     }
   };
 
@@ -1150,7 +1403,7 @@ const UploadFiles = () => {
 
       let response;
       
-      // Use template-aware upload only when no sheet comparison needs to run first.
+      // Use template-aware upload only when no sheet merge needs to run first.
       if (selectedTemplate && !sheetJoinSetup) {
         response = await api.uploadFilesWithTemplate(formData, selectedTemplate.id);
         
@@ -1191,9 +1444,9 @@ const UploadFiles = () => {
         }
         
       } else {
-        // No template selected, or sheet comparison must run before template mapping.
+        // No template selected, or sheet merge must run before template mapping.
         response = await api.uploadFiles(formData);
-        setSuccess(sheetJoinSetup ? 'Files uploaded. Preparing sheet comparison...' : 'Files uploaded successfully!');
+        setSuccess(sheetJoinSetup ? 'Files uploaded. Preparing sheet merge...' : 'Files uploaded successfully!');
 
         setTimeout(() => {
           continueAfterOptionalSheetJoin(response.data.session_id, selectedTemplate ? {
@@ -1295,8 +1548,31 @@ const UploadFiles = () => {
     }
   };
 
-  const sheetJoinBaseHeaders = getSheetHeaders(sheetJoinConfig.baseSheet, sheetJoinConfig.baseHeaderRow);
-  const sheetJoinDetailHeaders = getSheetHeaders(sheetJoinConfig.detailSheet, sheetJoinConfig.detailHeaderRow);
+  const currentBaseHeaders = getSheetHeaders(sheetJoinConfig.baseSheet, sheetJoinConfig.baseHeaderRow);
+  const currentDetailHeaders = getSheetHeaders(sheetJoinConfig.detailSheet, sheetJoinConfig.detailHeaderRow);
+  const sheetJoinBaseHeaders = currentBaseHeaders.length
+    ? currentBaseHeaders
+    : (sheetJoinConfig.baseHeaders || sheetJoinPreview?.config?.baseHeaders || []);
+  const sheetJoinDetailHeaders = currentDetailHeaders.length
+    ? currentDetailHeaders
+    : (sheetJoinConfig.detailHeaders || sheetJoinPreview?.config?.detailHeaders || []);
+  const sheetJoinDetailLabel = (() => {
+    const normalize = value => String(value || '').toLowerCase();
+    const selectedColumns = sheetJoinConfig.detailColumns || [];
+    const preferredColumn =
+      selectedColumns.find(column => /\bmpn\b|manufacturer part number|mfg part/i.test(column)) ||
+      selectedColumns.find(column => /manufacturer|mfg/i.test(column)) ||
+      selectedColumns[0];
+    const relationshipName = String(sheetJoinConfig.relationshipName || '').trim();
+    const rawLabel = preferredColumn || relationshipName || 'secondary values';
+    const lower = normalize(rawLabel);
+    if (lower.includes('manufacturer part number') || lower === 'mpn' || lower.includes('mpn')) return 'MPNs';
+    if (lower.includes('manufacturer')) return 'manufacturers';
+    return rawLabel;
+  })();
+  const sheetJoinDetailSingularLabel = sheetJoinDetailLabel === 'MPNs'
+    ? 'MPN'
+    : (sheetJoinDetailLabel === 'manufacturers' ? 'manufacturer' : sheetJoinDetailLabel);
   const sheetJoinFilteredPreviewRows = sheetJoinPreview
     ? sheetJoinPreview.rows
         .map((row, index) => ({ row, index }))
@@ -1412,7 +1688,7 @@ const UploadFiles = () => {
                         onClick={handleOpenSheetJoinSetup}
                         size="small"
                       >
-                        Add sheet comparison
+                        Merge sheets
                       </Button>
                     </Box>
                   )}
@@ -1420,12 +1696,59 @@ const UploadFiles = () => {
                   {sheetJoinSetup && (
                     <Alert severity="info" sx={{ mt: 2 }}>
                       <Typography variant="body2" fontWeight="600">
-                        Compare setup saved{sheetJoinSetup.relationshipName ? `: ${sheetJoinSetup.relationshipName}` : ''}
+                        Merge setup saved{sheetJoinSetup.relationshipName ? `: ${sheetJoinSetup.relationshipName}` : ''}
                       </Typography>
                       <Typography variant="body2">
                         {sheetJoinSetup.baseSheet}.{sheetJoinSetup.baseKey} -> {sheetJoinSetup.detailSheet}.{sheetJoinSetup.detailKey}
                       </Typography>
                     </Alert>
+                  )}
+
+                  {savedSheetJoinComparisons.length > 0 && (
+                    <Box sx={{ mt: 2 }}>
+                      <Typography variant="body2" fontWeight="600" sx={{ mb: 1 }}>
+                        Saved merge books
+                      </Typography>
+                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                        {savedSheetJoinComparisons.map(comparison => {
+                          const isActiveComparison = activeSheetJoinComparisonId === comparison.id;
+                          return (
+                            <Box
+                              key={comparison.id}
+                              sx={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 1,
+                                p: 1,
+                                border: isActiveComparison ? '1px solid #86efac' : '1px solid #bfdbfe',
+                                borderRadius: 1,
+                                bgcolor: isActiveComparison ? '#f0fdf4' : '#eff6ff'
+                              }}
+                            >
+                              <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+                                <Typography variant="body2" fontWeight="700" noWrap>
+                                  {comparison.name}
+                                </Typography>
+                                <Typography variant="caption" color="text.secondary" noWrap>
+                                  {comparison.baseSheet}.{comparison.baseKey} -> {comparison.detailSheet}.{comparison.detailKey} | {comparison.rowCount} rows
+                                </Typography>
+                              </Box>
+                              <Button size="small" onClick={() => handleOpenSavedComparison(comparison)}>
+                                View
+                              </Button>
+                              <Button
+                                size="small"
+                                variant="contained"
+                                disabled={isActiveComparison}
+                                onClick={() => handleContinueSavedComparison(comparison)}
+                              >
+                                {isActiveComparison ? 'In use' : 'Continue'}
+                              </Button>
+                            </Box>
+                          );
+                        })}
+                      </Box>
+                    </Box>
                   )}
                 </>
               )}
@@ -1790,10 +2113,10 @@ const UploadFiles = () => {
         <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2 }}>
           <Box>
             <Typography variant="h6" fontWeight="600">
-              Compare Sheets
+              Merge Sheets
             </Typography>
             <Typography variant="body2" color="text.secondary">
-              Build a sheet comparison before template mapping
+              Merge related sheet data before template mapping
             </Typography>
           </Box>
           <IconButton onClick={handleCloseSheetJoinSetup}>
@@ -1805,9 +2128,9 @@ const UploadFiles = () => {
             <Grid container spacing={2.5}>
               <Grid item xs={12} md={6}>
                 <FormControl fullWidth size="small" sx={{ mt: 1 }}>
-                  <InputLabel>Sheet with main item list</InputLabel>
+                  <InputLabel>Primary sheet</InputLabel>
                   <Select
-                    label="Sheet with main item list"
+                    label="Primary sheet"
                     value={sheetJoinConfig.baseSheet}
                     onChange={(event) => {
                       const baseSheet = event.target.value;
@@ -1830,9 +2153,9 @@ const UploadFiles = () => {
               </Grid>
               <Grid item xs={12} md={6}>
                 <FormControl fullWidth size="small" sx={{ mt: 1 }}>
-                  <InputLabel>Sheet with matching details</InputLabel>
+                  <InputLabel>Secondary sheet</InputLabel>
                   <Select
-                    label="Sheet with matching details"
+                    label="Secondary sheet"
                     value={sheetJoinConfig.detailSheet}
                     onChange={(event) => {
                       const detailSheet = event.target.value;
@@ -1859,7 +2182,7 @@ const UploadFiles = () => {
                   fullWidth
                   size="small"
                   type="number"
-                  label="Header row in main sheet"
+                  label="Header row in primary sheet"
                   value={sheetJoinConfig.baseHeaderRow}
                   onChange={(event) => {
                     const baseHeaderRow = Math.max(1, Number(event.target.value || 1));
@@ -1880,7 +2203,7 @@ const UploadFiles = () => {
                   fullWidth
                   size="small"
                   type="number"
-                  label="Header row in details sheet"
+                  label="Header row in secondary sheet"
                   value={sheetJoinConfig.detailHeaderRow}
                   onChange={(event) => {
                     const detailHeaderRow = Math.max(1, Number(event.target.value || 1));
@@ -1899,9 +2222,9 @@ const UploadFiles = () => {
               </Grid>
               <Grid item xs={12} md={6}>
                 <FormControl fullWidth size="small">
-                  <InputLabel>Main sheet column to match</InputLabel>
+                  <InputLabel>Common column to match on</InputLabel>
                   <Select
-                    label="Main sheet column to match"
+                    label="Common column to match on"
                     value={sheetJoinConfig.baseKey}
                     onChange={(event) => setSheetJoinConfig(prev => ({
                       ...prev,
@@ -1917,9 +2240,9 @@ const UploadFiles = () => {
               </Grid>
               <Grid item xs={12} md={6}>
                 <FormControl fullWidth size="small">
-                  <InputLabel>Details sheet column with same values</InputLabel>
+                  <InputLabel>Matching column in secondary sheet</InputLabel>
                   <Select
-                    label="Details sheet column with same values"
+                    label="Matching column in secondary sheet"
                     value={sheetJoinConfig.detailKey}
                     onChange={(event) => {
                       const detailKey = event.target.value;
@@ -1941,11 +2264,11 @@ const UploadFiles = () => {
                 <TextField
                   fullWidth
                   size="small"
-                  label="Name for new related-data column"
+                  label="Name for merged related-data column"
                   placeholder="Example: MPN details"
                   value={sheetJoinConfig.relationshipName}
                   onChange={(event) => setSheetJoinConfig(prev => ({ ...prev, relationshipName: event.target.value }))}
-                  helperText="Used when one detail column is grouped into the same row; otherwise original detail column names are kept."
+                  helperText="Used when one secondary-sheet column is merged into the same row; otherwise original secondary column names are kept."
                 />
               </Grid>
             </Grid>
@@ -1962,15 +2285,15 @@ const UploadFiles = () => {
                   value={sheetJoinConfig.outputMode}
                   onChange={(event) => setSheetJoinConfig(prev => ({ ...prev, outputMode: event.target.value }))}
                 >
-                  <FormControlLabel value="grouped" control={<Radio size="small" />} label="Put all related values in the same row" />
-                  <FormControlLabel value="expanded" control={<Radio size="small" />} label="Create a separate row for each related entry" />
+                  <FormControlLabel value="grouped" control={<Radio size="small" />} label={`Add all related ${sheetJoinDetailLabel} in the same cell`} />
+                  <FormControlLabel value="expanded" control={<Radio size="small" />} label={`Create a separate row for each ${sheetJoinDetailSingularLabel}`} />
                 </RadioGroup>
               </Grid>
 
               <Grid item xs={12}>
                 <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
                   <Typography variant="subtitle1" fontWeight="600">
-                    Columns to bring from details sheet
+                    Columns to bring from secondary sheet
                   </Typography>
                   <Box>
                     <Button size="small" onClick={() => setSheetJoinConfig(prev => ({
@@ -1984,6 +2307,11 @@ const UploadFiles = () => {
                     </Button>
                   </Box>
                 </Box>
+                {sheetJoinLegacyHeaderWarning && (
+                  <Alert severity="warning" sx={{ mb: 1 }}>
+                    This older saved merge book only contains the secondary columns that were saved in its preview. Reopen or re-upload the original workbook to choose every secondary-sheet column.
+                  </Alert>
+                )}
                 <FormGroup row sx={{ gap: 0.5 }}>
                   {sheetJoinDetailHeaders
                     .filter(header => header !== sheetJoinConfig.detailKey)
@@ -2010,106 +2338,6 @@ const UploadFiles = () => {
                 </FormGroup>
               </Grid>
 
-              {sheetJoinConfig.outputMode === 'expanded' && (
-                <Grid item xs={12}>
-                  <Divider sx={{ my: 1 }} />
-                  <Typography variant="subtitle1" fontWeight="600" gutterBottom>
-                    Row ID for expanded matches
-                  </Typography>
-                  <RadioGroup
-                    row
-                    value={sheetJoinConfig.uniqueIdMode}
-                    onChange={(event) => setSheetJoinConfig(prev => ({ ...prev, uniqueIdMode: event.target.value }))}
-                  >
-                    <FormControlLabel value="auto" control={<Radio size="small" />} label="Merge two selected columns" />
-                    <FormControlLabel value="custom" control={<Radio size="small" />} label="Use custom pattern" />
-                  </RadioGroup>
-
-                  <Grid container spacing={2} sx={{ mt: 0.5 }}>
-                    <Grid item xs={12} md={6}>
-                      <FormControl fullWidth size="small">
-                        <InputLabel>Main ID column</InputLabel>
-                        <Select
-                          label="Main ID column"
-                          value={sheetJoinConfig.uniqueIdBaseColumn}
-                          onChange={(event) => setSheetJoinConfig(prev => ({ ...prev, uniqueIdBaseColumn: event.target.value }))}
-                        >
-                          {sheetJoinBaseHeaders.map(header => (
-                            <MenuItem key={header} value={header}>{header}</MenuItem>
-                          ))}
-                        </Select>
-                      </FormControl>
-                    </Grid>
-                    <Grid item xs={12} md={6}>
-                      <FormControl fullWidth size="small">
-                        <InputLabel>Detail ID column</InputLabel>
-                        <Select
-                          label="Detail ID column"
-                          value={sheetJoinConfig.uniqueIdDetailColumn}
-                          onChange={(event) => setSheetJoinConfig(prev => ({ ...prev, uniqueIdDetailColumn: event.target.value }))}
-                        >
-                          {sheetJoinDetailHeaders.map(header => (
-                            <MenuItem key={header} value={header}>{header}</MenuItem>
-                          ))}
-                        </Select>
-                      </FormControl>
-                    </Grid>
-                    {sheetJoinConfig.uniqueIdMode === 'custom' && (
-                      <Grid item xs={12}>
-                        <TextField
-                          fullWidth
-                          size="small"
-                          label="Custom ID pattern"
-                          value={sheetJoinConfig.uniqueIdPattern}
-                          onChange={(event) => setSheetJoinConfig(prev => ({ ...prev, uniqueIdPattern: event.target.value }))}
-                          helperText="Use {base} and {detail}, for example {base}_{detail}"
-                        />
-                      </Grid>
-                    )}
-                  </Grid>
-                </Grid>
-              )}
-
-              {sheetJoinConfig.outputMode === 'expanded' && (
-              <Grid item xs={12}>
-                <Divider sx={{ my: 1 }} />
-                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
-                  <Typography variant="subtitle1" fontWeight="600">
-                    Main sheet columns to repeat on every generated row
-                  </Typography>
-                  <Box>
-                    <Button size="small" onClick={() => setSheetJoinConfig(prev => ({ ...prev, copiedBaseColumns: sheetJoinBaseHeaders }))}>
-                      Select all
-                    </Button>
-                    <Button size="small" onClick={() => setSheetJoinConfig(prev => ({ ...prev, copiedBaseColumns: [] }))}>
-                      Clear
-                    </Button>
-                  </Box>
-                </Box>
-                <FormGroup row sx={{ gap: 0.5 }}>
-                  {sheetJoinBaseHeaders.map(header => (
-                    <FormControlLabel
-                      key={header}
-                      control={
-                        <Checkbox
-                          size="small"
-                          checked={sheetJoinConfig.copiedBaseColumns.includes(header)}
-                          onChange={(event) => {
-                            setSheetJoinConfig(prev => ({
-                              ...prev,
-                              copiedBaseColumns: event.target.checked
-                                ? [...prev.copiedBaseColumns, header]
-                                : prev.copiedBaseColumns.filter(column => column !== header)
-                            }));
-                          }}
-                        />
-                      }
-                      label={header}
-                    />
-                  ))}
-                </FormGroup>
-              </Grid>
-              )}
             </Grid>
           )}
 
@@ -2152,10 +2380,10 @@ const UploadFiles = () => {
                     clickable
                   />
                 </Grid>
-                <Grid item xs={6} md={3}><Chip label={`${sheetJoinPreview.summary.orphanDetailKeys} detail-only keys`} /></Grid>
+                <Grid item xs={6} md={3}><Chip label={`${sheetJoinPreview.summary.orphanDetailKeys} secondary-only keys`} /></Grid>
               </Grid>
               <Alert severity="info" sx={{ mb: 2 }}>
-                Preview keeps the full generated data. Showing {visibleSheetJoinPreviewRows.length ? sheetJoinPreviewStart + 1 : 0}-{Math.min(sheetJoinPreviewStart + visibleSheetJoinPreviewRows.length, sheetJoinFilteredPreviewRows.length)} of {sheetJoinFilteredPreviewRows.length} rows to keep the page responsive.
+                Preview keeps the full merged data. Showing {visibleSheetJoinPreviewRows.length ? sheetJoinPreviewStart + 1 : 0}-{Math.min(sheetJoinPreviewStart + visibleSheetJoinPreviewRows.length, sheetJoinFilteredPreviewRows.length)} of {sheetJoinFilteredPreviewRows.length} rows to keep the page responsive.
               </Alert>
               <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 2, mb: 1 }}>
                 <Button
@@ -2318,23 +2546,90 @@ const UploadFiles = () => {
             <Button
               variant="contained"
               onClick={handlePreviewSheetJoin}
-              disabled={
-                sheetJoinConfig.detailColumns.length === 0 ||
-                (sheetJoinConfig.outputMode === 'expanded' && (
-                  !sheetJoinConfig.uniqueIdBaseColumn ||
-                  !sheetJoinConfig.uniqueIdDetailColumn ||
-                  (sheetJoinConfig.uniqueIdMode === 'custom' && !sheetJoinConfig.uniqueIdPattern.trim())
-                ))
-              }
+              disabled={sheetJoinConfig.detailColumns.length === 0}
             >
               Preview
             </Button>
           )}
           {sheetJoinStage === 'preview' && (
-            <Button variant="contained" onClick={handleSaveSheetJoinSetup}>
-              Save Comparison
+            <Button
+              variant="contained"
+              onClick={() => {
+                setSheetJoinSaveName(sheetJoinConfig.relationshipName || `Merge ${new Date().toLocaleString()}`);
+                setSheetJoinSaveDialogOpen(true);
+              }}
+            >
+              Save Merge Book
             </Button>
           )}
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={sheetJoinSaveDialogOpen}
+        onClose={() => !sheetJoinSaveLoading && setSheetJoinSaveDialogOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>Save Merge Book</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            Name this merge book so you can reopen it later and continue BOM mapping from it.
+          </DialogContentText>
+          <TextField
+            fullWidth
+            required
+            autoFocus
+            margin="normal"
+            label="Merge Book Name"
+            value={sheetJoinSaveName}
+            onChange={(event) => setSheetJoinSaveName(event.target.value)}
+            error={!sheetJoinSaveName.trim()}
+            helperText={!sheetJoinSaveName.trim() ? 'Merge book name is required' : 'This saves the generated merge book.'}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setSheetJoinSaveDialogOpen(false)} disabled={sheetJoinSaveLoading}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            onClick={handleSaveComparisonWithName}
+            disabled={sheetJoinSaveLoading || !sheetJoinSaveName.trim()}
+          >
+            {sheetJoinSaveLoading ? 'Saving...' : 'Save Merge Book'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={sheetJoinDuplicateDialogOpen}
+        onClose={() => !sheetJoinSaveLoading && setSheetJoinDuplicateDialogOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>Merge Book Name Already Exists</DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            A merge book named "{pendingSheetJoinDuplicate?.name}" is already saved. Replace the old one or keep both by saving this as a copy.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setSheetJoinDuplicateDialogOpen(false);
+              setPendingSheetJoinDuplicate(null);
+            }}
+            disabled={sheetJoinSaveLoading}
+          >
+            Cancel
+          </Button>
+          <Button onClick={handleSaveComparisonAsCopy} disabled={sheetJoinSaveLoading}>
+            Save as Copy
+          </Button>
+          <Button variant="contained" color="warning" onClick={handleOverrideSavedComparison} disabled={sheetJoinSaveLoading}>
+            Override
+          </Button>
         </DialogActions>
       </Dialog>
 

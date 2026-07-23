@@ -232,6 +232,11 @@ const EnhancedDataEditor = () => {
   const [firstColumn, setFirstColumn] = useState('');
   const [secondColumn, setSecondColumn] = useState('');
   const [operator, setOperator] = useState('_');
+  const [factwiseGenerationMode, setFactwiseGenerationMode] = useState('columns');
+  const [factwiseSerialPrefix, setFactwiseSerialPrefix] = useState('SFO');
+  const [factwiseSerialStart, setFactwiseSerialStart] = useState(1);
+  const [factwiseSerialPadding, setFactwiseSerialPadding] = useState(2);
+  const [factwiseSerialIncrement, setFactwiseSerialIncrement] = useState(true);
   
   // Store factwise ID rule for template saving
   const [factwiseIdRule, setFactwiseIdRule] = useState(null);
@@ -267,6 +272,8 @@ const EnhancedDataEditor = () => {
   const [showMpnColumns, setShowMpnColumns] = useState(true);
   const [mpnSplitting, setMpnSplitting] = useState(false);
   const [mpnSplitDialogOpen, setMpnSplitDialogOpen] = useState(false);
+  const [manufacturerMatchDialogOpen, setManufacturerMatchDialogOpen] = useState(false);
+  const [manufacturerRulesExpanded, setManufacturerRulesExpanded] = useState(false);
   const [mpnSplitOptions, setMpnSplitOptions] = useState({
     stripAlphaPrefix: true,
     alphaPrefixMinLength: 5,
@@ -275,6 +282,16 @@ const EnhancedDataEditor = () => {
     extraPrefixes: 'AGILE',
     manufacturerAliases: 'NIC=NIC COMPONENTS\nCOMPONENTS=',
     manufacturerDiscardTokens: 'COMPONENT\nCOMPONENTS'
+  });
+  const [manufacturerDirectory, setManufacturerDirectory] = useState({
+    fileName: '',
+    workbook: null,
+    sheetNames: [],
+    sheetName: '',
+    headerRow: 1,
+    headers: [],
+    nameColumn: '',
+    synonymColumns: []
   });
 
   // Helper function to identify MPN validation columns
@@ -1143,33 +1160,51 @@ const EnhancedDataEditor = () => {
 
   // ─── ENHANCED FACTWISE ID CREATION ──────────────────────────────────────────
   const runCreateFactwiseIdSynchronized = useCallback(async (strategy = 'fill_only_null') => {
-    if (!firstColumn || !secondColumn) {
+    if (factwiseGenerationMode === 'columns' && (!firstColumn || !secondColumn)) {
       showSnackbar('Please select both columns for creating Factwise ID', 'error');
       return;
     }
 
     try {
       setLoading(true);
+      const serialStart = Number(factwiseSerialStart) || 1;
+      const serialPadding = Math.max(0, Number(factwiseSerialPadding) || 0);
       
       const syncResult = await synchronizer.current.createFactWiseIdSynchronized(
         firstColumn, 
         secondColumn, 
         operator, 
-        strategy
+        strategy,
+        {
+          generationMode: factwiseGenerationMode,
+          serialPrefix: factwiseSerialPrefix,
+          serialStart,
+          serialPadding,
+          serialIncrement: factwiseSerialIncrement
+        }
       );
 
       if (syncResult.success) {
-        setFactwiseIdRule({ firstColumn, secondColumn, operator, strategy });
-        
-        // Update local data with validation data
-        if (syncResult.validationData && syncResult.validationData.success) {
-          const validatedData = syncResult.validationData.data;
-          updateDataIntegrity(true, []);
-          
-          // Refresh column definitions and data
-          await fetchDataSynchronized();
+        setFactwiseIdRule({
+          firstColumn,
+          secondColumn,
+          operator,
+          strategy,
+          generationMode: factwiseGenerationMode,
+          serialPrefix: factwiseSerialPrefix,
+          serialStart,
+          serialPadding,
+          serialIncrement: factwiseSerialIncrement
+        });
+        const responseVersion = syncResult?.result?.data?.template_version;
+        if (typeof responseVersion === 'number') {
+          setSessionVersion(responseVersion);
         }
         
+        updateDataIntegrity(true, []);
+        await fetchDataSynchronized();
+        setSyncNotice(prev => ({ ...prev, visible: false }));
+
         showSnackbar('FactWise ID created successfully! All columns are now synchronized.', 'success');
         handleCloseFactwiseIdDialog();
       } else {
@@ -1182,10 +1217,10 @@ const EnhancedDataEditor = () => {
     } finally {
       setLoading(false);
     }
-  }, [firstColumn, secondColumn, operator, showSnackbar, fetchDataSynchronized, updateDataIntegrity]);
+  }, [firstColumn, secondColumn, operator, factwiseGenerationMode, factwiseSerialPrefix, factwiseSerialStart, factwiseSerialPadding, factwiseSerialIncrement, showSnackbar, fetchDataSynchronized, updateDataIntegrity]);
 
   const handleCreateFactwiseIdSynchronized = useCallback(async () => {
-    if (!firstColumn || !secondColumn) {
+    if (factwiseGenerationMode === 'columns' && (!firstColumn || !secondColumn)) {
       showSnackbar('Please select both columns for creating Factwise ID', 'error');
       return;
     }
@@ -1205,7 +1240,7 @@ const EnhancedDataEditor = () => {
     }
 
     await runCreateFactwiseIdSynchronized('fill_only_null');
-  }, [firstColumn, secondColumn, columnDefs, rowData, showSnackbar, runCreateFactwiseIdSynchronized]);
+  }, [firstColumn, secondColumn, factwiseGenerationMode, columnDefs, rowData, showSnackbar, runCreateFactwiseIdSynchronized]);
 
   // ─── ENHANCED FORMULA APPLICATION ───────────────────────────────────────────
   const handleApplyFormulasSynchronized = useCallback(async (formulaResult) => {
@@ -1303,12 +1338,30 @@ const EnhancedDataEditor = () => {
           const factwiseRule = template.factwise_rules.find(rule => rule.type === "factwise_id");
           if (factwiseRule) {
             const { first_column, second_column, operator } = factwiseRule;
-            await synchronizer.current.createFactWiseIdSynchronized(first_column, second_column, operator);
+            await synchronizer.current.createFactWiseIdSynchronized(
+              first_column,
+              second_column,
+              operator,
+              factwiseRule.strategy || 'fill_only_null',
+              {
+                generationMode: factwiseRule.generation_mode || 'columns',
+                serialPrefix: factwiseRule.serial_prefix || '',
+                serialStart: factwiseRule.serial_start ?? 1,
+                serialPadding: factwiseRule.serial_padding ?? 0,
+                serialIncrement: factwiseRule.serial_increment !== false
+              }
+            );
             
             setFactwiseIdRule({
               firstColumn: first_column,
               secondColumn: second_column,
-              operator: operator
+              operator: operator,
+              strategy: factwiseRule.strategy || 'fill_only_null',
+              generationMode: factwiseRule.generation_mode || 'columns',
+              serialPrefix: factwiseRule.serial_prefix || '',
+              serialStart: factwiseRule.serial_start ?? 1,
+              serialPadding: factwiseRule.serial_padding ?? 0,
+              serialIncrement: factwiseRule.serial_increment !== false
             });
           }
         }
@@ -1371,6 +1424,11 @@ const EnhancedDataEditor = () => {
     setFirstColumn('');
     setSecondColumn('');
     setOperator('_');
+    setFactwiseGenerationMode('columns');
+    setFactwiseSerialPrefix('SFO');
+    setFactwiseSerialStart(1);
+    setFactwiseSerialPadding(2);
+    setFactwiseSerialIncrement(true);
   }, []);
 
   // ─── MANUAL REFRESH FUNCTION ────────────────────────────────────────────────
@@ -1523,7 +1581,12 @@ const EnhancedDataEditor = () => {
           first_column: factwiseIdRule.firstColumn,
           second_column: factwiseIdRule.secondColumn,
           operator: factwiseIdRule.operator || '_',
-          strategy: factwiseIdRule.strategy || 'fill_only_null'
+          strategy: factwiseIdRule.strategy || 'fill_only_null',
+          generation_mode: factwiseIdRule.generationMode || 'columns',
+          serial_prefix: factwiseIdRule.serialPrefix || '',
+          serial_start: factwiseIdRule.serialStart ?? 1,
+          serial_padding: factwiseIdRule.serialPadding ?? 0,
+          serial_increment: factwiseIdRule.serialIncrement !== false
         }];
       }
 
@@ -1675,14 +1738,154 @@ const EnhancedDataEditor = () => {
       },
       manufacturer: {
         aliases,
-        discard_tokens: parseLines(mpnSplitOptions.manufacturerDiscardTokens)
+        discard_tokens: parseLines(mpnSplitOptions.manufacturerDiscardTokens),
+        known_phrases: Object.values(aliases).filter(Boolean)
       }
     };
   }, [mpnSplitOptions]);
 
+  const getManufacturerDirectoryHeaders = useCallback((workbook, sheetName, headerRow = 1) => {
+    if (!workbook || !sheetName || !workbook.Sheets[sheetName]) return [];
+    const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, raw: false, defval: '' });
+    return (rows[Math.max(0, Number(headerRow || 1) - 1)] || [])
+      .map(value => String(value || '').trim())
+      .filter(Boolean);
+  }, []);
+
+  const guessManufacturerDirectoryNameColumn = useCallback((headers) => {
+    const preferred = ['manufacturer', 'manufacturer name', 'mfr', 'mfg', 'company', 'company name', 'name'];
+    const normalized = headers.map(header => ({
+      header,
+      value: String(header || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+    }));
+    for (const term of preferred) {
+      const match = normalized.find(item => item.value === term || item.value.includes(term));
+      if (match) return match.header;
+    }
+    return headers[0] || '';
+  }, []);
+
+  const handleManufacturerDirectoryUpload = useCallback((event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    if (!['xlsx', 'xls', 'csv'].includes(ext)) {
+      showSnackbar('Please upload an Excel or CSV manufacturer directory.', 'error');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (loadEvent) => {
+      try {
+        const data = new Uint8Array(loadEvent.target.result);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const sheetName = workbook.SheetNames[0] || '';
+        const headers = getManufacturerDirectoryHeaders(workbook, sheetName, 1);
+        const nameColumn = guessManufacturerDirectoryNameColumn(headers);
+        setManufacturerDirectory({
+          fileName: file.name,
+          workbook,
+          sheetNames: workbook.SheetNames,
+          sheetName,
+          headerRow: 1,
+          headers,
+          nameColumn,
+          synonymColumns: headers.filter(header => header !== nameColumn && /synonym|alias|alternate|aka|short|abbr/i.test(header))
+        });
+        setManufacturerRulesExpanded(false);
+        showSnackbar(`Loaded manufacturer directory: ${file.name}`, 'success');
+      } catch (err) {
+        showSnackbar('Failed to read manufacturer directory.', 'error');
+      } finally {
+        event.target.value = '';
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  }, [getManufacturerDirectoryHeaders, guessManufacturerDirectoryNameColumn, showSnackbar]);
+
+  const updateManufacturerDirectorySheet = useCallback((sheetName) => {
+    setManufacturerDirectory(prev => {
+      const headers = getManufacturerDirectoryHeaders(prev.workbook, sheetName, prev.headerRow);
+      const nameColumn = headers.includes(prev.nameColumn) ? prev.nameColumn : guessManufacturerDirectoryNameColumn(headers);
+      return {
+        ...prev,
+        sheetName,
+        headers,
+        nameColumn,
+        synonymColumns: prev.synonymColumns.filter(column => headers.includes(column) && column !== nameColumn)
+      };
+    });
+  }, [getManufacturerDirectoryHeaders, guessManufacturerDirectoryNameColumn]);
+
+  const updateManufacturerDirectoryHeaderRow = useCallback((headerRow) => {
+    const nextHeaderRow = Math.max(1, Number(headerRow || 1));
+    setManufacturerDirectory(prev => {
+      const headers = getManufacturerDirectoryHeaders(prev.workbook, prev.sheetName, nextHeaderRow);
+      const nameColumn = headers.includes(prev.nameColumn) ? prev.nameColumn : guessManufacturerDirectoryNameColumn(headers);
+      return {
+        ...prev,
+        headerRow: nextHeaderRow,
+        headers,
+        nameColumn,
+        synonymColumns: prev.synonymColumns.filter(column => headers.includes(column) && column !== nameColumn)
+      };
+    });
+  }, [getManufacturerDirectoryHeaders, guessManufacturerDirectoryNameColumn]);
+
+  const applyManufacturerDirectoryRules = useCallback(() => {
+    const { workbook, sheetName, headerRow, nameColumn, synonymColumns } = manufacturerDirectory;
+    if (!workbook || !sheetName || !nameColumn) {
+      showSnackbar('Upload a manufacturer directory and select the manufacturer name column first.', 'warning');
+      return;
+    }
+
+    const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { raw: false, defval: '', range: Math.max(0, Number(headerRow || 1) - 1) });
+    const aliases = new Map();
+    const addAlias = (source, target) => {
+      const sourceText = String(source || '').replace(/\s+/g, ' ').trim();
+      const targetText = String(target || '').replace(/\s+/g, ' ').trim();
+      if (!sourceText || !targetText) return;
+      aliases.set(sourceText.toUpperCase(), `${sourceText}=${targetText}`);
+    };
+
+    rows.forEach(row => {
+      const canonical = String(row[nameColumn] || '').replace(/\s+/g, ' ').trim();
+      if (!canonical) return;
+      addAlias(canonical, canonical);
+      synonymColumns.forEach(column => {
+        String(row[column] || '')
+          .split(/[,;|\n]+/)
+          .map(value => value.trim())
+          .filter(Boolean)
+          .forEach(alias => addAlias(alias, canonical));
+      });
+    });
+
+    if (aliases.size === 0) {
+      showSnackbar('No manufacturer names found in the selected directory column.', 'warning');
+      return;
+    }
+
+    const existing = String(mpnSplitOptions.manufacturerAliases || '')
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean);
+    const merged = [...existing];
+    const existingKeys = new Set(existing.map(line => line.split('=')[0]?.trim().toUpperCase()).filter(Boolean));
+    aliases.forEach((line, key) => {
+      if (!existingKeys.has(key)) merged.push(line);
+    });
+    setMpnSplitOptions(prev => ({ ...prev, manufacturerAliases: merged.join('\n') }));
+    showSnackbar(`Added ${aliases.size} manufacturer names/synonyms to split rules.`, 'success');
+  }, [manufacturerDirectory, mpnSplitOptions.manufacturerAliases, showSnackbar]);
+
   const handleOpenMpnSplitDialog = useCallback(() => {
     setToolsMenuAnchor(null);
     setMpnSplitDialogOpen(true);
+  }, []);
+
+  const handleOpenManufacturerMatchDialog = useCallback(() => {
+    setManufacturerMatchDialogOpen(true);
   }, []);
 
   const handleSplitMPNCells = useCallback(async () => {
@@ -1699,14 +1902,13 @@ const EnhancedDataEditor = () => {
         return;
       }
 
-      const response = await api.splitMPNCells(sessionId, selectedHeader, buildMpnSplitOptionsPayload());
+      const response = await api.splitMPNCells(sessionId, selectedHeader, buildMpnSplitOptionsPayload(), null, false);
       if (response.data?.success) {
         const splitRows = response.data.split_rows || 0;
         const totalRowsAfterSplit = response.data.total_rows || response.data.created_rows || 0;
         if (splitRows > 0) {
           const normalized = response.data.normalized_mpns || 0;
-          const paired = response.data.paired_manufacturer_rows || 0;
-          showSnackbar(`Split ${splitRows} rows into ${totalRowsAfterSplit} rows. Cleaned ${normalized} MPNs and paired ${paired} manufacturers.`, 'success');
+          showSnackbar(`Split ${splitRows} rows into ${totalRowsAfterSplit} rows. Cleaned ${normalized} MPNs.`, 'success');
         } else {
           showSnackbar('No multi-MPN cells found in the selected column', 'info');
         }
@@ -1721,7 +1923,49 @@ const EnhancedDataEditor = () => {
     } finally {
       setMpnSplitting(false);
     }
-  }, [columnDefs, mpnColumn, detectMpnColumn, sessionId, buildMpnSplitOptionsPayload, showSnackbar, fetchDataSynchronized]);
+  }, [columnDefs, mpnColumn, mpnManufacturerColumn, detectMpnColumn, sessionId, buildMpnSplitOptionsPayload, showSnackbar, fetchDataSynchronized]);
+
+  const handleManufacturerMatchSplit = useCallback(async () => {
+    try {
+      setMpnSplitting(true);
+      setManufacturerMatchDialogOpen(false);
+      const headers = columnDefs
+        .filter(col => col.field && col.field !== '__row_number__')
+        .map(col => col.field);
+      const selectedHeader = mpnColumn || detectMpnColumn(headers);
+
+      if (!selectedHeader) {
+        showSnackbar('Select the MPN column to split first', 'warning');
+        return;
+      }
+
+      if (!mpnManufacturerColumn) {
+        showSnackbar('Select the manufacturer column to update', 'warning');
+        return;
+      }
+
+      const response = await api.splitMPNCells(sessionId, selectedHeader, buildMpnSplitOptionsPayload(), mpnManufacturerColumn, true);
+      if (response.data?.success) {
+        const splitRows = response.data.split_rows || 0;
+        const totalRowsAfterSplit = response.data.total_rows || response.data.created_rows || 0;
+        const paired = response.data.paired_manufacturer_rows || 0;
+        if (splitRows > 0) {
+          showSnackbar(`Split ${splitRows} rows into ${totalRowsAfterSplit} rows and paired ${paired} manufacturers.`, 'success');
+        } else {
+          showSnackbar('No multi-MPN cells found in the selected column', 'info');
+        }
+        setMpnColumn(response.data.mpn_header || selectedHeader);
+        await fetchDataSynchronized();
+      } else {
+        showSnackbar(response.data?.error || 'Failed to match manufacturers', 'error');
+      }
+    } catch (error) {
+      const message = error.response?.data?.error || error.message || 'Failed to match manufacturers';
+      showSnackbar(message, 'error');
+    } finally {
+      setMpnSplitting(false);
+    }
+  }, [columnDefs, mpnColumn, mpnManufacturerColumn, detectMpnColumn, sessionId, buildMpnSplitOptionsPayload, showSnackbar, fetchDataSynchronized]);
 
   const handleCorrectionFileUpload = useCallback((event) => {
     const file = event.target.files[0];
@@ -2284,6 +2528,24 @@ const EnhancedDataEditor = () => {
                 }}
               >
                 Export to Project
+              </Button>
+
+              <Button
+                onClick={handleOpenManufacturerMatchDialog}
+                variant="contained"
+                startIcon={<AccountTreeIcon />}
+                disabled={mpnSplitting || syncStatus.inProgress}
+                sx={{
+                  backgroundColor: '#00796b',
+                  color: 'white',
+                  '&:hover': { backgroundColor: '#004d40' },
+                  textTransform: 'none',
+                  fontWeight: 600,
+                  borderRadius: '8px',
+                  px: 2.5
+                }}
+              >
+                Manufacturer Match
               </Button>
 
               {/* Divider */}
@@ -2871,95 +3133,63 @@ const EnhancedDataEditor = () => {
         />
       )}
 
-      {/* MPN Split Rules Dialog */}
-      <Dialog open={mpnSplitDialogOpen} onClose={() => setMpnSplitDialogOpen(false)} maxWidth="md" fullWidth>
+      {/* MPN Split Dialog */}
+      <Dialog open={mpnSplitDialogOpen} onClose={() => setMpnSplitDialogOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Split MPN Cells</DialogTitle>
         <DialogContent>
           <DialogContentText sx={{ mb: 2 }}>
-            Configure how supplier prefixes and manufacturer names should be cleaned while expanding one row into one row per MPN.
+            Select the MPN column to expand into one row per MPN. Cells are split only when they contain clear separators or recognized supplier prefixes; plain spaces stay part of the MPN.
           </DialogContentText>
-
-          <Grid container spacing={2}>
-            <Grid item xs={12} md={6}>
-              <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 700 }}>
-                MPN Prefix Rules
-              </Typography>
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    checked={mpnSplitOptions.stripAlphaPrefix}
-                    onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, stripAlphaPrefix: e.target.checked }))}
-                  />
-                }
-                label="Strip alphabetic prefixes"
+          <FormControl fullWidth size="small" sx={{ mb: 2 }}>
+            <InputLabel>MPN Column to Split</InputLabel>
+            <Select
+              label="MPN Column to Split"
+              value={mpnColumn || ''}
+              onChange={(e) => setMpnColumn(e.target.value || null)}
+            >
+              {columnDefs
+                .filter(col => col.field && col.field !== '__row_number__')
+                .map(col => (
+                  <MenuItem key={col.field} value={col.field}>
+                    {col.headerName || col.field}
+                  </MenuItem>
+                ))}
+            </Select>
+          </FormControl>
+          <Alert severity="info" sx={{ mb: 2 }}>
+            Empty cells are skipped. A cell with spaces only, like a single MPN containing spaces, is kept as one MPN.
+          </Alert>
+          <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 700 }}>
+            MPN Prefix Cleanup
+          </Typography>
+          <FormControlLabel
+            control={
+              <Checkbox
+                checked={mpnSplitOptions.stripAlphaPrefix}
+                onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, stripAlphaPrefix: e.target.checked }))}
               />
-              <TextField
-                fullWidth
-                size="small"
-                type="number"
-                label="Minimum alphabetic prefix length"
-                value={mpnSplitOptions.alphaPrefixMinLength}
-                onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, alphaPrefixMinLength: e.target.value }))}
-                sx={{ mt: 1 }}
-                inputProps={{ min: 1 }}
+            }
+            label="Strip alphabetic prefixes"
+          />
+          <FormControlLabel
+            control={
+              <Checkbox
+                checked={mpnSplitOptions.stripNumericPrefix}
+                onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, stripNumericPrefix: e.target.checked }))}
               />
-              <FormControlLabel
-                sx={{ mt: 1 }}
-                control={
-                  <Checkbox
-                    checked={mpnSplitOptions.stripNumericPrefix}
-                    onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, stripNumericPrefix: e.target.checked }))}
-                  />
-                }
-                label="Strip numeric prefixes"
-              />
-              <TextField
-                fullWidth
-                size="small"
-                type="number"
-                label="Numeric prefix length"
-                value={mpnSplitOptions.numericPrefixLength}
-                onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, numericPrefixLength: e.target.value }))}
-                sx={{ mt: 1 }}
-                inputProps={{ min: 1 }}
-              />
-              <TextField
-                fullWidth
-                multiline
-                minRows={3}
-                label="Always strip these prefixes"
-                value={mpnSplitOptions.extraPrefixes}
-                onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, extraPrefixes: e.target.value }))}
-                sx={{ mt: 2 }}
-                helperText="One per line or comma separated"
-              />
-            </Grid>
-
-            <Grid item xs={12} md={6}>
-              <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 700 }}>
-                Manufacturer Rules
-              </Typography>
-              <TextField
-                fullWidth
-                multiline
-                minRows={6}
-                label="Aliases"
-                value={mpnSplitOptions.manufacturerAliases}
-                onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, manufacturerAliases: e.target.value }))}
-                helperText="Use SOURCE=TARGET. Empty target discards the source."
-              />
-              <TextField
-                fullWidth
-                multiline
-                minRows={4}
-                label="Discard Tokens"
-                value={mpnSplitOptions.manufacturerDiscardTokens}
-                onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, manufacturerDiscardTokens: e.target.value }))}
-                sx={{ mt: 2 }}
-                helperText="One per line or comma separated"
-              />
-            </Grid>
-          </Grid>
+            }
+            label="Strip numeric prefixes"
+          />
+          <TextField
+            fullWidth
+            multiline
+            minRows={2}
+            label="Always strip these prefixes"
+            value={mpnSplitOptions.extraPrefixes}
+            onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, extraPrefixes: e.target.value }))}
+            sx={{ mt: 1 }}
+            helperText="Example: AGILE. One per line or comma separated."
+          />
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setMpnSplitDialogOpen(false)} disabled={mpnSplitting}>
@@ -2972,6 +3202,204 @@ const EnhancedDataEditor = () => {
             disabled={mpnSplitting}
           >
             {mpnSplitting ? 'Splitting...' : 'Split Rows'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Manufacturer Match Dialog */}
+      <Dialog open={manufacturerMatchDialogOpen} onClose={() => setManufacturerMatchDialogOpen(false)} maxWidth="md" fullWidth>
+        <DialogTitle sx={{ pb: 1 }}>
+          <Typography variant="h6" fontWeight={700}>Manufacturer Match</Typography>
+          <Typography variant="body2" color="text.secondary">
+            Match split MPN rows to canonical manufacturers from a directory.
+          </Typography>
+        </DialogTitle>
+        <DialogContent sx={{ pt: 2 }}>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <Box sx={{ border: '1px solid #e5e7eb', borderRadius: 1, p: 2 }}>
+              <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1.5 }}>
+                Target column
+              </Typography>
+              <FormControl fullWidth size="small">
+                <InputLabel>Manufacturer Column to Update</InputLabel>
+                <Select
+                  label="Manufacturer Column to Update"
+                  value={mpnManufacturerColumn || ''}
+                  onChange={(e) => setMpnManufacturerColumn(e.target.value || null)}
+                >
+                  {columnDefs
+                    .filter(col => col.field && col.field !== '__row_number__')
+                    .map(col => (
+                      <MenuItem key={col.field} value={col.field}>
+                        {col.headerName || col.field}
+                      </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+                Uses the selected MPN column from MPN tools, or auto-detects one. Empty MPN cells are skipped.
+              </Typography>
+            </Box>
+
+            <Box sx={{ border: '1px solid #e5e7eb', borderRadius: 1, p: 2 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 2, mb: 1.5 }}>
+                <Box>
+                  <Typography variant="subtitle2" fontWeight={700}>
+                    Manufacturer directory
+                  </Typography>
+                  {manufacturerDirectory.fileName && (
+                    <Typography variant="caption" color="text.secondary">
+                      {manufacturerDirectory.fileName}
+                    </Typography>
+                  )}
+                </Box>
+                <Button variant="outlined" component="label" size="small">
+                  Upload Directory
+                  <input
+                    type="file"
+                    hidden
+                    accept=".xlsx,.xls,.csv"
+                    onChange={handleManufacturerDirectoryUpload}
+                  />
+                </Button>
+              </Box>
+
+              {manufacturerDirectory.fileName ? (
+                <Grid container spacing={1.5}>
+                  <Grid item xs={12} sm={8}>
+                    <FormControl fullWidth size="small">
+                      <InputLabel>Directory Sheet</InputLabel>
+                      <Select
+                        label="Directory Sheet"
+                        value={manufacturerDirectory.sheetName}
+                        onChange={(e) => updateManufacturerDirectorySheet(e.target.value)}
+                      >
+                        {manufacturerDirectory.sheetNames.map(sheet => (
+                          <MenuItem key={sheet} value={sheet}>{sheet}</MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  </Grid>
+                  <Grid item xs={12} sm={4}>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      type="number"
+                      label="Header Row"
+                      value={manufacturerDirectory.headerRow}
+                      onChange={(e) => updateManufacturerDirectoryHeaderRow(e.target.value)}
+                      inputProps={{ min: 1 }}
+                    />
+                  </Grid>
+                  <Grid item xs={12} sm={6}>
+                    <FormControl fullWidth size="small">
+                      <InputLabel>Manufacturer Name Column</InputLabel>
+                      <Select
+                        label="Manufacturer Name Column"
+                        value={manufacturerDirectory.nameColumn}
+                        onChange={(e) => setManufacturerDirectory(prev => ({ ...prev, nameColumn: e.target.value, synonymColumns: prev.synonymColumns.filter(column => column !== e.target.value) }))}
+                      >
+                        {manufacturerDirectory.headers.map(header => (
+                          <MenuItem key={header} value={header}>{header}</MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  </Grid>
+                  <Grid item xs={12} sm={6}>
+                    <FormControl fullWidth size="small">
+                      <InputLabel>Synonym Columns</InputLabel>
+                      <Select
+                        multiple
+                        label="Synonym Columns"
+                        value={manufacturerDirectory.synonymColumns}
+                        onChange={(e) => {
+                          const value = typeof e.target.value === 'string' ? e.target.value.split(',') : e.target.value;
+                          setManufacturerDirectory(prev => ({ ...prev, synonymColumns: value.filter(column => column !== prev.nameColumn) }));
+                        }}
+                        renderValue={(selected) => selected.length ? `${selected.length} selected` : 'None'}
+                      >
+                        {manufacturerDirectory.headers
+                          .filter(header => header !== manufacturerDirectory.nameColumn)
+                          .map(header => (
+                            <MenuItem key={header} value={header}>
+                              <Checkbox checked={manufacturerDirectory.synonymColumns.includes(header)} />
+                              {header}
+                            </MenuItem>
+                          ))}
+                      </Select>
+                    </FormControl>
+                  </Grid>
+                  <Grid item xs={12}>
+                    <Button
+                      variant="contained"
+                      size="small"
+                      onClick={applyManufacturerDirectoryRules}
+                      disabled={!manufacturerDirectory.nameColumn}
+                    >
+                      Apply Directory Rules
+                    </Button>
+                  </Grid>
+                </Grid>
+              ) : (
+                <Alert severity="warning" sx={{ mt: 1 }}>
+                  Upload a manufacturer master to preserve names like NIC COMPONENTS and map synonyms to canonical manufacturers.
+                </Alert>
+              )}
+            </Box>
+
+            <Box sx={{ border: '1px solid #e5e7eb', borderRadius: 1, p: 1.5 }}>
+              <Button
+                size="small"
+                disabled={!manufacturerDirectory.fileName}
+                onClick={() => setManufacturerRulesExpanded(prev => !prev)}
+              >
+                {manufacturerRulesExpanded ? 'Hide advanced rules' : 'View advanced rules'}
+              </Button>
+              {!manufacturerDirectory.fileName && (
+                <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
+                  Upload a directory first
+                </Typography>
+              )}
+              <Collapse in={manufacturerRulesExpanded}>
+                <Grid container spacing={2} sx={{ mt: 0.5 }}>
+                  <Grid item xs={12} md={6}>
+                    <TextField
+                      fullWidth
+                      multiline
+                      minRows={6}
+                      label="Aliases"
+                      value={mpnSplitOptions.manufacturerAliases}
+                      onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, manufacturerAliases: e.target.value }))}
+                      helperText="Use SOURCE=TARGET. Empty target discards the source."
+                    />
+                  </Grid>
+                  <Grid item xs={12} md={6}>
+                    <TextField
+                      fullWidth
+                      multiline
+                      minRows={6}
+                      label="Discard Tokens"
+                      value={mpnSplitOptions.manufacturerDiscardTokens}
+                      onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, manufacturerDiscardTokens: e.target.value }))}
+                      helperText="One per line or comma separated."
+                    />
+                  </Grid>
+                </Grid>
+              </Collapse>
+            </Box>
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setManufacturerMatchDialogOpen(false)} disabled={mpnSplitting}>
+            Cancel
+          </Button>
+          <Button
+            onClick={handleManufacturerMatchSplit}
+            variant="contained"
+            startIcon={mpnSplitting ? <CircularProgress size={16} /> : <AccountTreeIcon />}
+            disabled={mpnSplitting || !mpnColumn || !mpnManufacturerColumn}
+          >
+            {mpnSplitting ? 'Matching...' : 'Split and Match'}
           </Button>
         </DialogActions>
       </Dialog>
@@ -3014,94 +3442,163 @@ const EnhancedDataEditor = () => {
         </DialogTitle>
         <DialogContent>
           <DialogContentText>
-            Create a synchronized FactWise ID by combining two columns. The system will ensure data consistency across all operations.
+            Create a synchronized FactWise ID in Item code by combining columns or generating a prefix-based sequence.
           </DialogContentText>
           
           <Box sx={{ mt: 2 }}>
-            <FormControl fullWidth margin="normal">
-              <InputLabel>First Column</InputLabel>
-              <Select
-                value={firstColumn}
-                label="First Column"
-                onChange={(e) => setFirstColumn(e.target.value)}
+            <FormControl component="fieldset" margin="normal">
+              <FormLabel>ID Source</FormLabel>
+              <RadioGroup
+                row
+                value={factwiseGenerationMode}
+                onChange={(event) => setFactwiseGenerationMode(event.target.value)}
               >
-                {columnDefs
-                  .filter(col => col.field && col.field !== '__row_number__')
-                  .filter(col => (col.headerName || col.field).toLowerCase() !== 'item code' && (col.headerName || col.field).toLowerCase() !== 'item_code')
-                  .map(col => {
-                  let example = '';
-                  for (const row of rowData) {
-                    const val = row[col.field];
-                    if (val !== null && val !== undefined && val !== '' && val.toString().toLowerCase() !== 'unknown') {
-                      example = val;
-                      break;
-                    }
-                  }
-                  const displayName = col.headerName || col.field;
-                  const truncated = example && example.toString().length > 30 ? `${example.toString().substring(0, 30)}...` : example;
-                  const display = truncated ? `${displayName} (${truncated})` : `${displayName} (Empty)`;
-                  return (
-                    <MenuItem key={col.field} value={col.field}>
-                      {display}
-                    </MenuItem>
-                  );
-                })}
-              </Select>
+                <FormControlLabel value="columns" control={<Radio />} label="Combine columns" />
+                <FormControlLabel value="serial" control={<Radio />} label="Prefix + sequence" />
+              </RadioGroup>
             </FormControl>
 
-            <FormControl fullWidth margin="normal">
-              <InputLabel>Operator</InputLabel>
-              <Select
-                value={operator}
-                label="Operator"
-                onChange={(e) => setOperator(e.target.value)}
-              >
-                <MenuItem value="_">_ (underscore)</MenuItem>
-                <MenuItem value="-">- (hyphen)</MenuItem>
-                <MenuItem value=".">. (dot)</MenuItem>
-                <MenuItem value="">No separator</MenuItem>
-              </Select>
-            </FormControl>
+            {factwiseGenerationMode === 'columns' ? (
+              <>
+                <FormControl fullWidth margin="normal">
+                  <InputLabel>First Column</InputLabel>
+                  <Select
+                    value={firstColumn}
+                    label="First Column"
+                    onChange={(e) => setFirstColumn(e.target.value)}
+                  >
+                    {columnDefs
+                      .filter(col => col.field && col.field !== '__row_number__')
+                      .filter(col => (col.headerName || col.field).toLowerCase() !== 'item code' && (col.headerName || col.field).toLowerCase() !== 'item_code')
+                      .map(col => {
+                      let example = '';
+                      for (const row of rowData) {
+                        const val = row[col.field];
+                        if (val !== null && val !== undefined && val !== '' && val.toString().toLowerCase() !== 'unknown') {
+                          example = val;
+                          break;
+                        }
+                      }
+                      const displayName = col.headerName || col.field;
+                      const truncated = example && example.toString().length > 30 ? `${example.toString().substring(0, 30)}...` : example;
+                      const display = truncated ? `${displayName} (${truncated})` : `${displayName} (Empty)`;
+                      return (
+                        <MenuItem key={col.field} value={col.field}>
+                          {display}
+                        </MenuItem>
+                      );
+                    })}
+                  </Select>
+                </FormControl>
 
-            <FormControl fullWidth margin="normal">
-              <InputLabel>Second Column</InputLabel>
-              <Select
-                value={secondColumn}
-                label="Second Column"
-                onChange={(e) => setSecondColumn(e.target.value)}
-              >
-                {columnDefs
-                  .filter(col => col.field && col.field !== '__row_number__')
-                  .filter(col => (col.headerName || col.field).toLowerCase() !== 'item code' && (col.headerName || col.field).toLowerCase() !== 'item_code')
-                  .map(col => {
-                  let example = '';
-                  for (const row of rowData) {
-                    const val = row[col.field];
-                    if (val !== null && val !== undefined && val !== '' && val.toString().toLowerCase() !== 'unknown') {
-                      example = val;
-                      break;
+                <FormControl fullWidth margin="normal">
+                  <InputLabel>Operator</InputLabel>
+                  <Select
+                    value={operator}
+                    label="Operator"
+                    onChange={(e) => setOperator(e.target.value)}
+                  >
+                    <MenuItem value="_">_ (underscore)</MenuItem>
+                    <MenuItem value="-">- (hyphen)</MenuItem>
+                    <MenuItem value=".">. (dot)</MenuItem>
+                    <MenuItem value="">No separator</MenuItem>
+                  </Select>
+                </FormControl>
+
+                <FormControl fullWidth margin="normal">
+                  <InputLabel>Second Column</InputLabel>
+                  <Select
+                    value={secondColumn}
+                    label="Second Column"
+                    onChange={(e) => setSecondColumn(e.target.value)}
+                  >
+                    {columnDefs
+                      .filter(col => col.field && col.field !== '__row_number__')
+                      .filter(col => (col.headerName || col.field).toLowerCase() !== 'item code' && (col.headerName || col.field).toLowerCase() !== 'item_code')
+                      .map(col => {
+                      let example = '';
+                      for (const row of rowData) {
+                        const val = row[col.field];
+                        if (val !== null && val !== undefined && val !== '' && val.toString().toLowerCase() !== 'unknown') {
+                          example = val;
+                          break;
+                        }
+                      }
+                      const displayName = col.headerName || col.field;
+                      const truncated = example && example.toString().length > 30 ? `${example.toString().substring(0, 30)}...` : example;
+                      const display = truncated ? `${displayName} (${truncated})` : `${displayName} (Empty)`;
+                      return (
+                        <MenuItem key={col.field} value={col.field}>
+                          {display}
+                        </MenuItem>
+                      );
+                    })}
+                  </Select>
+                </FormControl>
+              </>
+            ) : (
+              <Grid container spacing={2} sx={{ mt: 0.5 }}>
+                <Grid item xs={12}>
+                  <TextField
+                    fullWidth
+                    label="Prefix"
+                    value={factwiseSerialPrefix}
+                    onChange={(event) => setFactwiseSerialPrefix(event.target.value)}
+                    placeholder="SFO"
+                  />
+                </Grid>
+                <Grid item xs={6}>
+                  <TextField
+                    fullWidth
+                    type="number"
+                    label="Start Number"
+                    value={factwiseSerialStart}
+                    onChange={(event) => setFactwiseSerialStart(event.target.value)}
+                    inputProps={{ min: 0 }}
+                  />
+                </Grid>
+                <Grid item xs={6}>
+                  <TextField
+                    fullWidth
+                    type="number"
+                    label="Digits"
+                    value={factwiseSerialPadding}
+                    onChange={(event) => setFactwiseSerialPadding(event.target.value)}
+                    inputProps={{ min: 0, max: 12 }}
+                    helperText="2 gives 01, 02, 03"
+                  />
+                </Grid>
+                <Grid item xs={12}>
+                  <FormControlLabel
+                    control={
+                      <Checkbox
+                        checked={factwiseSerialIncrement}
+                        onChange={(event) => setFactwiseSerialIncrement(event.target.checked)}
+                      />
                     }
-                  }
-                  const displayName = col.headerName || col.field;
-                  const truncated = example && example.toString().length > 30 ? `${example.toString().substring(0, 30)}...` : example;
-                  const display = truncated ? `${displayName} (${truncated})` : `${displayName} (Empty)`;
-                  return (
-                    <MenuItem key={col.field} value={col.field}>
-                      {display}
-                    </MenuItem>
-                  );
-                })}
-              </Select>
-            </FormControl>
+                    label="Increase number for each row"
+                  />
+                </Grid>
+              </Grid>
+            )}
           </Box>
 
-          {firstColumn && secondColumn && (
+          {factwiseGenerationMode === 'columns' && firstColumn && secondColumn && (
             <Box sx={{ mt: 2, p: 2, backgroundColor: '#f5f5f5', borderRadius: 1 }}>
               <Typography variant="body2" color="text.secondary">
                 Preview: {firstColumn} + "{operator}" + {secondColumn} = "FactWise ID"
               </Typography>
               <Typography variant="body2" color="text.secondary">
                 Example: "A123" + "{operator}" + "XYZ" = "A123{operator}XYZ"
+              </Typography>
+            </Box>
+          )}
+
+          {factwiseGenerationMode === 'serial' && (
+            <Box sx={{ mt: 2, p: 2, backgroundColor: '#f5f5f5', borderRadius: 1 }}>
+              <Typography variant="body2" color="text.secondary">
+                Preview: {(factwiseSerialPrefix || '')}{String(Number(factwiseSerialStart) || 1).padStart(Math.max(0, Number(factwiseSerialPadding) || 0), '0')}
+                {factwiseSerialIncrement ? `, ${(factwiseSerialPrefix || '')}${String((Number(factwiseSerialStart) || 1) + 1).padStart(Math.max(0, Number(factwiseSerialPadding) || 0), '0')}` : ' for every row'}
               </Typography>
             </Box>
           )}
@@ -3115,7 +3612,7 @@ const EnhancedDataEditor = () => {
           <Button 
             onClick={handleCreateFactwiseIdSynchronized}
             variant="contained"
-            disabled={!firstColumn || !secondColumn || syncStatus.inProgress}
+            disabled={(factwiseGenerationMode === 'columns' && (!firstColumn || !secondColumn)) || syncStatus.inProgress}
             startIcon={syncStatus.inProgress ? <CircularProgress size={20} /> : <BadgeIcon />}
           >
             {syncStatus.inProgress ? 'Creating...' : 'Create Synchronized ID'}
