@@ -109,7 +109,6 @@ const Dashboard = () => {
   const [uploadSortOrder, setUploadSortOrder] = useState('desc');
   const [uploadPage, setUploadPage] = useState(0);
   const [uploadsPerPage, setUploadsPerPage] = useState(10);
-  const [uploadStatusFilter, setUploadStatusFilter] = useState('all');
   
   // Download state
   const [downloadingOriginal, setDownloadingOriginal] = useState({});
@@ -276,10 +275,7 @@ const Dashboard = () => {
         (upload.client_file || '').toLowerCase().includes(uploadSearchTerm.toLowerCase()) ||
         (upload.template_file || '').toLowerCase().includes(uploadSearchTerm.toLowerCase())
       );
-      const matchesStatus = uploadStatusFilter === 'all' || 
-        (uploadStatusFilter === 'completed' && upload.has_mappings) ||
-        (uploadStatusFilter === 'in_progress' && !upload.has_mappings);
-      return matchesSearch && matchesStatus;
+      return matchesSearch;
     });
 
     filtered.sort((a, b) => {
@@ -316,7 +312,7 @@ const Dashboard = () => {
     });
 
     return filtered;
-  }, [uploads, uploadSearchTerm, uploadSortBy, uploadSortOrder, uploadStatusFilter]);
+  }, [uploads, uploadSearchTerm, uploadSortBy, uploadSortOrder]);
 
   // Paginated data
   const paginatedTemplates = React.useMemo(() => {
@@ -396,9 +392,7 @@ const Dashboard = () => {
 
   const handleUseTemplate = async (template) => {
     // Check if there are any existing sessions we can apply the template to
-    const sessionsWithData = uploads.filter(upload => 
-      upload.status === 'completed' || upload.status === 'mapped'
-    );
+    const sessionsWithData = uploads.filter(upload => upload.has_mappings);
     
     if (sessionsWithData.length > 0) {
       // Apply template to the most recent session
@@ -577,7 +571,6 @@ const Dashboard = () => {
     setUploadSearchTerm('');
     setUploadSortBy('upload_date');
     setUploadSortOrder('desc');
-    setUploadStatusFilter('all');
     setUploadPage(0);
   };
 
@@ -713,14 +706,6 @@ const Dashboard = () => {
                 sx={{ flex: 1 }}
               />
               <FormControl size="small" sx={{ minWidth: 120 }}>
-                <InputLabel>Status</InputLabel>
-                <Select value={uploadStatusFilter} label="Status" onChange={(e) => setUploadStatusFilter(e.target.value)}>
-                  <MenuItem value="all">All Status</MenuItem>
-                  <MenuItem value="completed">Complete</MenuItem>
-                  <MenuItem value="in_progress">Pending</MenuItem>
-                </Select>
-              </FormControl>
-              <FormControl size="small" sx={{ minWidth: 120 }}>
                 <InputLabel>Sort by</InputLabel>
                 <Select value={uploadSortBy} label="Sort by" onChange={(e) => setUploadSortBy(e.target.value)}>
                   <MenuItem value="upload_date">Date</MenuItem>
@@ -745,7 +730,7 @@ const Dashboard = () => {
                   )}
                 </Select>
               </FormControl>
-              {(uploadSearchTerm || uploadStatusFilter !== 'all' || uploadSortBy !== 'upload_date' || uploadSortOrder !== 'desc') && (
+              {(uploadSearchTerm || uploadSortBy !== 'upload_date' || uploadSortOrder !== 'desc') && (
                 <Button size="small" onClick={clearUploadFilters} startIcon={<ClearIcon />}>
                   Clear
                 </Button>
@@ -780,7 +765,6 @@ const Dashboard = () => {
                         <TableCell><strong>FW Template</strong></TableCell>
                         <TableCell><strong>Upload Date</strong></TableCell>
                         <TableCell align="center"><strong>Rows</strong></TableCell>
-                        <TableCell align="center"><strong>Status</strong></TableCell>
                         <TableCell align="center"><strong>Actions</strong></TableCell>
                       </TableRow>
                     </TableHead>
@@ -868,14 +852,6 @@ const Dashboard = () => {
                                 color="info"
                                 variant="outlined"
                                 title={`Raw value: ${upload.rows_processed}`}
-                              />
-                            </TableCell>
-                            <TableCell align="center">
-                              <Chip 
-                                label={upload.has_mappings ? 'Complete' : 'Pending'}
-                                size="small"
-                                color={upload.has_mappings ? 'success' : 'warning'}
-                                variant="outlined"
                               />
                             </TableCell>
                             <TableCell align="center">

@@ -1,9 +1,11 @@
 # Gunicorn configuration file for Azure App Service
-# IMPORTANT: Using single worker to ensure session persistence across requests
-# Multi-worker configuration causes session loss due to separate memory spaces
+# Gunicorn configuration file for Azure App Service
+# Gunicorn configuration file for Azure App Service
+# Use multiple workers so long-running validations do not block health checks or
+# normal API reads. Session state is persisted through cache/file helpers.
 
 bind = "0.0.0.0:8000"
-workers = 1  # Changed from 2 to 1 to fix session persistence issues
+workers = 2
 worker_connections = 1000
 timeout = 600
 keepalive = 2

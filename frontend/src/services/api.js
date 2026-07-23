@@ -76,29 +76,10 @@ const api = {
         // Validate that upload was successful and has session_id
         if (response.data && response.data.session_id) {
           
-          // Wait a moment for file processing, then validate headers
-          await new Promise(resolve => setTimeout(resolve, 2000));
-          
-          try {
-            const headersCheck = await api.getHeaders(response.data.session_id);
-            const hasHeaders = headersCheck.data.client_headers.length > 0 || headersCheck.data.template_headers.length > 0;
-            
-            if (hasHeaders) {
-              return response;
-            } else {
-              if (attempt === maxRetries) {
-                throw new Error('Upload completed but file processing failed - headers are empty');
-              }
-              continue;
-            }
-          } catch (headerError) {
-            if (attempt === maxRetries) {
-              // Return the upload response even if header validation fails
-              // The session exists, maybe headers will be populated later
-              return response;
-            }
-            continue;
-          }
+          // Upload succeeded and the session exists. Do not re-upload the same
+          // files if a follow-up header check is delayed or blocked by CORS.
+          // The mapping page/cleanup dialog will fetch headers from this session.
+          return response;
         } else {
           throw new Error('Upload response missing session_id');
         }
@@ -125,6 +106,10 @@ const api = {
       session_id: sessionId,
       primary_column: primaryColumn
     }, { timeout: 60000 });
+  },
+
+  applySheetJoin: (payload) => {
+    return axios.post(`${API_URL}/sheet-join/apply/`, payload, { timeout: 120000 });
   },
 
   /**
@@ -241,11 +226,7 @@ const api = {
    */
   getPDFZones: async (sessionId) => {
     try {
-      const response = await axios.get(`${API_URL}/pdf/zones/${sessionId}/`, {
-        headers: {
-          'Cache-Control': 'no-cache, no-store, must-revalidate'
-        }
-      });
+      const response = await axios.get(`${API_URL}/pdf/zones/${sessionId}/`);
       return response;
     } catch (error) {
       console.error('Failed to get PDF zones:', error);
@@ -371,14 +352,7 @@ const api = {
     const _rand = Math.random().toString(36).substr(2, 9);
     const _mpn = 'mpn_validation_' + _ts;
     return axios.get(`${API_URL}/headers/${sessionId}/`, {
-      params: { _ts, _rand, _mpn, force_fresh: true, _bust: _ts },
-      headers: {
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0',
-        'X-Cache-Bust': _ts.toString(),
-        'X-MPN-Request': 'force_refresh'
-      }
+      params: { _ts, _rand, _mpn, force_fresh: true, _bust: _ts }
     });
   },
 
@@ -411,12 +385,7 @@ const api = {
   getExistingMappings: (sessionId) => {
     const _ts = Date.now();
     return axios.get(`${API_URL}/mapping/existing/${sessionId}/`, {
-      params: { _ts },
-      headers: { 
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0'
-      }
+      params: { _ts }
     });
   },
 
@@ -445,11 +414,6 @@ const api = {
         page,
         page_size: pageSize,
         _ts
-      },
-      headers: { 
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0'
       }
     });
   },
@@ -480,13 +444,6 @@ const api = {
     if (options._fresh) params._fresh = options._fresh;
     return axios.get(`${API_URL}/data/`, {
       params,
-      headers: {
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0',
-        'X-Cache-Bust': _ts.toString(),
-        'X-MPN-Data-Request': 'force_refresh'
-      },
       signal: options.signal,
       timeout: (options.timeoutMs != null)
         ? options.timeoutMs
@@ -614,12 +571,7 @@ const api = {
   getMappingTemplates: () => {
     const _ts = Date.now();
     return axios.get(`${API_URL}/templates/`, {
-      params: { _ts },
-      headers: { 
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0'
-      }
+      params: { _ts }
     });
   },
 
@@ -828,12 +780,7 @@ const api = {
   getSessionSnapshot: (sessionId) => {
     const _ts = Date.now();
     return axios.get(`${API_URL}/session/${sessionId}/snapshot/`, {
-      params: { _ts },
-      headers: { 
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0'
-      }
+      params: { _ts }
     });
   },
 
@@ -845,12 +792,7 @@ const api = {
   getSessionStatus: (sessionId, options = {}) => {
     const _ts = options._ts || Date.now();
     return axios.get(`${API_URL}/session/${sessionId}/status/`, {
-      params: { _ts },
-      headers: { 
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0'
-      }
+      params: { _ts }
     });
   },
 
@@ -1174,7 +1116,7 @@ const api = {
     const payload = { session_id: sessionId };
     if (mpnHeader) payload.mpn_header = mpnHeader;
     if (manufacturerHeader) payload.manufacturer_header = manufacturerHeader;
-    return axios.post(`${API_URL}/mpn/validate/`, payload, { timeout: 120000 });
+    return axios.post(`${API_URL}/mpn/validate/`, payload, { timeout: 600000 });
   },
 
   /**

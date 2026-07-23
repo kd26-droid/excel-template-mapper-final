@@ -24,7 +24,7 @@ services:
       - ALLOWED_HOSTS=localhost,127.0.0.1,backend
       - SECRET_KEY=your-secret-key-for-local-development
       - DATABASE_URL=sqlite:///db.sqlite3
-      - CORS_ALLOWED_ORIGINS=http://localhost:3000
+      - CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001
       - REDIS_URL=redis://redis:6379/1
     env_file:
       - ./backend/.env
@@ -55,6 +55,36 @@ services:
     stdin_open: true
     tty: true
 
+  frontend-dev:
+    image: node:20-alpine
+    working_dir: /app
+    command: sh -c "if [ ! -d node_modules/react-scripts ]; then npm ci; fi; npm start"
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - BROWSER=none
+      - CHOKIDAR_USEPOLLING=true
+      - WATCHPACK_POLLING=true
+      - DISABLE_ESLINT_PLUGIN=true
+      - GENERATE_SOURCEMAP=false
+      - REACT_APP_API_BASE_URL=http://localhost:8000/api
+      - WDS_SOCKET_PORT=3001
+    volumes:
+      - ./frontend:/app
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - frontend_dev_node_modules:/app/node_modules
+    depends_on:
+      - backend
+    networks:
+      - excel-mapper-network
+    stdin_open: true
+    tty: true
+
 networks:
   excel-mapper-network:
     driver: bridge
+
+volumes:
+  frontend_dev_node_modules:

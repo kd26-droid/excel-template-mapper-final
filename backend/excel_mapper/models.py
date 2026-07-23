@@ -59,41 +59,9 @@ class MappingTemplate(models.Model):
         else:
             mappings_to_process = None
 
-        # If template has Tag formula rules, only ignore Tag mappings that conflict with specific Tag_N targets
-        # Preserve non-conflicting Tag mappings (e.g., keep Tag_1..3 if formula targets Tag_4)
-        try:
-            tag_formula_targets = set()
-            for r in (getattr(self, 'formula_rules', []) or []):
-                if (r or {}).get('column_type', 'Tag') == 'Tag':
-                    tgt = (r or {}).get('target_column')
-                    if isinstance(tgt, str) and tgt.startswith('Tag_'):
-                        tag_formula_targets.add(tgt)
-            has_tag_formulas = len(tag_formula_targets) > 0 or any(
-                (r or {}).get('column_type', 'Tag') == 'Tag' and not str((r or {}).get('target_column', '')).startswith('Tag_')
-                for r in (getattr(self, 'formula_rules', []) or [])
-            )
-        except Exception:
-            tag_formula_targets = set()
-            has_tag_formulas = False
-
-        if mappings_to_process and has_tag_formulas:
-            def _tag_mapping_conflicts(target_name: str) -> bool:
-                # Conflict only if mapping targets a Tag_N that is explicitly targeted by a formula rule
-                if not isinstance(target_name, str):
-                    return False
-                # Generic 'Tag' targets should be dropped when any Tag formulas exist
-                if target_name == 'Tag':
-                    return True
-                if target_name in tag_formula_targets:
-                    return True
-                # If formula rule uses generic 'Tag' (no specific Tag_N), do not drop direct Tag mappings;
-                # generic formulas will use the next available Tag_N in the UI/runtime.
-                return False
-
-            mappings_to_process = [
-                m for m in mappings_to_process
-                if not _tag_mapping_conflicts(str(m.get('target', '')))
-            ]
+        # Explicit saved mappings are user intent. Formula rules are applied to
+        # the next available target during template application, so do not drop
+        # direct Tag/Tag_N mappings here; doing so makes restored templates drift.
 
         # Process list-based mappings (both direct list and new_format)
         if mappings_to_process:
@@ -138,16 +106,6 @@ class MappingTemplate(models.Model):
         else:
             # Old format (dictionary)
             mappings_dict = self.mappings.get('old_format', self.mappings) if isinstance(self.mappings, dict) and 'old_format' in self.mappings else self.mappings
-            # Filter only conflicting Tag_* targets if tag formulas exist
-            if isinstance(mappings_dict, dict) and has_tag_formulas:
-                filtered = {}
-                for t, s in mappings_dict.items():
-                    t_str = str(t)
-                    # Drop only if this Tag_N is explicitly targeted by a formula rule
-                    if t_str in tag_formula_targets:
-                        continue
-                    filtered[t] = s
-                mappings_dict = filtered
             for template_col, original_source_col in mappings_dict.items():
                 matched_source_col = None
                 confidence = 0.0

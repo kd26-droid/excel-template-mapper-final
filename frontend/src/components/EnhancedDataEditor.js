@@ -262,7 +262,6 @@ const EnhancedDataEditor = () => {
   const [originalMpnColumn, setOriginalMpnColumn] = useState(null); // Store original source column for template saving
   const [mpnManufacturerColumn, setMpnManufacturerColumn] = useState(null);
   const [mpnValidating, setMpnValidating] = useState(false);
-  const [mpnValidationProgress, setMpnValidationProgress] = useState(0);
   const [mpnValidationCompleted, setMpnValidationCompleted] = useState(false);
   const [mpnFilterInvalidOnly, setMpnFilterInvalidOnly] = useState(false);
   const [showMpnColumns, setShowMpnColumns] = useState(true);
@@ -288,7 +287,8 @@ const EnhancedDataEditor = () => {
     return digikeyColumns.includes(columnName) ||
            mouserColumns.includes(columnName) ||
            columnName === 'Canonical MPN' ||
-           /^Canonical MPN \d+$/.test(columnName);
+           /^Canonical MPN \d+$/.test(columnName) ||
+           /^MPN_\d+_DigiKey_(Valid|Canonical|PN)$/.test(columnName);
   }, []);
 
   // Filter columns based on MPN visibility toggle
@@ -308,6 +308,14 @@ const EnhancedDataEditor = () => {
       return true;
     });
   }, [columnDefs, showMpnColumns, isMpnValidationColumn]);
+
+  const hasMpnValidationColumns = useMemo(() => {
+    if (!columnDefs || !Array.isArray(columnDefs)) return false;
+    return columnDefs.some(col => (
+      isMpnValidationColumn(col.field) ||
+      isMpnValidationColumn(col.headerName)
+    ));
+  }, [columnDefs, isMpnValidationColumn]);
 
   // Heuristic detection of MPN column from headers
   const detectMpnColumn = useCallback((headers) => {
@@ -558,25 +566,26 @@ const EnhancedDataEditor = () => {
     if (!sessionId) return;
     try {
       setPageLoading(true);
-      // Add timeout for large datasets - give more time for larger page sizes
-      const timeoutMs = size >= 5000 ? 120000 : (size > 1000 ? 60000 : (size > 500 ? 30000 : 15000));
-      showSnackbar(size > 1000 ? `Loading ${size} rows, this may take a moment...` : '', 'info');
-      
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      // Give server-side mapping enough time to finish instead of canceling page loads.
+      const timeoutMs = size >= 5000 ? 180000 : (size > 1000 ? 120000 : 90000);
+      if (size > 1000) {
+        showSnackbar(`Loading ${size} rows, this may take a moment...`, 'info');
+      }
       
       const resp = await api.getMappedDataWithSpecs(sessionId, targetPage, size, true, { 
         force_fresh: true, 
         _fresh: Date.now(),
-        signal: controller.signal,
         timeoutMs
       });
-      clearTimeout(timeoutId);
       
       const payload = resp?.data || {};
       const headers = payload.headers || [];
       const rows = Array.isArray(payload.data) ? payload.data : [];
       const pg = payload.pagination || { page: targetPage, total_pages: 1, total_rows: rows.length };
+      const pageHasMpnValidation = headers.some(header => isMpnValidationColumn(header));
+      if (pageHasMpnValidation) {
+        setMpnValidationCompleted(true);
+      }
 
       // Update quality metrics state
 
@@ -662,7 +671,7 @@ const EnhancedDataEditor = () => {
       setUnknownCellsCount(unknownCount);
     } catch (e) {
       console.error('Page fetch failed:', e);
-      if (e.name === 'AbortError') {
+      if (e.name === 'AbortError' || e.name === 'CanceledError' || e.code === 'ERR_CANCELED') {
         showSnackbar(`Loading timed out for ${size} rows. Try a smaller page size.`, 'error');
       } else {
         showSnackbar(`Failed to load page ${targetPage}: ${e.message}`, 'error');
@@ -670,7 +679,7 @@ const EnhancedDataEditor = () => {
     } finally {
       setPageLoading(false);
     }
-  }, [sessionId, page, pageSize, columnDefs, showSnackbar]);
+  }, [sessionId, page, pageSize, columnDefs, showSnackbar, isMpnValidationColumn]);
 
   // ─── ENHANCED DATA LOADING WITH SYNCHRONIZATION ─────────────────────────────
   const initializeData = useCallback(async () => {
@@ -877,7 +886,7 @@ const EnhancedDataEditor = () => {
           const isSpecificationColumn = displayName.toLowerCase().includes('specification');
           const isFormulaColumn = detectedFormulaColumns.includes(col) || col.startsWith('Tag_') || col.startsWith('Specification_') || col.startsWith('Customer_Identification_') || col === 'Tag' || col.includes('Specification') || col.includes('Customer identification') || col.includes('Custom identification') || col === 'Factwise ID';
           const isMpnValidationColumn = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'Mouser Canonical MPN', 'Mouser Category', 'Category'].includes(col) ||
-            col === 'Canonical MPN' || /^Canonical MPN \d+$/.test(col);
+            col === 'Canonical MPN' || /^Canonical MPN \d+$/.test(col) || /^MPN_\d+_DigiKey_(Valid|Canonical|PN)$/.test(col);
           const columnWidth = Math.max(180, Math.min(400, displayName.length * 10 + 40));
           
           return {
@@ -2389,17 +2398,11 @@ const EnhancedDataEditor = () => {
                         setOriginalMpnColumn(mpnColumn);
                       }
                       setMpnValidating(true);
-                      setMpnValidationProgress(0);
-                      const progressInterval = setInterval(() => {
-                        setMpnValidationProgress(prev => prev >= 85 ? prev : Math.min(85, prev + Math.random() * 15));
-                      }, 500);
-                      const apiResponse = await api.validateMPNs(sessionId, mpnColumn, mpnManufacturerColumn);
-                      clearInterval(progressInterval);
-                      setMpnValidationProgress(100);
+                      await api.validateMPNs(sessionId, mpnColumn, mpnManufacturerColumn);
                       await fetchDataSynchronized();
+                      setShowMpnColumns(true);
                       setMpnValidationCompleted(true);
                       showSnackbar('MPN validation complete', 'success');
-                      setTimeout(() => setMpnValidationProgress(0), 1000);
                     } catch (e) {
                       const msg = e?.response?.data?.error || e.message || 'Unknown error';
                       if (e?.response?.status === 403) {
@@ -2451,14 +2454,19 @@ const EnhancedDataEditor = () => {
                 <Divider sx={{ my: 0.5 }} />
                 <MenuItem
                   onClick={() => { setMpnMenuAnchor(null); setMpnFilterInvalidOnly(v => !v); }}
-                  disabled={!mpnValidationCompleted}
+                  disabled={!hasMpnValidationColumns}
                 >
                   <ListItemIcon>{mpnFilterInvalidOnly ? <CheckIcon sx={{ color: '#2e7d32' }} /> : <ErrorIcon sx={{ color: '#f44336' }} />}</ListItemIcon>
                   <ListItemText>{mpnFilterInvalidOnly ? 'Show All Rows' : 'Filter Invalid MPNs'}</ListItemText>
                 </MenuItem>
-                <MenuItem onClick={() => { setMpnMenuAnchor(null); setShowMpnColumns(v => !v); }}>
+                <MenuItem
+                  onClick={() => { setMpnMenuAnchor(null); setShowMpnColumns(v => !v); }}
+                  disabled={!hasMpnValidationColumns}
+                >
                   <ListItemIcon><InfoIcon sx={{ color: showMpnColumns ? '#795548' : '#4caf50' }} /></ListItemIcon>
-                  <ListItemText>{showMpnColumns ? 'Hide MPN Columns' : 'Show MPN Columns'}</ListItemText>
+                  <ListItemText>
+                    {!hasMpnValidationColumns ? 'No MPN Columns Yet' : (showMpnColumns ? 'Hide MPN Columns' : 'Show MPN Columns')}
+                  </ListItemText>
                 </MenuItem>
               </Menu>
 
@@ -2501,11 +2509,10 @@ const EnhancedDataEditor = () => {
             {mpnValidating && (
               <Box sx={{ mt: 2, px: 4 }}>
                 <Typography variant="body2" sx={{ color: 'rgba(255,255,255,0.9)', mb: 1 }}>
-                  Validating MPNs with Digi-Key API...
+                  Validating MPNs with Digi-Key and Mouser. This can take a few minutes...
                 </Typography>
                 <LinearProgress
-                  variant="determinate"
-                  value={mpnValidationProgress}
+                  variant="indeterminate"
                   sx={{
                     height: 6,
                     borderRadius: 3,
@@ -2517,7 +2524,7 @@ const EnhancedDataEditor = () => {
                   }}
                 />
                 <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.8)', mt: 1, display: 'block' }}>
-                  {Math.round(mpnValidationProgress)}% complete
+                  Checking supplier APIs and updating validation columns
                 </Typography>
               </Box>
             )}

@@ -286,6 +286,7 @@ def get_session_consistent(session_id: str):
     data = cache.get(f"mapper:session:{session_id}")
     if data:
         logger.info(f"🔍 Session {session_id} found in cache")
+        SESSION_STORE[session_id] = data
         # Cross-check file snapshot for newer version to avoid stale cache across workers
         try:
             file_snapshot = load_session_from_file(session_id)
@@ -1405,6 +1406,271 @@ def upload_files(request):
 
 
 @api_view(['POST'])
+def apply_sheet_join(request):
+    """Expand/enrich a client workbook sheet with detail rows from another sheet."""
+    try:
+        session_id = request.data.get('session_id')
+        base_sheet = request.data.get('base_sheet')
+        detail_sheet = request.data.get('detail_sheet')
+        base_key = request.data.get('base_key')
+        detail_key = request.data.get('detail_key')
+        detail_columns = request.data.get('detail_columns') or []
+        output_mode = request.data.get('output_mode') or 'grouped'
+        relationship_name = str(request.data.get('relationship_name') or '').strip()
+        copied_base_columns = request.data.get('copied_base_columns') or []
+        unique_id_mode = request.data.get('unique_id_mode') or 'auto'
+        unique_id_base_column = request.data.get('unique_id_base_column') or base_key
+        unique_id_detail_column = request.data.get('unique_id_detail_column') or ''
+        unique_id_pattern = request.data.get('unique_id_pattern') or '{base}_{detail}'
+        base_header_row = int(request.data.get('base_header_row') or 1)
+        detail_header_row = int(request.data.get('detail_header_row') or 1)
+
+        if not all([session_id, base_sheet, detail_sheet, base_key, detail_key]):
+            return Response({
+                'success': False,
+                'error': 'session_id, base/detail sheets, and key columns are required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+
+        preview_headers = request.data.get('preview_headers') or []
+        preview_rows = request.data.get('preview_rows') or []
+        if isinstance(preview_headers, list) and isinstance(preview_rows, list) and preview_headers and preview_rows:
+            output_df = pd.DataFrame(preview_rows)
+            output_df = output_df.reindex(columns=[str(header) for header in preview_headers], fill_value='')
+
+            upload_dir = getattr(hybrid_file_manager, 'local_upload_dir', Path(settings.BASE_DIR) / 'uploaded_files')
+            upload_dir = Path(upload_dir)
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            joined_filename = f"{uuid.uuid4()}_sheet_join_preview.xlsx"
+            joined_path = upload_dir / joined_filename
+            output_df.to_excel(joined_path, index=False, sheet_name='Sheet_Joined')
+
+            info['client_path'] = str(joined_path)
+            info['sheet_name'] = 'Sheet_Joined'
+            info['header_row'] = 1
+            info['sheet_join'] = {
+                'base_sheet': base_sheet,
+                'detail_sheet': detail_sheet,
+                'base_key': base_key,
+                'detail_key': detail_key,
+                'detail_columns': detail_columns,
+                'output_mode': output_mode,
+                'relationship_name': relationship_name,
+                'copied_base_columns': copied_base_columns,
+                'unique_id_mode': unique_id_mode,
+                'unique_id_base_column': unique_id_base_column,
+                'unique_id_detail_column': unique_id_detail_column,
+                'unique_id_pattern': unique_id_pattern,
+                'used_preview_rows': True,
+            }
+            info.pop('formula_enhanced_data', None)
+            info.pop('enhanced_data', None)
+            info.pop('edited_data', None)
+            info.pop('enhanced_headers', None)
+            info.pop('current_template_headers', None)
+            save_session(session_id, info)
+
+            return Response({
+                'success': True,
+                'headers': [str(header) for header in preview_headers],
+                'rows': len(preview_rows),
+                'matched_base_rows': None,
+                'unmatched_base_rows': None,
+                'expanded_rows': len(preview_rows),
+                'orphan_detail_keys': None,
+            })
+
+        client_path = hybrid_file_manager.get_file_path(info['client_path'])
+        if str(client_path).lower().endswith('.csv'):
+            return Response({
+                'success': False,
+                'error': 'Sheet comparison requires an Excel workbook with multiple sheets'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        base_df = pd.read_excel(client_path, sheet_name=base_sheet, header=max(0, base_header_row - 1), dtype=object)
+        detail_df = pd.read_excel(client_path, sheet_name=detail_sheet, header=max(0, detail_header_row - 1), dtype=object)
+        base_df = base_df.fillna('')
+        detail_df = detail_df.fillna('')
+
+        base_df.columns = [str(c).strip() for c in base_df.columns]
+        detail_df.columns = [str(c).strip() for c in detail_df.columns]
+
+        if base_key not in base_df.columns:
+            return Response({'success': False, 'error': f'Base key column "{base_key}" not found'}, status=status.HTTP_400_BAD_REQUEST)
+        if detail_key not in detail_df.columns:
+            return Response({'success': False, 'error': f'Detail key column "{detail_key}" not found'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not detail_columns:
+            detail_columns = [c for c in detail_df.columns if c != detail_key]
+        detail_columns = [c for c in detail_columns if c in detail_df.columns and c != detail_key]
+        if not detail_columns:
+            return Response({'success': False, 'error': 'Select at least one column from the second sheet'}, status=status.HTTP_400_BAD_REQUEST)
+
+        base_headers = list(base_df.columns)
+        copied_base_columns = [c for c in copied_base_columns if c in base_headers]
+        if not copied_base_columns:
+            copied_base_columns = base_headers
+        if unique_id_base_column not in base_headers:
+            unique_id_base_column = base_key
+        if unique_id_detail_column not in detail_df.columns:
+            unique_id_detail_column = detail_columns[0] if detail_columns else detail_key
+
+        def norm_key(value):
+            return str(value or '').replace('\u00a0', ' ').strip().lower()
+
+        def clean_value(value):
+            if pd.isna(value):
+                return ''
+            return str(value).strip()
+
+        def unique_non_empty(values):
+            seen = set()
+            cleaned = []
+            for value in values:
+                value = clean_value(value)
+                if value and value not in seen:
+                    cleaned.append(value)
+                    seen.add(value)
+            return cleaned
+
+        def unique_output_name(name, existing):
+            candidate = name
+            suffix = 2
+            while candidate in existing:
+                candidate = f'{name} {suffix}'
+                suffix += 1
+            return candidate
+
+        def make_unique_id(base_row, detail_row):
+            base_value = clean_value(base_row.get(unique_id_base_column, ''))
+            detail_value = clean_value(detail_row.get(unique_id_detail_column, '')) if detail_row is not None else ''
+            if unique_id_mode == 'custom':
+                return unique_id_pattern.replace('{base}', base_value).replace('{detail}', detail_value).strip('_- ')
+            return f'{base_value}_{detail_value}'.strip('_- ')
+
+        detail_lookup = defaultdict(list)
+        for _, detail_row in detail_df.iterrows():
+            key = norm_key(detail_row.get(detail_key, ''))
+            if key:
+                detail_lookup[key].append(detail_row)
+
+        output_headers = list(base_headers)
+        unique_id_col = 'Generated Row ID'
+        detail_header_map = {}
+        if output_mode == 'grouped':
+            for col in detail_columns:
+                out_col = relationship_name if relationship_name and len(detail_columns) == 1 else col
+                if out_col in output_headers:
+                    out_col = f'{out_col} (related)'
+                out_col = unique_output_name(out_col, output_headers)
+                detail_header_map[col] = out_col
+                output_headers.append(out_col)
+        else:
+            for col in detail_columns:
+                out_col = col
+                if out_col in output_headers:
+                    out_col = f'{col} (detail)'
+                out_col = unique_output_name(out_col, output_headers)
+                detail_header_map[col] = out_col
+                output_headers.append(out_col)
+
+        if output_mode == 'expanded':
+            unique_id_col = unique_output_name(unique_id_col, output_headers)
+            output_headers.insert(0, unique_id_col)
+
+        output_rows = []
+        matched_base_rows = 0
+        unmatched_base_rows = 0
+        expanded_rows = 0
+        matched_detail_keys = set()
+
+        for _, base_row in base_df.iterrows():
+            base_key_value = norm_key(base_row.get(base_key, ''))
+            matches = detail_lookup.get(base_key_value, []) if base_key_value else []
+
+            if matches:
+                matched_base_rows += 1
+                matched_detail_keys.add(base_key_value)
+                if output_mode == 'grouped':
+                    row = {h: base_row.get(h, '') for h in base_headers}
+                    for detail_col, out_col in detail_header_map.items():
+                        row[out_col] = ' | '.join(unique_non_empty([detail_row.get(detail_col, '') for detail_row in matches]))
+                    output_rows.append(row)
+                    expanded_rows += 1
+                else:
+                    for match_index, detail_row in enumerate(matches):
+                        row = {h: base_row.get(h, '') if (h in copied_base_columns or match_index == 0) else '' for h in base_headers}
+                        row[unique_id_col] = make_unique_id(base_row, detail_row)
+                        for detail_col, out_col in detail_header_map.items():
+                            row[out_col] = detail_row.get(detail_col, '')
+                        output_rows.append(row)
+                        expanded_rows += 1
+            else:
+                unmatched_base_rows += 1
+                row = {h: base_row.get(h, '') for h in base_headers}
+                if output_mode == 'expanded':
+                    row[unique_id_col] = make_unique_id(base_row, None)
+                for out_col in detail_header_map.values():
+                    row[out_col] = ''
+                output_rows.append(row)
+
+        detail_keys = {norm_key(v) for v in detail_df[detail_key].tolist() if norm_key(v)}
+        orphan_detail_keys = detail_keys - {norm_key(v) for v in base_df[base_key].tolist() if norm_key(v)}
+
+        output_df = pd.DataFrame(output_rows, columns=output_headers)
+        upload_dir = getattr(hybrid_file_manager, 'local_upload_dir', Path(settings.BASE_DIR) / 'uploaded_files')
+        upload_dir = Path(upload_dir)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        joined_filename = f"{uuid.uuid4()}_sheet_join.xlsx"
+        joined_path = upload_dir / joined_filename
+        output_df.to_excel(joined_path, index=False, sheet_name='Sheet_Joined')
+
+        info['client_path'] = str(joined_path)
+        info['sheet_name'] = 'Sheet_Joined'
+        info['header_row'] = 1
+        info['sheet_join'] = {
+            'base_sheet': base_sheet,
+            'detail_sheet': detail_sheet,
+            'base_key': base_key,
+            'detail_key': detail_key,
+            'detail_columns': detail_columns,
+            'output_mode': output_mode,
+            'relationship_name': relationship_name,
+            'copied_base_columns': copied_base_columns,
+            'unique_id_mode': unique_id_mode,
+            'unique_id_base_column': unique_id_base_column,
+            'unique_id_detail_column': unique_id_detail_column,
+            'unique_id_pattern': unique_id_pattern,
+            'matched_base_rows': matched_base_rows,
+            'unmatched_base_rows': unmatched_base_rows,
+            'expanded_rows': expanded_rows,
+            'orphan_detail_keys': len(orphan_detail_keys),
+        }
+        info.pop('formula_enhanced_data', None)
+        info.pop('enhanced_data', None)
+        info.pop('edited_data', None)
+        info.pop('enhanced_headers', None)
+        info.pop('current_template_headers', None)
+        save_session(session_id, info)
+
+        return Response({
+            'success': True,
+            'headers': output_headers,
+            'rows': len(output_rows),
+            'matched_base_rows': matched_base_rows,
+            'unmatched_base_rows': unmatched_base_rows,
+            'expanded_rows': expanded_rows,
+            'orphan_detail_keys': len(orphan_detail_keys),
+        })
+    except Exception as e:
+        logger.error(f"Sheet join failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
 def cleanup_rows(request):
     """
     Remove rows where the primary column is empty.
@@ -2499,6 +2765,8 @@ def data_view(request):
         # Validate page parameters and set reasonable limits for large datasets
         page = max(1, page)
         page_size = max(1, min(5000, page_size))  # Allow up to 5000 rows per page
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
         
         # Log performance for large page sizes
         if page_size > 1000:
@@ -2535,20 +2803,44 @@ def data_view(request):
         logger.info(f"📊 DATA_VIEW: column_counts = {info.get('column_counts')}")
         logger.info(f"📊 DATA_VIEW: mappings count = {len(info.get('mappings', []))}")
 
+        def _normalize_session_rows(value):
+            if isinstance(value, list):
+                return value
+            if isinstance(value, dict):
+                rows = value.get('data') or value.get('rows')
+                return rows if isinstance(rows, list) else []
+            return []
+
+        def _normalize_session_headers(value, fallback=None):
+            if isinstance(value, dict) and isinstance(value.get('headers'), list):
+                return value.get('headers')
+            return fallback or []
+
         # If manual edits exist, serve them immediately without requiring mappings
         edited_data = info.get('edited_data')
-        if isinstance(edited_data, list) and edited_data:
-            headers_to_use = info.get('enhanced_headers') or info.get('current_template_headers') or info.get('template_headers') or []
+        edited_rows = _normalize_session_rows(edited_data)
+        active_enhanced_data = info.get('enhanced_data')
+        has_active_enhanced_data = (
+            isinstance(active_enhanced_data, dict)
+            and isinstance(active_enhanced_data.get('headers'), list)
+            and isinstance(active_enhanced_data.get('data'), list)
+            and bool(active_enhanced_data.get('data'))
+        )
+        if edited_rows and not has_active_enhanced_data:
+            headers_to_use = _normalize_session_headers(edited_data, info.get('enhanced_headers') or info.get('current_template_headers') or info.get('template_headers') or [])
 
             # Build transformed rows from edited_data
             transformed_rows = []
-            for r in edited_data:
+            for r in edited_rows:
                 if isinstance(r, dict):
                     transformed_rows.append({h: r.get(h, '') for h in headers_to_use})
+                elif isinstance(r, list):
+                    transformed_rows.append({h: (r[idx] if idx < len(r) else '') for idx, h in enumerate(headers_to_use)})
 
             # Quality + metadata calculation as usual
             final_headers = headers_to_use
-            final_data = transformed_rows
+            total_rows = len(transformed_rows)
+            final_data = transformed_rows[start_idx:end_idx]
             confidence_data = {}
             header_confidence_scores = {}
             quality_metrics = calculate_data_quality_metrics(final_data, final_headers, header_confidence_scores, confidence_data)
@@ -2557,7 +2849,7 @@ def data_view(request):
                 'success': True,
                 'headers': final_headers,
                 'data': final_data,
-                'total_rows': len(final_data),
+                'total_rows': total_rows,
                 'formula_rules': info.get('formula_rules', []),
                 'template_version': info.get('template_version', 0),
                 'quality_metrics': quality_metrics,
@@ -2574,8 +2866,8 @@ def data_view(request):
                 'pagination': {
                     'page': page,
                     'page_size': page_size,
-                    'total_rows': len(final_data),
-                    'total_pages': max(1, (len(final_data) + page_size - 1) // page_size)
+                    'total_rows': total_rows,
+                    'total_pages': max(1, (total_rows + page_size - 1) // page_size)
                 }
             }))
         
@@ -2607,16 +2899,18 @@ def data_view(request):
         edited_data = info.get('edited_data')
         enhanced_data = info.get("formula_enhanced_data")
         enhanced_headers = info.get("enhanced_headers")
+        edited_rows = _normalize_session_rows(edited_data)
+        enhanced_rows = _normalize_session_rows(enhanced_data)
 
         logger.info(f"🔍 DATA_VIEW_START: edited_data={len(edited_data) if edited_data else 0}, formula_enhanced_data={bool(enhanced_data)}, enhanced_headers={len(enhanced_headers) if enhanced_headers else 0}")
 
         template_just_applied = info.get("original_template_id") is not None
         # Prefer enhanced data if present (e.g., user uploaded corrected CSV) even when force_fresh=true
         force_fresh_param = request.GET.get('force_fresh', 'false').lower() == 'true'
-        if info.get('uploaded_via_correction') and enhanced_data and enhanced_headers:
+        if info.get('uploaded_via_correction') and enhanced_rows and enhanced_headers:
             force_fresh_mapping = False
         else:
-            force_fresh_mapping = (template_just_applied and not (enhanced_data and enhanced_headers)) or (force_fresh_param and not (enhanced_data and enhanced_headers))
+            force_fresh_mapping = (template_just_applied and not (enhanced_rows and enhanced_headers)) or (force_fresh_param and not (enhanced_rows and enhanced_headers))
         # Stability option for consumers like DataEditor: avoid cleaning headers by page slice
         stable_headers = request.GET.get('stable', 'false').lower() == 'true'
 
@@ -2648,13 +2942,15 @@ def data_view(request):
             headers_to_use = enhanced_headers
             using_enhanced = True
         # 2) Edited data takes second priority (but should include MPN columns if they exist)
-        elif isinstance(edited_data, list) and edited_data:
-            headers_to_use = enhanced_headers or info.get('current_template_headers') or info.get('template_headers') or []
+        elif edited_rows:
+            headers_to_use = _normalize_session_headers(edited_data, enhanced_headers or info.get('current_template_headers') or info.get('template_headers') or [])
             # Rebuild rows to include all headers in order
             transformed_rows = []
-            for r in edited_data:
+            for r in edited_rows:
                 if isinstance(r, dict):
                     transformed_rows.append({h: r.get(h, '') for h in headers_to_use})
+                elif isinstance(r, list):
+                    transformed_rows.append({h: (r[idx] if idx < len(r) else '') for idx, h in enumerate(headers_to_use)})
             using_enhanced = True
             try:
                 info['enhanced_headers'] = headers_to_use
@@ -2662,9 +2958,9 @@ def data_view(request):
             except Exception:
                 pass
         # 3) Otherwise use enhanced (correction / formula) data
-        elif enhanced_data and enhanced_headers and not force_fresh_mapping and not mpn_enhanced_data:
-            transformed_rows = enhanced_data
-            headers_to_use = enhanced_headers
+        elif enhanced_rows and enhanced_headers and not force_fresh_mapping and not mpn_enhanced_data:
+            transformed_rows = enhanced_rows
+            headers_to_use = _normalize_session_headers(enhanced_data, enhanced_headers)
             using_enhanced = True
             # Persist canonical headers to avoid worker drift
             try:
@@ -2674,8 +2970,6 @@ def data_view(request):
                 pass
         else:
             # fresh mapping – process only requested page to avoid heavy work on large datasets
-            # Compute pagination window and pass hints to the mapper
-            start_idx = (page - 1) * page_size
             # Provide pagination hints for apply_column_mappings
             try:
                 SESSION_STORE.setdefault(session_id, {})['__paginate__'] = {'offset': start_idx, 'limit': page_size}
@@ -3132,13 +3426,17 @@ def data_view(request):
         # Implement pagination
         # We already paginated at read-time. Compute total_rows accurately for UI.
                 pass
-        try:
-            client_local_path = hybrid_file_manager.get_file_path(info["client_path"])
-            total_rows = _count_total_data_rows(client_local_path, info.get("sheet_name"), info.get("header_row", 1) - 1 if info.get("header_row", 1) > 0 else 0)
-        except Exception:
-            # Fallback to current page length if counting fails
-            total_rows = start_idx + len(transformed_rows)
-        paginated_rows = transformed_rows
+        if using_enhanced:
+            total_rows = len(transformed_rows)
+            paginated_rows = transformed_rows[start_idx:end_idx]
+        else:
+            try:
+                client_local_path = hybrid_file_manager.get_file_path(info["client_path"])
+                total_rows = _count_total_data_rows(client_local_path, info.get("sheet_name"), info.get("header_row", 1) - 1 if info.get("header_row", 1) > 0 else 0)
+            except Exception:
+                # Fallback to current page length if counting fails
+                total_rows = start_idx + len(transformed_rows)
+            paginated_rows = transformed_rows
         
         # Use the headers we determined above (either enhanced or template headers)
         
@@ -3522,12 +3820,17 @@ def data_view(request):
                     if mpn_col not in canonical_headers:
                         canonical_headers.append(mpn_col)
 
-                # Add canonical MPN columns
-                canonical_counts = mpn_validation.get('validation_columns_added', {}).get('canonical_counts', 5)
-                for i in range(1, canonical_counts + 1):
-                    canonical_mpn_col = f'Canonical MPN{" " + str(i) if i > 1 else ""}'
-                    if canonical_mpn_col not in canonical_headers:
-                        canonical_headers.append(canonical_mpn_col)
+                validation_columns_added = mpn_validation.get('validation_columns_added') or []
+                if isinstance(validation_columns_added, list):
+                    for mpn_col in validation_columns_added:
+                        if mpn_col and mpn_col not in canonical_headers:
+                            canonical_headers.append(mpn_col)
+                else:
+                    canonical_counts = validation_columns_added.get('canonical_counts', 5) if isinstance(validation_columns_added, dict) else 5
+                    for i in range(1, canonical_counts + 1):
+                        canonical_mpn_col = f'Canonical MPN{" " + str(i) if i > 1 else ""}'
+                        if canonical_mpn_col not in canonical_headers:
+                            canonical_headers.append(canonical_mpn_col)
 
                 # Add Mouser columns if Mouser validation was performed
                 if mpn_validation.get('mouser_results'):
@@ -3536,6 +3839,13 @@ def data_view(request):
                     for mouser_col in mouser_columns:
                         if mouser_col not in canonical_headers:
                             canonical_headers.append(mouser_col)
+
+            # Preserve any response headers already produced by enhanced/validated data.
+            # This keeps validation/parser/source-specific columns from being dropped by
+            # the canonical template rebuild when metadata is older or partially shaped.
+            for existing_header in final_headers:
+                if existing_header and existing_header not in canonical_headers:
+                    canonical_headers.append(existing_header)
 
             # Rebuild data rows to include all canonical headers in order
             rebuilt_rows = []
@@ -4408,6 +4718,9 @@ def download_original_file(request, session_id=None):
                 'error': 'Invalid session'
             }, status=status.HTTP_400_BAD_REQUEST)
         
+        SESSION_STORE[session_id] = info
+        SESSION_STORE[session_id] = info
+        SESSION_STORE[session_id] = info
         info = SESSION_STORE[session_id]
         client_path = info["client_path"]
         original_name = info["original_client_name"]
@@ -4545,9 +4858,38 @@ def download_grid_excel(request):
 def dashboard_view(request):
     """Get dashboard data."""
     try:
-        # Get recent sessions
+        # Get recent sessions from both memory and persisted session files.
+        # Docker/backend restarts clear process memory, so relying only on
+        # SESSION_STORE makes the dashboard look empty even though sessions were
+        # saved to disk.
+        session_map = dict(SESSION_STORE)
+        try:
+            session_files = list(hybrid_file_manager.local_temp_dir.glob("session_*.json"))
+            for session_file in session_files:
+                try:
+                    session_id_from_file = session_file.stem.replace("session_", "", 1)
+                    if session_id_from_file in session_map:
+                        continue
+                    loaded = load_session_from_file(session_id_from_file)
+                    if loaded:
+                        session_map[session_id_from_file] = loaded
+                        SESSION_STORE[session_id_from_file] = loaded
+                        cache.set(f"mapper:session:{session_id_from_file}", loaded, 86400)
+                except Exception as file_error:
+                    logger.warning(f"Dashboard could not load session file {session_file}: {file_error}")
+        except Exception as scan_error:
+            logger.warning(f"Dashboard could not scan persisted sessions: {scan_error}")
+
+        def _created_sort_key(item):
+            _, data = item
+            created = data.get('created') or ''
+            try:
+                return datetime.fromisoformat(str(created).replace('Z', '+00:00'))
+            except Exception:
+                return datetime.min
+
         uploads = []
-        for session_id, session_data in list(SESSION_STORE.items())[-10:]:  # Last 10 sessions
+        for session_id, session_data in sorted(session_map.items(), key=_created_sort_key, reverse=True)[:25]:
             # Try to get row count from processed data or client data
             rows_processed = 0
             logger.info(f"Session {session_id}: Checking for data to calculate rows")
@@ -4581,87 +4923,16 @@ def dashboard_view(request):
                     logger.warning(f"Session {session_id}: Error counting client_data rows: {e}")
                     rows_processed = 0
             else:
-                # Try to calculate rows from processed data that would be used for download
-                try:
-                    if session_data.get('mappings'):
-                        # Import here to avoid circular imports
-                        from .bom_header_mapper import BOMHeaderMapper
-                        import pandas as pd
-                        
-                        # Get client file info
-                        client_path = session_data.get('client_path')
-                        sheet_name = session_data.get('sheet_name')
-                        header_row = session_data.get('header_row', 1) - 1 if session_data.get('header_row', 1) > 0 else 0
-                        
-                        logger.info(f"Session {session_id}: Attempting to read client file for row count")
-                        logger.info(f"Session {session_id}: client_path: {client_path}")
-                        logger.info(f"Session {session_id}: sheet_name: {sheet_name}")
-                        logger.info(f"Session {session_id}: header_row: {header_row}")
-                        
-                        if client_path:
-                            # Try to resolve the file path using hybrid_file_manager
-                            try:
-                                client_local_path = hybrid_file_manager.get_file_path(client_path)
-                                logger.info(f"Session {session_id}: Resolved client_local_path: {client_local_path}")
-                                
-                                # Check if the resolved path exists
-                                if Path(client_local_path).exists():
-                                    logger.info(f"Session {session_id}: Resolved path exists, reading file")
-                                    if str(client_local_path).lower().endswith('.csv'):
-                                        df = read_csv_with_encoding(client_local_path, header_row)
-                                    else:
-                                        result = pd.read_excel(client_local_path, sheet_name=sheet_name, header=header_row)
-                                        if isinstance(result, dict):
-                                            first_sheet_name = list(result.keys())[0]
-                                            df = result[first_sheet_name]
-                                        else:
-                                            df = result
-                                    
-                                    rows_processed = len(df)
-                                    logger.info(f"Session {session_id}: Successfully calculated rows from client file: {rows_processed}")
-                                else:
-                                    logger.warning(f"Session {session_id}: Resolved path does not exist: {client_local_path}")
-                                    # Try to check if the original path exists
-                                    if Path(client_path).exists():
-                                        logger.info(f"Session {session_id}: Original path exists, using it directly")
-                                        if str(client_path).lower().endswith('.csv'):
-                                            df = read_csv_with_encoding(client_path, header_row)
-                                        else:
-                                            result = pd.read_excel(client_path, sheet_name=sheet_name, header=header_row)
-                                            if isinstance(result, dict):
-                                                first_sheet_name = list(result.keys())[0]
-                                                df = result[first_sheet_name]
-                                            else:
-                                                df = result
-                                        
-                                        rows_processed = len(df)
-                                        logger.info(f"Session {session_id}: Successfully calculated rows from original path: {rows_processed}")
-                                    else:
-                                        logger.warning(f"Session {session_id}: Neither resolved nor original path exists")
-                            except Exception as path_error:
-                                logger.warning(f"Session {session_id}: Error resolving file path: {path_error}")
-                                # Fallback: try to read directly from client_path
-                                if Path(client_path).exists():
-                                    logger.info(f"Session {session_id}: Fallback: original path exists, reading directly")
-                                    if str(client_path).lower().endswith('.csv'):
-                                        df = read_csv_with_encoding(client_path, header_row)
-                                    else:
-                                        result = pd.read_excel(client_path, sheet_name=sheet_name, header=header_row)
-                                        if isinstance(result, dict):
-                                            first_sheet_name = list(result.keys())[0]
-                                            df = result[first_sheet_name]
-                                        else:
-                                            df = result
-                                    
-                                    rows_processed = len(df)
-                                    logger.info(f"Session {session_id}: Fallback successful, rows: {rows_processed}")
-                                else:
-                                    logger.warning(f"Session {session_id}: Fallback path also does not exist: {client_path}")
-                        else:
-                            logger.info(f"Session {session_id}: No client_path found in session data")
-                except Exception as e:
-                    logger.warning(f"Session {session_id}: Error calculating rows from client file: {e}")
-                    rows_processed = 0
+                # Keep dashboard fast: do not open uploaded Excel files just to
+                # count rows. Use already-processed session data when available.
+                for key in ('formula_enhanced_data', 'mapped_data'):
+                    data = session_data.get(key)
+                    if isinstance(data, list):
+                        rows_processed = len(data)
+                        break
+                    if isinstance(data, dict) and isinstance(data.get('data'), list):
+                        rows_processed = len(data['data'])
+                        break
                 
                 if rows_processed == 0:
                     logger.info(f"Session {session_id}: No edited_data, client_data, or client file found")
@@ -4709,8 +4980,7 @@ def dashboard_view(request):
                 'filled_sheet_name': filled_sheet_name,
                 'created': session_data.get('created', datetime.now().isoformat()),
                 'has_mappings': is_complete,
-                'rows_processed': rows_processed,
-                'status': 'Complete' if is_complete else 'Pending'
+                'rows_processed': rows_processed
             })
         
         # Get saved templates
@@ -5515,7 +5785,9 @@ def apply_mapping_template(request):
             logger.info(f"🔧 FIX: Template tag calculation - mapped_max={mapped_tag_max}, formula_rules={tag_formula_count}, final={tags_count}")
             # Ensure at least 1 Tag column if template declared any tags
             if tags_count == 0 and template_tags_count > 0:
-                tags_count = min(template_tags_count, 1)
+                tags_count = template_tags_count
+            else:
+                tags_count = max(tags_count, template_tags_count)
 
             # For specs/customers, keep existing behavior by distinct counts
             spec_pairs_count = max(template_spec_pairs_count, len(mapped_spec_indices))
@@ -5544,7 +5816,7 @@ def apply_mapping_template(request):
             })
             
             # Only regenerate if counts don't match or if no dynamic columns exist
-            should_regenerate = (
+            should_regenerate = (not existing_template_headers) and (
                 len([h for h in existing_dynamic_columns if h.startswith('Tag_') or h == 'Tag']) != tags_count or
                 len([h for h in existing_dynamic_columns if h.startswith('Specification_Name_') or h == 'Specification name']) != spec_pairs_count or
                 len([h for h in existing_dynamic_columns if h.startswith('Customer_Identification_Name_') or h == 'Customer identification name']) != customer_id_pairs_count or

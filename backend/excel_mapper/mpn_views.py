@@ -716,14 +716,15 @@ def mpn_validate(request):
         # Combine cached and API results
         results_map = {**cached_results, **api_results}
 
-        # ========== MOUSER VALIDATION (same MPNs) ==========
+        # ========== MOUSER VALIDATION (optional, same MPNs) ==========
+        include_mouser = request.data.get('include_mouser') in (True, 'true', 'True', '1', 1)
         logger.info("=" * 80)
         logger.info("🔍 MOUSER_VALIDATION_START: Beginning Mouser validation")
         logger.info("=" * 80)
         mouser_results_map = {}
         try:
             mouser_client = MouserClient()
-            if mouser_client.api_key:
+            if include_mouser and mouser_client.api_key:
                 logger.info(f"📊 MOUSER_VALIDATION: Validating {len(mpns)} MPNs via Mouser API")
                 for raw_mpn in mpns:
                     norm_mpn = mouser_client.normalize_mpn(raw_mpn)
@@ -733,6 +734,8 @@ def mpn_validate(request):
                             mouser_results_map[norm_mpn] = result
                 logger.info(f"✅ MOUSER_VALIDATION: Completed for {len(mouser_results_map)} MPNs")
                 logger.info(f"📋 MOUSER_VALIDATION_STATS: Valid={sum(1 for r in mouser_results_map.values() if r.get('valid'))}, Invalid={sum(1 for r in mouser_results_map.values() if not r.get('valid'))}")
+            elif not include_mouser:
+                logger.info("MOUSER_VALIDATION: Skipping Mouser validation for main MPN validation flow")
             else:
                 logger.warning("⚠️ MOUSER_VALIDATION: MOUSER_API_KEY not configured, skipping Mouser validation")
         except Exception as e:

@@ -725,6 +725,11 @@ export default function ColumnMapping() {
         setTemplateApplied(true);
         setAppliedTemplateName(template.name);
         setOriginalTemplateId(template.id);
+        setTemplateMappingCount(
+          Array.isArray(response.data.mappings_new_format)
+            ? response.data.mappings_new_format.length
+            : (response.data.total_mapped || 0)
+        );
 
         // Persist formula rules and counts to session metadata for Tag arrows and drawer
         try {
@@ -837,8 +842,17 @@ export default function ColumnMapping() {
             defaultValues: defaultValuesToUse
           };
           
-          // Use updateColumnCounts to trigger full regeneration with new counts
-          await updateColumnCounts(response.data.column_counts);
+          // Use the backend-returned headers directly. The generic column-count
+          // rebuild has its own restore pass and can overwrite freshly applied
+          // template mappings with stale/fuzzy matches.
+          setColumnCounts(response.data.column_counts);
+          if (headersToUse && headersToUse.length > 0) {
+            setTemplateHeaders(headersToUse);
+            setTemplateColumns(headersToUse);
+            setUseDynamicTemplate(true);
+            const factwiseRules = sessionMetadata?.factwise_rules || [];
+            initializeNodes(clientHeadersFromResponse, headersToUse, null, factwiseRules, defaultValuesToUse, setIsInitializingMappings);
+          }
           
           // CRITICAL FIX: Apply mappings and ensure default values after rebuild is complete
           setTimeout(() => {
@@ -2090,6 +2104,8 @@ export default function ColumnMapping() {
         if (session_metadata.template_name) {
           setAppliedTemplateName(session_metadata.template_name);
           // eslint-disable-next-line no-console
+        } else if (location.state?.appliedTemplate?.name) {
+          setAppliedTemplateName(location.state.appliedTemplate.name);
         }
         
         // Use template headers from uploaded template file (no regeneration needed)
@@ -2140,6 +2156,10 @@ export default function ColumnMapping() {
         const headersToUse = finalTemplateHeaders;
         const factwiseRules = session_metadata?.factwise_rules || [];
         initializeNodes(client_headers, headersToUse, session_metadata?.formula_rules || [], factwiseRules, defaultValueMappings, setIsInitializingMappings);
+        if ((session_metadata?.template_applied || location.state?.templateAlreadyApplied) && !location.state?.autoApplyTemplate) {
+          setTemplateApplied(true);
+          setTemplateMappingCount(normalizedMappings?.length || 0);
+        }
         
         // CRITICAL FIX: Apply existing mappings AFTER nodes are initialized
         if (normalizedMappings && normalizedMappings.length > 0) {
@@ -2278,8 +2298,9 @@ export default function ColumnMapping() {
   // Auto-apply template from Dashboard/Upload using the existing handleApplyTemplate logic
   useEffect(() => {
     const autoApplyTemplate = location.state?.autoApplyTemplate;
+    const templateAlreadyApplied = location.state?.templateAlreadyApplied;
     
-    if (autoApplyTemplate && !loading && clientHeaders.length > 0 && templateHeaders.length > 0 && !autoApplyTriggeredRef.current) {
+    if (autoApplyTemplate && !templateAlreadyApplied && !loading && clientHeaders.length > 0 && templateHeaders.length > 0 && !autoApplyTriggeredRef.current) {
       autoApplyTriggeredRef.current = true;
       
       // Small delay to ensure page is fully loaded
@@ -2449,6 +2470,10 @@ export default function ColumnMapping() {
           }
         }
       }
+
+      // Saved template mappings are user intent. If the exact/dynamic target is
+      // absent, skip it instead of guessing a different field by substring.
+      return null;
       
       // Try fuzzy matching for other columns
       for (let i = 0; i < templateHdrs.length; i++) {
@@ -2473,15 +2498,6 @@ export default function ColumnMapping() {
         const sourceCol = mapping.source;
         const templateCol = mapping.target;
 
-        // Guard: if there are Tag formula rules, ignore generic 'Tag' targets to avoid
-        // converting them into an extra Tag_N (e.g., Tag_4) that should be formula-only
-        try {
-          if (templateCol === 'Tag' && Array.isArray(sessionMetadata?.formula_rules)) {
-            const hasTagFormula = sessionMetadata.formula_rules.some(r => (r || {}).column_type === 'Tag');
-            if (hasTagFormula) return; // skip this mapping
-          }
-        } catch (_) { /* no-op */ }
-        
         const sourceIdx = clientHdrs.indexOf(sourceCol);
         const targetMatch = findBestTargetColumn(sourceCol, templateCol, templateHdrs, usedTargets);
         
@@ -2500,17 +2516,6 @@ export default function ColumnMapping() {
       mappings.mappings.forEach((mapping, index) => {
         const sourceCol = mapping.source;
         const templateCol = mapping.target;
-
-        // Guard for nested format as well
-        try {
-          if (templateCol === 'Tag' && Array.isArray(sessionMetadata?.formula_rules)) {
-            const hasTagFormula = sessionMetadata.formula_rules.some(r => (r || {}).column_type === 'Tag');
-            if (hasTagFormula) {
-              console.log(`🔍 [EDGE_CREATE] Mapping ${index + 1}: SKIPPED (Tag formula exists)`);
-              return; // skip this mapping
-            }
-          }
-        } catch (_) { /* no-op */ }
 
         const sourceIdx = clientHdrs.indexOf(sourceCol);
         const targetMatch = findBestTargetColumn(sourceCol, templateCol, templateHdrs, usedTargets);
@@ -2538,13 +2543,6 @@ export default function ColumnMapping() {
     } else {
       // Handle old format for backward compatibility
       Object.entries(mappings || {}).forEach(([templateCol, sourceCol]) => {
-        // Guard for old format
-        try {
-          if (templateCol === 'Tag' && Array.isArray(sessionMetadata?.formula_rules)) {
-            const hasTagFormula = sessionMetadata.formula_rules.some(r => (r || {}).column_type === 'Tag');
-            if (hasTagFormula) return; // skip this mapping
-          }
-        } catch (_) { /* no-op */ }
         const sourceIdx = clientHdrs.indexOf(sourceCol);
         const targetMatch = findBestTargetColumn(sourceCol, templateCol, templateHdrs, usedTargets);
         
@@ -3646,11 +3644,12 @@ export default function ColumnMapping() {
   // E) Debounced autosave with rebuild guard and label-based targeting
   useEffect(() => {
     // E) Early return if rebuilding or still initializing (check both state and ref)
-    if (isRebuildingRef.current || isInitializingMappings || isInitializingRef.current) {
+    if (isRebuildingRef.current || isInitializingMappings || isInitializingRef.current || applyingTemplate) {
       enhancedDebugLog('AUTOSAVE', 'Autosave blocked - rebuilding or initializing', {
         isRebuilding: isRebuildingRef.current,
         isInitializingMappings,
-        isInitializingRef: isInitializingRef.current
+        isInitializingRef: isInitializingRef.current,
+        applyingTemplate
       });
       // eslint-disable-next-line no-console
       return;
@@ -3786,7 +3785,7 @@ export default function ColumnMapping() {
     }, 800); // 🔥 OPTIMIZED: Reduced delay for faster mapping while ensuring save completion
 
     return () => clearTimeout(timer);
-  }, [edges, defaultValueMappings, clientHeaders, nodes, sessionId, isInitializingMappings, templateHeaders, loading]);
+  }, [edges, defaultValueMappings, clientHeaders, nodes, sessionId, isInitializingMappings, templateHeaders, loading, applyingTemplate]);
 
   // ENHANCED: Navigate to review page - UPDATED TO SEND TO BACKEND with template preservation
   // Ensure pending text edits/defaults are committed before proceeding
