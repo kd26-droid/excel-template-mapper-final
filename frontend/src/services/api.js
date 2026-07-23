@@ -172,6 +172,25 @@ const api = {
   },
 
   /**
+   * Process uploaded PDF with native extraction + Azure OCR, then choose the better result
+   * @param {Object} data - Request data containing session_id
+   */
+  processPDFCompare: async (data) => {
+    try {
+      showGlobalLoader(true);
+      const response = await axios.post(`${API_URL}/pdf/process-compare/`, data, {
+        timeout: 300000 // Compare mode can run both native parsing and Azure OCR
+      });
+      return response;
+    } catch (error) {
+      console.error('PDF compare processing failed:', error);
+      throw error;
+    } finally {
+      showGlobalLoader(false);
+    }
+  },
+
+  /**
    * Get PDF session status
    * @param {string} sessionId - PDF session ID
    */

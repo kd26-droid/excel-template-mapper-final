@@ -103,7 +103,7 @@ const UploadFiles = () => {
   // 'align' = align rows from different pages to same row level + keep original headers (MFR stays MFR)
   // 'preserve' = append rows sequentially (page 1 rows, then page 2 rows, etc.) + keep original headers
   // 'flatten' = align rows across pages + rename headers (MFR → Manufacturer)
-  const pdfDataAlignment = 'align';
+  const pdfDataAlignment = 'preserve';
 
   // PDF processing choice dialog state
   const [pdfChoiceDialogOpen, setPdfChoiceDialogOpen] = useState(false);
@@ -1090,7 +1090,8 @@ const UploadFiles = () => {
 
     const isPDF = userFile.name.toLowerCase().endsWith('.pdf');
 
-    // Template file is required for non-PDF files
+    // Template file is required for non-PDF files. PDF uploads can still fall back
+    // to the default template, but if a template is selected it must be complete.
     if (!isPDF && !templateFile) {
       setError('Please select a template file');
       return;
@@ -1101,7 +1102,7 @@ const UploadFiles = () => {
       return;
     }
 
-    if (!isPDF && templateSheetNames.length > 0 && !selectedTemplateSheet) {
+    if (templateFile && templateSheetNames.length > 0 && !selectedTemplateSheet) {
       setError('Please select a sheet from your template file');
       return;
     }
@@ -1114,6 +1115,11 @@ const UploadFiles = () => {
       if (isPDF) {
         const formData = new FormData();
         formData.append('file', userFile);
+        if (templateFile) {
+          formData.append('templateFile', templateFile);
+          formData.append('templateSheetName', selectedTemplateSheet);
+          formData.append('templateHeaderRow', templateHeaderRow.toString());
+        }
 
         // Upload PDF file to PDF OCR endpoint
         const response = await api.uploadPDF(formData);
@@ -1230,12 +1236,12 @@ const UploadFiles = () => {
   };
 
   // Handle PDF processing choice
-  const handlePdfProcessingChoice = async (useZonalMapping) => {
+  const handlePdfProcessingChoice = async (processingMode) => {
     try {
       setLoading(true);
       setPdfChoiceDialogOpen(false);
 
-      if (useZonalMapping) {
+      if (processingMode === 'zonal') {
         setSuccess('Proceeding to zone selection for optimal results...');
         setTimeout(() => {
           navigate(`/pdf-zones/${pendingPdfSessionId}`, {
@@ -1245,6 +1251,24 @@ const UploadFiles = () => {
             }
           });
         }, 1000);
+      } else if (processingMode === 'compare') {
+        setSuccess('Processing with native extraction and Azure OCR...');
+
+        const compareResponse = await api.processPDFCompare({
+          session_id: pendingPdfSessionId,
+          data_alignment: pdfDataAlignment
+        });
+        const decision = compareResponse.data?.decision;
+        const winner = decision?.winner ? `${decision.winner} extraction` : 'best extraction';
+        setSuccess(`PDF processed successfully with ${winner}. Proceeding to column mapping...`);
+
+        setTimeout(() => {
+          showPrimaryColumnDialog(pendingPdfSessionId, {
+            fromPDF: true,
+            ocrData: compareResponse.data,
+            pdfDecision: decision
+          });
+        }, 1500);
       } else {
         setSuccess('Processing with standard OCR...');
 
@@ -1256,11 +1280,9 @@ const UploadFiles = () => {
         setSuccess('PDF processed successfully! Proceeding to column mapping...');
 
         setTimeout(() => {
-          navigate(`/mapping/${pendingPdfSessionId}`, {
-            state: {
-              fromPDF: true,
-              ocrData: ocrResponse.data
-            }
+          showPrimaryColumnDialog(pendingPdfSessionId, {
+            fromPDF: true,
+            ocrData: ocrResponse.data
           });
         }, 1500);
       }
@@ -2488,7 +2510,7 @@ const UploadFiles = () => {
                     bgcolor: 'primary.50'
                   }
                 }}
-                onClick={() => handlePdfProcessingChoice(false)}
+                onClick={() => handlePdfProcessingChoice('ocr')}
               >
                 <CardContent sx={{ textAlign: 'center', p: 3 }}>
                   <PlayArrowIcon sx={{ fontSize: 48, color: 'success.main', mb: 2 }} />
@@ -2512,7 +2534,31 @@ const UploadFiles = () => {
                     bgcolor: 'primary.50'
                   }
                 }}
-                onClick={() => handlePdfProcessingChoice(true)}
+                onClick={() => handlePdfProcessingChoice('compare')}
+              >
+                <CardContent sx={{ textAlign: 'center', p: 3 }}>
+                  <TrendingUpIcon sx={{ fontSize: 48, color: 'info.main', mb: 2 }} />
+                  <Typography variant="h6" gutterBottom>
+                    Compare
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Runs native extraction and Azure OCR, then chooses the cleaner result for mapping.
+                  </Typography>
+                </CardContent>
+              </Card>
+            </Grid>
+
+            <Grid item xs={12} sm={6}>
+              <Card
+                sx={{
+                  cursor: 'pointer',
+                  border: '2px solid transparent',
+                  '&:hover': {
+                    border: '2px solid #1976d2',
+                    bgcolor: 'primary.50'
+                  }
+                }}
+                onClick={() => handlePdfProcessingChoice('zonal')}
               >
                 <CardContent sx={{ textAlign: 'center', p: 3 }}>
                   <SearchIcon sx={{ fontSize: 48, color: 'warning.main', mb: 2 }} />

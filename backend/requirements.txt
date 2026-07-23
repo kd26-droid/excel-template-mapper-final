@@ -34,6 +34,7 @@ azure-ai-documentintelligence==1.0.0
 
 # PDF processing
 pdf2image==1.17.0
+pdfplumber==0.11.5
 Pillow==10.0.1
 
 # Image processing for enhancement
