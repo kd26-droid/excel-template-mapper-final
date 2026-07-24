@@ -1152,6 +1152,15 @@ const api = {
     return axios.post(`${API_URL}/mpn/split-cells/`, payload, { timeout: 120000 });
   },
 
+  parseProducerColumn: (sessionId, producerHeader, mpnHeader = null, manufacturerHeader = null, splitOptions = null) => {
+    const payload = { session_id: sessionId };
+    if (producerHeader) payload.producer_header = producerHeader;
+    if (mpnHeader) payload.mpn_header = mpnHeader;
+    if (manufacturerHeader) payload.manufacturer_header = manufacturerHeader;
+    if (splitOptions) payload.split_options = splitOptions;
+    return axios.post(`${API_URL}/mpn/parse-producer/`, payload, { timeout: 120000 });
+  },
+
   /**
    * Validate MPNs from parser Specification columns
    */

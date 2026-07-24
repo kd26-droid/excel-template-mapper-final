@@ -7,13 +7,14 @@ import os
 import uuid
 import logging
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone as datetime_timezone
 from typing import Dict, Any, Optional
 
 import pandas as pd
 from django.conf import settings
 from django.core.cache import cache
 from django.http import FileResponse, Http404, JsonResponse, HttpResponse
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -89,6 +90,116 @@ def _canon(s: str) -> str:
         .replace("_", "")        # Remove underscores
         .replace("-", "")        # Remove hyphens
     )
+
+
+def _spec_pair_key(header: str, kind: str) -> Optional[str]:
+    raw = str(header or "").strip()
+    internal_match = re.match(rf"^specification_{kind}_(\d+)$", raw, re.IGNORECASE)
+    if internal_match:
+        return f"internal_{internal_match.group(1)}"
+
+    external_match = re.match(rf"^specification\s+{kind}(?:\.(\d+))?$", raw, re.IGNORECASE)
+    if external_match:
+        return f"external_{external_match.group(1) or 'base'}"
+
+    normalized = re.sub(r"[^a-z0-9]+", " ", str(header or "").lower()).strip()
+    match = re.match(rf"^specification {kind}(?: (\d+))?$", normalized)
+    if match:
+        return f"normalized_{match.group(1) or 'base'}"
+    return None
+
+
+def _is_blank_cell(value) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except Exception:
+        pass
+    text = str(value).strip()
+    return text == "" or text.lower() in {"nan", "none", "null"}
+
+
+def cleanup_empty_spec_pairs(headers: list, rows: list) -> int:
+    """Clear Specification name when the paired Specification value is blank."""
+    if not headers or not rows:
+        return 0
+
+    pairs = {}
+    for index, header in enumerate(headers):
+        name_key = _spec_pair_key(header, "name")
+        value_key = _spec_pair_key(header, "value")
+        if name_key:
+            pairs.setdefault(name_key, {})["name"] = header
+            pairs[name_key]["name_index"] = index
+        if value_key:
+            pairs.setdefault(value_key, {})["value"] = header
+            pairs[value_key]["value_index"] = index
+
+    cleaned = 0
+    for pair in pairs.values():
+        if "name" not in pair or "value" not in pair:
+            continue
+        for row in rows:
+            if isinstance(row, dict):
+                spec_name = str(row.get(pair["name"], "") or "").strip()
+                spec_value = row.get(pair["value"], "")
+                if spec_name and _is_blank_cell(spec_value):
+                    row[pair["name"]] = ""
+                    cleaned += 1
+            elif isinstance(row, list):
+                name_index = pair["name_index"]
+                value_index = pair["value_index"]
+                raw_name = row[name_index] if name_index < len(row) else ""
+                raw_value = row[value_index] if value_index < len(row) else ""
+                spec_name = str(raw_name or "").strip()
+                if spec_name and _is_blank_cell(raw_value):
+                    while len(row) <= name_index:
+                        row.append("")
+                    row[name_index] = ""
+                    cleaned += 1
+    return cleaned
+
+
+def _headers_from_rows(rows, fallback_headers=None):
+    if fallback_headers:
+        return list(fallback_headers)
+    if isinstance(rows, list) and rows:
+        first = rows[0]
+        if isinstance(first, dict):
+            return list(first.keys())
+    return []
+
+
+def enforce_empty_spec_pair_rule(session_data: dict) -> int:
+    """Apply spec-pair cleanup to every saved row snapshot in the session."""
+    if not isinstance(session_data, dict):
+        return 0
+
+    cleaned = 0
+    fallback_headers = (
+        session_data.get("enhanced_headers")
+        or session_data.get("current_template_headers")
+        or session_data.get("template_headers")
+        or []
+    )
+
+    for key in ("edited_data", "formula_enhanced_data", "mapped_data"):
+        rows = session_data.get(key)
+        if isinstance(rows, list):
+            cleaned += cleanup_empty_spec_pairs(_headers_from_rows(rows, fallback_headers), rows)
+
+    enhanced_data = session_data.get("enhanced_data")
+    if isinstance(enhanced_data, dict):
+        headers = enhanced_data.get("headers") or fallback_headers
+        rows = enhanced_data.get("data") or enhanced_data.get("rows")
+        if isinstance(rows, list):
+            cleaned += cleanup_empty_spec_pairs(headers, rows)
+    elif isinstance(enhanced_data, list):
+        cleaned += cleanup_empty_spec_pairs(_headers_from_rows(enhanced_data, fallback_headers), enhanced_data)
+
+    return cleaned
 
 def read_csv_with_encoding(file_path, header_row, **kwargs):
     """
@@ -368,6 +479,13 @@ def save_session(session_id, session_data):
                     session_data['source_type'] = 'pdf'
             except Exception:
                 pass
+
+        try:
+            cleaned_spec_pairs = enforce_empty_spec_pair_rule(session_data)
+            if cleaned_spec_pairs:
+                logger.info(f"Cleaned {cleaned_spec_pairs} empty Specification name/value pairs before saving session")
+        except Exception as spec_cleanup_err:
+            logger.warning(f"Spec pair cleanup before save skipped: {spec_cleanup_err}")
 
         # Save to shared cache first (critical for Azure multi-worker)
         cache.set(f"mapper:session:{session_id}", session_data, 86400)
@@ -1151,7 +1269,7 @@ def upload_files(request):
             "header_row": header_row,
             "template_sheet_name": template_sheet_name,
             "template_header_row": template_header_row,
-            "created": datetime.utcnow().isoformat(),
+            "created": timezone.now().isoformat(),
             "mappings": None,
             "edited_data": None,
             "original_template_id": None,
@@ -3980,6 +4098,13 @@ def data_view(request):
             except Exception as parser_merge_err:
                 logger.error(f"📊 DATA_VIEW: Error merging parser columns: {parser_merge_err}")
 
+        try:
+            cleaned_spec_pairs = cleanup_empty_spec_pairs(final_headers, final_data)
+            if cleaned_spec_pairs:
+                logger.info(f"Cleaned {cleaned_spec_pairs} empty Specification name/value pairs from data response")
+        except Exception as spec_cleanup_err:
+            logger.warning(f"Spec pair cleanup in data_view skipped: {spec_cleanup_err}")
+
         return no_store(Response({
             'success': True,
             'headers': final_headers,
@@ -4050,15 +4175,33 @@ def save_data(request):
         if not isinstance(rows_payload, list):
             rows_payload = []
 
+        # Ensure headers are preserved; prefer existing enhanced headers, else derive canonical/keys
+        enhanced_headers = info.get('enhanced_headers') or info.get('current_template_headers') or info.get('template_headers') or []
+        if not enhanced_headers and rows_payload and isinstance(rows_payload[0], dict):
+            enhanced_headers = list(rows_payload[0].keys())
+        if rows_payload and isinstance(rows_payload[0], dict):
+            header_set = set(enhanced_headers)
+            for row in rows_payload:
+                if not isinstance(row, dict):
+                    continue
+                for key in row.keys():
+                    if key and key not in header_set:
+                        enhanced_headers.append(key)
+                        header_set.add(key)
+        cleanup_empty_spec_pairs(enhanced_headers, rows_payload)
+
         # Save edited data to session (as a list of row dicts)
         info["edited_data"] = rows_payload
 
         # Ensure Data Editor uses these rows immediately
         info["formula_enhanced_data"] = rows_payload
+        info["enhanced_data"] = {
+            "headers": enhanced_headers,
+            "data": rows_payload,
+        }
 
-        # Ensure headers are preserved; prefer existing enhanced headers, else derive canonical/keys
-        enhanced_headers = info.get('enhanced_headers') or info.get('current_template_headers') or info.get('template_headers') or []
         info['enhanced_headers'] = enhanced_headers
+        info['current_template_headers'] = enhanced_headers
 
         # Bypass cleanup/mapping; prefer edited data immediately
         info['uploaded_via_correction'] = True
@@ -4599,6 +4742,13 @@ def download_file(request, session_id=None):
                 'success': False,
                 'error': 'No data to download'
             }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            cleaned_spec_pairs = cleanup_empty_spec_pairs(all_headers, transformed_rows)
+            if cleaned_spec_pairs:
+                logger.info(f"Cleaned {cleaned_spec_pairs} empty Specification name/value pairs from download")
+        except Exception as spec_cleanup_err:
+            logger.warning(f"Spec pair cleanup in download skipped: {spec_cleanup_err}")
         
         # For enhanced or dict data, use headers that actually exist in the data and normalize shape
         if isinstance(transformed_rows, list) and transformed_rows and isinstance(transformed_rows[0], dict):
@@ -4979,9 +5129,12 @@ def dashboard_view(request):
             _, data = item
             created = data.get('created') or ''
             try:
-                return datetime.fromisoformat(str(created).replace('Z', '+00:00'))
+                created_dt = datetime.fromisoformat(str(created).replace('Z', '+00:00'))
+                if timezone.is_naive(created_dt):
+                    created_dt = timezone.make_aware(created_dt, datetime_timezone.utc)
+                return created_dt
             except Exception:
-                return datetime.min
+                return datetime.min.replace(tzinfo=datetime_timezone.utc)
 
         uploads = []
         for session_id, session_data in sorted(session_map.items(), key=_created_sort_key, reverse=True)[:25]:
@@ -5073,7 +5226,7 @@ def dashboard_view(request):
                 'client_file': session_data.get('original_client_name', 'Unknown'),
                 'template_file': session_data.get('original_template_name', 'Unknown'),
                 'filled_sheet_name': filled_sheet_name,
-                'created': session_data.get('created', datetime.now().isoformat()),
+                'created': session_data.get('created', timezone.now().isoformat()),
                 'has_mappings': is_complete,
                 'rows_processed': rows_processed
             })

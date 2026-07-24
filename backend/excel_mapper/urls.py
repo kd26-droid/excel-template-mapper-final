@@ -85,6 +85,7 @@ from .mpn_views import (
     mpn_batch_validate_eol,
     mpn_restore_from_cache,
     mpn_validate_parser_specs,
+    mpn_parse_producer_column,
     mpn_split_cells,
 )
 
@@ -187,6 +188,7 @@ urlpatterns = [
     path('mpn/auth/callback', mpn_auth_callback, name='mpn-auth-callback'),
     path('mpn/validate/', mpn_validate, name='mpn-validate'),
     path('mpn/split-cells/', mpn_split_cells, name='mpn-split-cells'),
+    path('mpn/parse-producer/', mpn_parse_producer_column, name='mpn-parse-producer'),
     path('mpn/restore-from-cache/', mpn_restore_from_cache, name='mpn-restore-from-cache'),
     path('mpn/admin/exchange-code/', mpn_admin_exchange_code, name='mpn-admin-exchange-code'),
     path('mpn/batch-validate-eol/', mpn_batch_validate_eol, name='mpn-batch-validate-eol'),

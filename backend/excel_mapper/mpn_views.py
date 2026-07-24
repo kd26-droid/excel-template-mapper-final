@@ -4,9 +4,10 @@ MPN OAuth + Validation endpoints
 import json
 import logging
 import re
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from django.http import HttpResponseRedirect
+from django.core.cache import cache
 from django.views.decorators.http import require_GET, require_POST
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
@@ -124,6 +125,62 @@ def _looks_like_mpn_candidate(value: str) -> bool:
     return bool(re.search(r"[A-Za-z0-9]", text))
 
 
+def _is_comma_suffix_fragment(value: str) -> bool:
+    """Packaging/value suffixes like BAV99,215 or 2x0,5mH are not new MPNs."""
+    text = str(value or '').strip()
+    if not text:
+        return True
+    if re.fullmatch(r"\d{1,4}", text):
+        return True
+    if re.fullmatch(r"\d+(?:\.\d+)?\s*(?:pf|nf|uf|µf|mh|ohm|r|k|v|w|%)\b.*", text, re.IGNORECASE):
+        return True
+    return False
+
+
+def _split_mpn_delimited_candidates(text: str) -> List[str]:
+    """Split explicit MPN lists without breaking package suffixes after commas."""
+    source = str(text or '').strip()
+    if not source:
+        return []
+
+    parts = []
+    current = []
+    index = 0
+    while index < len(source):
+        char = source[index]
+        if char in ";\n|":
+            part = ''.join(current).strip(" ,;|")
+            if part:
+                parts.append(part)
+            current = []
+            index += 1
+            continue
+
+        if char == ',':
+            lookahead = index + 1
+            while lookahead < len(source) and source[lookahead].isspace():
+                lookahead += 1
+            next_match = re.match(r"[^,;|\n]+", source[lookahead:])
+            next_fragment = next_match.group(0).strip() if next_match else ''
+            if next_fragment and not _is_comma_suffix_fragment(next_fragment):
+                part = ''.join(current).strip(" ,;|")
+                if part:
+                    parts.append(part)
+                current = []
+                index += 1
+                while index < len(source) and source[index].isspace():
+                    index += 1
+                continue
+
+        current.append(char)
+        index += 1
+
+    final_part = ''.join(current).strip(" ,;|")
+    if final_part:
+        parts.append(final_part)
+    return parts
+
+
 def split_combined_mpn_cell(value, options=None) -> List[str]:
     """Split BOM-style multi-MPN cells while preserving MPNs that contain spaces."""
     text = str(value or '').strip()
@@ -132,7 +189,7 @@ def split_combined_mpn_cell(value, options=None) -> List[str]:
 
     starts = []
     prefix_pattern = build_prefix_pattern(options)
-    for match in re.finditer(rf"(?=(?:^|\s){prefix_pattern}[- ])", text):
+    for match in re.finditer(rf"(?=(?:^|\s){prefix_pattern}\s*(?:-| )\s*)", text):
         start = match.start()
         if start < len(text) and text[start].isspace():
             start += 1
@@ -151,7 +208,7 @@ def split_combined_mpn_cell(value, options=None) -> List[str]:
     # Conservative fallback for visibly separated lists. Avoid splitting on
     # ordinary spaces because some real MPNs contain spaces.
     if any(separator in text for separator in [",", ";", "|", "\n"]):
-        parts = [p.strip() for p in re.split(r"[,;|\n]+", text) if p.strip()]
+        parts = _split_mpn_delimited_candidates(text)
         if len(parts) > 1 and all(_looks_like_mpn_candidate(part) for part in parts):
             return parts
 
@@ -163,7 +220,70 @@ def normalize_split_mpn(part, options=None) -> str:
     text = str(part or '').strip()
     text = re.sub(r"\s+", " ", text)
     prefix_pattern = build_prefix_pattern(options)
-    return re.sub(rf"^{prefix_pattern}[-\s]+", "", text, flags=re.IGNORECASE).strip()
+    return re.sub(rf"^{prefix_pattern}\s*(?:-\s*|\s+)", "", text, flags=re.IGNORECASE).strip()
+
+
+def comparable_mpn(value) -> str:
+    """Normalize enough to compare split MPNs while preserving displayed text."""
+    return DigiKeyClient.normalize_mpn(value)
+
+
+MPN_NOISE_TOKEN_RE = re.compile(
+    r"(%|ppm\b|ohm\b|pf\b|nf\b|uf\b|µf\b|mh\b|mm\b|hz\b|khz\b|mhz\b|vac\b|vdc\b|watt\b|rohs\b|has\b|case\b|smd\b|esd\b)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_compact_mpn_token(value: str) -> bool:
+    token = str(value or '').strip().strip(",;|")
+    compact = re.sub(r"[^A-Za-z0-9]", "", token)
+    if len(compact) < 5:
+        return False
+    if not re.search(r"[A-Za-z]", compact) or not re.search(r"\d", compact):
+        return False
+    if MPN_NOISE_TOKEN_RE.search(token):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9._/\-]+", token))
+
+
+def _split_space_separated_mpn_alternates(value: str) -> List[str]:
+    text = str(value or '').strip()
+    tokens = [token.strip(",;|") for token in text.split() if token.strip(",;|")]
+    if len(tokens) < 2:
+        return [text] if text else []
+    if all(_looks_like_compact_mpn_token(token) for token in tokens):
+        return tokens
+    return [text]
+
+
+def clean_producer_mpn_segment(value) -> List[str]:
+    """Return one or more likely MPN values from a producer segment."""
+    text = re.sub(r"\s+", " ", str(value or '').replace('\u00A0', ' ')).strip()
+    text = text.strip(" ,;|:")
+    if not text:
+        return []
+
+    raw_parts = _split_mpn_delimited_candidates(text)
+
+    cleaned_parts = []
+    for raw_part in raw_parts:
+        tokens = raw_part.split()
+        kept = []
+        for token in tokens:
+            if MPN_NOISE_TOKEN_RE.search(token) or re.search(r"[%()[\]{}=*\"']", token):
+                if kept and re.fullmatch(r"\d+(?:\.\d+)?", kept[-1]):
+                    kept.pop()
+                break
+            kept.append(token)
+
+        cleaned = " ".join(kept).strip(" ,;|:")
+        cleaned = re.sub(r"\s+([,;/])", r"\1", cleaned)
+        cleaned = re.sub(r"([,/;])\s+", r"\1", cleaned)
+        for cleaned_part in _split_space_separated_mpn_alternates(cleaned):
+            if cleaned_part and re.search(r"\d", cleaned_part) and re.search(r"[A-Za-z0-9]", cleaned_part):
+                cleaned_parts.append(cleaned_part)
+
+    return cleaned_parts
 
 
 MANUFACTURER_JOIN_WORDS = {
@@ -192,6 +312,19 @@ MANUFACTURER_JOIN_WORDS = {
     'SYSTEMS',
     'TECHNOLOGIES',
     'TECHNOLOGY',
+}
+
+
+MANUFACTURER_LEGAL_SUFFIX_WORDS = {
+    'AG',
+    'CO',
+    'CORP',
+    'CORPORATION',
+    'GMBH',
+    'INC',
+    'LIMITED',
+    'LLC',
+    'LTD',
 }
 
 
@@ -282,31 +415,167 @@ def normalize_manufacturer_name(value, options=None) -> str:
     return text
 
 
+def _producer_word_tokens(value) -> List[Tuple[str, int, int]]:
+    return [
+        (match.group(0), match.start(), match.end())
+        for match in re.finditer(r"[\w&+.\-]+", str(value or ''), flags=re.UNICODE)
+    ]
+
+
+def manufacturer_phrase_tokens(value) -> List[str]:
+    """Tokenize manufacturer phrases so hyphens and spaces compare equally."""
+    return [
+        token.upper()
+        for token in re.findall(r"[\w&+]+", str(value or ''), flags=re.UNICODE)
+        if token
+    ]
+
+
+def _find_known_manufacturer_label(prefix: str, options=None) -> Optional[Tuple[int, str]]:
+    tokens = _producer_word_tokens(prefix)
+    if not tokens:
+        return None
+
+    token_values = [token for token, _, _ in tokens]
+    match_tokens = manufacturer_phrase_tokens(" ".join(token_values))
+    if not match_tokens:
+        return None
+
+    manufacturer_options = normalize_manufacturer_options(options)
+    phrase_map = {}
+    for phrase in manufacturer_options.get('known_phrases') or []:
+        phrase_text = re.sub(r"\s+", " ", str(phrase or '').strip())
+        if phrase_text:
+            phrase_map[phrase_text.upper()] = normalize_manufacturer_name(phrase_text, options)
+    for source, target in (manufacturer_options.get('aliases') or {}).items():
+        if source:
+            phrase_map[str(source).upper()] = str(target or '').strip()
+        if target:
+            phrase_map[str(target).upper()] = str(target).strip()
+
+    candidates = []
+    for phrase, canonical in phrase_map.items():
+        parts = manufacturer_phrase_tokens(phrase)
+        if not parts or len(parts) > len(match_tokens):
+            continue
+        if match_tokens[-len(parts):] == parts:
+            start = tokens[len(tokens) - len(parts)][1]
+            candidates.append((len(parts), start, canonical or prefix[start:].strip()))
+
+    if not candidates:
+        return None
+
+    _, start, label = max(candidates, key=lambda item: (item[0], item[1]))
+    return start, label
+
+
+def _infer_producer_label(prefix: str, options=None) -> Tuple[int, str]:
+    known_label = _find_known_manufacturer_label(prefix, options)
+    if known_label:
+        return known_label
+
+    tokens = _producer_word_tokens(prefix)
+    if not tokens:
+        return max(0, len(prefix)), ''
+
+    last_digit_token_index = -1
+    for index, (token, _, _) in enumerate(tokens):
+        if re.search(r"\d", token):
+            last_digit_token_index = index
+
+    start_token_index = last_digit_token_index + 1
+    if start_token_index >= len(tokens):
+        start_token_index = max(0, len(tokens) - 1)
+    elif len(tokens) - start_token_index > 1:
+        suffix_tokens = [token.upper() for token, _, _ in tokens[start_token_index:]]
+        suffix_originals = [token for token, _, _ in tokens[start_token_index:]]
+        suffix_is_all_caps = all(token == token.upper() for token in suffix_originals)
+        if suffix_is_all_caps and not any(token in MANUFACTURER_JOIN_WORDS or token in MANUFACTURER_LEGAL_SUFFIX_WORDS for token in suffix_tokens[1:]):
+            start_token_index = len(tokens) - 1
+
+    while (
+        start_token_index < len(tokens) - 1 and
+        len(tokens[start_token_index][0]) == 1 and
+        tokens[start_token_index][0].upper() not in MANUFACTURER_LEGAL_SUFFIX_WORDS
+    ):
+        start_token_index += 1
+
+    if len(tokens) - start_token_index > 5:
+        start_token_index = len(tokens) - 5
+
+    start = tokens[start_token_index][1]
+    raw_label = prefix[start:].strip(" ,;|")
+    raw_label = re.sub(r"\s+", " ", raw_label)
+    return start, normalize_manufacturer_name(raw_label, options)
+
+
+def parse_producer_cell(value, options=None) -> List[dict]:
+    """Parse messy 'Producer' cells into manufacturer/MPN pairs.
+
+    The parser intentionally accepts colon-labelled manufacturers even when they
+    are not in the directory, because those rows are still useful after MPN
+    validation flags incorrect values.
+    """
+    text = re.sub(r"\s+", " ", str(value or '').replace('\u00A0', ' ')).strip()
+    if not text or ':' not in text:
+        return []
+
+    markers = []
+    for colon_match in re.finditer(r":", text):
+        label_start, manufacturer = _infer_producer_label(text[:colon_match.start()], options)
+        if not manufacturer or not re.search(r"[^\W\d_]", manufacturer, flags=re.UNICODE):
+            continue
+        if markers and label_start <= markers[-1]['colon']:
+            continue
+        markers.append({
+            'start': label_start,
+            'colon': colon_match.start(),
+            'manufacturer': manufacturer,
+        })
+
+    if not markers:
+        return []
+
+    pairs = []
+    for index, marker in enumerate(markers):
+        next_start = markers[index + 1]['start'] if index + 1 < len(markers) else len(text)
+        segment = text[marker['colon'] + 1:next_start]
+        for mpn in clean_producer_mpn_segment(segment):
+            pairs.append({
+                'manufacturer': marker['manufacturer'],
+                'mpn': mpn,
+            })
+
+    return pairs
+
+
 def split_manufacturer_cell(value, expected_count: int, options=None) -> List[str]:
     """Split a manufacturer list into one manufacturer per split MPN."""
     text = str(value or '').strip()
     if not text:
         return []
 
+    has_explicit_delimiter = bool(re.search(r"[,;|\n]+", text))
     delimiter_parts = [p.strip() for p in re.split(r"[,;|\n]+", text) if p.strip()]
-    if len(delimiter_parts) == expected_count:
+    if has_explicit_delimiter and len(delimiter_parts) == expected_count:
         return [name for name in (normalize_manufacturer_name(p, options) for p in delimiter_parts) if name]
 
-    original_tokens = re.findall(r"[A-Za-z0-9&.+/-]+", text)
+    original_tokens = re.findall(r"[A-Za-z0-9&+]+", text)
+    match_tokens = manufacturer_phrase_tokens(text)
     upper_tokens = [token.upper() for token in original_tokens]
-    if not upper_tokens:
+    if not upper_tokens or not match_tokens:
         return []
 
     manufacturer_options = normalize_manufacturer_options(options)
     aliases = manufacturer_options['aliases']
     discard_tokens = manufacturer_options['discard_tokens']
     alias_phrases = [
-        (phrase, phrase.split(), aliases.get(phrase))
+        (phrase, manufacturer_phrase_tokens(phrase), aliases.get(phrase))
         for phrase in sorted(aliases.keys(), key=lambda item: len(item.split()), reverse=True)
-        if len(phrase.split()) > 1
+        if len(manufacturer_phrase_tokens(phrase)) > 1
     ]
     phrase_tokens = [
-        (phrase, phrase.split())
+        (phrase, manufacturer_phrase_tokens(phrase))
         for phrase in sorted(manufacturer_options.get('known_phrases') or KNOWN_MANUFACTURER_PHRASES, key=lambda item: len(item.split()), reverse=True)
     ]
 
@@ -314,22 +583,10 @@ def split_manufacturer_cell(value, expected_count: int, options=None) -> List[st
     index = 0
     while index < len(upper_tokens):
         token = upper_tokens[index]
-        if token in aliases:
-            alias_value = aliases[token]
-            index += 1
-            while index < len(upper_tokens) and upper_tokens[index] in discard_tokens:
-                index += 1
-            if alias_value:
-                manufacturers.append(alias_value)
-            continue
-
-        if token in discard_tokens:
-            index += 1
-            continue
 
         matched_alias = None
         for phrase, parts, alias_value in alias_phrases:
-            if upper_tokens[index:index + len(parts)] == parts:
+            if match_tokens[index:index + len(parts)] == parts:
                 matched_alias = (len(parts), alias_value)
                 break
         if matched_alias:
@@ -343,7 +600,7 @@ def split_manufacturer_cell(value, expected_count: int, options=None) -> List[st
 
         matched = None
         for phrase, parts in phrase_tokens:
-            if upper_tokens[index:index + len(parts)] == parts:
+            if match_tokens[index:index + len(parts)] == parts:
                 matched = len(parts)
                 break
 
@@ -352,13 +609,60 @@ def split_manufacturer_cell(value, expected_count: int, options=None) -> List[st
             index += matched
             continue
 
+        if token in aliases:
+            alias_value = aliases[token]
+            index += 1
+            while index < len(upper_tokens) and upper_tokens[index] in discard_tokens:
+                index += 1
+            if alias_value:
+                manufacturers.append(alias_value)
+            continue
+
+        if token in discard_tokens:
+            index += 1
+            continue
+
+        if token in MANUFACTURER_LEGAL_SUFFIX_WORDS:
+            index += 1
+            continue
+
+        # Group common "division of" manufacturer forms, e.g.
+        # "VALPEY FISHER DIV.OF VALTEC CO", without needing a hard-coded name.
+        div_index = None
+        for lookahead in (1, 2):
+            candidate_index = index + lookahead
+            if (
+                candidate_index + 1 < len(upper_tokens) and
+                upper_tokens[candidate_index] in {'DIV', 'DIVISION'} and
+                upper_tokens[candidate_index + 1] == 'OF'
+            ):
+                div_index = candidate_index
+                break
+        if div_index is not None:
+            end = min(div_index + 3, len(upper_tokens))
+            while end < len(upper_tokens) and upper_tokens[end] in MANUFACTURER_LEGAL_SUFFIX_WORDS:
+                end += 1
+            manufacturers.append(' '.join(original_tokens[index:end]))
+            index = end
+            continue
+
+        # Group "formerly" aliases with the manufacturer before and after it,
+        # e.g. "RALTRON FORMERLY SHOWA" or "PERICOM FORMERLY SARONIX".
+        if index + 2 < len(upper_tokens) and upper_tokens[index + 1] == 'FORMERLY':
+            end = index + 3
+            while end < len(upper_tokens) and upper_tokens[end] in MANUFACTURER_LEGAL_SUFFIX_WORDS:
+                end += 1
+            manufacturers.append(' '.join(original_tokens[index:end]))
+            index = end
+            continue
+
         current = [original_tokens[index]]
         index += 1
         while index < len(upper_tokens) and upper_tokens[index] in MANUFACTURER_JOIN_WORDS:
             current.append(original_tokens[index])
             index += 1
         normalized = normalize_manufacturer_name(' '.join(current), options)
-        if normalized:
+        if normalized and not all(token.upper() in MANUFACTURER_LEGAL_SUFFIX_WORDS for token in current):
             manufacturers.append(normalized)
 
     if len(manufacturers) == expected_count:
@@ -405,6 +709,35 @@ def find_manufacturer_columns(headers: List[str]):
     return direct_indices, tag_indices, spec_pairs
 
 
+def detect_producer_header(headers: List[str]) -> Optional[str]:
+    if not headers:
+        return None
+    preferred_patterns = [
+        r"\bproducer\b",
+        r"\bsupplier\b",
+        r"\bvendor\b",
+        r"\balternative\b",
+        r"\bapproved\b.*\bmanufacturer\b",
+    ]
+    lowered = [_normalized_header(header) for header in headers]
+    for pattern in preferred_patterns:
+        rx = re.compile(pattern, re.IGNORECASE)
+        for index, header in enumerate(lowered):
+            if rx.search(header):
+                return headers[index]
+    return None
+
+
+def detect_manufacturer_header(headers: List[str]) -> Optional[str]:
+    for header in headers:
+        normalized = _normalized_header(header)
+        if 'manufacturer' in normalized and 'part' not in normalized and 'equivalent' not in normalized:
+            return header
+        if normalized in {'mfr', 'mfg', 'producer'}:
+            return header
+    return None
+
+
 def manufacturer_context_for_row(row, direct_indices, tag_indices, spec_pairs, forced_update_indices=None):
     """Return the manufacturer text and columns to update for this row."""
     candidates = []
@@ -440,6 +773,131 @@ def manufacturer_context_for_row(row, direct_indices, tag_indices, spec_pairs, f
             update_indices.add(index)
 
     return manufacturer_text, sorted(update_indices)
+
+
+@api_view(['POST'])
+def mpn_parse_producer_column(request):
+    """Expand messy Producer cells into one row per manufacturer/MPN pair."""
+    try:
+        session_id = request.data.get('session_id')
+        if not session_id:
+            return Response({'success': False, 'error': 'session_id required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+
+        mapping = info.get('mappings')
+        if not mapping:
+            return Response({'success': False, 'error': 'No mappings found'}, status=status.HTTP_400_BAD_REQUEST)
+
+        result = apply_column_mappings(
+            client_file=info['client_path'],
+            mappings=mapping if isinstance(mapping, dict) else {'mappings': mapping},
+            sheet_name=info['sheet_name'],
+            header_row=info['header_row'] - 1 if info['header_row'] > 0 else 0,
+            session_id=session_id
+        )
+        headers = list(result.get('headers') or [])
+        rows = result.get('data') or []
+
+        producer_header = request.data.get('producer_header')
+        if not producer_header or producer_header not in headers:
+            producer_header = detect_producer_header(headers)
+        if not producer_header or producer_header not in headers:
+            return Response({'success': False, 'error': 'Producer column not found'}, status=status.HTTP_400_BAD_REQUEST)
+
+        mpn_header = request.data.get('mpn_header')
+        if not mpn_header or mpn_header not in headers:
+            mpn_header = detect_mpn_header(headers)
+        if not mpn_header:
+            mpn_header = 'MPN'
+            if mpn_header not in headers:
+                headers.append(mpn_header)
+
+        manufacturer_header = request.data.get('manufacturer_header')
+        if not manufacturer_header or manufacturer_header not in headers:
+            manufacturer_header = detect_manufacturer_header(headers)
+        if not manufacturer_header:
+            manufacturer_header = 'Manufacturer'
+            if manufacturer_header not in headers:
+                headers.append(manufacturer_header)
+
+        original_header = 'Original Producer Cell'
+        if original_header not in headers:
+            headers.append(original_header)
+
+        producer_index = headers.index(producer_header)
+        mpn_index = headers.index(mpn_header)
+        manufacturer_index = headers.index(manufacturer_header)
+        original_index = headers.index(original_header)
+
+        split_options = request.data.get('split_options') or {}
+        manufacturer_options = normalize_manufacturer_options(split_options.get('manufacturer') or split_options)
+
+        output_rows = []
+        parsed_rows = 0
+        created_rows = 0
+        max_pairs = 1
+
+        for row in rows:
+            expanded_row = list(row) + [''] * (len(headers) - len(row))
+            producer_value = expanded_row[producer_index] if producer_index < len(expanded_row) else ''
+            pairs = parse_producer_cell(producer_value, manufacturer_options)
+
+            if not pairs:
+                output_rows.append(expanded_row)
+                continue
+
+            parsed_rows += 1
+            max_pairs = max(max_pairs, len(pairs))
+            for pair in pairs:
+                new_row = list(expanded_row)
+                new_row[mpn_index] = pair.get('mpn') or ''
+                new_row[manufacturer_index] = pair.get('manufacturer') or ''
+                new_row[original_index] = producer_value
+                output_rows.append(new_row)
+                created_rows += 1
+
+        enhanced_result = {
+            'headers': headers,
+            'data': output_rows,
+        }
+
+        if parsed_rows > 0:
+            info['enhanced_data'] = enhanced_result
+            info['edited_data'] = enhanced_result
+            info['enhanced_headers'] = headers
+            info['current_template_headers'] = headers
+            info['producer_parse'] = {
+                'column': producer_header,
+                'mpn_column': mpn_header,
+                'manufacturer_column': manufacturer_header,
+                'parsed_rows': parsed_rows,
+                'created_rows': created_rows,
+                'max_pairs': max_pairs,
+                'split_options': {
+                    'manufacturer': serialize_manufacturer_options(manufacturer_options),
+                },
+            }
+            save_session(session_id, info)
+
+        return Response({
+            'success': True,
+            'message': f'Parsed {parsed_rows} Producer rows into {created_rows} manufacturer/MPN rows',
+            'producer_header': producer_header,
+            'mpn_header': mpn_header,
+            'manufacturer_header': manufacturer_header,
+            'parsed_rows': parsed_rows,
+            'created_rows': created_rows,
+            'total_rows': len(output_rows),
+            'max_pairs': max_pairs,
+            'headers': headers,
+            'data': output_rows,
+        })
+    except Exception as e:
+        logger.error(f"Producer parse failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['POST'])
@@ -511,6 +969,35 @@ def mpn_split_cells(request):
                 if normalized_value != str(raw_value or '').strip():
                     normalized_mpns += 1
                 expanded_row[mpn_index] = normalized_value
+
+                if pair_manufacturers and original_index < len(expanded_row):
+                    original_value = expanded_row[original_index]
+                    original_parts = split_combined_mpn_cell(original_value, mpn_split_options)
+                    original_normalized_parts = [normalize_split_mpn(part, mpn_split_options) for part in original_parts]
+                    current_part_key = comparable_mpn(normalized_value)
+                    if len(original_normalized_parts) > 1 and current_part_key:
+                        try:
+                            original_part_index = [
+                                comparable_mpn(part)
+                                for part in original_normalized_parts
+                            ].index(current_part_key)
+                        except ValueError:
+                            original_part_index = -1
+
+                        if original_part_index >= 0:
+                            manufacturer_text, manufacturer_update_indices = manufacturer_context_for_row(
+                                expanded_row,
+                                direct_mfr_indices,
+                                tag_indices,
+                                spec_pairs,
+                                forced_mfr_indices
+                            )
+                            manufacturers = split_manufacturer_cell(manufacturer_text, len(original_normalized_parts), manufacturer_options)
+                            if manufacturers and original_part_index < len(manufacturers):
+                                for manufacturer_index in manufacturer_update_indices:
+                                    expanded_row[manufacturer_index] = manufacturers[original_part_index]
+                                paired_manufacturer_rows += 1
+
                 output_rows.append(expanded_row)
                 continue
 
@@ -635,6 +1122,8 @@ def mpn_validate(request):
     """Validate MPNs for a session and persist results.
     Payload: { session_id, mpn_header?: string, manufacturer_header?: string }
     """
+    validation_lock_key = None
+    validation_lock_acquired = False
     try:
         logger.info("=" * 80)
         logger.info("🔍 MPN_VALIDATION_START: Beginning MPN validation request")
@@ -644,6 +1133,16 @@ def mpn_validate(request):
         if not session_id:
             logger.error("❌ MPN_VALIDATION_ERROR: No session_id provided")
             return Response({ 'success': False, 'error': 'session_id required' }, status=status.HTTP_400_BAD_REQUEST)
+
+        validation_lock_key = f"mpn_validation_lock:{session_id}"
+        validation_lock_acquired = cache.add(validation_lock_key, True, timeout=15 * 60)
+        if not validation_lock_acquired:
+            logger.warning(f"MPN_VALIDATION_LOCKED: Validation already running for session {session_id}")
+            return Response({
+                'success': False,
+                'error': 'MPN validation is already running for this workbook. Please wait for it to finish.',
+                'code': 'mpn_validation_in_progress'
+            }, status=status.HTTP_409_CONFLICT)
 
         logger.info(f"📋 MPN_VALIDATION_SESSION: session_id={session_id}")
 
@@ -780,6 +1279,28 @@ def mpn_validate(request):
         # Combine cached and API results
         results_map = {**cached_results, **api_results}
 
+        valid_canonical_candidates = []
+        for result in results_map.values():
+            if not result.get('valid'):
+                continue
+            valid_canonical_candidates.extend(result.get('all_canonical_mpns') or [])
+            if result.get('canonical_mpn'):
+                valid_canonical_candidates.append(result.get('canonical_mpn'))
+        valid_canonical_candidates = list(dict.fromkeys(candidate for candidate in valid_canonical_candidates if candidate))
+
+        for norm_mpn, result in results_map.items():
+            if result.get('valid'):
+                continue
+            candidate_pool = list(dict.fromkeys(
+                (result.get('all_canonical_mpns') or []) +
+                ([result.get('canonical_mpn')] if result.get('canonical_mpn') else []) +
+                valid_canonical_candidates
+            ))
+            similar_canonicals = client.filter_similar_canonical_mpns(norm_mpn, candidate_pool)
+            if similar_canonicals:
+                result['canonical_mpn'] = similar_canonicals[0]
+                result['all_canonical_mpns'] = similar_canonicals[:5]
+
         # ========== MOUSER VALIDATION (optional, same MPNs) ==========
         include_mouser = request.data.get('include_mouser') in (True, 'true', 'True', '1', 1)
         logger.info("=" * 80)
@@ -863,6 +1384,17 @@ def mpn_validate(request):
 
             is_valid = validation_result.get('valid', False)
 
+            if not norm_mpn:
+                rows[i][mpn_valid_idx] = ''
+                rows[i][mpn_status_idx] = ''
+                rows[i][eol_status_idx] = ''
+                rows[i][discontinued_idx] = ''
+                rows[i][dkpn_idx] = ''
+                rows[i][canonical_idx] = ''
+                if 'Category' in headers:
+                    rows[i][headers.index('Category')] = ''
+                continue
+
             rows[i][mpn_valid_idx] = 'Yes' if is_valid else 'No'
 
             if i == 0:  # Log first row data assignment
@@ -887,7 +1419,11 @@ def mpn_validate(request):
                 rows[i][eol_status_idx] = 'No'
                 rows[i][discontinued_idx] = 'No'
                 rows[i][dkpn_idx] = ''
-                rows[i][canonical_idx] = ''
+                similar_canonicals = client.filter_similar_canonical_mpns(
+                    raw_mpn,
+                    validation_result.get('all_canonical_mpns') or [validation_result.get('canonical_mpn')]
+                )
+                rows[i][canonical_idx] = similar_canonicals[0] if similar_canonicals else ''
 
                 # Leave category empty for invalid MPNs
                 if 'Category' in headers:
@@ -991,6 +1527,9 @@ def mpn_validate(request):
     except Exception as e:
         logger.error(f"MPN validate failed: {e}")
         return Response({ 'success': False, 'error': str(e) }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    finally:
+        if validation_lock_acquired and validation_lock_key:
+            cache.delete(validation_lock_key)
 
 
 @api_view(['POST'])
@@ -1214,7 +1753,11 @@ def mpn_restore_from_cache(request):
                     if 'DKPN' in headers:
                         rows[i][headers.index('DKPN')] = ''
                     if 'Canonical MPN' in headers:
-                        rows[i][headers.index('Canonical MPN')] = ''
+                        similar_canonicals = client.filter_similar_canonical_mpns(
+                            raw_mpn,
+                            validation_result.get('all_canonical_mpns') or [validation_result.get('canonical_mpn')]
+                        )
+                        rows[i][headers.index('Canonical MPN')] = similar_canonicals[0] if similar_canonicals else ''
                     if 'Category' in headers:
                         rows[i][headers.index('Category')] = ''
             else:

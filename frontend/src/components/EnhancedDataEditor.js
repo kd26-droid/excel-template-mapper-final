@@ -162,6 +162,14 @@ const EnhancedDataEditor = () => {
   // Formula Builder state
   const [formulaBuilderOpen, setFormulaBuilderOpen] = useState(false);
   const [columnParserOpen, setColumnParserOpen] = useState(false);
+  const [createColumnDialogOpen, setCreateColumnDialogOpen] = useState(false);
+  const [createColumnTarget, setCreateColumnTarget] = useState('Item name');
+  const [createColumnContentType, setCreateColumnContentType] = useState('concat');
+  const [createColumnFirst, setCreateColumnFirst] = useState('');
+  const [createColumnSecond, setCreateColumnSecond] = useState('');
+  const [createColumnSeparator, setCreateColumnSeparator] = useState(' ');
+  const [createColumnMode, setCreateColumnMode] = useState('fill_empty');
+  const [createColumnSaving, setCreateColumnSaving] = useState(false);
   const [hasFormulas, setHasFormulas] = useState(false);
   const [formulaColumns, setFormulaColumns] = useState([]);
   // Column examples and fill stats for FormulaBuilder dropdowns
@@ -267,12 +275,15 @@ const EnhancedDataEditor = () => {
   const [originalMpnColumn, setOriginalMpnColumn] = useState(null); // Store original source column for template saving
   const [mpnManufacturerColumn, setMpnManufacturerColumn] = useState(null);
   const [mpnValidating, setMpnValidating] = useState(false);
+  const mpnValidationInFlightRef = useRef(false);
   const [mpnValidationCompleted, setMpnValidationCompleted] = useState(false);
   const [mpnFilterInvalidOnly, setMpnFilterInvalidOnly] = useState(false);
   const [showMpnColumns, setShowMpnColumns] = useState(true);
   const [mpnSplitting, setMpnSplitting] = useState(false);
   const [mpnSplitDialogOpen, setMpnSplitDialogOpen] = useState(false);
   const [manufacturerMatchDialogOpen, setManufacturerMatchDialogOpen] = useState(false);
+  const [producerParseDialogOpen, setProducerParseDialogOpen] = useState(false);
+  const [producerColumn, setProducerColumn] = useState(null);
   const [manufacturerRulesExpanded, setManufacturerRulesExpanded] = useState(false);
   const [mpnSplitOptions, setMpnSplitOptions] = useState({
     stripAlphaPrefix: true,
@@ -350,6 +361,29 @@ const EnhancedDataEditor = () => {
       if (idx >= 0) return headers[idx];
     }
     return null;
+  }, []);
+
+  const detectProducerColumn = useCallback((headers) => {
+    if (!Array.isArray(headers)) return null;
+    const norm = (s) => String(s || '').toLowerCase().replace(/[\-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const preferred = [/\bproducer\b/, /\bsupplier\b/, /\bvendor\b/, /\balternative\b/, /\bapproved\b.*\bmanufacturer\b/];
+    const lowered = headers.map(h => norm(h));
+    for (const rx of preferred) {
+      const idx = lowered.findIndex(h => rx.test(h));
+      if (idx >= 0) return headers[idx];
+    }
+    return null;
+  }, []);
+
+  const detectManufacturerColumn = useCallback((headers) => {
+    if (!Array.isArray(headers)) return null;
+    const norm = (s) => String(s || '').toLowerCase().replace(/[\-_]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const idx = headers.findIndex(header => {
+      const lower = norm(header);
+      return (lower.includes('manufacturer') && !lower.includes('part') && !lower.includes('equivalent')) ||
+        ['mfr', 'mfg'].includes(lower);
+    });
+    return idx >= 0 ? headers[idx] : null;
   }, []);
 
   // MPN column tooltip meanings
@@ -503,6 +537,23 @@ const EnhancedDataEditor = () => {
     setSnackbar(prev => ({ ...prev, open: false }));
   }, []);
 
+  const getFriendlyErrorMessage = useCallback((error, fallback = 'Something went wrong') => {
+    const candidates = [
+      error?.response?.data?.error,
+      error?.response?.data?.message,
+      error?.message,
+      typeof error === 'string' ? error : ''
+    ];
+    const message = candidates
+      .map(value => value === null || value === undefined ? '' : String(value).trim())
+      .find(value => value && value !== '0' && value.toLowerCase() !== 'undefined' && value.toLowerCase() !== 'null');
+    if (message) return message;
+    if (error?.code === 'ECONNABORTED') return 'Request timed out. Please try again.';
+    if (error?.response?.status) return `Server returned HTTP ${error.response.status}`;
+    if (error?.request) return 'Could not reach the server. Please check if backend is running.';
+    return fallback;
+  }, []);
+
   const updateDataIntegrity = useCallback((consistent, issues = []) => {
     setDataIntegrity({
       consistent,
@@ -523,32 +574,54 @@ const EnhancedDataEditor = () => {
   // Remove completely blank Specification pairs (Specification_Name_N/Specification_Value_N and base name/value)
   const pruneEmptySpecificationPairs = useCallback((headers, rows) => {
     try {
-      const nameRegex = /^Specification_Name_(\d+)$/;
-      const valueRegex = /^Specification_Value_(\d+)$/;
+      const getSpecPair = (header) => {
+        const raw = String(header || '').trim();
+        let match = raw.match(/^specification_name_(\d+)$/i);
+        if (match) return { kind: 'name', key: `internal_${match[1]}` };
+        match = raw.match(/^specification_value_(\d+)$/i);
+        if (match) return { kind: 'value', key: `internal_${match[1]}` };
+        match = raw.match(/^specification\s+name(?:\.(\d+))?$/i);
+        if (match) return { kind: 'name', key: `external_${match[1] || 'base'}` };
+        match = raw.match(/^specification\s+value(?:\.(\d+))?$/i);
+        if (match) return { kind: 'value', key: `external_${match[1] || 'base'}` };
+
+        const normalized = raw.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+        match = normalized.match(/^specification name(?: (\d+))?$/);
+        if (match) {
+          return { kind: 'name', key: `normalized_${match[1] || 'base'}` };
+        }
+        match = normalized.match(/^specification value(?: (\d+))?$/);
+        if (match) {
+          return { kind: 'value', key: `normalized_${match[1] || 'base'}` };
+        }
+        return null;
+      };
       const hasBaseName = headers.includes('Specification name');
       const hasBaseValue = headers.includes('Specification value');
 
       const pairs = {};
       headers.forEach(h => {
-        const nm = h.match(nameRegex);
-        if (nm) {
-          const idx = nm[1];
-          pairs[idx] = pairs[idx] || { name: null, value: null };
-          pairs[idx].name = h;
-        }
-        const vm = h.match(valueRegex);
-        if (vm) {
-          const idx = vm[1];
-          pairs[idx] = pairs[idx] || { name: null, value: null };
-          pairs[idx].value = h;
-        }
+        const specPair = getSpecPair(h);
+        if (!specPair) return;
+        pairs[specPair.key] = pairs[specPair.key] || { name: null, value: null };
+        pairs[specPair.key][specPair.kind] = h;
       });
 
       const toRemove = new Set();
+      const cleanedRows = rows.map(row => {
+        const copy = { ...row };
+        Object.values(pairs).forEach(pair => {
+          if (!pair.name || !pair.value) return;
+          if (!isCellEmpty(copy[pair.name]) && isCellEmpty(copy[pair.value])) {
+            copy[pair.name] = '';
+          }
+        });
+        return copy;
+      });
 
       Object.values(pairs).forEach(pair => {
         if (!pair.name || !pair.value) return;
-        const allEmpty = rows.every(r => isCellEmpty(r[pair.name]) && isCellEmpty(r[pair.value]));
+        const allEmpty = cleanedRows.every(r => isCellEmpty(r[pair.name]) && isCellEmpty(r[pair.value]));
         if (allEmpty) {
           toRemove.add(pair.name);
           toRemove.add(pair.value);
@@ -563,10 +636,10 @@ const EnhancedDataEditor = () => {
         }
       }
 
-      if (toRemove.size === 0) return { headers, rows };
+      if (toRemove.size === 0) return { headers, rows: cleanedRows };
 
       const prunedHeaders = headers.filter(h => !toRemove.has(h));
-      const prunedRows = rows.map(row => {
+      const prunedRows = cleanedRows.map(row => {
         const copy = { ...row };
         toRemove.forEach(h => { delete copy[h]; });
         return copy;
@@ -1414,6 +1487,114 @@ const EnhancedDataEditor = () => {
     setFormulaBuilderOpen(false);
   }, []);
 
+  const dataColumnFields = useMemo(() => (
+    (columnDefs || [])
+      .filter(col => col.field && col.field !== '__row_number__')
+      .map(col => col.field)
+  ), [columnDefs]);
+
+  const createColumnTargetExists = useMemo(() => {
+    const target = String(createColumnTarget || '').trim();
+    return Boolean(target && dataColumnFields.includes(target));
+  }, [createColumnTarget, dataColumnFields]);
+
+  const createColumnTargetHasData = useMemo(() => {
+    const target = String(createColumnTarget || '').trim();
+    if (!target || !Array.isArray(rowData)) return false;
+    return rowData.some(row => {
+      const value = row?.[target];
+      return value !== null && value !== undefined && String(value).trim() !== '';
+    });
+  }, [createColumnTarget, rowData]);
+
+  const handleOpenCreateColumnDialog = useCallback(() => {
+    const fields = dataColumnFields;
+    setCreateColumnTarget(prev => prev || (fields.includes('Item name') ? 'Item name' : ''));
+    if (!createColumnFirst && fields.length > 0) {
+      setCreateColumnFirst(fields[0]);
+    }
+    if (!createColumnSecond && fields.length > 1) {
+      const first = createColumnFirst || fields[0];
+      setCreateColumnSecond(fields.find(field => field !== first) || fields[1]);
+    }
+    setCreateColumnDialogOpen(true);
+  }, [dataColumnFields, createColumnFirst, createColumnSecond]);
+
+  const buildCreatedColumnDef = useCallback((field) => ({
+    headerName: field,
+    field,
+    tooltipField: field,
+    editable: true,
+    sortable: true,
+    filter: true,
+    resizable: true,
+    width: columnWidths[field] || 180,
+    headerClass: 'ag-header-cell-excel',
+    cellStyle: { padding: '12px 16px', borderRight: '1px solid #e0e0e0' }
+  }), [columnWidths]);
+
+  const handleCreateConcatenatedColumn = useCallback(async () => {
+    const target = String(createColumnTarget || '').trim();
+    if (!target) {
+      showSnackbar('Enter a target column name', 'warning');
+      return;
+    }
+    if (createColumnContentType === 'concat' && (!createColumnFirst || !createColumnSecond)) {
+      showSnackbar('Select two source columns', 'warning');
+      return;
+    }
+
+    try {
+      setCreateColumnSaving(true);
+      const isBlank = (value) => value === null || value === undefined || String(value).trim() === '';
+      const updatedRows = (rowData || []).map(row => {
+        const copy = { ...row };
+        const generated = createColumnContentType === 'blank'
+          ? ''
+          : [copy[createColumnFirst], copy[createColumnSecond]]
+            .map(value => value === null || value === undefined ? '' : String(value).trim())
+            .filter(Boolean)
+            .join(createColumnSeparator);
+        if (createColumnMode === 'overwrite' || isBlank(copy[target])) {
+          copy[target] = generated;
+        }
+        return copy;
+      });
+
+      if (!dataColumnFields.includes(target)) {
+        setColumnDefs(prev => [...prev, buildCreatedColumnDef(target)]);
+      }
+
+      setRowData(updatedRows);
+      setHasUnsavedChanges(false);
+      await api.saveEditedData(sessionId, { rows: updatedRows });
+      setCreateColumnDialogOpen(false);
+      showSnackbar(
+        createColumnContentType === 'blank'
+          ? `${target} blank column saved`
+          : `${target} updated from selected columns`,
+        'success'
+      );
+    } catch (error) {
+      console.error('Create column failed:', error);
+      showSnackbar(error.response?.data?.error || error.message || 'Failed to create column', 'error');
+    } finally {
+      setCreateColumnSaving(false);
+    }
+  }, [
+    createColumnTarget,
+    createColumnContentType,
+    createColumnFirst,
+    createColumnSecond,
+    createColumnSeparator,
+    createColumnMode,
+    rowData,
+    dataColumnFields,
+    buildCreatedColumnDef,
+    sessionId,
+    showSnackbar
+  ]);
+
   const handleOpenFactwiseIdDialog = useCallback(() => {
     setFactwiseIdDialogOpen(true);
   }, []);
@@ -1888,6 +2069,32 @@ const EnhancedDataEditor = () => {
     setManufacturerMatchDialogOpen(true);
   }, []);
 
+  const handleOpenProducerParseDialog = useCallback(() => {
+    setToolsMenuAnchor(null);
+    const headers = columnDefs
+      .filter(col => col.field && col.field !== '__row_number__')
+      .map(col => col.field);
+    setProducerColumn(prev => prev || detectProducerColumn(headers));
+    setMpnColumn(prev => prev || detectMpnColumn(headers));
+    setMpnManufacturerColumn(prev => prev || detectManufacturerColumn(headers));
+    setProducerParseDialogOpen(true);
+  }, [columnDefs, detectProducerColumn, detectMpnColumn, detectManufacturerColumn]);
+
+  const selectedColumnLooksLikeProducerText = useCallback((header) => {
+    if (!header || !Array.isArray(rowData)) return false;
+    const sample = rowData.slice(0, 50);
+    let checked = 0;
+    let producerLike = 0;
+    sample.forEach(row => {
+      const value = String(row?.[header] || '').trim();
+      if (!value) return;
+      checked += 1;
+      const labelMatches = value.match(/(?:^|\s)[\p{L}][\p{L}0-9&+.,.\-\s]{0,40}:\s*\S/gu) || [];
+      if (labelMatches.length >= 1) producerLike += 1;
+    });
+    return checked > 0 && producerLike / checked >= 0.3;
+  }, [rowData]);
+
   const handleSplitMPNCells = useCallback(async () => {
     try {
       setMpnSplitting(true);
@@ -1910,7 +2117,12 @@ const EnhancedDataEditor = () => {
           const normalized = response.data.normalized_mpns || 0;
           showSnackbar(`Split ${splitRows} rows into ${totalRowsAfterSplit} rows. Cleaned ${normalized} MPNs.`, 'success');
         } else {
-          showSnackbar('No multi-MPN cells found in the selected column', 'info');
+          if (selectedColumnLooksLikeProducerText(selectedHeader)) {
+            showSnackbar('This looks like Manufacturer: MPN producer data. Use Tools > Parse Producer Column instead of Split MPN Cells.', 'warning');
+            setProducerColumn(selectedHeader);
+          } else {
+            showSnackbar('No multi-MPN cells found in the selected column', 'info');
+          }
         }
         setMpnColumn(response.data.mpn_header || selectedHeader);
         await fetchDataSynchronized();
@@ -1918,12 +2130,12 @@ const EnhancedDataEditor = () => {
         showSnackbar(response.data?.error || 'Failed to split MPN cells', 'error');
       }
     } catch (error) {
-      const message = error.response?.data?.error || error.message || 'Failed to split MPN cells';
+      const message = getFriendlyErrorMessage(error, 'Failed to split MPN cells');
       showSnackbar(message, 'error');
     } finally {
       setMpnSplitting(false);
     }
-  }, [columnDefs, mpnColumn, mpnManufacturerColumn, detectMpnColumn, sessionId, buildMpnSplitOptionsPayload, showSnackbar, fetchDataSynchronized]);
+  }, [columnDefs, mpnColumn, detectMpnColumn, sessionId, buildMpnSplitOptionsPayload, showSnackbar, fetchDataSynchronized, selectedColumnLooksLikeProducerText, getFriendlyErrorMessage]);
 
   const handleManufacturerMatchSplit = useCallback(async () => {
     try {
@@ -1960,12 +2172,69 @@ const EnhancedDataEditor = () => {
         showSnackbar(response.data?.error || 'Failed to match manufacturers', 'error');
       }
     } catch (error) {
-      const message = error.response?.data?.error || error.message || 'Failed to match manufacturers';
+      const message = getFriendlyErrorMessage(error, 'Failed to match manufacturers');
       showSnackbar(message, 'error');
     } finally {
       setMpnSplitting(false);
     }
-  }, [columnDefs, mpnColumn, mpnManufacturerColumn, detectMpnColumn, sessionId, buildMpnSplitOptionsPayload, showSnackbar, fetchDataSynchronized]);
+  }, [columnDefs, mpnColumn, mpnManufacturerColumn, detectMpnColumn, sessionId, buildMpnSplitOptionsPayload, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage]);
+
+  const handleProducerParse = useCallback(async () => {
+    try {
+      setMpnSplitting(true);
+      setProducerParseDialogOpen(false);
+      const headers = columnDefs
+        .filter(col => col.field && col.field !== '__row_number__')
+        .map(col => col.field);
+      const selectedProducer = producerColumn || detectProducerColumn(headers);
+      const selectedMpn = mpnColumn || detectMpnColumn(headers);
+      const selectedManufacturer = mpnManufacturerColumn || detectManufacturerColumn(headers);
+
+      if (!selectedProducer) {
+        showSnackbar('Select the Producer column first', 'warning');
+        return;
+      }
+
+      if (!selectedMpn) {
+        showSnackbar('Select the MPN output column first', 'warning');
+        return;
+      }
+
+      if (!selectedManufacturer) {
+        showSnackbar('Select the Manufacturer output column first', 'warning');
+        return;
+      }
+
+      const response = await api.parseProducerColumn(
+        sessionId,
+        selectedProducer,
+        selectedMpn,
+        selectedManufacturer,
+        buildMpnSplitOptionsPayload()
+      );
+
+      if (response.data?.success) {
+        const parsedRows = response.data.parsed_rows || 0;
+        const totalRowsAfterParse = response.data.total_rows || response.data.created_rows || 0;
+        if (parsedRows > 0) {
+          showSnackbar(`Parsed ${parsedRows} Producer rows into ${totalRowsAfterParse} rows.`, 'success');
+        } else {
+          showSnackbar('No parseable Producer cells found', 'info');
+        }
+        setProducerColumn(response.data.producer_header || selectedProducer);
+        setMpnColumn(response.data.mpn_header || selectedMpn);
+        setMpnManufacturerColumn(response.data.manufacturer_header || selectedManufacturer);
+        await fetchDataSynchronized();
+      } else {
+        showSnackbar(response.data?.error || 'Failed to parse Producer column', 'error');
+      }
+    } catch (error) {
+      const message = getFriendlyErrorMessage(error, 'Failed to parse Producer column');
+      showSnackbar(message, 'error');
+    } finally {
+      setMpnSplitting(false);
+    }
+  }, [columnDefs, producerColumn, mpnColumn, mpnManufacturerColumn, detectProducerColumn, detectMpnColumn, detectManufacturerColumn, sessionId, buildMpnSplitOptionsPayload, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage]);
 
   const handleCorrectionFileUpload = useCallback((event) => {
     const file = event.target.files[0];
@@ -2264,6 +2533,123 @@ const EnhancedDataEditor = () => {
           }} 
         />
       )}
+
+      {/* Create Column Dialog */}
+      <Dialog open={createColumnDialogOpen} onClose={() => setCreateColumnDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Create Column</DialogTitle>
+        <DialogContent>
+          <DialogContentText sx={{ mb: 2 }}>
+            Fill a required column by joining two existing columns.
+          </DialogContentText>
+          <Grid container spacing={2}>
+            <Grid item xs={12}>
+              <TextField
+                fullWidth
+                size="small"
+                label="Target column"
+                value={createColumnTarget}
+                onChange={(e) => setCreateColumnTarget(e.target.value)}
+                helperText="Use Item name for the compulsory item-name field, or enter a new column name."
+              />
+            </Grid>
+            <Grid item xs={12}>
+              <FormControl fullWidth size="small">
+                <InputLabel>Column content</InputLabel>
+                <Select
+                  label="Column content"
+                  value={createColumnContentType}
+                  onChange={(e) => setCreateColumnContentType(e.target.value)}
+                >
+                  <MenuItem value="concat">Join two columns</MenuItem>
+                  <MenuItem value="blank">Blank column</MenuItem>
+                </Select>
+              </FormControl>
+            </Grid>
+            {createColumnContentType === 'concat' && (
+              <>
+                <Grid item xs={12} sm={6}>
+                  <FormControl fullWidth size="small">
+                    <InputLabel>First column</InputLabel>
+                    <Select
+                      label="First column"
+                      value={createColumnFirst}
+                      onChange={(e) => setCreateColumnFirst(e.target.value)}
+                    >
+                      {dataColumnFields.map(field => (
+                        <MenuItem key={field} value={field}>{field}</MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                </Grid>
+                <Grid item xs={12} sm={6}>
+                  <FormControl fullWidth size="small">
+                    <InputLabel>Second column</InputLabel>
+                    <Select
+                      label="Second column"
+                      value={createColumnSecond}
+                      onChange={(e) => setCreateColumnSecond(e.target.value)}
+                    >
+                      {dataColumnFields.map(field => (
+                        <MenuItem key={field} value={field}>{field}</MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                </Grid>
+                <Grid item xs={12} sm={6}>
+                  <TextField
+                    fullWidth
+                    size="small"
+                    label="Separator"
+                    value={createColumnSeparator}
+                    onChange={(e) => setCreateColumnSeparator(e.target.value)}
+                    helperText="Example: space, -, _, or /"
+                  />
+                </Grid>
+              </>
+            )}
+            <Grid item xs={12} sm={6}>
+              <FormControl fullWidth size="small">
+                <InputLabel>Apply mode</InputLabel>
+                <Select
+                  label="Apply mode"
+                  value={createColumnMode}
+                  onChange={(e) => setCreateColumnMode(e.target.value)}
+                >
+                  <MenuItem value="fill_empty">Fill empty cells only</MenuItem>
+                  <MenuItem value="overwrite">Overwrite all rows</MenuItem>
+                </Select>
+              </FormControl>
+            </Grid>
+          </Grid>
+          {createColumnTargetExists && createColumnTargetHasData && (
+            <Alert severity="warning" sx={{ mt: 2 }}>
+              A column named {createColumnTarget} already has values. This will still run, but choose Fill empty cells only to preserve existing values.
+            </Alert>
+          )}
+          <Alert severity="info" sx={{ mt: 2 }}>
+            {createColumnContentType === 'blank'
+              ? 'Blank columns are useful when the user wants to fill values manually later.'
+              : 'Blank source values are skipped, so no extra separator is added when one side is empty.'}
+          </Alert>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCreateColumnDialogOpen(false)} disabled={createColumnSaving}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            onClick={handleCreateConcatenatedColumn}
+            disabled={
+              createColumnSaving ||
+              !createColumnTarget ||
+              (createColumnContentType === 'concat' && (!createColumnFirst || !createColumnSecond))
+            }
+            startIcon={createColumnSaving ? <CircularProgress size={16} /> : <AutoAwesomeIcon />}
+          >
+            {createColumnSaving ? 'Saving...' : 'Create'}
+          </Button>
+        </DialogActions>
+      </Dialog>
       
       {/* Cleanup Info Banner with Deleted Rows Detail */}
       {cleanupInfo && cleanupInfo.rows_deleted > 0 && (
@@ -2548,6 +2934,24 @@ const EnhancedDataEditor = () => {
                 Manufacturer Match
               </Button>
 
+              <Button
+                onClick={handleOpenCreateColumnDialog}
+                variant="contained"
+                startIcon={<AutoAwesomeIcon />}
+                disabled={createColumnSaving || syncStatus.inProgress}
+                sx={{
+                  backgroundColor: '#455a64',
+                  color: 'white',
+                  '&:hover': { backgroundColor: '#263238' },
+                  textTransform: 'none',
+                  fontWeight: 600,
+                  borderRadius: '8px',
+                  px: 2.5
+                }}
+              >
+                Create Column
+              </Button>
+
               {/* Divider */}
               <Divider orientation="vertical" flexItem sx={{ borderColor: 'rgba(255,255,255,0.3)', mx: 0.5 }} />
 
@@ -2587,6 +2991,12 @@ const EnhancedDataEditor = () => {
                     {mpnSplitting ? <CircularProgress size={18} /> : <ContentCutIcon sx={{ color: '#f57c00' }} />}
                   </ListItemIcon>
                   <ListItemText>{mpnSplitting ? 'Splitting MPNs...' : 'Split MPN Cells'}</ListItemText>
+                </MenuItem>
+                <MenuItem onClick={handleOpenProducerParseDialog} disabled={syncStatus.inProgress || mpnSplitting}>
+                  <ListItemIcon>
+                    {mpnSplitting ? <CircularProgress size={18} /> : <AccountTreeIcon sx={{ color: '#00796b' }} />}
+                  </ListItemIcon>
+                  <ListItemText>{mpnSplitting ? 'Parsing Producer...' : 'Parse Producer Column'}</ListItemText>
                 </MenuItem>
                 <MenuItem onClick={() => { setToolsMenuAnchor(null); handleOpenFactwiseIdDialog(); }} disabled={syncStatus.inProgress}>
                   <ListItemIcon><BadgeIcon sx={{ color: '#2e7d32' }} /></ListItemIcon>
@@ -2654,8 +3064,21 @@ const EnhancedDataEditor = () => {
                 <MenuItem
                   onClick={async () => {
                     setMpnMenuAnchor(null);
+                    if (mpnValidationInFlightRef.current || mpnValidating) {
+                      showSnackbar('MPN validation is already running for this workbook.', 'info');
+                      return;
+                    }
                     try {
                       if (!mpnColumn) return;
+                      const hasMpnValues = (rowData || []).some(row => {
+                        const value = row?.[mpnColumn];
+                        return value !== null && value !== undefined && String(value).trim() !== '';
+                      });
+                      if (!hasMpnValues) {
+                        showSnackbar(`MPN validation skipped: "${mpnColumn}" has no values to validate.`, 'warning');
+                        return;
+                      }
+                      mpnValidationInFlightRef.current = true;
                       if (!originalMpnColumn && !isMpnValidationColumn(mpnColumn)) {
                         setOriginalMpnColumn(mpnColumn);
                       }
@@ -2666,13 +3089,16 @@ const EnhancedDataEditor = () => {
                       setMpnValidationCompleted(true);
                       showSnackbar('MPN validation complete', 'success');
                     } catch (e) {
-                      const msg = e?.response?.data?.error || e.message || 'Unknown error';
+                      const msg = getFriendlyErrorMessage(e, 'Unable to validate MPNs. Please try again.');
                       if (e?.response?.status === 403) {
                         showSnackbar('MPN validation not configured. Complete Digi-Key setup on server.', 'error');
+                      } else if (e?.response?.status === 409 || e?.response?.data?.code === 'mpn_validation_in_progress') {
+                        showSnackbar('MPN validation is already running. Please wait for it to finish.', 'info');
                       } else {
                         showSnackbar(`MPN validation failed: ${msg}`, 'error');
                       }
                     } finally {
+                      mpnValidationInFlightRef.current = false;
                       setMpnValidating(false);
                     }
                   }}
@@ -3132,6 +3558,88 @@ const EnhancedDataEditor = () => {
           }}
         />
       )}
+
+      {/* Producer Parser Dialog */}
+      <Dialog open={producerParseDialogOpen} onClose={() => setProducerParseDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Parse Producer Column</DialogTitle>
+        <DialogContent>
+          <DialogContentText sx={{ mb: 2 }}>
+            Split messy Producer values like Manufacturer: MPN into separate rows and fill the selected MPN and Manufacturer columns.
+          </DialogContentText>
+          <Grid container spacing={2}>
+            <Grid item xs={12}>
+              <FormControl fullWidth size="small">
+                <InputLabel>Producer Column</InputLabel>
+                <Select
+                  label="Producer Column"
+                  value={producerColumn || ''}
+                  onChange={(e) => setProducerColumn(e.target.value || null)}
+                >
+                  {columnDefs
+                    .filter(col => col.field && col.field !== '__row_number__')
+                    .map(col => (
+                      <MenuItem key={col.field} value={col.field}>
+                        {col.headerName || col.field}
+                      </MenuItem>
+                    ))}
+                </Select>
+              </FormControl>
+            </Grid>
+            <Grid item xs={12} sm={6}>
+              <FormControl fullWidth size="small">
+                <InputLabel>MPN Output Column</InputLabel>
+                <Select
+                  label="MPN Output Column"
+                  value={mpnColumn || ''}
+                  onChange={(e) => setMpnColumn(e.target.value || null)}
+                >
+                  {columnDefs
+                    .filter(col => col.field && col.field !== '__row_number__')
+                    .map(col => (
+                      <MenuItem key={col.field} value={col.field}>
+                        {col.headerName || col.field}
+                      </MenuItem>
+                    ))}
+                </Select>
+              </FormControl>
+            </Grid>
+            <Grid item xs={12} sm={6}>
+              <FormControl fullWidth size="small">
+                <InputLabel>Manufacturer Output Column</InputLabel>
+                <Select
+                  label="Manufacturer Output Column"
+                  value={mpnManufacturerColumn || ''}
+                  onChange={(e) => setMpnManufacturerColumn(e.target.value || null)}
+                >
+                  {columnDefs
+                    .filter(col => col.field && col.field !== '__row_number__')
+                    .map(col => (
+                      <MenuItem key={col.field} value={col.field}>
+                        {col.headerName || col.field}
+                      </MenuItem>
+                    ))}
+                </Select>
+              </FormControl>
+            </Grid>
+          </Grid>
+          <Alert severity="info" sx={{ mt: 2 }}>
+            Directory aliases from Manufacturer Match are reused when available. Unknown colon labels are still parsed so validation can flag bad MPNs later.
+          </Alert>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setProducerParseDialogOpen(false)} disabled={mpnSplitting}>
+            Cancel
+          </Button>
+          <Button
+            onClick={handleProducerParse}
+            variant="contained"
+            startIcon={mpnSplitting ? <CircularProgress size={16} /> : <AccountTreeIcon />}
+            disabled={mpnSplitting || !producerColumn || !mpnColumn || !mpnManufacturerColumn}
+          >
+            {mpnSplitting ? 'Parsing...' : 'Parse Producer'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       {/* MPN Split Dialog */}
       <Dialog open={mpnSplitDialogOpen} onClose={() => setMpnSplitDialogOpen(false)} maxWidth="sm" fullWidth>

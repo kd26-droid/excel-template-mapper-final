@@ -9,6 +9,7 @@ import time
 import json
 import logging
 import datetime as dt
+from difflib import SequenceMatcher
 from typing import Dict, Any, List, Optional, Tuple
 
 import requests
@@ -264,6 +265,44 @@ class DigiKeyClient:
                 s = s[: -len(suf)]
         return s
 
+    @staticmethod
+    def strip_canonical_display_mpn(mpn: str) -> str:
+        """Remove display-only package text before comparing MPN similarity."""
+        return str(mpn or '').split('(', 1)[0].strip()
+
+    @classmethod
+    def mpn_similarity_score(cls, input_mpn: str, candidate_mpn: str) -> float:
+        input_norm = cls.normalize_mpn(input_mpn)
+        candidate_norm = cls.normalize_mpn(cls.strip_canonical_display_mpn(candidate_mpn))
+        if not input_norm or not candidate_norm:
+            return 0.0
+        ratio = SequenceMatcher(None, input_norm, candidate_norm).ratio()
+        if input_norm in candidate_norm or candidate_norm in input_norm:
+            containment = min(len(input_norm), len(candidate_norm)) / max(len(input_norm), len(candidate_norm))
+            ratio = max(ratio, containment)
+        return ratio
+
+    @classmethod
+    def filter_similar_canonical_mpns(cls, input_mpn: str, candidates: List[str], min_score: float = None) -> List[str]:
+        if min_score is None:
+            try:
+                min_score = float(os.environ.get('DIGIKEY_CANONICAL_SUGGESTION_MIN_SCORE', '0.75'))
+            except ValueError:
+                min_score = 0.75
+
+        scored = [
+            (candidate, cls.mpn_similarity_score(input_mpn, candidate))
+            for candidate in candidates
+            if candidate
+        ]
+        scored = [
+            (candidate, score)
+            for candidate, score in scored
+            if score >= min_score
+        ]
+        scored.sort(key=lambda item: item[1], reverse=True)
+        return [candidate for candidate, _score in scored]
+
     def _cache_key(self, mpn_norm: str, manufacturer_id: Optional[str]) -> str:
         mid = manufacturer_id or 'any'
         return f"dk:mpn:{mpn_norm}:{mid}:{self.site}:{self.lang}:{self.currency}"
@@ -434,10 +473,11 @@ class DigiKeyClient:
             # Valid: exact match found
             return True, primary_canonical, all_canonical_mpns
         else:
-            # Invalid: no exact match, but provide canonical suggestions for reference
-            # Use first candidate as suggestion, but mark as invalid
-            suggestion_canonical = all_canonical_mpns[0] if all_canonical_mpns else None
-            return False, suggestion_canonical, all_canonical_mpns
+            # Invalid: no exact match. Show only close canonical suggestions so
+            # users can spot likely missing suffixes without noisy false hints.
+            similar_canonicals = self.filter_similar_canonical_mpns(mpn_norm, all_canonical_mpns)
+            suggestion_canonical = similar_canonicals[0] if similar_canonicals else None
+            return False, suggestion_canonical, similar_canonicals
 
     def extract_category(self, search_json: Dict[str, Any]) -> Dict[str, Any]:
         """Extract category information from DigiKey keyword search response."""

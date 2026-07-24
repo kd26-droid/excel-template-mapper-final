@@ -50,6 +50,31 @@ import * as XLSX from 'xlsx';
 import api, { setGlobalLoaderCallback } from '../services/api';
 // Removed unused UploadFormulaBuilder import
 
+const IST_TIME_ZONE = 'Asia/Kolkata';
+
+const parseHistoryDate = (value) => {
+  if (!value) return null;
+  const raw = String(value);
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/.test(raw);
+  const date = new Date(hasTimezone ? raw : `${raw}Z`);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const formatIstDateTime = (value, options = {}) => {
+  const date = parseHistoryDate(value);
+  if (!date) return 'Unknown time';
+  return date.toLocaleString('en-IN', {
+    timeZone: IST_TIME_ZONE,
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: true,
+    ...options
+  });
+};
+
 const UploadFiles = () => {
   const sheetJoinDraftDbName = 'excel-template-mapper-drafts';
   const sheetJoinDraftStoreName = 'files';
@@ -323,12 +348,6 @@ const UploadFiles = () => {
       ].slice(0, 25);
       localStorage.setItem(sheetJoinComparisonListKey, JSON.stringify(nextList));
       setSavedSheetJoinComparisons(nextList);
-    } else {
-      localStorage.setItem(sheetJoinBomDraftKey, JSON.stringify({
-        filename,
-        savedAt,
-        rowCount: rows.length
-      }));
     }
 
     return { blob, filename, workbook, comparisonName, id: comparisonId };
@@ -355,31 +374,6 @@ const UploadFiles = () => {
     };
     reader.readAsBinaryString(file);
   }, []);
-
-  const restoreSheetJoinDraft = useCallback(async () => {
-    try {
-      if (userFile) return;
-      const meta = localStorage.getItem(sheetJoinBomDraftKey);
-      if (!meta) return;
-      const db = await openSheetJoinDraftDb();
-      const draft = await new Promise((resolve, reject) => {
-        const tx = db.transaction(sheetJoinDraftStoreName, 'readonly');
-        const request = tx.objectStore(sheetJoinDraftStoreName).get(sheetJoinBomDraftKey);
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-      db.close();
-      if (draft?.blob) {
-        applySheetJoinDraftToUpload(draft);
-      }
-    } catch (err) {
-      console.warn('Failed to restore sheet merge draft:', err);
-    }
-  }, [applySheetJoinDraftToUpload, openSheetJoinDraftDb, sheetJoinBomDraftKey, sheetJoinDraftStoreName, userFile]);
-
-  useEffect(() => {
-    restoreSheetJoinDraft();
-  }, [restoreSheetJoinDraft]);
 
   const getSheetHeaders = useCallback((sheetName, headerRow = 1) => {
     if (!clientWorkbook || !sheetName || !clientWorkbook.Sheets[sheetName]) return [];
@@ -1703,54 +1697,57 @@ const UploadFiles = () => {
                       </Typography>
                     </Alert>
                   )}
-
-                  {savedSheetJoinComparisons.length > 0 && (
-                    <Box sx={{ mt: 2 }}>
-                      <Typography variant="body2" fontWeight="600" sx={{ mb: 1 }}>
-                        Saved merge books
-                      </Typography>
-                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                        {savedSheetJoinComparisons.map(comparison => {
-                          const isActiveComparison = activeSheetJoinComparisonId === comparison.id;
-                          return (
-                            <Box
-                              key={comparison.id}
-                              sx={{
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: 1,
-                                p: 1,
-                                border: isActiveComparison ? '1px solid #86efac' : '1px solid #bfdbfe',
-                                borderRadius: 1,
-                                bgcolor: isActiveComparison ? '#f0fdf4' : '#eff6ff'
-                              }}
-                            >
-                              <Box sx={{ flexGrow: 1, minWidth: 0 }}>
-                                <Typography variant="body2" fontWeight="700" noWrap>
-                                  {comparison.name}
-                                </Typography>
-                                <Typography variant="caption" color="text.secondary" noWrap>
-                                  {comparison.baseSheet}.{comparison.baseKey} -> {comparison.detailSheet}.{comparison.detailKey} | {comparison.rowCount} rows
-                                </Typography>
-                              </Box>
-                              <Button size="small" onClick={() => handleOpenSavedComparison(comparison)}>
-                                View
-                              </Button>
-                              <Button
-                                size="small"
-                                variant="contained"
-                                disabled={isActiveComparison}
-                                onClick={() => handleContinueSavedComparison(comparison)}
-                              >
-                                {isActiveComparison ? 'In use' : 'Continue'}
-                              </Button>
-                            </Box>
-                          );
-                        })}
-                      </Box>
-                    </Box>
-                  )}
                 </>
+              )}
+
+              {savedSheetJoinComparisons.length > 0 && (
+                <Box sx={{ mt: 2 }}>
+                  <Typography variant="body2" fontWeight="600" sx={{ mb: 1 }}>
+                    Saved merge books
+                  </Typography>
+                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    {savedSheetJoinComparisons.map(comparison => {
+                      const isActiveComparison = activeSheetJoinComparisonId === comparison.id;
+                      return (
+                        <Box
+                          key={comparison.id}
+                          sx={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 1,
+                            p: 1,
+                            border: isActiveComparison ? '1px solid #86efac' : '1px solid #bfdbfe',
+                            borderRadius: 1,
+                            bgcolor: isActiveComparison ? '#f0fdf4' : '#eff6ff'
+                          }}
+                        >
+                          <Box sx={{ flexGrow: 1, minWidth: 0 }}>
+                            <Typography variant="body2" fontWeight="700" noWrap>
+                              {comparison.name}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary" noWrap>
+                              {comparison.baseSheet}.{comparison.baseKey} -> {comparison.detailSheet}.{comparison.detailKey} | {comparison.rowCount} rows
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary" noWrap sx={{ display: 'block' }}>
+                              Saved {formatIstDateTime(comparison.savedAt)}
+                            </Typography>
+                          </Box>
+                          <Button size="small" onClick={() => handleOpenSavedComparison(comparison)}>
+                            View
+                          </Button>
+                          <Button
+                            size="small"
+                            variant="contained"
+                            disabled={isActiveComparison}
+                            onClick={() => handleContinueSavedComparison(comparison)}
+                          >
+                            {isActiveComparison ? 'In use' : 'Continue'}
+                          </Button>
+                        </Box>
+                      );
+                    })}
+                  </Box>
+                </Box>
               )}
             </Grid>
             
@@ -1924,7 +1921,7 @@ const UploadFiles = () => {
                         />
                         <Chip 
                           icon={<ScheduleIcon />}
-                          label={new Date(template.created_at).toLocaleDateString()}
+                          label={formatIstDateTime(template.created_at, { hour: undefined, minute: undefined })}
                           size="small"
                           variant="outlined"
                         />
@@ -2049,7 +2046,7 @@ const UploadFiles = () => {
                         />
                         <Chip 
                           icon={<ScheduleIcon />}
-                          label={new Date(template.created_at).toLocaleDateString()}
+                          label={formatIstDateTime(template.created_at, { hour: undefined, minute: undefined })}
                           size="small"
                           variant="outlined"
                         />

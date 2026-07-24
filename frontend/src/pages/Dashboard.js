@@ -59,6 +59,16 @@ import {
 import api, { setGlobalLoaderCallback } from '../services/api';
 import FormulaBuilder from '../components/FormulaBuilder';
 
+const IST_TIME_ZONE = 'Asia/Kolkata';
+
+const parseHistoryDate = (value) => {
+  if (!value) return null;
+  const raw = String(value);
+  const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/.test(raw);
+  const date = new Date(hasTimezone ? raw : `${raw}Z`);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
 const Dashboard = () => {
   const [uploads, setUploads] = useState([]);
   const [globalLoading, setGlobalLoading] = useState(false);
@@ -207,8 +217,8 @@ const Dashboard = () => {
       
       switch (templateSortBy) {
         case 'created_at':
-          aValue = new Date(a.created_at);
-          bValue = new Date(b.created_at);
+          aValue = parseHistoryDate(a.created_at) || new Date(0);
+          bValue = parseHistoryDate(b.created_at) || new Date(0);
           break;
         case 'usage_count':
           aValue = a.usage_count || 0;
@@ -244,8 +254,8 @@ const Dashboard = () => {
       
       switch (tagTemplateSortBy) {
         case 'created_at':
-          aValue = new Date(a.created_at);
-          bValue = new Date(b.created_at);
+          aValue = parseHistoryDate(a.created_at) || new Date(0);
+          bValue = parseHistoryDate(b.created_at) || new Date(0);
           break;
         case 'usage_count':
           aValue = a.usage_count || 0;
@@ -283,8 +293,8 @@ const Dashboard = () => {
       
       switch (uploadSortBy) {
         case 'upload_date':
-          aValue = new Date(a.created);
-          bValue = new Date(b.created);
+          aValue = parseHistoryDate(a.created) || new Date(0);
+          bValue = parseHistoryDate(b.created) || new Date(0);
           break;
         case 'template_name':
           aValue = (a.template_file || '').toLowerCase();
@@ -549,8 +559,17 @@ const Dashboard = () => {
   };
 
   const formatDate = (dateString) => {
-    const date = new Date(dateString);
-    return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+    const date = parseHistoryDate(dateString);
+    if (!date) return 'Unknown time';
+    return date.toLocaleString('en-IN', {
+      timeZone: IST_TIME_ZONE,
+      day: '2-digit',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true
+    });
   };
 
   const getPopularityColor = (usageCount) => {
