@@ -9,12 +9,15 @@ Into Factwise-compatible format:
     MPN       | GCM155...  | C0402C...  | Manufacturer | MURATA | M001 | M002 |
 """
 
+import os
 import re
 import logging
+from pathlib import Path
+import pandas as pd
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from .views import get_session, save_session, hybrid_file_manager
-from .bom_header_mapper import BOMHeaderMapper
+from .models import PDFSession, PDFExtractionResult
 
 logger = logging.getLogger(__name__)
 
@@ -618,6 +621,64 @@ def get_client_headers_and_data(info):
 # API ENDPOINTS
 # =============================================================================
 
+def get_parser_headers_and_data(info):
+    """Read source data for Column Parser across Excel, CSV, and PDF/OCR sessions."""
+    headers = info.get('client_headers', []) or []
+    data = info.get('data', []) or []
+    source_type = str(info.get('source_type', ''))
+    is_pdf_session = source_type.startswith('pdf')
+
+    if is_pdf_session:
+        session_id = info.get('session_id')
+
+        try:
+            pdf_session = PDFSession.objects.get(session_id=session_id)
+            pdf_extraction = PDFExtractionResult.objects.filter(pdf_session=pdf_session).order_by('-created_at').first()
+            if pdf_extraction:
+                if pdf_extraction.extracted_headers:
+                    headers = list(pdf_extraction.extracted_headers)
+                if not data and pdf_extraction.extracted_data:
+                    data = pdf_extraction.extracted_data
+        except Exception as e:
+            logger.warning(f"PARSER: Could not load PDF extraction data for {session_id}: {e}")
+
+        client_path = info.get('client_path')
+        if client_path:
+            try:
+                actual_path = hybrid_file_manager.get_file_path(client_path)
+                if os.path.exists(str(actual_path)):
+                    df = pd.read_csv(str(actual_path), header=None, dtype=str, keep_default_na=False)
+                    if headers:
+                        if len(headers) < df.shape[1]:
+                            headers = list(headers) + [f'Column_{i+1}' for i in range(len(headers), df.shape[1])]
+                        df = df.iloc[:, :len(headers)]
+                    else:
+                        headers = [f'Column_{i+1}' for i in range(df.shape[1])]
+                    data = df.values.tolist()
+                    logger.info(f"PARSER: Read PDF/OCR data: {len(headers)} headers and {len(data)} rows")
+            except Exception as e:
+                logger.warning(f"PARSER: Could not read PDF/OCR CSV file; using extraction data if available: {e}")
+
+        return headers, data
+
+    client_path = info.get('client_path')
+    if client_path and (not headers or not data):
+        try:
+            actual_path = hybrid_file_manager.get_file_path(client_path)
+            actual_header_row = (info.get('header_row', 1) or 1) - 1
+            ext = Path(str(actual_path)).suffix.lower()
+
+            if ext == '.csv':
+                df = pd.read_csv(str(actual_path), header=actual_header_row, dtype=str, keep_default_na=False)
+                headers = list(df.columns)
+                data = df.values.tolist()
+            else:
+                headers, data = get_client_headers_and_data(info)
+        except Exception as e:
+            logger.error(f"PARSER: Error reading parser source data: {e}")
+
+    return headers, data
+
 @api_view(['POST'])
 def parser_analyze_column(request):
     """
@@ -649,7 +710,7 @@ def parser_analyze_column(request):
         return Response({'success': False, 'error': 'Session not found'})
 
     # Get data and headers from file
-    headers, data = get_client_headers_and_data(info)
+    headers, data = get_parser_headers_and_data(info)
 
     if not headers:
         return Response({'success': False, 'error': 'Could not read headers from file'})
@@ -702,7 +763,7 @@ def parser_preview(request):
         return Response({'success': False, 'error': 'Session not found'})
 
     # Get data and headers from file
-    headers, data = get_client_headers_and_data(info)
+    headers, data = get_parser_headers_and_data(info)
 
     if not headers:
         return Response({'success': False, 'error': 'Could not read data from file'})
@@ -756,7 +817,7 @@ def parser_apply(request):
         return Response({'success': False, 'error': 'Session not found'})
 
     # Get data and headers from file
-    headers, data = get_client_headers_and_data(info)
+    headers, data = get_parser_headers_and_data(info)
 
     if not headers:
         return Response({'success': False, 'error': 'Could not read data from file'})
@@ -817,6 +878,14 @@ def parser_get_columns(request, session_id):
     info = get_session(session_id)
     if not info:
         return Response({'success': False, 'error': 'Session not found'})
+
+    headers, _ = get_parser_headers_and_data(info)
+    logger.info(f"PARSER_GET_COLUMNS: Returning {len(headers)} columns")
+
+    return Response({
+        'success': True,
+        'columns': headers
+    })
 
     # Try to get headers from session first
     headers = info.get('client_headers', [])

@@ -25,6 +25,10 @@ from .views import (
     download_template_file,
     download_grid_excel,
     update_session_data,
+    expand_column_groups,
+    split_column_into_columns,
+    carry_forward_group,
+    stack_mapped_alternates,
 
     # Unified Template + Formula views (MappingTemplate based)
     save_mapping_template,
@@ -73,6 +77,7 @@ from .zone_views import (
     create_or_update_zones,
     get_zones,
     process_zones,
+    process_column_zones,
     get_zone_processing_status,
     manage_zone_links,
 )
@@ -130,6 +135,10 @@ urlpatterns = [
     path('data/', data_view, name='get-mapped-data'),
     path('data/save/', save_data, name='save-edited-data'),
     path('update-session-data/', update_session_data, name='update-session-data'),
+    path('transforms/expand-column-groups/', expand_column_groups, name='expand-column-groups'),
+    path('transforms/split-into-columns/', split_column_into_columns, name='split-column-into-columns'),
+    path('transforms/carry-forward-group/', carry_forward_group, name='carry-forward-group'),
+    path('transforms/stack-alternates/', stack_mapped_alternates, name='stack-mapped-alternates'),
 
     # Download endpoints
     path('download/', download_file, name='download-file'),
@@ -179,6 +188,7 @@ urlpatterns = [
     # PDF Zone Management endpoints (stubbed OK)
     path('pdf/zones/<str:session_id>/', get_zones, name='zones-handler'),
     path('pdf/zones/<str:session_id>/process/', process_zones, name='process-zones'),
+    path('pdf/zones/<str:session_id>/process-columns/', process_column_zones, name='process-column-zones'),
     path('pdf/zones/<str:session_id>/status/', get_zone_processing_status, name='get-zone-processing-status'),
     path('pdf/continuations/<str:session_id>/link/', manage_zone_links, name='manage-zone-links'),
 

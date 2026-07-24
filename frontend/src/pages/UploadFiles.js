@@ -50,6 +50,7 @@ import * as XLSX from 'xlsx';
 import api, { setGlobalLoaderCallback } from '../services/api';
 // Removed unused UploadFormulaBuilder import
 
+<<<<<<< Updated upstream
 const IST_TIME_ZONE = 'Asia/Kolkata';
 
 const parseHistoryDate = (value) => {
@@ -75,6 +76,71 @@ const formatIstDateTime = (value, options = {}) => {
   });
 };
 
+=======
+// Vendor item templates (e.g. FactWise "Default Item.xlsx") keep help text and
+// "Required / Optional" hints in the rows above the real header row, so the
+// header row is often not row 1. Score the first few rows and pick the one that
+// actually looks like column labels instead of assuming row 1.
+const HEADER_SCAN_ROWS = 12;
+
+const normalizeRowCells = (row = []) =>
+  row.map(cell => (cell === null || cell === undefined ? '' : String(cell).trim()));
+
+const scoreHeaderRow = (row = []) => {
+  const filled = normalizeRowCells(row).filter(cell => cell !== '');
+  if (filled.length === 0) return Number.NEGATIVE_INFINITY;
+
+  const count = filled.length;
+  const avgLength = filled.reduce((sum, cell) => sum + cell.length, 0) / count;
+  const longCells = filled.filter(cell => cell.length > 60).length;
+  const proseCells = filled.filter(cell => /[.!?](\s|$)/.test(cell) || cell.split(/\s+/).length > 8).length;
+  const numericCells = filled.filter(cell => !Number.isNaN(Number(cell.replace(/,/g, '')))).length;
+  const uniqueRatio = new Set(filled.map(cell => cell.toLowerCase())).size / count;
+
+  return (
+    count * 2                          // wide rows are more likely to be the header
+    - (longCells / count) * 40         // help text is long
+    - (proseCells / count) * 30        // help text reads like sentences
+    - (numericCells / count) * 25      // numbers mean this is a data row
+    - Math.max(0, avgLength - 30) * 0.6
+    + uniqueRatio * 10                 // column labels are mostly distinct
+  );
+};
+
+const readSheetRows = (workbook, sheetName) => {
+  if (!workbook || !sheetName || !workbook.Sheets || !workbook.Sheets[sheetName]) return [];
+  return XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
+    header: 1,
+    raw: false,
+    defval: '',
+    blankrows: true
+  });
+};
+
+// Returns a 1-based row number, matching the "Header Row" field.
+const detectHeaderRow = (workbook, sheetName) => {
+  const rows = readSheetRows(workbook, sheetName).slice(0, HEADER_SCAN_ROWS);
+  let bestRow = 0;
+  let bestScore = Number.NEGATIVE_INFINITY;
+
+  rows.forEach((row, index) => {
+    const score = scoreHeaderRow(row);
+    if (score > bestScore) {
+      bestScore = score;
+      bestRow = index;
+    }
+  });
+
+  return bestRow + 1;
+};
+
+const readHeadersAtRow = (workbook, sheetName, headerRow) => {
+  const rows = readSheetRows(workbook, sheetName);
+  const row = rows[Math.max(0, (Number(headerRow) || 1) - 1)];
+  return row ? normalizeRowCells(row).filter(cell => cell !== '') : [];
+};
+
+>>>>>>> Stashed changes
 const UploadFiles = () => {
   const sheetJoinDraftDbName = 'excel-template-mapper-drafts';
   const sheetJoinDraftStoreName = 'files';
@@ -105,6 +171,9 @@ const UploadFiles = () => {
   const [templateSheetNames, setTemplateSheetNames] = useState([]);
   const [selectedTemplateSheet, setSelectedTemplateSheet] = useState('');
   const [templateHeaderRow, setTemplateHeaderRow] = useState(1);
+  const [templateWorkbook, setTemplateWorkbook] = useState(null);
+  const [templateHeaderPreview, setTemplateHeaderPreview] = useState([]);
+  const [templateHeaderAutoDetected, setTemplateHeaderAutoDetected] = useState(false);
 
   // Template selection state
   const [selectedTemplate, setSelectedTemplate] = useState(null);
@@ -833,9 +902,17 @@ const UploadFiles = () => {
           }
 
           const sheets = workbook.SheetNames;
+          const firstSheet = sheets[0];
+          setTemplateWorkbook(workbook);
           setTemplateSheetNames(sheets);
-          setSelectedTemplateSheet(sheets[0]);
-          setTemplateHeaderRow(1);
+          setSelectedTemplateSheet(firstSheet);
+
+          // Templates frequently carry description/"Required, Max 200 characters"
+          // rows above the real headers, so detect the header row instead of
+          // defaulting to 1 (which would map help text as column names).
+          const detectedRow = detectHeaderRow(workbook, firstSheet);
+          setTemplateHeaderRow(detectedRow);
+          setTemplateHeaderAutoDetected(detectedRow > 1);
         } catch (err) {
           console.error('Error reading template file:', err);
           setError('Error reading template file. Please make sure it\'s a valid Excel or CSV file.');
@@ -862,6 +939,29 @@ const UploadFiles = () => {
       },
       maxFiles: 1
     });
+
+  // Keep the header preview in sync with the sheet / header row actually being sent.
+  useEffect(() => {
+    if (!templateWorkbook || !selectedTemplateSheet) {
+      setTemplateHeaderPreview([]);
+      return;
+    }
+    setTemplateHeaderPreview(readHeadersAtRow(templateWorkbook, selectedTemplateSheet, templateHeaderRow));
+  }, [templateWorkbook, selectedTemplateSheet, templateHeaderRow]);
+
+  const handleTemplateSheetChange = (sheetName) => {
+    setSelectedTemplateSheet(sheetName);
+    if (!templateWorkbook) return;
+    const detectedRow = detectHeaderRow(templateWorkbook, sheetName);
+    setTemplateHeaderRow(detectedRow);
+    setTemplateHeaderAutoDetected(detectedRow > 1);
+  };
+
+  const handleTemplateHeaderRowChange = (value) => {
+    const parsed = Number(value);
+    setTemplateHeaderRow(Number.isFinite(parsed) && parsed > 0 ? parsed : 1);
+    setTemplateHeaderAutoDetected(false);
+  };
 
   // Filter templates based on search term
   const filteredTemplates = availableTemplates.filter(template =>
@@ -1793,7 +1893,7 @@ const UploadFiles = () => {
                       <Select
                         value={selectedTemplateSheet}
                         label="Sheet Name"
-                        onChange={(e) => setSelectedTemplateSheet(e.target.value)}
+                        onChange={(e) => handleTemplateSheetChange(e.target.value)}
                       >
                         {templateSheetNames.map(sheet => (
                           <MenuItem key={sheet} value={sheet}>{sheet}</MenuItem>
@@ -1809,10 +1909,41 @@ const UploadFiles = () => {
                       fullWidth
                       InputProps={{ inputProps: { min: 1 } }}
                       value={templateHeaderRow}
-                      onChange={(e) => setTemplateHeaderRow(Number(e.target.value))}
+                      onChange={(e) => handleTemplateHeaderRowChange(e.target.value)}
                     />
                   </Grid>
                 </Grid>
+              )}
+
+              {templateFile && templateSheetNames.length > 0 && (
+                <Box sx={{ mt: 2 }}>
+                  {templateHeaderPreview.length > 0 ? (
+                    <>
+                      <Typography variant="body2" color="text.secondary">
+                        {templateHeaderAutoDetected
+                          ? `Header row auto-detected at row ${templateHeaderRow} — ${templateHeaderPreview.length} destination columns found. Adjust "Header Row" if this looks wrong.`
+                          : `${templateHeaderPreview.length} destination columns found on row ${templateHeaderRow}.`}
+                      </Typography>
+                      <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mt: 1 }}>
+                        {templateHeaderPreview.slice(0, 12).map((header, index) => (
+                          <Chip
+                            key={`${header}-${index}`}
+                            size="small"
+                            variant="outlined"
+                            label={header.length > 28 ? `${header.slice(0, 28)}…` : header}
+                          />
+                        ))}
+                        {templateHeaderPreview.length > 12 && (
+                          <Chip size="small" label={`+${templateHeaderPreview.length - 12} more`} />
+                        )}
+                      </Box>
+                    </>
+                  ) : (
+                    <Alert severity="warning" sx={{ mt: 1 }}>
+                      No columns found on row {templateHeaderRow} of "{selectedTemplateSheet}". Pick the row that holds the column names.
+                    </Alert>
+                  )}
+                </Box>
               )}
             </Grid>
           </Grid>

@@ -405,6 +405,146 @@ def process_zones(request, session_id):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+@api_view(['POST'])
+def process_column_zones(request, session_id):
+    """
+    Extract a table by treating the drawn zones as COLUMNS.
+
+    Unlike process_zones (which crops each zone and OCRs it separately, and so
+    collapses blank cells), this reads the PDF's word positions and buckets each
+    word into a column by where it sits and into a row by its line. Blank cells
+    stay blank, rows never desync, and repeated page headers/footers are excluded
+    because they fall outside the drawn zones' vertical span.
+
+    Nothing here is specific to any document: the columns are whatever the user
+    drew, in whatever positions, on however many pages.
+    """
+    try:
+        import pdfplumber
+        from .services.coordinate_table_extractor import (
+            scale_rect_to_pdf, extract_table_from_pdf_words,
+        )
+
+        pdf_session = PDFSession.objects.get(session_id=session_id)
+
+        zones = PDFZone.objects.filter(pdf_session=pdf_session).order_by('page_number', 'zone_id')
+        if not zones.exists():
+            return Response({'error': 'No columns marked yet. Draw a box around each column first.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        # Image-pixel dimensions the zones were drawn against, per page.
+        page_dims = {p.page_number: (p.width, p.height)
+                     for p in PDFPage.objects.filter(pdf_session=pdf_session)}
+
+        merge_wrapped = str(request.data.get('merge_wrapped', False)).lower() in ('1', 'true', 'yes', 'on')
+
+        # Optional user-supplied column names, in left-to-right order. Positions
+        # are kept (a blank name falls back to Column_N for that slot).
+        column_labels = [str(x).strip() for x in (request.data.get('column_labels') or [])]
+
+        skip_top_rows = 0
+        try:
+            skip_top_rows = max(0, int(request.data.get('skip_top_rows') or 0))
+        except (TypeError, ValueError):
+            skip_top_rows = 0
+        page_words = {}
+        column_zones = {}
+
+        with pdfplumber.open(pdf_session.original_pdf_path) as pdf:
+            for zone in zones:
+                page = zone.page_number
+                if page < 1 or page > len(pdf.pages):
+                    continue
+                pdf_page = pdf.pages[page - 1]
+                img_w, img_h = page_dims.get(page, (pdf_page.width, pdf_page.height))
+
+                rect = scale_rect_to_pdf(
+                    zone.coordinates, img_w, img_h, pdf_page.width, pdf_page.height
+                )
+                column_zones.setdefault(page, []).append(rect)
+
+                if page not in page_words:
+                    page_words[page] = [
+                        {'text': w['text'], 'x0': w['x0'], 'x1': w['x1'],
+                         'top': w['top'], 'bottom': w['bottom']}
+                        for w in pdf_page.extract_words()
+                    ]
+
+        result = extract_table_from_pdf_words(page_words, column_zones, merge_wrapped=merge_wrapped)
+        rows = result['rows']
+        n_cols = result['n_columns']
+
+        # Drop the first N rows (e.g. a captured page header) if requested.
+        if skip_top_rows and rows:
+            rows = rows[skip_top_rows:]
+
+        if not rows:
+            return Response({
+                'error': 'No text found inside the columns you marked. This PDF may be a scan '
+                         '(its text is not selectable) — use "Extract with OCR (scanned PDF)" instead.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # Use the name the user typed for each slot, falling back to a generic
+        # name where none was given.
+        headers = [
+            (column_labels[i] if i < len(column_labels) and column_labels[i] else f'Column_{i + 1}')
+            for i in range(n_cols)
+        ]
+
+        quality_metrics = {
+            'total_rows': len(rows),
+            'total_columns': n_cols,
+            'words_outside_columns': result['dropped'],
+            'merged_continuation_rows': result.get('merged_continuation_rows', 0),
+            'method': 'coordinate_column_zones',
+        }
+        extraction = PDFExtractionResult.objects.create(
+            pdf_session=pdf_session,
+            extracted_headers=headers,
+            extracted_data=rows,
+            confidence_scores={'overall_confidence': 1.0, 'header_confidence': {}},
+            quality_metrics=quality_metrics,
+            table_count=1,
+        )
+
+        import pandas as pd
+        from .pdf_views import create_mapping_session_from_dataframe
+        from .views import save_session
+
+        df = pd.DataFrame(rows, columns=headers)
+        session_data = create_mapping_session_from_dataframe(
+            pdf_session=pdf_session, session_id=session_id, df=df, source_type='pdf_zonal',
+        )
+        save_session(session_id, session_data)
+
+        pdf_session.processing_status = 'completed'
+        pdf_session.save()
+
+        logger.info(
+            f"🧭 Column-zone extraction | session={session_id} | rows={len(rows)} | "
+            f"cols={n_cols} | words_outside={result['dropped']}"
+        )
+
+        return Response({
+            'session_id': session_id,
+            'extraction_id': extraction.id,
+            'headers': headers,
+            'row_count': len(rows),
+            'column_count': n_cols,
+            'words_outside_columns': result['dropped'],
+            'sample_rows': rows[:10],
+            'status': 'completed',
+            'message': f'Extracted {len(rows)} rows into {n_cols} columns by position',
+        }, status=status.HTTP_200_OK)
+
+    except PDFSession.DoesNotExist:
+        return Response({'error': 'Session not found'}, status=status.HTTP_404_NOT_FOUND)
+    except Exception as e:
+        logger.error(f"Error in column-zone extraction: {e}", exc_info=True)
+        return Response({'error': f'Column-zone extraction failed: {str(e)}'},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 @api_view(['GET'])
 def get_zone_processing_status(request, session_id):
     """Get real-time processing status for zones"""

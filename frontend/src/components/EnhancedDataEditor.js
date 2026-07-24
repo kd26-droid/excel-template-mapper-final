@@ -75,7 +75,9 @@ import {
   MoreVert as MoreVertIcon,
   Build as BuildIcon,
   VerifiedUser as VerifiedUserIcon,
-  ContentCut as ContentCutIcon
+  ContentCut as ContentCutIcon,
+  Add as AddIcon,
+  DeleteOutline as DeleteIcon
 } from '@mui/icons-material';
 import api from '../services/api';
 import * as XLSX from 'xlsx';
@@ -304,6 +306,35 @@ const EnhancedDataEditor = () => {
     nameColumn: '',
     synonymColumns: []
   });
+
+  // "Split into columns": one delimited cell ("C3, C4, C5") becomes a numbered
+  // run of columns (Tag_1, Tag_2, Tag_3). The widest row sets the column count.
+  const [splitColsRunning, setSplitColsRunning] = useState(false);
+  const [splitColsDialogOpen, setSplitColsDialogOpen] = useState(false);
+  const [splitColsPreview, setSplitColsPreview] = useState(null);
+  const [splitColsPreviewLoading, setSplitColsPreviewLoading] = useState(false);
+  const [splitColsError, setSplitColsError] = useState('');
+  const [splitColsConfig, setSplitColsConfig] = useState({
+    sourceColumn: '',
+    destinationPrefix: '',
+    splitMode: 'delimiter',
+    delimiter: 'comma',
+    customDelimiter: '',
+    chunkSize: 3,
+    trim: true,
+    dropEmpty: true,
+    maxColumns: '',
+    onOverflow: 'review',
+    keepSourceColumn: false,
+    overwriteExisting: false
+  });
+
+  // FactWise required-field guard on export
+  const [requiredDialogOpen, setRequiredDialogOpen] = useState(false);
+  const [requiredGaps, setRequiredGaps] = useState([]);
+  const [requiredDefaults, setRequiredDefaults] = useState({});
+  const [requiredFilling, setRequiredFilling] = useState(false);
+  const pendingExportRef = useRef(null);
 
   // Helper function to identify MPN validation columns
   const isMpnValidationColumn = useCallback((columnName) => {
@@ -1822,6 +1853,82 @@ const EnhancedDataEditor = () => {
     }
   }, [sessionId, showSnackbar, columnDefs]);
 
+  // FactWise import sheets require these fields on every row. If the sheet looks
+  // like a FactWise sheet (it has these columns) and any are blank, we warn on
+  // export so the user can fill them — with a default, or by going back.
+  const FACTWISE_REQUIRED = useMemo(() => ([
+    'Item code', 'Item name', 'Item type', 'Measurement unit', 'Procurement entity name'
+  ]), []);
+
+  const getFactwiseRequiredGaps = useCallback(() => {
+    const dataCols = columnDefs.filter(c => c.field && c.field !== '__row_number__');
+    const norm = (s) => String(s || '').trim().toLowerCase();
+    const present = FACTWISE_REQUIRED
+      .map(req => {
+        const col = dataCols.find(c => norm(c.headerName) === norm(req) || norm(c.field) === norm(req));
+        return col ? { req, field: col.field, headerName: col.headerName || col.field } : null;
+      })
+      .filter(Boolean);
+
+    // Treat it as a FactWise sheet only if at least a couple of these exist.
+    const isFactwiseSheet = present.length >= 2;
+    if (!isFactwiseSheet) return { isFactwiseSheet: false, gaps: [] };
+
+    const gaps = present.map(p => {
+      const emptyCount = (rowData || []).reduce((n, r) => {
+        const v = r[p.field];
+        return n + ((v === null || v === undefined || String(v).trim() === '') ? 1 : 0);
+      }, 0);
+      return { ...p, emptyCount };
+    }).filter(g => g.emptyCount > 0);
+
+    return { isFactwiseSheet: true, gaps };
+  }, [columnDefs, rowData, FACTWISE_REQUIRED]);
+
+  // Run an export, but first check FactWise required fields. If any are blank,
+  // open the dialog instead and hold the export until the user resolves it.
+  const runGuardedExport = useCallback((exportFn) => {
+    const { isFactwiseSheet, gaps } = getFactwiseRequiredGaps();
+    if (isFactwiseSheet && gaps.length > 0) {
+      setRequiredGaps(gaps);
+      setRequiredDefaults({});
+      pendingExportRef.current = exportFn;
+      setRequiredDialogOpen(true);
+      return;
+    }
+    exportFn();
+  }, [getFactwiseRequiredGaps]);
+
+  const handleFillRequiredAndExport = useCallback(async () => {
+    try {
+      setRequiredFilling(true);
+      const headers = columnDefs
+        .filter(c => c.field && c.field !== '__row_number__')
+        .map(c => c.field);
+      const filled = (rowData || []).map(r => {
+        const row = { ...r };
+        requiredGaps.forEach(g => {
+          const def = (requiredDefaults[g.field] || '').trim();
+          const v = row[g.field];
+          if (def && (v === null || v === undefined || String(v).trim() === '')) {
+            row[g.field] = def;
+          }
+        });
+        return row;
+      });
+      await api.updateSessionData(sessionId, { headers, data: filled });
+      await fetchDataSynchronized();
+      setRequiredDialogOpen(false);
+      const fn = pendingExportRef.current;
+      pendingExportRef.current = null;
+      if (fn) fn();
+    } catch (e) {
+      showSnackbar(e.message || 'Could not fill the default values', 'error');
+    } finally {
+      setRequiredFilling(false);
+    }
+  }, [sessionId, columnDefs, rowData, requiredGaps, requiredDefaults, fetchDataSynchronized, showSnackbar]);
+
   const handleExportToProject = useCallback(() => {
     const cols = {};
     columnDefs
@@ -2235,6 +2342,88 @@ const EnhancedDataEditor = () => {
       setMpnSplitting(false);
     }
   }, [columnDefs, producerColumn, mpnColumn, mpnManufacturerColumn, detectProducerColumn, detectMpnColumn, detectManufacturerColumn, sessionId, buildMpnSplitOptionsPayload, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage]);
+
+  // The split runs on the mapped grid, so offer the grid's own columns. Indices
+  // are carried along because the grid may repeat a header name.
+  // Index must be counted over the real data columns only — the backend grid has
+  // no row-number column, so filter it out BEFORE numbering to stay aligned.
+  const splitColsCandidates = useMemo(
+    () => columnDefs
+      .filter(col => col.field && col.field !== '__row_number__')
+      .map((col, index) => ({ field: col.field, label: col.headerName || col.field, index })),
+    [columnDefs]
+  );
+
+  const buildSplitColsPayload = useCallback(() => {
+    const chosen = splitColsCandidates.find(col => col.field === splitColsConfig.sourceColumn);
+    return {
+      sourceColumn: splitColsConfig.sourceColumn,
+      sourceColumnIndex: chosen ? chosen.index : null,
+      destinationPrefix: splitColsConfig.destinationPrefix.trim(),
+      splitMode: splitColsConfig.splitMode,
+      delimiter: splitColsConfig.delimiter === 'custom'
+        ? splitColsConfig.customDelimiter
+        : splitColsConfig.delimiter,
+      chunkSize: Number(splitColsConfig.chunkSize) || 0,
+      trim: splitColsConfig.trim,
+      dropEmpty: splitColsConfig.dropEmpty,
+      maxColumns: Number(splitColsConfig.maxColumns) || 0,
+      onOverflow: splitColsConfig.onOverflow,
+      keepSourceColumn: splitColsConfig.keepSourceColumn,
+      overwriteExisting: splitColsConfig.overwriteExisting
+    };
+  }, [splitColsConfig, splitColsCandidates]);
+
+  const handleOpenSplitColsDialog = useCallback(() => {
+    setToolsMenuAnchor(null);
+    setSplitColsDialogOpen(true);
+    setSplitColsError('');
+    setSplitColsPreview(null);
+  }, []);
+
+  const handlePreviewSplitCols = useCallback(async () => {
+    try {
+      setSplitColsPreviewLoading(true);
+      setSplitColsError('');
+      const response = await api.splitColumnIntoColumns(sessionId, { ...buildSplitColsPayload(), preview: true });
+      if (response.data?.success) {
+        setSplitColsPreview(response.data);
+      } else {
+        setSplitColsPreview(null);
+        setSplitColsError(response.data?.error || 'Preview failed');
+      }
+    } catch (error) {
+      setSplitColsPreview(null);
+      setSplitColsError(error.response?.data?.error || error.message || 'Preview failed');
+    } finally {
+      setSplitColsPreviewLoading(false);
+    }
+  }, [sessionId, buildSplitColsPayload]);
+
+  const handleApplySplitCols = useCallback(async () => {
+    try {
+      setSplitColsRunning(true);
+      setSplitColsError('');
+      const response = await api.splitColumnIntoColumns(sessionId, buildSplitColsPayload());
+
+      if (response.data?.success) {
+        setSplitColsDialogOpen(false);
+        setSplitColsPreview(null);
+        showSnackbar(
+          `"${splitColsConfig.sourceColumn}" split into ${response.data.columns_created} column(s)` +
+          (response.data.overflow_rows ? ` (${response.data.overflow_rows} row(s) had more values than fit)` : ''),
+          'success'
+        );
+        await fetchDataSynchronized();
+      } else {
+        setSplitColsError(response.data?.error || 'Failed to split column');
+      }
+    } catch (error) {
+      setSplitColsError(error.response?.data?.error || error.message || 'Failed to split column');
+    } finally {
+      setSplitColsRunning(false);
+    }
+  }, [sessionId, buildSplitColsPayload, splitColsConfig.sourceColumn, showSnackbar, fetchDataSynchronized]);
 
   const handleCorrectionFileUpload = useCallback((event) => {
     const file = event.target.files[0];
@@ -2880,7 +3069,7 @@ const EnhancedDataEditor = () => {
             }}>
               {/* PRIMARY: Download File */}
               <Button
-                onClick={handleDownloadConverted}
+                onClick={() => runGuardedExport(handleDownloadConverted)}
                 variant="contained"
                 startIcon={<DownloadIcon />}
                 disabled={downloadLoading || syncStatus.inProgress}
@@ -2899,7 +3088,7 @@ const EnhancedDataEditor = () => {
 
               {/* PRIMARY: Export to Project */}
               <Button
-                onClick={handleExportToProject}
+                onClick={() => runGuardedExport(handleExportToProject)}
                 variant="contained"
                 startIcon={<FolderOpenIcon />}
                 disabled={downloadLoading || syncStatus.inProgress}
@@ -2992,11 +3181,19 @@ const EnhancedDataEditor = () => {
                   </ListItemIcon>
                   <ListItemText>{mpnSplitting ? 'Splitting MPNs...' : 'Split MPN Cells'}</ListItemText>
                 </MenuItem>
+<<<<<<< Updated upstream
                 <MenuItem onClick={handleOpenProducerParseDialog} disabled={syncStatus.inProgress || mpnSplitting}>
                   <ListItemIcon>
                     {mpnSplitting ? <CircularProgress size={18} /> : <AccountTreeIcon sx={{ color: '#00796b' }} />}
                   </ListItemIcon>
                   <ListItemText>{mpnSplitting ? 'Parsing Producer...' : 'Parse Producer Column'}</ListItemText>
+=======
+                <MenuItem onClick={handleOpenSplitColsDialog} disabled={syncStatus.inProgress || splitColsRunning}>
+                  <ListItemIcon>
+                    {splitColsRunning ? <CircularProgress size={18} /> : <ContentCutIcon sx={{ color: '#0277bd' }} />}
+                  </ListItemIcon>
+                  <ListItemText>{splitColsRunning ? 'Splitting...' : 'Split Values Into Columns'}</ListItemText>
+>>>>>>> Stashed changes
                 </MenuItem>
                 <MenuItem onClick={() => { setToolsMenuAnchor(null); handleOpenFactwiseIdDialog(); }} disabled={syncStatus.inProgress}>
                   <ListItemIcon><BadgeIcon sx={{ color: '#2e7d32' }} /></ListItemIcon>
@@ -3559,6 +3756,7 @@ const EnhancedDataEditor = () => {
         />
       )}
 
+<<<<<<< Updated upstream
       {/* Producer Parser Dialog */}
       <Dialog open={producerParseDialogOpen} onClose={() => setProducerParseDialogOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Parse Producer Column</DialogTitle>
@@ -3637,6 +3835,276 @@ const EnhancedDataEditor = () => {
             disabled={mpnSplitting || !producerColumn || !mpnColumn || !mpnManufacturerColumn}
           >
             {mpnSplitting ? 'Parsing...' : 'Parse Producer'}
+=======
+      {/* FactWise required-fields guard before export */}
+      <Dialog open={requiredDialogOpen} onClose={() => setRequiredDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Required fields are empty</DialogTitle>
+        <DialogContent>
+          <DialogContentText sx={{ mb: 2 }}>
+            This looks like a FactWise import sheet, and FactWise won't accept it while these required
+            fields have blank cells. Set a value to fill every blank in that column, or go back and fill
+            them yourself.
+          </DialogContentText>
+          {requiredGaps.map(g => (
+            <Box key={g.field} sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 1.5 }}>
+              <Box sx={{ minWidth: 200 }}>
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>{g.headerName}</Typography>
+                <Typography variant="caption" color="error">{g.emptyCount} blank {g.emptyCount === 1 ? 'cell' : 'cells'}</Typography>
+              </Box>
+              <TextField
+                size="small"
+                fullWidth
+                placeholder={`Default value for ${g.headerName}`}
+                value={requiredDefaults[g.field] || ''}
+                onChange={(e) => setRequiredDefaults(prev => ({ ...prev, [g.field]: e.target.value }))}
+              />
+            </Box>
+          ))}
+          <Alert severity="info" sx={{ mt: 2 }}>
+            Leave a value empty to skip that field for now. For Item code you may prefer to go back and use
+            <strong> Create FactWise ID</strong> instead of one fixed value.
+          </Alert>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => { setRequiredDialogOpen(false); pendingExportRef.current = null; }} disabled={requiredFilling}>
+            Go back and fill myself
+          </Button>
+          <Button
+            onClick={handleFillRequiredAndExport}
+            variant="contained"
+            disabled={requiredFilling || !requiredGaps.some(g => (requiredDefaults[g.field] || '').trim())}
+          >
+            {requiredFilling ? 'Filling…' : 'Fill blanks & continue'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Split Values Into Columns */}
+      <Dialog open={splitColsDialogOpen} onClose={() => setSplitColsDialogOpen(false)} maxWidth="md" fullWidth>
+        <DialogTitle>Split one column into several</DialogTitle>
+        <DialogContent>
+          <DialogContentText sx={{ mb: 2 }}>
+            When one cell holds several values &mdash; for example <code>C3, C4, C5</code> in a single cell &mdash;
+            this puts each value in its own column. Pick what separates them (a comma, space, etc.), or split every
+            N characters for fixed-width codes. You set it once and every row is split the same way.
+          </DialogContentText>
+
+            <Box sx={{ display: 'flex', gap: 2, mb: 2, flexWrap: 'wrap' }}>
+              <FormControl size="small" sx={{ minWidth: 220, flex: 1 }}>
+                <InputLabel>Column to split</InputLabel>
+                <Select
+                  label="Column to split"
+                  value={splitColsConfig.sourceColumn}
+                  onChange={(e) => setSplitColsConfig(prev => ({ ...prev, sourceColumn: e.target.value }))}
+                >
+                  {splitColsCandidates.map(col => (
+                    <MenuItem key={`${col.field}-${col.index}`} value={col.field}>{col.label}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+
+              <FormControl size="small" sx={{ minWidth: 190 }}>
+                <InputLabel>Split by</InputLabel>
+                <Select
+                  label="Split by"
+                  value={splitColsConfig.splitMode}
+                  onChange={(e) => setSplitColsConfig(prev => ({ ...prev, splitMode: e.target.value }))}
+                >
+                  <MenuItem value="delimiter">A delimiter</MenuItem>
+                  <MenuItem value="characters">Every N characters</MenuItem>
+                </Select>
+              </FormControl>
+
+              {splitColsConfig.splitMode === 'delimiter' ? (
+                <>
+                  <FormControl size="small" sx={{ minWidth: 160 }}>
+                    <InputLabel>Delimiter</InputLabel>
+                    <Select
+                      label="Delimiter"
+                      value={splitColsConfig.delimiter}
+                      onChange={(e) => setSplitColsConfig(prev => ({ ...prev, delimiter: e.target.value }))}
+                    >
+                      <MenuItem value="comma">Comma ,</MenuItem>
+                      <MenuItem value="semicolon">Semicolon ;</MenuItem>
+                      <MenuItem value="pipe">Pipe |</MenuItem>
+                      <MenuItem value="slash">Slash /</MenuItem>
+                      <MenuItem value="newline">New line</MenuItem>
+                      <MenuItem value="tab">Tab</MenuItem>
+                      <MenuItem value="space">Space</MenuItem>
+                      <MenuItem value="custom">Custom character...</MenuItem>
+                    </Select>
+                  </FormControl>
+
+                  {splitColsConfig.delimiter === 'custom' && (
+                    <TextField
+                      size="small"
+                      label="Custom delimiter"
+                      sx={{ minWidth: 160 }}
+                      value={splitColsConfig.customDelimiter}
+                      onChange={(e) => setSplitColsConfig(prev => ({ ...prev, customDelimiter: e.target.value }))}
+                      helperText="Any character or text"
+                    />
+                  )}
+                </>
+              ) : (
+                <TextField
+                  size="small"
+                  type="number"
+                  label="Characters per column"
+                  sx={{ minWidth: 190 }}
+                  InputProps={{ inputProps: { min: 1 } }}
+                  value={splitColsConfig.chunkSize}
+                  onChange={(e) => setSplitColsConfig(prev => ({ ...prev, chunkSize: e.target.value }))}
+                  helperText="e.g. 3 turns ABCDEFGH into ABC | DEF | GH"
+                />
+              )}
+            </Box>
+
+            <Box sx={{ display: 'flex', gap: 2, mb: 2, flexWrap: 'wrap' }}>
+              <TextField
+                size="small"
+                label="Output column prefix"
+                sx={{ minWidth: 220, flex: 1 }}
+                value={splitColsConfig.destinationPrefix}
+                onChange={(e) => setSplitColsConfig(prev => ({ ...prev, destinationPrefix: e.target.value }))}
+                helperText={
+                  splitColsConfig.destinationPrefix.trim()
+                    ? `Creates ${splitColsConfig.destinationPrefix.trim()}_1, ${splitColsConfig.destinationPrefix.trim()}_2, ...`
+                    : 'e.g. Tag'
+                }
+              />
+              <TextField
+                size="small"
+                type="number"
+                label="Max columns"
+                sx={{ minWidth: 160 }}
+                InputProps={{ inputProps: { min: 0 } }}
+                value={splitColsConfig.maxColumns}
+                onChange={(e) => setSplitColsConfig(prev => ({ ...prev, maxColumns: e.target.value }))}
+                helperText="Blank = as many as needed"
+              />
+            </Box>
+
+            <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center', mb: 1 }}>
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    checked={splitColsConfig.trim}
+                    onChange={(e) => setSplitColsConfig(prev => ({ ...prev, trim: e.target.checked }))}
+                  />
+                }
+                label="Trim spaces"
+              />
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    checked={splitColsConfig.dropEmpty}
+                    onChange={(e) => setSplitColsConfig(prev => ({ ...prev, dropEmpty: e.target.checked }))}
+                  />
+                }
+                label="Drop empty values"
+              />
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    checked={splitColsConfig.keepSourceColumn}
+                    onChange={(e) => setSplitColsConfig(prev => ({ ...prev, keepSourceColumn: e.target.checked }))}
+                  />
+                }
+                label="Keep the original column"
+              />
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    checked={splitColsConfig.overwriteExisting}
+                    onChange={(e) => setSplitColsConfig(prev => ({ ...prev, overwriteExisting: e.target.checked }))}
+                  />
+                }
+                label="Fill existing columns of this name (e.g. the template's Tag_1, Tag_2 …)"
+              />
+            </Box>
+
+            {Number(splitColsConfig.maxColumns) > 0 && (
+              <FormControl fullWidth size="small" sx={{ mb: 2 }}>
+                <InputLabel>If a row has more values than fit</InputLabel>
+                <Select
+                  label="If a row has more values than fit"
+                  value={splitColsConfig.onOverflow}
+                  onChange={(e) => setSplitColsConfig(prev => ({ ...prev, onOverflow: e.target.value }))}
+                >
+                  <MenuItem value="review">Flag the extra values for review</MenuItem>
+                  <MenuItem value="truncate">Drop the extras quietly</MenuItem>
+                </Select>
+              </FormControl>
+            )}
+
+            {splitColsError && <Alert severity="error" sx={{ mt: 2 }}>{splitColsError}</Alert>}
+
+            {splitColsPreview && (
+              <Box sx={{ mt: 2 }}>
+                <Alert severity="success" sx={{ mb: 1 }}>
+                  {splitColsPreview.columns_created} column(s) created from {splitColsPreview.rows_split} row(s)
+                  holding more than one value. Widest row had {splitColsPreview.widest_row}.
+                  {splitColsPreview.overflow_rows > 0 && ` ${splitColsPreview.overflow_rows} row(s) overflowed.`}
+                </Alert>
+                <Box sx={{ maxHeight: 240, overflow: 'auto', border: '1px solid #e0e0e0', borderRadius: 1 }}>
+                  <Box component="table" sx={{ borderCollapse: 'collapse', width: '100%', fontSize: 12 }}>
+                    <Box component="thead" sx={{ position: 'sticky', top: 0, bgcolor: '#fafafa' }}>
+                      <Box component="tr">
+                        {splitColsPreview.headers.map(header => (
+                          <Box
+                            component="th"
+                            key={header}
+                            sx={{
+                              p: 0.75,
+                              textAlign: 'left',
+                              borderBottom: '1px solid #e0e0e0',
+                              whiteSpace: 'nowrap',
+                              fontWeight: splitColsPreview.new_columns?.includes(header) ? 700 : 500,
+                              color: splitColsPreview.new_columns?.includes(header) ? '#0277bd' : 'inherit'
+                            }}
+                          >
+                            {header}
+                          </Box>
+                        ))}
+                      </Box>
+                    </Box>
+                    <Box component="tbody">
+                      {splitColsPreview.data.map((row, rowIndex) => (
+                        <Box component="tr" key={rowIndex}>
+                          {splitColsPreview.headers.map(header => (
+                            <Box
+                              component="td"
+                              key={header}
+                              sx={{ p: 0.75, borderBottom: '1px solid #f0f0f0', whiteSpace: 'nowrap' }}
+                            >
+                              {row[header]}
+                            </Box>
+                          ))}
+                        </Box>
+                      ))}
+                    </Box>
+                  </Box>
+                </Box>
+              </Box>
+            )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setSplitColsDialogOpen(false)} disabled={splitColsRunning}>Cancel</Button>
+          <Button
+            onClick={handlePreviewSplitCols}
+            disabled={splitColsPreviewLoading || splitColsRunning || !splitColsConfig.sourceColumn}
+          >
+            {splitColsPreviewLoading ? 'Previewing...' : 'Preview'}
+          </Button>
+          <Button
+            onClick={handleApplySplitCols}
+            variant="contained"
+            startIcon={splitColsRunning ? <CircularProgress size={16} /> : <ContentCutIcon />}
+            disabled={splitColsRunning || !splitColsConfig.sourceColumn || !splitColsConfig.destinationPrefix.trim()}
+          >
+            {splitColsRunning ? 'Splitting...' : 'Apply'}
+>>>>>>> Stashed changes
           </Button>
         </DialogActions>
       </Dialog>

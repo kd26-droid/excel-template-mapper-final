@@ -435,9 +435,13 @@ def upload_pdf(request):
         # Generate session ID
         session_id = str(uuid.uuid4())
 
-        # Save uploaded file temporarily
-        temp_dir = tempfile.gettempdir()
-        file_path = os.path.join(temp_dir, f"{session_id}.pdf")
+        # Save the uploaded PDF under the volume-mounted media dir so it survives
+        # a container restart/recreate (the old /tmp location was wiped each time).
+        from django.conf import settings as _settings
+        base = getattr(_settings, 'BASE_DIR', None)
+        pdf_dir = os.path.join(str(base), 'media', 'pdf_sessions') if base else tempfile.gettempdir()
+        os.makedirs(pdf_dir, exist_ok=True)
+        file_path = os.path.join(pdf_dir, f"{session_id}.pdf")
 
         with open(file_path, 'wb') as f:
             for chunk in uploaded_file.chunks():

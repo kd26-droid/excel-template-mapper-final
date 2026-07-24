@@ -4398,6 +4398,16 @@ def download_file(request, session_id=None):
                 base_headers = info.get("current_template_headers") or info.get("enhanced_headers") or []
                 logger.info(f"🔧 DOWNLOAD: Using formula-enhanced data with {len(base_headers)} headers")
 
+            # Rows are stored as position-aligned lists. Convert them to dicts keyed
+            # by their real headers so that any later column reordering moves values
+            # by NAME — otherwise reordering only relabels positions and scrambles
+            # every cell (designators land under Procurement/Spec columns, etc.).
+            if transformed_rows and isinstance(transformed_rows[0], list) and base_headers:
+                transformed_rows = [
+                    {base_headers[i]: (row[i] if i < len(row) else '') for i in range(len(base_headers))}
+                    for row in transformed_rows
+                ]
+
             # Inject MPN validation columns for enhanced data path as well
             try:
                 mpn_validation = info.get('mpn_validation') or {}
@@ -8441,6 +8451,994 @@ def create_factwise_id(request):
             'success': False,
             'error': f'Failed to create Factwise ID: {str(e)}'
         }, status=500))
+
+
+def _latest_pdf_extraction_for_session(session_id):
+    """Return the most recent extraction record for a PDF-backed session, if any."""
+    try:
+        pdf_session = PDFSession.objects.get(session_id=session_id)
+        return PDFExtractionResult.objects.filter(pdf_session=pdf_session).order_by('-created_at').first()
+    except Exception:
+        return None
+
+
+def _cell_text(value):
+    """Normalize a source cell to a trimmed string."""
+    if value is None:
+        return ''
+    try:
+        if pd.isna(value):
+            return ''
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip()
+
+
+def read_session_source(session_id, info):
+    """
+    Read the current source table for a session.
+
+    Returns (headers, rows, extraction) where rows are dicts keyed by header and
+    extraction is the PDFExtractionResult backing the session, or None for
+    spreadsheet sessions.
+    """
+    extraction = _latest_pdf_extraction_for_session(session_id)
+    if extraction and extraction.extracted_headers:
+        headers = [str(h) for h in extraction.extracted_headers]
+        rows = []
+        for raw_row in (extraction.extracted_data or []):
+            if isinstance(raw_row, dict):
+                rows.append({h: _cell_text(raw_row.get(h)) for h in headers})
+            else:
+                rows.append({h: _cell_text(raw_row[i] if i < len(raw_row) else '') for i, h in enumerate(headers)})
+        return headers, rows, extraction
+
+    client_path = hybrid_file_manager.get_file_path(info.get('client_path'))
+    header_row = (info.get('header_row', 1) or 1) - 1
+    if str(client_path).lower().endswith('.csv'):
+        df = read_csv_with_encoding(client_path, header_row, dtype=str, keep_default_na=False)
+    else:
+        df = pd.read_excel(client_path, sheet_name=info.get('sheet_name'), header=header_row, dtype=str)
+
+    headers = [str(c).strip() for c in df.columns]
+    rows = [
+        {header: _cell_text(value) for header, value in zip(headers, record)}
+        for record in df.values.tolist()
+    ]
+    return headers, rows, extraction
+
+
+def write_session_source(session_id, info, headers, rows, extraction=None):
+    """Persist a rewritten source table so mapping and header endpoints see the new shape."""
+    table = [[row.get(header, '') for header in headers] for row in rows]
+
+    if extraction is not None:
+        extraction.extracted_headers = headers
+        extraction.extracted_data = table
+        extraction.save(update_fields=['extracted_headers', 'extracted_data'])
+
+        # PDF client CSVs are written without a header row; the mapping layer
+        # re-attaches headers from the extraction record.
+        csv_path = hybrid_file_manager.get_file_path(info.get('client_path'))
+        pd.DataFrame(table).to_csv(str(csv_path), index=False, header=False)
+        info['client_headers'] = headers
+        return str(csv_path)
+
+    target_dir = Path(hybrid_file_manager.local_temp_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    csv_path = target_dir / f"source_expanded_{session_id}.csv"
+    pd.DataFrame(table, columns=headers).to_csv(str(csv_path), index=False)
+
+    info['client_path'] = str(csv_path)
+    info['sheet_name'] = None
+    info['header_row'] = 1
+    info['client_headers'] = headers
+    return str(csv_path)
+
+
+def read_session_grid(session_id, info):
+    """
+    Read the mapped grid the review screen shows: destination headers and rows.
+
+    Rows stay as lists because the grid may legitimately repeat a header (several
+    source columns can map onto the same template column), so keying by name
+    would silently merge those columns.
+
+    Prefers snapshots later steps have already written, so transforms chain.
+    """
+    for key in ('edited_data', 'enhanced_data'):
+        snapshot = info.get(key)
+        if isinstance(snapshot, dict) and snapshot.get('headers') and snapshot.get('data'):
+            return list(snapshot['headers']), [list(row) for row in snapshot['data']]
+
+    mapping = info.get('mappings')
+    if not mapping:
+        return None, None
+
+    result = apply_column_mappings(
+        client_file=info['client_path'],
+        mappings=mapping if isinstance(mapping, dict) else {'mappings': mapping},
+        sheet_name=info.get('sheet_name'),
+        header_row=info['header_row'] - 1 if info.get('header_row', 1) > 0 else 0,
+        session_id=session_id
+    )
+    return list(result.get('headers') or []), [list(row) for row in (result.get('data') or [])]
+
+
+def write_session_grid(session_id, info, headers, rows):
+    """Persist a rewritten grid, matching how the other review-screen tools save."""
+    snapshot = {'headers': list(headers), 'data': [list(row) for row in rows]}
+    info['enhanced_data'] = snapshot
+    info['edited_data'] = snapshot
+    info['enhanced_headers'] = list(headers)
+    info['current_template_headers'] = list(headers)
+    return snapshot
+
+
+def _normalize_group_config(groups, target_fields, source_headers):
+    """
+    Validate the group configuration and return it as a list of column lists.
+
+    A group is an ordered tuple of source columns that lines up with
+    target_fields, so ["Manufacturer", "Manufacturer PartNo"] fills
+    ["Manufacturer", "MPN"]. Single-column groups may be given as bare strings.
+    """
+    if not target_fields:
+        raise ValueError('target_fields is required')
+    if len(set(target_fields)) != len(target_fields):
+        raise ValueError('target_fields must be unique')
+    if not groups or len(groups) < 2:
+        raise ValueError('At least two column groups are required to expand into rows')
+
+    width = len(target_fields)
+    normalized = []
+    for position, group in enumerate(groups, start=1):
+        columns = [group] if isinstance(group, str) else list(group or [])
+        if len(columns) != width:
+            raise ValueError(
+                f'Group {position} has {len(columns)} column(s) but {width} target field(s) were given'
+            )
+        missing = [column for column in columns if column not in source_headers]
+        if missing:
+            raise ValueError(f'Group {position} refers to columns not in the source: {", ".join(missing)}')
+        normalized.append(columns)
+
+    seen = {}
+    for position, columns in enumerate(normalized, start=1):
+        for column in columns:
+            if column in seen:
+                raise ValueError(f'Column "{column}" is used by both group {seen[column]} and group {position}')
+            seen[column] = position
+
+    return normalized
+
+
+def build_expanded_headers(source_headers, groups, target_fields):
+    """
+    Lay out the post-expansion headers.
+
+    Grouped columns collapse into the target fields, which take the position of
+    the first grouped column so the output keeps the source's column order.
+    """
+    grouped_columns = {column for group in groups for column in group}
+    first_group_index = min(source_headers.index(column) for column in grouped_columns)
+
+    headers = []
+    for index, header in enumerate(source_headers):
+        if index == first_group_index:
+            headers.extend(target_fields)
+        if header not in grouped_columns:
+            headers.append(header)
+    return headers
+
+
+@api_view(['POST'])
+def expand_column_groups(request):
+    """
+    Fold repeated column groups into rows.
+
+    Columns that mean the same thing often sit side by side on a single source
+    row: a manufacturer/MPN pair next to its alternate pair, or an item code
+    next to its alternate item codes. This turns each group into its own row and
+    copies every other column on that source row down into all of them.
+
+        target_fields: ["Manufacturer", "MPN"]
+        groups: [["Manufacturer", "Manufacturer PartNo"],
+                 ["Manufacturer S S", "Manufacturer PartNo S S"]]
+
+    Groups can be any width. Four single-column groups turn one row into four.
+    Nothing here is tied to a customer, a file, or a particular column name.
+    """
+    try:
+        session_id = request.data.get('session_id')
+        if not session_id:
+            return Response({'success': False, 'error': 'session_id required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+
+        target_fields = [str(f).strip() for f in (request.data.get('target_fields') or []) if str(f).strip()]
+        on_partial = str(request.data.get('on_partial') or 'review')
+        if on_partial not in ('review', 'emit', 'skip'):
+            on_partial = 'review'
+        keep_rows_without_groups = bool(request.data.get('keep_rows_without_groups', False))
+        preview = bool(request.data.get('preview', False))
+        preview_rows = max(1, min(int(request.data.get('preview_rows') or 20), 200))
+
+        source_headers, source_rows, extraction = read_session_source(session_id, info)
+        if not source_headers or not source_rows:
+            return Response({
+                'success': False,
+                'error': 'No source data found for this session'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            groups = _normalize_group_config(request.data.get('groups'), target_fields, source_headers)
+        except ValueError as config_error:
+            return Response({
+                'success': False,
+                'error': str(config_error),
+                'source_headers': source_headers,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        grouped_columns = {column for group in groups for column in group}
+        carried_columns = [h for h in source_headers if h not in grouped_columns]
+        collisions = [f for f in target_fields if f in carried_columns]
+        if collisions:
+            return Response({
+                'success': False,
+                'error': f'Target field(s) collide with columns that are kept as-is: {", ".join(collisions)}',
+                'source_headers': source_headers,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        output_headers = build_expanded_headers(source_headers, groups, target_fields)
+
+        expanded_rows = []
+        review_rows = []
+        empty_groups = 0
+        partial_groups = 0
+        rows_without_groups = 0
+
+        for row_number, source_row in enumerate(source_rows, start=1):
+            carried = {column: source_row.get(column, '') for column in carried_columns}
+            emitted_for_row = 0
+
+            for group_index, group in enumerate(groups, start=1):
+                values = [source_row.get(column, '') for column in group]
+                filled = [value for value in values if value != '']
+
+                if not filled:
+                    empty_groups += 1
+                    continue
+
+                if len(filled) < len(values):
+                    partial_groups += 1
+                    blanks = [column for column, value in zip(group, values) if value == '']
+                    review_rows.append({
+                        'row': row_number,
+                        'group': group_index,
+                        'reason': f'Incomplete group; no value in {", ".join(blanks)}',
+                        'values': dict(zip(group, values)),
+                    })
+                    if on_partial != 'emit':
+                        continue
+
+                output_row = dict(carried)
+                output_row.update(dict(zip(target_fields, values)))
+                output_row['_source_row'] = row_number
+                expanded_rows.append(output_row)
+                emitted_for_row += 1
+
+            if emitted_for_row == 0:
+                rows_without_groups += 1
+                if keep_rows_without_groups:
+                    output_row = dict(carried)
+                    output_row.update({field: '' for field in target_fields})
+                    output_row['_source_row'] = row_number
+                    expanded_rows.append(output_row)
+
+        if not expanded_rows:
+            return Response({
+                'success': False,
+                'error': 'No rows were produced. Check the group columns, or allow rows with no filled group.',
+                'source_headers': source_headers,
+                'review_rows': review_rows[:50],
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        summary = {
+            'source_rows': len(source_rows),
+            'output_rows': len(expanded_rows),
+            'groups': len(groups),
+            'empty_groups_skipped': empty_groups,
+            'partial_groups': partial_groups,
+            'partial_handling': on_partial,
+            'rows_without_groups': rows_without_groups,
+            'target_fields': target_fields,
+        }
+
+        preview_payload = [
+            {header: row.get(header, '') for header in output_headers}
+            for row in expanded_rows[:preview_rows]
+        ]
+
+        if preview:
+            return Response({
+                'success': True,
+                'preview': True,
+                'headers': output_headers,
+                'data': preview_payload,
+                'review_rows': review_rows[:50],
+                **summary,
+            })
+
+        write_session_source(session_id, info, output_headers, expanded_rows, extraction)
+
+        # The source shape changed, so anything derived from the old columns is stale.
+        for derived_key in ('mappings', 'mapped_data', 'edited_data', 'enhanced_data', 'formula_enhanced_data'):
+            info.pop(derived_key, None)
+
+        history = list(info.get('source_transforms') or [])
+        history.append({
+            'type': 'expand_column_groups',
+            'applied_at': datetime.utcnow().isoformat(),
+            'config': {
+                'target_fields': target_fields,
+                'groups': groups,
+                'on_partial': on_partial,
+                'keep_rows_without_groups': keep_rows_without_groups,
+            },
+            'summary': summary,
+        })
+        info['source_transforms'] = history
+        save_session(session_id, info)
+        new_version = increment_template_version(session_id)
+
+        logger.info(
+            f"🔁 expand_column_groups on {session_id}: {len(source_rows)} rows -> {len(expanded_rows)} rows "
+            f"across {len(groups)} groups"
+        )
+
+        return Response({
+            'success': True,
+            'preview': False,
+            'message': f'{len(source_rows)} source rows expanded into {len(expanded_rows)} rows',
+            'template_version': new_version,
+            'headers': output_headers,
+            'data': preview_payload,
+            'review_rows': review_rows[:50],
+            **summary,
+        })
+    except Exception as e:
+        logger.error(f"expand_column_groups failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+# Friendly names the UI offers for the usual separators. Anything else the user
+# types is used verbatim, so unusual separators still work.
+DELIMITER_PRESETS = {
+    'comma': ',',
+    'semicolon': ';',
+    'pipe': '|',
+    'newline': '\n',
+    'tab': '\t',
+    'space': ' ',
+    'slash': '/',
+}
+
+
+def resolve_delimiter(value):
+    """Turn a preset name or a literal separator into the string to split on."""
+    if value is None:
+        return ','
+    text = str(value)
+    key = text.strip().lower()
+    if key in DELIMITER_PRESETS:
+        return DELIMITER_PRESETS[key]
+    # Let callers send escapes like "\n" without sending a real newline.
+    text = text.replace('\\n', '\n').replace('\\t', '\t')
+    return text or ','
+
+
+def split_cell_values(value, mode='delimiter', delimiter=',', chunk_size=0, trim=True, drop_empty=True):
+    """
+    Split one cell into its individual values.
+
+    mode 'delimiter'  splits on a separator, so "C3, C4, C5" gives three values.
+    mode 'characters' cuts every chunk_size characters, for fixed-width codes.
+    """
+    text = _cell_text(value)
+    if not text:
+        return []
+
+    if mode == 'characters':
+        size = max(1, int(chunk_size or 1))
+        parts = [text[i:i + size] for i in range(0, len(text), size)]
+    else:
+        parts = text.split(delimiter)
+
+    if trim:
+        parts = [part.strip() for part in parts]
+    if drop_empty:
+        parts = [part for part in parts if part != '']
+    return parts
+
+
+@api_view(['POST'])
+def split_column_into_columns(request):
+    """
+    Split one column's values into a numbered run of columns.
+
+    A single cell often holds a list: reference designators as "C3, C4, C5", or
+    any other packed set. Each value moves into its own column, so with the
+    prefix "Tag" that cell becomes Tag_1=C3, Tag_2=C4, Tag_3=C5.
+
+    Splitting is either on a delimiter the user picks once, or every N
+    characters for fixed-width codes.
+
+    This runs on the mapped grid, like the other review-screen tools, so the
+    column being split is a destination column and mappings are left alone.
+
+    The widest row decides how many columns are produced, capped by max_columns
+    when one is given. Nothing here is tied to a particular column or customer.
+    """
+    try:
+        session_id = request.data.get('session_id')
+        if not session_id:
+            return Response({'success': False, 'error': 'session_id required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+
+        source_column = str(request.data.get('source_column') or '').strip()
+        destination_prefix = str(request.data.get('destination_prefix') or '').strip()
+        if not source_column:
+            return Response({'success': False, 'error': 'source_column required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not destination_prefix:
+            return Response({'success': False, 'error': 'destination_prefix required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        split_mode = str(request.data.get('split_mode') or 'delimiter')
+        if split_mode not in ('delimiter', 'characters'):
+            split_mode = 'delimiter'
+        delimiter = resolve_delimiter(request.data.get('delimiter', 'comma'))
+
+        try:
+            chunk_size = int(request.data.get('chunk_size') or 0)
+        except (TypeError, ValueError):
+            chunk_size = 0
+        if split_mode == 'characters' and chunk_size < 1:
+            return Response({
+                'success': False,
+                'error': 'chunk_size must be 1 or more when splitting every N characters'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        trim = bool(request.data.get('trim', True))
+        drop_empty = bool(request.data.get('drop_empty', True))
+        keep_source_column = bool(request.data.get('keep_source_column', False))
+        on_overflow = str(request.data.get('on_overflow') or 'review')
+        if on_overflow not in ('review', 'truncate'):
+            on_overflow = 'review'
+        preview = bool(request.data.get('preview', False))
+        preview_rows = max(1, min(int(request.data.get('preview_rows') or 20), 200))
+
+        try:
+            max_columns = int(request.data.get('max_columns') or 0)
+        except (TypeError, ValueError):
+            max_columns = 0
+        max_columns = max(0, max_columns)
+
+        headers, rows = read_session_grid(session_id, info)
+        if headers is None:
+            return Response({
+                'success': False,
+                'error': 'No mappings found. Map your columns before splitting.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        if not headers or not rows:
+            return Response({'success': False, 'error': 'No data found for this session'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        # Resolve which column to split. A unique column name is authoritative —
+        # this survives any off-by-one in the caller's index (e.g. a hidden
+        # row-number column shifting positions). The index is only used to
+        # disambiguate when the same header legitimately repeats in the grid.
+        try:
+            requested_index = int(request.data.get('source_column_index'))
+        except (TypeError, ValueError):
+            requested_index = None
+
+        name_positions = [i for i, h in enumerate(headers) if h == source_column]
+        if len(name_positions) == 1:
+            source_index = name_positions[0]
+        elif len(name_positions) > 1 and requested_index in name_positions:
+            source_index = requested_index
+        elif len(name_positions) > 1:
+            source_index = name_positions[0]
+        elif requested_index is not None and 0 <= requested_index < len(headers):
+            source_index = requested_index
+        else:
+            return Response({
+                'success': False,
+                'error': f'Column "{source_column}" is not in the grid',
+                'headers': headers,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        split_per_row = [
+            split_cell_values(
+                row[source_index] if source_index < len(row) else '',
+                split_mode, delimiter, chunk_size, trim, drop_empty
+            )
+            for row in rows
+        ]
+
+        widest = max((len(values) for values in split_per_row), default=0)
+        if widest == 0:
+            hint = 'Check the delimiter.' if split_mode == 'delimiter' else 'Check the chunk size.'
+            return Response({
+                'success': False,
+                'error': f'No values were produced from "{source_column}". {hint}',
+                'headers': headers,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        column_count = min(widest, max_columns) if max_columns else widest
+        new_columns = [f'{destination_prefix}_{i + 1}' for i in range(column_count)]
+        overwrite_existing = bool(request.data.get('overwrite_existing', False))
+
+        kept_headers = [h for i, h in enumerate(headers) if keep_source_column or i != source_index]
+        clashes = [c for c in new_columns if c in kept_headers]
+        if clashes and not overwrite_existing:
+            return Response({
+                'success': False,
+                'error': f'Output column(s) already exist: {", ".join(clashes)}. '
+                         f'Turn on "Fill existing columns" to write into them, or use a different prefix.',
+                'headers': headers,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        review_rows = []
+        rows_split = 0
+        rows_empty = 0
+        overflow_rows = 0
+
+        if overwrite_existing:
+            # Write the split values into columns that already carry this prefix
+            # (e.g. the template's Tag_1 … Tag_N), creating only the ones missing.
+            output_headers = [h for i, h in enumerate(headers) if keep_source_column or i != source_index]
+            insert_at = min(source_index, len(output_headers))
+            for offset, name in enumerate([c for c in new_columns if c not in output_headers]):
+                output_headers.insert(insert_at + offset, name)
+            name_to_out = {h: k for k, h in enumerate(output_headers)}
+
+            output_rows = []
+            for row_number, (row, values) in enumerate(zip(rows, split_per_row), start=1):
+                if not values:
+                    rows_empty += 1
+                elif len(values) > 1:
+                    rows_split += 1
+                if column_count and len(values) > column_count:
+                    overflow_rows += 1
+                    if on_overflow == 'review':
+                        review_rows.append({'row': row_number,
+                                            'reason': f'{len(values)} values but only {column_count} column(s) available',
+                                            'dropped': values[column_count:]})
+                    values = values[:column_count]
+
+                out = [''] * len(output_headers)
+                for i, h in enumerate(headers):
+                    if not keep_source_column and i == source_index:
+                        continue
+                    if h in name_to_out:
+                        out[name_to_out[h]] = row[i] if i < len(row) else ''
+                for i, name in enumerate(new_columns):
+                    out[name_to_out[name]] = values[i] if i < len(values) else ''
+                output_rows.append(out)
+        else:
+            # Put the new columns where the split column was, so column order survives.
+            output_headers = []
+            carried_indices = []
+            for index, header in enumerate(headers):
+                if index == source_index:
+                    output_headers.extend(new_columns)
+                    if keep_source_column:
+                        output_headers.append(header)
+                        carried_indices.append(index)
+                else:
+                    output_headers.append(header)
+                    carried_indices.append(index)
+
+            new_column_start = source_index
+            output_rows = []
+            for row_number, (row, values) in enumerate(zip(rows, split_per_row), start=1):
+                if not values:
+                    rows_empty += 1
+                elif len(values) > 1:
+                    rows_split += 1
+
+                if column_count and len(values) > column_count:
+                    overflow_rows += 1
+                    if on_overflow == 'review':
+                        review_rows.append({
+                            'row': row_number,
+                            'reason': f'{len(values)} values but only {column_count} column(s) available',
+                            'dropped': values[column_count:],
+                        })
+                    values = values[:column_count]
+
+                carried = [row[i] if i < len(row) else '' for i in carried_indices]
+                padded = list(values) + [''] * (column_count - len(values))
+                output_rows.append(
+                    carried[:new_column_start] + padded + carried[new_column_start:]
+                )
+
+        summary = {
+            'source_rows': len(rows),
+            'output_rows': len(output_rows),
+            'columns_created': column_count,
+            'widest_row': widest,
+            'rows_split': rows_split,
+            'rows_with_no_values': rows_empty,
+            'overflow_rows': overflow_rows,
+            'overflow_handling': on_overflow,
+            'split_mode': split_mode,
+            'new_columns': new_columns,
+        }
+
+        preview_payload = [
+            dict(zip(output_headers, row)) for row in output_rows[:preview_rows]
+        ]
+
+        if preview:
+            return Response({
+                'success': True,
+                'preview': True,
+                'headers': output_headers,
+                'data': preview_payload,
+                'review_rows': review_rows[:50],
+                **summary,
+            })
+
+        write_session_grid(session_id, info, output_headers, output_rows)
+
+        history = list(info.get('source_transforms') or [])
+        history.append({
+            'type': 'split_column_into_columns',
+            'applied_at': datetime.utcnow().isoformat(),
+            'config': {
+                'source_column': source_column,
+                'source_column_index': source_index,
+                'split_mode': split_mode,
+                'delimiter': delimiter,
+                'chunk_size': chunk_size,
+                'destination_prefix': destination_prefix,
+                'trim': trim,
+                'drop_empty': drop_empty,
+                'max_columns': max_columns,
+                'on_overflow': on_overflow,
+                'keep_source_column': keep_source_column,
+            },
+            'summary': summary,
+        })
+        info['source_transforms'] = history
+        save_session(session_id, info)
+        new_version = increment_template_version(session_id)
+
+        logger.info(
+            f"✂️ split_column_into_columns on {session_id}: \"{source_column}\" -> "
+            f"{column_count} column(s) across {len(output_rows)} rows"
+        )
+
+        return Response({
+            'success': True,
+            'preview': False,
+            'message': f'"{source_column}" split into {column_count} column(s)',
+            'template_version': new_version,
+            'headers': output_headers,
+            'data': preview_payload,
+            'review_rows': review_rows[:50],
+            **summary,
+        })
+    except Exception as e:
+        logger.error(f"split_column_into_columns failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+def _row_matches_condition(row, column, test, value=''):
+    """Evaluate a single condition on a row's cell. Used for group segmentation."""
+    cell = str(row.get(column, '') or '').strip()
+    value = str(value or '')
+    if test == 'blank':
+        return cell == ''
+    if test == 'not_blank':
+        return cell != ''
+    if test == 'equals':
+        return cell == value.strip()
+    if test == 'not_equals':
+        return cell != value.strip()
+    if test == 'is_number':
+        try:
+            float(cell.replace(',', ''))
+            return True
+        except (ValueError, AttributeError):
+            return False
+    if test == 'matches':
+        try:
+            return re.search(value, cell) is not None
+        except re.error:
+            return False
+    return False
+
+
+@api_view(['POST'])
+def carry_forward_group(request):
+    """
+    Group rows under a parent/header row and reshape them into item rows.
+
+    Some tables repeat a structure the import format can't use directly: a
+    "parent" row establishes shared context (e.g. a base part with its
+    description) and the rows beneath it are alternates/options for that parent.
+    This walks the table, treats each row matching the parent condition as a
+    group header, copies chosen columns down into the rows below it, and emits
+    either just the child rows or the whole group.
+
+    The parent condition, the columns to carry, and the emit policy are all
+    caller-supplied — nothing here is tied to a document, column name, or vendor.
+
+        parent_condition: {"column": "MFR", "test": "blank"}
+        carry_columns: ["PartNo", "Description"]
+        emit: "children"     # drop the parent header rows
+
+    Test options: blank, not_blank, equals, not_equals, is_number, matches(regex).
+    """
+    try:
+        session_id = request.data.get('session_id')
+        if not session_id:
+            return Response({'success': False, 'error': 'session_id required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+
+        condition = request.data.get('parent_condition') or {}
+        parent_column = str(condition.get('column') or '').strip()
+        parent_test = str(condition.get('test') or 'blank')
+        parent_value = condition.get('value', '')
+        if not parent_column:
+            return Response({'success': False, 'error': 'parent_condition.column is required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        carry_columns = [str(c).strip() for c in (request.data.get('carry_columns') or []) if str(c).strip()]
+        fill_only_blank = bool(request.data.get('fill_only_blank', True))
+        emit = str(request.data.get('emit') or 'children')
+        if emit not in ('children', 'all'):
+            emit = 'children'
+        preview = bool(request.data.get('preview', False))
+        preview_rows = max(1, min(int(request.data.get('preview_rows') or 20), 200))
+
+        headers, rows, extraction = read_session_source(session_id, info)
+        if not headers or not rows:
+            return Response({'success': False, 'error': 'No source data found for this session'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if parent_column not in headers:
+            return Response({'success': False, 'error': f'Column "{parent_column}" is not in the source',
+                             'source_headers': headers}, status=status.HTTP_400_BAD_REQUEST)
+        missing = [c for c in carry_columns if c not in headers]
+        if missing:
+            return Response({'success': False, 'error': f'Carry columns not in source: {", ".join(missing)}',
+                             'source_headers': headers}, status=status.HTTP_400_BAD_REQUEST)
+
+        output_rows = []
+        review_rows = []
+        parent_count = 0
+        child_count = 0
+        orphan_count = 0
+        current_parent = None
+
+        for row_number, row in enumerate(rows, start=1):
+            is_parent = _row_matches_condition(row, parent_column, parent_test, parent_value)
+            if is_parent:
+                parent_count += 1
+                current_parent = row
+                if emit == 'all':
+                    output_rows.append(dict(row))
+                continue
+
+            # child row
+            child = dict(row)
+            if current_parent is None:
+                orphan_count += 1
+                review_rows.append({'row': row_number, 'reason': 'Child row before any parent — no context to carry'})
+            else:
+                for col in carry_columns:
+                    parent_val = str(current_parent.get(col, '') or '').strip()
+                    if not parent_val:
+                        continue
+                    if fill_only_blank and str(child.get(col, '') or '').strip():
+                        continue
+                    child[col] = parent_val
+            child_count += 1
+            output_rows.append(child)
+
+        if not output_rows:
+            return Response({'success': False,
+                             'error': 'No rows were produced. Check the parent condition and emit setting.',
+                             'source_headers': headers, 'review_rows': review_rows[:50]},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        summary = {
+            'source_rows': len(rows),
+            'output_rows': len(output_rows),
+            'parents': parent_count,
+            'children': child_count,
+            'orphans': orphan_count,
+            'emit': emit,
+            'parent_condition': {'column': parent_column, 'test': parent_test, 'value': parent_value},
+            'carry_columns': carry_columns,
+        }
+
+        preview_payload = [{h: r.get(h, '') for h in headers} for r in output_rows[:preview_rows]]
+
+        if preview:
+            return Response({'success': True, 'preview': True, 'headers': headers,
+                             'data': preview_payload, 'review_rows': review_rows[:50], **summary})
+
+        write_session_source(session_id, info, headers, output_rows, extraction)
+        for derived_key in ('mappings', 'mapped_data', 'edited_data', 'enhanced_data', 'formula_enhanced_data'):
+            info.pop(derived_key, None)
+        history = list(info.get('source_transforms') or [])
+        history.append({'type': 'carry_forward_group', 'applied_at': datetime.utcnow().isoformat(),
+                        'config': summary})
+        info['source_transforms'] = history
+        save_session(session_id, info)
+        new_version = increment_template_version(session_id)
+
+        logger.info(f"🧷 carry_forward_group on {session_id}: {len(rows)} rows -> {len(output_rows)} "
+                    f"(parents={parent_count}, children={child_count}, orphans={orphan_count})")
+
+        return Response({'success': True, 'preview': False,
+                         'message': f'{len(rows)} rows -> {len(output_rows)} item rows '
+                                    f'({parent_count} parents removed)' if emit == 'children'
+                                    else f'{len(rows)} rows regrouped',
+                         'template_version': new_version, 'headers': headers,
+                         'data': preview_payload, 'review_rows': review_rows[:50], **summary})
+    except Exception as e:
+        logger.error(f"carry_forward_group failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+def stack_mapped_alternates(request):
+    """
+    Turn "two source columns mapped to one destination" into stacked rows.
+
+    When a row lists a main and an alternate the same way — a main supplier's
+    manufacturer/part next to an alternate's — the user maps both onto the same
+    destination columns (e.g. both part-number columns to MPN Code, both
+    manufacturer columns to the manufacturer field). This reads those mappings
+    and, instead of jamming two values into one cell, gives each its own row:
+    the main becomes one row, the alternate the next, everything else copied down.
+
+    Destinations that receive more than one source are "alternates" and must all
+    receive the SAME number of sources, so they pair up cleanly into rows. If
+    they don't, the request is blocked rather than producing shifted data.
+
+    Nothing here is specific to a document — it works off whatever mappings the
+    user drew.
+    """
+    try:
+        session_id = request.data.get('session_id')
+        if not session_id:
+            return Response({'success': False, 'error': 'session_id required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+
+        raw = request.data.get('mappings') or info.get('mappings')
+        if isinstance(raw, dict) and 'mappings' in raw:
+            raw = raw['mappings']
+        pairs = []
+        for m in (raw or []):
+            if isinstance(m, dict):
+                s, t = m.get('source'), m.get('target')
+                if s and t:
+                    pairs.append((str(s), str(t)))
+        if not pairs:
+            return Response({'success': False, 'error': 'No mappings found. Draw your mappings first.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        # Group sources by destination, keeping the order they were mapped
+        # (dicts preserve insertion order on Python 3.7+).
+        grouped = {}
+        for s, t in pairs:
+            grouped.setdefault(t, []).append(s)
+
+        multi = {t: srcs for t, srcs in grouped.items() if len(srcs) > 1}
+        if not multi:
+            return Response({
+                'success': False,
+                'error': 'No alternates found. Map the alternate columns onto the same destinations as the '
+                         'main ones (two source columns pointing at one destination), then try again.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        counts = {t: len(srcs) for t, srcs in multi.items()}
+        n_rows_per_item = max(counts.values())
+        mismatched = {t: c for t, c in counts.items() if c != n_rows_per_item}
+        if mismatched:
+            detail = '; '.join(f'"{t}" has {c}' for t, c in counts.items())
+            return Response({
+                'success': False,
+                'error': f'These destinations have different numbers of sources ({detail}). '
+                         f'Give each the same number of alternates so they can pair into rows.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        preview = bool(request.data.get('preview', False))
+        preview_rows = max(1, min(int(request.data.get('preview_rows') or 20), 200))
+
+        # Read the source once for detecting empty alternates (item with no S S).
+        src_headers, src_rows, extraction = read_session_source(session_id, info)
+
+        client_path = info.get('client_path')
+        sheet_name = info.get('sheet_name')
+        header_row = info.get('header_row', 1)
+        header_row = header_row - 1 if header_row and header_row > 0 else 0
+
+        # For each slot (main, alt1, alt2 …) run a clean single-source-per-target
+        # mapping so the destination naming is correct and nothing shifts.
+        slot_results = []
+        for slot in range(n_rows_per_item):
+            slot_mappings = [
+                {'source': (srcs[slot] if len(srcs) > 1 else srcs[0]), 'target': t}
+                for t, srcs in grouped.items()
+            ]
+            res = apply_column_mappings(
+                client_path, {'mappings': slot_mappings},
+                sheet_name=sheet_name, header_row=header_row, session_id=session_id
+            )
+            slot_results.append(res)
+
+        headers = slot_results[0].get('headers') or []
+        alt_source_cols_by_slot = {slot: [srcs[slot] for srcs in multi.values()] for slot in range(1, n_rows_per_item)}
+
+        output_rows = []
+        n = min(len(r.get('data') or []) for r in slot_results)
+        for k in range(n):
+            output_rows.append(slot_results[0]['data'][k])          # main row for this item
+            src_row = src_rows[k] if k < len(src_rows) else {}
+            for slot in range(1, n_rows_per_item):
+                alt_cols = alt_source_cols_by_slot[slot]
+                if all(str(src_row.get(c, '') or '').strip() == '' for c in alt_cols):
+                    continue                                          # this item has no such alternate
+                output_rows.append(slot_results[slot]['data'][k])
+
+        summary = {
+            'source_rows': n,
+            'output_rows': len(output_rows),
+            'rows_per_item': n_rows_per_item,
+            'alternate_destinations': list(multi.keys()),
+        }
+        preview_payload = [dict(zip(headers, row)) for row in output_rows[:preview_rows]]
+
+        if preview:
+            return Response({'success': True, 'preview': True, 'headers': headers,
+                             'data': preview_payload, **summary})
+
+        snapshot = {'headers': list(headers), 'data': [list(r) for r in output_rows]}
+        info['enhanced_data'] = snapshot
+        info['edited_data'] = snapshot
+        info['enhanced_headers'] = list(headers)
+        info['current_template_headers'] = list(headers)
+        save_session(session_id, info)
+        new_version = increment_template_version(session_id)
+
+        logger.info(f"🧬 stack_mapped_alternates on {session_id}: {n} items -> {len(output_rows)} rows "
+                    f"({n_rows_per_item} per item across {list(multi.keys())})")
+
+        return Response({'success': True, 'preview': False,
+                         'message': f'{n} items expanded into {len(output_rows)} rows',
+                         'template_version': new_version, 'headers': headers,
+                         'data': preview_payload, **summary})
+    except Exception as e:
+        logger.error(f"stack_mapped_alternates failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['GET'])

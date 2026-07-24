@@ -295,6 +295,29 @@ const api = {
   },
 
   /**
+   * Extract a table by treating the drawn zones as COLUMNS, using word
+   * coordinates (blanks preserved, rows aligned, header/footer excluded).
+   */
+  processPDFColumnZones: async (sessionId, { mergeWrapped = false, columnLabels = [], skipTopRows = 0 } = {}) => {
+    try {
+      showGlobalLoader(true);
+      const response = await axios.post(`${API_URL}/pdf/zones/${sessionId}/process-columns/`, {
+        merge_wrapped: mergeWrapped,
+        column_labels: columnLabels,
+        skip_top_rows: skipTopRows
+      }, {
+        timeout: 120000
+      });
+      return response;
+    } catch (error) {
+      console.error('❌ PDF column-zone extraction failed:', error?.response?.data || error?.message || error);
+      throw error;
+    } finally {
+      showGlobalLoader(false);
+    }
+  },
+
+  /**
    * Get processing status for PDF zones
    * @param {string} sessionId - PDF session ID
    */
@@ -1159,6 +1182,94 @@ const api = {
     if (manufacturerHeader) payload.manufacturer_header = manufacturerHeader;
     if (splitOptions) payload.split_options = splitOptions;
     return axios.post(`${API_URL}/mpn/parse-producer/`, payload, { timeout: 120000 });
+  },
+
+  /**
+   * List the session's source columns (pre-mapping), for Excel/CSV and PDF sessions alike.
+   */
+  getSourceColumns: (sessionId) => {
+    return axios.get(`${API_URL}/parser/columns/${sessionId}/`);
+  },
+
+  /**
+   * Fold repeated column groups into rows.
+   * groups: [["Manufacturer","Manufacturer PartNo"], ["Manufacturer S S","Manufacturer PartNo S S"]]
+   * targetFields: ["Manufacturer","MPN"]
+   */
+  expandColumnGroups: (sessionId, { targetFields, groups, onPartial = 'review', keepRowsWithoutGroups = false, preview = false } = {}) => {
+    return axios.post(`${API_URL}/transforms/expand-column-groups/`, {
+      session_id: sessionId,
+      target_fields: targetFields,
+      groups,
+      on_partial: onPartial,
+      keep_rows_without_groups: keepRowsWithoutGroups,
+      preview
+    }, { timeout: 120000 });
+  },
+
+  /**
+   * Split one delimited column into a numbered run of columns.
+   * "C3, C4, C5" with prefix "Tag" becomes Tag_1=C3, Tag_2=C4, Tag_3=C5.
+   */
+  splitColumnIntoColumns: (sessionId, {
+    sourceColumn,
+    sourceColumnIndex = null,
+    destinationPrefix,
+    splitMode = 'delimiter',
+    delimiter = 'comma',
+    chunkSize = 0,
+    trim = true,
+    dropEmpty = true,
+    maxColumns = 0,
+    onOverflow = 'review',
+    keepSourceColumn = false,
+    overwriteExisting = false,
+    preview = false
+  } = {}) => {
+    return axios.post(`${API_URL}/transforms/split-into-columns/`, {
+      session_id: sessionId,
+      source_column: sourceColumn,
+      source_column_index: sourceColumnIndex,
+      destination_prefix: destinationPrefix,
+      split_mode: splitMode,
+      delimiter,
+      chunk_size: chunkSize,
+      trim,
+      drop_empty: dropEmpty,
+      max_columns: maxColumns,
+      on_overflow: onOverflow,
+      keep_source_column: keepSourceColumn,
+      overwrite_existing: overwriteExisting,
+      preview
+    }, { timeout: 120000 });
+  },
+
+  /**
+   * Group rows under parent/header rows and reshape into item rows.
+   * parentCondition: { column, test, value } where test is one of
+   * blank | not_blank | equals | not_equals | is_number | matches.
+   */
+  carryForwardGroup: (sessionId, { parentCondition, carryColumns = [], fillOnlyBlank = true, emit = 'children', preview = false } = {}) => {
+    return axios.post(`${API_URL}/transforms/carry-forward-group/`, {
+      session_id: sessionId,
+      parent_condition: parentCondition,
+      carry_columns: carryColumns,
+      fill_only_blank: fillOnlyBlank,
+      emit,
+      preview
+    }, { timeout: 120000 });
+  },
+
+  /**
+   * Stack alternates into rows from the current mappings: when two source
+   * columns are mapped to the same destination, each becomes its own row.
+   */
+  stackAlternates: (sessionId, mappings, { preview = false } = {}) => {
+    return axios.post(`${API_URL}/transforms/stack-alternates/`, {
+      session_id: sessionId,
+      mappings,
+      preview
+    }, { timeout: 120000 });
   },
 
   /**

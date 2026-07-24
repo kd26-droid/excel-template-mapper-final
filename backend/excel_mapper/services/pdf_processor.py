@@ -19,8 +19,14 @@ class PDFProcessor:
     """Service for handling PDF to image conversion and basic processing"""
 
     def __init__(self):
-        self.temp_dir = Path(tempfile.gettempdir()) / "excel_mapper_pdf"
-        self.temp_dir.mkdir(exist_ok=True)
+        # Store page images under the volume-mounted media dir so they survive a
+        # container restart/recreate (the old /tmp location was wiped each time).
+        base = getattr(settings, 'BASE_DIR', None)
+        if base:
+            self.temp_dir = Path(base) / "media" / "pdf_sessions"
+        else:
+            self.temp_dir = Path(tempfile.gettempdir()) / "excel_mapper_pdf"
+        self.temp_dir.mkdir(parents=True, exist_ok=True)
 
         # PDF processing configuration
         self.config = getattr(settings, 'PDF_CONFIG', {

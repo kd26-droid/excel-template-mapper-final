@@ -43,6 +43,8 @@ import {
   Alert
 } from '@mui/material';
 import api, { setGlobalLoaderCallback } from '../services/api';
+import ExpandColumnGroupsDialog from '../components/ExpandColumnGroupsDialog';
+import CarryForwardDialog from '../components/CarryForwardDialog';
 // Optional: lightweight import of synchronizer helpers later if needed
 // import { getDataSynchronizer } from '../utils/DataSynchronizer';
 // Inline helper functions to avoid module initialization issues
@@ -574,6 +576,15 @@ export default function ColumnMapping() {
   const [templateColumns, setTemplateColumns] = useState([]);
   const [useDynamicTemplate, setUseDynamicTemplate] = useState(false);
   const [clientFileName, setClientFileName] = useState('');
+  const [expandDialogOpen, setExpandDialogOpen] = useState(false);
+  const [carryForwardOpen, setCarryForwardOpen] = useState(false);
+  // When off, a destination column accepts only one source (prevents the
+  // "two values, one cell" shift). Turn on to wire an alternate supplier to the
+  // same column and stack them into rows.
+  const [stackingEnabled, setStackingEnabled] = useState(false);
+  // Set true right before a transform-triggered reload, so the "unsaved changes"
+  // guard doesn't prompt on a refresh we intended.
+  const bypassUnloadGuardRef = useRef(false);
   const [templateFileName, setTemplateFileName] = useState('');
   const [templateOptionals, setTemplateOptionals] = useState([]);
   const [isInitializingMappings, setIsInitializingMappings] = useState(true);
@@ -2327,8 +2338,8 @@ export default function ColumnMapping() {
     };
 
     const handlePopState = (event) => {
-      // Check if there are unsaved mappings
-      if (edges.length > 0 && !isReviewing && !isProcessingMappings) {
+      // Check if there are unsaved mappings (skip when we triggered the reload)
+      if (edges.length > 0 && !isReviewing && !isProcessingMappings && !bypassUnloadGuardRef.current) {
         event.preventDefault();
         setShowNavigationConfirm(true);
         setPendingNavigation(() => () => {
@@ -3260,12 +3271,22 @@ export default function ColumnMapping() {
 
   // Handle new connections
   const onConnect = useCallback(async (connection) => {
+    // Guard: unless stacking is on, a destination column takes only one source.
+    // This blocks the "two values into one cell" case that shifts data.
+    if (!stackingEnabled) {
+      const targetAlreadyMapped = edges.some(e => e.target === connection.target);
+      if (targetAlreadyMapped) {
+        setError('Stacking is off — each destination takes one source. Turn on "Allow alternates (stack into rows)" to map a second supplier onto this column.');
+        return;
+      }
+    }
+
     // Check if we should show loader (every 3rd mapping)
     const showLoader = shouldShowMappingLoader();
     if (showLoader) {
       setMappingActionLoading(true);
     }
-    
+
     try {
       // Save state for undo
       setMappingHistory(prev => [...prev, { nodes, edges }]);
@@ -3322,7 +3343,7 @@ export default function ColumnMapping() {
         setMappingActionLoading(false);
       }
     }
-  }, [nodes, edges, setEdges, setNodes, shouldShowMappingLoader]);
+  }, [nodes, edges, setEdges, setNodes, shouldShowMappingLoader, stackingEnabled]);
 
   // Handle edge click for deletion
   const onEdgeClick = useCallback((event, edge) => {
@@ -3802,6 +3823,38 @@ export default function ColumnMapping() {
 
   
 
+  // Stack alternates into rows from the mappings the user drew: when two source
+  // columns point at one destination, each becomes its own row.
+  const handleStackAlternates = async () => {
+    const built = buildMappingData(edges);
+    const mappings = built.mappings || [];
+    if (mappings.length === 0) {
+      setError('Draw your mappings first — including the alternate columns onto the same destinations.');
+      return;
+    }
+    try {
+      setGlobalLoading(true);
+      const res = await api.stackAlternates(sessionId, mappings);
+      if (res.data?.success) {
+        setSnackbar({
+          open: true,
+          message: `Stacked into ${res.data.output_rows} rows (${res.data.rows_per_item} per item). Opening review…`,
+          severity: 'success'
+        });
+        // The stacked rows ARE the final mapped result — show them on the review
+        // screen. Use SPA navigation so the "unsaved changes" prompt doesn't fire.
+        setIsReviewing(true);
+        setTimeout(() => navigate(`/editor/${sessionId}`), 400);
+      } else {
+        setError(res.data?.error || 'Could not stack alternates.');
+      }
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Could not stack alternates.');
+    } finally {
+      setGlobalLoading(false);
+    }
+  };
+
   const handleReview = async () => {
     if (edges.length === 0) {
       setError('Please create at least one mapping before reviewing.');
@@ -4231,6 +4284,30 @@ export default function ColumnMapping() {
               Clear All
             </button>
 
+            <Tooltip title="Off: each destination column takes one source (safe). On: wire a second supplier onto the same column to stack them into rows." placement="bottom">
+              <label className={`px-4 py-3 rounded-lg flex items-center gap-2 shadow-sm cursor-pointer transition-all border-2 ${stackingEnabled ? 'bg-teal-50 border-teal-400 text-teal-800' : 'bg-white border-gray-300 text-gray-600'}`}>
+                <input
+                  type="checkbox"
+                  checked={stackingEnabled}
+                  onChange={(e) => setStackingEnabled(e.target.checked)}
+                  className="w-4 h-4 accent-teal-600"
+                />
+                <span className="font-semibold text-sm whitespace-nowrap">Allow alternates</span>
+              </label>
+            </Tooltip>
+
+            {stackingEnabled && (
+              <Tooltip title="Turn each main + alternate you mapped onto the same destination into its own row" placement="bottom">
+                <button
+                  onClick={handleStackAlternates}
+                  disabled={edges.length === 0}
+                  className="px-6 py-3 bg-teal-600 hover:bg-teal-700 disabled:bg-gray-200 disabled:text-gray-500 text-white rounded-lg flex items-center gap-2 shadow-sm transition-all"
+                >
+                  Stack alternates into rows
+                </button>
+              </Tooltip>
+            )}
+
             <button
               onClick={handleReview}
               disabled={edges.length === 0 || isReviewing || isRebuildingRef.current || !isReady || isProcessingMappings || applyingTemplate}
@@ -4618,13 +4695,37 @@ export default function ColumnMapping() {
 
           {/* Fixed section headers - properly aligned with columns */}
       <div className="sticky top-0 z-30 bg-white bg-opacity-95 backdrop-blur-sm border-b border-gray-200" style={{ height: '140px' }}>
-            <div className="absolute" style={{ left: '35px', top: '80px' }}>
+            <div className="absolute flex items-center gap-3" style={{ left: '35px', top: '80px' }}>
               <div className="bg-blue-600 text-white px-6 py-3 rounded-xl shadow-lg font-bold flex items-center gap-2">
                 <span>Client File ({clientHeaders.length} fields)</span>
                 <Tooltip title={clientFileName ? `File: ${clientFileName}` : 'Client file'} placement="bottom">
                   <span><Info size={16} className="opacity-90 cursor-default" /></span>
                 </Tooltip>
               </div>
+              {/* Clean up the source before mapping: alternate-supplier columns are
+                  usually left unmapped, so they must be reshaped here first. */}
+              <Tooltip
+                title="If a row lists a main and an alternate supplier side by side, make each supplier its own row"
+                placement="bottom"
+              >
+                <button
+                  onClick={() => setExpandDialogOpen(true)}
+                  className="bg-white text-blue-700 border-2 border-blue-300 hover:bg-blue-50 px-4 py-3 rounded-xl shadow font-semibold text-sm transition-colors"
+                >
+                  Split alternates into rows
+                </button>
+              </Tooltip>
+              <Tooltip
+                title="If your sheet has a summary/header row per item followed by supplier rows, keep the supplier rows and copy the item details down"
+                placement="bottom"
+              >
+                <button
+                  onClick={() => setCarryForwardOpen(true)}
+                  className="bg-white text-blue-700 border-2 border-blue-300 hover:bg-blue-50 px-4 py-3 rounded-xl shadow font-semibold text-sm transition-colors"
+                >
+                  Group header &amp; detail rows
+                </button>
+              </Tooltip>
             </div>
             
             <div className="absolute" style={{ left: '535px', top: '80px' }}>
@@ -4842,6 +4943,39 @@ export default function ColumnMapping() {
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* Source prep: fold repeated column groups into rows before mapping */}
+      <ExpandColumnGroupsDialog
+        open={expandDialogOpen}
+        onClose={() => setExpandDialogOpen(false)}
+        sessionId={sessionId}
+        onApplied={(result) => {
+          setSnackbar({
+            open: true,
+            message: `${result.source_rows} source rows expanded into ${result.output_rows} rows. Reloading columns...`,
+            severity: 'success'
+          });
+          // The source columns changed, so reload rather than leave stale nodes/edges.
+          bypassUnloadGuardRef.current = true;
+          setTimeout(() => window.location.reload(), 1200);
+        }}
+      />
+
+      {/* Source prep: group rows under a parent header (drop parents / carry context down) */}
+      <CarryForwardDialog
+        open={carryForwardOpen}
+        onClose={() => setCarryForwardOpen(false)}
+        sessionId={sessionId}
+        onApplied={(result) => {
+          setSnackbar({
+            open: true,
+            message: `${result.source_rows} rows → ${result.output_rows} item rows (${result.parents} parents removed). Reloading...`,
+            severity: 'success'
+          });
+          setTimeout(() => window.location.reload(), 1200);
+        }}
+      />
+
       {/* Snackbar */}
       <Snackbar
         open={snackbar.open}
