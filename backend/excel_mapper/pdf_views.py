@@ -467,25 +467,28 @@ def upload_pdf(request):
             processing_metadata={'template_mapping': template_metadata} if template_metadata else {}
         )
 
-        # Convert PDF to images
+        # Do NOT render every page here — that's what made upload take a minute for
+        # multi-page PDFs. Just record each page's dimensions (computed, no render);
+        # each page's image is rendered on demand when the user opens it (get_page_image).
         try:
-            page_info = pdf_processor.convert_to_images(file_path, session_id)
+            page_dims = pdf_processor.get_page_dimensions(file_path)
 
-            # Save page information to database
-            for page_data in page_info:
+            for pd in page_dims:
                 PDFPage.objects.create(
                     pdf_session=pdf_session,
-                    page_number=page_data['page_number'],
-                    image_path=page_data['image_path'],
-                    width=page_data['width'],
-                    height=page_data['height']
+                    page_number=pd['page_number'],
+                    image_path='',  # rendered lazily
+                    width=pd['width'],
+                    height=pd['height'],
                 )
+            page_info = [{'page_number': pd['page_number'], 'width': pd['width'], 'height': pd['height']}
+                         for pd in page_dims]
 
             # Update session status
             pdf_session.processing_status = 'completed'
             pdf_session.save()
 
-            logger.info(f"PDF upload successful: {session_id}")
+            logger.info(f"PDF upload successful (lazy render): {session_id} — {len(page_dims)} pages")
 
             return Response({
                 'session_id': session_id,
@@ -955,19 +958,15 @@ def get_page_image(request, session_id, page_number):
                 return Response({'error': 'Original PDF file not found'}, status=status.HTTP_404_NOT_FOUND)
             pdf_processor = PDFProcessor()
             try:
-                page_info = pdf_processor.convert_to_images(pdf_session.original_pdf_path, session_id)
-                # Create or update page records
-                for p in page_info:
-                    PDFPage.objects.update_or_create(
-                        pdf_session=pdf_session,
-                        page_number=p['page_number'],
-                        defaults={
-                            'image_path': p['image_path'],
-                            'width': p['width'],
-                            'height': p['height']
-                        }
-                    )
-                page = PDFPage.objects.get(pdf_session=pdf_session, page_number=page_number)
+                p = pdf_processor.convert_single_page(
+                    pdf_session.original_pdf_path, session_id, page_number,
+                    dpi=pdf_processor.config.get('preview_image_dpi', 300), optimize=False,
+                )
+                page, _ = PDFPage.objects.update_or_create(
+                    pdf_session=pdf_session,
+                    page_number=page_number,
+                    defaults={'image_path': p['image_path'], 'width': p['width'], 'height': p['height']},
+                )
             except Exception as e:
                 logger.error(f"Error generating page images for missing record: {e}")
                 return Response({'error': f'Image generation failed: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -996,18 +995,18 @@ def get_page_image(request, session_id, page_number):
                     img.save(buf, format='JPEG', quality=85, optimize=True)
                     buf.seek(0)
                     response = HttpResponse(buf.read(), content_type='image/jpeg')
-                    response['Cache-Control'] = 'max-age=3600'
+                    response['Cache-Control'] = 'public, max-age=604800, immutable'
                     return response
                 except Exception as _e:
                     # Fallback to raw PNG if conversion fails
                     with open(page.image_path, 'rb') as f:
                         response = HttpResponse(f.read(), content_type='image/png')
-                        response['Cache-Control'] = 'max-age=3600'
+                        response['Cache-Control'] = 'public, max-age=604800, immutable'
                         return response
             else:
                 with open(page.image_path, 'rb') as f:
                     response = HttpResponse(f.read(), content_type='image/png')
-                    response['Cache-Control'] = 'max-age=3600'  # Cache for 1 hour
+                    response['Cache-Control'] = 'public, max-age=604800, immutable'  # Cache for 1 hour
                     return response
 
         # If image doesn't exist, generate it on-demand
@@ -1021,15 +1020,17 @@ def get_page_image(request, session_id, page_number):
         pdf_processor = PDFProcessor()
 
         try:
-            # Generate images for the entire PDF
-            page_info = pdf_processor.convert_to_images(pdf_session.original_pdf_path, session_id)
-
-            # Update all pages with image paths
-            for page_data in page_info:
-                PDFPage.objects.filter(
-                    pdf_session=pdf_session,
-                    page_number=page_data['page_number']
-                ).update(image_path=page_data['image_path'])
+            # Render ONLY the requested page (fast), at preview DPI, and cache it.
+            page_data = pdf_processor.convert_single_page(
+                pdf_session.original_pdf_path, session_id, page_number,
+                dpi=pdf_processor.config.get('preview_image_dpi', 300), optimize=False,
+            )
+            # Keep the upload-computed dims (the frontend scales zones against those);
+            # only record where the image now lives. A sub-pixel render rounding
+            # difference must not desync the two sides.
+            PDFPage.objects.filter(
+                pdf_session=pdf_session, page_number=page_number
+            ).update(image_path=page_data['image_path'])
 
             # Now serve the requested page
             updated_page = PDFPage.objects.get(pdf_session=pdf_session, page_number=page_number)
@@ -1049,17 +1050,17 @@ def get_page_image(request, session_id, page_number):
                         img.save(buf, format='JPEG', quality=85, optimize=True)
                         buf.seek(0)
                         response = HttpResponse(buf.read(), content_type='image/jpeg')
-                        response['Cache-Control'] = 'max-age=3600'
+                        response['Cache-Control'] = 'public, max-age=604800, immutable'
                         return response
                     except Exception:
                         with open(updated_page.image_path, 'rb') as f:
                             response = HttpResponse(f.read(), content_type='image/png')
-                            response['Cache-Control'] = 'max-age=3600'
+                            response['Cache-Control'] = 'public, max-age=604800, immutable'
                             return response
                 else:
                     with open(updated_page.image_path, 'rb') as f:
                         response = HttpResponse(f.read(), content_type='image/png')
-                        response['Cache-Control'] = 'max-age=3600'  # Cache for 1 hour
+                        response['Cache-Control'] = 'public, max-age=604800, immutable'  # Cache for 1 hour
                         return response
             else:
                 return Response({'error': 'Failed to generate page image'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

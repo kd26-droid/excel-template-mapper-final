@@ -122,6 +122,10 @@ def process_zones(request, session_id):
         # Process ALL zones (both header and table types)
         # Each zone can have its own headers and data
         all_zone_results = []
+        # Zones were drawn on the low-DPI preview image. For OCR we render each
+        # page at full OCR DPI on demand (cached per page) and scale the zone
+        # coordinates up to that image, so recognition quality is unchanged.
+        ocr_page_cache = {}
 
         for zone in zones:
             zone.processing_status = 'processing'
@@ -134,10 +138,31 @@ def process_zones(request, session_id):
                     page_number=zone.page_number
                 )
 
-                # Crop zone from page image
+                if zone.page_number not in ocr_page_cache:
+                    ocr_pd = pdf_processor.convert_single_page(
+                        pdf_session.original_pdf_path, session_id, zone.page_number,
+                        dpi=pdf_processor.config.get('image_dpi', 300), optimize=True,
+                    )
+                    prev_w = page.width or ocr_pd['width']
+                    prev_h = page.height or ocr_pd['height']
+                    ocr_page_cache[zone.page_number] = {
+                        'path': ocr_pd['image_path'],
+                        'sx': (ocr_pd['width'] / prev_w) if prev_w else 1.0,
+                        'sy': (ocr_pd['height'] / prev_h) if prev_h else 1.0,
+                    }
+                oc = ocr_page_cache[zone.page_number]
+                c = zone.coordinates or {}
+                scaled_coords = {
+                    'x': int(round(c.get('x', 0) * oc['sx'])),
+                    'y': int(round(c.get('y', 0) * oc['sy'])),
+                    'width': int(round(c.get('width', 0) * oc['sx'])),
+                    'height': int(round(c.get('height', 0) * oc['sy'])),
+                }
+
+                # Crop zone from the high-DPI OCR image
                 zone_image = pdf_processor.crop_zone_from_image(
-                    page.image_path,
-                    zone.coordinates
+                    oc['path'],
+                    scaled_coords
                 )
 
                 try:

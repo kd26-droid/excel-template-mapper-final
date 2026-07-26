@@ -46,8 +46,13 @@ except Exception:
     
     class LocalFileManager:
         def __init__(self):
-            self.local_upload_dir = Path(settings.BASE_DIR) / 'uploaded_files'
-            self.local_temp_dir = Path(settings.BASE_DIR) / 'temp_downloads'
+            # SESSION_DATA_ROOT lets deployments put uploads + session files on a
+            # persistent volume (e.g. Azure App Service's /home) so they survive
+            # redeploys. Defaults to the app dir (ephemeral) for local/dev.
+            import os as _os
+            _root = Path(_os.environ.get('SESSION_DATA_ROOT') or settings.BASE_DIR)
+            self.local_upload_dir = _root / 'uploaded_files'
+            self.local_temp_dir = _root / 'temp_downloads'
             self._ensure_local_directories()
         
         def _ensure_local_directories(self):
@@ -547,6 +552,68 @@ def _count_total_data_rows(file_path: str, sheet_name: Optional[str], header_row
 # falls back to local storage for development
 
 
+def _eval_default_rule_condition(cell, operator, compare):
+    """Evaluate one conditional-default test against a cell value."""
+    c = str(cell or '').strip()
+    cl = c.lower()
+    cmp = str(compare or '').strip().lower()
+    if operator == 'is_empty':
+        return c == ''
+    if operator == 'not_empty':
+        return c != ''
+    if operator == 'equals':
+        return cl == cmp
+    if operator == 'not_equals':
+        return cl != cmp
+    if operator == 'contains':
+        return cmp in cl
+    return False
+
+
+def apply_default_value_rules(headers, rows, rules, only_empty=False):
+    """Apply conditional default-value rules to a built grid (list-of-lists rows).
+
+    rules: { target_col: { column, operator, compare, then, else } }
+      - column:   the OTHER column whose value the rule tests
+      - operator: is_empty | not_empty | equals | not_equals | contains
+      - then:     value written when the condition is true
+      - else:     value written when false (omit to leave the cell as-is)
+
+    Returns the number of cells changed. Safe no-op if rules/headers/rows are empty
+    or the referenced columns aren't present.
+    """
+    if not rules or not headers or not rows:
+        return 0
+    hindex = {h: i for i, h in enumerate(headers)}
+    changed = 0
+    for target, rule in rules.items():
+        if not isinstance(rule, dict):
+            continue
+        cond_col = str(rule.get('column') or '').strip()
+        if target not in hindex or cond_col not in hindex:
+            continue
+        ti = hindex[target]
+        ci = hindex[cond_col]
+        operator = str(rule.get('operator') or 'is_empty')
+        compare = rule.get('compare')
+        then_val = '' if rule.get('then') is None else str(rule.get('then'))
+        raw_else = rule.get('else')
+        has_else = raw_else is not None
+        else_val = '' if raw_else is None else str(raw_else)
+        for row in rows:
+            if ti >= len(row) or ci >= len(row):
+                continue
+            if only_empty and str(row[ti] or '').strip():
+                continue
+            if _eval_default_rule_condition(row[ci], operator, compare):
+                row[ti] = then_val
+                changed += 1
+            elif has_else:
+                row[ti] = else_val
+                changed += 1
+    return changed
+
+
 def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, session_id=None):
     """
     Apply column mappings to transform client data to template format.
@@ -601,6 +668,8 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
             if 'default_values' in mappings and session_id and session_id in SESSION_STORE:
                 default_values = mappings['default_values']
                 SESSION_STORE[session_id]["default_values"] = default_values
+            if 'default_value_rules' in mappings and session_id and session_id in SESSION_STORE:
+                SESSION_STORE[session_id]["default_value_rules"] = mappings['default_value_rules'] or {}
         else:
             # Fallback to old format for compatibility - convert to preserve order better
             mapping_list = []
@@ -902,11 +971,23 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
                     final_headers.append(target_column)
                     seen_headers.add(target_column)
         
+        # Apply conditional default-value rules (if / else based on another column).
+        # These run AFTER the whole grid is built so the condition can read the mapped
+        # value of another column in the same row. Rows align to final_headers here.
+        session_default_rules = {}
+        if session_id and session_id in SESSION_STORE:
+            session_default_rules = SESSION_STORE[session_id].get("default_value_rules", {}) or {}
+        if session_default_rules:
+            rule_ready_rows = [r for r in transformed_rows if len(r) == len(final_headers)]
+            if len(rule_ready_rows) == len(transformed_rows):
+                n = apply_default_value_rules(final_headers, transformed_rows, session_default_rules, only_empty=False)
+                logger.info(f"🔧 Applied {len(session_default_rules)} conditional default rule(s): {n} cells set")
+
         # Return data structure that includes column order and data
         logger.info(f"🔧 DEBUG apply_column_mappings: final_headers = {final_headers}")
         final_standard_check = [h for h in standard_headers_check if h in final_headers]
         logger.info(f"🔧 DEBUG apply_column_mappings: final_headers contains {len(final_standard_check)}/{len(standard_headers_check)} standard headers: {final_standard_check}")
-        
+
         return {
             'headers': final_headers,
             'data': transformed_rows
@@ -2454,6 +2535,7 @@ def save_mappings(request):
         session_id = request.data.get('session_id')
         mappings = request.data.get('mappings', {})
         default_values = request.data.get('default_values', {})
+        default_value_rules = request.data.get('default_value_rules', {})
         header_corrections = request.data.get('header_corrections', {})
         
         
@@ -2600,6 +2682,16 @@ def save_mappings(request):
                     cleaned_default_values[field_name] = str(value).strip()
         info["default_values"] = cleaned_default_values
 
+        # Conditional default-value rules ({target: {column, operator, ...}}). Kept
+        # separate from the plain string defaults so the many places that read
+        # default_values never see a dict where they expect a string.
+        cleaned_default_rules = {}
+        if default_value_rules and isinstance(default_value_rules, dict):
+            for field_name, rule in default_value_rules.items():
+                if isinstance(rule, dict) and str(rule.get('column') or '').strip():
+                    cleaned_default_rules[field_name] = rule
+        info["default_value_rules"] = cleaned_default_rules
+
         # Store header corrections for PDF sessions
         if header_corrections and isinstance(header_corrections, dict):
             info["header_corrections"] = header_corrections
@@ -2679,6 +2771,7 @@ def get_existing_mappings(request, session_id):
             pass
         mappings = session_data.get("mappings", {})
         default_values = session_data.get("default_values", {})
+        default_value_rules = session_data.get("default_value_rules", {}) or {}
 
         # Note: Mappings normalization happens below at lines 2501-2511
         # Don't prematurely wrap mappings here - let normalization handle all formats
@@ -2811,6 +2904,7 @@ def get_existing_mappings(request, session_id):
             'success': True,
             'mappings': normalized_mappings,                # <— one shape
             'default_values': default_values,
+            'default_value_rules': default_value_rules,
             'session_metadata': session_metadata
         }))
         
@@ -3015,6 +3109,13 @@ def data_view(request):
 
             # Quality + metadata calculation as usual
             final_headers = headers_to_use
+            # Keep specification columns clustered (name, then all its values) in the
+            # editor too, so dynamic split columns don't drift to the end — matching
+            # the export. Rows are dicts keyed by header, so reordering headers is
+            # enough.
+            _ord = _cluster_factwise_columns(final_headers)
+            if _ord != list(range(len(final_headers))):
+                final_headers = [final_headers[i] for i in _ord]
             total_rows = len(transformed_rows)
             final_data = transformed_rows[start_idx:end_idx]
             confidence_data = {}
@@ -3115,8 +3216,23 @@ def data_view(request):
             else:
                 transformed_rows = mpn_data_rows
 
-            headers_to_use = enhanced_headers
+            # Use the SAME headers the rows were built from. enhanced_headers can
+            # drift shorter than enhanced_data (a canonical rebuild regenerates the
+            # header list from template+counts but leaves enhanced_data untouched),
+            # which would hide any extra columns actually present in the rows —
+            # split outputs (e.g. Reference Designator_1..N) and MPN validation
+            # columns. Trusting the grid's own headers keeps them visible and keeps
+            # headers aligned with row values.
+            headers_to_use = mpn_headers
             using_enhanced = True
+            # Heal the drift so downstream paths (export, rebuild) see the full set.
+            try:
+                if list(enhanced_headers or []) != list(mpn_headers or []):
+                    info['enhanced_headers'] = list(mpn_headers)
+                    info['current_template_headers'] = list(mpn_headers)
+                    save_session(session_id, info)
+            except Exception:
+                pass
         # 2) Edited data takes second priority (but should include MPN columns if they exist)
         elif edited_rows:
             headers_to_use = _normalize_session_headers(edited_data, enhanced_headers or info.get('current_template_headers') or info.get('template_headers') or [])
@@ -3823,6 +3939,15 @@ def data_view(request):
                     corrected_data.append(corrected_row)
                 final_data = corrected_data
 
+        # Cluster specification columns (name then all its values) so dynamic split
+        # columns stay beside their spec in the editor, matching the export instead
+        # of drifting to the end.
+        _ord = _cluster_factwise_columns(final_headers)
+        if _ord != list(range(len(final_headers))):
+            reordered = [final_headers[i] for i in _ord]
+            if final_data and isinstance(final_data[0], list):
+                final_data = [[row[i] if i < len(row) else '' for i in _ord] for row in final_data]
+            final_headers = reordered
 
         # Get confidence data for quality metrics (robust PDF detection)
         confidence_data = {}
@@ -4308,6 +4433,87 @@ def rebuild_template(request):
             'success': False,
             'error': f'Failed to rebuild template: {str(e)}'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+def _cluster_factwise_columns(headers):
+    """
+    Return a column order (list of original indices) that groups every repeated
+    FactWise structure — Specification name/value/uom, Tag, Customer
+    identification — so all of a group's columns are CONTIGUOUS, anchored at the
+    group's first occurrence. Non-group columns keep their relative order.
+
+    Why: the FactWise importer collects a specification's values by scanning
+    "from a Specification name column up to the next Specification name column".
+    When dynamic Specification columns are appended at the end, unrelated columns
+    (Tag, vendor codes, procurement…) sit between two Specification-name columns,
+    so the importer swallows them — and blank cells (read as the string 'none')
+    collide into false "Same specification value" duplicate errors. Clustering the
+    groups makes the export import-safe without changing which columns exist.
+    """
+    import re
+
+    def group_of(h):
+        n = re.sub(r'\s+', ' ', str(h or '').strip().lower())
+        if (n.startswith('specification name') or n.startswith('specification value')
+                or n.startswith('specification uom')
+                or re.match(r'^specification_(name|value|uom)_\d+$', n)):
+            return 'spec'
+        if n == 'tag' or re.match(r'^tag_\d+$', n):
+            return 'tag'
+        if (n.startswith('customer identification') or n.startswith('custom identification')
+                or re.match(r'^customer_identification_(name|value)_\d+$', n)):
+            return 'customer'
+        return None
+
+    def spec_sort_key(h):
+        # Keep every value of one specification together. A split spec produces
+        # a base pair plus "_2, _3…" siblings (e.g. Designator, Designator_2…);
+        # a second, different spec is a ".1" family (e.g. Manufacturer). Order by
+        # (family, split index, name<value<uom) so all of one family's pairs are
+        # adjacent instead of interleaved with another spec.
+        n = re.sub(r'\s+', ' ', str(h or '').strip().lower())
+        m_int = re.match(r'^specification_(name|value|uom)_(\d+)$', n)
+        if m_int:
+            kind, fam, split = m_int.group(1), int(m_int.group(2)), 0
+        else:
+            kind = 'name' if 'name' in n else ('uom' if 'uom' in n else 'value')
+            m_split = re.search(r'_(\d+)$', n)
+            split = int(m_split.group(1)) if m_split else 0
+            core = n[:m_split.start()] if m_split else n
+            m_dot = re.search(r'\.(\d+)$', core)
+            fam = int(m_dot.group(1)) if m_dot else 0
+        # Order within a specification family: the single name first, then all of
+        # its values (value #1, #2, #3 …), then UOM. FactWise reads a spec's values
+        # from its name column up to the next name, so one name owns many values.
+        return (fam, {'name': 0, 'value': 1, 'uom': 2}.get(kind, 1), split)
+
+    groups = {}
+    for i, h in enumerate(headers):
+        g = group_of(h)
+        if g:
+            groups.setdefault(g, []).append(i)
+    if not groups:
+        return list(range(len(headers)))
+
+    # Within the spec group, group each specification's pairs together by family.
+    if 'spec' in groups:
+        groups['spec'] = sorted(groups['spec'], key=lambda j: spec_sort_key(headers[j]))
+
+    consumed = set()
+    order = []
+    for i, h in enumerate(headers):
+        if i in consumed:
+            continue
+        g = group_of(h)
+        if g:
+            for j in groups[g]:
+                if j not in consumed:
+                    order.append(j)
+                    consumed.add(j)
+        else:
+            order.append(i)
+            consumed.add(i)
+    return order
 
 
 @api_view(['GET', 'POST'])
@@ -4896,7 +5102,20 @@ def download_file(request, session_id=None):
         else:
             # Create empty DataFrame
             df = pd.DataFrame(columns=all_headers or [])
-        
+
+        # Cluster repeated FactWise groups (Specification/Tag/Customer identification)
+        # so no unrelated column sits between two like columns — otherwise the
+        # FactWise importer reports false "Same specification value" duplicates.
+        # Reorder by POSITION so it is safe even with duplicate header names.
+        try:
+            if len(df.columns) > 0:
+                order = _cluster_factwise_columns(list(df.columns))
+                if order and order != list(range(len(df.columns))):
+                    df = df.iloc[:, order]
+                    logger.info(f"🧷 Clustered FactWise groups for export ({len(order)} columns reordered)")
+        except Exception as _cluster_err:
+            logger.warning(f"FactWise column clustering skipped: {_cluster_err}")
+
         # Clean column names for export only (remove numbers, underscores, dots)
         if not df.empty:
             import re
@@ -5260,6 +5479,108 @@ def dashboard_view(request):
             'success': False,
             'error': f'Failed to get dashboard data: {str(e)}'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+def _hard_delete_session(session_id):
+    """Permanently remove every trace of one upload/session.
+
+    Hard delete, not soft: the persisted session_<id>.json file, the in-memory
+    SESSION_STORE entry, the Redis/cache entry, any associated uploaded/generated
+    files, and any PDF records are all removed. Returns a small report dict.
+    """
+    removed = {'session_file': False, 'memory': False, 'cache': False, 'pdf_rows': 0, 'files': 0}
+
+    session_data = SESSION_STORE.get(session_id)
+    if session_data is None:
+        try:
+            session_data = load_session_from_file(session_id)
+        except Exception:
+            session_data = None
+
+    # 1) persisted session file
+    try:
+        session_file = hybrid_file_manager.local_temp_dir / f"session_{session_id}.json"
+        if session_file.exists():
+            session_file.unlink()
+            removed['session_file'] = True
+    except Exception as e:
+        logger.warning(f"_hard_delete_session: could not remove session file for {session_id}: {e}")
+
+    # 2) in-memory store
+    if SESSION_STORE.pop(session_id, None) is not None:
+        removed['memory'] = True
+
+    # 3) cache
+    try:
+        cache.delete(f"mapper:session:{session_id}")
+        removed['cache'] = True
+    except Exception:
+        pass
+
+    # 4) associated uploaded / generated files
+    if isinstance(session_data, dict):
+        for key in ('client_path', 'template_path', 'enhanced_path', 'formula_enhanced_path', 'download_path'):
+            p = session_data.get(key)
+            if not p:
+                continue
+            try:
+                fp = Path(str(p))
+                if fp.exists() and fp.is_file():
+                    fp.unlink()
+                    removed['files'] += 1
+            except Exception:
+                pass
+
+    # 5) PDF records (cascades to pages / zones / extractions)
+    try:
+        from .models import PDFSession
+        deleted, _ = PDFSession.objects.filter(session_id=session_id).delete()
+        removed['pdf_rows'] = deleted
+    except Exception as e:
+        logger.warning(f"_hard_delete_session: PDF row cleanup failed for {session_id}: {e}")
+
+    return removed
+
+
+@api_view(['DELETE'])
+def delete_upload(request, session_id):
+    """Hard-delete a single upload/session from the dashboard."""
+    try:
+        if not session_id:
+            return Response({'success': False, 'error': 'session_id required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        removed = _hard_delete_session(session_id)
+        logger.info(f"🗑️ delete_upload hard-deleted {session_id}: {removed}")
+        return Response({'success': True, 'session_id': session_id, 'removed': removed})
+    except Exception as e:
+        logger.error(f"delete_upload failed for {session_id}: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['DELETE'])
+def delete_all_uploads(request):
+    """Hard-delete every upload/session (bulk clear)."""
+    try:
+        ids = set(SESSION_STORE.keys())
+        try:
+            for f in hybrid_file_manager.local_temp_dir.glob("session_*.json"):
+                ids.add(f.stem.replace("session_", "", 1))
+        except Exception as e:
+            logger.warning(f"delete_all_uploads: could not scan session files: {e}")
+
+        count = 0
+        for sid in list(ids):
+            try:
+                _hard_delete_session(sid)
+                count += 1
+            except Exception as e:
+                logger.warning(f"delete_all_uploads: failed on {sid}: {e}")
+
+        logger.info(f"🗑️ delete_all_uploads hard-deleted {count} session(s)")
+        return Response({'success': True, 'deleted': count})
+    except Exception as e:
+        logger.error(f"delete_all_uploads failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 # Template management views
@@ -5839,6 +6160,120 @@ def delete_mapping_template(request, template_id):
             'success': False,
             'error': f'Failed to delete template: {str(e)}'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+TEMPLATE_EXPORT_FORMAT = 'factwise-mapping-template'
+TEMPLATE_EXPORT_VERSION = 1
+
+
+def _serialize_template_for_export(t):
+    """Portable, environment-independent snapshot of a mapping template."""
+    return {
+        'format': TEMPLATE_EXPORT_FORMAT,
+        'version': TEMPLATE_EXPORT_VERSION,
+        'exported_at': datetime.utcnow().isoformat() + 'Z',
+        'template': {
+            'name': t.name,
+            'description': t.description or '',
+            'template_headers': t.template_headers,
+            'source_headers': t.source_headers,
+            'mappings': t.mappings,
+            'formula_rules': t.formula_rules or [],
+            'factwise_rules': t.factwise_rules or [],
+            'default_values': t.default_values or {},
+            'mpn_validation_metadata': t.mpn_validation_metadata or {},
+            'tags_count': t.tags_count,
+            'spec_pairs_count': t.spec_pairs_count,
+            'customer_id_pairs_count': t.customer_id_pairs_count,
+        },
+    }
+
+
+@api_view(['GET'])
+def export_mapping_template(request, template_id):
+    """Download a saved mapping template as a portable .fwtemplate.json file."""
+    try:
+        try:
+            t = MappingTemplate.objects.get(id=template_id)
+        except MappingTemplate.DoesNotExist:
+            return Response({'success': False, 'error': 'Template not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        import json as _json, re as _re
+        body = _json.dumps(_serialize_template_for_export(t), indent=2, ensure_ascii=False)
+        safe = _re.sub(r'[^A-Za-z0-9._-]+', '_', t.name or 'template').strip('_') or 'template'
+        resp = HttpResponse(body, content_type='application/json')
+        resp['Content-Disposition'] = f'attachment; filename="{safe}.fwtemplate.json"'
+        return resp
+    except Exception as e:
+        logger.error(f"export_mapping_template failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+def import_mapping_template(request):
+    """
+    Create a mapping template from an exported .fwtemplate.json.
+
+    Accepts the wrapped export ({format, template:{...}}), a bare template dict,
+    or a multipart file upload under 'file'. Names are made unique so importing
+    never clobbers an existing template.
+    """
+    try:
+        import json as _json
+        payload = None
+        if request.FILES.get('file'):
+            try:
+                payload = _json.loads(request.FILES['file'].read().decode('utf-8'))
+            except Exception:
+                return Response({'success': False, 'error': 'Could not read the file as JSON.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+        else:
+            payload = request.data
+
+        tpl = None
+        if isinstance(payload, dict):
+            if isinstance(payload.get('template'), dict):
+                tpl = payload['template']
+            elif 'template_headers' in payload and 'mappings' in payload:
+                tpl = payload
+        if not isinstance(tpl, dict) or 'template_headers' not in tpl or 'mappings' not in tpl:
+            return Response({'success': False, 'error': 'Not a valid FactWise mapping-template file.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        base = str(tpl.get('name') or 'Imported template').strip() or 'Imported template'
+        name = base
+        n = 2
+        while MappingTemplate.objects.filter(name=name).exists():
+            name = f"{base} ({n})"
+            n += 1
+
+        def _int(v, d=1):
+            try:
+                return max(1, int(v))
+            except (TypeError, ValueError):
+                return d
+
+        t = MappingTemplate.objects.create(
+            name=name,
+            description=tpl.get('description') or '',
+            template_headers=tpl.get('template_headers') or [],
+            source_headers=tpl.get('source_headers') or [],
+            mappings=tpl.get('mappings') or [],
+            formula_rules=tpl.get('formula_rules') or [],
+            factwise_rules=tpl.get('factwise_rules') or [],
+            default_values=tpl.get('default_values') or {},
+            mpn_validation_metadata=tpl.get('mpn_validation_metadata') or {},
+            tags_count=_int(tpl.get('tags_count')),
+            spec_pairs_count=_int(tpl.get('spec_pairs_count')),
+            customer_id_pairs_count=_int(tpl.get('customer_id_pairs_count')),
+            session_id='imported',
+        )
+        logger.info(f"📥 Imported mapping template '{name}' (id={t.id})")
+        return Response({'success': True, 'message': f'Imported template "{name}"',
+                         'template': t.get_mapping_summary()})
+    except Exception as e:
+        logger.error(f"import_mapping_template failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['POST'])
@@ -8984,8 +9419,29 @@ def split_column_into_columns(request):
         new_columns = [f'{destination_prefix}_{i + 1}' for i in range(column_count)]
         overwrite_existing = bool(request.data.get('overwrite_existing', False))
 
-        kept_headers = [h for i, h in enumerate(headers) if keep_source_column or i != source_index]
-        clashes = [c for c in new_columns if c in kept_headers]
+        # A Specification value can't be split into bare value columns: FactWise
+        # groups strictly by name/value pairs, so every split value needs its own
+        # Specification name beside it and the whole run must stay in one
+        # contiguous cluster. When the source is a spec value, keep value #1 in the
+        # original column (so the original name is never orphaned and wiped by the
+        # empty-pair guard) and add name/value pairs for the rest, in place.
+        spec_value_key = _spec_pair_key(source_column, "value")
+        spec_name_header = None
+        spec_name_index = None
+        if spec_value_key:
+            for _i, _h in enumerate(headers):
+                if _spec_pair_key(_h, "name") == spec_value_key:
+                    spec_name_header, spec_name_index = _h, _i
+                    break
+        is_spec_value_split = bool(spec_value_key and spec_name_header is not None)
+
+        if is_spec_value_split:
+            new_value_cols = [f'{source_column}_{k}' for k in range(2, column_count + 1)]
+            new_columns = new_value_cols
+            clashes = [c for c in new_value_cols if c in headers]
+        else:
+            kept_headers = [h for i, h in enumerate(headers) if keep_source_column or i != source_index]
+            clashes = [c for c in new_columns if c in kept_headers]
         if clashes and not overwrite_existing:
             return Response({
                 'success': False,
@@ -8999,7 +9455,39 @@ def split_column_into_columns(request):
         rows_empty = 0
         overflow_rows = 0
 
-        if overwrite_existing:
+        if is_spec_value_split:
+            # FactWise reads a specification's values from its Specification name
+            # column up to the NEXT name column — so ONE name carries MANY values.
+            # Keep the single name, keep value #1 in the original value column (so
+            # the name is never orphaned/wiped by the empty-pair guard), and add
+            # value-only columns for the rest, right beside it:
+            #   Specification name, value #1, value #2, value #3, …
+            insert_block = list(new_value_cols)
+            output_headers = headers[:source_index + 1] + insert_block + headers[source_index + 1:]
+
+            output_rows = []
+            for row_number, (row, values) in enumerate(zip(rows, split_per_row), start=1):
+                if not values:
+                    rows_empty += 1
+                elif len(values) > 1:
+                    rows_split += 1
+                if column_count and len(values) > column_count:
+                    overflow_rows += 1
+                    if on_overflow == 'review':
+                        review_rows.append({
+                            'row': row_number,
+                            'reason': f'{len(values)} values but only {column_count} column(s) available',
+                            'dropped': values[column_count:],
+                        })
+                    values = values[:column_count]
+
+                padded_row = list(row) + [''] * (len(headers) - len(row))
+                first_val = values[0] if len(values) >= 1 else ''
+                block = [values[k - 1] if (k - 1) < len(values) else '' for k in range(2, column_count + 1)]
+                output_rows.append(
+                    padded_row[:source_index] + [first_val] + block + padded_row[source_index + 1:]
+                )
+        elif overwrite_existing:
             # Write the split values into columns that already carry this prefix
             # (e.g. the template's Tag_1 … Tag_N), creating only the ones missing.
             output_headers = [h for i, h in enumerate(headers) if keep_source_column or i != source_index]
@@ -9138,6 +9626,316 @@ def split_column_into_columns(request):
         })
     except Exception as e:
         logger.error(f"split_column_into_columns failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+def copy_column_values(request):
+    """Copy one column's values into another column on the current grid.
+
+    Both columns must already exist. Runs on the mapped grid like the other
+    review-screen tools, so mappings are untouched.
+    """
+    try:
+        session_id = request.data.get('session_id')
+        source_column = str(request.data.get('source_column') or '').strip()
+        target_column = str(request.data.get('target_column') or '').strip()
+        only_empty = bool(request.data.get('only_empty', False))
+        if not session_id:
+            return Response({'success': False, 'error': 'session_id required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not source_column or not target_column:
+            return Response({'success': False, 'error': 'source_column and target_column required'}, status=status.HTTP_400_BAD_REQUEST)
+        if source_column == target_column:
+            return Response({'success': False, 'error': 'Source and target are the same column'}, status=status.HTTP_400_BAD_REQUEST)
+
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+        headers, rows = read_session_grid(session_id, info)
+        if not headers or rows is None:
+            return Response({'success': False, 'error': 'No data found for this session'}, status=status.HTTP_400_BAD_REQUEST)
+        if source_column not in headers:
+            return Response({'success': False, 'error': f'Column "{source_column}" is not in the grid'}, status=status.HTTP_400_BAD_REQUEST)
+        if target_column not in headers:
+            return Response({'success': False, 'error': f'Column "{target_column}" is not in the grid'}, status=status.HTTP_400_BAD_REQUEST)
+
+        si = headers.index(source_column)
+        ti = headers.index(target_column)
+        changed = 0
+        for row in rows:
+            while len(row) <= max(si, ti):
+                row.append('')
+            if only_empty and str(row[ti] or '').strip():
+                continue
+            row[ti] = row[si] if si < len(row) else ''
+            changed += 1
+
+        write_session_grid(session_id, info, headers, rows)
+        save_session(session_id, info)
+        new_version = increment_template_version(session_id)
+        logger.info(f"📋 copy_column_values on {session_id}: \"{source_column}\" -> \"{target_column}\" ({changed} cells)")
+        return Response({'success': True, 'changed': changed, 'template_version': new_version, 'headers': headers})
+    except Exception as e:
+        logger.error(f"copy_column_values failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+def set_column_default(request):
+    """Set a fixed value for cells in a column — all cells, or only the empty ones."""
+    try:
+        session_id = request.data.get('session_id')
+        column = str(request.data.get('column') or '').strip()
+        value = request.data.get('value', '')
+        value = '' if value is None else str(value)
+        only_empty = bool(request.data.get('only_empty', True))
+        if not session_id:
+            return Response({'success': False, 'error': 'session_id required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not column:
+            return Response({'success': False, 'error': 'column required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+        headers, rows = read_session_grid(session_id, info)
+        if not headers or rows is None:
+            return Response({'success': False, 'error': 'No data found for this session'}, status=status.HTTP_400_BAD_REQUEST)
+        if column not in headers:
+            return Response({'success': False, 'error': f'Column "{column}" is not in the grid'}, status=status.HTTP_400_BAD_REQUEST)
+
+        ci = headers.index(column)
+        changed = 0
+
+        # Optional conditional rule: fill the target based on another column's value.
+        #   condition = {column, operator, compare, then, else}
+        # e.g. { column: "MPN Code", operator: "is_empty",
+        #        then: "Finished good", else: "RM" }
+        condition = request.data.get('condition')
+        if isinstance(condition, dict) and str(condition.get('column') or '').strip():
+            cond_col = str(condition.get('column')).strip()
+            if cond_col not in headers:
+                return Response({'success': False, 'error': f'Condition column "{cond_col}" is not in the grid'}, status=status.HTTP_400_BAD_REQUEST)
+            cond_idx = headers.index(cond_col)
+            operator = str(condition.get('operator') or 'is_empty')
+            compare = '' if condition.get('compare') is None else str(condition.get('compare')).strip().lower()
+            then_val = '' if condition.get('then') is None else str(condition.get('then'))
+            raw_else = condition.get('else')
+            has_else = raw_else is not None
+            else_val = '' if raw_else is None else str(raw_else)
+
+            def cond_is_true(cell):
+                c = str(cell or '').strip()
+                cl = c.lower()
+                if operator == 'is_empty':
+                    return c == ''
+                if operator == 'not_empty':
+                    return c != ''
+                if operator == 'equals':
+                    return cl == compare
+                if operator == 'not_equals':
+                    return cl != compare
+                if operator == 'contains':
+                    return compare in cl
+                return False
+
+            for row in rows:
+                while len(row) <= max(ci, cond_idx):
+                    row.append('')
+                if only_empty and str(row[ci] or '').strip():
+                    continue
+                if cond_is_true(row[cond_idx]):
+                    row[ci] = then_val
+                    changed += 1
+                elif has_else:
+                    row[ci] = else_val
+                    changed += 1
+                # no else and condition false → leave the cell as-is
+
+            write_session_grid(session_id, info, headers, rows)
+            save_session(session_id, info)
+            new_version = increment_template_version(session_id)
+            logger.info(f"🖊️ set_column_default (conditional) on {session_id}: \"{column}\" by \"{cond_col}\" {operator} → {changed} cells")
+            return Response({'success': True, 'changed': changed, 'template_version': new_version, 'headers': headers})
+
+        for row in rows:
+            while len(row) <= ci:
+                row.append('')
+            if only_empty and str(row[ci] or '').strip():
+                continue
+            row[ci] = value
+            changed += 1
+
+        write_session_grid(session_id, info, headers, rows)
+        save_session(session_id, info)
+        new_version = increment_template_version(session_id)
+        logger.info(f"🖊️ set_column_default on {session_id}: \"{column}\" = {value!r} ({'empty only' if only_empty else 'all'}, {changed} cells)")
+        return Response({'success': True, 'changed': changed, 'template_version': new_version, 'headers': headers})
+    except Exception as e:
+        logger.error(f"set_column_default failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+def expand_alternate_columns(request):
+    """
+    Expand side-by-side alternate columns into rows, ON THE CURRENT GRID.
+
+    Some sources hold a primary supplier and an alternate supplier in separate
+    side-by-side columns (e.g. BOM 4: Manufacturer / Manufacturer PartNo next to
+    Manufacturer S S / Manufacturer PartNo S S). The alternate columns are
+    usually left unmapped, so they never reach the mapped grid.
+
+    This reads those alternate columns straight from the source and, for each
+    current grid row, emits one extra row per alternate set — copying the row and
+    overwriting the chosen destination columns with the alternate's values. The
+    primary row (already in the grid from mapping) is kept as-is.
+
+    Unlike the source-level expand, this writes onto the current grid, so it
+    composes: a designator split (or anything else) already applied survives.
+
+    Request:
+      alternate_sets: [ [ {"target": "MPN Code", "source": "Manufacturer PartNo S S"},
+                          {"target": "Preferred vendor code", "source": "Manufacturer S S"} ], ... ]
+    """
+    try:
+        session_id = request.data.get('session_id')
+        if not session_id:
+            return Response({'success': False, 'error': 'session_id required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+
+        alternate_sets = request.data.get('alternate_sets') or []
+        # Accept a single flat set too.
+        if alternate_sets and isinstance(alternate_sets[0], dict):
+            alternate_sets = [alternate_sets]
+        pairs_flat = [p for s in alternate_sets for p in (s or [])]
+        if not pairs_flat:
+            return Response({'success': False, 'error': 'alternate_sets required (target → source pairs)'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        headers, rows = read_session_grid(session_id, info)
+        if not headers or rows is None:
+            return Response({'success': False, 'error': 'No grid to expand for this session'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        src_headers, src_rows, _extraction = read_session_source(session_id, info)
+        if not src_headers or not src_rows:
+            return Response({'success': False, 'error': 'No source data found for this session'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate columns.
+        missing_targets = sorted({p.get('target') for p in pairs_flat if p.get('target') not in headers})
+        missing_sources = sorted({p.get('source') for p in pairs_flat if p.get('source') not in src_headers})
+        if missing_targets:
+            return Response({'success': False, 'error': f'Destination column(s) not in the grid: {", ".join(missing_targets)}',
+                             'headers': headers}, status=status.HTTP_400_BAD_REQUEST)
+        if missing_sources:
+            return Response({'success': False, 'error': f'Source column(s) not found: {", ".join(missing_sources)}',
+                             'source_headers': src_headers}, status=status.HTTP_400_BAD_REQUEST)
+
+        target_index = {h: i for i, h in enumerate(headers)}
+
+        # Align each grid row to its source row. Fast path: identical counts →
+        # match by position. Otherwise (primary-id filtering commonly drops some
+        # source rows during mapping, so counts differ) → match by the values of
+        # the directly-mapped columns, which survives added/removed rows.
+        if len(rows) == len(src_rows):
+            def src_for_row(i, row):
+                return src_rows[i] if i < len(src_rows) else None
+        else:
+            m = info.get('mappings')
+            mlist = m.get('mappings') if isinstance(m, dict) else m
+            anchor = []
+            seen_t = set()
+            for it in (mlist or []):
+                s = it.get('source') if isinstance(it, dict) else None
+                t = it.get('target') if isinstance(it, dict) else None
+                if s in src_headers and t in headers and t not in seen_t:
+                    anchor.append((s, headers.index(t)))
+                    seen_t.add(t)
+            if not anchor:
+                return Response({
+                    'success': False,
+                    'error': (f'Row counts differ from the source ({len(rows)} grid vs '
+                              f'{len(src_rows)} source) and there are no stable mapped columns to '
+                              f'line them up by. Run this before any step that changes rows.'),
+                }, status=status.HTTP_400_BAD_REQUEST)
+            src_by_key = {}
+            for sr in src_rows:
+                key = tuple(str(sr.get(s, '') or '').strip() for s, _ti in anchor)
+                if key not in src_by_key:
+                    src_by_key[key] = sr
+
+            def src_for_row(i, row):
+                key = tuple(str((row[ti] if ti < len(row) else '') or '').strip() for _s, ti in anchor)
+                return src_by_key.get(key)
+
+            unmatched = sum(1 for i, r in enumerate(rows) if src_for_row(i, list(r)) is None)
+            if unmatched:
+                return Response({
+                    'success': False,
+                    'error': (f'Could not line up {unmatched} of {len(rows)} rows with the source — '
+                              f'a later step has likely already changed the rows. Run "expand '
+                              f'alternate columns" earlier in your flow.'),
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+        output_rows = []
+        rows_expanded = 0
+        alternates_emitted = 0
+        for i, row in enumerate(rows):
+            row = list(row)
+            while len(row) < len(headers):
+                row.append('')
+            output_rows.append(row)  # primary row, already mapped
+            src_row = src_for_row(i, row) or {}
+            emitted_here = 0
+            for aset in alternate_sets:
+                values = {}
+                complete = True
+                for pair in (aset or []):
+                    val = str(src_row.get(pair.get('source'), '') or '').strip()
+                    if not val:
+                        complete = False
+                        break
+                    values[pair.get('target')] = val
+                if complete and values:
+                    new_row = list(row)
+                    for tgt, val in values.items():
+                        new_row[target_index[tgt]] = val
+                    output_rows.append(new_row)
+                    alternates_emitted += 1
+                    emitted_here += 1
+            if emitted_here:
+                rows_expanded += 1
+
+        write_session_grid(session_id, info, headers, output_rows)
+        history = list(info.get('source_transforms') or [])
+        history.append({
+            'type': 'expand_alternate_columns',
+            'applied_at': datetime.utcnow().isoformat(),
+            'config': {'alternate_sets': alternate_sets},
+            'summary': {'rows_expanded': rows_expanded, 'alternates_emitted': alternates_emitted,
+                        'output_rows': len(output_rows)},
+        })
+        info['source_transforms'] = history
+        save_session(session_id, info)
+        new_version = increment_template_version(session_id)
+
+        logger.info(f"↳ expand_alternate_columns on {session_id}: +{alternates_emitted} alternate rows "
+                    f"({len(rows)} → {len(output_rows)})")
+        return Response({
+            'success': True,
+            'message': f'Added {alternates_emitted} alternate row(s)',
+            'template_version': new_version,
+            'headers': headers,
+            'rows_expanded': rows_expanded,
+            'alternates_emitted': alternates_emitted,
+            'output_rows': len(output_rows),
+        })
+    except Exception as e:
+        logger.error(f"expand_alternate_columns failed: {e}", exc_info=True)
         return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -9438,6 +10236,429 @@ def stack_mapped_alternates(request):
                          'data': preview_payload, **summary})
     except Exception as e:
         logger.error(f"stack_mapped_alternates failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+def apply_factwise_id_to_grid(headers, rows, factwise_rules):
+    """Fill the 'Item code' column from factwise_id rules on a list-of-lists grid,
+    mirroring the download/export logic. Lets blank/duplicate checks match what the
+    user sees and what actually gets exported (the rule is otherwise applied only at
+    display/export time, not written into the stored grid). Returns (headers, rows)."""
+    if not factwise_rules:
+        return headers, rows
+    headers = list(headers)
+    for rule in factwise_rules:
+        if not isinstance(rule, dict) or rule.get('type') != 'factwise_id':
+            continue
+        first_col = rule.get('first_column')
+        second_col = rule.get('second_column')
+        operator = rule.get('operator', '_')
+        strategy = rule.get('strategy', 'fill_only_null')
+        generation_mode = rule.get('generation_mode', 'columns')
+        if 'Item code' not in headers:
+            headers = ['Item code'] + headers
+            rows = [[''] + list(r) for r in rows]
+        ic_idx = headers.index('Item code')
+        first_idx = headers.index(first_col) if first_col in headers else -1
+        second_idx = headers.index(second_col) if second_col in headers else -1
+        for row_index, row in enumerate(rows):
+            while len(row) <= ic_idx:
+                row.append('')
+            if generation_mode == 'serial':
+                try:
+                    start_number = int(rule.get('serial_start', 1))
+                except Exception:
+                    start_number = 1
+                try:
+                    padding = max(0, int(rule.get('serial_padding', 0)))
+                except Exception:
+                    padding = 0
+                increment_each_row = str(rule.get('serial_increment', True)).lower() not in ['false', '0', 'no', 'off']
+                current_number = start_number + row_index if increment_each_row else start_number
+                suffix = str(current_number).zfill(padding) if padding > 0 else str(current_number)
+                factwise_id = f"{rule.get('serial_prefix', '') or ''}{suffix}"
+            else:
+                first_val = str((row[first_idx] if 0 <= first_idx < len(row) else '') or '').strip()
+                second_val = str((row[second_idx] if 0 <= second_idx < len(row) else '') or '').strip()
+                factwise_id = (f"{first_val}{operator}{second_val}" if first_val and second_val else (first_val or second_val or ''))
+            if strategy == 'override_all':
+                row[ic_idx] = factwise_id
+            elif not str(row[ic_idx] or '').strip():
+                row[ic_idx] = factwise_id
+    return headers, rows
+
+
+@api_view(['POST'])
+def required_field_report(request):
+    """
+    Count blank cells across the FULL grid for the given columns.
+
+    The editor fetches rows one page at a time, so the frontend can only see the
+    current page. This reports true blank counts over every row so the export
+    required-field guard shows the correct number (e.g. 251, not just 100).
+    """
+    try:
+        session_id = request.data.get('session_id')
+        if not session_id:
+            return Response({'success': False, 'error': 'session_id required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+
+        columns = request.data.get('columns') or []
+        if not isinstance(columns, list) or not columns:
+            return Response({'success': False, 'error': 'columns (list) required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        headers, rows = read_session_grid(session_id, info)
+        if not headers or rows is None:
+            return Response({'success': True, 'gaps': [], 'total_rows': 0})
+
+        # The 'Item code' (and similar) columns may be GENERATED by a FactWise ID
+        # rule that is applied at display/export time but not written into the stored
+        # grid. Apply those rules here too, otherwise this check reports the column as
+        # all-blank while the user (and the actual export) see it filled.
+        headers, rows = apply_factwise_id_to_grid(headers, rows, info.get('factwise_rules') or [])
+
+        gaps = []
+        for column in columns:
+            if column not in headers:
+                continue
+            idx = headers.index(column)
+            empty = 0
+            for row in rows:
+                v = row[idx] if idx < len(row) else ''
+                if str(v or '').strip() == '':
+                    empty += 1
+            if empty > 0:
+                gaps.append({'field': column, 'emptyCount': empty})
+
+        # Optional duplicate report for key columns (e.g. Item code must be unique
+        # in FactWise). Reports how many rows carry a value that repeats.
+        duplicates = []
+        for column in (request.data.get('dupe_columns') or []):
+            if column not in headers:
+                continue
+            idx = headers.index(column)
+            from collections import Counter
+            counts = Counter()
+            for row in rows:
+                v = str((row[idx] if idx < len(row) else '') or '').strip()
+                if v:
+                    counts[v] += 1
+            dup_rows = sum(c for c in counts.values() if c > 1)
+            dup_values = sum(1 for c in counts.values() if c > 1)
+            if dup_rows > 0:
+                # The actual repeated values, so the UI can highlight those cells for
+                # manual editing (capped to keep the payload small).
+                dup_value_list = [v for v, c in counts.items() if c > 1][:1000]
+                duplicates.append({
+                    'field': column,
+                    'duplicateRows': dup_rows,
+                    'duplicateValues': dup_values,
+                    'values': dup_value_list,
+                })
+
+        return Response({'success': True, 'gaps': gaps, 'duplicates': duplicates, 'total_rows': len(rows)})
+    except Exception as e:
+        logger.error(f"required_field_report failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+def fill_required_defaults(request):
+    """
+    Fill blank cells in the named columns with a default value.
+
+    Used by the export required-field guard. It writes straight onto the current
+    grid so every existing column is preserved — unlike the canonical
+    update-session-data path, which rebuilds to template columns and would drop
+    dynamically-added columns (e.g. MPN validation results).
+    """
+    try:
+        session_id = request.data.get('session_id')
+        if not session_id:
+            return Response({'success': False, 'error': 'session_id required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+
+        defaults = request.data.get('defaults') or {}
+        if not isinstance(defaults, dict) or not defaults:
+            return Response({'success': False, 'error': 'defaults (column -> value) required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        headers, rows = read_session_grid(session_id, info)
+        if not headers or rows is None:
+            return Response({'success': False, 'error': 'No data to fill for this session'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        filled_counts = {}
+        for column, value in defaults.items():
+            value = str(value or '').strip()
+            if not value or column not in headers:
+                continue
+            idx = headers.index(column)
+            n = 0
+            for row in rows:
+                while len(row) <= idx:
+                    row.append('')
+                if str(row[idx] or '').strip() == '':
+                    row[idx] = value
+                    n += 1
+            filled_counts[column] = n
+
+        write_session_grid(session_id, info, headers, rows)
+        save_session(session_id, info)
+        new_version = increment_template_version(session_id)
+
+        logger.info(f"🩹 fill_required_defaults on {session_id}: {filled_counts}")
+        return Response({'success': True, 'headers': headers, 'rows': len(rows),
+                         'filled': filled_counts, 'template_version': new_version})
+    except Exception as e:
+        logger.error(f"fill_required_defaults failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+def cleanup_grid_rows(request):
+    """
+    Remove rows from the current mapped grid where the chosen key column is empty.
+
+    This is the "primary column" cleanup, but run at the Review step (mapping →
+    editor) on the MAPPED grid, so it works the same for every source type
+    (Excel, OCR, PDF zonal) and lets the user pick a destination column like
+    "Item code" as the key.
+    """
+    try:
+        session_id = request.data.get('session_id')
+        column = str(request.data.get('column') or '').strip()
+        if not session_id:
+            return Response({'success': False, 'error': 'session_id required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not column:
+            return Response({'success': False, 'error': 'column required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+
+        headers, rows = read_session_grid(session_id, info)
+        if not headers or rows is None:
+            return Response({'success': False, 'error': 'No grid to clean for this session'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if column not in headers:
+            return Response({'success': False, 'error': f'Column "{column}" is not in the grid', 'headers': headers},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        idx = headers.index(column)
+        kept = [r for r in rows if str((r[idx] if idx < len(r) else '') or '').strip()]
+        removed = len(rows) - len(kept)
+
+        if removed > 0:
+            write_session_grid(session_id, info, headers, kept)
+            save_session(session_id, info)
+            new_version = increment_template_version(session_id)
+        else:
+            new_version = info.get('template_version')
+
+        logger.info(f"🧹 cleanup_grid_rows on {session_id}: removed {removed} rows with empty '{column}' "
+                    f"({len(rows)} → {len(kept)})")
+        return Response({'success': True, 'removed': removed, 'remaining': len(kept),
+                         'column': column, 'template_version': new_version})
+    except Exception as e:
+        logger.error(f"cleanup_grid_rows failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+def source_columns_preview(request, session_id):
+    """
+    List the raw source columns with a sample cell value each, so source-column
+    dropdowns (e.g. the alternate-columns picker) can show what's inside — handy
+    for Excel/PDF sources where the column name alone is ambiguous.
+    """
+    try:
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+        headers, rows, _ = read_session_source(session_id, info)
+        headers = headers or []
+        samples = {}
+        for h in headers:
+            for r in (rows or [])[:120]:
+                v = r.get(h, '') if isinstance(r, dict) else ''
+                v = str(v or '').strip()
+                if v:
+                    samples[h] = v[:40]
+                    break
+        return Response({'success': True, 'columns': headers, 'samples': samples})
+    except Exception as e:
+        logger.error(f"source_columns_preview failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+def column_source_map(request, session_id):
+    """
+    For each destination column, report the source column mapped into it (and any
+    default value). Lets the UI disambiguate duplicate-named columns in dropdowns
+    — e.g. "Tag_1 (← Manufacturer)" vs "Tag_2 (← Designator)".
+    """
+    try:
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+        m = info.get('mappings')
+        mlist = m.get('mappings') if isinstance(m, dict) else m
+        sources = {}
+        for it in (mlist or []):
+            if not isinstance(it, dict):
+                continue
+            t = it.get('target')
+            s = it.get('source')
+            if t and s and t not in sources:  # first source per column
+                sources[t] = s
+        defaults = info.get('default_values') or {}
+        return Response({'success': True, 'sources': sources, 'defaults': defaults})
+    except Exception as e:
+        logger.error(f"column_source_map failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+def resolve_item_code(request):
+    """
+    Resolve blank and/or duplicate Item codes on the current grid, at export time.
+
+    Item code is required AND must be unique in FactWise, but MPN-based codes are
+    often blank on some rows, and CPN-based codes repeat heavily after MPN
+    row-expansion. This fixes both, per the user's chosen strategy, writing onto
+    the current grid so nothing else is disturbed.
+
+    Request:
+      column: 'Item code' (default)
+      blank_strategy:     'prefix_sequence' | 'leave'
+      duplicate_strategy: 'suffix' | 'prefix_sequence' | 'leave'
+      prefix, separator ('-'), start (1), padding (0)
+    """
+    try:
+        session_id = request.data.get('session_id')
+        if not session_id:
+            return Response({'success': False, 'error': 'session_id required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+
+        column = str(request.data.get('column') or 'Item code').strip()
+        blank_strategy = str(request.data.get('blank_strategy') or 'leave')
+        duplicate_strategy = str(request.data.get('duplicate_strategy') or 'leave')
+        prefix = str(request.data.get('prefix') or '')
+        separator = str(request.data.get('separator') or '-')
+        try:
+            counter = int(request.data.get('start') or 1)
+        except (TypeError, ValueError):
+            counter = 1
+        try:
+            padding = max(0, int(request.data.get('padding') or 0))
+        except (TypeError, ValueError):
+            padding = 0
+
+        headers, rows = read_session_grid(session_id, info)
+        if not headers or rows is None:
+            return Response({'success': False, 'error': 'No data for this session'}, status=status.HTTP_400_BAD_REQUEST)
+        if column not in headers:
+            return Response({'success': False, 'error': f'Column "{column}" is not in the grid'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        idx = headers.index(column)
+        used = set()
+        for row in rows:
+            v = str((row[idx] if idx < len(row) else '') or '').strip()
+            if v:
+                used.add(v)
+
+        def next_code():
+            nonlocal counter
+            while True:
+                num = str(counter).zfill(padding) if padding else str(counter)
+                code = f"{prefix}{num}"
+                counter += 1
+                if code not in used:
+                    used.add(code)
+                    return code
+
+        # Pass 1 — blanks.
+        blanks_filled = 0
+        for row in rows:
+            while len(row) <= idx:
+                row.append('')
+            if str(row[idx] or '').strip() == '':
+                if blank_strategy == 'prefix_sequence':
+                    row[idx] = next_code()
+                    blanks_filled += 1
+
+        # Pass 2 — duplicates (first occurrence kept; later ones resolved).
+        dups_resolved = 0
+        if duplicate_strategy == 'delete':
+            # Delete the later duplicate ROWS entirely, keeping the first occurrence.
+            # Detect duplicates on the EFFECTIVE Item code (apply any factwise_id rule),
+            # so it matches the count the user saw and what would export.
+            factwise_rules = info.get('factwise_rules') or []
+            eff_headers, eff_rows = apply_factwise_id_to_grid(list(headers), [list(r) for r in rows], factwise_rules)
+            eff_idx = eff_headers.index('Item code') if 'Item code' in eff_headers else idx
+            effective = [
+                str((eff_rows[i][eff_idx] if i < len(eff_rows) and eff_idx < len(eff_rows[i]) else '') or '').strip()
+                for i in range(len(rows))
+            ]
+            seen_codes = set()
+            kept = []
+            for i, row in enumerate(rows):
+                code = effective[i] if i < len(effective) else ''
+                if code and code in seen_codes:
+                    dups_resolved += 1
+                    continue
+                if code:
+                    seen_codes.add(code)
+                kept.append(row)
+            rows = kept
+        else:
+            seen = {}
+            for row in rows:
+                v = str(row[idx] or '').strip()
+                if not v:
+                    continue
+                if v not in seen:
+                    seen[v] = 1
+                    continue
+                seen[v] += 1
+                if duplicate_strategy == 'suffix':
+                    n = seen[v]
+                    new_v = f"{v}{separator}{n}"
+                    while new_v in used:
+                        n += 1
+                        new_v = f"{v}{separator}{n}"
+                    seen[v] = n
+                    used.add(new_v)
+                    row[idx] = new_v
+                    dups_resolved += 1
+                elif duplicate_strategy == 'prefix_sequence':
+                    row[idx] = next_code()
+                    dups_resolved += 1
+
+        write_session_grid(session_id, info, headers, rows)
+        save_session(session_id, info)
+        new_version = increment_template_version(session_id)
+
+        logger.info(f"🆔 resolve_item_code on {session_id}: filled {blanks_filled} blanks, "
+                    f"resolved {dups_resolved} duplicates ({blank_strategy}/{duplicate_strategy})")
+        return Response({'success': True, 'headers': headers, 'rows': len(rows),
+                         'blanks_filled': blanks_filled, 'duplicates_resolved': dups_resolved,
+                         'template_version': new_version})
+    except Exception as e:
+        logger.error(f"resolve_item_code failed: {e}", exc_info=True)
         return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 

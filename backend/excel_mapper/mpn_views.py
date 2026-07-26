@@ -15,7 +15,7 @@ from rest_framework import status
 
 from .services.digikey_service import DigiKeyClient
 from .services.mouser_service import MouserClient
-from .views import get_session_consistent, save_session, apply_column_mappings
+from .views import get_session_consistent, save_session, apply_column_mappings, read_session_grid, write_session_grid
 
 logger = logging.getLogger(__name__)
 
@@ -348,7 +348,87 @@ KNOWN_MANUFACTURER_PHRASES = [
 ]
 
 
+def _load_builtin_manufacturer_directory():
+    """Load the bundled manufacturer master (names + synonyms) so the packed
+    'Manufacturer' column splits correctly — multi-word names like
+    'NIC COMPONENTS' stay whole and synonyms map to a canonical name. This is
+    the built-in replacement for the old per-session directory upload.
+    """
+    import os
+    import json
+    path = os.path.join(os.path.dirname(__file__), 'data', 'manufacturers.json')
+    try:
+        with open(path, 'r', encoding='utf-8') as fh:
+            data = json.load(fh)
+    except Exception as e:
+        logger.warning(f"Built-in manufacturer directory not loaded: {e}")
+        return
+
+    names = data.get('names') or []
+    aliases = data.get('aliases') or {}
+
+    for syn, canon in aliases.items():
+        s = re.sub(r"\s+", " ", str(syn or '').strip()).upper()
+        c = re.sub(r"\s+", " ", str(canon or '').strip())
+        if s and s not in DEFAULT_MANUFACTURER_ALIASES:
+            DEFAULT_MANUFACTURER_ALIASES[s] = c
+
+    seen = {re.sub(r"\s+", " ", p.strip()).upper() for p in KNOWN_MANUFACTURER_PHRASES}
+    for n in names:
+        up = re.sub(r"\s+", " ", str(n or '').strip()).upper()
+        if up and up not in seen:
+            KNOWN_MANUFACTURER_PHRASES.append(re.sub(r"\s+", " ", str(n).strip()))
+            seen.add(up)
+    logger.info(
+        f"Built-in manufacturer directory: {len(KNOWN_MANUFACTURER_PHRASES)} phrases, "
+        f"{len(DEFAULT_MANUFACTURER_ALIASES)} aliases"
+    )
+
+
+_load_builtin_manufacturer_directory()
+
+# Pre-tokenized, length-sorted phrase list built ONCE from the built-in directory
+# (7k+ names). Rebuilding this per cell would make splitting unusably slow, so the
+# splitter reuses this cache and only appends any extra phrases from request options.
+_BUILTIN_PHRASE_TOKENS_SORTED = None
+
+# The built-in directory has ~7500 phrases. Rebuilding the normalized-options dict,
+# the length-sorted token lists, and the label phrase-map on every cell turned
+# producer-parse / manufacturer-split into an O(N²)-per-cell hang once the directory
+# grew from 16 hardcoded names to 7500. These caches build each structure ONCE for a
+# given options set. The default (no per-session override) path — by far the common
+# one — is keyed on '__default__'; custom options are keyed by their JSON form.
+_MFR_OPTIONS_CACHE = {}
+_MFR_PHRASE_INDEX_CACHE = {}   # id(normalized options) -> (alias_phrases, phrase_tokens)
+_MFR_LABEL_MAP_CACHE = {}      # id(normalized options) -> phrase_map for label lookup
+
+
+def _mfr_options_cache_key(options):
+    """A stable, hashable key for an options dict, or None if uncacheable."""
+    if not options or not isinstance(options, dict):
+        return '__default__'
+    try:
+        import json as _json
+        return _json.dumps(options, sort_keys=True, default=str)
+    except Exception:
+        return None
+
+
 def normalize_manufacturer_options(options=None):
+    cache_key = _mfr_options_cache_key(options)
+    if cache_key is not None and cache_key in _MFR_OPTIONS_CACHE:
+        return _MFR_OPTIONS_CACHE[cache_key]
+    result = _build_manufacturer_options(options)
+    # Tag with the cache key so the derived-structure caches (phrase index, label
+    # map) can key off the same stable string instead of id(), which would be
+    # unsafe for uncacheable options (fresh dict each call → id reuse).
+    result['_key'] = cache_key
+    if cache_key is not None:
+        _MFR_OPTIONS_CACHE[cache_key] = result
+    return result
+
+
+def _build_manufacturer_options(options=None):
     raw = options if isinstance(options, dict) else {}
     aliases = dict(DEFAULT_MANUFACTURER_ALIASES)
     raw_aliases = raw.get('aliases') or raw.get('manufacturer_aliases') or {}
@@ -431,6 +511,70 @@ def manufacturer_phrase_tokens(value) -> List[str]:
     ]
 
 
+def _manufacturer_phrase_index(manufacturer_options):
+    """Return (alias_phrases, phrase_tokens) for these options, built ONCE and cached.
+
+    - alias_phrases: [(phrase, tokens, alias_value)] for multi-word aliases
+    - phrase_tokens: [(phrase, tokens)] for every known phrase
+
+    Both are length-sorted (longest first, alphabetical tiebreak) so the greedy
+    splitter is deterministic. Building this over the ~7500-name directory is the
+    single most expensive step in a split; caching it turns an O(N²)-per-cell hang
+    into a one-time cost.
+    """
+    key = manufacturer_options.get('_key')
+    if key is not None:
+        cached = _MFR_PHRASE_INDEX_CACHE.get(key)
+        if cached is not None:
+            return cached
+    aliases = manufacturer_options['aliases']
+    alias_phrases = [
+        (phrase, manufacturer_phrase_tokens(phrase), aliases.get(phrase))
+        for phrase in sorted(aliases.keys(), key=lambda item: (-len(item.split()), item))
+        if len(manufacturer_phrase_tokens(phrase)) > 1
+    ]
+    phrase_tokens = [
+        (phrase, manufacturer_phrase_tokens(phrase))
+        for phrase in sorted(
+            manufacturer_options.get('known_phrases') or KNOWN_MANUFACTURER_PHRASES,
+            key=lambda item: (-len(item.split()), item)
+        )
+    ]
+    result = (alias_phrases, phrase_tokens)
+    if key is not None:
+        _MFR_PHRASE_INDEX_CACHE[key] = result
+    return result
+
+
+def _manufacturer_label_index(manufacturer_options, options=None):
+    """Pre-tokenized (parts, canonical) list for producer-label lookup, built once
+    over the ~7500-name directory and cached. Without this, every colon of every
+    Producer cell rebuilt the whole map (7500 normalize calls) — the 2-minute hang."""
+    key = manufacturer_options.get('_key')
+    if key is not None:
+        cached = _MFR_LABEL_MAP_CACHE.get(key)
+        if cached is not None:
+            return cached
+    phrase_map = {}
+    for phrase in manufacturer_options.get('known_phrases') or []:
+        phrase_text = re.sub(r"\s+", " ", str(phrase or '').strip())
+        if phrase_text:
+            phrase_map[phrase_text.upper()] = normalize_manufacturer_name(phrase_text, options)
+    for source, target in (manufacturer_options.get('aliases') or {}).items():
+        if source:
+            phrase_map[str(source).upper()] = str(target or '').strip()
+        if target:
+            phrase_map[str(target).upper()] = str(target).strip()
+    index = []
+    for phrase, canonical in phrase_map.items():
+        parts = manufacturer_phrase_tokens(phrase)
+        if parts:
+            index.append((parts, canonical))
+    if key is not None:
+        _MFR_LABEL_MAP_CACHE[key] = index
+    return index
+
+
 def _find_known_manufacturer_label(prefix: str, options=None) -> Optional[Tuple[int, str]]:
     tokens = _producer_word_tokens(prefix)
     if not tokens:
@@ -442,21 +586,11 @@ def _find_known_manufacturer_label(prefix: str, options=None) -> Optional[Tuple[
         return None
 
     manufacturer_options = normalize_manufacturer_options(options)
-    phrase_map = {}
-    for phrase in manufacturer_options.get('known_phrases') or []:
-        phrase_text = re.sub(r"\s+", " ", str(phrase or '').strip())
-        if phrase_text:
-            phrase_map[phrase_text.upper()] = normalize_manufacturer_name(phrase_text, options)
-    for source, target in (manufacturer_options.get('aliases') or {}).items():
-        if source:
-            phrase_map[str(source).upper()] = str(target or '').strip()
-        if target:
-            phrase_map[str(target).upper()] = str(target).strip()
+    label_index = _manufacturer_label_index(manufacturer_options, options)
 
     candidates = []
-    for phrase, canonical in phrase_map.items():
-        parts = manufacturer_phrase_tokens(phrase)
-        if not parts or len(parts) > len(match_tokens):
+    for parts, canonical in label_index:
+        if len(parts) > len(match_tokens):
             continue
         if match_tokens[-len(parts):] == parts:
             start = tokens[len(tokens) - len(parts)][1]
@@ -569,15 +703,9 @@ def split_manufacturer_cell(value, expected_count: int, options=None) -> List[st
     manufacturer_options = normalize_manufacturer_options(options)
     aliases = manufacturer_options['aliases']
     discard_tokens = manufacturer_options['discard_tokens']
-    alias_phrases = [
-        (phrase, manufacturer_phrase_tokens(phrase), aliases.get(phrase))
-        for phrase in sorted(aliases.keys(), key=lambda item: len(item.split()), reverse=True)
-        if len(manufacturer_phrase_tokens(phrase)) > 1
-    ]
-    phrase_tokens = [
-        (phrase, manufacturer_phrase_tokens(phrase))
-        for phrase in sorted(manufacturer_options.get('known_phrases') or KNOWN_MANUFACTURER_PHRASES, key=lambda item: len(item.split()), reverse=True)
-    ]
+    # Length-sorted (longest first, alphabetical tiebreak → deterministic) phrase
+    # lists, built once per options set and cached rather than rebuilt per cell.
+    alias_phrases, phrase_tokens = _manufacturer_phrase_index(manufacturer_options)
 
     manufacturers = []
     index = 0
@@ -592,6 +720,11 @@ def split_manufacturer_cell(value, expected_count: int, options=None) -> List[st
         if matched_alias:
             matched_len, alias_value = matched_alias
             index += matched_len
+            # Absorb a trailing legal suffix the shorter alias form left behind, e.g.
+            # input "INFINEON TECHNOLOGIES AG" vs alias "INFINEON TECHNOLOGIES" —
+            # otherwise the stray "AG" leaks out as its own bogus manufacturer.
+            while index < len(upper_tokens) and upper_tokens[index] in MANUFACTURER_LEGAL_SUFFIX_WORDS:
+                index += 1
             while index < len(upper_tokens) and upper_tokens[index] in discard_tokens:
                 index += 1
             if alias_value:
@@ -605,8 +738,12 @@ def split_manufacturer_cell(value, expected_count: int, options=None) -> List[st
                 break
 
         if matched:
-            manufacturers.append(' '.join(original_tokens[index:index + matched]))
-            index += matched
+            end = index + matched
+            # Keep a trailing legal suffix (AG / INC / CORP …) attached to the name.
+            while end < len(upper_tokens) and upper_tokens[end] in MANUFACTURER_LEGAL_SUFFIX_WORDS:
+                end += 1
+            manufacturers.append(' '.join(original_tokens[index:end]))
+            index = end
             continue
 
         if token in aliases:
@@ -665,13 +802,12 @@ def split_manufacturer_cell(value, expected_count: int, options=None) -> List[st
         if normalized and not all(token.upper() in MANUFACTURER_LEGAL_SUFFIX_WORDS for token in current):
             manufacturers.append(normalized)
 
-    if len(manufacturers) == expected_count:
-        return manufacturers
-
-    if len(manufacturers) > expected_count and expected_count > 0:
-        return manufacturers[:expected_count - 1] + [' '.join(manufacturers[expected_count - 1:])]
-
-    return []
+    # Return the natural split. Forcing it to expected_count used to merge extra
+    # names into the last slot (e.g. "TDK YAGEO AVX") or drop everything to [] on a
+    # near-miss — both corrupt good data. The caller pairs by position, so a genuine
+    # count mismatch just leaves the tail unpaired (surfaced for review) instead of
+    # silently wrong.
+    return manufacturers
 
 
 def _normalized_header(header) -> str:
@@ -791,15 +927,24 @@ def mpn_parse_producer_column(request):
         if not mapping:
             return Response({'success': False, 'error': 'No mappings found'}, status=status.HTTP_400_BAD_REQUEST)
 
-        result = apply_column_mappings(
-            client_file=info['client_path'],
-            mappings=mapping if isinstance(mapping, dict) else {'mappings': mapping},
-            sheet_name=info['sheet_name'],
-            header_row=info['header_row'] - 1 if info['header_row'] > 0 else 0,
-            session_id=session_id
-        )
-        headers = list(result.get('headers') or [])
-        rows = result.get('data') or []
+        # Operate on the CURRENT working grid so prior transforms (e.g. a
+        # reference-designator split) survive. Rebuilding from a fresh mapping
+        # here is what used to wipe those columns. Fall back to a fresh mapping
+        # only when there is no working grid yet.
+        grid_headers, grid_rows = read_session_grid(session_id, info)
+        if grid_headers:
+            headers = list(grid_headers)
+            rows = grid_rows
+        else:
+            result = apply_column_mappings(
+                client_file=info['client_path'],
+                mappings=mapping if isinstance(mapping, dict) else {'mappings': mapping},
+                sheet_name=info['sheet_name'],
+                header_row=info['header_row'] - 1 if info['header_row'] > 0 else 0,
+                session_id=session_id
+            )
+            headers = list(result.get('headers') or [])
+            rows = result.get('data') or []
 
         producer_header = request.data.get('producer_header')
         if not producer_header or producer_header not in headers:
@@ -807,29 +952,52 @@ def mpn_parse_producer_column(request):
         if not producer_header or producer_header not in headers:
             return Response({'success': False, 'error': 'Producer column not found'}, status=status.HTTP_400_BAD_REQUEST)
 
-        mpn_header = request.data.get('mpn_header')
-        if not mpn_header or mpn_header not in headers:
-            mpn_header = detect_mpn_header(headers)
-        if not mpn_header:
-            mpn_header = 'MPN'
-            if mpn_header not in headers:
-                headers.append(mpn_header)
+        # Destination columns for the extracted MPN and manufacturer values. Each
+        # side accepts a LIST so the same value can be written into more than one
+        # column; falls back to the single *_header field, then to auto-detect, then
+        # to creating a default column.
+        def _resolve_dest_headers(list_key, single_key, detector, default_name):
+            requested = request.data.get(list_key)
+            if isinstance(requested, str):
+                requested = [requested]
+            if not isinstance(requested, list):
+                requested = []
+            requested = [h for h in requested if h]
+            single = request.data.get(single_key)
+            if single and single not in requested:
+                requested.append(single)
+            # Keep only real columns; if the user picked none, auto-detect / create one.
+            valid = [h for h in requested if h in headers]
+            if not valid:
+                detected = detector(headers)
+                if detected and detected in headers:
+                    valid = [detected]
+                else:
+                    if default_name not in headers:
+                        headers.append(default_name)
+                    valid = [default_name]
+            else:
+                # Any requested-but-missing names get created so they can receive values.
+                for h in requested:
+                    if h not in headers:
+                        headers.append(h)
+                        valid.append(h)
+            # De-dup, preserve order.
+            seen = set()
+            return [h for h in valid if not (h in seen or seen.add(h))]
 
-        manufacturer_header = request.data.get('manufacturer_header')
-        if not manufacturer_header or manufacturer_header not in headers:
-            manufacturer_header = detect_manufacturer_header(headers)
-        if not manufacturer_header:
-            manufacturer_header = 'Manufacturer'
-            if manufacturer_header not in headers:
-                headers.append(manufacturer_header)
+        mpn_headers = _resolve_dest_headers('mpn_headers', 'mpn_header', detect_mpn_header, 'MPN')
+        manufacturer_headers = _resolve_dest_headers('manufacturer_headers', 'manufacturer_header', detect_manufacturer_header, 'Manufacturer')
+        mpn_header = mpn_headers[0]
+        manufacturer_header = manufacturer_headers[0]
 
         original_header = 'Original Producer Cell'
         if original_header not in headers:
             headers.append(original_header)
 
         producer_index = headers.index(producer_header)
-        mpn_index = headers.index(mpn_header)
-        manufacturer_index = headers.index(manufacturer_header)
+        mpn_indices = [headers.index(h) for h in mpn_headers]
+        manufacturer_indices = [headers.index(h) for h in manufacturer_headers]
         original_index = headers.index(original_header)
 
         split_options = request.data.get('split_options') or {}
@@ -853,8 +1021,12 @@ def mpn_parse_producer_column(request):
             max_pairs = max(max_pairs, len(pairs))
             for pair in pairs:
                 new_row = list(expanded_row)
-                new_row[mpn_index] = pair.get('mpn') or ''
-                new_row[manufacturer_index] = pair.get('manufacturer') or ''
+                mpn_value = pair.get('mpn') or ''
+                manufacturer_value = pair.get('manufacturer') or ''
+                for i in mpn_indices:
+                    new_row[i] = mpn_value
+                for i in manufacturer_indices:
+                    new_row[i] = manufacturer_value
                 new_row[original_index] = producer_value
                 output_rows.append(new_row)
                 created_rows += 1
@@ -888,6 +1060,8 @@ def mpn_parse_producer_column(request):
             'producer_header': producer_header,
             'mpn_header': mpn_header,
             'manufacturer_header': manufacturer_header,
+            'mpn_headers': mpn_headers,
+            'manufacturer_headers': manufacturer_headers,
             'parsed_rows': parsed_rows,
             'created_rows': created_rows,
             'total_rows': len(output_rows),
@@ -897,6 +1071,72 @@ def mpn_parse_producer_column(request):
         })
     except Exception as e:
         logger.error(f"Producer parse failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+def analyze_mpn_pairing(request):
+    """Find the rows where the auto manufacturer-split won't match the MPN count,
+    so the user can hand-cut them on a review screen before expanding.
+
+    Returns, per flagged row: the MPN count + list, the raw manufacturer text and
+    its word tokens (for the click-between-words cutter), and the auto split.
+    """
+    try:
+        session_id = request.data.get('session_id')
+        mpn_header = request.data.get('mpn_header')
+        manufacturer_header = request.data.get('manufacturer_header')
+        raw_options = request.data.get('split_options') or {}
+        if not session_id or not mpn_header or not manufacturer_header:
+            return Response({'success': False, 'error': 'session_id, mpn_header and manufacturer_header required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+        headers, rows = read_session_grid(session_id, info)
+        if not headers or rows is None:
+            return Response({'success': False, 'error': 'No data found'}, status=status.HTTP_400_BAD_REQUEST)
+        if mpn_header not in headers or manufacturer_header not in headers:
+            return Response({'success': False, 'error': 'MPN or manufacturer column not in grid'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        mpn_opts = normalize_mpn_split_options(raw_options.get('mpn'))
+        mfr_opts = raw_options.get('manufacturer')
+        mi = headers.index(mpn_header)
+        hi = headers.index(manufacturer_header)
+
+        flagged = []
+        considered = 0
+        for row_idx, r in enumerate(rows):
+            mpn_cell = str(r[mi]) if mi < len(r) else ''
+            mfr_cell = str(r[hi]) if hi < len(r) else ''
+            if not mpn_cell.strip() or not mfr_cell.strip():
+                continue
+            parts = split_combined_mpn_cell(mpn_cell, mpn_opts)
+            if len(parts) <= 1:
+                continue
+            considered += 1
+            auto_mans = split_manufacturer_cell(mfr_cell, len(parts), mfr_opts)
+            if len(auto_mans) != len(parts):
+                clean_mfr = re.sub(r"\s+", " ", mfr_cell).strip()
+                flagged.append({
+                    'row': row_idx,
+                    'mpn_count': len(parts),
+                    'mpns': [normalize_split_mpn(p, mpn_opts) for p in parts],
+                    'mfr_raw': clean_mfr,
+                    'mfr_tokens': clean_mfr.split(' '),
+                    'auto_mans': auto_mans,
+                })
+
+        return Response({
+            'success': True,
+            'flagged': flagged,
+            'flagged_count': len(flagged),
+            'considered_rows': considered,
+        })
+    except Exception as e:
+        logger.error(f"analyze_mpn_pairing failed: {e}", exc_info=True)
         return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -916,15 +1156,21 @@ def mpn_split_cells(request):
         if not mapping:
             return Response({'success': False, 'error': 'No mappings found'}, status=status.HTTP_400_BAD_REQUEST)
 
-        result = apply_column_mappings(
-            client_file=info['client_path'],
-            mappings=mapping if isinstance(mapping, dict) else {'mappings': mapping},
-            sheet_name=info['sheet_name'],
-            header_row=info['header_row'] - 1 if info['header_row'] > 0 else 0,
-            session_id=session_id
-        )
-        headers = result.get('headers') or []
-        rows = result.get('data') or []
+        # Operate on the CURRENT working grid so any transforms already applied
+        # (e.g. a reference-designator split) survive. Rebuilding from a fresh
+        # mapping here is what used to wipe those columns. Fall back to a fresh
+        # mapping only when there is no working grid yet.
+        headers, rows = read_session_grid(session_id, info)
+        if not headers:
+            result = apply_column_mappings(
+                client_file=info['client_path'],
+                mappings=mapping if isinstance(mapping, dict) else {'mappings': mapping},
+                sheet_name=info['sheet_name'],
+                header_row=info['header_row'] - 1 if info['header_row'] > 0 else 0,
+                session_id=session_id
+            )
+            headers = result.get('headers') or []
+            rows = result.get('data') or []
 
         mpn_header = request.data.get('mpn_header')
         if not mpn_header or mpn_header not in headers:
@@ -953,6 +1199,12 @@ def mpn_split_cells(request):
                 direct_mfr_indices.append(requested_index)
             direct_mfr_indices = sorted(set(direct_mfr_indices))
 
+        # Per-row manual manufacturer splits from the review screen, keyed by the
+        # original row index: { "0": ["YAGEO","KEMET","NIC COMPONENTS","AVX"], ... }.
+        manufacturer_overrides = request.data.get('manufacturer_overrides') or {}
+        if not isinstance(manufacturer_overrides, dict):
+            manufacturer_overrides = {}
+
         output_rows = []
         split_rows = 0
         created_rows = 0
@@ -960,7 +1212,7 @@ def mpn_split_cells(request):
         normalized_mpns = 0
         paired_manufacturer_rows = 0
 
-        for row in rows:
+        for row_idx, row in enumerate(rows):
             expanded_row = list(row) + [''] * (len(output_headers) - len(row))
             raw_value = expanded_row[mpn_index] if mpn_index < len(expanded_row) else ''
             parts = split_combined_mpn_cell(raw_value, mpn_split_options)
@@ -1009,7 +1261,11 @@ def mpn_split_cells(request):
                     spec_pairs,
                     forced_mfr_indices
                 )
-                manufacturers = split_manufacturer_cell(manufacturer_text, len(parts), manufacturer_options)
+                override = manufacturer_overrides.get(str(row_idx))
+                if isinstance(override, list) and override:
+                    manufacturers = [str(m).strip() for m in override]
+                else:
+                    manufacturers = split_manufacturer_cell(manufacturer_text, len(parts), manufacturer_options)
             else:
                 manufacturers = []
                 manufacturer_update_indices = []
@@ -1023,9 +1279,14 @@ def mpn_split_cells(request):
                     normalized_mpns += 1
                 new_row[mpn_index] = normalized_part
                 if manufacturers:
+                    # Pair by position; when the manufacturer list is shorter than the
+                    # MPN list (a genuine source mismatch), leave the extra parts'
+                    # manufacturer blank rather than crashing — those rows surface for review.
+                    mfr_value = manufacturers[part_index] if part_index < len(manufacturers) else ''
                     for manufacturer_index in manufacturer_update_indices:
-                        new_row[manufacturer_index] = manufacturers[part_index]
-                    paired_manufacturer_rows += 1
+                        new_row[manufacturer_index] = mfr_value
+                    if mfr_value:
+                        paired_manufacturer_rows += 1
                 new_row[original_index] = raw_value
                 output_rows.append(new_row)
                 created_rows += 1
@@ -1118,6 +1379,101 @@ def mpn_auth_callback(request):
 
 
 @api_view(['POST'])
+def mpn_validate_warm(request):
+    """Cache-warm a SLICE of a session's unique MPNs.
+
+    Validating a whole BOM in one request makes the backend fan out dozens of
+    Digi-Key calls and blows past Azure App Service's hard 230s request limit.
+    The client instead loops offset=0, limit, 2*limit… calling this endpoint —
+    each call validates only ~8 MPNs (in parallel, populating the persistent
+    cache) and returns progress. When done, the client calls mpn_validate once,
+    which is fast because every MPN is now cached. Result content is unchanged;
+    this only splits the slow API fan-out into timeout-proof batches.
+    """
+    try:
+        session_id = request.data.get('session_id')
+        if not session_id:
+            return Response({'success': False, 'error': 'session_id required'}, status=status.HTTP_400_BAD_REQUEST)
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+
+        current_data = info.get('enhanced_data')
+        if current_data and current_data.get('headers') and current_data.get('data'):
+            headers = current_data['headers']
+            rows = current_data['data']
+        else:
+            mapping = info.get('mappings')
+            if not mapping:
+                return Response({'success': False, 'error': 'No mappings found'}, status=status.HTTP_400_BAD_REQUEST)
+            result = apply_column_mappings(
+                client_file=info['client_path'],
+                mappings=mapping if isinstance(mapping, dict) else {'mappings': mapping},
+                sheet_name=info['sheet_name'],
+                header_row=info['header_row'] - 1 if info['header_row'] > 0 else 0,
+                session_id=session_id,
+            )
+            headers = result['headers']
+            rows = result['data']
+
+        # enhanced_data rows may be dicts (keyed by header) or lists depending on
+        # which transform last wrote them. Normalize to lists aligned to headers so
+        # the integer-index access below works either way.
+        if rows and isinstance(rows[0], dict):
+            rows = [[r.get(h, '') for h in headers] for r in rows]
+
+        mpn_header = request.data.get('mpn_header') or detect_mpn_header(headers)
+        if not mpn_header or mpn_header not in headers:
+            return Response({'success': False, 'error': 'MPN column not found'}, status=status.HTTP_400_BAD_REQUEST)
+        manufacturer_header = request.data.get('manufacturer_header')
+        if manufacturer_header and manufacturer_header not in headers:
+            manufacturer_header = None
+        mi = headers.index(mpn_header)
+        fi = headers.index(manufacturer_header) if manufacturer_header else None
+
+        client = DigiKeyClient()
+        unique = []
+        seen = set()
+        for row in rows:
+            raw = row[mi] if mi < len(row) else ''
+            norm = client.normalize_mpn(raw)
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            mfr = row[fi] if (fi is not None and fi < len(row)) else None
+            unique.append((raw, mfr))
+        total = len(unique)
+
+        try:
+            offset = max(0, int(request.data.get('offset', 0)))
+        except (TypeError, ValueError):
+            offset = 0
+        try:
+            limit = int(request.data.get('limit', 8))
+        except (TypeError, ValueError):
+            limit = 8
+        limit = max(1, min(limit, 25))
+
+        chunk = unique[offset:offset + limit]
+        if chunk:
+            client.validate_mpns([m for m, _ in chunk], [f for _, f in chunk])
+
+        done = (offset + limit) >= total
+        return Response({
+            'success': True,
+            'mpn_header': mpn_header,
+            'offset': offset,
+            'limit': limit,
+            'total': total,
+            'validated': min(offset + limit, total),
+            'done': done,
+        })
+    except Exception as e:
+        logger.error(f"mpn_validate_warm failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
 def mpn_validate(request):
     """Validate MPNs for a session and persist results.
     Payload: { session_id, mpn_header?: string, manufacturer_header?: string }
@@ -1134,15 +1490,21 @@ def mpn_validate(request):
             logger.error("❌ MPN_VALIDATION_ERROR: No session_id provided")
             return Response({ 'success': False, 'error': 'session_id required' }, status=status.HTTP_400_BAD_REQUEST)
 
+        # cache_only: build the grid from ONLY what's already cached (no Digi-Key
+        # calls). The client fires this after each warm batch to fill the columns
+        # progressively, so it must not make API calls or contend on the run lock.
+        cache_only = str(request.data.get('cache_only', '')).lower() in ('1', 'true', 'yes', 'on')
+
         validation_lock_key = f"mpn_validation_lock:{session_id}"
-        validation_lock_acquired = cache.add(validation_lock_key, True, timeout=15 * 60)
-        if not validation_lock_acquired:
-            logger.warning(f"MPN_VALIDATION_LOCKED: Validation already running for session {session_id}")
-            return Response({
-                'success': False,
-                'error': 'MPN validation is already running for this workbook. Please wait for it to finish.',
-                'code': 'mpn_validation_in_progress'
-            }, status=status.HTTP_409_CONFLICT)
+        if not cache_only:
+            validation_lock_acquired = cache.add(validation_lock_key, True, timeout=15 * 60)
+            if not validation_lock_acquired:
+                logger.warning(f"MPN_VALIDATION_LOCKED: Validation already running for session {session_id}")
+                return Response({
+                    'success': False,
+                    'error': 'MPN validation is already running for this workbook. Please wait for it to finish.',
+                    'code': 'mpn_validation_in_progress'
+                }, status=status.HTTP_409_CONFLICT)
 
         logger.info(f"📋 MPN_VALIDATION_SESSION: session_id={session_id}")
 
@@ -1170,6 +1532,11 @@ def mpn_validate(request):
             )
             headers = result['headers']
             rows = result['data']
+
+        # enhanced_data rows may be dicts (keyed by header) or lists depending on the
+        # last transform. Normalize to lists aligned to headers for the code below.
+        if rows and isinstance(rows[0], dict):
+            rows = [[r.get(h, '') for h in headers] for r in rows]
 
         # Determine MPN header
         mpn_header = request.data.get('mpn_header')
@@ -1252,7 +1619,7 @@ def mpn_validate(request):
             if cached_result:
                 cached_results[norm_mpn] = cached_result
                 logger.debug(f"Cache HIT for MPN: {norm_mpn}")
-            else:
+            elif not cache_only:
                 api_mpns.append(raw_mpn)
                 api_mfrs.append(mfr)
                 logger.debug(f"Cache MISS for MPN: {norm_mpn} - needs API validation")
@@ -1621,15 +1988,22 @@ def mpn_restore_from_cache(request):
         if not mapping:
             return Response({ 'success': False, 'error': 'No mappings found' }, status=status.HTTP_400_BAD_REQUEST)
 
-        result = apply_column_mappings(
-            client_file=info['client_path'],
-            mappings=mapping if isinstance(mapping, dict) else { 'mappings': mapping },
-            sheet_name=info['sheet_name'],
-            header_row=info['header_row'] - 1 if info['header_row'] > 0 else 0,
-            session_id=session_id
-        )
-        headers = result['headers']
-        rows = result['data']
+        # Prefer the current working grid so prior transforms (splits, expansions)
+        # survive; only rebuild from a fresh mapping when no grid exists yet.
+        current_data = info.get('enhanced_data')
+        if current_data and current_data.get('headers') and current_data.get('data'):
+            headers = current_data['headers']
+            rows = current_data['data']
+        else:
+            result = apply_column_mappings(
+                client_file=info['client_path'],
+                mappings=mapping if isinstance(mapping, dict) else { 'mappings': mapping },
+                sheet_name=info['sheet_name'],
+                header_row=info['header_row'] - 1 if info['header_row'] > 0 else 0,
+                session_id=session_id
+            )
+            headers = result['headers']
+            rows = result['data']
 
         # Determine MPN header
         mpn_header = request.data.get('mpn_header')

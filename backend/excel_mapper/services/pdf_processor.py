@@ -183,6 +183,67 @@ class PDFProcessor:
             logger.error(f"Error converting PDF to images: {e}")
             raise
 
+    def get_page_dimensions(self, file_path: str, dpi: int = None) -> List[Dict[str, any]]:
+        """
+        Return each page's would-be image dimensions WITHOUT rendering anything.
+
+        Fast (reads page geometry only) so upload can finish instantly. The dims
+        are computed from the PDF page size × preview DPI, and match what a raw
+        (un-optimized) render at that DPI produces — so zone coordinates drawn on
+        the on-demand preview scale correctly even for pages never opened.
+        """
+        dpi = dpi or self.config.get('preview_image_dpi', 150)
+        scale = dpi / 72.0  # PDF units are points (1/72 inch)
+        dims = []
+        try:
+            import pdfplumber
+            with pdfplumber.open(file_path) as pdf:
+                for i, page in enumerate(pdf.pages, 1):
+                    dims.append({
+                        'page_number': i,
+                        'width': int(round(page.width * scale)),
+                        'height': int(round(page.height * scale)),
+                    })
+        except Exception as e:
+            logger.error(f"Error reading page dimensions: {e}")
+            raise
+        return dims
+
+    def convert_single_page(self, file_path: str, session_id: str, page_number: int,
+                            dpi: int = None, optimize: bool = False) -> Dict[str, any]:
+        """
+        Render ONE page to an image on demand.
+
+        Preview use: dpi=preview (150), optimize=False → raw render whose size
+        matches get_page_dimensions, so zone scaling stays consistent.
+        OCR use: dpi=image_dpi (300), optimize=True → high-quality for recognition.
+        """
+        session_dir = self.temp_dir / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        dpi = dpi or self.config.get('preview_image_dpi', 150)
+
+        images = convert_from_path(
+            file_path, dpi=dpi, fmt='PNG', thread_count=1,
+            first_page=page_number, last_page=page_number,
+            timeout=self.config.get('processing_timeout_seconds', 600),
+        )
+        if not images:
+            raise ValueError(f"Could not render page {page_number}")
+        image = images[0]
+        if optimize:
+            image = self._optimize_image_for_ocr(image)
+
+        suffix = '' if optimize else '_preview'
+        image_path = session_dir / f"page_{page_number:03d}{suffix}.png"
+        image.save(image_path, 'PNG', optimize=True)
+        return {
+            'page_number': page_number,
+            'image_path': str(image_path),
+            'width': image.width,
+            'height': image.height,
+            'file_size': os.path.getsize(image_path),
+        }
+
     def _optimize_image_for_ocr(self, image: Image.Image) -> Image.Image:
         """
         Optimize image for better OCR results

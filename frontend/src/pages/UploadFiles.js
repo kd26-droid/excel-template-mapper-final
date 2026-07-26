@@ -50,7 +50,6 @@ import * as XLSX from 'xlsx';
 import api, { setGlobalLoaderCallback } from '../services/api';
 // Removed unused UploadFormulaBuilder import
 
-<<<<<<< Updated upstream
 const IST_TIME_ZONE = 'Asia/Kolkata';
 
 const parseHistoryDate = (value) => {
@@ -76,7 +75,6 @@ const formatIstDateTime = (value, options = {}) => {
   });
 };
 
-=======
 // Vendor item templates (e.g. FactWise "Default Item.xlsx") keep help text and
 // "Required / Optional" hints in the rows above the real header row, so the
 // header row is often not row 1. Score the first few rows and pick the one that
@@ -109,12 +107,23 @@ const scoreHeaderRow = (row = []) => {
 
 const readSheetRows = (workbook, sheetName) => {
   if (!workbook || !sheetName || !workbook.Sheets || !workbook.Sheets[sheetName]) return [];
-  return XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
-    header: 1,
-    raw: false,
-    defval: '',
-    blankrows: true
-  });
+  const ws = workbook.Sheets[sheetName];
+  const opts = { header: 1, raw: false, defval: '', blankrows: true };
+  // Force reading from literal row A1 so a blank leading row is INCLUDED. Excel's
+  // used-range can start at row 2, which makes XLSX drop the blank row 1 — then
+  // the frontend's row numbers no longer match the backend (pandas), which counts
+  // that blank row. Anchoring at A1 keeps both sides on the same row numbering.
+  try {
+    if (ws['!ref']) {
+      const r = XLSX.utils.decode_range(ws['!ref']);
+      if (r.s.r > 0 || r.s.c > 0) {
+        r.s.r = 0;
+        r.s.c = 0;
+        opts.range = XLSX.utils.encode_range(r);
+      }
+    }
+  } catch (_) { /* fall back to default range */ }
+  return XLSX.utils.sheet_to_json(ws, opts);
 };
 
 // Returns a 1-based row number, matching the "Header Row" field.
@@ -140,7 +149,40 @@ const readHeadersAtRow = (workbook, sheetName, headerRow) => {
   return row ? normalizeRowCells(row).filter(cell => cell !== '') : [];
 };
 
->>>>>>> Stashed changes
+// Stack several same-layout sheets into one sheet and return it as an .xlsx File.
+// The first selected sheet's header is canonical; each sheet's rows are aligned to
+// it by column NAME (so column-order differences are tolerated). The combined
+// sheet always has its header on row 1, so it uploads like any normal single sheet.
+const buildCombinedSheetFile = (workbook, sheetNames, headerRow, fileName) => {
+  const hr = Math.max(1, Number(headerRow) || 1);
+  let canonical = null;
+  const dataRows = [];
+  (sheetNames || []).forEach((sheet) => {
+    const rows = readSheetRows(workbook, sheet);
+    if (!rows || rows.length < hr) return;
+    const header = (rows[hr - 1] || []).map((c) => String(c ?? '').trim());
+    if (!canonical) canonical = header.slice();
+    const idxByName = {};
+    header.forEach((name, i) => { if (name && !(name in idxByName)) idxByName[name] = i; });
+    for (let r = hr; r < rows.length; r += 1) {
+      const row = rows[r] || [];
+      if (row.every((c) => String(c ?? '').trim() === '')) continue; // skip blank lines
+      dataRows.push(canonical.map((name) => {
+        const si = idxByName[name];
+        return si === undefined ? '' : (row[si] ?? '');
+      }));
+    }
+  });
+  if (!canonical) return null;
+  const ws = XLSX.utils.aoa_to_sheet([canonical, ...dataRows]);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Combined');
+  const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+  const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+  const base = String(fileName || 'combined').replace(/\.(xlsx|xls|csv)$/i, '');
+  return { file: new File([blob], `${base} (combined).xlsx`, { type: blob.type }), rows: dataRows.length };
+};
+
 const UploadFiles = () => {
   const sheetJoinDraftDbName = 'excel-template-mapper-drafts';
   const sheetJoinDraftStoreName = 'files';
@@ -163,8 +205,14 @@ const UploadFiles = () => {
   // Client file sheet/header state
   const [clientSheetNames, setClientSheetNames] = useState([]);
   const [selectedClientSheet, setSelectedClientSheet] = useState('');
+  // Multi-sheet combine: when a workbook has several same-layout sheets (e.g. one
+  // per BOM), stack them into a single dataset and map once.
+  const [combineSheetsMode, setCombineSheetsMode] = useState(false);
+  const [selectedClientSheets, setSelectedClientSheets] = useState([]);
   const [clientHeaderRow, setClientHeaderRow] = useState(1);
   const [clientWorkbook, setClientWorkbook] = useState(null);
+  const [clientHeaderPreview, setClientHeaderPreview] = useState([]);
+  const [clientHeaderAutoDetected, setClientHeaderAutoDetected] = useState(false);
 
   // Template file state
   const [templateFile, setTemplateFile] = useState(null);
@@ -513,7 +561,8 @@ const UploadFiles = () => {
     const detailHeaders = getSheetHeaders(config.detailSheet, config.detailHeaderRow).length
       ? getSheetHeaders(config.detailSheet, config.detailHeaderRow)
       : (config.detailHeaders || []);
-    const baseKey = baseHeaders.includes(config.baseKey) ? config.baseKey : guessKeyColumn(baseHeaders);
+    // Don't auto-guess the primary match column — the user must pick it deliberately.
+    const baseKey = baseHeaders.includes(config.baseKey) ? config.baseKey : '';
     const detailKey = detailHeaders.includes(config.detailKey) ? config.detailKey : guessKeyColumn(detailHeaders);
     const detailColumns = (config.detailColumns || []).filter(column => detailHeaders.includes(column) && column !== detailKey);
     const selectedDetailColumns = detailColumns.length ? detailColumns : defaultDetailColumns(detailHeaders, detailKey);
@@ -725,18 +774,16 @@ const UploadFiles = () => {
           
           // Extract column headers from the first sheet
           if (sheets.length > 0) {
-            const firstSheet = workbook.Sheets[sheets[0]];
-            const jsonData = XLSX.utils.sheet_to_json(firstSheet, { 
-              header: 1,
-              raw: false,
-              defval: '' // Default value for empty cells
-            });
-            
-            
+            // A1-anchored read so blank leading rows are counted the same way the
+            // backend (pandas) counts them — otherwise the detected "Header Row"
+            // is off by one and the backend reads a blank row (Unnamed columns).
+            const jsonData = readSheetRows(workbook, sheets[0]);
+
+
             // Smart header detection: find the row with the most non-empty columns
             let bestHeaderRow = 0;
             let maxColumns = 0;
-            
+
             // Check first 5 rows for potential headers
             for (let i = 0; i < Math.min(5, jsonData.length); i++) {
               if (jsonData[i]) {
@@ -772,6 +819,7 @@ const UploadFiles = () => {
               // Update the header row setting to the detected row
               if (bestHeaderRow !== 0) {
                 setClientHeaderRow(bestHeaderRow + 1);
+                setClientHeaderAutoDetected(true);
               }
             } else {
               console.warn('No data found in the file');
@@ -830,6 +878,7 @@ const UploadFiles = () => {
                   if (maxColumns > 0) {
                     if (bestHeaderRow !== 0) {
                       setClientHeaderRow(bestHeaderRow + 1);
+                      setClientHeaderAutoDetected(true);
                     }
                     return; // Success with fallback
                   }
@@ -949,6 +998,29 @@ const UploadFiles = () => {
     setTemplateHeaderPreview(readHeadersAtRow(templateWorkbook, selectedTemplateSheet, templateHeaderRow));
   }, [templateWorkbook, selectedTemplateSheet, templateHeaderRow]);
 
+  // Same header-row preview for the source/client file.
+  useEffect(() => {
+    if (!clientWorkbook || !selectedClientSheet) {
+      setClientHeaderPreview([]);
+      return;
+    }
+    setClientHeaderPreview(readHeadersAtRow(clientWorkbook, selectedClientSheet, clientHeaderRow));
+  }, [clientWorkbook, selectedClientSheet, clientHeaderRow]);
+
+  const handleClientSheetChange = (sheetName) => {
+    setSelectedClientSheet(sheetName);
+    if (!clientWorkbook) return;
+    const detectedRow = detectHeaderRow(clientWorkbook, sheetName);
+    setClientHeaderRow(detectedRow);
+    setClientHeaderAutoDetected(detectedRow > 1);
+  };
+
+  const handleClientHeaderRowChange = (value) => {
+    const parsed = Number(value);
+    setClientHeaderRow(Number.isFinite(parsed) && parsed > 0 ? parsed : 1);
+    setClientHeaderAutoDetected(false);
+  };
+
   const handleTemplateSheetChange = (sheetName) => {
     setSelectedTemplateSheet(sheetName);
     if (!templateWorkbook) return;
@@ -1047,7 +1119,8 @@ const UploadFiles = () => {
     const detailHeaderRow = sheetJoinSetup?.detailHeaderRow || 1;
     const baseHeaders = getSheetHeaders(baseSheet, baseHeaderRow);
     const detailHeaders = getSheetHeaders(detailSheet, detailHeaderRow);
-    const baseKey = sheetJoinSetup?.baseKey || guessKeyColumn(baseHeaders);
+    // Don't auto-guess the primary match column — the user picks it deliberately.
+    const baseKey = sheetJoinSetup?.baseKey || '';
     const detailKey = sheetJoinSetup?.detailKey || guessKeyColumn(detailHeaders);
     const defaultDetailColumnSelection = defaultDetailColumns(detailHeaders, detailKey);
     const defaultCopiedColumnSelection = defaultCopiedBaseColumns(baseHeaders);
@@ -1375,26 +1448,11 @@ const UploadFiles = () => {
 
   // Primary column cleanup helpers
   const showPrimaryColumnDialog = async (sessionId, navState = null) => {
-    try {
-      const headersResp = await api.getHeaders(sessionId);
-      const headers = headersResp.data.client_headers || [];
-      if (headers.length === 0) {
-        // No headers found, just navigate
-        navigate(`/mapping/${sessionId}`, navState ? { state: navState } : undefined);
-        return;
-      }
-      setPrimaryColumnHeaders(headers);
-      setPrimaryColumnSessionId(sessionId);
-      setPendingNavigateState(navState);
-      setCleanupResult(null);
-      setSelectedPrimaryColumn('');
-      setCleanupLoading(false);
-      setPrimaryColumnDialogOpen(true);
-    } catch (err) {
-      console.error('Failed to fetch headers for cleanup dialog:', err);
-      // On error, just navigate normally
-      navigate(`/mapping/${sessionId}`, navState ? { state: navState } : undefined);
-    }
+    // The primary-key cleanup moved to the Review step (mapping → editor), so it
+    // runs the same for every source type (Excel, OCR, PDF zonal) and lets the
+    // user pick a mapped column like "Item code" as the key. Here we just proceed
+    // to mapping.
+    navigate(`/mapping/${sessionId}`, navState ? { state: navState } : undefined);
   };
 
   const handleSkipCleanup = () => {
@@ -1444,9 +1502,16 @@ const UploadFiles = () => {
       return;
     }
 
-    if (!isPDF && clientSheetNames.length > 0 && !selectedClientSheet) {
-      setError('Please select a sheet from your client file');
-      return;
+    if (!isPDF && clientSheetNames.length > 0) {
+      if (combineSheetsMode) {
+        if (selectedClientSheets.length < 1) {
+          setError('Select at least one sheet to combine');
+          return;
+        }
+      } else if (!selectedClientSheet) {
+        setError('Please select a sheet from your client file');
+        return;
+      }
     }
 
     if (templateFile && templateSheetNames.length > 0 && !selectedTemplateSheet) {
@@ -1481,10 +1546,29 @@ const UploadFiles = () => {
       }
 
       // Handle Excel/CSV files (existing logic)
+      // If the user chose to combine several same-layout sheets, stack them into
+      // one sheet client-side and upload that — the rest of the pipeline is
+      // unchanged (it just sees a normal single-sheet file with header on row 1).
+      let uploadClientFile = userFile;
+      let uploadSheetName = selectedClientSheet;
+      let uploadHeaderRow = clientHeaderRow;
+      if (combineSheetsMode && selectedClientSheets.length > 1 && clientWorkbook) {
+        const combined = buildCombinedSheetFile(clientWorkbook, selectedClientSheets, clientHeaderRow, userFile.name);
+        if (combined && combined.file) {
+          uploadClientFile = combined.file;
+          uploadSheetName = 'Combined';
+          uploadHeaderRow = 1;
+        } else {
+          setError('Could not combine the selected sheets. Check they share the same columns.');
+          setLoading(false);
+          return;
+        }
+      }
+
       const formData = new FormData();
-      formData.append('clientFile', userFile);
-      formData.append('sheetName', selectedClientSheet);
-      formData.append('headerRow', clientHeaderRow.toString());
+      formData.append('clientFile', uploadClientFile);
+      formData.append('sheetName', uploadSheetName);
+      formData.append('headerRow', uploadHeaderRow.toString());
       formData.append('templateFile', templateFile);
       formData.append('templateSheetName', selectedTemplateSheet);
       formData.append('templateHeaderRow', templateHeaderRow.toString());
@@ -1753,7 +1837,7 @@ const UploadFiles = () => {
                         <Select
                           value={selectedClientSheet}
                           label="Sheet Name"
-                          onChange={(e) => setSelectedClientSheet(e.target.value)}
+                          onChange={(e) => handleClientSheetChange(e.target.value)}
                         >
                           {clientSheetNames.map(sheet => (
                             <MenuItem key={sheet} value={sheet}>{sheet}</MenuItem>
@@ -1769,10 +1853,85 @@ const UploadFiles = () => {
                         fullWidth
                         InputProps={{ inputProps: { min: 1 } }}
                         value={clientHeaderRow}
-                        onChange={(e) => setClientHeaderRow(Number(e.target.value))}
+                        onChange={(e) => handleClientHeaderRowChange(e.target.value)}
                       />
                     </Grid>
                   </Grid>
+
+                  {clientSheetNames.length > 1 && (
+                    <Box sx={{ mt: 1.5 }}>
+                      <FormControlLabel
+                        control={
+                          <Checkbox
+                            size="small"
+                            checked={combineSheetsMode}
+                            onChange={(e) => {
+                              const on = e.target.checked;
+                              setCombineSheetsMode(on);
+                              if (on && selectedClientSheets.length === 0) {
+                                setSelectedClientSheets(clientSheetNames);
+                              }
+                            }}
+                          />
+                        }
+                        label="Combine multiple sheets into one (same layout, e.g. one sheet per BOM)"
+                      />
+                      {combineSheetsMode && (
+                        <FormControl fullWidth size="small" sx={{ mt: 1 }}>
+                          <InputLabel>Sheets to combine</InputLabel>
+                          <Select
+                            multiple
+                            value={selectedClientSheets}
+                            label="Sheets to combine"
+                            onChange={(e) =>
+                              setSelectedClientSheets(
+                                typeof e.target.value === 'string' ? e.target.value.split(',') : e.target.value
+                              )
+                            }
+                            renderValue={(sel) => `${sel.length} of ${clientSheetNames.length} sheets selected`}
+                          >
+                            {clientSheetNames.map((sheet) => (
+                              <MenuItem key={sheet} value={sheet}>
+                                <Checkbox size="small" checked={selectedClientSheets.indexOf(sheet) > -1} />
+                                {sheet}
+                              </MenuItem>
+                            ))}
+                          </Select>
+                          <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5 }}>
+                            Rows from every selected sheet are stacked into one dataset and mapped together, using
+                            header row {clientHeaderRow} on each sheet.
+                          </Typography>
+                        </FormControl>
+                      )}
+                    </Box>
+                  )}
+
+                  {clientHeaderPreview.length > 0 ? (
+                    <Box sx={{ mt: 2 }}>
+                      <Typography variant="body2" color="text.secondary">
+                        {clientHeaderAutoDetected
+                          ? `Header row auto-detected at row ${clientHeaderRow} — ${clientHeaderPreview.length} source columns found. Adjust "Header Row" if this looks wrong.`
+                          : `${clientHeaderPreview.length} source columns found on row ${clientHeaderRow}.`}
+                      </Typography>
+                      <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mt: 1 }}>
+                        {clientHeaderPreview.slice(0, 12).map((header, index) => (
+                          <Chip
+                            key={`${header}-${index}`}
+                            size="small"
+                            variant="outlined"
+                            label={header.length > 28 ? `${header.slice(0, 28)}…` : header}
+                          />
+                        ))}
+                        {clientHeaderPreview.length > 12 && (
+                          <Chip size="small" label={`+${clientHeaderPreview.length - 12} more`} />
+                        )}
+                      </Box>
+                    </Box>
+                  ) : (clientSheetNames.length > 0 && (
+                    <Alert severity="warning" sx={{ mt: 2 }}>
+                      No columns found on row {clientHeaderRow} of "{selectedClientSheet}". Pick the row that holds the column names.
+                    </Alert>
+                  ))}
 
                   {clientSheetNames.length > 1 && (
                     <Box sx={{ mt: 2, display: 'flex', justifyContent: 'flex-start' }}>
@@ -2263,7 +2422,7 @@ const UploadFiles = () => {
                     onChange={(event) => {
                       const baseSheet = event.target.value;
                       const baseHeaders = getSheetHeaders(baseSheet, sheetJoinConfig.baseHeaderRow);
-                      const baseKey = guessKeyColumn(baseHeaders);
+                      const baseKey = '';
                       setSheetJoinConfig(prev => ({
                         ...prev,
                         baseSheet,
@@ -2315,7 +2474,7 @@ const UploadFiles = () => {
                   onChange={(event) => {
                     const baseHeaderRow = Math.max(1, Number(event.target.value || 1));
                     const headers = getSheetHeaders(sheetJoinConfig.baseSheet, baseHeaderRow);
-                    const baseKey = guessKeyColumn(headers);
+                    const baseKey = '';
                     setSheetJoinConfig(prev => ({
                       ...prev,
                       baseHeaderRow,
@@ -2387,17 +2546,6 @@ const UploadFiles = () => {
                     ))}
                   </Select>
                 </FormControl>
-              </Grid>
-              <Grid item xs={12}>
-                <TextField
-                  fullWidth
-                  size="small"
-                  label="Name for merged related-data column"
-                  placeholder="Example: MPN details"
-                  value={sheetJoinConfig.relationshipName}
-                  onChange={(event) => setSheetJoinConfig(prev => ({ ...prev, relationshipName: event.target.value }))}
-                  helperText="Used when one secondary-sheet column is merged into the same row; otherwise original secondary column names are kept."
-                />
               </Grid>
             </Grid>
           )}

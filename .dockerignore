@@ -17,10 +17,21 @@ ENV/
 .installed.cfg
 *.egg
 
-# Node.js
+# Node.js — match node_modules at ANY depth (frontend/node_modules is the big one)
 node_modules/
+**/node_modules
+**/node_modules/
+frontend/node_modules/
 npm-debug.log
 yarn-debug.log
+
+# Large data/log archives not needed in any image
+*.zip
+LogFiles/
+SFO_Technologies/
+*.pdf
+*.xls
+5847814_*.csv
 yarn-error.log
 
 # Development and IDE files
@@ -28,6 +39,12 @@ yarn-error.log
 .vscode/
 *.swp
 *.swo
+
+# Local dev database — must never ship in the image (contains local sessions,
+# templates, MPN cache, and OAuth tokens). The container runs migrations on boot
+# to create a fresh empty DB.
+*.sqlite3
+backend/db.sqlite3
 
 # Local development settings
 .env
@@ -51,13 +68,21 @@ frontend/dist/
 backend/static/
 backend/media/
 
-# Temporary files
+# Temporary files — session JSON, uploads and downloads must NEVER ship in the
+# image. Patterns without a leading path only match the context root, so the
+# earlier `temp_downloads/` missed backend/temp_downloads/ and baked local
+# sessions in. Match at any depth explicitly.
 *.log
 *.tmp
 tmp/
 temp/
 uploaded_files/
 temp_downloads/
+**/uploaded_files/
+**/temp_downloads/
+backend/uploaded_files/
+backend/temp_downloads/
+**/session_*.json
 
 # Docker files (to avoid recursive copying)
 Dockerfile*

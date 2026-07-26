@@ -98,14 +98,18 @@ def words_to_table(
     right_edge = max(r[1] for r in column_ranges)
 
     def column_for(center_x):
-        # Prefer a box that actually contains the word. When boxes overlap and a
-        # word falls inside more than one, pick the box whose center is nearest —
-        # the word sits most squarely in that column. This keeps a value in its
-        # own narrow column even if a neighbouring box was drawn over it.
+        # A word belongs to a column only if it actually sits inside a drawn box.
+        # When boxes overlap and a word falls inside more than one, pick the box
+        # whose center is nearest — the word sits most squarely in that column.
+        # A word inside NO box (e.g. a column the user didn't zone, sitting in the
+        # gap between two zones) returns None and is dropped, rather than being
+        # force-assigned to the nearest column and polluting it. Zones are a strict
+        # filter: what you draw over is what you get.
         containing = [j for j in range(n_cols)
                       if column_ranges[j][0] <= center_x <= column_ranges[j][1]]
-        pool = containing if containing else range(n_cols)
-        return min(pool, key=lambda j: abs(centers[j] - center_x))
+        if not containing:
+            return None
+        return min(containing, key=lambda j: abs(centers[j] - center_x))
 
     rows: List[List[str]] = []
     dropped = 0
@@ -118,6 +122,10 @@ def words_to_table(
                 dropped += 1
                 continue
             idx = column_for(center)
+            if idx is None:
+                # Falls in a gap between drawn columns — not part of any zone.
+                dropped += 1
+                continue
             cells[idx] = (cells[idx] + joiner + w['text']).strip() if cells[idx] else w['text']
         rows.append(cells)
 

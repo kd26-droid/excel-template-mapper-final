@@ -1,0 +1,14 @@
+services:
+  redis:
+    ports: !override
+      - "6380:6379"
+
+  backend:
+    ports: !override
+      - "8002:8000"
+    environment:
+      - CORS_ALLOWED_ORIGINS=http://localhost:3002,http://127.0.0.1:3002
+
+  frontend:
+    ports: !override
+      - "3002:80"

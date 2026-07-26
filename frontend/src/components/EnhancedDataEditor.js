@@ -59,6 +59,8 @@ import {
   Check as CheckIcon,
   ArrowBack as ArrowBackIcon,
   AutoAwesome as AutoAwesomeIcon,
+  ContentCopy as ContentCopyIcon,
+  EditNote as EditNoteIcon,
   Badge as BadgeIcon,
   Close as CloseIcon,
   Map as MapIcon,
@@ -84,6 +86,60 @@ import * as XLSX from 'xlsx';
 import FormulaBuilder from './FormulaBuilder';
 import ColumnParser from './ColumnParser/ColumnParser';
 import { getDataSynchronizer, cleanupSynchronizer } from '../utils/DataSynchronizer';
+
+// The manufacturer groups a review row currently represents: either the manually
+// typed override, or the word tokens joined at the un-cut boundaries.
+const reviewRowGroups = (rr) => {
+  if (!rr) return [];
+  if (rr.manual != null) return String(rr.manual).split('|').map((s) => s.trim()).filter(Boolean);
+  const tokens = rr.tokens || [];
+  if (!tokens.length) return [];
+  const groups = [];
+  let cur = [tokens[0]];
+  for (let i = 0; i < tokens.length - 1; i += 1) {
+    if (rr.cuts[i]) { groups.push(cur.join(' ')); cur = [tokens[i + 1]]; }
+    else cur.push(tokens[i + 1]);
+  }
+  groups.push(cur.join(' '));
+  return groups;
+};
+
+// Assistant-style "analyzing" lines shown briefly before the Smart Expand plan.
+const SMART_EXPAND_STEPS = [
+  'Reading your columns…',
+  'Detecting how the alternates are arranged…',
+  'Checking for catalog / vendor prefixes…',
+  'Preparing a plan…',
+];
+
+// Turn an internal column name into the header shown in the grid.
+// Known template groups collapse to a single label (Tag_1..N -> "Tag"), and any
+// other split-generated run (e.g. "Reference Designator_1".."_33") collapses to
+// its shared base so the whole run reads as one column name in-place, instead of
+// showing the numeric suffix on every column.
+const deriveDisplayName = (col, allHeaders = []) => {
+  if (/^MPN_\d+_DigiKey_Valid$/.test(col)) return col.replace(/^MPN_(\d+)_DigiKey_Valid$/, 'MPN $1 — DigiKey Valid');
+  if (/^MPN_\d+_Canonical$/.test(col)) return col.replace(/^MPN_(\d+)_Canonical$/, 'MPN $1 — Canonical');
+  if (col.startsWith('Tag_') || col === 'Tag') return 'Tag';
+  if (col.startsWith('Specification_Name_') || col === 'Specification name') return 'Specification name';
+  if (col.startsWith('Specification_Value_') || col === 'Specification value') return 'Specification value';
+  if (col.startsWith('Customer_Identification_Name_') || col === 'Customer identification name' || col === 'Custom identification name') return 'Customer identification name';
+  if (col.startsWith('Customer_Identification_Value_') || col === 'Customer identification value' || col === 'Custom identification value') return 'Customer identification value';
+
+  // General fallback: a "<base>_<n>" column that has 2+ siblings sharing the
+  // same base is a split-generated run — show them all under "<base>".
+  const m = String(col).match(/^(.+)_(\d+)$/);
+  if (m) {
+    const base = m[1];
+    let siblings = 0;
+    for (const h of allHeaders) {
+      const hm = String(h).match(/^(.+)_(\d+)$/);
+      if (hm && hm[1] === base) siblings += 1;
+    }
+    if (siblings >= 2) return base;
+  }
+  return col;
+};
 
 const EnhancedDataEditor = () => {
   const { sessionId } = useParams();
@@ -277,6 +333,7 @@ const EnhancedDataEditor = () => {
   const [originalMpnColumn, setOriginalMpnColumn] = useState(null); // Store original source column for template saving
   const [mpnManufacturerColumn, setMpnManufacturerColumn] = useState(null);
   const [mpnValidating, setMpnValidating] = useState(false);
+  const [mpnProgress, setMpnProgress] = useState(null); // { done, total } while chunk-warming
   const mpnValidationInFlightRef = useRef(false);
   const [mpnValidationCompleted, setMpnValidationCompleted] = useState(false);
   const [mpnFilterInvalidOnly, setMpnFilterInvalidOnly] = useState(false);
@@ -286,6 +343,10 @@ const EnhancedDataEditor = () => {
   const [manufacturerMatchDialogOpen, setManufacturerMatchDialogOpen] = useState(false);
   const [producerParseDialogOpen, setProducerParseDialogOpen] = useState(false);
   const [producerColumn, setProducerColumn] = useState(null);
+  // Producer parse can write the extracted MPN / manufacturer into MORE THAN ONE
+  // destination column each, so these hold arrays of chosen columns.
+  const [producerMpnCols, setProducerMpnCols] = useState([]);
+  const [producerMfrCols, setProducerMfrCols] = useState([]);
   const [manufacturerRulesExpanded, setManufacturerRulesExpanded] = useState(false);
   const [mpnSplitOptions, setMpnSplitOptions] = useState({
     stripAlphaPrefix: true,
@@ -311,6 +372,57 @@ const EnhancedDataEditor = () => {
   // run of columns (Tag_1, Tag_2, Tag_3). The widest row sets the column count.
   const [splitColsRunning, setSplitColsRunning] = useState(false);
   const [splitColsDialogOpen, setSplitColsDialogOpen] = useState(false);
+  // Unified "Expand Alternates into Rows" entry point — a small arrangement
+  // chooser that routes to the proven per-shape dialogs (Manufacturer Match,
+  // MPN Split, Parse Producer) instead of a fourth reimplementation.
+  const [alternatesChooserOpen, setAlternatesChooserOpen] = useState(false);
+  // "Separate columns per alternate" arrangement — reads unmapped alternate
+  // source columns and expands the current grid (composes).
+  const [altColsDialogOpen, setAltColsDialogOpen] = useState(false);
+  const [altColsSourceColumns, setAltColsSourceColumns] = useState([]);
+  const [altColsSourceSamples, setAltColsSourceSamples] = useState({});
+  const [altColsPairs, setAltColsPairs] = useState([]);
+  const [altColsRunning, setAltColsRunning] = useState(false);
+  // Per-column mapped source / default, to annotate dropdowns so duplicate-named
+  // columns (Tag_1..N, Specification value…) are distinguishable.
+  const [columnSourceMap, setColumnSourceMap] = useState({ sources: {}, defaults: {} });
+  // Per-arrangement detection from the user's OWN data (real column names +
+  // sample cell values), so the chooser cards show their sheet, not made-up text.
+  const [alternatesDetection, setAlternatesDetection] = useState({});
+  // Unified "Smart Expand": one entry point that inspects the columns, shows an
+  // assistant-style analysis, then applies the right transform in one click.
+  const [smartExpandOpen, setSmartExpandOpen] = useState(false);
+  const [smartPhase, setSmartPhase] = useState('analyzing'); // 'analyzing' | 'plan' | 'applying'
+  const [smartStepIndex, setSmartStepIndex] = useState(0);
+  const [smartPlan, setSmartPlan] = useState(null);
+  // User-adjustable columns for Smart Expand (pre-filled from detection, but the
+  // user can override — e.g. point it at the Manufacturer column to force pairing).
+  const [smartMpnCol, setSmartMpnCol] = useState('');
+  const [smartMfrCol, setSmartMfrCol] = useState('');
+  // Review screen for rows where the manufacturer split doesn't match the MPN count.
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewRows, setReviewRows] = useState([]); // [{row, mpnCount, mpns, mfrRaw, tokens, cuts:bool[], manual:string|null}]
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [reviewMpnCol, setReviewMpnCol] = useState('');
+  const [reviewMfrCol, setReviewMfrCol] = useState('');
+  // Copy-a-column and set-default-value tools
+  const [copyColOpen, setCopyColOpen] = useState(false);
+  const [copySource, setCopySource] = useState('');
+  const [copyTarget, setCopyTarget] = useState('');
+  const [copyOnlyEmpty, setCopyOnlyEmpty] = useState(false);
+  const [copyBusy, setCopyBusy] = useState(false);
+  const [defaultColOpen, setDefaultColOpen] = useState(false);
+  const [defaultCol, setDefaultCol] = useState('');
+  const [defaultValue, setDefaultValue] = useState('');
+  const [defaultOnlyEmpty, setDefaultOnlyEmpty] = useState(true);
+  // Conditional default value: fill based on another column's value.
+  const [defaultMode, setDefaultMode] = useState('always'); // 'always' | 'conditional'
+  const [condCol, setCondCol] = useState('');
+  const [condOp, setCondOp] = useState('is_empty'); // is_empty|not_empty|equals|not_equals|contains
+  const [condCompare, setCondCompare] = useState('');
+  const [condThen, setCondThen] = useState('');
+  const [condElse, setCondElse] = useState('');
+  const [defaultBusy, setDefaultBusy] = useState(false);
   const [splitColsPreview, setSplitColsPreview] = useState(null);
   const [splitColsPreviewLoading, setSplitColsPreviewLoading] = useState(false);
   const [splitColsError, setSplitColsError] = useState('');
@@ -335,6 +447,15 @@ const EnhancedDataEditor = () => {
   const [requiredDefaults, setRequiredDefaults] = useState({});
   const [requiredFilling, setRequiredFilling] = useState(false);
   const pendingExportRef = useRef(null);
+  // Item code gets special export handling: it must be filled AND unique. This
+  // holds the detected blanks/duplicates and the user's chosen fix strategy.
+  const [itemCodeIssue, setItemCodeIssue] = useState(null); // { field, blanks, dupRows, dupValues }
+  const [itemCodeCfg, setItemCodeCfg] = useState({
+    blank: 'prefix_sequence', duplicate: 'suffix', prefix: 'ITEM-', separator: '-', start: 1, padding: 4,
+  });
+  // "Highlight duplicates so I can edit them" — the column + the set of repeated
+  // values whose cells the grid should mark. Cleared with the banner's Clear button.
+  const [dupHighlight, setDupHighlight] = useState(null); // { field, values: Set<string> }
 
   // Helper function to identify MPN validation columns
   const isMpnValidationColumn = useCallback((columnName) => {
@@ -752,14 +873,7 @@ const EnhancedDataEditor = () => {
             suppressAutoSize: true
           },
           ...headers.map(col => ({
-            headerName: /^MPN_\d+_DigiKey_Valid$/.test(col) ? col.replace(/^MPN_(\d+)_DigiKey_Valid$/, 'MPN $1 — DigiKey Valid')
-                      : /^MPN_\d+_Canonical$/.test(col) ? col.replace(/^MPN_(\d+)_Canonical$/, 'MPN $1 — Canonical')
-                      : (col.startsWith('Tag_') || col === 'Tag') ? 'Tag'
-                      : (col.startsWith('Specification_Name_') || col === 'Specification name') ? 'Specification name'
-                      : (col.startsWith('Specification_Value_') || col === 'Specification value') ? 'Specification value'
-                      : (col.startsWith('Customer_Identification_Name_') || col === 'Customer identification name' || col === 'Custom identification name') ? 'Customer identification name'
-                      : (col.startsWith('Customer_Identification_Value_') || col === 'Customer identification value' || col === 'Custom identification value') ? 'Customer identification value'
-                      : col,
+            headerName: deriveDisplayName(col, headers),
             field: col,
             tooltipField: col,
             isFormulaColumn: detectedFormulaColumns.includes(col)
@@ -985,24 +1099,9 @@ const EnhancedDataEditor = () => {
           suppressSizeToFit: true,
           suppressAutoSize: true
         },
-        ...viewHeaders.filter(col => col && col.trim() !== '').map((col, index) => {
-          let displayName = col;
-          if (/^MPN_\d+_DigiKey_Valid$/.test(col)) {
-            displayName = col.replace(/^MPN_(\d+)_DigiKey_Valid$/, 'MPN $1 — DigiKey Valid');
-          } else if (/^MPN_\d+_Canonical$/.test(col)) {
-            displayName = col.replace(/^MPN_(\d+)_Canonical$/, 'MPN $1 — Canonical');
-          } else if (col.startsWith('Tag_') || col === 'Tag') {
-            displayName = 'Tag';
-          } else if (col.startsWith('Specification_Name_') || col === 'Specification name') {
-            displayName = 'Specification name';
-          } else if (col.startsWith('Specification_Value_') || col === 'Specification value') {
-            displayName = 'Specification value';
-          } else if (col.startsWith('Customer_Identification_Name_') || col === 'Customer identification name' || col === 'Custom identification name') {
-            displayName = 'Customer identification name';
-          } else if (col.startsWith('Customer_Identification_Value_') || col === 'Customer identification value' || col === 'Custom identification value') {
-            displayName = 'Customer identification value';
-          }
-          
+        ...viewHeaders.filter(col => col && col.trim() !== '').map((col) => {
+          let displayName = deriveDisplayName(col, viewHeaders);
+
           const isUnmapped = data.unmapped_columns && data.unmapped_columns.includes(displayName);
           const isSpecificationColumn = displayName.toLowerCase().includes('specification');
           const isFormulaColumn = detectedFormulaColumns.includes(col) || col.startsWith('Tag_') || col.startsWith('Specification_') || col.startsWith('Customer_Identification_') || col === 'Tag' || col.includes('Specification') || col.includes('Customer identification') || col.includes('Custom identification') || col === 'Factwise ID';
@@ -1232,14 +1331,7 @@ const EnhancedDataEditor = () => {
                 suppressAutoSize: true
               },
               ...data.headers.filter(col => col && col.trim() !== '').map((col) => ({
-                headerName: /^MPN_\d+_DigiKey_Valid$/.test(col) ? col.replace(/^MPN_(\d+)_DigiKey_Valid$/, 'MPN $1 — DigiKey Valid')
-                            : /^MPN_\d+_Canonical$/.test(col) ? col.replace(/^MPN_(\d+)_Canonical$/, 'MPN $1 — Canonical')
-                            : (col.startsWith('Tag_') || col === 'Tag') ? 'Tag'
-                            : (col.startsWith('Specification_Name_') || col === 'Specification name') ? 'Specification name'
-                            : (col.startsWith('Specification_Value_') || col === 'Specification value') ? 'Specification value'
-                            : (col.startsWith('Customer_Identification_Name_') || col === 'Customer identification name' || col === 'Custom identification name') ? 'Customer identification name'
-                            : (col.startsWith('Customer_Identification_Value_') || col === 'Customer identification value' || col === 'Custom identification value') ? 'Customer identification value'
-                            : col,
+                headerName: deriveDisplayName(col, data.headers),
                 field: col,
                 tooltipField: col,
               }))
@@ -1872,62 +1964,107 @@ const EnhancedDataEditor = () => {
 
     // Treat it as a FactWise sheet only if at least a couple of these exist.
     const isFactwiseSheet = present.length >= 2;
-    if (!isFactwiseSheet) return { isFactwiseSheet: false, gaps: [] };
-
-    const gaps = present.map(p => {
-      const emptyCount = (rowData || []).reduce((n, r) => {
-        const v = r[p.field];
-        return n + ((v === null || v === undefined || String(v).trim() === '') ? 1 : 0);
-      }, 0);
-      return { ...p, emptyCount };
-    }).filter(g => g.emptyCount > 0);
-
-    return { isFactwiseSheet: true, gaps };
-  }, [columnDefs, rowData, FACTWISE_REQUIRED]);
+    return { isFactwiseSheet, present };
+  }, [columnDefs, FACTWISE_REQUIRED]);
 
   // Run an export, but first check FactWise required fields. If any are blank,
   // open the dialog instead and hold the export until the user resolves it.
-  const runGuardedExport = useCallback((exportFn) => {
-    const { isFactwiseSheet, gaps } = getFactwiseRequiredGaps();
-    if (isFactwiseSheet && gaps.length > 0) {
-      setRequiredGaps(gaps);
+  // Blank counts come from the backend so they reflect the WHOLE dataset, not
+  // just the current (server-paginated) page.
+  const runGuardedExport = useCallback(async (exportFn) => {
+    const { isFactwiseSheet, present } = getFactwiseRequiredGaps();
+    if (!isFactwiseSheet || present.length === 0) {
+      exportFn();
+      return;
+    }
+    const itemCodeField = present.find(p => p.req === 'Item code')?.field || null;
+    let gaps = [];
+    let icIssue = null;
+    try {
+      const resp = await api.requiredFieldReport(sessionId, present.map(p => p.field), itemCodeField ? [itemCodeField] : []);
+      const counts = (resp?.data?.gaps || []).reduce((m, g) => { m[g.field] = g.emptyCount; return m; }, {});
+      gaps = present.map(p => ({ ...p, emptyCount: counts[p.field] || 0 })).filter(g => g.emptyCount > 0);
+      const dup = (resp?.data?.duplicates || []).find(d => d.field === itemCodeField);
+      const icBlanks = counts[itemCodeField] || 0;
+      const icDups = dup?.duplicateRows || 0;
+      if (itemCodeField && (icBlanks > 0 || icDups > 0)) {
+        icIssue = { field: itemCodeField, blanks: icBlanks, dupRows: icDups, dupValues: dup?.values || [] };
+      }
+    } catch (e) {
+      gaps = present.map(p => ({
+        ...p,
+        emptyCount: (rowData || []).reduce((n, r) => {
+          const v = r[p.field];
+          return n + ((v === null || v === undefined || String(v).trim() === '') ? 1 : 0);
+        }, 0),
+      })).filter(g => g.emptyCount > 0);
+    }
+    // Item code gets its own section; keep other required fields as simple fills.
+    const otherGaps = gaps.filter(g => g.field !== itemCodeField);
+    if (otherGaps.length > 0 || icIssue) {
+      setRequiredGaps(otherGaps);
+      setItemCodeIssue(icIssue);
       setRequiredDefaults({});
       pendingExportRef.current = exportFn;
       setRequiredDialogOpen(true);
       return;
     }
     exportFn();
-  }, [getFactwiseRequiredGaps]);
+  }, [getFactwiseRequiredGaps, sessionId, rowData]);
 
   const handleFillRequiredAndExport = useCallback(async () => {
     try {
-      setRequiredFilling(true);
-      const headers = columnDefs
-        .filter(c => c.field && c.field !== '__row_number__')
-        .map(c => c.field);
-      const filled = (rowData || []).map(r => {
-        const row = { ...r };
-        requiredGaps.forEach(g => {
-          const def = (requiredDefaults[g.field] || '').trim();
-          const v = row[g.field];
-          if (def && (v === null || v === undefined || String(v).trim() === '')) {
-            row[g.field] = def;
-          }
+      // "Highlight" is not a fix — mark the duplicate cells in the grid and stop,
+      // so the user can edit them by hand. Don't touch data, don't export.
+      if (itemCodeIssue && itemCodeIssue.dupRows > 0 && itemCodeCfg.duplicate === 'highlight') {
+        setDupHighlight({
+          field: itemCodeIssue.field,
+          values: new Set((itemCodeIssue.dupValues || []).map(v => String(v).trim())),
         });
-        return row;
+        setRequiredDialogOpen(false);
+        setItemCodeIssue(null);
+        pendingExportRef.current = null;
+        showSnackbar(`Highlighted ${itemCodeIssue.dupRows} rows with duplicate Item codes — edit them, then export again.`, 'info');
+        return;
+      }
+      setRequiredFilling(true);
+      // 1) Resolve Item code blanks/duplicates first (it must be filled AND unique).
+      if (itemCodeIssue) {
+        const blankStrategy = itemCodeIssue.blanks > 0 ? itemCodeCfg.blank : 'leave';
+        const duplicateStrategy = itemCodeIssue.dupRows > 0 ? itemCodeCfg.duplicate : 'leave';
+        if (blankStrategy !== 'leave' || duplicateStrategy !== 'leave') {
+          await api.resolveItemCode(sessionId, {
+            column: itemCodeIssue.field,
+            blankStrategy,
+            duplicateStrategy,
+            prefix: itemCodeCfg.prefix,
+            separator: itemCodeCfg.separator || '-',
+            start: parseInt(itemCodeCfg.start, 10) || 1,
+            padding: parseInt(itemCodeCfg.padding, 10) || 0,
+          });
+        }
+      }
+      // 2) Fill the other required fields with their chosen default values.
+      const defaults = {};
+      requiredGaps.forEach(g => {
+        const def = (requiredDefaults[g.field] || '').trim();
+        if (def) defaults[g.field] = def;
       });
-      await api.updateSessionData(sessionId, { headers, data: filled });
+      if (Object.keys(defaults).length > 0) {
+        await api.fillRequiredDefaults(sessionId, defaults);
+      }
       await fetchDataSynchronized();
       setRequiredDialogOpen(false);
+      setItemCodeIssue(null);
       const fn = pendingExportRef.current;
       pendingExportRef.current = null;
       if (fn) fn();
     } catch (e) {
-      showSnackbar(e.message || 'Could not fill the default values', 'error');
+      showSnackbar(e.response?.data?.error || e.message || 'Could not apply the fixes', 'error');
     } finally {
       setRequiredFilling(false);
     }
-  }, [sessionId, columnDefs, rowData, requiredGaps, requiredDefaults, fetchDataSynchronized, showSnackbar]);
+  }, [sessionId, requiredGaps, requiredDefaults, itemCodeIssue, itemCodeCfg, fetchDataSynchronized, showSnackbar]);
 
   const handleExportToProject = useCallback(() => {
     const cols = {};
@@ -2169,21 +2306,37 @@ const EnhancedDataEditor = () => {
 
   const handleOpenMpnSplitDialog = useCallback(() => {
     setToolsMenuAnchor(null);
+    const headers = columnDefs
+      .filter(col => col.field && col.field !== '__row_number__')
+      .map(col => col.field);
+    setMpnColumn(prev => prev || detectMpnColumn(headers));
     setMpnSplitDialogOpen(true);
-  }, []);
+  }, [columnDefs, detectMpnColumn]);
 
   const handleOpenManufacturerMatchDialog = useCallback(() => {
+    setToolsMenuAnchor(null);
+    const headers = columnDefs
+      .filter(col => col.field && col.field !== '__row_number__')
+      .map(col => col.field);
+    setMpnColumn(prev => prev || detectMpnColumn(headers));
+    setMpnManufacturerColumn(prev => prev || detectManufacturerColumn(headers));
     setManufacturerMatchDialogOpen(true);
-  }, []);
+  }, [columnDefs, detectMpnColumn, detectManufacturerColumn]);
 
   const handleOpenProducerParseDialog = useCallback(() => {
     setToolsMenuAnchor(null);
     const headers = columnDefs
       .filter(col => col.field && col.field !== '__row_number__')
       .map(col => col.field);
-    setProducerColumn(prev => prev || detectProducerColumn(headers));
-    setMpnColumn(prev => prev || detectMpnColumn(headers));
-    setMpnManufacturerColumn(prev => prev || detectManufacturerColumn(headers));
+    const detectedProducer = detectProducerColumn(headers);
+    const detectedMpn = detectMpnColumn(headers);
+    const detectedMfr = detectManufacturerColumn(headers);
+    setProducerColumn(prev => prev || detectedProducer);
+    setMpnColumn(prev => prev || detectedMpn);
+    setMpnManufacturerColumn(prev => prev || detectedMfr);
+    // Seed the multi-select destinations from detection (only real, existing columns).
+    setProducerMpnCols(prev => (prev && prev.length ? prev : (detectedMpn && headers.includes(detectedMpn) ? [detectedMpn] : [])));
+    setProducerMfrCols(prev => (prev && prev.length ? prev : (detectedMfr && headers.includes(detectedMfr) ? [detectedMfr] : [])));
     setProducerParseDialogOpen(true);
   }, [columnDefs, detectProducerColumn, detectMpnColumn, detectManufacturerColumn]);
 
@@ -2225,7 +2378,7 @@ const EnhancedDataEditor = () => {
           showSnackbar(`Split ${splitRows} rows into ${totalRowsAfterSplit} rows. Cleaned ${normalized} MPNs.`, 'success');
         } else {
           if (selectedColumnLooksLikeProducerText(selectedHeader)) {
-            showSnackbar('This looks like Manufacturer: MPN producer data. Use Tools > Parse Producer Column instead of Split MPN Cells.', 'warning');
+            showSnackbar('This looks like labelled “Manufacturer: MPN” data — reopen Expand Alternates and pick the “Labelled Manufacturer: MPN” option.', 'warning');
             setProducerColumn(selectedHeader);
           } else {
             showSnackbar('No multi-MPN cells found in the selected column', 'info');
@@ -2294,54 +2447,543 @@ const EnhancedDataEditor = () => {
         .filter(col => col.field && col.field !== '__row_number__')
         .map(col => col.field);
       const selectedProducer = producerColumn || detectProducerColumn(headers);
-      const selectedMpn = mpnColumn || detectMpnColumn(headers);
-      const selectedManufacturer = mpnManufacturerColumn || detectManufacturerColumn(headers);
+      // Destination columns (one or more each). Fall back to the single-picker/detected
+      // value if the multi-selects are empty.
+      const mpnDests = (producerMpnCols && producerMpnCols.length)
+        ? producerMpnCols
+        : [mpnColumn || detectMpnColumn(headers)].filter(Boolean);
+      const mfrDests = (producerMfrCols && producerMfrCols.length)
+        ? producerMfrCols
+        : [mpnManufacturerColumn || detectManufacturerColumn(headers)].filter(Boolean);
 
       if (!selectedProducer) {
-        showSnackbar('Select the Producer column first', 'warning');
+        showSnackbar('Choose the column to read from first', 'warning');
         return;
       }
-
-      if (!selectedMpn) {
-        showSnackbar('Select the MPN output column first', 'warning');
+      if (!mpnDests.length) {
+        showSnackbar('Pick at least one MPN destination column', 'warning');
         return;
       }
-
-      if (!selectedManufacturer) {
-        showSnackbar('Select the Manufacturer output column first', 'warning');
+      if (!mfrDests.length) {
+        showSnackbar('Pick at least one Manufacturer destination column', 'warning');
         return;
       }
 
       const response = await api.parseProducerColumn(
         sessionId,
         selectedProducer,
-        selectedMpn,
-        selectedManufacturer,
-        buildMpnSplitOptionsPayload()
+        null,
+        null,
+        buildMpnSplitOptionsPayload(),
+        mpnDests,
+        mfrDests
       );
 
       if (response.data?.success) {
         const parsedRows = response.data.parsed_rows || 0;
         const totalRowsAfterParse = response.data.total_rows || response.data.created_rows || 0;
         if (parsedRows > 0) {
-          showSnackbar(`Parsed ${parsedRows} Producer rows into ${totalRowsAfterParse} rows.`, 'success');
+          showSnackbar(`Expanded ${parsedRows} rows into ${totalRowsAfterParse} rows.`, 'success');
         } else {
-          showSnackbar('No parseable Producer cells found', 'info');
+          showSnackbar('No “Manufacturer: MPN” cells found to expand', 'info');
         }
         setProducerColumn(response.data.producer_header || selectedProducer);
-        setMpnColumn(response.data.mpn_header || selectedMpn);
-        setMpnManufacturerColumn(response.data.manufacturer_header || selectedManufacturer);
+        if (response.data.mpn_header || mpnDests[0]) setMpnColumn(response.data.mpn_header || mpnDests[0]);
+        if (response.data.manufacturer_header || mfrDests[0]) setMpnManufacturerColumn(response.data.manufacturer_header || mfrDests[0]);
         await fetchDataSynchronized();
       } else {
-        showSnackbar(response.data?.error || 'Failed to parse Producer column', 'error');
+        showSnackbar(response.data?.error || 'Could not expand the column', 'error');
       }
     } catch (error) {
-      const message = getFriendlyErrorMessage(error, 'Failed to parse Producer column');
+      const message = getFriendlyErrorMessage(error, 'Could not expand the column');
       showSnackbar(message, 'error');
     } finally {
       setMpnSplitting(false);
     }
   }, [columnDefs, producerColumn, mpnColumn, mpnManufacturerColumn, detectProducerColumn, detectMpnColumn, detectManufacturerColumn, sessionId, buildMpnSplitOptionsPayload, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage]);
+
+  // Fetch each column's mapped source / default so dropdowns can disambiguate
+  // duplicate-named columns.
+  const refreshColumnSourceMap = useCallback(async () => {
+    try {
+      const resp = await api.getColumnSourceMap(sessionId);
+      if (resp?.data?.success) {
+        setColumnSourceMap({ sources: resp.data.sources || {}, defaults: resp.data.defaults || {} });
+      }
+    } catch (_) { /* non-fatal */ }
+  }, [sessionId]);
+
+  // "Tag_1" → "Tag  (← Manufacturer)" or "(= default)". No annotation if neither.
+  const columnLabel = useCallback((field, headerName) => {
+    const base = headerName || field;
+    const src = columnSourceMap.sources?.[field];
+    if (src) return `${base}  (← ${src})`;
+    const def = columnSourceMap.defaults?.[field];
+    if (def !== undefined && def !== null && String(def).trim() !== '') return `${base}  (= ${def})`;
+    return base;
+  }, [columnSourceMap]);
+
+  // First non-empty cell for a field, so a dropdown can show the user what that
+  // column actually holds (used by the "two matching lists" pairing dialog).
+  const sampleForField = useCallback((field) => {
+    if (!field) return '';
+    for (const r of (rowData || []).slice(0, 80)) {
+      const v = String(r?.[field] ?? '').trim();
+      if (v) return v.length > 52 ? v.slice(0, 52) + '…' : v;
+    }
+    return '';
+  }, [rowData]);
+
+  // Load the per-column source/default map once columns are available, so every
+  // column dropdown can annotate duplicate-named columns.
+  useEffect(() => {
+    if (sessionId && columnDefs.length > 0) refreshColumnSourceMap();
+  }, [sessionId, columnDefs.length, refreshColumnSourceMap]);
+
+  // Look at the user's actual data and work out which arrangement(s) fit, with
+  // real column names + sample cell values to show on each chooser card.
+  const handleOpenAlternatesChooser = useCallback(async () => {
+    const gridCols = columnDefs.filter(c => c.field && c.field !== '__row_number__');
+    const names = gridCols.map(c => c.field);
+    const label = (field) => { const c = gridCols.find(x => x.field === field); return (c && c.headerName) || field; };
+    const sampleFor = (field) => {
+      for (const r of (rowData || []).slice(0, 80)) {
+        const v = String(r?.[field] ?? '').trim();
+        if (v) return v.length > 46 ? v.slice(0, 46) + '…' : v;
+      }
+      return '';
+    };
+    const isMulti = (field) => {
+      const v = sampleFor(field).replace(/…$/, '');
+      return v && v.split(/[\s,;]+/).filter(Boolean).length >= 2;
+    };
+
+    const labelledCol = gridCols.map(c => c.field).find(f => selectedColumnLooksLikeProducerText(f));
+    const mpnField = detectMpnColumn(names);
+    const mfrField = detectManufacturerColumn(names);
+
+    const detection = {
+      lists: (mpnField && mfrField && (isMulti(mpnField) || isMulti(mfrField)))
+        ? { matched: true, lines: [`${label(mfrField)}:  ${sampleFor(mfrField)}`, `${label(mpnField)}:  ${sampleFor(mpnField)}`] }
+        : { matched: false },
+      labelled: labelledCol
+        ? { matched: true, lines: [`${label(labelledCol)}:  ${sampleFor(labelledCol)}`] }
+        : { matched: false },
+      packed: (mpnField && isMulti(mpnField) && !labelledCol)
+        ? { matched: true, lines: [`${label(mpnField)}:  ${sampleFor(mpnField)}`] }
+        : { matched: false },
+      columns: { matched: false },
+    };
+
+    // Separate side-by-side columns live in the (often unmapped) source. Use
+    // source-columns-preview (raw client headers, always populated) and fall back
+    // to the parser columns endpoint.
+    try {
+      let srcCols = [];
+      try {
+        const resp = await api.getSourceColumnsPreview(sessionId);
+        srcCols = (resp?.data?.columns || []).filter(Boolean);
+      } catch (_) {
+        const resp2 = await api.getSourceColumns(sessionId);
+        srcCols = (resp2?.data?.columns || []).filter(Boolean);
+      }
+      const altCols = srcCols.filter(c => /(^|\s)s\s*s(\s|$)|\balt(ernate)?\b/i.test(String(c)));
+      if (altCols.length > 0) {
+        detection.columns = { matched: true, lines: altCols.slice(0, 3).map(c => `${c}`) };
+      }
+    } catch (_) { /* leave unmatched */ }
+
+    setAlternatesDetection(detection);
+    setAlternatesChooserOpen(true);
+  }, [columnDefs, rowData, sessionId, selectedColumnLooksLikeProducerText, detectMpnColumn, detectManufacturerColumn]);
+
+  // Smart Expand: build the plan from explicit columns (MPN required; a
+  // manufacturer column, if given, turns it into a two-list pairing). The
+  // detection is genuine, but the user can override the columns in the dialog —
+  // e.g. point it at the Manufacturer column so it pairs instead of just splitting.
+  const planFromColumns = useCallback((mpnCol, mfrCol) => {
+    if (!mpnCol) return null;
+    const gridCols = columnDefs.filter(c => c.field && c.field !== '__row_number__');
+    const label = (f) => { const c = gridCols.find(x => x.field === f); return (c && c.headerName) || f; };
+    const mpnSample = String(sampleForField(mpnCol) || '');
+    const hasPrefixes = /(^|[\s,;])(AGILE|[A-Za-z]{5,}|\d{5,})[-\s]/i.test(mpnSample);
+
+    // BOM 2 style: manufacturer + parts written together in one cell, labelled
+    // with a colon ("Murata: GRM188; TDK: C1608"). This is AUTHORITATIVE — a
+    // colon-labelled cell can't be paired against a separate list, so it always
+    // routes to the producer parser, even if a (usually empty) manufacturer column
+    // was detected or picked. This is NOT the BOM 5 pairing.
+    const isLabelled = /(^|[\s;])[A-Za-z][\w .&/()-]*:\s*[A-Za-z0-9]/.test(mpnSample);
+    if (isLabelled) {
+      return {
+        op: 'labelled', producerCol: mpnCol,
+        headline: `Manufacturer + parts written together in "${label(mpnCol)}"`,
+        steps: [
+          'Read each manufacturer written before its colon',
+          'Pull out the part numbers that follow it',
+          'Expand into one row per manufacturer + part pair',
+        ],
+        columns: [{ label: label(mpnCol), sample: sampleForField(mpnCol) }],
+      };
+    }
+
+    if (mfrCol && mfrCol !== mpnCol) {
+      const steps = [];
+      if (hasPrefixes) steps.push('Strip catalog / vendor prefixes from the part numbers');
+      steps.push('Keep multi-word manufacturer names whole (built-in manufacturer directory)');
+      steps.push(`Pair each part in "${label(mpnCol)}" with its manufacturer in "${label(mfrCol)}" by position`);
+      steps.push('Expand into one row per manufacturer + part pair');
+      return {
+        op: 'lists', mpnCol, mfrCol,
+        headline: `Pairing two lists — ${label(mfrCol)} ↔ ${label(mpnCol)}`,
+        steps,
+        columns: [
+          { label: label(mfrCol), sample: sampleForField(mfrCol) },
+          { label: label(mpnCol), sample: sampleForField(mpnCol) },
+        ],
+      };
+    }
+    const steps = [];
+    if (hasPrefixes) steps.push('Strip catalog / vendor prefixes from the part numbers');
+    steps.push(`Split the values packed in "${label(mpnCol)}"`);
+    steps.push('Expand into one row per part number');
+    return {
+      op: 'packed', mpnCol,
+      headline: `Splitting packed parts — "${label(mpnCol)}"`,
+      steps,
+      columns: [{ label: label(mpnCol), sample: sampleForField(mpnCol) }],
+    };
+  }, [columnDefs, sampleForField]);
+
+  const detectSmartColumns = useCallback(() => {
+    const names = columnDefs.filter(c => c.field && c.field !== '__row_number__').map(c => c.field);
+    const isMulti = (f) => {
+      const v = String(sampleForField(f) || '').replace(/…$/, '');
+      return v && v.split(/[\s,;]+/).filter(Boolean).length >= 2;
+    };
+    // A colon-labelled cell ("NIPPON: EMV-350ADA1") is the producer-parse case —
+    // everything is in one column, so any separately-detected (usually empty)
+    // manufacturer column must NOT turn it into two-list pairing.
+    const looksLabelled = (f) => /[A-Za-z][\w .&/()-]*:\s*[A-Za-z0-9]/.test(String(sampleForField(f) || '').replace(/…$/, ''));
+    const mpn = detectMpnColumn(names) || '';
+    let mfr = detectManufacturerColumn(names) || '';
+    if (mfr === mpn) mfr = '';
+    if (mpn && looksLabelled(mpn)) {
+      mfr = '';
+    } else if (mfr && !(isMulti(mfr) || (mpn && isMulti(mpn)))) {
+      // Only auto-fill the manufacturer (→ pairing) when it or the MPN actually
+      // holds a list; otherwise leave it blank so the user picks it deliberately.
+      mfr = '';
+    }
+    return { mpn, mfr };
+  }, [columnDefs, sampleForField, detectMpnColumn, detectManufacturerColumn]);
+
+  const handleOpenSmartExpand = useCallback(() => {
+    setToolsMenuAnchor(null);
+    const { mpn, mfr } = detectSmartColumns();
+    setSmartMpnCol(mpn);
+    setSmartMfrCol(mfr);
+    setSmartPlan(planFromColumns(mpn, mfr));
+    // Seed the "where do the values go" destinations for the labelled case so they
+    // can be edited inline in this same dialog (no second step).
+    const allNames = columnDefs.filter(c => c.field && c.field !== '__row_number__').map(c => c.field);
+    const detMpn = detectMpnColumn(allNames);
+    const detMfr = detectManufacturerColumn(allNames);
+    setProducerMpnCols(detMpn && allNames.includes(detMpn) ? [detMpn] : []);
+    setProducerMfrCols(detMfr && allNames.includes(detMfr) && detMfr !== detMpn ? [detMfr] : []);
+    setSmartPhase('analyzing');
+    setSmartStepIndex(0);
+    setSmartExpandOpen(true);
+    // In parallel, look at the (usually unmapped) raw source columns for
+    // side-by-side alternate columns like "Manufacturer S S" / "Manufacturer
+    // PartNo S S". When they exist that IS the arrangement (BOM 3) — override the
+    // plan to route to the alternate-columns tool instead of a packed MPN split.
+    // Use the same source the alternate-columns tool uses (source-columns-preview),
+    // which returns the raw client headers reliably; fall back to parser columns.
+    (async () => {
+      try {
+        let srcCols = [];
+        try {
+          const resp = await api.getSourceColumnsPreview(sessionId);
+          srcCols = (resp?.data?.columns || []).filter(Boolean);
+        } catch (_) {
+          const resp2 = await api.getSourceColumns(sessionId);
+          srcCols = (resp2?.data?.columns || []).filter(Boolean);
+        }
+        const altCols = srcCols.filter(c => /(^|\s)s\s*s(\s|$)|\balt(ernate)?\b/i.test(String(c)));
+        if (altCols.length > 0) {
+          setSmartPlan({
+            op: 'altcols',
+            altSourceCols: altCols,
+            headline: `Separate alternate columns — ${altCols.slice(0, 2).join(', ')}${altCols.length > 2 ? '…' : ''}`,
+            steps: [
+              'Read the side-by-side alternate columns (alternate supplier / part number)',
+              'Add one extra row per alternate',
+              'Copy the shared item details down into each new row',
+            ],
+            columns: altCols.slice(0, 3).map(c => ({ label: c, sample: '' })),
+          });
+        }
+      } catch (_) { /* keep the MPN/manufacturer plan */ }
+    })();
+  }, [detectSmartColumns, planFromColumns, sessionId, columnDefs, detectMpnColumn, detectManufacturerColumn]);
+
+  // Drive the short "analyzing" sequence, then reveal the plan.
+  useEffect(() => {
+    if (!smartExpandOpen || smartPhase !== 'analyzing') return undefined;
+    if (smartStepIndex < SMART_EXPAND_STEPS.length - 1) {
+      const t = setTimeout(() => setSmartStepIndex((i) => i + 1), 560);
+      return () => clearTimeout(t);
+    }
+    const t = setTimeout(() => setSmartPhase('plan'), 650);
+    return () => clearTimeout(t);
+  }, [smartExpandOpen, smartPhase, smartStepIndex]);
+
+  // "Separate columns per alternate": fetch the raw source columns (which include
+  // the usually-unmapped alternate columns like "Manufacturer S S"), pre-fill a
+  // sensible default pairing, and open the config dialog. Defined before
+  // handleSmartApply so it can appear in that callback's dependency array.
+  const handleOpenAltColsDialog = useCallback(async () => {
+    try {
+      refreshColumnSourceMap();
+      const gridCols = columnDefs.filter(c => c.field && c.field !== '__row_number__').map(c => c.field);
+      const findGrid = (...needles) => gridCols.find(c => needles.every(n => c.toLowerCase().includes(n)));
+      let sourceCols = [];
+      try {
+        const resp = await api.getSourceColumnsPreview(sessionId);
+        sourceCols = (resp?.data?.columns || []).filter(Boolean);
+        setAltColsSourceSamples(resp?.data?.samples || {});
+      } catch (_) {
+        try {
+          const resp2 = await api.getSourceColumns(sessionId);
+          sourceCols = (resp2?.data?.columns || []).filter(Boolean);
+        } catch (__) { /* leave empty */ }
+        setAltColsSourceSamples({});
+      }
+      setAltColsSourceColumns(sourceCols);
+      const findSrc = (...needles) => sourceCols.find(c => needles.every(n => String(c).toLowerCase().includes(n)));
+      // Default guesses: an "S S"/alt part → MPN, an "S S"/alt manufacturer → vendor.
+      const altPart = findSrc('s s', 'part') || findSrc('alt', 'part') || findSrc('s s') || '';
+      const altMfr = sourceCols.find(c => /s\s*s/i.test(String(c)) && /manufacturer|mfr|vendor/i.test(String(c)) && !/part/i.test(String(c))) || '';
+      const mpnTarget = findGrid('mpn') || findGrid('part') || (gridCols[0] || '');
+      const vendorTarget = findGrid('vendor') || findGrid('preferred') || findGrid('manufacturer') || '';
+      const pairs = [];
+      if (mpnTarget) pairs.push({ target: mpnTarget, source: altPart });
+      if (vendorTarget) pairs.push({ target: vendorTarget, source: altMfr });
+      if (pairs.length === 0) pairs.push({ target: gridCols[0] || '', source: '' });
+      setAltColsPairs(pairs);
+      setAltColsDialogOpen(true);
+    } catch (e) {
+      showSnackbar('Could not open the alternate-columns tool', 'error');
+    }
+  }, [columnDefs, sessionId, showSnackbar, refreshColumnSourceMap]);
+
+  const handleSmartApply = useCallback(async () => {
+    if (!smartPlan) return;
+    setSmartPhase('applying');
+    try {
+      setMpnSplitting(true);
+      if (smartPlan.op === 'lists') {
+        // Check for rows where the manufacturer split won't line up with the MPN
+        // count first. If any, send the user to the review screen to hand-cut them
+        // before expanding, rather than silently mis-pairing.
+        const analysis = await api.analyzeMpnPairing(sessionId, smartPlan.mpnCol, smartPlan.mfrCol, buildMpnSplitOptionsPayload());
+        const flagged = (analysis.data?.flagged) || [];
+        if (flagged.length) {
+          setReviewRows(flagged.map((f) => {
+            const tokens = f.mfr_tokens || [];
+            return {
+              row: f.row,
+              mpnCount: f.mpn_count,
+              mpns: f.mpns || [],
+              mfrRaw: f.mfr_raw || '',
+              tokens,
+              // Start with a cut after every word (each token its own name); the
+              // user removes cuts to join multi-word manufacturers back together.
+              cuts: tokens.slice(0, Math.max(0, tokens.length - 1)).map(() => true),
+              manual: null,
+            };
+          }));
+          setReviewMpnCol(smartPlan.mpnCol);
+          setReviewMfrCol(smartPlan.mfrCol);
+          setMpnColumn(smartPlan.mpnCol);
+          setMpnSplitting(false);
+          setSmartExpandOpen(false);
+          setSmartPhase('plan');
+          setReviewOpen(true);
+          return;
+        }
+        const resp = await api.splitMPNCells(sessionId, smartPlan.mpnCol, buildMpnSplitOptionsPayload(), smartPlan.mfrCol, true);
+        if (!resp.data?.success) throw new Error(resp.data?.error || 'Expand failed');
+        setMpnColumn(resp.data.mpn_header || smartPlan.mpnCol);
+        const paired = resp.data.paired_manufacturer_rows || 0;
+        showSnackbar(`Expanded into ${resp.data.total_rows || 0} rows — paired ${paired} manufacturers.`, 'success');
+      } else if (smartPlan.op === 'packed') {
+        const resp = await api.splitMPNCells(sessionId, smartPlan.mpnCol, buildMpnSplitOptionsPayload(), null, false);
+        if (!resp.data?.success) throw new Error(resp.data?.error || 'Expand failed');
+        setMpnColumn(resp.data.mpn_header || smartPlan.mpnCol);
+        showSnackbar(`Expanded into ${resp.data.total_rows || 0} rows.`, 'success');
+      } else if (smartPlan.op === 'labelled') {
+        // Read "Manufacturer: MPN" cells and write the extracted values into the
+        // destination columns chosen inline in this dialog (each can be more than
+        // one column). No separate step.
+        if (!producerMpnCols.length || !producerMfrCols.length) {
+          showSnackbar('Pick where the part numbers and manufacturers should go.', 'warning');
+          setSmartPhase('plan');
+          setMpnSplitting(false);
+          return;
+        }
+        const resp = await api.parseProducerColumn(
+          sessionId, smartPlan.producerCol, null, null, buildMpnSplitOptionsPayload(),
+          producerMpnCols, producerMfrCols
+        );
+        if (!resp.data?.success) throw new Error(resp.data?.error || 'Parse failed');
+        showSnackbar(`Expanded into ${resp.data.total_rows || resp.data.created_rows || 0} rows.`, 'success');
+      } else if (smartPlan.op === 'altcols') {
+        setSmartExpandOpen(false);
+        handleOpenAltColsDialog();
+        return;
+      }
+      await fetchDataSynchronized();
+      setShowMpnColumns(true);
+      setSmartExpandOpen(false);
+    } catch (e) {
+      showSnackbar(getFriendlyErrorMessage(e, 'Could not expand automatically — open Configure manually.'), 'error');
+      setSmartPhase('plan');
+    } finally {
+      setMpnSplitting(false);
+    }
+  }, [smartPlan, sessionId, buildMpnSplitOptionsPayload, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage, handleOpenProducerParseDialog, handleOpenAltColsDialog, producerMpnCols, producerMfrCols]);
+
+  // Review screen: toggle a cut between two adjacent words in a row.
+  const toggleReviewCut = useCallback((rowIdx, boundaryIdx) => {
+    setReviewRows((prev) => prev.map((rr, i) => {
+      if (i !== rowIdx) return rr;
+      // A manual edit locks the row; toggling a boundary drops back to word-cutting
+      // seeded from the manual grouping so the click still does something sensible.
+      const base = rr.manual != null
+        ? (() => {
+            const groups = reviewRowGroups(rr);
+            const cuts = rr.tokens.slice(0, Math.max(0, rr.tokens.length - 1)).map(() => true);
+            let idx = 0;
+            groups.forEach((g) => {
+              const n = String(g).trim().split(/\s+/).filter(Boolean).length;
+              for (let k = 0; k < n - 1; k += 1) { if (idx + k < cuts.length) cuts[idx + k] = false; }
+              idx += n;
+            });
+            return { ...rr, manual: null, cuts };
+          })()
+        : rr;
+      if (boundaryIdx < 0) return base; // just exit manual mode, keep seeded cuts
+      const cuts = base.cuts.slice();
+      cuts[boundaryIdx] = !cuts[boundaryIdx];
+      return { ...base, cuts };
+    }));
+  }, []);
+
+  // Review screen: replace a row's grouping with a manually typed "A | B | C" list.
+  const setReviewManual = useCallback((rowIdx, text) => {
+    setReviewRows((prev) => prev.map((rr, i) => (i === rowIdx ? { ...rr, manual: text } : rr)));
+  }, []);
+
+  const removeReviewRow = useCallback((rowIdx) => {
+    setReviewRows((prev) => prev.filter((_, i) => i !== rowIdx));
+  }, []);
+
+  // Apply the reviewed cuts: send per-row manufacturer lists as overrides so the
+  // expand pairs exactly how the user grouped them.
+  const handleApplyReview = useCallback(async () => {
+    setReviewBusy(true);
+    try {
+      const overrides = {};
+      reviewRows.forEach((rr) => {
+        const groups = reviewRowGroups(rr);
+        if (groups.length) overrides[String(rr.row)] = groups;
+      });
+      const resp = await api.splitMPNCells(
+        sessionId, reviewMpnCol, buildMpnSplitOptionsPayload(), reviewMfrCol, true, overrides
+      );
+      if (!resp.data?.success) throw new Error(resp.data?.error || 'Expand failed');
+      setMpnColumn(resp.data.mpn_header || reviewMpnCol);
+      const paired = resp.data.paired_manufacturer_rows || 0;
+      await fetchDataSynchronized();
+      setShowMpnColumns(true);
+      setReviewOpen(false);
+      showSnackbar(`Expanded into ${resp.data.total_rows || 0} rows — paired ${paired} manufacturers.`, 'success');
+    } catch (e) {
+      showSnackbar(getFriendlyErrorMessage(e, 'Could not expand — please try again.'), 'error');
+    } finally {
+      setReviewBusy(false);
+    }
+  }, [reviewRows, sessionId, reviewMpnCol, reviewMfrCol, buildMpnSplitOptionsPayload, fetchDataSynchronized, showSnackbar, getFriendlyErrorMessage]);
+
+  const handleCopyColumn = useCallback(async () => {
+    if (!copySource || !copyTarget || copySource === copyTarget) return;
+    setCopyBusy(true);
+    try {
+      const resp = await api.copyColumn(sessionId, copySource, copyTarget, copyOnlyEmpty);
+      if (!resp.data?.success) throw new Error(resp.data?.error || 'Copy failed');
+      showSnackbar(`Copied "${copySource}" into "${copyTarget}" (${resp.data.changed} cells).`, 'success');
+      setCopyColOpen(false);
+      await fetchDataSynchronized();
+    } catch (e) {
+      showSnackbar(getFriendlyErrorMessage(e, 'Could not copy the column.'), 'error');
+    } finally {
+      setCopyBusy(false);
+    }
+  }, [copySource, copyTarget, copyOnlyEmpty, sessionId, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage]);
+
+  const handleSetDefault = useCallback(async () => {
+    if (!defaultCol) return;
+    const conditional = defaultMode === 'conditional';
+    if (conditional && !condCol) {
+      showSnackbar('Pick the column the condition looks at.', 'warning');
+      return;
+    }
+    setDefaultBusy(true);
+    try {
+      const condition = conditional
+        ? {
+            column: condCol, operator: condOp, compare: condCompare, then: condThen,
+            // Omit "else" when blank so the backend leaves non-matching cells as-is
+            // (rather than overwriting them with an empty value).
+            ...(String(condElse).trim() !== '' ? { else: condElse } : {}),
+          }
+        : null;
+      const resp = await api.setColumnDefault(sessionId, defaultCol, defaultValue, defaultOnlyEmpty, condition);
+      if (!resp.data?.success) throw new Error(resp.data?.error || 'Set default failed');
+      showSnackbar(`Set "${defaultCol}" for ${resp.data.changed} cell${resp.data.changed !== 1 ? 's' : ''}.`, 'success');
+      setDefaultColOpen(false);
+      await fetchDataSynchronized();
+    } catch (e) {
+      showSnackbar(getFriendlyErrorMessage(e, 'Could not set the default value.'), 'error');
+    } finally {
+      setDefaultBusy(false);
+    }
+  }, [defaultCol, defaultValue, defaultOnlyEmpty, defaultMode, condCol, condOp, condCompare, condThen, condElse, sessionId, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage]);
+
+  const handleApplyAltCols = useCallback(async () => {
+    const pairs = (altColsPairs || []).filter(p => p.target && p.source);
+    if (pairs.length === 0) {
+      showSnackbar('Pick at least one destination column and its alternate source column', 'warning');
+      return;
+    }
+    try {
+      setAltColsRunning(true);
+      const resp = await api.expandAlternateColumns(sessionId, [pairs]);
+      if (resp.data?.success) {
+        setAltColsDialogOpen(false);
+        showSnackbar(`Added ${resp.data.alternates_emitted} alternate row(s).`, 'success');
+        await fetchDataSynchronized();
+      } else {
+        showSnackbar(resp.data?.error || 'Could not expand alternate columns', 'error');
+      }
+    } catch (error) {
+      showSnackbar(getFriendlyErrorMessage(error, 'Could not expand alternate columns'), 'error');
+    } finally {
+      setAltColsRunning(false);
+    }
+  }, [altColsPairs, sessionId, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage]);
 
   // The split runs on the mapped grid, so offer the grid's own columns. Indices
   // are carried along because the grid may repeat a header name.
@@ -2376,10 +3018,11 @@ const EnhancedDataEditor = () => {
 
   const handleOpenSplitColsDialog = useCallback(() => {
     setToolsMenuAnchor(null);
+    refreshColumnSourceMap();
     setSplitColsDialogOpen(true);
     setSplitColsError('');
     setSplitColsPreview(null);
-  }, []);
+  }, [refreshColumnSourceMap]);
 
   const handlePreviewSplitCols = useCallback(async () => {
     try {
@@ -2679,32 +3322,6 @@ const EnhancedDataEditor = () => {
   // ─── MAIN RENDER ────────────────────────────────────────────────────────────
   return (
     <Box sx={{ height: '100vh', display: 'flex', flexDirection: 'column', bgcolor: '#f8fafc' }}>
-      {syncNotice.visible && (
-        <Box sx={{
-          position: 'sticky',
-          top: 0,
-          zIndex: 1100,
-          bgcolor: '#fffbe6',
-          borderBottom: '1px solid #ffe58f',
-          color: '#ad8b00',
-          px: 2,
-          py: 1,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between'
-        }}>
-          <Typography variant="body2" sx={{ fontWeight: 600 }}>
-            {syncNotice.message}
-          </Typography>
-          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-            <Button size="small" variant="outlined" onClick={fetchDataSynchronized} startIcon={<RefreshIcon />}>Refresh now</Button>
-            <IconButton size="small" onClick={() => setSyncNotice(prev => ({ ...prev, visible: false }))}>
-              <CloseIcon fontSize="small" />
-            </IconButton>
-          </Box>
-        </Box>
-      )}
-      
       {/* Sync Status Indicator */}
       {syncStatus.inProgress && (
         <LinearProgress 
@@ -2860,7 +3477,7 @@ const EnhancedDataEditor = () => {
               }
             }}
           >
-            <strong>{cleanupInfo.rows_deleted} row{cleanupInfo.rows_deleted !== 1 ? 's' : ''} removed</strong> — column "{cleanupInfo.primary_column}" was empty ({cleanupInfo.total_rows_before} → {cleanupInfo.total_rows_after} rows)
+            <strong>{cleanupInfo.rows_deleted} row{cleanupInfo.rows_deleted !== 1 ? 's' : ''} removed</strong> because column "{cleanupInfo.primary_column}" was empty ({cleanupInfo.total_rows_before} to {cleanupInfo.total_rows_after} rows)
             {cleanupInfo.deleted_rows_preview && cleanupInfo.deleted_rows_preview.length > 0 && (
               <Typography variant="caption" sx={{ ml: 1, opacity: 0.7 }}>
                 {showDeletedRows ? 'Click to hide' : 'Click to see deleted rows'}
@@ -2991,8 +3608,7 @@ const EnhancedDataEditor = () => {
                     <ErrorIcon sx={{ color: '#ff9800' }} />
                   </Tooltip>
                 )}
-                <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.85)', mx: 1 }}>v{sessionVersion}</Typography>
-                
+
               {/* Auto-fit All */}
               <Tooltip title="Auto-fit all columns to content">
                 <span>
@@ -3105,23 +3721,9 @@ const EnhancedDataEditor = () => {
                 Export to Project
               </Button>
 
-              <Button
-                onClick={handleOpenManufacturerMatchDialog}
-                variant="contained"
-                startIcon={<AccountTreeIcon />}
-                disabled={mpnSplitting || syncStatus.inProgress}
-                sx={{
-                  backgroundColor: '#00796b',
-                  color: 'white',
-                  '&:hover': { backgroundColor: '#004d40' },
-                  textTransform: 'none',
-                  fontWeight: 600,
-                  borderRadius: '8px',
-                  px: 2.5
-                }}
-              >
-                Manufacturer Match
-              </Button>
+              {/* "Manufacturer Match" button removed — it now lives inside
+                  Tools ▸ Expand Alternates into Rows (the "two matching lists"
+                  arrangement), alongside the other alternate shapes. */}
 
               <Button
                 onClick={handleOpenCreateColumnDialog}
@@ -3171,29 +3773,25 @@ const EnhancedDataEditor = () => {
                   <ListItemIcon><AutoAwesomeIcon sx={{ color: '#9c27b0' }} /></ListItemIcon>
                   <ListItemText>Add Tags</ListItemText>
                 </MenuItem>
-                <MenuItem onClick={() => { setToolsMenuAnchor(null); setColumnParserOpen(true); }} disabled={syncStatus.inProgress}>
-                  <ListItemIcon><AutoAwesomeIcon sx={{ color: '#0891b2' }} /></ListItemIcon>
-                  <ListItemText>Parse Column</ListItemText>
-                </MenuItem>
-                <MenuItem onClick={handleOpenMpnSplitDialog} disabled={syncStatus.inProgress || mpnSplitting}>
-                  <ListItemIcon>
-                    {mpnSplitting ? <CircularProgress size={18} /> : <ContentCutIcon sx={{ color: '#f57c00' }} />}
-                  </ListItemIcon>
-                  <ListItemText>{mpnSplitting ? 'Splitting MPNs...' : 'Split MPN Cells'}</ListItemText>
-                </MenuItem>
-<<<<<<< Updated upstream
-                <MenuItem onClick={handleOpenProducerParseDialog} disabled={syncStatus.inProgress || mpnSplitting}>
-                  <ListItemIcon>
-                    {mpnSplitting ? <CircularProgress size={18} /> : <AccountTreeIcon sx={{ color: '#00796b' }} />}
-                  </ListItemIcon>
-                  <ListItemText>{mpnSplitting ? 'Parsing Producer...' : 'Parse Producer Column'}</ListItemText>
-=======
                 <MenuItem onClick={handleOpenSplitColsDialog} disabled={syncStatus.inProgress || splitColsRunning}>
                   <ListItemIcon>
                     {splitColsRunning ? <CircularProgress size={18} /> : <ContentCutIcon sx={{ color: '#0277bd' }} />}
                   </ListItemIcon>
-                  <ListItemText>{splitColsRunning ? 'Splitting...' : 'Split Values Into Columns'}</ListItemText>
->>>>>>> Stashed changes
+                  <ListItemText>{splitColsRunning ? 'Splitting...' : 'Split into Columns'}</ListItemText>
+                </MenuItem>
+                <MenuItem onClick={() => { setToolsMenuAnchor(null); handleOpenSmartExpand(); }} disabled={syncStatus.inProgress || mpnSplitting}>
+                  <ListItemIcon>
+                    {mpnSplitting ? <CircularProgress size={18} /> : <AccountTreeIcon sx={{ color: '#00796b' }} />}
+                  </ListItemIcon>
+                  <ListItemText>{mpnSplitting ? 'Expanding…' : 'Expand Alternates into Rows'}</ListItemText>
+                </MenuItem>
+                <MenuItem onClick={() => { setToolsMenuAnchor(null); setCopySource(''); setCopyTarget(''); setCopyOnlyEmpty(false); setCopyColOpen(true); }} disabled={syncStatus.inProgress}>
+                  <ListItemIcon><ContentCopyIcon sx={{ color: '#1976d2' }} /></ListItemIcon>
+                  <ListItemText>Copy a column into another</ListItemText>
+                </MenuItem>
+                <MenuItem onClick={() => { setToolsMenuAnchor(null); setDefaultCol(''); setDefaultValue(''); setDefaultOnlyEmpty(true); setDefaultColOpen(true); }} disabled={syncStatus.inProgress}>
+                  <ListItemIcon><EditNoteIcon sx={{ color: '#7b1fa2' }} /></ListItemIcon>
+                  <ListItemText>Set a default value for a column</ListItemText>
                 </MenuItem>
                 <MenuItem onClick={() => { setToolsMenuAnchor(null); handleOpenFactwiseIdDialog(); }} disabled={syncStatus.inProgress}>
                   <ListItemIcon><BadgeIcon sx={{ color: '#2e7d32' }} /></ListItemIcon>
@@ -3226,7 +3824,9 @@ const EnhancedDataEditor = () => {
                   borderRadius: '8px'
                 }}
               >
-                MPN
+                {mpnValidating
+                  ? (mpnProgress && mpnProgress.total ? `MPN ${mpnProgress.done}/${mpnProgress.total}` : 'MPN...')
+                  : 'MPN'}
               </Button>
               <Menu
                 anchorEl={mpnMenuAnchor}
@@ -3251,7 +3851,7 @@ const EnhancedDataEditor = () => {
                         .filter(col => col.field && col.field !== '__row_number__')
                         .map(col => (
                           <MenuItem key={col.field} value={col.field}>
-                            {col.headerName || col.field}
+                            {columnLabel(col.field, col.headerName)}
                           </MenuItem>
                         ))}
                     </Select>
@@ -3280,9 +3880,32 @@ const EnhancedDataEditor = () => {
                         setOriginalMpnColumn(mpnColumn);
                       }
                       setMpnValidating(true);
-                      await api.validateMPNs(sessionId, mpnColumn, mpnManufacturerColumn);
-                      await fetchDataSynchronized();
-                      setShowMpnColumns(true);
+                      // Chunk the slow Digi-Key fan-out into small requests (never
+                      // hits Azure's 230s limit), and fill the columns PROGRESSIVELY:
+                      // each batch warms ~8 MPNs into the cache, then we rebuild the
+                      // grid from whatever's cached so far (cache_only, no API) and
+                      // push it to the screen — so results appear batch by batch.
+                      const CHUNK = 8;
+                      let offset = 0;
+                      let total = 0;
+                      let shown = false;
+                      setMpnProgress({ done: 0, total: 0 });
+                      // eslint-disable-next-line no-constant-condition
+                      while (true) {
+                        const resp = await api.warmMPNs(sessionId, mpnColumn, offset, CHUNK, mpnManufacturerColumn);
+                        const d = resp?.data || {};
+                        total = d.total || 0;
+                        setMpnProgress({ done: Math.min(d.validated || 0, total), total });
+                        // Build + render the grid from the cache so far (live fill-in).
+                        try {
+                          await api.validateMPNs(sessionId, mpnColumn, mpnManufacturerColumn, true);
+                          if (!shown) { setShowMpnColumns(true); shown = true; }
+                          await fetchDataSynchronized();
+                        } catch (_) { /* keep warming even if a partial render hiccups */ }
+                        if (d.done || total === 0) break;
+                        offset += CHUNK;
+                      }
+                      setMpnProgress(null);
                       setMpnValidationCompleted(true);
                       showSnackbar('MPN validation complete', 'success');
                     } catch (e) {
@@ -3297,12 +3920,17 @@ const EnhancedDataEditor = () => {
                     } finally {
                       mpnValidationInFlightRef.current = false;
                       setMpnValidating(false);
+                      setMpnProgress(null);
                     }
                   }}
                   disabled={!mpnColumn || mpnValidating || syncStatus.inProgress}
                 >
                   <ListItemIcon><CheckIcon sx={{ color: '#f57c00' }} /></ListItemIcon>
-                  <ListItemText>{mpnValidating ? 'Validating MPNs...' : 'Validate MPNs'}</ListItemText>
+                  <ListItemText>{mpnValidating
+                    ? (mpnProgress && mpnProgress.total
+                        ? `Validating ${mpnProgress.done}/${mpnProgress.total}...`
+                        : 'Validating MPNs...')
+                    : 'Validate MPNs'}</ListItemText>
                 </MenuItem>
                 {hasParserMpnColumns && (
                   <MenuItem
@@ -3518,10 +4146,19 @@ const EnhancedDataEditor = () => {
               </Box>
               <Pagination count={Math.max(1, totalPages)} page={page} onChange={(_, p) => { setPage(p); fetchPageData(p, pageSize); }} color="primary" size="small" shape="rounded" />
             </Box>
+            {dupHighlight && (
+              <Alert
+                severity="warning"
+                sx={{ mb: 1 }}
+                action={<Button color="inherit" size="small" onClick={() => setDupHighlight(null)}>Clear highlight</Button>}
+              >
+                Duplicate <strong>{columnLabel(dupHighlight.field, dupHighlight.field)}</strong> values are highlighted in amber ({dupHighlight.values.size} value{dupHighlight.values.size === 1 ? '' : 's'}). Edit them so each is unique, then export again.
+              </Alert>
+            )}
             {pageLoading && <LinearProgress sx={{ mb: 1 }} />}
-            <div style={{ overflowX: 'auto' }}>
-              <table style={{ 
-                width: '100%', 
+            <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: 'calc(100vh - 260px)' }}>
+              <table style={{
+                width: '100%',
                 borderCollapse: 'collapse',
                 tableLayout: 'fixed',
                 fontSize: '14px',
@@ -3582,7 +4219,9 @@ const EnhancedDataEditor = () => {
                           color: '#2c3e50',
                           border: '1px solid #e9ecef',
                           backgroundColor: '#f8f9fa',
-                          position: 'relative',
+                          position: 'sticky',
+                          top: 0,
+                          zIndex: 3,
                           userSelect: 'none',
                           width: `${columnWidths[col.field] || (col.field === '__row_number__' ? 80 : 180)}px`
                         }}
@@ -3669,13 +4308,14 @@ const EnhancedDataEditor = () => {
                           const cellValue = raw == null ? '' : String(raw);
                           const isUnknown = cellValue.toLowerCase() === 'unknown';
                           const isInvalidMpn = (mpnColumn && col.field === mpnColumn && String(row['MPN valid'] || '').toLowerCase() === 'no');
+                          const isDupHighlighted = !!(dupHighlight && col.field === dupHighlight.field && cellValue.trim() && dupHighlight.values.has(cellValue.trim()));
                           return (
                             <td key={`${col.field}-${realIndex}`} style={{
                               padding: '12px 16px',
-                              border: '1px solid #e9ecef',
-                              backgroundColor: isUnknown ? '#ffebee' : 'inherit',
-                              color: isInvalidMpn ? '#d32f2f' : (isUnknown ? '#c62828' : 'inherit'),
-                              fontWeight: isInvalidMpn ? '700' : (isUnknown ? '500' : 'normal'),
+                              border: isDupHighlighted ? '2px solid #f59e0b' : '1px solid #e9ecef',
+                              backgroundColor: isDupHighlighted ? '#fff3cd' : (isUnknown ? '#ffebee' : 'inherit'),
+                              color: isDupHighlighted ? '#92400e' : (isInvalidMpn ? '#d32f2f' : (isUnknown ? '#c62828' : 'inherit')),
+                              fontWeight: (isDupHighlighted || isInvalidMpn) ? '700' : (isUnknown ? '500' : 'normal'),
                               width: `${columnWidths[col.field] || (col.field === '__row_number__' ? 80 : 180)}px`
                             }}>
                               {col.field === 'datasheet' && cellValue.startsWith('http') ? (
@@ -3756,20 +4396,567 @@ const EnhancedDataEditor = () => {
         />
       )}
 
-<<<<<<< Updated upstream
-      {/* Producer Parser Dialog */}
-      <Dialog open={producerParseDialogOpen} onClose={() => setProducerParseDialogOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Parse Producer Column</DialogTitle>
+      {/* Smart Expand — one entry point. Genuinely inspects the columns, shows a
+          short assistant-style analysis, then applies the right transform in one
+          click. The manual chooser below is the "Configure manually" fallback. */}
+      <Dialog open={smartExpandOpen} onClose={() => smartPhase !== 'applying' && setSmartExpandOpen(false)} maxWidth="sm" fullWidth
+        PaperProps={{ sx: { borderRadius: 3 } }}>
+        <DialogTitle sx={{ pb: 0.5 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            <AutoAwesomeIcon sx={{ color: '#7c3aed' }} />
+            <Typography variant="h6" fontWeight={700}>Expand Alternates into Rows</Typography>
+          </Box>
+          <Typography variant="body2" color="text.secondary">
+            {smartPhase === 'plan'
+              ? "Here's what I found in your sheet — review, then expand."
+              : 'Analyzing your data…'}
+          </Typography>
+        </DialogTitle>
+        <DialogContent sx={{ pt: 2 }}>
+          {(smartPhase === 'analyzing' || smartPhase === 'applying') && (
+            <Box sx={{ py: 2, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+              {(smartPhase === 'applying' ? ['Applying the transform to every row…'] : SMART_EXPAND_STEPS).map((step, i) => {
+                const active = smartPhase === 'applying' ? true : i <= smartStepIndex;
+                const done = smartPhase === 'applying' ? false : i < smartStepIndex;
+                return (
+                  <Box key={i} sx={{ display: 'flex', alignItems: 'center', gap: 1.5, opacity: active ? 1 : 0.4, transition: 'opacity .3s' }}>
+                    {done ? <CheckCircleIcon sx={{ color: '#22c55e', fontSize: 20 }} />
+                      : active ? <CircularProgress size={16} sx={{ color: '#7c3aed' }} />
+                      : <Box sx={{ width: 16, height: 16, borderRadius: '50%', border: '2px solid #d1d5db' }} />}
+                    <Typography variant="body2" sx={{ fontWeight: active && !done ? 600 : 400 }}>{step}</Typography>
+                  </Box>
+                );
+              })}
+            </Box>
+          )}
+          {smartPhase === 'plan' && (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+              {smartPlan && (
+                <Alert icon={<AutoAwesomeIcon fontSize="inherit" />} severity="info"
+                  sx={{ bgcolor: 'rgba(124,58,237,0.06)', border: '1px solid rgba(124,58,237,0.2)', color: '#4c1d95', '& .MuiAlert-icon': { color: '#7c3aed' } }}>
+                  {smartPlan.headline}
+                </Alert>
+              )}
+              {/* Columns I'll work on — pre-filled from detection, but you can change
+                  them. Pick a Manufacturer column to pair; leave it None to just split.
+                  Hidden for the separate-alternate-columns case, which has its own
+                  column mapping in the next step. */}
+              {smartPlan?.op !== 'altcols' && smartPlan?.op !== 'labelled' && (
+                <>
+                <Grid container spacing={1.5}>
+                <Grid item xs={12} sm={6}>
+                  <FormControl fullWidth size="small">
+                    <InputLabel>Part-number (MPN) column</InputLabel>
+                    <Select label="Part-number (MPN) column" value={smartMpnCol}
+                      onChange={(e) => { const v = e.target.value; setSmartMpnCol(v); setSmartPlan(planFromColumns(v, smartMfrCol)); }}>
+                      {columnDefs.filter(c => c.field && c.field !== '__row_number__').map(c => (
+                        <MenuItem key={c.field} value={c.field}>{columnLabel(c.field, c.headerName)}</MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                  {smartMpnCol && (
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5, fontFamily: 'monospace', wordBreak: 'break-word' }}>
+                      {sampleForField(smartMpnCol) || '(empty)'}
+                    </Typography>
+                  )}
+                </Grid>
+                <Grid item xs={12} sm={6}>
+                  <FormControl fullWidth size="small" color={!smartMfrCol ? 'warning' : undefined} focused={!smartMfrCol ? true : undefined}>
+                    <InputLabel>Where are the manufacturers?</InputLabel>
+                    <Select label="Where are the manufacturers?" value={smartMfrCol}
+                      onChange={(e) => { const v = e.target.value; setSmartMfrCol(v); setSmartPlan(planFromColumns(smartMpnCol, v)); }}>
+                      <MenuItem value=""><em>No manufacturers — just split the parts</em></MenuItem>
+                      {columnDefs.filter(c => c.field && c.field !== '__row_number__').map(c => (
+                        <MenuItem key={c.field} value={c.field}>{columnLabel(c.field, c.headerName)}</MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                  {smartMfrCol && (
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5, fontFamily: 'monospace', wordBreak: 'break-word' }}>
+                      {sampleForField(smartMfrCol) || '(empty)'}
+                    </Typography>
+                  )}
+                </Grid>
+              </Grid>
+              {!smartMfrCol ? (
+                <Alert severity="warning" sx={{ py: 0.5 }}>
+                  Right now only the <strong>part numbers</strong> will expand into rows — manufacturers won't be paired.
+                  If you mapped manufacturers to a column, pick it in <strong>“Where are the manufacturers?”</strong> so each part
+                  pairs with its maker. Leave it as-is only if there are no manufacturers.
+                </Alert>
+              ) : (
+                <Typography variant="caption" color="text.secondary">
+                  Each part in <strong>{columnLabel(smartMpnCol, smartMpnCol)}</strong> will be paired with its manufacturer in <strong>{columnLabel(smartMfrCol, smartMfrCol)}</strong>. Rows the split is unsure about get a quick review screen before expanding.
+                </Typography>
+              )}
+                </>
+              )}
+
+              {/* Labelled case: choose inline where the extracted values go. */}
+              {smartPlan?.op === 'labelled' && (
+                <Grid container spacing={1.5}>
+                  <Grid item xs={12} sm={6}>
+                    <FormControl fullWidth size="small">
+                      <InputLabel>Put part numbers in…</InputLabel>
+                      <Select
+                        multiple
+                        label="Put part numbers in…"
+                        value={producerMpnCols}
+                        onChange={(e) => setProducerMpnCols(typeof e.target.value === 'string' ? e.target.value.split(',') : e.target.value)}
+                        renderValue={(selected) => selected.map(f => columnLabel(f, f)).join(', ')}
+                      >
+                        {columnDefs.filter(c => c.field && c.field !== '__row_number__').map(c => (
+                          <MenuItem key={c.field} value={c.field}>
+                            <Checkbox size="small" checked={producerMpnCols.indexOf(c.field) > -1} />
+                            {columnLabel(c.field, c.headerName)}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  </Grid>
+                  <Grid item xs={12} sm={6}>
+                    <FormControl fullWidth size="small">
+                      <InputLabel>Put manufacturers in…</InputLabel>
+                      <Select
+                        multiple
+                        label="Put manufacturers in…"
+                        value={producerMfrCols}
+                        onChange={(e) => setProducerMfrCols(typeof e.target.value === 'string' ? e.target.value.split(',') : e.target.value)}
+                        renderValue={(selected) => selected.map(f => columnLabel(f, f)).join(', ')}
+                      >
+                        {columnDefs.filter(c => c.field && c.field !== '__row_number__').map(c => (
+                          <MenuItem key={c.field} value={c.field}>
+                            <Checkbox size="small" checked={producerMfrCols.indexOf(c.field) > -1} />
+                            {columnLabel(c.field, c.headerName)}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  </Grid>
+                  <Grid item xs={12}>
+                    <Typography variant="caption" color="text.secondary">
+                      Each value is written into every column you pick — choose more than one if needed.
+                    </Typography>
+                  </Grid>
+                </Grid>
+              )}
+
+              {smartPlan ? (
+                <Box>
+                  <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1 }}>What I'll do</Typography>
+                  <Box component="ol" sx={{ m: 0, pl: 2.5, display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+                    {smartPlan.steps.map((s, i) => (
+                      <Typography key={i} component="li" variant="body2" color="text.secondary">{s}</Typography>
+                    ))}
+                  </Box>
+                </Box>
+              ) : (
+                <Alert severity="warning">Pick the part-number column above to continue.</Alert>
+              )}
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={() => { setSmartExpandOpen(false); handleOpenAlternatesChooser(); }} disabled={smartPhase === 'applying'} color="inherit">
+            Configure manually
+          </Button>
+          <Box sx={{ flex: 1 }} />
+          <Button onClick={() => setSmartExpandOpen(false)} disabled={smartPhase === 'applying'}>Cancel</Button>
+          <Button variant="contained" onClick={handleSmartApply}
+            disabled={smartPhase !== 'plan' || !smartPlan || mpnSplitting}
+            startIcon={smartPhase === 'applying' ? <CircularProgress size={16} sx={{ color: 'white' }} /> : <AutoAwesomeIcon />}
+            sx={{ bgcolor: '#7c3aed', '&:hover': { bgcolor: '#6d28d9' } }}>
+            {smartPhase === 'applying' ? 'Expanding…' : (smartPlan?.op === 'altcols' ? 'Set up columns' : 'Expand into rows')}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Review screen: rows where the manufacturer names don't line up with the
+          part count. Click between two words to add/remove a break; each segment
+          becomes one manufacturer, paired to the part in the same position. */}
+      <Dialog open={reviewOpen} onClose={() => !reviewBusy && setReviewOpen(false)} maxWidth="md" fullWidth>
+        <DialogTitle>
+          Review manufacturer names
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+            {reviewRows.length} row{reviewRows.length === 1 ? '' : 's'} need a quick check — the manufacturers didn't line up
+            with the number of parts. Click between two words to add or remove a break. Each segment is one manufacturer.
+          </Typography>
+        </DialogTitle>
+        <DialogContent dividers>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {reviewRows.map((rr, ri) => {
+              const groups = reviewRowGroups(rr);
+              const ok = groups.length === rr.mpnCount;
+              return (
+                <Box key={rr.row} sx={{ p: 1.5, borderRadius: 2, border: '1px solid', borderColor: ok ? '#c9e7d6' : '#f2d6a8', backgroundColor: ok ? '#f5fbf8' : '#fffdf7' }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
+                    <Typography variant="caption" color="text.secondary">
+                      Row {rr.row + 1} · {rr.mpnCount} part{rr.mpnCount === 1 ? '' : 's'}: <span style={{ fontFamily: 'monospace' }}>{(rr.mpns || []).join('  ')}</span>
+                    </Typography>
+                    <Chip
+                      size="small"
+                      label={`${groups.length} of ${rr.mpnCount} manufacturer${rr.mpnCount === 1 ? '' : 's'}`}
+                      color={ok ? 'success' : 'warning'}
+                      variant={ok ? 'filled' : 'outlined'}
+                    />
+                  </Box>
+
+                  {rr.manual == null ? (
+                    <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', rowGap: 1 }}>
+                      {rr.tokens.map((tok, ti) => (
+                        <React.Fragment key={ti}>
+                          <Box component="span" sx={{ px: 1, py: 0.5, borderRadius: 1, backgroundColor: '#eef2f7', fontFamily: 'monospace', fontSize: 13, whiteSpace: 'nowrap' }}>
+                            {tok}
+                          </Box>
+                          {ti < rr.tokens.length - 1 && (
+                            <Tooltip title={rr.cuts[ti] ? 'Joined into one name — click to keep separate' : 'Separate names — click to join'}>
+                              <Box
+                                component="span"
+                                onClick={() => toggleReviewCut(ri, ti)}
+                                sx={{
+                                  mx: 0.25, px: 0.75, cursor: 'pointer', userSelect: 'none',
+                                  fontWeight: 700, lineHeight: 1,
+                                  color: rr.cuts[ti] ? '#c0392b' : '#94a3b8',
+                                  '&:hover': { color: rr.cuts[ti] ? '#e74c3c' : '#475569' },
+                                }}
+                              >
+                                {rr.cuts[ti] ? '|' : '·'}
+                              </Box>
+                            </Tooltip>
+                          )}
+                        </React.Fragment>
+                      ))}
+                    </Box>
+                  ) : (
+                    <TextField
+                      fullWidth size="small" autoFocus
+                      label="Manufacturers (separate with | )"
+                      value={rr.manual}
+                      onChange={(e) => setReviewManual(ri, e.target.value)}
+                      helperText="e.g. YAGEO | KEMET | NIC COMPONENTS | AVX"
+                    />
+                  )}
+
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 1 }}>
+                    <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
+                      → {groups.length ? groups.join('   |   ') : '(nothing yet)'}
+                    </Typography>
+                    {rr.manual == null ? (
+                      <Button size="small" startIcon={<EditNoteIcon />} onClick={() => setReviewManual(ri, groups.join(' | '))}>
+                        Edit
+                      </Button>
+                    ) : (
+                      <Button size="small" onClick={() => toggleReviewCut(ri, -1)}>
+                        Back to click-to-cut
+                      </Button>
+                    )}
+                    <Button size="small" color="inherit" onClick={() => removeReviewRow(ri)}>
+                      Skip row
+                    </Button>
+                  </Box>
+                </Box>
+              );
+            })}
+            {reviewRows.length === 0 && (
+              <Alert severity="info">Nothing left to review — every row is skipped. You can still expand with the automatic split.</Alert>
+            )}
+          </Box>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={() => setReviewOpen(false)} disabled={reviewBusy}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={handleApplyReview}
+            disabled={reviewBusy}
+            startIcon={reviewBusy ? <CircularProgress size={16} sx={{ color: 'white' }} /> : <AutoAwesomeIcon />}
+            sx={{ bgcolor: '#7c3aed', '&:hover': { bgcolor: '#6d28d9' } }}
+          >
+            {reviewBusy ? 'Expanding…' : 'Expand into rows'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Copy a column into another */}
+      <Dialog open={copyColOpen} onClose={() => !copyBusy && setCopyColOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Copy a column into another</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Copies every value from one column into another. Both columns must already exist.
+          </Typography>
+          <Grid container spacing={2}>
+            <Grid item xs={12} sm={6}>
+              <FormControl fullWidth size="small">
+                <InputLabel>From (source)</InputLabel>
+                <Select label="From (source)" value={copySource} onChange={(e) => setCopySource(e.target.value)}>
+                  {columnDefs.filter(c => c.field && c.field !== '__row_number__').map(c => (
+                    <MenuItem key={c.field} value={c.field}>{columnLabel(c.field, c.headerName)}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Grid>
+            <Grid item xs={12} sm={6}>
+              <FormControl fullWidth size="small">
+                <InputLabel>Into (destination)</InputLabel>
+                <Select label="Into (destination)" value={copyTarget} onChange={(e) => setCopyTarget(e.target.value)}>
+                  {columnDefs.filter(c => c.field && c.field !== '__row_number__').map(c => (
+                    <MenuItem key={c.field} value={c.field}>{columnLabel(c.field, c.headerName)}</MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            </Grid>
+          </Grid>
+          <FormControlLabel sx={{ mt: 1 }} control={<Checkbox size="small" checked={copyOnlyEmpty} onChange={(e) => setCopyOnlyEmpty(e.target.checked)} />} label="Only fill cells that are empty in the destination" />
+          {copySource && copyTarget && copySource === copyTarget && (
+            <Alert severity="warning" sx={{ mt: 1 }}>Pick two different columns.</Alert>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCopyColOpen(false)} disabled={copyBusy}>Cancel</Button>
+          <Button variant="contained" onClick={handleCopyColumn}
+            disabled={copyBusy || !copySource || !copyTarget || copySource === copyTarget}
+            startIcon={copyBusy ? <CircularProgress size={16} /> : <ContentCopyIcon />}>
+            {copyBusy ? 'Copying…' : 'Copy'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Set a default value for a column */}
+      <Dialog open={defaultColOpen} onClose={() => !defaultBusy && setDefaultColOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Set a default value for a column</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Writes a value into a column — the same value everywhere, or a value that depends on another column.
+          </Typography>
+          <FormControl fullWidth size="small" sx={{ mb: 2 }}>
+            <InputLabel>Column to fill</InputLabel>
+            <Select label="Column to fill" value={defaultCol} onChange={(e) => setDefaultCol(e.target.value)}>
+              {columnDefs.filter(c => c.field && c.field !== '__row_number__').map(c => (
+                <MenuItem key={c.field} value={c.field}>{columnLabel(c.field, c.headerName)}</MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+
+          <FormControl fullWidth size="small" sx={{ mb: 2 }}>
+            <InputLabel>How to decide the value</InputLabel>
+            <Select label="How to decide the value" value={defaultMode} onChange={(e) => setDefaultMode(e.target.value)}>
+              <MenuItem value="always">Same value for every row</MenuItem>
+              <MenuItem value="conditional">Depends on another column (if / else)</MenuItem>
+            </Select>
+          </FormControl>
+
+          {defaultMode === 'always' ? (
+            <TextField fullWidth size="small" label="Value" value={defaultValue} onChange={(e) => setDefaultValue(e.target.value)} sx={{ mb: 1 }} />
+          ) : (
+            <Box sx={{ border: '1px solid #e0e0e0', borderRadius: 2, p: 1.5, mb: 1.5, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+              <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>If</Typography>
+                <FormControl size="small" sx={{ minWidth: 160, flex: 1 }}>
+                  <InputLabel>Column</InputLabel>
+                  <Select label="Column" value={condCol} onChange={(e) => setCondCol(e.target.value)}>
+                    {columnDefs.filter(c => c.field && c.field !== '__row_number__').map(c => (
+                      <MenuItem key={c.field} value={c.field}>{columnLabel(c.field, c.headerName)}</MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                <FormControl size="small" sx={{ minWidth: 150 }}>
+                  <InputLabel>Test</InputLabel>
+                  <Select label="Test" value={condOp} onChange={(e) => setCondOp(e.target.value)}>
+                    <MenuItem value="is_empty">is empty</MenuItem>
+                    <MenuItem value="not_empty">is not empty</MenuItem>
+                    <MenuItem value="equals">equals</MenuItem>
+                    <MenuItem value="not_equals">does not equal</MenuItem>
+                    <MenuItem value="contains">contains</MenuItem>
+                  </Select>
+                </FormControl>
+                {(condOp === 'equals' || condOp === 'not_equals' || condOp === 'contains') && (
+                  <TextField size="small" label="Text" value={condCompare} onChange={(e) => setCondCompare(e.target.value)} sx={{ minWidth: 120, flex: 1 }} />
+                )}
+              </Box>
+              <TextField fullWidth size="small" label="then set the value to" value={condThen} onChange={(e) => setCondThen(e.target.value)} />
+              <TextField fullWidth size="small" label="otherwise set the value to" placeholder="(leave empty to keep existing value)" value={condElse} onChange={(e) => setCondElse(e.target.value)} InputLabelProps={{ shrink: true }} />
+              <Typography variant="caption" color="text.secondary">
+                Example: If <strong>MPN Code</strong> is empty → “Finished good”, otherwise → “RM”.
+              </Typography>
+            </Box>
+          )}
+          <FormControlLabel control={<Checkbox size="small" checked={defaultOnlyEmpty} onChange={(e) => setDefaultOnlyEmpty(e.target.checked)} />} label="Only fill empty cells (leave existing values alone)" />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDefaultColOpen(false)} disabled={defaultBusy}>Cancel</Button>
+          <Button variant="contained" onClick={handleSetDefault} disabled={defaultBusy || !defaultCol}
+            startIcon={defaultBusy ? <CircularProgress size={16} /> : <EditNoteIcon />}>
+            {defaultBusy ? 'Applying…' : 'Apply'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Manual arrangement chooser — the "Configure manually" fallback for Smart Expand. */}
+      <Dialog open={alternatesChooserOpen} onClose={() => setAlternatesChooserOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle sx={{ pb: 0.5 }}>
+          <Typography variant="h6" fontWeight={700}>Expand Alternates into Rows</Typography>
+          <Typography variant="body2" color="text.secondary">
+            Each alternate value becomes its own row. We scanned your columns — the arrangement that fits is highlighted. How are your alternates arranged?
+          </Typography>
+        </DialogTitle>
+        <DialogContent sx={{ pt: 2 }}>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+            {[
+              {
+                key: 'lists',
+                title: 'Two matching lists',
+                example: 'one column:   name   name   name\nother column: code   code   code',
+                desc: 'Two columns whose cells each hold a list, lined up in order — the 1st value in one goes with the 1st in the other, and so on. Each pair becomes its own row.',
+                onPick: handleOpenManufacturerMatchDialog,
+              },
+              {
+                key: 'packed',
+                title: 'Several values packed in one cell',
+                example: 'one column:   code   code   code',
+                desc: 'A single cell holds several values with nothing labelling them (separated by spaces, commas or semicolons). Each value becomes its own row.',
+                onPick: handleOpenMpnSplitDialog,
+              },
+              {
+                key: 'labelled',
+                title: 'Name and value together in one cell',
+                example: 'one column:   Name1: value, value;  Name2: value',
+                desc: 'Each cell holds name→value groups, with the name written before a separator (like a colon). Pulls both the name and its values out of the same cell.',
+                onPick: handleOpenProducerParseDialog,
+              },
+              {
+                key: 'columns',
+                title: 'Separate columns per alternate',
+                example: 'primary column   ·   alternate column   ·   alternate column',
+                desc: 'A primary value and one or more alternates sit in side-by-side columns (the alternate columns are often left unmapped). Adds a row for each.',
+                onPick: handleOpenAltColsDialog,
+              },
+            ].sort((a, b) => (alternatesDetection[b.key]?.matched ? 1 : 0) - (alternatesDetection[a.key]?.matched ? 1 : 0)).map(opt => {
+              const det = alternatesDetection[opt.key] || {};
+              return (
+              <Box
+                key={opt.key}
+                onClick={() => { setAlternatesChooserOpen(false); opt.onPick(); }}
+                sx={{
+                  border: det.matched ? '1.5px solid #00796b' : '1.5px solid #d8dee9',
+                  borderRadius: 2, p: 2, cursor: 'pointer',
+                  backgroundColor: det.matched ? 'rgba(0,121,107,0.05)' : 'transparent',
+                  transition: 'all .15s', '&:hover': { borderColor: '#00796b', backgroundColor: 'rgba(0,121,107,0.08)' },
+                }}
+              >
+                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, mb: 0.5 }}>
+                  <Typography fontWeight={700}>{opt.title}</Typography>
+                  {det.matched && (
+                    <Box sx={{ fontSize: 11, fontWeight: 700, color: '#00796b', backgroundColor: 'rgba(0,121,107,0.12)', px: 1, py: 0.25, borderRadius: 5, whiteSpace: 'nowrap' }}>
+                      ✓ matches your sheet
+                    </Box>
+                  )}
+                </Box>
+                <Box component="pre" sx={{
+                  m: 0, mb: 1, p: 1, borderRadius: 1,
+                  backgroundColor: det.matched ? '#e9f4f1' : '#f5f7fa',
+                  color: det.matched ? '#334155' : '#9aa5b1',
+                  fontFamily: 'monospace', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+                }}>{det.matched && Array.isArray(det.lines) ? det.lines.join('\n') : opt.example}</Box>
+                <Typography variant="body2" color="text.secondary">{opt.desc}</Typography>
+                {!det.matched && (
+                  <Typography variant="caption" sx={{ color: '#9aa5b1', display: 'block', mt: 0.5 }}>
+                    Pattern shown for reference — pick this if it matches how your sheet is arranged.
+                  </Typography>
+                )}
+              </Box>
+              );
+            })}
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setAlternatesChooserOpen(false)}>Cancel</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Expand Alternates · Separate columns per alternate */}
+      <Dialog open={altColsDialogOpen} onClose={() => setAltColsDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Expand Alternates · Separate columns per alternate</DialogTitle>
         <DialogContent>
           <DialogContentText sx={{ mb: 2 }}>
-            Split messy Producer values like Manufacturer: MPN into separate rows and fill the selected MPN and Manufacturer columns.
+            For each destination column, pick the <strong>alternate source column</strong> that holds the second supplier
+            (usually left unmapped, e.g. <code>Manufacturer&nbsp;S&nbsp;S</code>). Every row gains one extra row per
+            alternate — the primary stays, the alternate's values fill the chosen destinations. Everything else is copied down.
+          </DialogContentText>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5 }}>
+            {(altColsPairs || []).map((pair, i) => (
+              <Box key={i} sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                <FormControl size="small" sx={{ flex: 1 }}>
+                  <InputLabel>Destination column</InputLabel>
+                  <Select
+                    label="Destination column"
+                    value={pair.target || ''}
+                    onChange={(e) => setAltColsPairs(prev => prev.map((p, j) => j === i ? { ...p, target: e.target.value } : p))}
+                  >
+                    {columnDefs.filter(c => c.field && c.field !== '__row_number__').map(c => (
+                      <MenuItem key={c.field} value={c.field}>{columnLabel(c.field, c.headerName)}</MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                <Box sx={{ color: 'text.secondary', fontWeight: 700 }}>←</Box>
+                <FormControl size="small" sx={{ flex: 1 }}>
+                  <InputLabel>Alternate source column</InputLabel>
+                  <Select
+                    label="Alternate source column"
+                    value={pair.source || ''}
+                    onChange={(e) => setAltColsPairs(prev => prev.map((p, j) => j === i ? { ...p, source: e.target.value } : p))}
+                  >
+                    {altColsSourceColumns.map(sc => (
+                      <MenuItem key={sc} value={sc}>
+                        {altColsSourceSamples[sc] ? `${sc}  (e.g. "${altColsSourceSamples[sc]}")` : sc}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                <Button
+                  size="small" color="inherit"
+                  onClick={() => setAltColsPairs(prev => prev.filter((_, j) => j !== i))}
+                  disabled={(altColsPairs || []).length <= 1}
+                  sx={{ minWidth: 32 }}
+                >✕</Button>
+              </Box>
+            ))}
+            <Button
+              size="small"
+              onClick={() => setAltColsPairs(prev => [...(prev || []), { target: '', source: '' }])}
+              sx={{ alignSelf: 'flex-start', textTransform: 'none' }}
+            >+ Add another destination</Button>
+            {altColsSourceColumns.length === 0 && (
+              <Typography variant="caption" color="error">
+                No source columns found for this session — the alternate columns can't be read.
+              </Typography>
+            )}
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setAltColsDialogOpen(false)} disabled={altColsRunning}>Cancel</Button>
+          <Button
+            onClick={handleApplyAltCols}
+            variant="contained"
+            startIcon={altColsRunning ? <CircularProgress size={16} /> : <AccountTreeIcon />}
+            disabled={altColsRunning || !(altColsPairs || []).some(p => p.target && p.source)}
+          >
+            {altColsRunning ? 'Expanding…' : 'Expand into rows'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Producer Parser Dialog */}
+      <Dialog open={producerParseDialogOpen} onClose={() => setProducerParseDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Manufacturer + parts written together</DialogTitle>
+        <DialogContent>
+          <DialogContentText sx={{ mb: 2 }}>
+            Read cells like “Manufacturer: MPN” and expand them into one row per manufacturer + part, filling the columns you choose below.
           </DialogContentText>
           <Grid container spacing={2}>
             <Grid item xs={12}>
               <FormControl fullWidth size="small">
-                <InputLabel>Producer Column</InputLabel>
+                <InputLabel>Column to read from</InputLabel>
                 <Select
-                  label="Producer Column"
+                  label="Column to read from"
                   value={producerColumn || ''}
                   onChange={(e) => setProducerColumn(e.target.value || null)}
                 >
@@ -3777,7 +4964,7 @@ const EnhancedDataEditor = () => {
                     .filter(col => col.field && col.field !== '__row_number__')
                     .map(col => (
                       <MenuItem key={col.field} value={col.field}>
-                        {col.headerName || col.field}
+                        {columnLabel(col.field, col.headerName)}
                       </MenuItem>
                     ))}
                 </Select>
@@ -3785,17 +4972,20 @@ const EnhancedDataEditor = () => {
             </Grid>
             <Grid item xs={12} sm={6}>
               <FormControl fullWidth size="small">
-                <InputLabel>MPN Output Column</InputLabel>
+                <InputLabel>Put MPN values in…</InputLabel>
                 <Select
-                  label="MPN Output Column"
-                  value={mpnColumn || ''}
-                  onChange={(e) => setMpnColumn(e.target.value || null)}
+                  multiple
+                  label="Put MPN values in…"
+                  value={producerMpnCols}
+                  onChange={(e) => setProducerMpnCols(typeof e.target.value === 'string' ? e.target.value.split(',') : e.target.value)}
+                  renderValue={(selected) => selected.map(f => columnLabel(f, f)).join(', ')}
                 >
                   {columnDefs
                     .filter(col => col.field && col.field !== '__row_number__')
                     .map(col => (
                       <MenuItem key={col.field} value={col.field}>
-                        {col.headerName || col.field}
+                        <Checkbox size="small" checked={producerMpnCols.indexOf(col.field) > -1} />
+                        {columnLabel(col.field, col.headerName)}
                       </MenuItem>
                     ))}
                 </Select>
@@ -3803,23 +4993,29 @@ const EnhancedDataEditor = () => {
             </Grid>
             <Grid item xs={12} sm={6}>
               <FormControl fullWidth size="small">
-                <InputLabel>Manufacturer Output Column</InputLabel>
+                <InputLabel>Put Manufacturer values in…</InputLabel>
                 <Select
-                  label="Manufacturer Output Column"
-                  value={mpnManufacturerColumn || ''}
-                  onChange={(e) => setMpnManufacturerColumn(e.target.value || null)}
+                  multiple
+                  label="Put Manufacturer values in…"
+                  value={producerMfrCols}
+                  onChange={(e) => setProducerMfrCols(typeof e.target.value === 'string' ? e.target.value.split(',') : e.target.value)}
+                  renderValue={(selected) => selected.map(f => columnLabel(f, f)).join(', ')}
                 >
                   {columnDefs
                     .filter(col => col.field && col.field !== '__row_number__')
                     .map(col => (
                       <MenuItem key={col.field} value={col.field}>
-                        {col.headerName || col.field}
+                        <Checkbox size="small" checked={producerMfrCols.indexOf(col.field) > -1} />
+                        {columnLabel(col.field, col.headerName)}
                       </MenuItem>
                     ))}
                 </Select>
               </FormControl>
             </Grid>
           </Grid>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+            Pick one or more destination columns for each. The extracted value is written into every column you choose.
+          </Typography>
           <Alert severity="info" sx={{ mt: 2 }}>
             Directory aliases from Manufacturer Match are reused when available. Unknown colon labels are still parsed so validation can flag bad MPNs later.
           </Alert>
@@ -3832,19 +5028,75 @@ const EnhancedDataEditor = () => {
             onClick={handleProducerParse}
             variant="contained"
             startIcon={mpnSplitting ? <CircularProgress size={16} /> : <AccountTreeIcon />}
-            disabled={mpnSplitting || !producerColumn || !mpnColumn || !mpnManufacturerColumn}
+            disabled={mpnSplitting || !producerColumn || !producerMpnCols.length || !producerMfrCols.length}
           >
-            {mpnSplitting ? 'Parsing...' : 'Parse Producer'}
-=======
-      {/* FactWise required-fields guard before export */}
+            {mpnSplitting ? 'Expanding…' : 'Expand into rows'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* FactWise required-fields + Item-code guard before export */}
       <Dialog open={requiredDialogOpen} onClose={() => setRequiredDialogOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Required fields are empty</DialogTitle>
+        <DialogTitle>Before export — fix these for FactWise</DialogTitle>
         <DialogContent>
           <DialogContentText sx={{ mb: 2 }}>
-            This looks like a FactWise import sheet, and FactWise won't accept it while these required
-            fields have blank cells. Set a value to fill every blank in that column, or go back and fill
-            them yourself.
+            FactWise won't accept the sheet with these issues. Choose how to fix each, or go back and edit it yourself.
           </DialogContentText>
+
+          {/* Item code — must be filled AND unique */}
+          {itemCodeIssue && (
+            <Box sx={{ border: '1px solid #d8dee9', borderRadius: 2, p: 2, mb: 2 }}>
+              <Typography variant="body2" sx={{ fontWeight: 700 }}>Item code</Typography>
+              <Typography variant="caption" color="error" sx={{ display: 'block', mb: 1.5 }}>
+                {[itemCodeIssue.blanks > 0 && `${itemCodeIssue.blanks} blank`,
+                  itemCodeIssue.dupRows > 0 && `${itemCodeIssue.dupRows} duplicate rows`]
+                  .filter(Boolean).join(' · ')}
+              </Typography>
+
+              {itemCodeIssue.blanks > 0 && (
+                <FormControl fullWidth size="small" sx={{ mb: 1.5 }}>
+                  <InputLabel>For blank Item codes</InputLabel>
+                  <Select label="For blank Item codes" value={itemCodeCfg.blank}
+                    onChange={(e) => setItemCodeCfg(prev => ({ ...prev, blank: e.target.value }))}>
+                    <MenuItem value="prefix_sequence">Generate a code — prefix + running number</MenuItem>
+                    <MenuItem value="leave">Leave blank — I'll fill them in the sheet</MenuItem>
+                  </Select>
+                </FormControl>
+              )}
+
+              {itemCodeIssue.dupRows > 0 && (
+                <FormControl fullWidth size="small" sx={{ mb: 1.5 }}>
+                  <InputLabel>For duplicate Item codes</InputLabel>
+                  <Select label="For duplicate Item codes" value={itemCodeCfg.duplicate}
+                    onChange={(e) => setItemCodeCfg(prev => ({ ...prev, duplicate: e.target.value }))}>
+                    <MenuItem value="highlight">Highlight them so I can edit them myself</MenuItem>
+                    <MenuItem value="delete">Delete duplicate rows — keep the first, remove the rest</MenuItem>
+                    <MenuItem value="suffix">Add a suffix — keep first, later ones become …-2, -3</MenuItem>
+                    <MenuItem value="prefix_sequence">Replace duplicates — prefix + running number</MenuItem>
+                    <MenuItem value="leave">Leave as-is (may fail import)</MenuItem>
+                  </Select>
+                </FormControl>
+              )}
+
+              {((itemCodeIssue.blanks > 0 && itemCodeCfg.blank === 'prefix_sequence') ||
+                (itemCodeIssue.dupRows > 0 && itemCodeCfg.duplicate === 'prefix_sequence')) && (
+                <Box sx={{ display: 'flex', gap: 1.5 }}>
+                  <TextField size="small" label="Prefix" value={itemCodeCfg.prefix}
+                    onChange={(e) => setItemCodeCfg(prev => ({ ...prev, prefix: e.target.value }))} sx={{ flex: 2 }} />
+                  <TextField size="small" label="Start #" type="number" value={itemCodeCfg.start}
+                    onChange={(e) => setItemCodeCfg(prev => ({ ...prev, start: e.target.value }))} sx={{ flex: 1 }} />
+                  <TextField size="small" label="Digits" type="number" value={itemCodeCfg.padding}
+                    onChange={(e) => setItemCodeCfg(prev => ({ ...prev, padding: e.target.value }))} sx={{ flex: 1 }} />
+                </Box>
+              )}
+              {itemCodeIssue.dupRows > 0 && itemCodeCfg.duplicate === 'suffix' && (
+                <TextField size="small" label="Suffix separator" value={itemCodeCfg.separator}
+                  onChange={(e) => setItemCodeCfg(prev => ({ ...prev, separator: e.target.value }))} sx={{ width: 160 }} />
+              )}
+            </Box>
+          )}
+
+          {/* Other required fields — one value fills every blank */}
           {requiredGaps.map(g => (
             <Box key={g.field} sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 1.5 }}>
               <Box sx={{ minWidth: 200 }}>
@@ -3860,33 +5112,38 @@ const EnhancedDataEditor = () => {
               />
             </Box>
           ))}
-          <Alert severity="info" sx={{ mt: 2 }}>
-            Leave a value empty to skip that field for now. For Item code you may prefer to go back and use
-            <strong> Create FactWise ID</strong> instead of one fixed value.
+          <Alert severity="info" sx={{ mt: 1 }}>
+            Anything set to “leave” exports as-is. Blank required fields left empty may be rejected by FactWise.
           </Alert>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => { setRequiredDialogOpen(false); pendingExportRef.current = null; }} disabled={requiredFilling}>
-            Go back and fill myself
+          <Button onClick={() => { setRequiredDialogOpen(false); setItemCodeIssue(null); pendingExportRef.current = null; }} disabled={requiredFilling}>
+            Go back and edit myself
           </Button>
           <Button
             onClick={handleFillRequiredAndExport}
             variant="contained"
-            disabled={requiredFilling || !requiredGaps.some(g => (requiredDefaults[g.field] || '').trim())}
+            disabled={requiredFilling}
           >
-            {requiredFilling ? 'Filling…' : 'Fill blanks & continue'}
+            {requiredFilling
+              ? 'Applying…'
+              : (itemCodeIssue && itemCodeIssue.dupRows > 0 && itemCodeCfg.duplicate === 'highlight'
+                  ? 'Highlight duplicates'
+                  : 'Apply & continue')}
           </Button>
         </DialogActions>
       </Dialog>
 
       {/* Split Values Into Columns */}
       <Dialog open={splitColsDialogOpen} onClose={() => setSplitColsDialogOpen(false)} maxWidth="md" fullWidth>
-        <DialogTitle>Split one column into several</DialogTitle>
+        <DialogTitle>Split into Columns</DialogTitle>
         <DialogContent>
           <DialogContentText sx={{ mb: 2 }}>
-            When one cell holds several values &mdash; for example <code>C3, C4, C5</code> in a single cell &mdash;
-            this puts each value in its own column. Pick what separates them (a comma, space, etc.), or split every
-            N characters for fixed-width codes. You set it once and every row is split the same way.
+            When one cell holds several values &mdash; for example <code>C3, C4, C5</code> &mdash; this puts each value
+            in its own column, <strong>replacing the original column in place</strong>. Give them a FactWise clustered
+            name (e.g. <code>Tag</code> or <code>Specification value</code>) and every column carries that same name —
+            no <code>Tag&nbsp;1&nbsp;/&nbsp;Tag&nbsp;2</code> numbering. It sizes to the widest cell, so a row with 13
+            values makes 13 columns.
           </DialogContentText>
 
             <Box sx={{ display: 'flex', gap: 2, mb: 2, flexWrap: 'wrap' }}>
@@ -3895,10 +5152,21 @@ const EnhancedDataEditor = () => {
                 <Select
                   label="Column to split"
                   value={splitColsConfig.sourceColumn}
-                  onChange={(e) => setSplitColsConfig(prev => ({ ...prev, sourceColumn: e.target.value }))}
+                  onChange={(e) => {
+                    const field = e.target.value;
+                    const cand = splitColsCandidates.find(c => c.field === field);
+                    // Auto-fill the output name from the column's FactWise name
+                    // (e.g. "Specification value", "Tag") so the split columns land
+                    // in the right cluster — no typing, no casing mistakes.
+                    setSplitColsConfig(prev => ({
+                      ...prev,
+                      sourceColumn: field,
+                      destinationPrefix: cand ? cand.label : (prev.destinationPrefix || field),
+                    }));
+                  }}
                 >
                   {splitColsCandidates.map(col => (
-                    <MenuItem key={`${col.field}-${col.index}`} value={col.field}>{col.label}</MenuItem>
+                    <MenuItem key={`${col.field}-${col.index}`} value={col.field}>{columnLabel(col.field, col.label)}</MenuItem>
                   ))}
                 </Select>
               </FormControl>
@@ -3963,14 +5231,14 @@ const EnhancedDataEditor = () => {
             <Box sx={{ display: 'flex', gap: 2, mb: 2, flexWrap: 'wrap' }}>
               <TextField
                 size="small"
-                label="Output column prefix"
+                label="Output column name"
                 sx={{ minWidth: 220, flex: 1 }}
                 value={splitColsConfig.destinationPrefix}
                 onChange={(e) => setSplitColsConfig(prev => ({ ...prev, destinationPrefix: e.target.value }))}
                 helperText={
                   splitColsConfig.destinationPrefix.trim()
-                    ? `Creates ${splitColsConfig.destinationPrefix.trim()}_1, ${splitColsConfig.destinationPrefix.trim()}_2, ...`
-                    : 'e.g. Tag'
+                    ? `Auto-filled from the column — all new columns will be named "${splitColsConfig.destinationPrefix.trim()}" (clustered). Edit only if needed.`
+                    : 'Pick a column above — this fills in automatically.'
                 }
               />
               <TextField
@@ -4090,6 +5358,13 @@ const EnhancedDataEditor = () => {
             )}
         </DialogContent>
         <DialogActions>
+          <Button
+            onClick={() => { setSplitColsDialogOpen(false); setColumnParserOpen(true); }}
+            disabled={splitColsRunning}
+            sx={{ mr: 'auto', color: '#0891b2', textTransform: 'none' }}
+          >
+            Advanced: structured parse…
+          </Button>
           <Button onClick={() => setSplitColsDialogOpen(false)} disabled={splitColsRunning}>Cancel</Button>
           <Button
             onClick={handlePreviewSplitCols}
@@ -4104,14 +5379,13 @@ const EnhancedDataEditor = () => {
             disabled={splitColsRunning || !splitColsConfig.sourceColumn || !splitColsConfig.destinationPrefix.trim()}
           >
             {splitColsRunning ? 'Splitting...' : 'Apply'}
->>>>>>> Stashed changes
           </Button>
         </DialogActions>
       </Dialog>
 
       {/* MPN Split Dialog */}
       <Dialog open={mpnSplitDialogOpen} onClose={() => setMpnSplitDialogOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Split MPN Cells</DialogTitle>
+        <DialogTitle>Expand Alternates · Packed in one column</DialogTitle>
         <DialogContent>
           <DialogContentText sx={{ mb: 2 }}>
             Select the MPN column to expand into one row per MPN. Cells are split only when they contain clear separators or recognized supplier prefixes; plain spaces stay part of the MPN.
@@ -4127,7 +5401,7 @@ const EnhancedDataEditor = () => {
                 .filter(col => col.field && col.field !== '__row_number__')
                 .map(col => (
                   <MenuItem key={col.field} value={col.field}>
-                    {col.headerName || col.field}
+                    {columnLabel(col.field, col.headerName)}
                   </MenuItem>
                 ))}
             </Select>
@@ -4185,184 +5459,76 @@ const EnhancedDataEditor = () => {
       {/* Manufacturer Match Dialog */}
       <Dialog open={manufacturerMatchDialogOpen} onClose={() => setManufacturerMatchDialogOpen(false)} maxWidth="md" fullWidth>
         <DialogTitle sx={{ pb: 1 }}>
-          <Typography variant="h6" fontWeight={700}>Manufacturer Match</Typography>
+          <Typography variant="h6" fontWeight={700}>Expand Alternates · Two matching lists</Typography>
           <Typography variant="body2" color="text.secondary">
-            Match split MPN rows to canonical manufacturers from a directory.
+            Pair a manufacturer column with an MPN column by position, and expand each pair into its own row.
           </Typography>
         </DialogTitle>
         <DialogContent sx={{ pt: 2 }}>
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
             <Box sx={{ border: '1px solid #e5e7eb', borderRadius: 1, p: 2 }}>
-              <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1.5 }}>
-                Target column
+              <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 0.5 }}>
+                The two lists to pair
               </Typography>
-              <FormControl fullWidth size="small">
-                <InputLabel>Manufacturer Column to Update</InputLabel>
-                <Select
-                  label="Manufacturer Column to Update"
-                  value={mpnManufacturerColumn || ''}
-                  onChange={(e) => setMpnManufacturerColumn(e.target.value || null)}
-                >
-                  {columnDefs
-                    .filter(col => col.field && col.field !== '__row_number__')
-                    .map(col => (
-                      <MenuItem key={col.field} value={col.field}>
-                        {col.headerName || col.field}
-                      </MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-                Uses the selected MPN column from MPN tools, or auto-detects one. Empty MPN cells are skipped.
+              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1.5 }}>
+                Pick the two columns whose cells each hold a list, in matching order. The 1st manufacturer
+                goes with the 1st part number, the 2nd with the 2nd, and so on — each pair becomes its own row.
               </Typography>
-            </Box>
-
-            <Box sx={{ border: '1px solid #e5e7eb', borderRadius: 1, p: 2 }}>
-              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 2, mb: 1.5 }}>
-                <Box>
-                  <Typography variant="subtitle2" fontWeight={700}>
-                    Manufacturer directory
-                  </Typography>
-                  {manufacturerDirectory.fileName && (
-                    <Typography variant="caption" color="text.secondary">
-                      {manufacturerDirectory.fileName}
+              <Grid container spacing={1.5}>
+                <Grid item xs={12} sm={6}>
+                  <FormControl fullWidth size="small">
+                    <InputLabel>Manufacturer list column</InputLabel>
+                    <Select
+                      label="Manufacturer list column"
+                      value={mpnManufacturerColumn || ''}
+                      onChange={(e) => setMpnManufacturerColumn(e.target.value || null)}
+                    >
+                      {columnDefs
+                        .filter(col => col.field && col.field !== '__row_number__')
+                        .map(col => (
+                          <MenuItem key={col.field} value={col.field}>
+                            {columnLabel(col.field, col.headerName)}
+                          </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                  {mpnManufacturerColumn && (
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                      e.g. {sampleForField(mpnManufacturerColumn) || '(all cells empty)'}
                     </Typography>
                   )}
-                </Box>
-                <Button variant="outlined" component="label" size="small">
-                  Upload Directory
-                  <input
-                    type="file"
-                    hidden
-                    accept=".xlsx,.xls,.csv"
-                    onChange={handleManufacturerDirectoryUpload}
-                  />
-                </Button>
-              </Box>
-
-              {manufacturerDirectory.fileName ? (
-                <Grid container spacing={1.5}>
-                  <Grid item xs={12} sm={8}>
-                    <FormControl fullWidth size="small">
-                      <InputLabel>Directory Sheet</InputLabel>
-                      <Select
-                        label="Directory Sheet"
-                        value={manufacturerDirectory.sheetName}
-                        onChange={(e) => updateManufacturerDirectorySheet(e.target.value)}
-                      >
-                        {manufacturerDirectory.sheetNames.map(sheet => (
-                          <MenuItem key={sheet} value={sheet}>{sheet}</MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                  </Grid>
-                  <Grid item xs={12} sm={4}>
-                    <TextField
-                      fullWidth
-                      size="small"
-                      type="number"
-                      label="Header Row"
-                      value={manufacturerDirectory.headerRow}
-                      onChange={(e) => updateManufacturerDirectoryHeaderRow(e.target.value)}
-                      inputProps={{ min: 1 }}
-                    />
-                  </Grid>
-                  <Grid item xs={12} sm={6}>
-                    <FormControl fullWidth size="small">
-                      <InputLabel>Manufacturer Name Column</InputLabel>
-                      <Select
-                        label="Manufacturer Name Column"
-                        value={manufacturerDirectory.nameColumn}
-                        onChange={(e) => setManufacturerDirectory(prev => ({ ...prev, nameColumn: e.target.value, synonymColumns: prev.synonymColumns.filter(column => column !== e.target.value) }))}
-                      >
-                        {manufacturerDirectory.headers.map(header => (
-                          <MenuItem key={header} value={header}>{header}</MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                  </Grid>
-                  <Grid item xs={12} sm={6}>
-                    <FormControl fullWidth size="small">
-                      <InputLabel>Synonym Columns</InputLabel>
-                      <Select
-                        multiple
-                        label="Synonym Columns"
-                        value={manufacturerDirectory.synonymColumns}
-                        onChange={(e) => {
-                          const value = typeof e.target.value === 'string' ? e.target.value.split(',') : e.target.value;
-                          setManufacturerDirectory(prev => ({ ...prev, synonymColumns: value.filter(column => column !== prev.nameColumn) }));
-                        }}
-                        renderValue={(selected) => selected.length ? `${selected.length} selected` : 'None'}
-                      >
-                        {manufacturerDirectory.headers
-                          .filter(header => header !== manufacturerDirectory.nameColumn)
-                          .map(header => (
-                            <MenuItem key={header} value={header}>
-                              <Checkbox checked={manufacturerDirectory.synonymColumns.includes(header)} />
-                              {header}
-                            </MenuItem>
-                          ))}
-                      </Select>
-                    </FormControl>
-                  </Grid>
-                  <Grid item xs={12}>
-                    <Button
-                      variant="contained"
-                      size="small"
-                      onClick={applyManufacturerDirectoryRules}
-                      disabled={!manufacturerDirectory.nameColumn}
-                    >
-                      Apply Directory Rules
-                    </Button>
-                  </Grid>
                 </Grid>
-              ) : (
-                <Alert severity="warning" sx={{ mt: 1 }}>
-                  Upload a manufacturer master to preserve names like NIC COMPONENTS and map synonyms to canonical manufacturers.
+                <Grid item xs={12} sm={6}>
+                  <FormControl fullWidth size="small">
+                    <InputLabel>Part-number (MPN) list column</InputLabel>
+                    <Select
+                      label="Part-number (MPN) list column"
+                      value={mpnColumn || ''}
+                      onChange={(e) => setMpnColumn(e.target.value || null)}
+                    >
+                      {columnDefs
+                        .filter(col => col.field && col.field !== '__row_number__')
+                        .map(col => (
+                          <MenuItem key={col.field} value={col.field}>
+                            {columnLabel(col.field, col.headerName)}
+                          </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                  {mpnColumn && (
+                    <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+                      e.g. {sampleForField(mpnColumn) || '(all cells empty)'}
+                    </Typography>
+                  )}
+                </Grid>
+              </Grid>
+              {mpnColumn && mpnManufacturerColumn && mpnColumn === mpnManufacturerColumn && (
+                <Alert severity="warning" sx={{ mt: 1.5 }}>
+                  Both lists point at the same column. Pick two different columns.
                 </Alert>
               )}
             </Box>
 
-            <Box sx={{ border: '1px solid #e5e7eb', borderRadius: 1, p: 1.5 }}>
-              <Button
-                size="small"
-                disabled={!manufacturerDirectory.fileName}
-                onClick={() => setManufacturerRulesExpanded(prev => !prev)}
-              >
-                {manufacturerRulesExpanded ? 'Hide advanced rules' : 'View advanced rules'}
-              </Button>
-              {!manufacturerDirectory.fileName && (
-                <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
-                  Upload a directory first
-                </Typography>
-              )}
-              <Collapse in={manufacturerRulesExpanded}>
-                <Grid container spacing={2} sx={{ mt: 0.5 }}>
-                  <Grid item xs={12} md={6}>
-                    <TextField
-                      fullWidth
-                      multiline
-                      minRows={6}
-                      label="Aliases"
-                      value={mpnSplitOptions.manufacturerAliases}
-                      onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, manufacturerAliases: e.target.value }))}
-                      helperText="Use SOURCE=TARGET. Empty target discards the source."
-                    />
-                  </Grid>
-                  <Grid item xs={12} md={6}>
-                    <TextField
-                      fullWidth
-                      multiline
-                      minRows={6}
-                      label="Discard Tokens"
-                      value={mpnSplitOptions.manufacturerDiscardTokens}
-                      onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, manufacturerDiscardTokens: e.target.value }))}
-                      helperText="One per line or comma separated."
-                    />
-                  </Grid>
-                </Grid>
-              </Collapse>
-            </Box>
           </Box>
         </DialogContent>
         <DialogActions>
@@ -4373,7 +5539,7 @@ const EnhancedDataEditor = () => {
             onClick={handleManufacturerMatchSplit}
             variant="contained"
             startIcon={mpnSplitting ? <CircularProgress size={16} /> : <AccountTreeIcon />}
-            disabled={mpnSplitting || !mpnColumn || !mpnManufacturerColumn}
+            disabled={mpnSplitting || !mpnColumn || !mpnManufacturerColumn || mpnColumn === mpnManufacturerColumn}
           >
             {mpnSplitting ? 'Matching...' : 'Split and Match'}
           </Button>
@@ -4457,7 +5623,11 @@ const EnhancedDataEditor = () => {
                       }
                       const displayName = col.headerName || col.field;
                       const truncated = example && example.toString().length > 30 ? `${example.toString().substring(0, 30)}...` : example;
-                      const display = truncated ? `${displayName} (${truncated})` : `${displayName} (Empty)`;
+                      // Prefer the mapped source (← Manufacturer); fall back to a sample value.
+                      const labeled = columnLabel(col.field, col.headerName);
+                      const display = labeled !== displayName
+                        ? labeled
+                        : (truncated ? `${displayName} (${truncated})` : `${displayName} (Empty)`);
                       return (
                         <MenuItem key={col.field} value={col.field}>
                           {display}
@@ -4502,7 +5672,11 @@ const EnhancedDataEditor = () => {
                       }
                       const displayName = col.headerName || col.field;
                       const truncated = example && example.toString().length > 30 ? `${example.toString().substring(0, 30)}...` : example;
-                      const display = truncated ? `${displayName} (${truncated})` : `${displayName} (Empty)`;
+                      // Prefer the mapped source (← Manufacturer); fall back to a sample value.
+                      const labeled = columnLabel(col.field, col.headerName);
+                      const display = labeled !== displayName
+                        ? labeled
+                        : (truncated ? `${displayName} (${truncated})` : `${displayName} (Empty)`);
                       return (
                         <MenuItem key={col.field} value={col.field}>
                           {display}

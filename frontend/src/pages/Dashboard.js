@@ -89,6 +89,11 @@ const Dashboard = () => {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [templateToDelete, setTemplateToDelete] = useState(null);
   const [deleting, setDeleting] = useState(false);
+
+  // Upload (session) hard-delete state
+  const [uploadDeleteDialogOpen, setUploadDeleteDialogOpen] = useState(false);
+  const [uploadToDelete, setUploadToDelete] = useState(null);
+  const [deletingUploadId, setDeletingUploadId] = useState(null);
   
   // Template search and filtering
   const [templateSearchTerm, setTemplateSearchTerm] = useState('');
@@ -474,6 +479,27 @@ const Dashboard = () => {
   const openDeleteDialog = (template) => {
     setTemplateToDelete(template);
     setDeleteDialogOpen(true);
+  };
+
+  const openUploadDeleteDialog = (upload) => {
+    setUploadToDelete(upload);
+    setUploadDeleteDialogOpen(true);
+  };
+
+  const handleDeleteUpload = async () => {
+    if (!uploadToDelete) return;
+    const sessionId = uploadToDelete.session_id;
+    setDeletingUploadId(sessionId);
+    try {
+      await api.deleteUpload(sessionId);
+      setUploads(prev => prev.filter(u => u.session_id !== sessionId));
+      setUploadDeleteDialogOpen(false);
+      setUploadToDelete(null);
+    } catch (err) {
+      console.error('Error deleting upload:', err);
+    } finally {
+      setDeletingUploadId(null);
+    }
   };
 
   // Tag Template handlers
@@ -875,24 +901,43 @@ const Dashboard = () => {
                               />
                             </TableCell>
                             <TableCell align="center">
-                              <Tooltip title="View">
-                                <IconButton
-                                  size="small"
-                                  variant="outlined"
-                                  onClick={() => navigate(`/editor/${upload.session_id}`)}
-                                  sx={{ 
-                                    textTransform: 'none', 
-                                    minWidth: 'auto',
-                                    border: '1px solid rgba(0, 0, 0, 0.23)',
-                                    '&:hover': {
-                                      borderColor: 'rgba(0, 0, 0, 0.87)',
-                                      backgroundColor: 'rgba(0, 0, 0, 0.04)'
-                                    }
-                                  }}
-                                >
-                                  <FolderIcon fontSize="small" />
-                                </IconButton>
-                              </Tooltip>
+                              <Box sx={{ display: 'inline-flex', gap: 0.5 }}>
+                                <Tooltip title="View">
+                                  <IconButton
+                                    size="small"
+                                    variant="outlined"
+                                    onClick={() => navigate(`/editor/${upload.session_id}`)}
+                                    sx={{
+                                      textTransform: 'none',
+                                      minWidth: 'auto',
+                                      border: '1px solid rgba(0, 0, 0, 0.23)',
+                                      '&:hover': {
+                                        borderColor: 'rgba(0, 0, 0, 0.87)',
+                                        backgroundColor: 'rgba(0, 0, 0, 0.04)'
+                                      }
+                                    }}
+                                  >
+                                    <FolderIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+                                <Tooltip title="Delete this upload permanently">
+                                  <IconButton
+                                    size="small"
+                                    color="error"
+                                    disabled={deletingUploadId === upload.session_id}
+                                    onClick={() => openUploadDeleteDialog(upload)}
+                                    sx={{
+                                      minWidth: 'auto',
+                                      border: '1px solid rgba(211, 47, 47, 0.5)',
+                                      '&:hover': { backgroundColor: 'rgba(211, 47, 47, 0.08)' }
+                                    }}
+                                  >
+                                    {deletingUploadId === upload.session_id
+                                      ? <CircularProgress size={16} />
+                                      : <DeleteIcon fontSize="small" />}
+                                  </IconButton>
+                                </Tooltip>
+                              </Box>
                             </TableCell>
                           </TableRow>
                         </Grow>
@@ -1375,6 +1420,55 @@ const Dashboard = () => {
             startIcon={deleting ? <CircularProgress size={16} /> : <DeleteIcon />}
           >
             {deleting ? 'Deleting...' : 'Delete Template'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Upload Hard-Delete Confirmation Dialog */}
+      <Dialog
+        open={uploadDeleteDialogOpen}
+        onClose={() => !deletingUploadId && setUploadDeleteDialogOpen(false)}
+        maxWidth="sm"
+        fullWidth
+        PaperProps={{ sx: { borderRadius: 3 } }}
+      >
+        <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <Avatar sx={{ bgcolor: '#fee2e2', color: '#dc2626' }}>
+              <DeleteIcon />
+            </Avatar>
+            <Box>
+              <Typography variant="h6" fontWeight="600">
+                Delete Upload
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Permanent, cannot be undone
+              </Typography>
+            </Box>
+          </Box>
+          <IconButton onClick={() => setUploadDeleteDialogOpen(false)} disabled={!!deletingUploadId}>
+            <ClearIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            Permanently delete <strong>"{uploadToDelete?.file_name || uploadToDelete?.original_client_name || uploadToDelete?.session_id}"</strong>?
+            <br /><br />
+            This removes the session and its data completely (file, cache and any extracted PDF records). It will not come back.
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions sx={{ p: 3 }}>
+          <Button onClick={() => setUploadDeleteDialogOpen(false)} disabled={!!deletingUploadId}>
+            Cancel
+          </Button>
+          <Button
+            onClick={handleDeleteUpload}
+            color="error"
+            variant="contained"
+            disabled={!!deletingUploadId}
+            startIcon={deletingUploadId ? <CircularProgress size={16} /> : <DeleteIcon />}
+          >
+            {deletingUploadId ? 'Deleting...' : 'Delete Permanently'}
           </Button>
         </DialogActions>
       </Dialog>

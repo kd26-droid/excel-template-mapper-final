@@ -1898,7 +1898,7 @@ const DataEditor = () => {
             variant="outlined"
             value={templateName}
             onChange={(e) => setTemplateName(e.target.value)}
-            placeholder="e.g. BOM Template v1"
+            placeholder="e.g. BOM Template"
             sx={{ mb: 2 }}
           />
 

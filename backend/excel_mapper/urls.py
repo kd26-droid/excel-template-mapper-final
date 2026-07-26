@@ -18,6 +18,8 @@ from .views import (
     save_mappings,
     get_existing_mappings,
     dashboard_view,
+    delete_upload,
+    delete_all_uploads,
     data_view,
     save_data,
     download_file,
@@ -27,8 +29,17 @@ from .views import (
     update_session_data,
     expand_column_groups,
     split_column_into_columns,
+    copy_column_values,
+    set_column_default,
     carry_forward_group,
     stack_mapped_alternates,
+    fill_required_defaults,
+    required_field_report,
+    resolve_item_code,
+    column_source_map,
+    source_columns_preview,
+    cleanup_grid_rows,
+    expand_alternate_columns,
 
     # Unified Template + Formula views (MappingTemplate based)
     save_mapping_template,
@@ -36,6 +47,8 @@ from .views import (
     delete_mapping_template,
     apply_mapping_template,
     update_mapping_template,
+    export_mapping_template,
+    import_mapping_template,
     update_column_counts,
     apply_formulas,
     preview_formulas,
@@ -86,12 +99,14 @@ from .mpn_views import (
     mpn_auth_start,
     mpn_auth_callback,
     mpn_validate,
+    mpn_validate_warm,
     mpn_admin_exchange_code,
     mpn_batch_validate_eol,
     mpn_restore_from_cache,
     mpn_validate_parser_specs,
     mpn_parse_producer_column,
     mpn_split_cells,
+    analyze_mpn_pairing,
 )
 
 # Column Parser views
@@ -137,8 +152,17 @@ urlpatterns = [
     path('update-session-data/', update_session_data, name='update-session-data'),
     path('transforms/expand-column-groups/', expand_column_groups, name='expand-column-groups'),
     path('transforms/split-into-columns/', split_column_into_columns, name='split-column-into-columns'),
+    path('transforms/copy-column/', copy_column_values, name='copy-column-values'),
+    path('transforms/set-column-default/', set_column_default, name='set-column-default'),
     path('transforms/carry-forward-group/', carry_forward_group, name='carry-forward-group'),
     path('transforms/stack-alternates/', stack_mapped_alternates, name='stack-mapped-alternates'),
+    path('transforms/fill-required-defaults/', fill_required_defaults, name='fill-required-defaults'),
+    path('transforms/required-field-report/', required_field_report, name='required-field-report'),
+    path('transforms/resolve-item-code/', resolve_item_code, name='resolve-item-code'),
+    path('transforms/column-source-map/<str:session_id>/', column_source_map, name='column-source-map'),
+    path('transforms/source-columns-preview/<str:session_id>/', source_columns_preview, name='source-columns-preview'),
+    path('transforms/cleanup-grid-rows/', cleanup_grid_rows, name='cleanup-grid-rows'),
+    path('transforms/expand-alternate-columns/', expand_alternate_columns, name='expand-alternate-columns'),
 
     # Download endpoints
     path('download/', download_file, name='download-file'),
@@ -150,10 +174,14 @@ urlpatterns = [
 
     # Dashboard
     path('dashboard/', dashboard_view, name='dashboard'),
+    path('dashboard/uploads/<str:session_id>/', delete_upload, name='delete-upload'),
+    path('dashboard/uploads/', delete_all_uploads, name='delete-all-uploads'),
 
     # Unified Templates (Column Mappings + Formulas)
     path('templates/save/', save_mapping_template, name='save-mapping-template'),
+    path('templates/import/', import_mapping_template, name='import-mapping-template'),
     path('templates/', get_mapping_templates, name='get-mapping-templates'),
+    path('templates/<int:template_id>/export/', export_mapping_template, name='export-mapping-template'),
     path('templates/<int:template_id>/', delete_mapping_template, name='delete-mapping-template'),
     path('templates/apply/', apply_mapping_template, name='apply-mapping-template'),
     path('templates/update/', update_mapping_template, name='update-mapping-template'),
@@ -197,7 +225,9 @@ urlpatterns = [
     path('mpn/auth/start/', mpn_auth_start, name='mpn-auth-start'),
     path('mpn/auth/callback', mpn_auth_callback, name='mpn-auth-callback'),
     path('mpn/validate/', mpn_validate, name='mpn-validate'),
+    path('mpn/validate-warm/', mpn_validate_warm, name='mpn-validate-warm'),
     path('mpn/split-cells/', mpn_split_cells, name='mpn-split-cells'),
+    path('mpn/analyze-pairing/', analyze_mpn_pairing, name='mpn-analyze-pairing'),
     path('mpn/parse-producer/', mpn_parse_producer_column, name='mpn-parse-producer'),
     path('mpn/restore-from-cache/', mpn_restore_from_cache, name='mpn-restore-from-cache'),
     path('mpn/admin/exchange-code/', mpn_admin_exchange_code, name='mpn-admin-exchange-code'),

@@ -38,6 +38,10 @@ server {
         root /usr/share/nginx/html;
         index index.html index.htm;
         try_files \$uri \$uri/ /index.html;
+        # Never let the browser serve a stale app shell / bundle from cache — always
+        # revalidate so a rebuild is picked up on a normal refresh (no hard-refresh
+        # needed). Hashed asset filenames make this cheap (304s).
+        add_header Cache-Control "no-cache, must-revalidate";
     }
     
     # Proxy API calls to local backend

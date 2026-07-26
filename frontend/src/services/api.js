@@ -141,7 +141,7 @@ const api = {
         headers: {
           'Content-Type': 'multipart/form-data'
         },
-        timeout: 60000 // 1 minute timeout for file upload
+        timeout: 300000 // 5 min — multi-page PDFs render page images server-side; don't abort early
       });
       return response;
     } catch (error) {
@@ -574,6 +574,19 @@ const api = {
   getUploadDashboard: () =>
     axios.get(`${API_URL}/dashboard/`),
 
+  /**
+   * Hard-delete one upload/session (removes the session file, memory, cache and
+   * any PDF records — not a soft delete).
+   */
+  deleteUpload: (sessionId) =>
+    axios.delete(`${API_URL}/dashboard/uploads/${sessionId}/`),
+
+  /**
+   * Hard-delete every upload/session (bulk clear).
+   */
+  deleteAllUploads: () =>
+    axios.delete(`${API_URL}/dashboard/uploads/`),
+
   // ==========================================
   // 6️⃣ MAPPING TEMPLATE ENDPOINTS
   // ==========================================
@@ -642,6 +655,36 @@ const api = {
    */
   deleteMappingTemplate: (templateId) =>
     axios.delete(`${API_URL}/templates/${templateId}/`),
+
+  /**
+   * Download a saved mapping template as a portable .fwtemplate.json file,
+   * so it can be moved to another environment and imported there.
+   */
+  exportMappingTemplate: async (templateId, templateName = 'template') => {
+    const resp = await axios.get(`${API_URL}/templates/${templateId}/export/`, { responseType: 'blob' });
+    const url = window.URL.createObjectURL(new Blob([resp.data], { type: 'application/json' }));
+    const safe = String(templateName).replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '') || 'template';
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${safe}.fwtemplate.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+    return true;
+  },
+
+  /**
+   * Import a mapping template from a .fwtemplate.json File object.
+   * Creates a new template (name made unique) — never overwrites.
+   */
+  importMappingTemplate: (file) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return axios.post(`${API_URL}/templates/import/`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+  },
 
   /**
    * Update an existing mapping template
@@ -1154,11 +1197,25 @@ const api = {
    * @param {string} mpnHeader optional detected column name
    * @param {string} manufacturerHeader optional manufacturer column name
    */
-  validateMPNs: (sessionId, mpnHeader = null, manufacturerHeader = null) => {
+  validateMPNs: (sessionId, mpnHeader = null, manufacturerHeader = null, cacheOnly = false) => {
     const payload = { session_id: sessionId };
     if (mpnHeader) payload.mpn_header = mpnHeader;
     if (manufacturerHeader) payload.manufacturer_header = manufacturerHeader;
+    if (cacheOnly) payload.cache_only = true;
     return axios.post(`${API_URL}/mpn/validate/`, payload, { timeout: 600000 });
+  },
+
+  /**
+   * Cache-warm one chunk of a session's unique MPNs. The caller loops
+   * offset=0, limit, 2*limit… until the response's `done` is true, then calls
+   * validateMPNs once (fast, fully cached). Keeps each request small so it never
+   * hits Azure's 230s request limit, and lets the UI show progress.
+   */
+  warmMPNs: (sessionId, mpnHeader = null, offset = 0, limit = 8, manufacturerHeader = null) => {
+    const payload = { session_id: sessionId, offset, limit };
+    if (mpnHeader) payload.mpn_header = mpnHeader;
+    if (manufacturerHeader) payload.manufacturer_header = manufacturerHeader;
+    return axios.post(`${API_URL}/mpn/validate-warm/`, payload, { timeout: 120000 });
   },
 
   /**
@@ -1166,20 +1223,30 @@ const api = {
    * @param {string} sessionId
    * @param {string} mpnHeader optional selected MPN column name
    */
-  splitMPNCells: (sessionId, mpnHeader = null, splitOptions = null, manufacturerHeader = null, pairManufacturers = true) => {
+  splitMPNCells: (sessionId, mpnHeader = null, splitOptions = null, manufacturerHeader = null, pairManufacturers = true, manufacturerOverrides = null) => {
     const payload = { session_id: sessionId };
     if (mpnHeader) payload.mpn_header = mpnHeader;
     if (manufacturerHeader) payload.manufacturer_header = manufacturerHeader;
     payload.pair_manufacturers = pairManufacturers;
     if (splitOptions) payload.split_options = splitOptions;
+    if (manufacturerOverrides && Object.keys(manufacturerOverrides).length) payload.manufacturer_overrides = manufacturerOverrides;
     return axios.post(`${API_URL}/mpn/split-cells/`, payload, { timeout: 120000 });
   },
 
-  parseProducerColumn: (sessionId, producerHeader, mpnHeader = null, manufacturerHeader = null, splitOptions = null) => {
+  /** Find rows where the manufacturer split won't match the MPN count (for the review screen). */
+  analyzeMpnPairing: (sessionId, mpnHeader, manufacturerHeader, splitOptions = null) => {
+    const payload = { session_id: sessionId, mpn_header: mpnHeader, manufacturer_header: manufacturerHeader };
+    if (splitOptions) payload.split_options = splitOptions;
+    return axios.post(`${API_URL}/mpn/analyze-pairing/`, payload, { timeout: 120000 });
+  },
+
+  parseProducerColumn: (sessionId, producerHeader, mpnHeader = null, manufacturerHeader = null, splitOptions = null, mpnHeaders = null, manufacturerHeaders = null) => {
     const payload = { session_id: sessionId };
     if (producerHeader) payload.producer_header = producerHeader;
     if (mpnHeader) payload.mpn_header = mpnHeader;
     if (manufacturerHeader) payload.manufacturer_header = manufacturerHeader;
+    if (Array.isArray(mpnHeaders) && mpnHeaders.length) payload.mpn_headers = mpnHeaders;
+    if (Array.isArray(manufacturerHeaders) && manufacturerHeaders.length) payload.manufacturer_headers = manufacturerHeaders;
     if (splitOptions) payload.split_options = splitOptions;
     return axios.post(`${API_URL}/mpn/parse-producer/`, payload, { timeout: 120000 });
   },
@@ -1189,6 +1256,27 @@ const api = {
    */
   getSourceColumns: (sessionId) => {
     return axios.get(`${API_URL}/parser/columns/${sessionId}/`);
+  },
+
+  /**
+   * Per-column mapped source + default value, to disambiguate duplicate-named
+   * columns in dropdowns (e.g. "Tag_1 (← Manufacturer)").
+   */
+  getColumnSourceMap: (sessionId) => {
+    return axios.get(`${API_URL}/transforms/column-source-map/${sessionId}/`);
+  },
+
+  /** Source columns with a sample value each, for source-column dropdowns. */
+  getSourceColumnsPreview: (sessionId) => {
+    return axios.get(`${API_URL}/transforms/source-columns-preview/${sessionId}/`);
+  },
+
+  /** Remove rows from the mapped grid where the chosen key column is empty. */
+  cleanupGridRows: (sessionId, column) => {
+    return axios.post(`${API_URL}/transforms/cleanup-grid-rows/`, {
+      session_id: sessionId,
+      column,
+    }, { timeout: 120000 });
   },
 
   /**
@@ -1204,6 +1292,21 @@ const api = {
       on_partial: onPartial,
       keep_rows_without_groups: keepRowsWithoutGroups,
       preview
+    }, { timeout: 120000 });
+  },
+
+  /**
+   * Expand side-by-side alternate columns into rows ON THE CURRENT GRID (composes).
+   * Reads the (usually unmapped) alternate source columns and adds one extra row
+   * per alternate set, copying the row and overwriting the given destination
+   * columns with the alternate's values.
+   *   alternateSets: [ [ { target: 'MPN Code', source: 'Manufacturer PartNo S S' },
+   *                       { target: 'Preferred vendor code', source: 'Manufacturer S S' } ] ]
+   */
+  expandAlternateColumns: (sessionId, alternateSets) => {
+    return axios.post(`${API_URL}/transforms/expand-alternate-columns/`, {
+      session_id: sessionId,
+      alternate_sets: alternateSets,
     }, { timeout: 120000 });
   },
 
@@ -1244,6 +1347,25 @@ const api = {
     }, { timeout: 120000 });
   },
 
+  /** Copy one column's values into another column (both must exist). */
+  copyColumn: (sessionId, sourceColumn, targetColumn, onlyEmpty = false) =>
+    axios.post(`${API_URL}/transforms/copy-column/`, {
+      session_id: sessionId,
+      source_column: sourceColumn,
+      target_column: targetColumn,
+      only_empty: onlyEmpty,
+    }, { timeout: 120000 }),
+
+  /** Set a fixed value for a column — all cells, or only the empty ones. */
+  setColumnDefault: (sessionId, column, value, onlyEmpty = true, condition = null) =>
+    axios.post(`${API_URL}/transforms/set-column-default/`, {
+      session_id: sessionId,
+      column,
+      value,
+      only_empty: onlyEmpty,
+      ...(condition ? { condition } : {}),
+    }, { timeout: 120000 }),
+
   /**
    * Group rows under parent/header rows and reshape into item rows.
    * parentCondition: { column, test, value } where test is one of
@@ -1257,6 +1379,45 @@ const api = {
       fill_only_blank: fillOnlyBlank,
       emit,
       preview
+    }, { timeout: 120000 });
+  },
+
+  /**
+   * Fill blank cells in the named columns with a default value, preserving all
+   * existing columns (unlike update-session-data which rebuilds to template cols).
+   */
+  fillRequiredDefaults: (sessionId, defaults) => {
+    return axios.post(`${API_URL}/transforms/fill-required-defaults/`, {
+      session_id: sessionId,
+      defaults
+    }, { timeout: 120000 });
+  },
+
+  /**
+   * Count blank cells across the FULL grid (all pages) for the given columns.
+   * Used by the export required-field guard so the count reflects the whole
+   * dataset, not just the current page.
+   */
+  requiredFieldReport: (sessionId, columns, dupeColumns = []) => {
+    return axios.post(`${API_URL}/transforms/required-field-report/`, {
+      session_id: sessionId,
+      columns,
+      dupe_columns: dupeColumns,
+    }, { timeout: 60000 });
+  },
+
+  /**
+   * Resolve blank and/or duplicate Item codes at export time.
+   * blankStrategy: 'prefix_sequence' | 'leave'
+   * duplicateStrategy: 'suffix' | 'prefix_sequence' | 'leave'
+   */
+  resolveItemCode: (sessionId, { column = 'Item code', blankStrategy = 'leave', duplicateStrategy = 'leave', prefix = '', separator = '-', start = 1, padding = 0 } = {}) => {
+    return axios.post(`${API_URL}/transforms/resolve-item-code/`, {
+      session_id: sessionId,
+      column,
+      blank_strategy: blankStrategy,
+      duplicate_strategy: duplicateStrategy,
+      prefix, separator, start, padding,
     }, { timeout: 120000 });
   },
 

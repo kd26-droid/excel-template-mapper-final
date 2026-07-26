@@ -32,6 +32,7 @@ import {
   X as Cancel,
 } from 'lucide-react';
 import {
+  Box,
   Dialog,
   DialogContent,
   DialogTitle,
@@ -40,7 +41,11 @@ import {
   Typography,
   Tooltip,
   Snackbar,
-  Alert
+  Alert,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem
 } from '@mui/material';
 import api, { setGlobalLoaderCallback } from '../services/api';
 import ExpandColumnGroupsDialog from '../components/ExpandColumnGroupsDialog';
@@ -495,6 +500,14 @@ export default function ColumnMapping() {
   const [selectedTemplateField, setSelectedTemplateField] = useState(null);
   const [defaultValueText, setDefaultValueText] = useState('');
   const [defaultValueMappings, setDefaultValueMappings] = useState({});
+  // Conditional default-value rules ({ fieldName: {column, operator, compare, then, else} })
+  const [defaultValueRules, setDefaultValueRules] = useState({});
+  const [dvMode, setDvMode] = useState('always'); // 'always' | 'conditional'
+  const [dvCondCol, setDvCondCol] = useState('');
+  const [dvCondOp, setDvCondOp] = useState('is_empty');
+  const [dvCondCompare, setDvCondCompare] = useState('');
+  const [dvThen, setDvThen] = useState('');
+  const [dvElse, setDvElse] = useState('');
   const suppressRestoreRef = useRef(false);
   
   // Navigation protection states
@@ -544,10 +557,42 @@ export default function ColumnMapping() {
   // Template application state
   const [availableTemplates, setAvailableTemplates] = useState([]);
   const [showTemplateDialog, setShowTemplateDialog] = useState(false);
+  // Primary-key cleanup at the Review step: pick a mapped column and drop rows
+  // where it's empty. Runs for every source type (Excel, OCR, PDF zonal).
+  const [primaryDialogOpen, setPrimaryDialogOpen] = useState(false);
+  const [primaryKeyColumn, setPrimaryKeyColumn] = useState('');
+  const [primaryKeyOptions, setPrimaryKeyOptions] = useState([]);
+  const [primaryKeySources, setPrimaryKeySources] = useState({});
+  const [primaryCleaning, setPrimaryCleaning] = useState(false);
+  // How many rows the chosen key column is empty on, out of the total — shown
+  // in the cleanup dialog so the user sees the impact before removing anything.
+  const [primaryEmptyInfo, setPrimaryEmptyInfo] = useState(null); // { empty, total } | null
+  const [primaryEmptyLoading, setPrimaryEmptyLoading] = useState(false);
   const [templatesLoading, setTemplatesLoading] = useState(false);
   const [applyingTemplate, setApplyingTemplate] = useState(false);
   const [applyingTemplateId, setApplyingTemplateId] = useState(null);
-  const [syncNotice, setSyncNotice] = useState({ visible: false, message: 'Applying template… syncing latest changes…' });
+  const [syncNotice, setSyncNotice] = useState({ visible: false, message: 'Applying template... syncing latest changes...' });
+
+  // When the cleanup dialog is open and a key column is chosen, count how many
+  // rows are empty on it (out of the total) so the dialog can show the impact.
+  useEffect(() => {
+    if (!primaryDialogOpen || !primaryKeyColumn || !sessionId) {
+      setPrimaryEmptyInfo(null);
+      return;
+    }
+    let cancelled = false;
+    setPrimaryEmptyLoading(true);
+    api.requiredFieldReport(sessionId, [primaryKeyColumn])
+      .then((res) => {
+        if (cancelled) return;
+        const d = (res && res.data) || {};
+        const gap = (d.gaps || []).find((g) => g.field === primaryKeyColumn);
+        setPrimaryEmptyInfo({ empty: gap ? gap.emptyCount : 0, total: d.total_rows || 0 });
+      })
+      .catch(() => { if (!cancelled) setPrimaryEmptyInfo(null); })
+      .finally(() => { if (!cancelled) setPrimaryEmptyLoading(false); });
+    return () => { cancelled = true; };
+  }, [primaryDialogOpen, primaryKeyColumn, sessionId]);
   const [sessionVersion, setSessionVersion] = useState(0);
   const [statusPolling, setStatusPolling] = useState(false);
   const [rebuildingColumns, setRebuildingColumns] = useState(false);
@@ -578,10 +623,6 @@ export default function ColumnMapping() {
   const [clientFileName, setClientFileName] = useState('');
   const [expandDialogOpen, setExpandDialogOpen] = useState(false);
   const [carryForwardOpen, setCarryForwardOpen] = useState(false);
-  // When off, a destination column accepts only one source (prevents the
-  // "two values, one cell" shift). Turn on to wire an alternate supplier to the
-  // same column and stack them into rows.
-  const [stackingEnabled, setStackingEnabled] = useState(false);
   // Set true right before a transform-triggered reload, so the "unsaved changes"
   // guard doesn't prompt on a refresh we intended.
   const bypassUnloadGuardRef = useRef(false);
@@ -703,6 +744,36 @@ export default function ColumnMapping() {
     }
   }, [showSnackbar]);
 
+  // Export a saved template to a portable .fwtemplate.json file (to move it to
+  // another environment), and import one back in.
+  const templateImportInputRef = useRef(null);
+
+  const handleExportTemplate = useCallback(async (template) => {
+    try {
+      await api.exportMappingTemplate(template.id, template.name);
+      showSnackbar(`Exported "${template.name}"`, 'success');
+    } catch (e) {
+      showSnackbar('Could not export template', 'error');
+    }
+  }, [showSnackbar]);
+
+  const handleImportTemplateFile = useCallback(async (event) => {
+    const file = event.target.files && event.target.files[0];
+    if (event.target) event.target.value = '';
+    if (!file) return;
+    try {
+      const resp = await api.importMappingTemplate(file);
+      if (resp.data?.success) {
+        showSnackbar(resp.data.message || 'Template imported', 'success');
+        await loadAvailableTemplates();
+      } else {
+        showSnackbar(resp.data?.error || 'Import failed', 'error');
+      }
+    } catch (e) {
+      showSnackbar(e.response?.data?.error || 'Could not import template', 'error');
+    }
+  }, [showSnackbar, loadAvailableTemplates]);
+
   const handleApplyTemplate = useCallback(async (template) => {
     try {
       setApplyingTemplate(true);
@@ -795,6 +866,9 @@ export default function ColumnMapping() {
         } catch (_) {}
 
         // Load default values if available
+        if (response.data.default_value_rules) {
+          setDefaultValueRules(response.data.default_value_rules || {});
+        }
         if (response.data.default_values) {
           setExistingDefaultValues(response.data.default_values);
           // CRITICAL: Also store in defaultValueMappings for UI integration
@@ -1162,7 +1236,10 @@ export default function ColumnMapping() {
       });
       
       if (response.data.success) {
-        const { mappings, default_values, session_metadata } = response.data;
+        const { mappings, default_values, default_value_rules, session_metadata } = response.data;
+        if (default_value_rules && typeof default_value_rules === 'object') {
+          setDefaultValueRules(default_value_rules);
+        }
         
         enhancedDebugLog('CHECK_EXISTING_MAPPINGS', 'Processing successful response', {
           mappingsType: typeof mappings,
@@ -2837,6 +2914,7 @@ export default function ColumnMapping() {
     return {
       mappings,
       default_values: defaultValues,
+      default_value_rules: defaultValueRules,
       header_corrections: headerCorrections,
       ...additionalData
     };
@@ -2917,43 +2995,67 @@ export default function ColumnMapping() {
 
   // createEdge function is hoisted above as function declaration to avoid TDZ
 
-  // Handle default value dialog
+  // Human-readable summary of a conditional rule, shown as the node's default tag.
+  const describeRule = (rule) => {
+    if (!rule || !rule.column) return '';
+    const opText = {
+      is_empty: 'is empty', not_empty: 'is not empty',
+      equals: `= "${rule.compare || ''}"`, not_equals: `≠ "${rule.compare || ''}"`,
+      contains: `contains "${rule.compare || ''}"`,
+    }[rule.operator] || rule.operator;
+    const elsePart = (rule.else !== undefined && rule.else !== '') ? `, else "${rule.else}"` : '';
+    return `if ${rule.column} ${opText} → "${rule.then || ''}"${elsePart}`;
+  };
+
+  // Handle default value dialog — supports a fixed value or a conditional if/else rule.
   const handleSaveDefaultValue = async () => {
-    if (!selectedTemplateField || !defaultValueText.trim()) return;
-    
+    if (!selectedTemplateField) return;
+    const field = selectedTemplateField.name;
+    const conditional = dvMode === 'conditional';
+    if (conditional && !dvCondCol) return;
+    if (!conditional && !defaultValueText.trim()) return;
+
     setDefaultValueLoading(true);
-    
     try {
-      // Save the default value mapping
-      setDefaultValueMappings(prev => ({
-        ...prev,
-        [selectedTemplateField.name]: defaultValueText.trim()
-      }));
-      
-      // Update the specific template node to show the default value tag
-      setNodes(currentNodes => currentNodes.map(node => {
-        if (node.id === selectedTemplateField.id) {
-          return {
-            ...node,
-            data: {
-              ...node.data,
-              hasDefaultValue: true,
-              defaultValue: defaultValueText.trim()
-            }
-          };
-        }
-        return node;
-      }));
-      
-      // Wait for 1 second to show loading state
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      // Close dialog and reset state
+      let nextDefaults = {};
+      let nextRules = {};
+      let nodeTag = '';
+
+      if (conditional) {
+        const rule = {
+          column: dvCondCol,
+          operator: dvCondOp,
+          compare: dvCondCompare,
+          then: dvThen,
+          ...(String(dvElse).trim() !== '' ? { else: dvElse } : {}),
+        };
+        setDefaultValueRules(prev => { nextRules = { ...(prev || {}), [field]: rule }; return nextRules; });
+        // A rule replaces any fixed default for the same field.
+        setDefaultValueMappings(prev => { const n = { ...(prev || {}) }; delete n[field]; nextDefaults = n; return n; });
+        nodeTag = describeRule(rule);
+      } else {
+        const val = defaultValueText.trim();
+        setDefaultValueMappings(prev => { nextDefaults = { ...(prev || {}), [field]: val }; return nextDefaults; });
+        setDefaultValueRules(prev => { const n = { ...(prev || {}) }; delete n[field]; nextRules = n; return n; });
+        nodeTag = val;
+      }
+
+      // Update the template node to show the default/rule tag.
+      setNodes(currentNodes => currentNodes.map(node => (
+        node.id === selectedTemplateField.id
+          ? { ...node, data: { ...node.data, hasDefaultValue: true, defaultValue: nodeTag } }
+          : node
+      )));
+
+      // Persist immediately so the rule survives before the next autosave.
+      try {
+        api.saveColumnMappings(sessionId, buildMappingData(edges, nextDefaults, { default_value_rules: nextRules, force_persist: true }));
+      } catch (_) {}
+
+      await new Promise(resolve => setTimeout(resolve, 400));
       setShowDefaultValueDialog(false);
       setSelectedTemplateField(null);
       setDefaultValueText('');
-      
-      // eslint-disable-next-line no-console
     } finally {
       setDefaultValueLoading(false);
     }
@@ -2967,16 +3069,23 @@ export default function ColumnMapping() {
     try {
       const field = selectedTemplateField.name;
       let nextDefaults = {};
+      let nextRules = {};
       setDefaultValueMappings(prev => {
         const next = { ...(prev || {}) };
         delete next[field];
         nextDefaults = next;
         return next;
       });
-      
-      // Persist cleared defaults with current mappings
+      setDefaultValueRules(prev => {
+        const next = { ...(prev || {}) };
+        delete next[field];
+        nextRules = next;
+        return next;
+      });
+
+      // Persist cleared defaults + rules with current mappings
       try {
-        const payload = buildMappingData(edges, nextDefaults);
+        const payload = buildMappingData(edges, nextDefaults, { default_value_rules: nextRules });
         api.saveColumnMappings(sessionId, payload);
       } catch (_) {}
       
@@ -3125,6 +3234,19 @@ export default function ColumnMapping() {
         if (templateFieldName) {
           setSelectedTemplateField({ id: node.id, name: templateFieldName, index: targetIdx });
           setDefaultValueText(defaultValueMappings[templateFieldName] || '');
+          // Prefill the conditional-rule fields from any saved rule for this field.
+          const rule = (defaultValueRules || {})[templateFieldName];
+          if (rule && rule.column) {
+            setDvMode('conditional');
+            setDvCondCol(rule.column || '');
+            setDvCondOp(rule.operator || 'is_empty');
+            setDvCondCompare(rule.compare || '');
+            setDvThen(rule.then || '');
+            setDvElse(rule.else || '');
+          } else {
+            setDvMode('always');
+            setDvCondCol(''); setDvCondOp('is_empty'); setDvCondCompare(''); setDvThen(''); setDvElse('');
+          }
           setShowDefaultValueDialog(true);
         } else {
           // eslint-disable-next-line no-console
@@ -3271,14 +3393,14 @@ export default function ColumnMapping() {
 
   // Handle new connections
   const onConnect = useCallback(async (connection) => {
-    // Guard: unless stacking is on, a destination column takes only one source.
-    // This blocks the "two values into one cell" case that shifts data.
-    if (!stackingEnabled) {
-      const targetAlreadyMapped = edges.some(e => e.target === connection.target);
-      if (targetAlreadyMapped) {
-        setError('Stacking is off — each destination takes one source. Turn on "Allow alternates (stack into rows)" to map a second supplier onto this column.');
-        return;
-      }
+    // A destination column takes exactly one source. One source may still feed
+    // several destinations (1 → many). Alternates that need row-expansion are
+    // handled later by the editor's "Expand Alternates into Rows" tool, so the
+    // old "stack two sources onto one column" path no longer exists here.
+    const targetAlreadyMapped = edges.some(e => e.target === connection.target);
+    if (targetAlreadyMapped) {
+      setError('Each destination column takes one source. To reuse a source, connect it to several destinations instead — a destination can’t take two sources.');
+      return;
     }
 
     // Check if we should show loader (every 3rd mapping)
@@ -3343,7 +3465,7 @@ export default function ColumnMapping() {
         setMappingActionLoading(false);
       }
     }
-  }, [nodes, edges, setEdges, setNodes, shouldShowMappingLoader, stackingEnabled]);
+  }, [nodes, edges, setEdges, setNodes, shouldShowMappingLoader]);
 
   // Handle edge click for deletion
   const onEdgeClick = useCallback((event, edge) => {
@@ -3535,23 +3657,25 @@ export default function ColumnMapping() {
     setIsReady(ready);
   }, [edges.length, templateVersion, expectedTemplateVersion]);
 
-  // Ensure default value tags are applied to nodes when defaultValueMappings changes
+  // Ensure default value / rule tags are applied to nodes when either changes.
   useEffect(() => {
     setNodes(currentNodes => currentNodes.map(node => {
       if (!node.id.startsWith('t-')) return node; // Only update template nodes
       const fieldName = node.data?.originalLabel;
-      const has = fieldName && Object.prototype.hasOwnProperty.call(defaultValueMappings || {}, fieldName);
-      const val = has ? defaultValueMappings[fieldName] : '';
+      const hasVal = fieldName && Object.prototype.hasOwnProperty.call(defaultValueMappings || {}, fieldName);
+      const rule = fieldName ? (defaultValueRules || {})[fieldName] : null;
+      const hasRule = !!(rule && rule.column);
+      const tag = hasRule ? describeRule(rule) : (hasVal ? defaultValueMappings[fieldName] : '');
       return {
         ...node,
         data: {
           ...node.data,
-          hasDefaultValue: has,
-          defaultValue: has ? val : ''
+          hasDefaultValue: hasVal || hasRule,
+          defaultValue: tag
         }
       };
     }));
-  }, [defaultValueMappings, setNodes]);
+  }, [defaultValueMappings, defaultValueRules, setNodes]);
 
   // Update nodes with confidence scores when they are loaded for PDF sessions
   useEffect(() => {
@@ -3823,37 +3947,8 @@ export default function ColumnMapping() {
 
   
 
-  // Stack alternates into rows from the mappings the user drew: when two source
-  // columns point at one destination, each becomes its own row.
-  const handleStackAlternates = async () => {
-    const built = buildMappingData(edges);
-    const mappings = built.mappings || [];
-    if (mappings.length === 0) {
-      setError('Draw your mappings first — including the alternate columns onto the same destinations.');
-      return;
-    }
-    try {
-      setGlobalLoading(true);
-      const res = await api.stackAlternates(sessionId, mappings);
-      if (res.data?.success) {
-        setSnackbar({
-          open: true,
-          message: `Stacked into ${res.data.output_rows} rows (${res.data.rows_per_item} per item). Opening review…`,
-          severity: 'success'
-        });
-        // The stacked rows ARE the final mapped result — show them on the review
-        // screen. Use SPA navigation so the "unsaved changes" prompt doesn't fire.
-        setIsReviewing(true);
-        setTimeout(() => navigate(`/editor/${sessionId}`), 400);
-      } else {
-        setError(res.data?.error || 'Could not stack alternates.');
-      }
-    } catch (err) {
-      setError(err.response?.data?.error || err.message || 'Could not stack alternates.');
-    } finally {
-      setGlobalLoading(false);
-    }
-  };
+  // Stacking alternates from the mapping screen was removed — alternate
+  // row-expansion is now an editor step ("Expand Alternates into Rows").
 
   const handleReview = async () => {
     if (edges.length === 0) {
@@ -4003,10 +4098,19 @@ export default function ColumnMapping() {
       sessionStorage.setItem(`templateVersion_${sessionId}`, finalVersion.toString());
       sessionStorage.setItem(`lastMappingUpdate_${sessionId}`, Date.now().toString());
 
-      // Navigate to editor on success (defer a tick to ensure flags persisted)
-      // If readiness timed out, still navigate but EnhancedDataEditor will refresh.
-      setTimeout(() => navigate(`/editor/${sessionId}`), 0);
-      
+      // Before the editor, ask which mapped column is the item key and drop rows
+      // where it's empty. This is the primary-key cleanup, now at Review so it
+      // runs the same for Excel, OCR, and PDF-zonal sources.
+      const gridCols = (response?.data?.enhanced_headers || templateHeaders || [])
+        .filter((h, i, a) => h && a.indexOf(h) === i);
+      setPrimaryKeyOptions(gridCols);
+      setPrimaryKeyColumn(gridCols.find(c => String(c).toLowerCase() === 'item code') || '');
+      try {
+        const smap = await api.getColumnSourceMap(sessionId);
+        setPrimaryKeySources(smap?.data?.sources || {});
+      } catch (_) { setPrimaryKeySources({}); }
+      setPrimaryDialogOpen(true);
+
     } catch (err) {
       console.error('Error saving mappings:', err);
       setError('Failed to save mappings. Please try again.');
@@ -4017,6 +4121,33 @@ export default function ColumnMapping() {
       try { closeSnackbar(); } catch (_) {}
     }
   };
+
+  const goToEditor = useCallback(() => {
+    setPrimaryDialogOpen(false);
+    const sid = sessionId;
+    setTimeout(() => navigate(`/editor/${sid}`), 0);
+  }, [sessionId, navigate]);
+
+  const handleCleanupAndReview = useCallback(async () => {
+    if (!primaryKeyColumn) { goToEditor(); return; }
+    try {
+      setPrimaryCleaning(true);
+      const res = await api.cleanupGridRows(sessionId, primaryKeyColumn);
+      if (res.data?.success) {
+        const v = res.data.template_version || Date.now();
+        sessionStorage.setItem(`templateVersion_${sessionId}`, v.toString());
+        if (res.data.removed > 0) {
+          setSnackbar({ open: true, message: `Removed ${res.data.removed} row(s) with an empty "${primaryKeyColumn}".`, severity: 'success' });
+        }
+      }
+    } catch (e) {
+      // Non-fatal — proceed to the editor anyway.
+      console.warn('Primary-key cleanup failed:', e);
+    } finally {
+      setPrimaryCleaning(false);
+      goToEditor();
+    }
+  }, [primaryKeyColumn, sessionId, goToEditor]);
 
   // Robust Azure-ready readiness check before navigating to review/editor
   // Waits for mapped data to materialize and for expected Tag/Factwise columns
@@ -4147,27 +4278,6 @@ export default function ColumnMapping() {
   return (
     <div className="w-full h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex flex-col">
 
-      {syncNotice.visible && (
-        <div className="sticky top-0 z-50 bg-yellow-50 border-b border-yellow-300 text-yellow-800 px-4 py-2 flex items-center justify-between">
-          <div className="font-semibold text-sm">{syncNotice.message}</div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => {
-                try { if (loadDataRef.current) loadDataRef.current(); } catch (_) {}
-              }}
-              className="px-3 py-1 text-sm border border-yellow-500 text-yellow-800 rounded hover:bg-yellow-100"
-            >
-              Refresh now
-            </button>
-            <button
-              onClick={() => setSyncNotice(prev => ({ ...prev, visible: false }))}
-              className="px-2 py-1 text-sm text-yellow-800 hover:bg-yellow-100 rounded"
-            >
-              ✕
-            </button>
-          </div>
-        </div>
-      )}
 
       {/* Clean Top Header - Just essentials */}
       <div className="bg-white shadow-xl border-b border-gray-200 px-8 py-4">
@@ -4187,18 +4297,19 @@ export default function ColumnMapping() {
             </div>
             <div className="text-lg font-semibold text-gray-700">Column Mapping</div>
             <div className="ml-4 text-sm text-gray-500 flex items-center gap-2">
-              <span>v{sessionVersion}</span>
               <span className={`px-2 py-0.5 text-xs rounded ${syncNotice.visible ? 'bg-yellow-100 text-yellow-700 border border-yellow-300' : 'bg-green-100 text-green-700 border border-green-300'}`}>
                 {syncNotice.visible ? 'Cache' : 'Fresh'}
               </span>
             </div>
           </div>
           
-          {/* Right side - Action buttons with proper spacing */}
-          <div className="flex items-center gap-4">
+          {/* Right side - Action buttons. Uniform height + wrapping so they never
+              overflow or collide on narrower viewports. Secondary utilities are
+              subtle; primary actions (Auto Map / Apply Template / Review) carry color. */}
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <button
               onClick={() => { try { if (loadDataRef.current) loadDataRef.current(); } catch(_) {} }}
-              className={`px-3 py-2 rounded-md text-sm border ${statusPolling ? 'opacity-70' : ''}`}
+              className={`h-10 px-3 rounded-lg text-sm border bg-white hover:bg-gray-100 text-gray-700 shadow-sm transition-all ${statusPolling ? 'opacity-70' : ''}`}
               title="Refresh headers and mappings"
             >
               {statusPolling ? 'Syncing…' : 'Refresh'}
@@ -4206,7 +4317,7 @@ export default function ColumnMapping() {
             <button
               onClick={handleRebuildColumns}
               disabled={rebuildingColumns || isRebuildingRef.current}
-              className={`px-3 py-2 rounded-md text-sm font-semibold border shadow-sm transition-all ${rebuildingColumns ? 'bg-gray-200 text-gray-500' : 'bg-white hover:bg-gray-100 text-gray-800'}`}
+              className={`h-10 px-3 rounded-lg text-sm font-medium border shadow-sm transition-all ${rebuildingColumns ? 'bg-gray-200 text-gray-500' : 'bg-white hover:bg-gray-100 text-gray-700'}`}
               title="Regenerate canonical template headers from counts"
             >
               {rebuildingColumns ? 'Rebuilding…' : 'Rebuild Columns'}
@@ -4215,7 +4326,7 @@ export default function ColumnMapping() {
               onClick={handleAutoMap}
               disabled={isAutoMapping || isRebuildingRef.current}
               className={`
-                px-8 py-3 rounded-lg font-semibold flex items-center gap-2 shadow-sm transition-all
+                h-10 px-4 rounded-lg text-sm font-semibold flex items-center gap-2 shadow-sm transition-all
                 ${isAutoMapping
                   ? 'bg-gray-200 text-gray-500'
                   : 'bg-blue-600 hover:bg-blue-700 text-white'
@@ -4244,7 +4355,7 @@ export default function ColumnMapping() {
               }}
               disabled={applyingTemplate || templatesLoading}
               className={`
-                px-8 py-3 rounded-lg font-semibold flex items-center gap-2 shadow-sm transition-all
+                h-10 px-4 rounded-lg text-sm font-semibold flex items-center gap-2 shadow-sm transition-all
                 ${applyingTemplate || templatesLoading
                   ? 'bg-gray-200 text-gray-500'
                   : 'bg-green-600 hover:bg-green-700 text-white'
@@ -4270,49 +4381,29 @@ export default function ColumnMapping() {
                 !hasMeaningfulHistory() || applyingTemplate || templateApplied ||
                 edges.length === 0 || isReviewing || isRebuildingRef.current || !isReady || isProcessingMappings
               }
-              className="px-6 py-3 bg-yellow-500 hover:bg-yellow-600 disabled:opacity-50 disabled:bg-gray-200 text-white rounded-lg shadow-sm transition-all flex items-center gap-2"
+              className="h-10 px-3 bg-white hover:bg-gray-100 disabled:opacity-50 disabled:bg-gray-100 text-gray-700 border rounded-lg shadow-sm transition-all flex items-center gap-1.5 text-sm"
             >
               <RotateCcw size={16} />
               Undo
             </button>
-            
+
             <button
               onClick={clearMappings}
-              className="px-6 py-3 bg-red-600 hover:bg-red-700 text-white rounded-lg flex items-center gap-2 shadow-sm transition-all"
+              className="h-10 px-3 bg-white hover:bg-red-50 text-red-600 border border-red-200 rounded-lg flex items-center gap-1.5 shadow-sm transition-all text-sm"
             >
               <Trash2 size={16} />
               Clear All
             </button>
 
-            <Tooltip title="Off: each destination column takes one source (safe). On: wire a second supplier onto the same column to stack them into rows." placement="bottom">
-              <label className={`px-4 py-3 rounded-lg flex items-center gap-2 shadow-sm cursor-pointer transition-all border-2 ${stackingEnabled ? 'bg-teal-50 border-teal-400 text-teal-800' : 'bg-white border-gray-300 text-gray-600'}`}>
-                <input
-                  type="checkbox"
-                  checked={stackingEnabled}
-                  onChange={(e) => setStackingEnabled(e.target.checked)}
-                  className="w-4 h-4 accent-teal-600"
-                />
-                <span className="font-semibold text-sm whitespace-nowrap">Allow alternates</span>
-              </label>
-            </Tooltip>
-
-            {stackingEnabled && (
-              <Tooltip title="Turn each main + alternate you mapped onto the same destination into its own row" placement="bottom">
-                <button
-                  onClick={handleStackAlternates}
-                  disabled={edges.length === 0}
-                  className="px-6 py-3 bg-teal-600 hover:bg-teal-700 disabled:bg-gray-200 disabled:text-gray-500 text-white rounded-lg flex items-center gap-2 shadow-sm transition-all"
-                >
-                  Stack alternates into rows
-                </button>
-              </Tooltip>
-            )}
+            {/* "Allow alternates" toggle + "Stack into rows" removed — alternate
+                row-expansion now lives in the editor's "Expand Alternates into
+                Rows" tool. A destination takes one source; 1 → many is allowed. */}
 
             <button
               onClick={handleReview}
               disabled={edges.length === 0 || isReviewing || isRebuildingRef.current || !isReady || isProcessingMappings || applyingTemplate}
               className={`
-                px-8 py-3 rounded-lg font-semibold flex items-center gap-2 shadow-sm transition-all
+                h-10 px-5 rounded-lg text-sm font-semibold flex items-center gap-2 shadow-sm transition-all
                 ${edges.length > 0 && !isReviewing && !isProcessingMappings
                   ? 'bg-purple-600 hover:bg-purple-700 text-white'
                   : 'bg-gray-200 text-gray-500'
@@ -4322,7 +4413,7 @@ export default function ColumnMapping() {
               {isReviewing ? (
                 <>
                   <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                  <span>Preparing review...</span>
+                  <span>Preparing…</span>
                 </>
               ) : (
                 <>
@@ -4331,10 +4422,10 @@ export default function ColumnMapping() {
                 </>
               )}
             </button>
-            
+
             <button
               onClick={() => setRulesOpen(true)}
-              className="px-3 py-2 rounded-md text-sm font-semibold border bg-white hover:bg-gray-100 text-gray-800 shadow-sm"
+              className="h-10 px-3 rounded-lg text-sm font-medium border bg-white hover:bg-gray-100 text-gray-700 shadow-sm"
               title="View active Tag rules"
             >
               Tag Rules
@@ -4693,47 +4784,32 @@ export default function ColumnMapping() {
           {/* Vertical divider line */}
           <div className="absolute left-1/2 top-0 w-px h-full bg-gray-300 opacity-50 pointer-events-none transform -translate-x-1/2"></div>
 
-          {/* Fixed section headers - properly aligned with columns */}
-      <div className="sticky top-0 z-30 bg-white bg-opacity-95 backdrop-blur-sm border-b border-gray-200" style={{ height: '140px' }}>
-            <div className="absolute flex items-center gap-3" style={{ left: '35px', top: '80px' }}>
-              <div className="bg-blue-600 text-white px-6 py-3 rounded-xl shadow-lg font-bold flex items-center gap-2">
-                <span>Client File ({clientHeaders.length} fields)</span>
-                <Tooltip title={clientFileName ? `File: ${clientFileName}` : 'Client file'} placement="bottom">
-                  <span><Info size={16} className="opacity-90 cursor-default" /></span>
-                </Tooltip>
+          {/* Fixed section headers. Split into two halves that track the left
+              (source) and right (template) columns, so the source-prep buttons
+              stay inside the left half and never overlap the template badge. */}
+          <div className="sticky top-0 z-30 bg-white bg-opacity-95 backdrop-blur-sm border-b border-gray-200">
+            <div className="flex items-start">
+              {/* Left half: source badge + source-prep tools */}
+              <div className="w-1/2 flex flex-wrap items-center gap-2 px-6 py-4 min-w-0">
+                <div className="bg-blue-600 text-white px-4 py-2.5 rounded-xl shadow-md font-bold flex items-center gap-2 whitespace-nowrap">
+                  <span>Client File ({clientHeaders.length} fields)</span>
+                  <Tooltip title={clientFileName ? `File: ${clientFileName}` : 'Client file'} placement="bottom">
+                    <span><Info size={16} className="opacity-90 cursor-default" /></span>
+                  </Tooltip>
+                </div>
+                {/* Row-expansion tools (alternates, header/detail grouping) all
+                    live in the editor now, so nothing extra sits on the mapping
+                    header beside the source badge. */}
               </div>
-              {/* Clean up the source before mapping: alternate-supplier columns are
-                  usually left unmapped, so they must be reshaped here first. */}
-              <Tooltip
-                title="If a row lists a main and an alternate supplier side by side, make each supplier its own row"
-                placement="bottom"
-              >
-                <button
-                  onClick={() => setExpandDialogOpen(true)}
-                  className="bg-white text-blue-700 border-2 border-blue-300 hover:bg-blue-50 px-4 py-3 rounded-xl shadow font-semibold text-sm transition-colors"
-                >
-                  Split alternates into rows
-                </button>
-              </Tooltip>
-              <Tooltip
-                title="If your sheet has a summary/header row per item followed by supplier rows, keep the supplier rows and copy the item details down"
-                placement="bottom"
-              >
-                <button
-                  onClick={() => setCarryForwardOpen(true)}
-                  className="bg-white text-blue-700 border-2 border-blue-300 hover:bg-blue-50 px-4 py-3 rounded-xl shadow font-semibold text-sm transition-colors"
-                >
-                  Group header &amp; detail rows
-                </button>
-              </Tooltip>
-            </div>
-            
-            <div className="absolute" style={{ left: '535px', top: '80px' }}>
-              <div className="bg-emerald-600 text-white px-6 py-3 rounded-xl shadow-lg font-bold flex items-center gap-2">
-                <span>FW Item Template ({templateHeaders.length} fields)</span>
-                <Tooltip title={templateFileName ? `File: ${templateFileName}` : 'Template file'} placement="bottom">
-                  <span><Info size={16} className="opacity-90 cursor-default" /></span>
-                </Tooltip>
+
+              {/* Right half: template badge */}
+              <div className="w-1/2 flex items-center px-6 py-4 min-w-0">
+                <div className="bg-emerald-600 text-white px-4 py-2.5 rounded-xl shadow-md font-bold flex items-center gap-2 whitespace-nowrap">
+                  <span>FW Item Template ({templateHeaders.length} fields)</span>
+                  <Tooltip title={templateFileName ? `File: ${templateFileName}` : 'Template file'} placement="bottom">
+                    <span><Info size={16} className="opacity-90 cursor-default" /></span>
+                  </Tooltip>
+                </div>
               </div>
             </div>
           </div>
@@ -4852,7 +4928,7 @@ export default function ColumnMapping() {
                 Set Default Value
               </h2>
               <p className="text-gray-600">
-                Enter a default text that will fill the entire column for:{' '}
+                Set the value for:{' '}
                 <span className="font-semibold text-blue-600">
                   {selectedTemplateField?.name}
                 </span>
@@ -4860,29 +4936,95 @@ export default function ColumnMapping() {
             </div>
 
             <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Default Text
-                </label>
-                <input
-                  type="text"
-                  value={defaultValueText}
-                  onChange={(e) => setDefaultValueText(e.target.value)}
-                  placeholder="Enter text to fill all cells in this column..."
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  autoFocus
-                />
+              {/* Mode toggle */}
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDvMode('always')}
+                  className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition-colors ${dvMode === 'always' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'}`}
+                >
+                  Same value for every row
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDvMode('conditional')}
+                  className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition-colors ${dvMode === 'conditional' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'}`}
+                >
+                  If / else rule
+                </button>
               </div>
-              
+
+              {dvMode === 'always' ? (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Default Text</label>
+                  <input
+                    type="text"
+                    value={defaultValueText}
+                    onChange={(e) => setDefaultValueText(e.target.value)}
+                    placeholder="Enter text to fill all cells in this column..."
+                    className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    autoFocus
+                  />
+                </div>
+              ) : (
+                <div className="space-y-3 border border-gray-200 rounded-lg p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-semibold text-gray-700">If</span>
+                    <select
+                      value={dvCondCol}
+                      onChange={(e) => setDvCondCol(e.target.value)}
+                      className="flex-1 min-w-[140px] px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                    >
+                      <option value="">Choose column…</option>
+                      {((useDynamicTemplate && templateColumns.length > 0) ? templateColumns : templateHeaders)
+                        .filter(Boolean)
+                        .map((h) => (<option key={h} value={h}>{h}</option>))}
+                    </select>
+                    <select
+                      value={dvCondOp}
+                      onChange={(e) => setDvCondOp(e.target.value)}
+                      className="px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                    >
+                      <option value="is_empty">is empty</option>
+                      <option value="not_empty">is not empty</option>
+                      <option value="equals">equals</option>
+                      <option value="not_equals">does not equal</option>
+                      <option value="contains">contains</option>
+                    </select>
+                    {(dvCondOp === 'equals' || dvCondOp === 'not_equals' || dvCondOp === 'contains') && (
+                      <input
+                        type="text"
+                        value={dvCondCompare}
+                        onChange={(e) => setDvCondCompare(e.target.value)}
+                        placeholder="text"
+                        className="flex-1 min-w-[100px] px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                      />
+                    )}
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">then set the value to</label>
+                    <input type="text" value={dvThen} onChange={(e) => setDvThen(e.target.value)}
+                      placeholder='e.g. "Finished good"'
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">otherwise set the value to</label>
+                    <input type="text" value={dvElse} onChange={(e) => setDvElse(e.target.value)}
+                      placeholder="leave empty to keep existing value"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                  </div>
+                </div>
+              )}
+
               <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
                 <div className="flex items-start gap-3">
                   <Info className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
                   <div className="text-sm text-blue-800">
                     <p className="font-medium mb-1">How this works:</p>
                     <p>
-                      This text will be used to fill all cells in the "{selectedTemplateField?.name}" column
-                      when the data is processed. This is useful for fields like "Component" where all items
-                      have the same value.
+                      Fills the "{selectedTemplateField?.name}" column when the data is processed —
+                      either the same value everywhere, or a value that depends on another column
+                      (e.g. <em>if MPN Code is empty → "Finished good", otherwise → "RM"</em>).
                     </p>
                   </div>
                 </div>
@@ -4896,7 +5038,10 @@ export default function ColumnMapping() {
                 >
                   Cancel
                 </button>
-                {selectedTemplateField?.name && defaultValueMappings && Object.prototype.hasOwnProperty.call(defaultValueMappings, selectedTemplateField.name) && (
+                {selectedTemplateField?.name && (
+                  (defaultValueMappings && Object.prototype.hasOwnProperty.call(defaultValueMappings, selectedTemplateField.name)) ||
+                  (defaultValueRules && Object.prototype.hasOwnProperty.call(defaultValueRules, selectedTemplateField.name))
+                ) && (
                   <button
                     onClick={handleClearDefaultValue}
                     disabled={defaultValueLoading}
@@ -4910,13 +5055,13 @@ export default function ColumnMapping() {
                 )}
                 <button
                   onClick={handleSaveDefaultValue}
-                  disabled={!defaultValueText.trim() || defaultValueLoading}
+                  disabled={defaultValueLoading || (dvMode === 'always' ? !defaultValueText.trim() : !dvCondCol)}
                   className="px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:bg-gray-300 text-white rounded-lg font-medium transition-colors flex items-center gap-2"
                 >
                   {defaultValueLoading && (
                     <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
                   )}
-                  {defaultValueLoading ? 'Setting...' : 'Set Default Value'}
+                  {defaultValueLoading ? 'Setting...' : (dvMode === 'conditional' ? 'Set Rule' : 'Set Default Value')}
                 </button>
               </div>
           </div>
@@ -4975,6 +5120,62 @@ export default function ColumnMapping() {
           setTimeout(() => window.location.reload(), 1200);
         }}
       />
+
+      {/* Primary-key cleanup before the editor (all source types) */}
+      <Dialog open={primaryDialogOpen} disableEscapeKeyDown maxWidth="sm" fullWidth>
+        <DialogTitle>Which column identifies each item?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Rows where this column is empty will be removed (e.g. blank part numbers or leftover header lines).
+            Pick the key column, or skip to keep every row.
+          </Typography>
+          <FormControl fullWidth size="small">
+            <InputLabel>Key column</InputLabel>
+            <Select
+              label="Key column"
+              value={primaryKeyColumn}
+              onChange={(e) => setPrimaryKeyColumn(e.target.value)}
+            >
+              {primaryKeyOptions.map(col => (
+                <MenuItem key={col} value={col}>
+                  {primaryKeySources[col] ? `${col}  (from ${primaryKeySources[col]})` : col}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          {primaryKeyColumn && (
+            <Box sx={{ mt: 2 }}>
+              {primaryEmptyLoading ? (
+                <Typography variant="body2" color="text.secondary">
+                  Checking how many rows are empty...
+                </Typography>
+              ) : primaryEmptyInfo ? (
+                primaryEmptyInfo.empty > 0 ? (
+                  <Alert severity="warning" sx={{ py: 0.5 }}>
+                    <strong>{primaryEmptyInfo.empty}</strong> of <strong>{primaryEmptyInfo.total}</strong> rows are empty
+                    in this column and will be removed. <strong>{primaryEmptyInfo.total - primaryEmptyInfo.empty}</strong> will remain.
+                  </Alert>
+                ) : (
+                  <Alert severity="success" sx={{ py: 0.5 }}>
+                    No empty rows in this column ({primaryEmptyInfo.total} rows). Nothing will be removed.
+                  </Alert>
+                )
+              ) : null}
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPrimaryDialogOpen(false)} disabled={primaryCleaning}>
+            Cancel
+          </Button>
+          <Button onClick={goToEditor} disabled={primaryCleaning} color="secondary">
+            Skip and keep all rows
+          </Button>
+          <Button onClick={handleCleanupAndReview} variant="contained" disabled={primaryCleaning || !primaryKeyColumn}>
+            {primaryCleaning ? 'Cleaning...' : 'Remove empty & continue'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       {/* Snackbar */}
       <Snackbar
@@ -5097,16 +5298,25 @@ export default function ColumnMapping() {
                           Column counts: Tags={template.tags_count}, Spec={template.spec_pairs_count}, Customer={template.customer_id_pairs_count}
                         </div>
                       </div>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleApplyTemplate(template);
-                        }}
-                        disabled={applyingTemplate && applyingTemplateId === template.id}
-                        className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
-                      >
-                        {applyingTemplate && applyingTemplateId === template.id ? 'Applying...' : 'Apply'}
-                      </button>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleExportTemplate(template); }}
+                          title="Download this template as a file to move to another environment"
+                          className="px-3 py-2 bg-white border border-gray-300 hover:bg-gray-100 text-gray-700 rounded-lg text-sm font-medium transition-colors"
+                        >
+                          Export
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleApplyTemplate(template);
+                          }}
+                          disabled={applyingTemplate && applyingTemplateId === template.id}
+                          className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+                        >
+                          {applyingTemplate && applyingTemplateId === template.id ? 'Applying...' : 'Apply'}
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -5115,6 +5325,19 @@ export default function ColumnMapping() {
           </div>
         </DialogContent>
         <DialogActions>
+          <input
+            ref={templateImportInputRef}
+            type="file"
+            accept=".json,application/json"
+            hidden
+            onChange={handleImportTemplateFile}
+          />
+          <Button
+            onClick={() => templateImportInputRef.current && templateImportInputRef.current.click()}
+            sx={{ mr: 'auto' }}
+          >
+            Import template…
+          </Button>
           <Button
             onClick={() => setShowTemplateDialog(false)}
             color="secondary"

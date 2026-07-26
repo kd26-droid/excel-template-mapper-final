@@ -1,6 +1,6 @@
 {
-  "short_name": "Excel Mapper",
-  "name": "Excel Template Mapper",
+  "short_name": "BOM Mapper",
+  "name": "Factwise BOM Mapper",
   "icons": [
     {
       "src": "favicon.ico",

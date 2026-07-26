@@ -233,17 +233,29 @@ class DigiKeyClient:
                 resp = requests.request(method, url, headers=headers, timeout=30, **kwargs)
             if resp.status_code in (429, 502, 503, 504):
                 attempt += 1
-                if attempt > 5:
-                    resp.raise_for_status()
-                # honor Retry-After
                 ra = resp.headers.get('Retry-After')
+                wait = None
                 if ra:
                     try:
-                        time.sleep(float(ra))
-                    except Exception:
-                        time.sleep(self._backoff(attempt))
-                else:
-                    time.sleep(self._backoff(attempt))
+                        wait = float(ra)
+                    except (TypeError, ValueError):
+                        wait = None
+                remaining = resp.headers.get('X-RateLimit-Remaining')
+                # A daily-quota 429 carries a huge Retry-After (hours) and
+                # Remaining=0. NEVER block the request on that — sleeping for hours
+                # is what made validation "hang". Fail fast with a clear error so
+                # the caller can tell the user (cached MPNs still work).
+                MAX_WAIT = 20.0
+                if (attempt > 5
+                        or (wait is not None and wait > MAX_WAIT)
+                        or (resp.status_code == 429 and str(remaining) == '0')):
+                    reset_hint = f" Try again in ~{int(wait // 60)} min." if wait else ""
+                    raise RuntimeError(
+                        f"Digi-Key rate limit hit (HTTP {resp.status_code}, "
+                        f"{resp.headers.get('X-RateLimit-Limit', '?')}/day quota)."
+                        f"{reset_hint}"
+                    )
+                time.sleep(wait if (wait is not None and wait <= MAX_WAIT) else self._backoff(attempt))
                 continue
             resp.raise_for_status()
             return resp
@@ -573,25 +585,20 @@ class DigiKeyClient:
 
         logger.info(f"MPN validation: {cache_hits} cache hits, {len(api_calls_needed)} API calls needed")
 
-        # Second pass: Make API calls for uncached MPNs
-        for mpn_norm, mfr_name in api_calls_needed:
+        # Second pass: fetch uncached MPNs from the API. Each MPN is a network
+        # round-trip, so a 44-item BOM done serially blows past Azure App
+        # Service's hard 230s request limit. Run the network fetches CONCURRENTLY
+        # (the slow part), then write the caches SERIALLY afterwards so we never
+        # hit concurrent-SQLite-write locks. Result content is unchanged.
+        def _fetch_one(item):
+            mpn_norm, mfr_name = item
             try:
                 search_json = self.search_keyword(mpn_norm, manufacturer_id)
                 valid, canon_mpn, all_canonical_mpns = self.is_valid_match(search_json, mpn_norm, mfr_name)
                 dkpn = self.pick_dkpn(search_json) if valid else None
 
-                # Log validation result for debugging
-                if valid:
-                    logger.debug(f"✅ MPN '{mpn_norm}' validated: exact match found")
-                elif all_canonical_mpns:
-                    logger.debug(f"❌ MPN '{mpn_norm}' invalid: no exact match, but found {len(all_canonical_mpns)} suggestions")
-                else:
-                    logger.debug(f"❌ MPN '{mpn_norm}' invalid: no matches found at all")
-
-                # Extract category information
                 category_info = self.extract_category(search_json)
                 lifecycle = None
-
                 if dkpn:
                     try:
                         pd = self.product_details(dkpn)
@@ -606,9 +613,7 @@ class DigiKeyClient:
                     except Exception as e:
                         logger.warning(f"Lifecycle fetch failed for {dkpn}: {e}")
 
-                # CRITICAL FIX: For invalid MPNs, don't populate canonical MPNs or category
                 if valid:
-                    # Valid MPN: provide all information
                     res = {
                         'valid': True,
                         'canonical_mpn': canon_mpn,
@@ -621,28 +626,55 @@ class DigiKeyClient:
                         'currency': self.currency,
                     }
                 else:
-                    # Invalid MPN: provide canonical suggestions but mark as invalid
-                    # This helps users see what the correct part number should be
                     res = {
                         'valid': False,
-                        'canonical_mpn': canon_mpn,  # Show suggestion even if invalid
-                        'all_canonical_mpns': all_canonical_mpns,  # Show all suggestions
-                        'dkpn': None,  # No DKPN for invalid
-                        'lifecycle': None,  # No lifecycle for invalid
-                        'category': {'name': None, 'id': None, 'parent_id': None, 'path': None},  # No category for invalid
+                        'canonical_mpn': canon_mpn,
+                        'all_canonical_mpns': all_canonical_mpns,
+                        'dkpn': None,
+                        'lifecycle': None,
+                        'category': {'name': None, 'id': None, 'parent_id': None, 'path': None},
                         'site': self.site,
                         'lang': self.lang,
                         'currency': self.currency,
                     }
+                return (mpn_norm, res, None)
+            except Exception as e:
+                return (mpn_norm, None, e)
+
+        if api_calls_needed:
+            try:
+                self.ensure_access_token()
+            except Exception:
+                pass
+
+            # Fetch sequentially. A ThreadPoolExecutor here deadlocks: each worker
+            # thread touches the Django ORM (OAuth token lookup) and SQLite does
+            # not tolerate that concurrency, so validation hangs. The client-side
+            # chunking (a small batch of MPNs per request) is what keeps us under
+            # Azure's 230s request limit — we don't need thread concurrency here.
+            fetched = [_fetch_one(item) for item in api_calls_needed]
+
+            for mpn_norm, res, err in fetched:
+                if err is not None:
+                    logger.error(f"API validation failed for MPN {mpn_norm}: {err}")
+                    error_result = {
+                        'valid': False,
+                        'canonical_mpn': None,
+                        'all_canonical_mpns': [],
+                        'dkpn': None,
+                        'lifecycle': None,
+                        'category': {'name': None, 'id': None, 'parent_id': None, 'path': None},
+                        'site': self.site,
+                        'lang': self.lang,
+                        'currency': self.currency,
+                        'error': str(err),
+                    }
+                    results[mpn_norm] = error_result
+                    cache.set(self._cache_key(mpn_norm, manufacturer_id), error_result, timeout=60 * 5)
+                    continue
 
                 results[mpn_norm] = res
-
-                # Store in both caches
-                # Short-term Django cache (12h)
-                cache_key = self._cache_key(mpn_norm, manufacturer_id)
-                cache.set(cache_key, res, timeout=60 * 60 * 12)
-
-                # Persistent global cache (forever)
+                cache.set(self._cache_key(mpn_norm, manufacturer_id), res, timeout=60 * 60 * 12)
                 GlobalMpnCache.store_result(
                     mpn_norm=mpn_norm,
                     validation_data=res,
@@ -651,28 +683,5 @@ class DigiKeyClient:
                     lang=self.lang,
                     currency=self.currency
                 )
-
-                logger.debug(f"API call completed for MPN: {mpn_norm}, stored in both caches")
-
-            except Exception as e:
-                logger.error(f"API validation failed for MPN {mpn_norm}: {e}")
-                # Store negative result to avoid repeated failures
-                error_result = {
-                    'valid': False,
-                    'canonical_mpn': None,
-                    'all_canonical_mpns': [],  # NEW: Empty list for errors
-                    'dkpn': None,
-                    'lifecycle': None,
-                    'category': {'name': None, 'id': None, 'parent_id': None, 'path': None},  # Empty category for errors
-                    'site': self.site,
-                    'lang': self.lang,
-                    'currency': self.currency,
-                    'error': str(e)
-                }
-                results[mpn_norm] = error_result
-
-                # Cache the error result briefly (don't persist errors globally)
-                cache_key = self._cache_key(mpn_norm, manufacturer_id)
-                cache.set(cache_key, error_result, timeout=60 * 5)  # 5 minutes for errors
 
         return results
