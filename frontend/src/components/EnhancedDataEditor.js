@@ -2372,10 +2372,10 @@ const EnhancedDataEditor = () => {
       const response = await api.splitMPNCells(sessionId, selectedHeader, buildMpnSplitOptionsPayload(), null, false);
       if (response.data?.success) {
         const splitRows = response.data.split_rows || 0;
-        const totalRowsAfterSplit = response.data.total_rows || response.data.created_rows || 0;
+        const createdRows = response.data.created_rows || 0;
         if (splitRows > 0) {
           const normalized = response.data.normalized_mpns || 0;
-          showSnackbar(`Split ${splitRows} rows into ${totalRowsAfterSplit} rows. Cleaned ${normalized} MPNs.`, 'success');
+          showSnackbar(`Created ${createdRows} MPN rows from ${splitRows} source rows. Cleaned ${normalized} MPNs.`, 'success');
         } else {
           if (selectedColumnLooksLikeProducerText(selectedHeader)) {
             showSnackbar('This looks like labelled “Manufacturer: MPN” data — reopen Expand Alternates and pick the “Labelled Manufacturer: MPN” option.', 'warning');
@@ -2419,10 +2419,10 @@ const EnhancedDataEditor = () => {
       const response = await api.splitMPNCells(sessionId, selectedHeader, buildMpnSplitOptionsPayload(), mpnManufacturerColumn, true);
       if (response.data?.success) {
         const splitRows = response.data.split_rows || 0;
-        const totalRowsAfterSplit = response.data.total_rows || response.data.created_rows || 0;
+        const createdRows = response.data.created_rows || 0;
         const paired = response.data.paired_manufacturer_rows || 0;
         if (splitRows > 0) {
-          showSnackbar(`Split ${splitRows} rows into ${totalRowsAfterSplit} rows and paired ${paired} manufacturers.`, 'success');
+          showSnackbar(`Created ${createdRows} MPN rows from ${splitRows} source rows and paired ${paired} manufacturers.`, 'success');
         } else {
           showSnackbar('No multi-MPN cells found in the selected column', 'info');
         }

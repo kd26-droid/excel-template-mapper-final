@@ -1214,6 +1214,9 @@ def mpn_split_cells(request):
 
         for row_idx, row in enumerate(rows):
             expanded_row = list(row) + [''] * (len(output_headers) - len(row))
+            if not any(str(cell or '').strip() for cell in expanded_row):
+                continue
+
             raw_value = expanded_row[mpn_index] if mpn_index < len(expanded_row) else ''
             parts = split_combined_mpn_cell(raw_value, mpn_split_options)
             if len(parts) <= 1:

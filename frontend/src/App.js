@@ -1,5 +1,5 @@
 import React from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route, useLocation } from 'react-router-dom';
 import { Container, Box } from '@mui/material';
 import Header from './components/Header';
 import Dashboard from './pages/Dashboard';
@@ -7,10 +7,26 @@ import UploadFiles from './pages/UploadFiles';
 import ColumnMapping from './pages/ColumnMapping';
 import PDFZoneSelection from './pages/PDFZoneSelection';
 import Settings from './pages/Settings';
+import BomPreview from './pages/BomPreview';
+import BomNormalizer from './pages/BomNormalizer';
 // Prefer the enhanced, Azure-friendly data editor with robust synchronization
 import EnhancedDataEditor from './components/EnhancedDataEditor';
 
 function App() {
+  const location = useLocation();
+  const normalizedPath = location.pathname.replace(/\/+$/, '') || '/';
+  const isStandaloneRoute = ['/preview', '/bom-normalizer', '/bom-normaliser'].includes(normalizedPath);
+
+  if (isStandaloneRoute) {
+    return (
+      <Routes>
+        <Route path="/preview" element={<BomPreview />} />
+        <Route path="/bom-normalizer" element={<BomNormalizer />} />
+        <Route path="/bom-normaliser" element={<BomNormalizer />} />
+      </Routes>
+    );
+  }
+
   return (
     <div className="App" style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
       <Header />
@@ -24,6 +40,9 @@ function App() {
             <Route path="/editor/:sessionId" element={<EnhancedDataEditor />} />
             <Route path="/pdf-zones/:sessionId" element={<PDFZoneSelection />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="/preview" element={<BomPreview />} />
+            <Route path="/bom-normalizer" element={<BomNormalizer />} />
+            <Route path="/bom-normaliser" element={<BomNormalizer />} />
           </Routes>
         </Box>
       </Container>

@@ -126,6 +126,81 @@ def _is_blank_cell(value) -> bool:
     return text == "" or text.lower() in {"nan", "none", "null"}
 
 
+def _clean_text(value) -> str:
+    if _is_blank_cell(value):
+        return ""
+    return str(value).replace("\u00a0", " ").strip()
+
+
+def _norm_loose(value) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", _clean_text(value).lower()).strip()
+
+
+def _looks_like_repeated_header_row(row, columns) -> bool:
+    values = [_norm_loose(v) for v in row.tolist() if _clean_text(v)]
+    if len(values) < 2:
+        return False
+    header_keys = {_norm_loose(c) for c in columns if _clean_text(c)}
+    if not header_keys:
+        return False
+    matches = sum(1 for value in values if value in header_keys)
+    return matches >= max(2, int(len(values) * 0.6 + 0.999))
+
+
+def _looks_like_section_title_row(row) -> bool:
+    values = [_clean_text(v) for v in row.tolist() if _clean_text(v)]
+    if not values:
+        return True
+    if len(values) != 1:
+        return False
+
+    text = values[0]
+    compact = re.sub(r"[^A-Za-z0-9]", "", text)
+    if len(compact) > 40:
+        return False
+    has_letters = bool(re.search(r"[A-Za-z]", text))
+    looks_like_title = text == text.upper() or len(compact) <= 28
+    looks_like_part = bool(re.search(r"[A-Za-z]+\d|\d+[A-Za-z]", text))
+    return has_letters and looks_like_title and not looks_like_part
+
+
+def drop_non_data_rows(df: pd.DataFrame, context: str = "") -> pd.DataFrame:
+    """Drop visual BOM separators: blank rows, repeated headers, and one-cell section titles."""
+    if df is None or df.empty:
+        return df
+
+    keep_indices = []
+    dropped_blank = 0
+    dropped_header = 0
+    dropped_title = 0
+
+    for index, row in df.iterrows():
+        values = [_clean_text(v) for v in row.tolist()]
+        if not any(values):
+            dropped_blank += 1
+            continue
+        if _looks_like_repeated_header_row(row, df.columns):
+            dropped_header += 1
+            continue
+        if _looks_like_section_title_row(row):
+            dropped_title += 1
+            continue
+        keep_indices.append(index)
+
+    if len(keep_indices) == len(df):
+        return df
+
+    logger.info(
+        "Dropped %s non-data row(s)%s: blank=%s, repeated_header=%s, section_title=%s",
+        len(df) - len(keep_indices),
+        f" in {context}" if context else "",
+        dropped_blank,
+        dropped_header,
+        dropped_title,
+    )
+    return df.loc[keep_indices].reset_index(drop=True)
+
+
 def cleanup_empty_spec_pairs(headers: list, rows: list) -> int:
     """Clear Specification name when the paired Specification value is blank."""
     if not headers or not rows:
@@ -803,6 +878,7 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
         
         # Clean column names
         df.columns = [str(col).strip() for col in df.columns]
+        df = drop_non_data_rows(df, context="apply_column_mappings")
         
         # Build canonical lookup for df columns (for source snapping)
         df_canon = {_canon(c): c for c in df.columns}
