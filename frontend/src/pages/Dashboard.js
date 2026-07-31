@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
-import LoaderOverlay, { useGlobalBlock } from '../components/LoaderOverlay';
-import { 
-  Typography, 
-  Grid, 
-  Card, 
+import React, { useState, useEffect, useMemo } from 'react';
+import styled from '@emotion/styled';
+import { useGlobalBlock } from '../components/LoaderOverlay';
+import {
+  Typography,
+  Grid,
+  Card,
   CardContent,
   Button,
   Table,
@@ -13,30 +14,17 @@ import {
   TableHead,
   TableRow,
   CircularProgress,
-  Alert,
   Box,
   Chip,
   IconButton,
-  Tooltip,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogContentText,
-  DialogTitle,
   TextField,
   InputAdornment,
   FormControl,
-  InputLabel,
   Select,
   MenuItem,
-  TablePagination,
   Avatar,
-  List,
-  ListItem,
-  ListItemAvatar,
-  Fade,
-  Grow,
-  Stack
+  Stack,
+  TablePagination
 } from '@mui/material';
 import { useNavigate } from 'react-router-dom';
 import StandaloneFormulaBuilder from '../components/StandaloneFormulaBuilder';
@@ -47,19 +35,230 @@ import {
   PlayArrow as PlayArrowIcon,
   Delete as DeleteIcon,
   Star as StarIcon,
-  Folder as FolderIcon,
   Search as SearchIcon,
-  GetApp as GetAppIcon,
   Description as DescriptionIcon,
-  Transform as TransformIcon,
   Refresh as RefreshIcon,
   Clear as ClearIcon,
-  Science as ScienceIcon
+  Science as ScienceIcon,
+  Code as CodeIcon,
+  ExpandMore as ExpandMoreIcon,
+  ExpandLess as ExpandLessIcon,
+  GetApp as GetAppIcon
 } from '@mui/icons-material';
 import api, { setGlobalLoaderCallback } from '../services/api';
-import FormulaBuilder from '../components/FormulaBuilder';
+import { useThemeContext } from '../utils/ThemeContext';
 
-const IST_TIME_ZONE = 'Asia/Kolkata';
+// ─── Styled animated buttons (matching final-2 UI) ──────────────────────────
+
+const DownloadButtonWrapper = styled.div`
+  width: 100%;
+  .download-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+    height: 32px;
+    border-radius: 8px;
+    background: ${props => props.color || 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)'};
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 600;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+    cursor: pointer;
+    transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .icon-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1px;
+  }
+  .dl-svg-icon {
+    color: rgba(255, 255, 255, 0.9);
+    transition: all 0.2s ease;
+  }
+  .tray-bar {
+    width: 14px;
+    height: 2px;
+    background-color: rgba(255, 255, 255, 0.7);
+    border-radius: 1px;
+    transition: all 0.2s ease;
+  }
+  .download-btn:hover:not(:disabled) .dl-svg-icon {
+    color: #ffffff;
+    animation: slide-in-top 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94) both;
+  }
+  .download-btn:hover:not(:disabled) .tray-bar {
+    background-color: #ffffff;
+    box-shadow: 0 0 6px #ffffff;
+  }
+  .download-btn:hover:not(:disabled) {
+    background: ${props => props.hoverColor || 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)'};
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+    transform: translateY(-1.5px);
+  }
+  .download-btn:active:not(:disabled) { transform: scale(0.97); }
+  @keyframes slide-in-top {
+    0% { transform: translateY(-8px); opacity: 0; }
+    100% { transform: translateY(0px); opacity: 1; }
+  }
+`;
+
+const DownloadButton = ({ onClick, label = 'Download',
+  color = 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
+  hoverColor = 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)' }) => (
+  <DownloadButtonWrapper color={color} hoverColor={hoverColor}>
+    <button className="download-btn" onClick={onClick} type="button">
+      <div className="icon-container">
+        <svg className="dl-svg-icon" viewBox="0 0 384 512" height="13" width="13" xmlns="http://www.w3.org/2000/svg">
+          <path fill="currentColor" d="M169.4 470.6c12.5 12.5 32.8 12.5 45.3 0l160-160c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0L224 370.8 224 64c0-17.7-14.3-32-32-32s-32 14.3-32 32l0 306.7L54.6 265.4c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3l160 160z" />
+        </svg>
+        <span className="tray-bar" />
+      </div>
+      <span>{label}</span>
+    </button>
+  </DownloadButtonWrapper>
+);
+
+const ToggleButtonWrapper = styled.div`
+  display: inline-flex;
+  .toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-start;
+    height: 28px;
+    width: 28px;
+    padding: 0 6px;
+    border-radius: 14px;
+    background: ${props => props.isExpanded ? 'rgba(35, 131, 226, 0.25)' : 'rgba(255, 255, 255, 0.05)'};
+    border: 1px solid ${props => props.isExpanded ? 'rgba(35, 131, 226, 0.5)' : 'rgba(255, 255, 255, 0.1)'};
+    color: ${props => props.isExpanded ? '#60a5fa' : '#8992a5'};
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .chevron-icon {
+    min-width: 14px;
+    width: 14px;
+    height: 14px;
+    transform: ${props => props.isExpanded ? 'rotate(180deg)' : 'rotate(0deg)'};
+    transition: transform 0.3s ease;
+  }
+  .btn-label {
+    opacity: 0;
+    max-width: 0;
+    transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    margin-left: 0;
+  }
+  .toggle-btn:hover {
+    width: 78px;
+    padding: 0 10px;
+    background: rgba(35, 131, 226, 0.3);
+    border-color: #2383e2;
+    color: #ffffff;
+    box-shadow: 0 0 14px rgba(35, 131, 226, 0.4);
+    transform: translateY(-1px);
+  }
+  .toggle-btn:hover .btn-label {
+    opacity: 1;
+    max-width: 50px;
+    margin-left: 5px;
+  }
+  .toggle-btn:active { transform: scale(0.94); }
+`;
+
+const ToggleButton = ({ isExpanded, onClick }) => (
+  <ToggleButtonWrapper isExpanded={isExpanded}>
+    <button className="toggle-btn" onClick={onClick} type="button">
+      <svg className="chevron-icon" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z" />
+      </svg>
+      <span className="btn-label">{isExpanded ? 'Collapse' : 'Expand'}</span>
+    </button>
+  </ToggleButtonWrapper>
+);
+
+const UseButtonWrapper = styled.div`
+  display: inline-flex;
+  .use-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-start;
+    height: 32px;
+    width: 32px;
+    padding: 0;
+    border-radius: 16px;
+    background: ${props => props.color};
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    color: #ffffff;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 3px 10px ${props => props.glowColor}, inset 0 1px 0 rgba(255, 255, 255, 0.3);
+    transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .icon-box {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    min-width: 30px;
+    height: 30px;
+    transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .play-icon {
+    width: 16px;
+    height: 16px;
+    margin-left: 1px;
+    transition: transform 0.25s ease;
+  }
+  .btn-label {
+    opacity: 0;
+    max-width: 0;
+    color: #ffffff;
+    transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    margin-left: 0;
+  }
+  .use-btn:hover {
+    width: 125px;
+    padding: 0 10px;
+    background: ${props => props.hoverColor};
+    border-color: rgba(255, 255, 255, 0.4);
+    box-shadow: 0 5px 16px ${props => props.glowColor}, inset 0 1px 0 rgba(255, 255, 255, 0.4);
+    transform: translateY(-1px);
+  }
+  .use-btn:hover .icon-box { width: 18px; min-width: 18px; }
+  .use-btn:hover .play-icon { transform: translateX(1px) scale(1.1); }
+  .use-btn:hover .btn-label { opacity: 1; max-width: 95px; margin-left: 6px; }
+  .use-btn:active { transform: scale(0.95); }
+`;
+
+const UseButton = ({
+  onClick,
+  label = 'Use Template',
+  color = 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
+  hoverColor = 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
+  glowColor = 'rgba(37, 99, 235, 0.45)'
+}) => (
+  <UseButtonWrapper color={color} hoverColor={hoverColor} glowColor={glowColor}>
+    <button className="use-btn" onClick={onClick} type="button">
+      <div className="icon-box">
+        <svg className="play-icon" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M8 5v14l11-7z" />
+        </svg>
+      </div>
+      <span className="btn-label">{label}</span>
+    </button>
+  </UseButtonWrapper>
+);
 
 const parseHistoryDate = (value) => {
   if (!value) return null;
@@ -69,68 +268,31 @@ const parseHistoryDate = (value) => {
   return Number.isNaN(date.getTime()) ? null : date;
 };
 
+const formatDisplayDate = (value) => {
+  const dt = parseHistoryDate(value);
+  return dt
+    ? dt.toLocaleString('en-IN', {
+        timeZone: 'Asia/Kolkata',
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true,
+      })
+    : 'Unknown time';
+};
+
 const Dashboard = () => {
+  const navigate = useNavigate();
+  const { isDarkMode, tokens: t } = useThemeContext();
+
   const [uploads, setUploads] = useState([]);
   const [globalLoading, setGlobalLoading] = useState(false);
   useGlobalBlock(globalLoading);
-  
-  // Setup global loader callback
-  useEffect(() => {
-    setGlobalLoaderCallback(setGlobalLoading);
-    return () => setGlobalLoaderCallback(null);
-  }, []);
-  const [templates, setTemplates] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [templatesLoading, setTemplatesLoading] = useState(true);
-  const [error, setError] = useState(null);
-  const [templatesError, setTemplatesError] = useState(null);
-  
-  // Template management state
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [templateToDelete, setTemplateToDelete] = useState(null);
-  const [deleting, setDeleting] = useState(false);
 
-  // Upload (session) hard-delete state
-  const [uploadDeleteDialogOpen, setUploadDeleteDialogOpen] = useState(false);
-  const [uploadToDelete, setUploadToDelete] = useState(null);
-  const [deletingUploadId, setDeletingUploadId] = useState(null);
-  
-  // Template search and filtering
-  const [templateSearchTerm, setTemplateSearchTerm] = useState('');
-  const [templateSortBy, setTemplateSortBy] = useState('usage_count');
-  const [templateSortOrder, setTemplateSortOrder] = useState('desc');
-  const [templatePage, setTemplatePage] = useState(0);
-  const [templatesPerPage, setTemplatesPerPage] = useState(10);
-  
-  // Tag Templates state
+  const [mappingTemplates, setMappingTemplates] = useState([]);
   const [tagTemplates, setTagTemplates] = useState([]);
-  const [tagTemplatesLoading, setTagTemplatesLoading] = useState(true);
-  const [tagTemplatesError, setTagTemplatesError] = useState(null);
-  const [tagTemplateSearchTerm, setTagTemplateSearchTerm] = useState('');
-  const [tagTemplateSortBy, setTagTemplateSortBy] = useState('usage_count');
-  const [tagTemplateSortOrder, setTagTemplateSortOrder] = useState('desc');
-  const [tagTemplatePage, setTagTemplatePage] = useState(0);
-  const [tagTemplatesPerPage, setTagTemplatesPerPage] = useState(10);
-  const [tagTemplateDeleteDialogOpen, setTagTemplateDeleteDialogOpen] = useState(false);
-  const [tagTemplateToDelete, setTagTemplateToDelete] = useState(null);
-  const [deletingTagTemplate, setDeletingTagTemplate] = useState(false);
-  
-  // Formula builder state
-  const [formulaBuilderOpen, setFormulaBuilderOpen] = useState(false);
-  
-  // Upload search and filtering
-  const [uploadSearchTerm, setUploadSearchTerm] = useState('');
-  const [uploadSortBy, setUploadSortBy] = useState('upload_date');
-  const [uploadSortOrder, setUploadSortOrder] = useState('desc');
-  const [uploadPage, setUploadPage] = useState(0);
-  const [uploadsPerPage, setUploadsPerPage] = useState(10);
-  
-  // Download state
-  const [downloadingOriginal, setDownloadingOriginal] = useState({});
-  const [downloadingConverted, setDownloadingConverted] = useState({});
-  const [downloadingTemplate, setDownloadingTemplate] = useState({});
-  
-  // Template stats
   const [templateStats, setTemplateStats] = useState({
     totalTemplates: 0,
     totalUsage: 0,
@@ -138,1413 +300,970 @@ const Dashboard = () => {
     top3Templates: []
   });
 
-  
-  const [selectedTemplateForFormulas, setSelectedTemplateForFormulas] = useState(null);
+  const [loadingUploads, setLoadingUploads] = useState(true);
+  const [, setLoadingTemplates] = useState(true);
+  const [, setLoadingTags] = useState(true);
 
-  const navigate = useNavigate();
+  // Tab & Filters
+  const [activeTab, setActiveTab] = useState(0); // 0: Sessions, 1: Templates, 2: Tag Rules
+  const [sessionSearch, setSessionSearch] = useState('');
+  const [sessionSortBy, setSessionSortBy] = useState('upload_date');
+  const [sessionSortOrder, setSessionSortOrder] = useState('desc');
+  const [expandedSessionId, setExpandedSessionId] = useState(null);
 
-  // Fetch dashboard data
+  // Mapping Templates tab pagination + sort
+  const [tmplSearch, setTmplSearch] = useState('');
+  const [tmplSortBy, setTmplSortBy] = useState('usage_count');
+  const [tmplSortOrder, setTmplSortOrder] = useState('desc');
+  const [tmplPage, setTmplPage] = useState(0);
+  const [tmplRowsPerPage, setTmplRowsPerPage] = useState(10);
+
+  // Tag Rules tab pagination + sort
+  const [tagSearch, setTagSearch] = useState('');
+  const [tagSortBy, setTagSortBy] = useState('usage_count');
+  const [tagSortOrder, setTagSortOrder] = useState('desc');
+  const [tagPage, setTagPage] = useState(0);
+  const [tagRowsPerPage, setTagRowsPerPage] = useState(10);
+
+  // Sessions tab pagination
+  const [sessionPage, setSessionPage] = useState(0);
+  const [sessionRowsPerPage, setSessionRowsPerPage] = useState(10);
+
+  // Mouse background glow position
+  const [mousePos, setMousePos] = useState({ x: 50, y: 50 });
+
+  // Dialog states
+  const [showFormulaModal, setShowFormulaModal] = useState(false);
+
   useEffect(() => {
-    const fetchDashboardData = async () => {
-      try {
-        setLoading(true);
-        const response = await api.getUploadDashboard();
-        setUploads(response.data.uploads || []);
-        setError(null);
-      } catch (err) {
-        console.error('Error fetching dashboard data:', err);
-        setError('Failed to load dashboard data. Please try again later.');
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchDashboardData();
+    setGlobalLoaderCallback(setGlobalLoading);
+    return () => setGlobalLoaderCallback(null);
   }, []);
 
-  // Fetch mapping templates
-  const loadTemplates = async () => {
+  useEffect(() => {
+    const handleMouseMove = (e) => {
+      setMousePos({
+        x: (e.clientX / window.innerWidth) * 100,
+        y: (e.clientY / window.innerHeight) * 100
+      });
+    };
+    window.addEventListener('mousemove', handleMouseMove);
+    return () => window.removeEventListener('mousemove', handleMouseMove);
+  }, []);
+
+  // Fetch Dashboard Data
+  const fetchData = async () => {
     try {
-      setTemplatesLoading(true);
-      const response = await api.getMappingTemplates();
-      const templateData = response.data.templates || [];
-      setTemplates(templateData);
-      
-      // Calculate stats
-      const sortedByUsage = [...templateData].sort((a, b) => (b.usage_count || 0) - (a.usage_count || 0));
-      const stats = {
-        totalTemplates: templateData.length,
-        totalUsage: templateData.reduce((sum, t) => sum + (t.usage_count || 0), 0),
-        mostUsed: sortedByUsage[0],
-        top3Templates: sortedByUsage.slice(0, 3)
-      };
-      setTemplateStats(stats);
-      setTemplatesError(null);
+      setLoadingUploads(true);
+      const res = await api.getUploadDashboard();
+      setUploads(res.data?.uploads || []);
+    } catch (err) {
+      console.error('Error fetching dashboard uploads:', err);
+    } finally {
+      setLoadingUploads(false);
+    }
+
+    try {
+      setLoadingTemplates(true);
+      const res = await api.getMappingTemplates();
+      const tmpls = res.data?.templates || [];
+      setMappingTemplates(tmpls);
+
+      const sorted = [...tmpls].sort((a, b) => (b.usage_count || 0) - (a.usage_count || 0));
+      setTemplateStats({
+        totalTemplates: tmpls.length,
+        totalUsage: tmpls.reduce((acc, curr) => acc + (curr.usage_count || 0), 0),
+        mostUsed: sorted[0] || null,
+        top3Templates: sorted.slice(0, 3)
+      });
     } catch (err) {
       console.error('Error fetching templates:', err);
-      setTemplatesError('Failed to load mapping templates.');
     } finally {
-      setTemplatesLoading(false);
+      setLoadingTemplates(false);
+    }
+
+    try {
+      setLoadingTags(true);
+      const res = await api.getTagTemplates();
+      setTagTemplates(res.data?.templates || []);
+    } catch (err) {
+      console.error('Error fetching tag templates:', err);
+    } finally {
+      setLoadingTags(false);
     }
   };
 
   useEffect(() => {
-    loadTemplates();
-    loadTagTemplates();
+    fetchData();
   }, []);
 
-  // Fetch tag templates
-  const loadTagTemplates = async () => {
-    try {
-      setTagTemplatesLoading(true);
-      const response = await api.getTagTemplates();
-      const tagTemplateData = response.data.templates || [];
-      setTagTemplates(tagTemplateData);
-      setTagTemplatesError(null);
-    } catch (err) {
-      console.error('Error fetching tag templates:', err);
-      setTagTemplatesError('Failed to load tag templates.');
-    } finally {
-      setTagTemplatesLoading(false);
-    }
-  };
-
-  // Enhanced template filtering and sorting
-  const filteredAndSortedTemplates = React.useMemo(() => {
-    let filtered = templates.filter(template =>
-      (template.name && template.name.toLowerCase().includes(templateSearchTerm.toLowerCase())) ||
-      (template.description && template.description.toLowerCase().includes(templateSearchTerm.toLowerCase()))
+  // Filtered Sessions
+  const filteredSessions = useMemo(() => {
+    let list = uploads.filter(u =>
+      (u.client_file || '').toLowerCase().includes(sessionSearch.toLowerCase()) ||
+      (u.template_file || '').toLowerCase().includes(sessionSearch.toLowerCase()) ||
+      (u.session_id || '').toLowerCase().includes(sessionSearch.toLowerCase())
     );
-
-    // Sort templates
-    filtered.sort((a, b) => {
-      let aValue, bValue;
-      
-      switch (templateSortBy) {
-        case 'created_at':
-          aValue = parseHistoryDate(a.created_at) || new Date(0);
-          bValue = parseHistoryDate(b.created_at) || new Date(0);
-          break;
-        case 'usage_count':
-          aValue = a.usage_count || 0;
-          bValue = b.usage_count || 0;
-          break;
-        case 'name':
-        default:
-          aValue = (a.name || '').toLowerCase();
-          bValue = (b.name || '').toLowerCase();
-          break;
-      }
-      
-      if (templateSortOrder === 'desc') {
-        return aValue < bValue ? 1 : aValue > bValue ? -1 : 0;
+    list.sort((a, b) => {
+      let va, vb;
+      if (sessionSortBy === 'upload_date') {
+        va = parseHistoryDate(a.created) || new Date(0);
+        vb = parseHistoryDate(b.created) || new Date(0);
+      } else if (sessionSortBy === 'rows_processed') {
+        va = a.rows_processed || 0;
+        vb = b.rows_processed || 0;
       } else {
-        return aValue > bValue ? 1 : aValue < bValue ? -1 : 0;
+        va = (a.client_file || '').toLowerCase();
+        vb = (b.client_file || '').toLowerCase();
       }
+      return sessionSortOrder === 'desc'
+        ? (vb > va ? 1 : vb < va ? -1 : 0)
+        : (va > vb ? 1 : va < vb ? -1 : 0);
     });
+    return list;
+  }, [uploads, sessionSearch, sessionSortBy, sessionSortOrder]);
 
-    return filtered;
-  }, [templates, templateSearchTerm, templateSortBy, templateSortOrder]);
+  const pagedSessions = useMemo(() => {
+    const start = sessionPage * sessionRowsPerPage;
+    return filteredSessions.slice(start, start + sessionRowsPerPage);
+  }, [filteredSessions, sessionPage, sessionRowsPerPage]);
 
-  // Enhanced tag template filtering and sorting
-  const filteredAndSortedTagTemplates = React.useMemo(() => {
-    let filtered = tagTemplates.filter(template =>
-      (template.name && template.name.toLowerCase().includes(tagTemplateSearchTerm.toLowerCase())) ||
-      (template.description && template.description.toLowerCase().includes(tagTemplateSearchTerm.toLowerCase()))
+  // Filtered + paginated Mapping Templates
+  const filteredTemplates = useMemo(() => {
+    let list = mappingTemplates.filter(tmpl =>
+      (tmpl.name || '').toLowerCase().includes(tmplSearch.toLowerCase()) ||
+      (tmpl.description || '').toLowerCase().includes(tmplSearch.toLowerCase())
     );
-
-    // Sort tag templates
-    filtered.sort((a, b) => {
-      let aValue, bValue;
-      
-      switch (tagTemplateSortBy) {
-        case 'created_at':
-          aValue = parseHistoryDate(a.created_at) || new Date(0);
-          bValue = parseHistoryDate(b.created_at) || new Date(0);
-          break;
-        case 'usage_count':
-          aValue = a.usage_count || 0;
-          bValue = b.usage_count || 0;
-          break;
-        case 'name':
-        default:
-          aValue = (a.name || '').toLowerCase();
-          bValue = (b.name || '').toLowerCase();
-          break;
-      }
-      
-      if (tagTemplateSortOrder === 'desc') {
-        return aValue < bValue ? 1 : aValue > bValue ? -1 : 0;
+    list.sort((a, b) => {
+      let va, vb;
+      if (tmplSortBy === 'created_at') {
+        va = parseHistoryDate(a.created_at) || new Date(0);
+        vb = parseHistoryDate(b.created_at) || new Date(0);
+      } else if (tmplSortBy === 'usage_count') {
+        va = a.usage_count || 0;
+        vb = b.usage_count || 0;
       } else {
-        return aValue > bValue ? 1 : aValue < bValue ? -1 : 0;
+        va = (a.name || '').toLowerCase();
+        vb = (b.name || '').toLowerCase();
       }
+      return tmplSortOrder === 'desc'
+        ? (vb > va ? 1 : vb < va ? -1 : 0)
+        : (va > vb ? 1 : va < vb ? -1 : 0);
     });
+    return list;
+  }, [mappingTemplates, tmplSearch, tmplSortBy, tmplSortOrder]);
 
-    return filtered;
-  }, [tagTemplates, tagTemplateSearchTerm, tagTemplateSortBy, tagTemplateSortOrder]);
+  const pagedTemplates = useMemo(() => {
+    const start = tmplPage * tmplRowsPerPage;
+    return filteredTemplates.slice(start, start + tmplRowsPerPage);
+  }, [filteredTemplates, tmplPage, tmplRowsPerPage]);
 
-  // Enhanced upload filtering and sorting
-  const filteredAndSortedUploads = React.useMemo(() => {
-    let filtered = uploads.filter(upload => {
-      const matchesSearch = (
-        (upload.client_file || '').toLowerCase().includes(uploadSearchTerm.toLowerCase()) ||
-        (upload.template_file || '').toLowerCase().includes(uploadSearchTerm.toLowerCase())
-      );
-      return matchesSearch;
-    });
-
-    filtered.sort((a, b) => {
-      let aValue, bValue;
-      
-      switch (uploadSortBy) {
-        case 'upload_date':
-          aValue = parseHistoryDate(a.created) || new Date(0);
-          bValue = parseHistoryDate(b.created) || new Date(0);
-          break;
-        case 'template_name':
-          aValue = (a.template_file || '').toLowerCase();
-          bValue = (b.template_file || '').toLowerCase();
-          break;
-        case 'client_name':
-          aValue = (a.client_file || '').toLowerCase();
-          bValue = (b.client_file || '').toLowerCase();
-          break;
-        case 'rows_processed':
-          aValue = a.rows_processed || 0;
-          bValue = b.rows_processed || 0;
-          break;
-        default:
-          aValue = (a.client_file || '').toLowerCase();
-          bValue = (b.client_file || '').toLowerCase();
-          break;
-      }
-      
-      if (uploadSortOrder === 'desc') {
-        return aValue < bValue ? 1 : aValue > bValue ? -1 : 0;
+  // Filtered + paginated Tag Rules
+  const filteredTags = useMemo(() => {
+    let list = tagTemplates.filter(tmpl =>
+      (tmpl.name || '').toLowerCase().includes(tagSearch.toLowerCase()) ||
+      (tmpl.description || '').toLowerCase().includes(tagSearch.toLowerCase())
+    );
+    list.sort((a, b) => {
+      let va, vb;
+      if (tagSortBy === 'created_at') {
+        va = parseHistoryDate(a.created_at) || new Date(0);
+        vb = parseHistoryDate(b.created_at) || new Date(0);
+      } else if (tagSortBy === 'usage_count') {
+        va = a.usage_count || 0;
+        vb = b.usage_count || 0;
       } else {
-        return aValue > bValue ? 1 : aValue < bValue ? -1 : 0;
+        va = (a.name || '').toLowerCase();
+        vb = (b.name || '').toLowerCase();
       }
+      return tagSortOrder === 'desc'
+        ? (vb > va ? 1 : vb < va ? -1 : 0)
+        : (va > vb ? 1 : va < vb ? -1 : 0);
     });
+    return list;
+  }, [tagTemplates, tagSearch, tagSortBy, tagSortOrder]);
 
-    return filtered;
-  }, [uploads, uploadSearchTerm, uploadSortBy, uploadSortOrder]);
+  const pagedTags = useMemo(() => {
+    const start = tagPage * tagRowsPerPage;
+    return filteredTags.slice(start, start + tagRowsPerPage);
+  }, [filteredTags, tagPage, tagRowsPerPage]);
 
-  // Paginated data
-  const paginatedTemplates = React.useMemo(() => {
-    const start = templatePage * templatesPerPage;
-    return filteredAndSortedTemplates.slice(start, start + templatesPerPage);
-  }, [filteredAndSortedTemplates, templatePage, templatesPerPage]);
-
-  const paginatedTagTemplates = React.useMemo(() => {
-    const start = tagTemplatePage * tagTemplatesPerPage;
-    return filteredAndSortedTagTemplates.slice(start, start + tagTemplatesPerPage);
-  }, [filteredAndSortedTagTemplates, tagTemplatePage, tagTemplatesPerPage]);
-
-  const paginatedUploads = React.useMemo(() => {
-    const start = uploadPage * uploadsPerPage;
-    return filteredAndSortedUploads.slice(start, start + uploadsPerPage);
-  }, [filteredAndSortedUploads, uploadPage, uploadsPerPage]);
-
-  // Extract readable filename
-  const extractReadableFilename = (longFilename) => {
-    if (!longFilename) return 'Unknown File';
-    
-    const parts = longFilename.split('_');
-    if (parts.length > 1) {
-      const originalName = parts[parts.length - 1];
-      const nameWithoutExt = originalName.replace(/\.(xlsx|xls)$/i, '');
-      const extension = originalName.match(/\.(xlsx|xls)$/i)?.[0] || '.xlsx';
-      return `${nameWithoutExt}${extension}`;
-    }
-    
-    return longFilename.length > 30 ? `${longFilename.substring(0, 30)}...` : longFilename;
+  // Derived tokens for panel styling
+  const Ze = {
+    bg: t.background.app,
+    text: t.text.primary,
+    muted: t.text.secondary,
+    surface: t.surface.card,
+    surfaceSolid: t.surface.cardSolid || t.surface.card,
+    surfaceSoft: t.surface.elevatedSoft || t.surface.card,
+    border: t.border.default,
+    subtleBorder: t.border.subtle,
+    tableLine: t.table.line,
+    rowLine: t.table.rowLine,
+    rowHover: t.table.hover,
+    activeRow: t.table.selected,
+    cardShadow: t.shadow.card,
+    panelShadow: t.shadow.card,
+    inputBg: t.surface.input,
+    searchBg: t.surface.input,
+    controlBg: t.surface.control
   };
 
-  const handleUploadClick = () => {
-    navigate('/upload');
+  const cardStyle = {
+    borderRadius: '18px',
+    border: `1px solid ${Ze.border}`,
+    bgcolor: Ze.surface,
+    color: Ze.text,
+    backdropFilter: 'blur(16px) saturate(180%)',
+    WebkitBackdropFilter: 'blur(16px) saturate(180%)',
+    boxShadow: Ze.cardShadow
   };
 
-  const handleOpenFormulaBuilder = () => {
-    setFormulaBuilderOpen(true);
+  const handleApplyTemplate = (tmpl) => {
+    navigate('/upload', { state: { selectedTemplate: tmpl, autoApplyTemplate: true } });
   };
 
-  const handleCloseFormulaBuilder = () => {
-    setFormulaBuilderOpen(false);
-  };
-
-  const handleSaveFormulaTemplate = async (templateData) => {
-    try {
-      const response = await api.saveTagTemplate(
-        templateData.name,
-        templateData.description,
-        templateData.formula_rules
-      );
-      
-      if (response.data.success) {
-        
-        // Refresh tag templates list
-        loadTagTemplates();
-        
-        // Close the formula builder
-        setFormulaBuilderOpen(false);
-        
-        // Optionally navigate to upload with the template
-        navigate('/upload', {
-          state: {
-            selectedTagTemplate: response.data.template,
-            smartTagFormulaRules: templateData.formula_rules,
-          },
-        });
-      } else {
-        console.error('Failed to save tag template:', response.data.error);
-        alert(`Failed to save tag template: ${response.data.error}`);
-      }
-    } catch (error) {
-      console.error('Error saving tag template:', error);
-      alert(`Error saving tag template: ${error.message}`);
-    }
-  };
-
-  const handleUseTemplate = async (template) => {
-    // Check if there are any existing sessions we can apply the template to
-    const sessionsWithData = uploads.filter(upload => upload.has_mappings);
-    
-    if (sessionsWithData.length > 0) {
-      // Apply template to the most recent session
-      const targetSession = sessionsWithData[0];
-      try {
-        // Navigate to ColumnMapping and let it handle template application using its working logic
-        navigate(`/mapping/${targetSession.session_id}`, {
-          state: { 
-            autoApplyTemplate: template,
-            fromDashboard: true
-          }
-        });
-      } catch (error) {
-        console.error('Error applying template:', error);
-        // Fall back to upload flow
-        navigate('/upload', { 
-          state: { 
-            selectedTemplate: template,
-            autoApplyTemplate: true 
-          } 
-        });
-      }
-    } else {
-      // No existing sessions, go to upload
-      navigate('/upload', { 
-        state: { 
-          selectedTemplate: template,
-          autoApplyTemplate: true 
-        } 
-      });
-    }
-  };
-
-
-  const handleFormulaBuilderClose = () => {
-    setFormulaBuilderOpen(false);
-    setSelectedTemplateForFormulas(null);
-  };
-
-  const handleFormulasApplied = async (formulaResult) => {
-    // Update the template with new formula rules
-    // This would integrate with the template saving system
-    handleFormulaBuilderClose();
-  };
-
-  const handleDeleteTemplate = async () => {
-    if (!templateToDelete) return;
-
-    setDeleting(true);
-    try {
-      await api.deleteMappingTemplate(templateToDelete.id);
-      
-      setTemplates(prev => prev.filter(t => t.id !== templateToDelete.id));
-      setTemplateStats(prev => ({
-        ...prev,
-        totalTemplates: prev.totalTemplates - 1,
-        totalUsage: prev.totalUsage - (templateToDelete.usage_count || 0)
-      }));
-
-      setDeleteDialogOpen(false);
-      setTemplateToDelete(null);
-    } catch (err) {
-      console.error('Error deleting template:', err);
-    } finally {
-      setDeleting(false);
-    }
-  };
-
-  const openDeleteDialog = (template) => {
-    setTemplateToDelete(template);
-    setDeleteDialogOpen(true);
-  };
-
-  const openUploadDeleteDialog = (upload) => {
-    setUploadToDelete(upload);
-    setUploadDeleteDialogOpen(true);
-  };
-
-  const handleDeleteUpload = async () => {
-    if (!uploadToDelete) return;
-    const sessionId = uploadToDelete.session_id;
-    setDeletingUploadId(sessionId);
+  const handleDeleteSession = async (sessionId) => {
     try {
       await api.deleteUpload(sessionId);
-      setUploads(prev => prev.filter(u => u.session_id !== sessionId));
-      setUploadDeleteDialogOpen(false);
-      setUploadToDelete(null);
+      fetchData();
     } catch (err) {
-      console.error('Error deleting upload:', err);
-    } finally {
-      setDeletingUploadId(null);
+      console.error('Delete error:', err);
     }
   };
-
-  // Tag Template handlers
-  const handleUseTagTemplate = (template) => {
-    navigate('/upload', { 
-      state: { 
-        selectedTagTemplate: template,
-        smartTagFormulaRules: template.formula_rules || []
-      } 
-    });
-  };
-
-  const handleDeleteTagTemplate = async () => {
-    if (!tagTemplateToDelete) return;
-
-    setDeletingTagTemplate(true);
-    try {
-      await api.deleteTagTemplate(tagTemplateToDelete.id);
-      
-      setTagTemplates(prev => prev.filter(t => t.id !== tagTemplateToDelete.id));
-      setTagTemplateDeleteDialogOpen(false);
-      setTagTemplateToDelete(null);
-    } catch (err) {
-      console.error('Error deleting tag template:', err);
-    } finally {
-      setDeletingTagTemplate(false);
-    }
-  };
-
-  const openTagTemplateDeleteDialog = (template) => {
-    setTagTemplateToDelete(template);
-    setTagTemplateDeleteDialogOpen(true);
-  };
-
-  const clearTagTemplateFilters = () => {
-    setTagTemplateSearchTerm('');
-    setTagTemplateSortBy('usage_count');
-    setTagTemplateSortOrder('desc');
-    setTagTemplatePage(0);
-  };
-
-  // Download handlers
-  const handleDownloadOriginal = async (upload) => {
-    const uploadId = upload.session_id;
-    setDownloadingOriginal(prev => ({ ...prev, [uploadId]: true }));
-    
-    try {
-      await api.downloadFileEnhanced(uploadId, 'original');
-    } catch (err) {
-      console.error('Error downloading original file:', err);
-    } finally {
-      setDownloadingOriginal(prev => ({ ...prev, [uploadId]: false }));
-    }
-  };
-
-  const handleDownloadConverted = async (upload) => {
-    const uploadId = upload.session_id;
-    setDownloadingConverted(prev => ({ ...prev, [uploadId]: true }));
-    
-    try {
-      await api.downloadFileEnhanced(uploadId, 'converted');
-    } catch (err) {
-      console.error('Error downloading converted file:', err);
-    } finally {
-      setDownloadingConverted(prev => ({ ...prev, [uploadId]: false }));
-    }
-  };
-
-  const handleDownloadTemplate = async (upload) => {
-    const uploadId = upload.session_id;
-    setDownloadingTemplate(prev => ({ ...prev, [uploadId]: true }));
-
-    try {
-      // For FW Template, download the original template file
-      await api.downloadFileEnhanced(uploadId, 'template');
-    } catch (err) {
-      console.error('Error downloading template file:', err);
-      // Show user-friendly error message
-      alert(`Failed to download template: ${err.message || 'Unknown error occurred'}`);
-    } finally {
-      setDownloadingTemplate(prev => ({ ...prev, [uploadId]: false }));
-    }
-  };
-
-  const formatDate = (dateString) => {
-    const date = parseHistoryDate(dateString);
-    if (!date) return 'Unknown time';
-    return date.toLocaleString('en-IN', {
-      timeZone: IST_TIME_ZONE,
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      hour12: true
-    });
-  };
-
-  const getPopularityColor = (usageCount) => {
-    if (usageCount >= 10) return 'success';
-    if (usageCount >= 5) return 'warning';
-    if (usageCount >= 1) return 'info';
-    return 'default';
-  };
-
-  const clearTemplateFilters = () => {
-    setTemplateSearchTerm('');
-    setTemplateSortBy('usage_count');
-    setTemplateSortOrder('desc');
-    setTemplatePage(0);
-  };
-
-  const clearUploadFilters = () => {
-    setUploadSearchTerm('');
-    setUploadSortBy('upload_date');
-    setUploadSortOrder('desc');
-    setUploadPage(0);
-  };
-
 
   return (
-    <Box sx={{ p: 3, backgroundColor: '#f8fafc', minHeight: '100vh', flexGrow: 1 }}>
-      {/* Modern Header */}
-      <Box sx={{ mb: 4 }}>
-        <Typography variant="h3" fontWeight="700" color="#1e293b" gutterBottom>
-          Dashboard
-        </Typography>
-        <Typography variant="h6" color="#64748b" sx={{ mb: 3 }}>
-          Manage your Excel mapping workflows with intelligent automation
-        </Typography>
-      </Box>
+    <Box
+      sx={{
+        position: 'relative',
+        p: { xs: 2, md: 3 },
+        bgcolor: Ze.bg,
+        color: Ze.text,
+        minHeight: '100vh',
+        width: '100%',
+        overflow: 'hidden'
+      }}
+    >
+      {/* Background glow circle following mouse */}
+      <Box
+        sx={{
+          pointerEvents: 'none',
+          position: 'absolute',
+          transition: 'all 0.7s cubic-bezier(0.16, 1, 0.3, 1)',
+          borderRadius: '50%',
+          opacity: 0.36,
+          width: '62vw',
+          height: '62vw',
+          left: `${mousePos.x}%`,
+          top: `${mousePos.y}%`,
+          transform: 'translate(-50%, -50%)',
+          filter: 'blur(90px)',
+          background: 'radial-gradient(circle, var(--color-brand, #2383e2) 0%, transparent 70%)',
+          zIndex: 0
+        }}
+      />
 
-      {/* Quick Stats */}
-      <Fade in timeout={1200}>
-        <Stack spacing={2} sx={{ mb: 4 }}>
-          <Card sx={{ borderRadius: 3, boxShadow: '0 4px 20px rgba(0,0,0,0.08)' }}>
-            <CardContent sx={{ p: 3 }}>
-              <Typography variant="h6" fontWeight="600" color="#1e293b" gutterBottom>
-                Quick Stats
-              </Typography>
-              <Grid container spacing={2}>
-                <Grid item xs={12} sm={4}>
-                  <Box sx={{ textAlign: 'center', p: 2, bgcolor: '#f0f9ff', borderRadius: 2 }}>
-                    <Typography variant="h4" fontWeight="700" color="#0369a1">
-                      {templateStats.totalTemplates}
-                    </Typography>
-                    <Typography variant="body2" color="#64748b">Mapping Templates</Typography>
-                  </Box>
-                </Grid>
-                <Grid item xs={12} sm={4}>
-                  <Box sx={{ textAlign: 'center', p: 2, bgcolor: '#f5f3ff', borderRadius: 2 }}>
-                    <Typography variant="h4" fontWeight="700" color="#6d28d9">
-                      {tagTemplates.length}
-                    </Typography>
-                    <Typography variant="body2" color="#64748b">Tag Templates</Typography>
-                  </Box>
-                </Grid>
-                <Grid item xs={12} sm={4}>
-                  <Box sx={{ textAlign: 'center', p: 2, bgcolor: '#f0fdf4', borderRadius: 2 }}>
-                    <Typography variant="h4" fontWeight="700" color="#166534">
-                      {uploads.length}
-                    </Typography>
-                    <Typography variant="body2" color="#64748b">Uploads</Typography>
-                  </Box>
-                </Grid>
-              </Grid>
-            </CardContent>
-          </Card>
+      {/* Grid Pattern Overlay */}
+      <Box
+        className="auth-grid-pattern"
+        sx={{ position: 'absolute', inset: 0, pointerEvents: 'none', opacity: 0.45, zIndex: 0 }}
+      />
 
-          {templateStats.top3Templates && templateStats.top3Templates.length > 0 && (
-            <Card sx={{ borderRadius: 3, boxShadow: '0 4px 20px rgba(0,0,0,0.08)' }}>
-              <CardContent sx={{ p: 3 }}>
-                <Typography variant="h6" fontWeight="600" color="#1e293b" gutterBottom>
-                  Top 3 Mapping Templates
-                </Typography>
-                <Stack direction="row" spacing={1.5} sx={{ mt: 2, flexWrap: 'wrap' }}>
-                  {templateStats.top3Templates.map((template) => (
-                    <Chip
-                      key={template.id}
-                      avatar={
-                        <Avatar sx={{ bgcolor: '#fef3c7', color: '#f59e0b' }}>
-                          <StarIcon sx={{ fontSize: 16 }} />
-                        </Avatar>
-                      }
-                      label={`${template.name} (Used ${template.usage_count || 0} times)`}
-                      onClick={() => handleUseTemplate(template)}
-                      clickable
-                      sx={{
-                        fontWeight: 500,
-                        p: 2,
-                        '&:hover': {
-                          backgroundColor: '#f0f9ff',
-                          borderColor: '#3b82f6'
-                        }
-                      }}
-                    />
-                  ))}
-                </Stack>
+      <Box sx={{ position: 'relative', zIndex: 1 }}>
+        {/* Title Bar */}
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3, flexWrap: 'wrap', gap: 2 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <Typography variant="h5" fontWeight="700" sx={{ color: Ze.text, letterSpacing: '-0.025em' }}>
+              BOM Mapper Workbench
+            </Typography>
+          </Box>
+          <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'center' }}>
+            <Button
+              variant="outlined"
+              size="small"
+              startIcon={<CodeIcon sx={{ fontSize: 16 }} />}
+              onClick={() => setShowFormulaModal(true)}
+              sx={{
+                height: 38,
+                px: 2.2,
+                borderRadius: '9px',
+                borderColor: Ze.border,
+                color: Ze.text,
+                bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.04)' : '#ffffff',
+                backdropFilter: 'blur(10px)',
+                fontWeight: 600,
+                fontSize: '13px',
+                textTransform: 'none',
+                boxShadow: isDarkMode ? 'inset 0 1px 0 rgba(255, 255, 255, 0.08)' : '0 8px 20px rgba(15,23,42,0.08)',
+                transition: 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
+                '&:hover': {
+                  borderColor: '#06b6d4',
+                  bgcolor: 'rgba(6, 182, 212, 0.12)',
+                  color: '#38bdf8',
+                  transform: 'translateY(-1.5px)'
+                }
+              }}
+            >
+              New Formula Template
+            </Button>
+          </Box>
+        </Box>
+
+        {/* Quick Metrics & Top 3 Leaderboard */}
+        <Grid container spacing={2.5} sx={{ mb: 3 }}>
+          {/* Quick Metrics */}
+          <Grid item xs={12} md={4}>
+            <Card sx={{ ...cardStyle, height: '100%', minHeight: 145 }}>
+              <CardContent sx={{ p: 2.25, '&:last-child': { pb: 2.25 }, height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1.5 }}>
+                  <Typography variant="subtitle2" fontWeight="700" sx={{ color: Ze.text, fontSize: '14px' }}>
+                    Quick Metrics
+                  </Typography>
+                  <Chip
+                    label="Realtime"
+                    size="small"
+                    sx={{ height: 18, fontSize: '10px', bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.06)' : '#eef2f7', color: Ze.muted, borderRadius: '4px' }}
+                  />
+                </Box>
+                <Grid container spacing={1}>
+                  <Grid item xs={4}>
+                    <Box sx={{ p: 1.25, bgcolor: 'rgba(59, 130, 246, 0.08)', borderRadius: '10px', border: '1px solid rgba(59, 130, 246, 0.2)' }}>
+                      <Typography variant="caption" fontWeight="600" sx={{ color: '#93c5fd', fontSize: '10px', display: 'block', mb: 0.25 }}>
+                        Mapping
+                      </Typography>
+                      <Typography variant="h6" fontWeight="700" sx={{ color: Ze.text, fontFamily: '"JetBrains Mono", monospace' }}>
+                        {templateStats.totalTemplates}
+                      </Typography>
+                    </Box>
+                  </Grid>
+                  <Grid item xs={4}>
+                    <Box sx={{ p: 1.25, bgcolor: 'rgba(168, 85, 247, 0.08)', borderRadius: '10px', border: '1px solid rgba(168, 85, 247, 0.2)' }}>
+                      <Typography variant="caption" fontWeight="600" sx={{ color: '#e9d5ff', fontSize: '10px', display: 'block', mb: 0.25 }}>
+                        Tag Rules
+                      </Typography>
+                      <Typography variant="h6" fontWeight="700" sx={{ color: Ze.text, fontFamily: '"JetBrains Mono", monospace' }}>
+                        {tagTemplates.length}
+                      </Typography>
+                    </Box>
+                  </Grid>
+                  <Grid item xs={4}>
+                    <Box sx={{ p: 1.25, bgcolor: 'rgba(16, 185, 129, 0.08)', borderRadius: '10px', border: '1px solid rgba(16, 185, 129, 0.2)' }}>
+                      <Typography variant="caption" fontWeight="600" sx={{ color: '#a7f3d0', fontSize: '10px', display: 'block', mb: 0.25 }}>
+                        Uploads
+                      </Typography>
+                      <Typography variant="h6" fontWeight="700" sx={{ color: Ze.text, fontFamily: '"JetBrains Mono", monospace' }}>
+                        {uploads.length}
+                      </Typography>
+                    </Box>
+                  </Grid>
+                </Grid>
               </CardContent>
             </Card>
-          )}
-        </Stack>
-      </Fade>
+          </Grid>
 
-      {/* Enhanced Recent Uploads */}
-      <Fade in timeout={1400}>
-        <Card sx={{ borderRadius: 3, boxShadow: '0 4px 20px rgba(0,0,0,0.08)' }}>
-          <CardContent sx={{ p: 3 }}>
-            {/* Header */}
-            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                <Avatar sx={{ bgcolor: '#8b5cf6', width: 40, height: 40 }}>
-                  <HistoryIcon />
-                </Avatar>
-                <Box>
-                  <Typography variant="h5" fontWeight="600" color="#1e293b">
-                    Recent Uploads
-                  </Typography>
-                  <Typography variant="body2" color="#64748b">
-                    {uploads.length} uploads total
-                  </Typography>
+          {/* Leaderboard Top 3 */}
+          <Grid item xs={12} md={5}>
+            <Card sx={{ ...cardStyle, height: '100%', minHeight: 145, display: 'flex', flexDirection: 'column' }}>
+              <CardContent sx={{ p: 2.25, '&:last-child': { pb: 2.25 }, height: '100%', display: 'flex', flexDirection: 'column' }}>
+                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <StarIcon sx={{ fontSize: 16, color: '#fbbf24' }} />
+                    <Typography variant="subtitle2" fontWeight="700" sx={{ color: Ze.text, fontSize: '14px' }}>
+                      Top 3 BOM Templates
+                    </Typography>
+                  </Box>
+                  <Chip
+                    label="Leaderboard"
+                    size="small"
+                    sx={{ height: 18, fontSize: '10px', bgcolor: 'rgba(245, 158, 11, 0.12)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.2)', borderRadius: '4px' }}
+                  />
                 </Box>
-              </Box>
-              <Button
-                variant="contained"
-                startIcon={<UploadFileIcon />}
-                onClick={handleUploadClick}
-              >
-                Start Upload
-              </Button>
-            </Box>
-
-            {/* Enhanced Search & Filter */}
-            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ mb: 3 }}>
-              <TextField
-                size="small"
-                placeholder="Search uploads..."
-                value={uploadSearchTerm}
-                onChange={(e) => setUploadSearchTerm(e.target.value)}
-                InputProps={{
-                  startAdornment: <InputAdornment position="start"><SearchIcon size="small" /></InputAdornment>,
-                  endAdornment: uploadSearchTerm && (
-                    <InputAdornment position="end">
-                      <IconButton size="small" onClick={() => setUploadSearchTerm('')}>
-                        <ClearIcon fontSize="small" />
-                      </IconButton>
-                    </InputAdornment>
-                  )
-                }}
-                sx={{ flex: 1 }}
-              />
-              <FormControl size="small" sx={{ minWidth: 120 }}>
-                <InputLabel>Sort by</InputLabel>
-                <Select value={uploadSortBy} label="Sort by" onChange={(e) => setUploadSortBy(e.target.value)}>
-                  <MenuItem value="upload_date">Date</MenuItem>
-                  <MenuItem value="client_name">Client File</MenuItem>
-                  <MenuItem value="template_name">FW Template</MenuItem>
-                  <MenuItem value="rows_processed">Rows</MenuItem>
-                </Select>
-              </FormControl>
-              <FormControl size="small" sx={{ minWidth: 100 }}>
-                <InputLabel>Order</InputLabel>
-                <Select value={uploadSortOrder} label="Order" onChange={(e) => setUploadSortOrder(e.target.value)}>
-                  {uploadSortBy === 'upload_date' ? (
-                    [
-                      <MenuItem key="desc" value="desc">Latest</MenuItem>,
-                      <MenuItem key="asc" value="asc">Earliest</MenuItem>
-                    ]
-                  ) : (
-                    [
-                      <MenuItem key="asc" value="asc">A → Z</MenuItem>,
-                      <MenuItem key="desc" value="desc">Z → A</MenuItem>
-                    ]
-                  )}
-                </Select>
-              </FormControl>
-              {(uploadSearchTerm || uploadSortBy !== 'upload_date' || uploadSortOrder !== 'desc') && (
-                <Button size="small" onClick={clearUploadFilters} startIcon={<ClearIcon />}>
-                  Clear
-                </Button>
-              )}
-            </Stack>
-
-            {/* Upload List */}
-            {loading ? (
-              <Box sx={{ textAlign: 'center', py: 4 }}>
-                <CircularProgress size={32} />
-              </Box>
-            ) : error ? (
-              <Alert severity="error">{error}</Alert>
-            ) : uploads.length === 0 ? (
-              <Box sx={{ textAlign: 'center', py: 6, color: '#64748b' }}>
-                <HistoryIcon sx={{ fontSize: 48, mb: 2, opacity: 0.5 }} />
-                <Typography variant="h6" fontWeight="500" gutterBottom>
-                  No Upload History
-                </Typography>
-                <Typography variant="body2">
-                  Start by uploading your first file
-                </Typography>
-              </Box>
-            ) : (
-              <>
-                <TableContainer>
-                  <Table size="small">
-                    <TableHead>
-                      <TableRow>
-                        <TableCell><strong>Client File</strong></TableCell>
-                        <TableCell><strong>FW Filled Sheet</strong></TableCell>
-                        <TableCell><strong>FW Template</strong></TableCell>
-                        <TableCell><strong>Upload Date</strong></TableCell>
-                        <TableCell align="center"><strong>Rows</strong></TableCell>
-                        <TableCell align="center"><strong>Actions</strong></TableCell>
-                      </TableRow>
-                    </TableHead>
-                    <TableBody>
-                      {paginatedUploads.map((upload, index) => (
-                        <Grow in timeout={400 + index * 50} key={upload.session_id}>
-                          <TableRow 
-                            sx={{ 
-                              '&:hover': { backgroundColor: '#f8fafc' },
-                              borderLeft: '3px solid transparent',
-                              '&:hover': { borderLeftColor: '#3b82f6' }
-                            }}
-                          >
-                            <TableCell>
-                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-                                <Avatar sx={{ bgcolor: '#e0e7ff', color: '#3b82f6', width: 32, height: 32 }}>
-                                  <DescriptionIcon fontSize="small" />
-                                </Avatar>
-                                <Box sx={{ flexGrow: 1 }}>
-                                  <Typography variant="body2" fontWeight="600" color="#1e293b">
-                                    {extractReadableFilename(upload.client_file)}
-                                  </Typography>
-                                </Box>
-                                <IconButton
-                                  size="small"
-                                  onClick={() => handleDownloadOriginal(upload)}
-                                  disabled={downloadingOriginal[upload.session_id]}
-                                  sx={{ color: '#3b82f6' }}
-                                >
-                                  {downloadingOriginal[upload.session_id] ? <CircularProgress size={16} /> : <GetAppIcon />}
-                                </IconButton>
-                              </Box>
-                            </TableCell>
-                            <TableCell>
-                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-                                <Avatar sx={{ bgcolor: '#e0e7ff', color: '#3b82f6', width: 32, height: 32 }}>
-                                  <DescriptionIcon fontSize="small" />
-                                </Avatar>
-                                <Box sx={{ flexGrow: 1 }}>
-                                  <Typography variant="body2" fontWeight="600" color="#1e293b">
-                                    {upload.filled_sheet_name || (upload.has_mappings ? 'Ready' : 'Not Ready')}
-                                  </Typography>
-                                </Box>
-                                {upload.has_mappings && (
-                                  <IconButton
-                                    size="small"
-                                    onClick={() => handleDownloadConverted(upload)}
-                                    disabled={downloadingConverted[upload.session_id]}
-                                    sx={{ color: '#3b82f6' }}
-                                  >
-                                    {downloadingConverted[upload.session_id] ? <CircularProgress size={16} /> : <GetAppIcon />}
-                                  </IconButton>
-                                )}
-                              </Box>
-                            </TableCell>
-                            <TableCell>
-                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-                                <Avatar sx={{ bgcolor: '#e0e7ff', color: '#3b82f6', width: 32, height: 32 }}>
-                                  <DescriptionIcon fontSize="small" />
-                                </Avatar>
-                                <Box sx={{ flexGrow: 1 }}>
-                                  <Typography variant="body2" fontWeight="600" color="#1e293b">
-                                    {extractReadableFilename(upload.template_file)}
-                                  </Typography>
-                                </Box>
-                                <IconButton
-                                  size="small"
-                                  onClick={() => handleDownloadTemplate(upload)}
-                                  disabled={downloadingTemplate[upload.session_id]}
-                                  sx={{ color: '#3b82f6' }}
-                                >
-                                  {downloadingTemplate[upload.session_id] ? <CircularProgress size={16} /> : <GetAppIcon />}
-                                </IconButton>
-                              </Box>
-                            </TableCell>
-                            <TableCell>
-                              <Typography variant="body2" color="#64748b">
-                                {formatDate(upload.created)}
+                {templateStats.top3Templates && templateStats.top3Templates.length > 0 ? (
+                  <Stack spacing={0.6} sx={{ flexGrow: 1, justifyContent: 'center' }}>
+                    {templateStats.top3Templates.slice(0, 3).map((tmpl, idx) => {
+                      const ranks = [
+                        { bg: 'rgba(245, 158, 11, 0.2)', text: '#fbbf24', label: '#1' },
+                        { bg: 'rgba(148, 163, 184, 0.2)', text: '#cbd5e1', label: '#2' },
+                        { bg: 'rgba(217, 119, 6, 0.2)', text: '#fdba74', label: '#3' }
+                      ];
+                      const rank = ranks[idx] || ranks[1];
+                      return (
+                        <Box
+                          key={tmpl.id || idx}
+                          onClick={() => handleApplyTemplate(tmpl)}
+                          sx={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            py: 0.5,
+                            px: 1.25,
+                            borderRadius: '8px',
+                            bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.03)' : '#ffffff',
+                            border: `1px solid ${Ze.subtleBorder}`,
+                            cursor: 'pointer',
+                            height: 28,
+                            transition: 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
+                            '&:hover': {
+                              bgcolor: isDarkMode ? 'rgba(35, 131, 226, 0.12)' : '#eff6ff',
+                              borderColor: '#2383e2',
+                              transform: 'translateX(2px)'
+                            }
+                          }}
+                        >
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, minWidth: 0 }}>
+                            <Box
+                              sx={{
+                                width: 20,
+                                height: 18,
+                                borderRadius: '4px',
+                                bgcolor: rank.bg,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                border: `1px solid ${rank.text}40`
+                              }}
+                            >
+                              <Typography variant="caption" fontWeight="800" sx={{ fontSize: '10px', color: rank.text }}>
+                                {rank.label}
                               </Typography>
-                            </TableCell>
-                            <TableCell align="center">
-                              <Chip 
-                                label={upload.rows_processed || 'N/A'}
-                                size="small"
-                                color="info"
-                                variant="outlined"
-                                title={`Raw value: ${upload.rows_processed}`}
-                              />
-                            </TableCell>
-                            <TableCell align="center">
-                              <Box sx={{ display: 'inline-flex', gap: 0.5 }}>
-                                <Tooltip title="View">
-                                  <IconButton
-                                    size="small"
-                                    variant="outlined"
-                                    onClick={() => navigate(`/editor/${upload.session_id}`)}
-                                    sx={{
-                                      textTransform: 'none',
-                                      minWidth: 'auto',
-                                      border: '1px solid rgba(0, 0, 0, 0.23)',
-                                      '&:hover': {
-                                        borderColor: 'rgba(0, 0, 0, 0.87)',
-                                        backgroundColor: 'rgba(0, 0, 0, 0.04)'
-                                      }
-                                    }}
-                                  >
-                                    <FolderIcon fontSize="small" />
-                                  </IconButton>
-                                </Tooltip>
-                                <Tooltip title="Delete this upload permanently">
-                                  <IconButton
-                                    size="small"
-                                    color="error"
-                                    disabled={deletingUploadId === upload.session_id}
-                                    onClick={() => openUploadDeleteDialog(upload)}
-                                    sx={{
-                                      minWidth: 'auto',
-                                      border: '1px solid rgba(211, 47, 47, 0.5)',
-                                      '&:hover': { backgroundColor: 'rgba(211, 47, 47, 0.08)' }
-                                    }}
-                                  >
-                                    {deletingUploadId === upload.session_id
-                                      ? <CircularProgress size={16} />
-                                      : <DeleteIcon fontSize="small" />}
-                                  </IconButton>
-                                </Tooltip>
-                              </Box>
-                            </TableCell>
-                          </TableRow>
-                        </Grow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </TableContainer>
-
-                {/* Upload Pagination */}
-                {filteredAndSortedUploads.length > uploadsPerPage && (
-                  <Box sx={{ display: 'flex', justifyContent: 'center', mt: 2 }}>
-                    <TablePagination
-                      component="div"
-                      count={filteredAndSortedUploads.length}
-                      page={uploadPage}
-                      onPageChange={(event, newPage) => setUploadPage(newPage)}
-                      rowsPerPage={uploadsPerPage}
-                      onRowsPerPageChange={(event) => {
-                        setUploadsPerPage(parseInt(event.target.value, 10));
-                        setUploadPage(0);
-                      }}
-                      rowsPerPageOptions={[5, 10, 25, 50]}
-                      labelDisplayedRows={({ from, to, count }) => `${from}–${to} of ${count}`}
-                      size="small"
-                    />
+                            </Box>
+                            <Typography variant="body2" fontWeight="600" noWrap sx={{ color: Ze.text, fontSize: '12px' }}>
+                              {tmpl.name}
+                            </Typography>
+                          </Box>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+                            <Chip
+                              label={`${tmpl.total_mappings || 0} cols`}
+                              size="small"
+                              sx={{ height: 16, fontSize: '9px', bgcolor: isDarkMode ? 'rgba(255,255,255,0.06)' : '#eef2f7', color: Ze.muted }}
+                            />
+                            {/* Animated expand-on-hover Use button (final-2 style) */}
+                            <UseButton
+                              onClick={(e) => { e.stopPropagation(); handleApplyTemplate(tmpl); }}
+                              label="Use"
+                              color="linear-gradient(135deg, #2563eb 0%, #0284c7 100%)"
+                              hoverColor="linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)"
+                              glowColor="rgba(37, 99, 235, 0.45)"
+                            />
+                          </Box>
+                        </Box>
+                      );
+                    })}
+                  </Stack>
+                ) : (
+                  <Box sx={{ flexGrow: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <Typography variant="caption" sx={{ color: Ze.muted }}>
+                      No templates yet.
+                    </Typography>
                   </Box>
                 )}
-              </>
+              </CardContent>
+            </Card>
+          </Grid>
+
+          {/* Upload New File quick-action card */}
+          <Grid item xs={12} md={3}>
+            <Card
+              onClick={() => navigate('/upload')}
+              sx={{
+                borderRadius: '18px',
+                border: '1px dashed rgba(35, 131, 226, 0.4)',
+                bgcolor: 'rgba(35, 131, 226, 0.06)',
+                backdropFilter: 'blur(16px)',
+                height: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+                transition: 'all 0.2s ease',
+                '&:hover': {
+                  bgcolor: 'rgba(35, 131, 226, 0.12)',
+                  borderColor: '#2383e2',
+                  transform: 'scale(1.01)'
+                }
+              }}
+            >
+              <CardContent sx={{ p: 2, textAlign: 'center' }}>
+                <Avatar sx={{ bgcolor: 'rgba(35, 131, 226, 0.2)', color: '#60a5fa', width: 36, height: 36, mx: 'auto', mb: 1 }}>
+                  <UploadFileIcon sx={{ fontSize: 20 }} />
+                </Avatar>
+                <Typography variant="subtitle2" fontWeight="700" sx={{ color: Ze.text, fontSize: '13px' }}>
+                  Upload New File
+                </Typography>
+                <Typography variant="caption" sx={{ color: Ze.muted, fontSize: '11px', display: 'block' }}>
+                  Drag & drop Excel or PDF BOM
+                </Typography>
+              </CardContent>
+            </Card>
+          </Grid>
+        </Grid>
+
+        {/* Tabbed Content Panel */}
+        <Card sx={{ ...cardStyle, mb: 3 }}>
+          <CardContent sx={{ p: 2.5, '&:last-child': { pb: 2.5 } }}>
+            {/* Header with Capsule Tabs & Actions */}
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2, flexWrap: 'wrap', gap: 1.5 }}>
+              {/* Capsule Tabs */}
+              <Box
+                sx={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 0.75,
+                  p: '4px',
+                  bgcolor: Ze.controlBg,
+                  borderRadius: '999px',
+                  border: `1px solid ${Ze.subtleBorder}`,
+                  boxShadow: isDarkMode ? 'inset 0 1px 3px rgba(0, 0, 0, 0.6)' : 'inset 0 1px 0 rgba(255,255,255,0.8)'
+                }}
+              >
+                {[
+                  { id: 0, label: 'Recent Sessions', count: uploads.length, icon: HistoryIcon },
+                  { id: 1, label: 'Mapping Templates', count: templateStats.totalTemplates, icon: LibraryBooksIcon },
+                  { id: 2, label: 'Tag Rules', count: tagTemplates.length, icon: ScienceIcon }
+                ].map((tab) => {
+                  const isActive = activeTab === tab.id;
+                  const Icon = tab.icon;
+                  return (
+                    <Button
+                      key={tab.id}
+                      onClick={() => setActiveTab(tab.id)}
+                      size="small"
+                      startIcon={
+                        isActive ? (
+                          <Box sx={{ width: 6, height: 6, borderRadius: '50%', bgcolor: '#34d399', boxShadow: '0 0 8px #34d399', mr: 0.2 }} />
+                        ) : (
+                          <Icon sx={{ fontSize: 14, color: isActive ? '#ffffff' : Ze.muted }} />
+                        )
+                      }
+                      sx={{
+                        height: 32,
+                        px: 2,
+                        fontSize: '12px',
+                        fontWeight: 600,
+                        textTransform: 'none',
+                        borderRadius: '999px',
+                        color: isActive ? '#ffffff' : Ze.muted,
+                        background: isActive
+                          ? 'linear-gradient(135deg, rgba(37, 99, 235, 0.9) 0%, rgba(2, 132, 199, 0.9) 100%)'
+                          : 'transparent',
+                        boxShadow: isActive ? '0 4px 14px rgba(37, 99, 235, 0.45)' : 'none',
+                        border: isActive ? '1px solid rgba(255, 255, 255, 0.2)' : '1px solid transparent',
+                        transition: 'all 0.25s cubic-bezier(0.16, 1, 0.3, 1)',
+                        '&:hover': {
+                          color: isActive ? '#ffffff' : Ze.text,
+                          bgcolor: isActive ? 'none' : isDarkMode ? 'rgba(255, 255, 255, 0.06)' : '#ffffff'
+                        }
+                      }}
+                    >
+                      <span style={{ whiteSpace: 'nowrap' }}>{tab.label}</span>
+                      <Box
+                        sx={{
+                          ml: 1,
+                          px: 0.8,
+                          py: 0.1,
+                          borderRadius: '999px',
+                          fontSize: '10px',
+                          fontWeight: 700,
+                          fontFamily: '"JetBrains Mono", monospace',
+                          bgcolor: isActive ? 'rgba(255, 255, 255, 0.22)' : isDarkMode ? 'rgba(255, 255, 255, 0.06)' : '#eef2f7',
+                          color: isActive ? '#ffffff' : Ze.muted
+                        }}
+                      >
+                        {tab.count}
+                      </Box>
+                    </Button>
+                  );
+                })}
+              </Box>
+
+              <IconButton onClick={() => fetchData()} size="small" sx={{ color: Ze.muted }}>
+                <RefreshIcon sx={{ fontSize: 16 }} />
+              </IconButton>
+            </Box>
+
+            {/* TAB 0: Recent Sessions */}
+            {activeTab === 0 && (
+              <Box>
+                {/* Search & Sort */}
+                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ mb: 2 }}>
+                  <TextField
+                    size="small"
+                    placeholder="Search recent upload sessions..."
+                    value={sessionSearch}
+                    onChange={(e) => { setSessionSearch(e.target.value); setSessionPage(0); }}
+                    InputProps={{
+                      startAdornment: (
+                        <InputAdornment position="start">
+                          <SearchIcon sx={{ fontSize: 16, color: '#8992a5' }} />
+                        </InputAdornment>
+                      ),
+                      endAdornment: sessionSearch && (
+                        <InputAdornment position="end">
+                          <IconButton size="small" onClick={() => setSessionSearch('')} sx={{ color: '#8992a5' }}>
+                            <ClearIcon sx={{ fontSize: 14 }} />
+                          </IconButton>
+                        </InputAdornment>
+                      )
+                    }}
+                    sx={{
+                      flex: 1,
+                      '& .MuiOutlinedInput-root': { height: 38, fontSize: '13px', borderRadius: '8px', bgcolor: Ze.searchBg }
+                    }}
+                  />
+                  <FormControl size="small" sx={{ minWidth: 140 }}>
+                    <Select
+                      value={sessionSortBy}
+                      onChange={(e) => { setSessionSortBy(e.target.value); setSessionPage(0); }}
+                      MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
+                      sx={{ height: 38, fontSize: '12px', borderRadius: '8px', bgcolor: Ze.searchBg }}
+                    >
+                      <MenuItem value="upload_date">Sort by Date</MenuItem>
+                      <MenuItem value="client_name">Sort by Client</MenuItem>
+                      <MenuItem value="rows_processed">Sort by Rows</MenuItem>
+                    </Select>
+                  </FormControl>
+                  <FormControl size="small" sx={{ minWidth: 100 }}>
+                    <Select
+                      value={sessionSortOrder}
+                      onChange={(e) => { setSessionSortOrder(e.target.value); setSessionPage(0); }}
+                      MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
+                      sx={{ height: 38, fontSize: '12px', borderRadius: '8px', bgcolor: Ze.searchBg }}
+                    >
+                      <MenuItem value="desc">Newest</MenuItem>
+                      <MenuItem value="asc">Oldest</MenuItem>
+                    </Select>
+                  </FormControl>
+                </Stack>
+
+                {/* Table */}
+                {loadingUploads ? (
+                  <Box sx={{ textAlign: 'center', py: 4 }}>
+                    <CircularProgress size={28} sx={{ color: '#2383e2' }} />
+                  </Box>
+                ) : filteredSessions.length === 0 ? (
+                  <Box sx={{ textAlign: 'center', py: 5, color: Ze.muted }}>
+                    <HistoryIcon sx={{ fontSize: 40, mb: 1, opacity: 0.4 }} />
+                    <Typography variant="body2">No processing sessions yet.</Typography>
+                  </Box>
+                ) : (
+                  <>
+                    <TableContainer>
+                      <Table size="small">
+                        <TableHead>
+                          <TableRow sx={{ '& th': { borderBottom: `1px solid ${Ze.tableLine}`, color: Ze.muted, fontSize: '11px', fontWeight: 600, textTransform: 'uppercase' } }}>
+                            <TableCell style={{ width: 40 }} />
+                            <TableCell>File / Session Name</TableCell>
+                            <TableCell>Processed Date</TableCell>
+                            <TableCell>Status</TableCell>
+                            <TableCell align="right">Actions</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {pagedSessions.map((session) => {
+                            const isExpanded = expandedSessionId === session.session_id;
+                            return (
+                              <React.Fragment key={session.session_id}>
+                                <TableRow
+                                  sx={{
+                                    cursor: 'pointer',
+                                    bgcolor: isExpanded ? Ze.activeRow : 'transparent',
+                                    '&:hover': { bgcolor: Ze.rowHover },
+                                    '& td': { borderBottom: isExpanded ? 'none' : `1px solid ${Ze.rowLine}`, color: Ze.text, fontSize: '13px' }
+                                  }}
+                                >
+                                  <TableCell onClick={() => setExpandedSessionId(isExpanded ? null : session.session_id)}>
+                                    <ToggleButton
+                                      isExpanded={isExpanded}
+                                      onClick={(e) => { e.stopPropagation(); setExpandedSessionId(isExpanded ? null : session.session_id); }}
+                                    />
+                                  </TableCell>
+                                  <TableCell onClick={() => setExpandedSessionId(isExpanded ? null : session.session_id)}>
+                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                      <DescriptionIcon sx={{ fontSize: 16, color: '#60a5fa' }} />
+                                      <Typography variant="body2" fontWeight="600" sx={{ fontSize: '13px' }}>
+                                        {session.client_file || session.session_id}
+                                      </Typography>
+                                    </Box>
+                                  </TableCell>
+                                  <TableCell onClick={() => setExpandedSessionId(isExpanded ? null : session.session_id)} sx={{ color: Ze.muted, fontSize: '12px' }}>
+                                    {formatDisplayDate(session.created)}
+                                  </TableCell>
+                                  <TableCell onClick={() => setExpandedSessionId(isExpanded ? null : session.session_id)}>
+                                    <Chip
+                                      label={session.has_mappings ? 'Mapped' : 'Uploaded'}
+                                      size="small"
+                                      sx={{
+                                        height: 20,
+                                        fontSize: '10px',
+                                        fontWeight: 700,
+                                        bgcolor: session.has_mappings ? 'rgba(52, 211, 153, 0.15)' : 'rgba(59, 130, 246, 0.15)',
+                                        color: session.has_mappings ? '#34d399' : '#60a5fa'
+                                      }}
+                                    />
+                                  </TableCell>
+                                  <TableCell align="right" onClick={(e) => e.stopPropagation()}>
+                                    <Stack direction="row" spacing={1} justifyContent="flex-end" alignItems="center">
+                                      <Button
+                                        size="small"
+                                        variant="outlined"
+                                        startIcon={<PlayArrowIcon sx={{ fontSize: 14 }} />}
+                                        onClick={() => navigate(`/mapping/${session.session_id}`)}
+                                        sx={{ height: 26, fontSize: '11px', textTransform: 'none', borderRadius: '6px', color: Ze.text, borderColor: Ze.subtleBorder }}
+                                      >
+                                        Mapping
+                                      </Button>
+                                      <Box sx={{ width: 90 }}>
+                                        <DownloadButton
+                                          label="Download"
+                                          onClick={() => navigate(`/editor/${session.session_id}`)}
+                                        />
+                                      </Box>
+                                      <IconButton
+                                        size="small"
+                                        onClick={() => handleDeleteSession(session.session_id)}
+                                        sx={{ color: '#ef4444', opacity: 0.8, '&:hover': { opacity: 1 } }}
+                                      >
+                                        <DeleteIcon sx={{ fontSize: 16 }} />
+                                      </IconButton>
+                                    </Stack>
+                                  </TableCell>
+                                </TableRow>
+                                {isExpanded && (
+                                  <TableRow sx={{ bgcolor: Ze.activeRow }}>
+                                    <TableCell colSpan={5} sx={{ p: 2, borderBottom: `1px solid ${Ze.rowLine}` }}>
+                                      <Box sx={{ p: 2, borderRadius: '12px', bgcolor: Ze.controlBg, border: `1px solid ${Ze.subtleBorder}` }}>
+                                        <Grid container spacing={2}>
+                                          <Grid item xs={12} sm={4}>
+                                            <Typography variant="caption" sx={{ color: Ze.muted, display: 'block' }}>Client File</Typography>
+                                            <Typography variant="body2" fontWeight="600" sx={{ color: Ze.text }}>{session.client_file || 'N/A'}</Typography>
+                                          </Grid>
+                                          <Grid item xs={12} sm={4}>
+                                            <Typography variant="caption" sx={{ color: Ze.muted, display: 'block' }}>Template File</Typography>
+                                            <Typography variant="body2" fontWeight="600" sx={{ color: Ze.text }}>{session.template_file || 'Default Item.xlsx'}</Typography>
+                                          </Grid>
+                                          <Grid item xs={12} sm={4}>
+                                            <Typography variant="caption" sx={{ color: Ze.muted, display: 'block' }}>Rows Processed</Typography>
+                                            <Typography variant="body2" fontWeight="600" sx={{ color: Ze.text }}>{session.rows_processed || 'N/A'}</Typography>
+                                          </Grid>
+                                        </Grid>
+                                        <Stack direction="row" spacing={1.5} sx={{ mt: 2 }} justifyContent="flex-end">
+                                          <Button
+                                            size="small"
+                                            className="gradient-btn"
+                                            startIcon={<PlayArrowIcon sx={{ fontSize: 14 }} />}
+                                            onClick={() => navigate(`/mapping/${session.session_id}`)}
+                                            sx={{ height: 28, px: 2, fontSize: '11px', textTransform: 'none' }}
+                                          >
+                                            Continue to Mapping
+                                          </Button>
+                                          {session.has_mappings && (
+                                            <Button
+                                              size="small"
+                                              variant="outlined"
+                                              onClick={() => navigate(`/editor/${session.session_id}`)}
+                                              sx={{ height: 28, px: 2, fontSize: '11px', textTransform: 'none', color: Ze.text, borderColor: Ze.subtleBorder }}
+                                            >
+                                              Open Data Editor
+                                            </Button>
+                                          )}
+                                        </Stack>
+                                      </Box>
+                                    </TableCell>
+                                  </TableRow>
+                                )}
+                              </React.Fragment>
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                    </TableContainer>
+                    <TablePagination
+                      component="div"
+                      count={filteredSessions.length}
+                      page={sessionPage}
+                      onPageChange={(_, p) => setSessionPage(p)}
+                      rowsPerPage={sessionRowsPerPage}
+                      onRowsPerPageChange={(e) => { setSessionRowsPerPage(parseInt(e.target.value, 10)); setSessionPage(0); }}
+                      rowsPerPageOptions={[5, 10, 25]}
+                      sx={{ color: Ze.muted, fontSize: '12px' }}
+                    />
+                  </>
+                )}
+              </Box>
+            )}
+
+            {/* TAB 1: Mapping Templates */}
+            {activeTab === 1 && (
+              <Box>
+                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ mb: 2 }}>
+                  <TextField
+                    size="small"
+                    placeholder="Search mapping templates..."
+                    value={tmplSearch}
+                    onChange={(e) => { setTmplSearch(e.target.value); setTmplPage(0); }}
+                    InputProps={{
+                      startAdornment: <InputAdornment position="start"><SearchIcon sx={{ fontSize: 16, color: '#8992a5' }} /></InputAdornment>,
+                      endAdornment: tmplSearch && (
+                        <InputAdornment position="end">
+                          <IconButton size="small" onClick={() => setTmplSearch('')} sx={{ color: '#8992a5' }}>
+                            <ClearIcon sx={{ fontSize: 14 }} />
+                          </IconButton>
+                        </InputAdornment>
+                      )
+                    }}
+                    sx={{ flex: 1, '& .MuiOutlinedInput-root': { height: 38, fontSize: '13px', borderRadius: '8px', bgcolor: Ze.searchBg } }}
+                  />
+                  <FormControl size="small" sx={{ minWidth: 150 }}>
+                    <Select value={tmplSortBy} onChange={(e) => { setTmplSortBy(e.target.value); setTmplPage(0); }}
+                      MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
+                      sx={{ height: 38, fontSize: '12px', borderRadius: '8px', bgcolor: Ze.searchBg }}>
+                      <MenuItem value="usage_count">Sort by Usage</MenuItem>
+                      <MenuItem value="name">Sort by Name</MenuItem>
+                      <MenuItem value="created_at">Sort by Date</MenuItem>
+                    </Select>
+                  </FormControl>
+                  <FormControl size="small" sx={{ minWidth: 100 }}>
+                    <Select value={tmplSortOrder} onChange={(e) => { setTmplSortOrder(e.target.value); setTmplPage(0); }}
+                      MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
+                      sx={{ height: 38, fontSize: '12px', borderRadius: '8px', bgcolor: Ze.searchBg }}>
+                      <MenuItem value="desc">High → Low</MenuItem>
+                      <MenuItem value="asc">Low → High</MenuItem>
+                    </Select>
+                  </FormControl>
+                </Stack>
+                {filteredTemplates.length === 0 ? (
+                  <Box sx={{ textAlign: 'center', py: 5, color: Ze.muted }}>
+                    <LibraryBooksIcon sx={{ fontSize: 40, mb: 1, opacity: 0.4 }} />
+                    <Typography variant="body2">No mapping templates saved yet.</Typography>
+                  </Box>
+                ) : (
+                  <>
+                    <Grid container spacing={2}>
+                      {pagedTemplates.map((tmpl) => (
+                        <Grid item xs={12} sm={6} md={4} key={tmpl.id}>
+                          <Card sx={{ bgcolor: Ze.inputBg, border: `1px solid ${Ze.subtleBorder}`, borderRadius: '12px', transition: 'all 0.2s ease', '&:hover': { borderColor: '#2383e2', transform: 'translateY(-1px)' } }}>
+                            <CardContent sx={{ p: 2 }}>
+                              <Typography variant="subtitle2" fontWeight="700" sx={{ color: Ze.text, mb: 0.5 }}>{tmpl.name}</Typography>
+                              <Typography variant="caption" sx={{ color: Ze.muted, display: 'block', mb: 1.5 }}>
+                                {tmpl.total_mappings || 0} mapped columns • Used {tmpl.usage_count || 0} times
+                              </Typography>
+                              <UseButton
+                                onClick={() => handleApplyTemplate(tmpl)}
+                                label="Apply Template"
+                                color="linear-gradient(135deg, #2563eb 0%, #0284c7 100%)"
+                                hoverColor="linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)"
+                                glowColor="rgba(37, 99, 235, 0.45)"
+                              />
+                            </CardContent>
+                          </Card>
+                        </Grid>
+                      ))}
+                    </Grid>
+                    <TablePagination
+                      component="div"
+                      count={filteredTemplates.length}
+                      page={tmplPage}
+                      onPageChange={(_, p) => setTmplPage(p)}
+                      rowsPerPage={tmplRowsPerPage}
+                      onRowsPerPageChange={(e) => { setTmplRowsPerPage(parseInt(e.target.value, 10)); setTmplPage(0); }}
+                      rowsPerPageOptions={[6, 12, 24]}
+                      sx={{ color: Ze.muted, fontSize: '12px' }}
+                    />
+                  </>
+                )}
+              </Box>
+            )}
+
+            {/* TAB 2: Tag Rules */}
+            {activeTab === 2 && (
+              <Box>
+                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ mb: 2 }}>
+                  <TextField
+                    size="small"
+                    placeholder="Search tag rule templates..."
+                    value={tagSearch}
+                    onChange={(e) => { setTagSearch(e.target.value); setTagPage(0); }}
+                    InputProps={{
+                      startAdornment: <InputAdornment position="start"><SearchIcon sx={{ fontSize: 16, color: '#8992a5' }} /></InputAdornment>,
+                      endAdornment: tagSearch && (
+                        <InputAdornment position="end">
+                          <IconButton size="small" onClick={() => setTagSearch('')} sx={{ color: '#8992a5' }}>
+                            <ClearIcon sx={{ fontSize: 14 }} />
+                          </IconButton>
+                        </InputAdornment>
+                      )
+                    }}
+                    sx={{ flex: 1, '& .MuiOutlinedInput-root': { height: 38, fontSize: '13px', borderRadius: '8px', bgcolor: Ze.searchBg } }}
+                  />
+                  <FormControl size="small" sx={{ minWidth: 150 }}>
+                    <Select value={tagSortBy} onChange={(e) => { setTagSortBy(e.target.value); setTagPage(0); }}
+                      MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
+                      sx={{ height: 38, fontSize: '12px', borderRadius: '8px', bgcolor: Ze.searchBg }}>
+                      <MenuItem value="usage_count">Sort by Usage</MenuItem>
+                      <MenuItem value="name">Sort by Name</MenuItem>
+                      <MenuItem value="created_at">Sort by Date</MenuItem>
+                    </Select>
+                  </FormControl>
+                  <FormControl size="small" sx={{ minWidth: 100 }}>
+                    <Select value={tagSortOrder} onChange={(e) => { setTagSortOrder(e.target.value); setTagPage(0); }}
+                      MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
+                      sx={{ height: 38, fontSize: '12px', borderRadius: '8px', bgcolor: Ze.searchBg }}>
+                      <MenuItem value="desc">High → Low</MenuItem>
+                      <MenuItem value="asc">Low → High</MenuItem>
+                    </Select>
+                  </FormControl>
+                </Stack>
+                {filteredTags.length === 0 ? (
+                  <Box sx={{ textAlign: 'center', py: 5, color: Ze.muted }}>
+                    <ScienceIcon sx={{ fontSize: 40, mb: 1, opacity: 0.4 }} />
+                    <Typography variant="body2">No tag rule templates found.</Typography>
+                  </Box>
+                ) : (
+                  <>
+                    <Grid container spacing={2}>
+                      {pagedTags.map((tmpl) => (
+                        <Grid item xs={12} sm={6} md={4} key={tmpl.id}>
+                          <Card sx={{ bgcolor: Ze.inputBg, border: `1px solid ${Ze.subtleBorder}`, borderRadius: '12px', transition: 'all 0.2s ease', '&:hover': { borderColor: '#a78bfa', transform: 'translateY(-1px)' } }}>
+                            <CardContent sx={{ p: 2 }}>
+                              <Typography variant="subtitle2" fontWeight="700" sx={{ color: Ze.text, mb: 0.5 }}>{tmpl.name}</Typography>
+                              <Typography variant="caption" sx={{ color: Ze.muted, display: 'block', mb: 1 }}>
+                                {tmpl.rules?.length || 0} tag rules{tmpl.usage_count ? ` • Used ${tmpl.usage_count} times` : ''}
+                              </Typography>
+                              <Chip
+                                label="Tag Template"
+                                size="small"
+                                sx={{ height: 18, fontSize: '10px', bgcolor: 'rgba(168, 85, 247, 0.12)', color: '#a78bfa', border: '1px solid rgba(168, 85, 247, 0.25)', borderRadius: '4px' }}
+                              />
+                            </CardContent>
+                          </Card>
+                        </Grid>
+                      ))}
+                    </Grid>
+                    <TablePagination
+                      component="div"
+                      count={filteredTags.length}
+                      page={tagPage}
+                      onPageChange={(_, p) => setTagPage(p)}
+                      rowsPerPage={tagRowsPerPage}
+                      onRowsPerPageChange={(e) => { setTagRowsPerPage(parseInt(e.target.value, 10)); setTagPage(0); }}
+                      rowsPerPageOptions={[6, 12, 24]}
+                      sx={{ color: Ze.muted, fontSize: '12px' }}
+                    />
+                  </>
+                )}
+              </Box>
             )}
           </CardContent>
         </Card>
-      </Fade>
+      </Box>
 
-      <Grid container spacing={3} sx={{ mt: 4, flexGrow: 1 }}>
-        {/* Compact Templates Section */}
-        <Grid item xs={12} lg={6}>
-          <Fade in timeout={1000}>
-            <Card sx={{ borderRadius: 3, boxShadow: '0 4px 20px rgba(0,0,0,0.08)', height: '100%' }}>
-              <CardContent sx={{ p: 3 }}>
-                {/* Header */}
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                    <Avatar sx={{ bgcolor: '#3b82f6', width: 40, height: 40 }}>
-                      <LibraryBooksIcon />
-                    </Avatar>
-                    <Box>
-                      <Typography variant="h5" fontWeight="600" color="#1e293b">
-                        Mapping Templates
-                      </Typography>
-                      <Typography variant="body2" color="#64748b">
-                        {templateStats.totalTemplates} templates • {templateStats.totalUsage} total uses
-                      </Typography>
-                    </Box>
-                  </Box>
-                  <Box sx={{ display: 'flex', gap: 1 }}>
-                    <Tooltip title="Refresh">
-                      <IconButton onClick={() => window.location.reload()} size="small">
-                        <RefreshIcon />
-                      </IconButton>
-                    </Tooltip>
-                  </Box>
-                </Box>
-
-                {/* Compact Search & Filter */}
-                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ mb: 3 }}>
-                  <TextField
-                    size="small"
-                    placeholder="Search templates..."
-                    value={templateSearchTerm}
-                    onChange={(e) => setTemplateSearchTerm(e.target.value)}
-                    InputProps={{
-                      startAdornment: <InputAdornment position="start"><SearchIcon size="small" /></InputAdornment>,
-                      endAdornment: templateSearchTerm && (
-                        <InputAdornment position="end">
-                          <IconButton size="small" onClick={() => setTemplateSearchTerm('')}>
-                            <ClearIcon fontSize="small" />
-                          </IconButton>
-                        </InputAdornment>
-                      )
-                    }}
-                    sx={{ flex: 1 }}
-                  />
-                  <FormControl size="small" sx={{ minWidth: 120 }}>
-                    <InputLabel>Sort by</InputLabel>
-                    <Select value={templateSortBy} label="Sort by" onChange={(e) => setTemplateSortBy(e.target.value)}>
-                      <MenuItem value="name">Name</MenuItem>
-                      <MenuItem value="created_at">Date</MenuItem>
-                      <MenuItem value="usage_count">Usage</MenuItem>
-                    </Select>
-                  </FormControl>
-                  <FormControl size="small" sx={{ minWidth: 100 }}>
-                    <InputLabel>Order</InputLabel>
-                    <Select value={templateSortOrder} label="Order" onChange={(e) => setTemplateSortOrder(e.target.value)}>
-                      <MenuItem value="asc">{templateSortBy === 'name' ? 'A-Z' : templateSortBy === 'created_at' ? 'Earliest' : 'Least'}</MenuItem>
-                      <MenuItem value="desc">{templateSortBy === 'name' ? 'Z-A' : templateSortBy === 'created_at' ? 'Latest' : 'Most'}</MenuItem>
-                    </Select>
-                  </FormControl>
-                  {(templateSearchTerm || templateSortBy !== 'usage_count' || templateSortOrder !== 'desc') && (
-                    <Button size="small" onClick={clearTemplateFilters} startIcon={<ClearIcon />}>
-                      Clear
-                    </Button>
-                  )}
-                </Stack>
-
-                {/* Compact Template List */}
-                {templatesLoading ? (
-                  <Box sx={{ textAlign: 'center', py: 4 }}>
-                    <CircularProgress size={32} />
-                    <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                      Loading templates...
-                    </Typography>
-                  </Box>
-                ) : templatesError ? (
-                  <Alert severity="error" sx={{ mb: 2 }}>{templatesError}</Alert>
-                ) : templateStats.totalTemplates === 0 ? (
-                  <Box sx={{ textAlign: 'center', py: 6, color: '#64748b' }}>
-                    <LibraryBooksIcon sx={{ fontSize: 48, mb: 2, opacity: 0.5 }} />
-                    <Typography variant="h6" fontWeight="500" gutterBottom>
-                      No Templates Yet
-                    </Typography>
-                    <Typography variant="body2">
-                      Create your first template by saving a column mapping
-                    </Typography>
-                  </Box>
-                ) : (
-                  <>
-                    <List sx={{ p: 0 }}>
-                      {paginatedTemplates.map((template, index) => (
-                        <Grow in timeout={600 + index * 100} key={template.id}>
-                          <ListItem 
-                            sx={{ 
-                              border: '1px solid #e2e8f0',
-                              borderRadius: 2,
-                              mb: 1,
-                              '&:hover': { 
-                                backgroundColor: '#f8fafc',
-                                borderColor: '#3b82f6',
-                                transform: 'translateY(-1px)',
-                                boxShadow: '0 4px 12px rgba(59, 130, 246, 0.15)'
-                              },
-                              transition: 'all 0.2s ease'
-                            }}
-                          >
-                            <ListItemAvatar>
-                              <Avatar sx={{ bgcolor: '#f1f5f9', color: '#3b82f6', width: 36, height: 36 }}>
-                                <LibraryBooksIcon fontSize="small" />
-                              </Avatar>
-                            </ListItemAvatar>
-                            <Box sx={{ flexGrow: 1, minWidth: 0 }}>
-                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
-                                <Typography variant="subtitle2" fontWeight="600" noWrap sx={{ color: '#1e293b' }}>
-                                  {template.name}
-                                </Typography>
-                                {templateStats.mostUsed && templateStats.mostUsed.id === template.id && template.usage_count > 0 && (
-                                  <StarIcon sx={{ color: '#f59e0b', fontSize: 16 }} />
-                                )}
-                              </Box>
-                              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                                <Chip 
-                                  label={`${template.total_mappings} mappings`}
-                                  size="small"
-                                  variant="outlined"
-                                  sx={{ height: 20, fontSize: '0.7rem' }}
-                                />
-                                <Chip 
-                                  label={`Used ${template.usage_count || 0}×`}
-                                  size="small"
-                                  color={getPopularityColor(template.usage_count || 0)}
-                                  variant="outlined"
-                                  sx={{ height: 20, fontSize: '0.7rem' }}
-                                />
-                                <Typography variant="caption" color="text.secondary" sx={{ alignSelf: 'center' }}>
-                                  {formatDate(template.created_at)}
-                                </Typography>
-                              </Box>
-                            </Box>
-                            <Box sx={{ display: 'flex', gap: 1 }}>
-                              <Button
-                                size="small"
-                                variant="contained"
-                                startIcon={<PlayArrowIcon />}
-                                onClick={() => handleUseTemplate(template)}
-                                sx={{ 
-                                  textTransform: 'none',
-                                  fontWeight: 600,
-                                  borderRadius: 1.5,
-                                  minWidth: 'auto'
-                                }}
-                              >
-                                Use
-                              </Button>
-                              <IconButton 
-                                size="small" 
-                                onClick={() => openDeleteDialog(template)}
-                                sx={{ color: '#ef4444' }}
-                              >
-                                <DeleteIcon fontSize="small" />
-                              </IconButton>
-                            </Box>
-                          </ListItem>
-                        </Grow>
-                      ))}
-                    </List>
-
-                    {/* Compact Pagination */}
-                    {filteredAndSortedTemplates.length > templatesPerPage && (
-                      <Box sx={{ display: 'flex', justifyContent: 'center', mt: 2 }}>
-                        <TablePagination
-                          component="div"
-                          count={filteredAndSortedTemplates.length}
-                          page={templatePage}
-                          onPageChange={(event, newPage) => setTemplatePage(newPage)}
-                          rowsPerPage={templatesPerPage}
-                          onRowsPerPageChange={(event) => {
-                            setTemplatesPerPage(parseInt(event.target.value, 10));
-                            setTemplatePage(0);
-                          }}
-                          rowsPerPageOptions={[5, 10, 15, 20]}
-                          labelDisplayedRows={({ from, to, count }) => `${from}–${to} of ${count}`}
-                          size="small"
-                        />
-                      </Box>
-                    )}
-                  </>
-                )}
-              </CardContent>
-            </Card>
-          </Fade>
-        </Grid>
-
-        {/* Tag Templates Section */}
-        <Grid item xs={12} lg={6}>
-          <Fade in timeout={1100}>
-            <Card sx={{ borderRadius: 3, boxShadow: '0 4px 20px rgba(0,0,0,0.08)', height: '100%' }}>
-              <CardContent sx={{ p: 3 }}>
-                {/* Header */}
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                    <Avatar sx={{ bgcolor: '#10b981', width: 40, height: 40 }}>
-                      <ScienceIcon />
-                    </Avatar>
-                    <Box>
-                      <Typography variant="h5" fontWeight="600" color="#1e293b">
-                        Tag Templates
-                      </Typography>
-                      <Typography variant="body2" color="#64748b">
-                        {tagTemplates.length} templates • Smart tag rules
-                      </Typography>
-                    </Box>
-                  </Box>
-                  <Box sx={{ display: 'flex', gap: 1 }}>
-                    <Tooltip title="Create Smart Tag Template">
-                      <Button
-                        variant="outlined"
-                        size="small"
-                        onClick={handleOpenFormulaBuilder}
-                        startIcon={<ScienceIcon />}
-                        sx={{ whiteSpace: 'nowrap' }}
-                      >
-                        New Template
-                      </Button>
-                    </Tooltip>
-                    <Tooltip title="Refresh">
-                      <IconButton onClick={() => loadTagTemplates()} size="small">
-                        <RefreshIcon />
-                      </IconButton>
-                    </Tooltip>
-                  </Box>
-                </Box>
-
-                {/* Compact Search & Filter */}
-                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ mb: 3 }}>
-                  <TextField
-                    size="small"
-                    placeholder="Search tag templates..."
-                    value={tagTemplateSearchTerm}
-                    onChange={(e) => setTagTemplateSearchTerm(e.target.value)}
-                    InputProps={{
-                      startAdornment: <InputAdornment position="start"><SearchIcon size="small" /></InputAdornment>,
-                      endAdornment: tagTemplateSearchTerm && (
-                        <InputAdornment position="end">
-                          <IconButton size="small" onClick={() => setTagTemplateSearchTerm('')}>
-                            <ClearIcon fontSize="small" />
-                          </IconButton>
-                        </InputAdornment>
-                      )
-                    }}
-                    sx={{ flex: 1 }}
-                  />
-                  <FormControl size="small" sx={{ minWidth: 120 }}>
-                    <InputLabel>Sort by</InputLabel>
-                    <Select value={tagTemplateSortBy} label="Sort by" onChange={(e) => setTagTemplateSortBy(e.target.value)}>
-                      <MenuItem value="name">Name</MenuItem>
-                      <MenuItem value="created_at">Date</MenuItem>
-                      <MenuItem value="usage_count">Usage</MenuItem>
-                    </Select>
-                  </FormControl>
-                  <FormControl size="small" sx={{ minWidth: 100 }}>
-                    <InputLabel>Order</InputLabel>
-                    <Select value={tagTemplateSortOrder} label="Order" onChange={(e) => setTagTemplateSortOrder(e.target.value)}>
-                      <MenuItem value="asc">{tagTemplateSortBy === 'name' ? 'A-Z' : tagTemplateSortBy === 'created_at' ? 'Earliest' : 'Least'}</MenuItem>
-                      <MenuItem value="desc">{tagTemplateSortBy === 'name' ? 'Z-A' : tagTemplateSortBy === 'created_at' ? 'Latest' : 'Most'}</MenuItem>
-                    </Select>
-                  </FormControl>
-                  {(tagTemplateSearchTerm || tagTemplateSortBy !== 'usage_count' || tagTemplateSortOrder !== 'desc') && (
-                    <Button size="small" onClick={clearTagTemplateFilters} startIcon={<ClearIcon />}>
-                      Clear
-                    </Button>
-                  )}
-                </Stack>
-
-                {/* Compact Tag Template List */}
-                {tagTemplatesLoading ? (
-                  <Box sx={{ textAlign: 'center', py: 4 }}>
-                    <CircularProgress size={32} />
-                    <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                      Loading tag templates...
-                    </Typography>
-                  </Box>
-                ) : tagTemplatesError ? (
-                  <Alert severity="error" sx={{ mb: 2 }}>{tagTemplatesError}</Alert>
-                ) : tagTemplates.length === 0 ? (
-                  <Box sx={{ textAlign: 'center', py: 6, color: '#64748b' }}>
-                    <ScienceIcon sx={{ fontSize: 48, mb: 2, opacity: 0.5 }} />
-                    <Typography variant="h6" fontWeight="500" gutterBottom>
-                      No Tag Templates Yet
-                    </Typography>
-                    <Typography variant="body2">
-                      Create your first template by saving smart tag rules
-                    </Typography>
-                  </Box>
-                ) : (
-                  <>
-                    <List sx={{ p: 0 }}>
-                      {paginatedTagTemplates.map((template, index) => (
-                        <Grow in timeout={600 + index * 100} key={template.id}>
-                          <ListItem 
-                            sx={{ 
-                              border: '1px solid #e2e8f0',
-                              borderRadius: 2,
-                              mb: 1,
-                              '&:hover': { 
-                                backgroundColor: '#f0fdf4',
-                                borderColor: '#10b981',
-                                transform: 'translateY(-1px)',
-                                boxShadow: '0 4px 12px rgba(16, 185, 129, 0.15)'
-                              },
-                              transition: 'all 0.2s ease'
-                            }}
-                          >
-                            <ListItemAvatar>
-                              <Avatar sx={{ bgcolor: '#ecfdf5', color: '#10b981', width: 36, height: 36 }}>
-                                <ScienceIcon fontSize="small" />
-                              </Avatar>
-                            </ListItemAvatar>
-                            <Box sx={{ flexGrow: 1, minWidth: 0 }}>
-                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.5 }}>
-                                <Typography variant="subtitle2" fontWeight="600" noWrap sx={{ color: '#1e293b' }}>
-                                  {template.name}
-                                </Typography>
-                              </Box>
-                              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                                <Chip 
-                                  label={`${(template.formula_rules || []).length} rules`}
-                                  size="small"
-                                  variant="outlined"
-                                  sx={{ height: 20, fontSize: '0.7rem' }}
-                                />
-                                <Chip 
-                                  label={`Used ${template.usage_count || 0}×`}
-                                  size="small"
-                                  color={getPopularityColor(template.usage_count || 0)}
-                                  variant="outlined"
-                                  sx={{ height: 20, fontSize: '0.7rem' }}
-                                />
-                                <Typography variant="caption" color="text.secondary" sx={{ alignSelf: 'center' }}>
-                                  {formatDate(template.created_at)}
-                                </Typography>
-                              </Box>
-                            </Box>
-                            <Box sx={{ display: 'flex', gap: 1 }}>
-                              <Button
-                                size="small"
-                                variant="contained"
-                                startIcon={<PlayArrowIcon />}
-                                onClick={() => handleUseTagTemplate(template)}
-                                sx={{ 
-                                  textTransform: 'none',
-                                  fontWeight: 600,
-                                  borderRadius: 1.5,
-                                  minWidth: 'auto',
-                                  bgcolor: '#10b981',
-                                  '&:hover': { bgcolor: '#059669' }
-                                }}
-                              >
-                                Use
-                              </Button>
-                              <IconButton 
-                                size="small" 
-                                onClick={() => openTagTemplateDeleteDialog(template)}
-                                sx={{ color: '#ef4444' }}
-                              >
-                                <DeleteIcon fontSize="small" />
-                              </IconButton>
-                            </Box>
-                          </ListItem>
-                        </Grow>
-                      ))}
-                    </List>
-
-                    {/* Compact Pagination */}
-                    {filteredAndSortedTagTemplates.length > tagTemplatesPerPage && (
-                      <Box sx={{ display: 'flex', justifyContent: 'center', mt: 2 }}>
-                        <TablePagination
-                          component="div"
-                          count={filteredAndSortedTagTemplates.length}
-                          page={tagTemplatePage}
-                          onPageChange={(event, newPage) => setTagTemplatePage(newPage)}
-                          rowsPerPage={tagTemplatesPerPage}
-                          onRowsPerPageChange={(event) => {
-                            setTagTemplatesPerPage(parseInt(event.target.value, 10));
-                            setTagTemplatePage(0);
-                          }}
-                          rowsPerPageOptions={[5, 10, 15, 20]}
-                          labelDisplayedRows={({ from, to, count }) => `${from}–${to} of ${count}`}
-                          size="small"
-                        />
-                      </Box>
-                    )}
-                  </>
-                )}
-              </CardContent>
-            </Card>
-          </Fade>
-        </Grid>
-      </Grid>
-
-      {/* Delete Confirmation Dialog */}
-      <Dialog
-        open={deleteDialogOpen}
-        onClose={() => !deleting && setDeleteDialogOpen(false)}
-        maxWidth="sm"
-        fullWidth
-        PaperProps={{ sx: { borderRadius: 3 } }}
-      >
-        <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-            <Avatar sx={{ bgcolor: '#fee2e2', color: '#dc2626' }}>
-              <DeleteIcon />
-            </Avatar>
-            <Box>
-              <Typography variant="h6" fontWeight="600">
-                Delete Template
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                This action cannot be undone
-              </Typography>
-            </Box>
-          </Box>
-          <IconButton onClick={() => setDeleteDialogOpen(false)} disabled={deleting}>
-            <ClearIcon />
-          </IconButton>
-        </DialogTitle>
-        <DialogContent>
-          <DialogContentText>
-            Are you sure you want to delete the template <strong>"{templateToDelete?.name}"</strong>?
-            <br /><br />
-            This template has been used <strong>{templateToDelete?.usage_count || 0} times</strong>.
-          </DialogContentText>
-        </DialogContent>
-        <DialogActions sx={{ p: 3 }}>
-          <Button onClick={() => setDeleteDialogOpen(false)} disabled={deleting}>
-            Cancel
-          </Button>
-          <Button 
-            onClick={handleDeleteTemplate}
-            color="error"
-            variant="contained"
-            disabled={deleting}
-            startIcon={deleting ? <CircularProgress size={16} /> : <DeleteIcon />}
-          >
-            {deleting ? 'Deleting...' : 'Delete Template'}
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* Upload Hard-Delete Confirmation Dialog */}
-      <Dialog
-        open={uploadDeleteDialogOpen}
-        onClose={() => !deletingUploadId && setUploadDeleteDialogOpen(false)}
-        maxWidth="sm"
-        fullWidth
-        PaperProps={{ sx: { borderRadius: 3 } }}
-      >
-        <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-            <Avatar sx={{ bgcolor: '#fee2e2', color: '#dc2626' }}>
-              <DeleteIcon />
-            </Avatar>
-            <Box>
-              <Typography variant="h6" fontWeight="600">
-                Delete Upload
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                Permanent, cannot be undone
-              </Typography>
-            </Box>
-          </Box>
-          <IconButton onClick={() => setUploadDeleteDialogOpen(false)} disabled={!!deletingUploadId}>
-            <ClearIcon />
-          </IconButton>
-        </DialogTitle>
-        <DialogContent>
-          <DialogContentText>
-            Permanently delete <strong>"{uploadToDelete?.file_name || uploadToDelete?.original_client_name || uploadToDelete?.session_id}"</strong>?
-            <br /><br />
-            This removes the session and its data completely (file, cache and any extracted PDF records). It will not come back.
-          </DialogContentText>
-        </DialogContent>
-        <DialogActions sx={{ p: 3 }}>
-          <Button onClick={() => setUploadDeleteDialogOpen(false)} disabled={!!deletingUploadId}>
-            Cancel
-          </Button>
-          <Button
-            onClick={handleDeleteUpload}
-            color="error"
-            variant="contained"
-            disabled={!!deletingUploadId}
-            startIcon={deletingUploadId ? <CircularProgress size={16} /> : <DeleteIcon />}
-          >
-            {deletingUploadId ? 'Deleting...' : 'Delete Permanently'}
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* Tag Template Delete Confirmation Dialog */}
-      <Dialog
-        open={tagTemplateDeleteDialogOpen}
-        onClose={() => !deletingTagTemplate && setTagTemplateDeleteDialogOpen(false)}
-        maxWidth="sm"
-        fullWidth
-        PaperProps={{ sx: { borderRadius: 3 } }}
-      >
-        <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-            <Avatar sx={{ bgcolor: '#fee2e2', color: '#dc2626' }}>
-              <DeleteIcon />
-            </Avatar>
-            <Box>
-              <Typography variant="h6" fontWeight="600">
-                Delete Tag Template
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                This action cannot be undone
-              </Typography>
-            </Box>
-          </Box>
-          <IconButton onClick={() => setTagTemplateDeleteDialogOpen(false)} disabled={deletingTagTemplate}>
-            <ClearIcon />
-          </IconButton>
-        </DialogTitle>
-        <DialogContent>
-          <DialogContentText>
-            Are you sure you want to delete the tag template <strong>"{tagTemplateToDelete?.name}"</strong>?
-            <br /><br />
-            This template has <strong>{(tagTemplateToDelete?.formula_rules || []).length} formula rules</strong> and has been used <strong>{tagTemplateToDelete?.usage_count || 0} times</strong>.
-          </DialogContentText>
-        </DialogContent>
-        <DialogActions sx={{ p: 3 }}>
-          <Button onClick={() => setTagTemplateDeleteDialogOpen(false)} disabled={deletingTagTemplate}>
-            Cancel
-          </Button>
-          <Button 
-            onClick={handleDeleteTagTemplate}
-            color="error"
-            variant="contained"
-            disabled={deletingTagTemplate}
-            startIcon={deletingTagTemplate ? <CircularProgress size={16} /> : <DeleteIcon />}
-          >
-            {deletingTagTemplate ? 'Deleting...' : 'Delete Template'}
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* Formula Builder for Dashboard Template Configuration */}
-      {selectedTemplateForFormulas && (
-        <FormulaBuilder
-          open={formulaBuilderOpen}
-          onClose={handleFormulaBuilderClose}
-          sessionId="dashboard" // Special session for template configuration
-          availableColumns={[]} // Will be populated when we have a session
-          onApplyFormulas={handleFormulasApplied}
-          initialRules={selectedTemplateForFormulas.formula_rules || []}
-          templateMode={true}
-          templateName={selectedTemplateForFormulas.name}
+      {/* Standalone Formula Builder Modal */}
+      {showFormulaModal && (
+        <StandaloneFormulaBuilder
+          open={showFormulaModal}
+          onClose={() => setShowFormulaModal(false)}
         />
       )}
-
-      {/* Standalone Formula Builder Dialog */}
-      <StandaloneFormulaBuilder
-        open={formulaBuilderOpen}
-        onClose={handleCloseFormulaBuilder}
-        onSave={handleSaveFormulaTemplate}
-      />
-
-      {/* Global Loader Overlay */}
-      <LoaderOverlay visible={globalLoading} label="Processing..." />
     </Box>
   );
 };
