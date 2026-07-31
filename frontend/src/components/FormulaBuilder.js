@@ -72,6 +72,7 @@ const FormulaBuilder = ({
   
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'info' });
+  const isDarkMode = document.documentElement.getAttribute('data-theme') === 'dark';
 
   // ─── UTILITY FUNCTIONS ──────────────────────────────────────────────────────
   function createEmptyRule() {
@@ -500,7 +501,17 @@ const FormulaBuilder = ({
 
   // ─── RENDER COMPONENTS ──────────────────────────────────────────────────────
   const renderRuleEditor = (rule, index) => (
-    <Card key={index} variant="outlined" sx={{ mb: 3, position: 'relative' }}>
+    <Card
+      key={index}
+      variant="outlined"
+      sx={{
+        mb: 3,
+        position: 'relative',
+        bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.72)' : '#ffffff',
+        color: isDarkMode ? '#e2e8f0' : '#0f172a',
+        borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.22)' : '#e2e8f0'
+      }}
+    >
       <CardContent>
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
           <Typography variant="h6" color="primary">
@@ -519,7 +530,7 @@ const FormulaBuilder = ({
 
         <Grid container spacing={2} sx={{ mb: 3 }}>
           {/* Source Column */}
-          <Grid item xs={12} md={6}>
+          <Grid item xs={12}>
             <FormControl fullWidth size="small">
               <InputLabel>Source Column</InputLabel>
               <Select
@@ -576,23 +587,8 @@ const FormulaBuilder = ({
             )}
           </Grid>
 
-          {/* Column Type */}
-          <Grid item xs={12} md={3}>
-            <FormControl fullWidth size="small">
-              <InputLabel>Destination Column Type</InputLabel>
-              <Select
-                value={rule.column_type}
-                onChange={(e) => updateRule(index, 'column_type', e.target.value)}
-                label="Destination Column Type"
-              >
-                <MenuItem value="Tag">Tag</MenuItem>
-                <MenuItem value="Specification Value">Specification Value</MenuItem>
-              </Select>
-            </FormControl>
-          </Grid>
-
           {/* Specification Name (only show when column_type is 'Specification Value') */}
-          {rule.column_type === 'Specification Value' && (
+          {false && rule.column_type === 'Specification Value' && (
             <Grid item xs={12} md={3}>
               <TextField
                 fullWidth
@@ -607,7 +603,12 @@ const FormulaBuilder = ({
         </Grid>
 
         {/* Sub-Rules Section */}
-        <Box sx={{ border: '1px solid #e0e0e0', borderRadius: 1, p: 2, bgcolor: '#fafafa' }}>
+        <Box sx={{
+          border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.18)' : '1px solid #e0e0e0',
+          borderRadius: '12px',
+          p: 2,
+          bgcolor: isDarkMode ? 'rgba(2, 6, 23, 0.45)' : '#fafafa'
+        }}>
           <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
             <Typography variant="subtitle1" fontWeight="600">
               Conditions (Sub-Rules)
@@ -629,9 +630,9 @@ const FormulaBuilder = ({
               alignItems: 'center', 
               mb: 2,
               p: 2,
-              bgcolor: 'white',
-              borderRadius: 1,
-              border: '1px solid #e0e0e0'
+              bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.72)' : 'white',
+              borderRadius: '12px',
+              border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.18)' : '1px solid #e0e0e0'
             }}>
               <Typography variant="body2" sx={{ minWidth: 60, color: 'text.secondary' }}>
                 If contains:
@@ -692,8 +693,14 @@ const FormulaBuilder = ({
         </Box>
 
         {/* Rule preview */}
-        <Box sx={{ mt: 2, p: 2, bgcolor: 'grey.50', borderRadius: 1 }}>
-          <Typography variant="body2" color="text.secondary">
+        <Box sx={{
+          mt: 2,
+          p: 2,
+          bgcolor: isDarkMode ? 'rgba(30, 41, 59, 0.68)' : 'grey.50',
+          border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.18)' : '1px solid #e5e7eb',
+          borderRadius: '12px'
+        }}>
+          <Typography variant="body2" sx={{ color: isDarkMode ? '#cbd5e1' : 'text.secondary' }}>
             <strong>Rule Preview:</strong> Check "{rule.source_column}" column and apply first matching condition to{' '}
             {rule.column_type === 'Tag' ? (
               'Tag column'
@@ -804,7 +811,18 @@ const FormulaBuilder = ({
         onClose={onClose}
         maxWidth="lg"
         fullWidth
-        PaperProps={{ sx: { height: '90vh' } }}
+        PaperProps={{
+          sx: {
+            height: '82vh',
+            maxHeight: 720,
+            borderRadius: '18px',
+            bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.94)' : 'rgba(255, 255, 255, 0.92)',
+            color: isDarkMode ? '#f8fafc' : '#0f172a',
+            border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.22)' : '1px solid rgba(203, 213, 225, 0.9)',
+            backdropFilter: 'blur(18px)',
+            boxShadow: isDarkMode ? '0 28px 80px rgba(0,0,0,0.72)' : '0 24px 70px rgba(15,23,42,0.18)'
+          }
+        }}
       >
         <DialogTitle sx={{ 
           display: 'flex', 
@@ -812,7 +830,7 @@ const FormulaBuilder = ({
           alignItems: 'center', 
           gap: 2,
           pb: 1,
-          borderBottom: '1px solid #e0e0e0'
+          borderBottom: isDarkMode ? '1px solid rgba(148, 163, 184, 0.18)' : '1px solid #e0e0e0'
         }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
             <ScienceIcon color="primary" />
@@ -831,7 +849,7 @@ const FormulaBuilder = ({
         </DialogTitle>
 
         <DialogContent sx={{ p: 0 }}>
-          <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
+          <Box sx={{ borderBottom: 1, borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.18)' : 'divider' }}>
             <Tabs 
               value={currentTab} 
               onChange={(e, newValue) => setCurrentTab(newValue)}
@@ -852,7 +870,7 @@ const FormulaBuilder = ({
             </Tabs>
           </Box>
 
-          <Box sx={{ p: 3, height: 'calc(90vh - 180px)', overflow: 'auto' }}>
+          <Box sx={{ p: 3, height: 'calc(82vh - 180px)', maxHeight: 540, overflow: 'auto' }}>
             {currentTab === 0 && (
               <Box>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>

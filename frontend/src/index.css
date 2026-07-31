@@ -80,6 +80,37 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--fw-scrollbar-thumb-hover);
 }
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Uiverse Floating Tooltip Styling
+   ═══════════════════════════════════════════════════════════════════════════ */
+.MuiTooltip-tooltip {
+  background-color: #0f172a !important;
+  color: #ffffff !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  border-radius: 10px !important;
+  padding: 7px 14px !important;
+  box-shadow: 0 12px 28px -4px rgba(15, 23, 42, 0.35) !important;
+  border: 1px solid rgba(255, 255, 255, 0.1) !important;
+}
+
+:root[data-theme="dark"] .MuiTooltip-tooltip {
+  background-color: #1e293b !important;
+  box-shadow: 0 12px 28px -4px rgba(0, 0, 0, 0.65), 0 0 15px rgba(37, 99, 235, 0.15) !important;
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+}
+
+.MuiTooltip-arrow {
+  color: #0f172a !important;
+}
+
+:root[data-theme="dark"] .MuiTooltip-arrow {
+  color: #1e293b !important;
+}
 
 /* ═══════════════════════════════════════════════════════════════════════════
    MUI Menu / Select Dropdown Overrides
@@ -149,6 +180,57 @@ body {
   background-size: 68px 68px;
   mask-image: radial-gradient(ellipse at center, transparent 30%, black 80%);
   -webkit-mask-image: radial-gradient(ellipse at center, transparent 30%, black 80%);
+}
+
+:root[data-theme="light"] .auth-grid-pattern {
+  background-image:
+    linear-gradient(90deg, rgba(37, 99, 235, 0.075) 1px, transparent 0),
+    linear-gradient(180deg, rgba(37, 99, 235, 0.075) 1px, transparent 0);
+}
+
+.fw-expand-action {
+  align-items: center;
+  border: 1px solid rgba(255,255,255,0.18);
+  border-radius: 999px;
+  color: #ffffff;
+  cursor: pointer;
+  display: inline-flex;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 800;
+  height: 42px;
+  justify-content: flex-start;
+  min-width: 42px;
+  overflow: hidden;
+  padding: 0;
+  transition: width 0.24s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.24s ease, transform 0.24s ease;
+  white-space: nowrap;
+  width: 42px;
+}
+.fw-expand-action:hover {
+  width: 156px;
+  transform: translateY(-1px);
+}
+.fw-expand-action > svg {
+  flex: 0 0 18px;
+  margin-left: 12px;
+}
+.fw-expand-action .fw-expand-label {
+  margin-left: 0;
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-width 0.24s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.18s ease, margin-left 0.24s ease;
+}
+.fw-expand-action:hover .fw-expand-label {
+  margin-left: 8px;
+  max-width: 130px;
+  opacity: 1;
+}
+.fw-expand-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

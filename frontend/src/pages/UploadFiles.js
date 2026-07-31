@@ -29,6 +29,7 @@ import {
   Radio,
   RadioGroup,
   Snackbar,
+  Tooltip,
 } from '@mui/material';
 import { useDropzone } from 'react-dropzone';
 import {
@@ -43,7 +44,11 @@ import {
   Search as SearchIcon,
   Close as CloseIcon,
   Science as ScienceIcon,
-  Add as AddIcon
+  Add as AddIcon,
+  ChevronLeft as ChevronLeftIcon,
+  ChevronRight as ChevronRightIcon,
+  Visibility as VisibilityIcon,
+  DeleteOutline as DeleteOutlineIcon
 } from '@mui/icons-material';
 import * as XLSX from 'xlsx';
 import api, { setGlobalLoaderCallback } from '../services/api';
@@ -240,8 +245,8 @@ const DropzoneFileStackIcon = ({ color = "#3b82f6", glowColor = "#22c55e", selec
         }}>
           <rect x="0" y="0" width="40" height="54" rx="7" fill={cardBg} stroke={selected || isHovered ? color : strokeColor} strokeWidth="2" />
           <path d="M28 0V12H40" fill={cornerFill} stroke={strokeColor} strokeWidth="1.5" />
-          <circle cx="20" cy="30" r="11" fill="rgba(37, 99, 235, 0.25)" stroke={color} strokeWidth="1.5" />
-          <path d="M20 35V25M20 25L16 29M20 25L24 29" stroke="#93c5fd" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          <circle cx="20" cy="30" r="11" fill={isDarkMode ? "rgba(37, 99, 235, 0.25)" : "rgba(37, 99, 235, 0.15)"} stroke={color} strokeWidth="1.5" />
+          <path d="M20 35V25M20 25L16 29M20 25L24 29" stroke={isDarkMode ? "#93c5fd" : "#1d4ed8"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
         </g>
       </svg>
     </Box>
@@ -297,6 +302,103 @@ const UploadFiles = () => {
     whiteButtonText: a.color.dark,
     accent: a.border.focus,
     accentHover: a.color.primaryLight
+  };
+
+  const dialogPaperSx = {
+    borderRadius: '18px',
+    bgcolor: isDarkMode ? 'rgba(17, 24, 39, 0.84)' : 'rgba(255, 255, 255, 0.84)',
+    backgroundImage: Nn.modalBg,
+    border: `1px solid ${Nn.modalBorder}`,
+    boxShadow: Nn.modalShadow,
+    color: Nn.text,
+    backdropFilter: 'blur(22px) saturate(180%)',
+    WebkitBackdropFilter: 'blur(22px) saturate(180%)',
+    overflow: 'hidden'
+  };
+  const dialogHeaderSx = {
+    px: 3,
+    pt: 2.5,
+    pb: 1.25,
+    bgcolor: 'transparent'
+  };
+  const dialogBodySx = {
+    px: 3,
+    py: 1.5,
+    bgcolor: 'transparent'
+  };
+  const dialogFooterSx = {
+    px: 3,
+    py: 2,
+    bgcolor: isDarkMode ? 'rgba(11, 16, 26, 0.48)' : 'rgba(248, 250, 252, 0.58)',
+    borderTop: `1px solid ${Nn.divider}`
+  };
+  const fieldSx = {
+    '& .MuiInputBase-root': {
+      bgcolor: isDarkMode ? '#0f172a' : '#f8fafc',
+      color: isDarkMode ? '#f8fafc' : '#0f172a',
+      borderRadius: '12px'
+    },
+    '& .MuiOutlinedInput-notchedOutline': {
+      borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.28)' : '#cbd5e1'
+    },
+    '& .MuiInputBase-root:hover .MuiOutlinedInput-notchedOutline': {
+      borderColor: '#2563eb'
+    },
+    '& .MuiSelect-icon': {
+      color: isDarkMode ? '#94a3b8' : '#64748b'
+    }
+  };
+  const selectFieldSx = {
+    bgcolor: isDarkMode ? '#0f172a' : '#f8fafc',
+    color: isDarkMode ? '#f8fafc' : '#0f172a',
+    borderRadius: '12px',
+    '& .MuiOutlinedInput-notchedOutline': {
+      borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.28)' : '#cbd5e1'
+    },
+    '&:hover .MuiOutlinedInput-notchedOutline': {
+      borderColor: '#2563eb'
+    },
+    '& .MuiSelect-icon': {
+      color: isDarkMode ? '#94a3b8' : '#64748b'
+    }
+  };
+  const pillButtonSx = {
+    borderRadius: '999px',
+    px: 2.5,
+    py: 0.85,
+    fontWeight: 800,
+    textTransform: 'none',
+    boxShadow: 'none',
+    lineHeight: 1.2
+  };
+  const primaryPillSx = {
+    ...pillButtonSx,
+    bgcolor: '#2563eb',
+    color: '#ffffff !important',
+    boxShadow: '0 14px 28px -16px rgba(37, 99, 235, 0.9)',
+    background: 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
+    '&:hover': {
+      background: 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
+      boxShadow: '0 18px 34px -18px rgba(37, 99, 235, 0.95)'
+    },
+    '&.Mui-disabled': {
+      background: isDarkMode ? 'rgba(30, 41, 59, 0.78)' : '#dbeafe',
+      color: isDarkMode ? 'rgba(226, 232, 240, 0.58) !important' : 'rgba(30, 64, 175, 0.46) !important',
+      boxShadow: 'none'
+    }
+  };
+  const dialogChoiceCardSx = {
+    borderRadius: '16px',
+    border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.18)' : '1px solid #e2e8f0',
+    bgcolor: isDarkMode ? '#0f172a' : '#ffffff',
+    color: isDarkMode ? '#f8fafc' : '#0f172a',
+    transition: 'all 0.2s ease',
+    cursor: 'pointer',
+    '&:hover': {
+      borderColor: '#2563eb',
+      bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff',
+      transform: 'translateY(-1px)'
+    }
   };
 
   const sheetJoinDraftDbName = 'excel-template-mapper-drafts';
@@ -412,6 +514,7 @@ const UploadFiles = () => {
   const [sheetJoinLegacyHeaderWarning, setSheetJoinLegacyHeaderWarning] = useState(false);
   const [savedSheetJoinComparisons, setSavedSheetJoinComparisons] = useState([]);
   const [activeSheetJoinComparisonId, setActiveSheetJoinComparisonId] = useState(null);
+  const [previousClientState, setPreviousClientState] = useState(null);
   const [sheetJoinSaveDialogOpen, setSheetJoinSaveDialogOpen] = useState(false);
   const [sheetJoinSaveName, setSheetJoinSaveName] = useState('');
   const [sheetJoinSaveLoading, setSheetJoinSaveLoading] = useState(false);
@@ -611,6 +714,112 @@ const UploadFiles = () => {
     };
     reader.readAsBinaryString(file);
   }, []);
+
+  const handleSelectSavedSheetJoinComparison = useCallback(async (item) => {
+    try {
+      if (userFile && !activeSheetJoinComparisonId) {
+        setPreviousClientState({
+          userFile,
+          clientWorkbook,
+          clientSheetNames,
+          selectedClientSheet,
+          clientHeaderRow,
+          clientHeaderPreview,
+          clientHeaderAutoDetected
+        });
+      }
+      const db = await openSheetJoinDraftDb();
+      const draftData = await new Promise((resolve, reject) => {
+        const tx = db.transaction(sheetJoinDraftStoreName, 'readonly');
+        const req = tx.objectStore(sheetJoinDraftStoreName).get(item.id);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      db.close();
+      if (draftData && draftData.blob) {
+        applySheetJoinDraftToUpload(draftData, item.id);
+      } else {
+        setError('Could not load saved merge book data.');
+      }
+    } catch (err) {
+      console.error('Error loading saved merge book:', err);
+      setError('Failed to open saved merge book.');
+    }
+  }, [openSheetJoinDraftDb, sheetJoinDraftStoreName, applySheetJoinDraftToUpload, userFile, activeSheetJoinComparisonId, clientWorkbook, clientSheetNames, selectedClientSheet, clientHeaderRow, clientHeaderPreview, clientHeaderAutoDetected]);
+
+  const handleViewSavedSheetJoinComparison = useCallback(async (item, e) => {
+    if (e) e.stopPropagation();
+    try {
+      const db = await openSheetJoinDraftDb();
+      const draftData = await new Promise((resolve, reject) => {
+        const tx = db.transaction(sheetJoinDraftStoreName, 'readonly');
+        const req = tx.objectStore(sheetJoinDraftStoreName).get(item.id);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      db.close();
+      if (draftData) {
+        setSheetJoinPreview({
+          headers: draftData.headers || draftData.previewHeaders || [],
+          rows: draftData.previewRows || [],
+          summary: draftData.previewSummary || { matchedCount: 0, baseUnmatchedCount: 0, detailOnlyCount: 0 },
+          config: draftData.previewConfig || {}
+        });
+        setSheetJoinVisibleColumns(draftData.headers || draftData.previewHeaders || []);
+        setActiveSheetJoinComparisonId(item.id);
+        setSheetJoinStage('preview');
+        setSheetJoinDialogOpen(true);
+      } else {
+        setError('Could not load preview data for this saved merge book.');
+      }
+    } catch (err) {
+      console.error('Error viewing saved merge book:', err);
+      setError('Failed to preview saved merge book.');
+    }
+  }, [openSheetJoinDraftDb, sheetJoinDraftStoreName]);
+
+  const handleUnselectSavedSheetJoinComparison = useCallback((e) => {
+    if (e) e.stopPropagation();
+    if (previousClientState) {
+      setUserFile(previousClientState.userFile);
+      setClientWorkbook(previousClientState.clientWorkbook);
+      setClientSheetNames(previousClientState.clientSheetNames);
+      setSelectedClientSheet(previousClientState.selectedClientSheet);
+      setClientHeaderRow(previousClientState.clientHeaderRow);
+      if (previousClientState.clientHeaderPreview) setClientHeaderPreview(previousClientState.clientHeaderPreview);
+      if (previousClientState.clientHeaderAutoDetected !== undefined) setClientHeaderAutoDetected(previousClientState.clientHeaderAutoDetected);
+      setPreviousClientState(null);
+    } else {
+      setUserFile(null);
+      setClientWorkbook(null);
+      setClientSheetNames([]);
+      setSelectedClientSheet('');
+    }
+    setActiveSheetJoinComparisonId(null);
+  }, [previousClientState]);
+
+  const handleDeleteSavedSheetJoinComparison = useCallback(async (itemId, e) => {
+    if (e) e.stopPropagation();
+    try {
+      const db = await openSheetJoinDraftDb();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(sheetJoinDraftStoreName, 'readwrite');
+        tx.objectStore(sheetJoinDraftStoreName).delete(itemId);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+      db.close();
+      const updatedList = savedSheetJoinComparisons.filter(item => item.id !== itemId);
+      localStorage.setItem(sheetJoinComparisonListKey, JSON.stringify(updatedList));
+      setSavedSheetJoinComparisons(updatedList);
+      if (activeSheetJoinComparisonId === itemId) {
+        setActiveSheetJoinComparisonId(null);
+      }
+      setSuccess('Saved merge book deleted.');
+    } catch (err) {
+      console.error('Error deleting saved merge book:', err);
+    }
+  }, [openSheetJoinDraftDb, sheetJoinDraftStoreName, savedSheetJoinComparisons, sheetJoinComparisonListKey, activeSheetJoinComparisonId]);
 
   const getSheetHeaders = useCallback((sheetName, headerRow = 1) => {
     if (!clientWorkbook || !sheetName || !clientWorkbook.Sheets[sheetName]) return [];
@@ -1935,7 +2144,7 @@ const UploadFiles = () => {
               <Chip
                 label={wizardStep === 0 ? "Step 1 of 2 • Files" : "Step 2 of 2 • Options"}
                 size="small"
-                sx={{ height: 22, fontSize: '11px', fontWeight: 700, bgcolor: 'rgba(37, 99, 235, 0.2)', color: '#60a5fa', border: '1px solid rgba(37, 99, 235, 0.4)', borderRadius: '999px' }}
+                sx={{ height: 22, fontSize: '11px', fontWeight: 700, bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.2)' : 'rgba(37, 99, 235, 0.1)', color: isDarkMode ? '#60a5fa' : '#1d4ed8', border: isDarkMode ? '1px solid rgba(37, 99, 235, 0.4)' : '1px solid rgba(37, 99, 235, 0.25)', borderRadius: '999px' }}
               />
             </Box>
             <Typography variant="caption" sx={{ color: Nn.muted, fontSize: '0.85rem' }}>
@@ -1945,7 +2154,7 @@ const UploadFiles = () => {
           {/* Progress bar */}
           <Box sx={{ display: 'flex', gap: 0.5, width: 80, mt: 1 }}>
             <Box sx={{ height: 4, flex: 1, borderRadius: 2, bgcolor: '#2563eb' }} />
-            <Box sx={{ height: 4, flex: 1, borderRadius: 2, bgcolor: wizardStep === 1 ? '#2563eb' : 'rgba(255,255,255,0.15)' }} />
+            <Box sx={{ height: 4, flex: 1, borderRadius: 2, bgcolor: wizardStep === 1 ? '#2563eb' : (isDarkMode ? 'rgba(255,255,255,0.15)' : 'rgba(15,23,42,0.12)') }} />
           </Box>
         </Box>
 
@@ -1963,12 +2172,173 @@ const UploadFiles = () => {
         {/* STEP 1: Files Selection */}
         {wizardStep === 0 && (
           <Box sx={{ display: 'flex', flexDirection: 'column', flex: 1, justifyContent: 'space-between' }}>
+            {/* Saved Merge Books Section */}
+            {savedSheetJoinComparisons.length > 0 && (
+              <Box
+                sx={{
+                  mb: 2.5,
+                  p: 2,
+                  borderRadius: '16px',
+                  border: isDarkMode ? '1px solid rgba(59, 130, 246, 0.3)' : '1px solid rgba(37, 99, 235, 0.2)',
+                  bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.75)' : '#f0f7ff',
+                  backdropFilter: 'blur(12px)',
+                  boxShadow: '0 4px 16px rgba(0,0,0,0.1)'
+                }}
+              >
+                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1.5 }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <LibraryBooksIcon sx={{ color: '#3b82f6', fontSize: 20 }} />
+                    <Typography variant="subtitle2" sx={{ fontWeight: 700, color: Nn.text, fontSize: '13.5px' }}>
+                      Saved Merge Books ({savedSheetJoinComparisons.length})
+                    </Typography>
+                  </Box>
+                  <Typography variant="caption" sx={{ color: Nn.muted, fontSize: '11px' }}>
+                    Click any saved merge book to load it directly as your client file
+                  </Typography>
+                </Box>
+
+                <Box
+                  sx={{
+                    display: 'flex',
+                    gap: 1.5,
+                    overflowX: 'auto',
+                    py: 0.5,
+                    px: 0.2,
+                    '&::-webkit-scrollbar': { height: '6px' },
+                    '&::-webkit-scrollbar-track': { background: 'transparent' },
+                    '&::-webkit-scrollbar-thumb': {
+                      backgroundColor: isDarkMode ? 'rgba(255,255,255,0.18)' : 'rgba(0,0,0,0.18)',
+                      borderRadius: '4px'
+                    }
+                  }}
+                >
+                  {[...savedSheetJoinComparisons]
+                    .sort((a, b) => new Date(b.savedAt || 0) - new Date(a.savedAt || 0))
+                    .map((item) => {
+                      const isSelected = activeSheetJoinComparisonId === item.id;
+                      return (
+                        <Box
+                          key={item.id}
+                          onClick={() => {
+                            if (isSelected) {
+                              handleUnselectSavedSheetJoinComparison();
+                            } else {
+                              handleSelectSavedSheetJoinComparison(item);
+                            }
+                          }}
+                          sx={{
+                            minWidth: 270,
+                            maxWidth: 310,
+                            flexShrink: 0,
+                            p: 1.5,
+                            borderRadius: '12px',
+                            cursor: 'pointer',
+                            border: isSelected ? '2px solid #2563eb' : (isDarkMode ? '1px solid rgba(255,255,255,0.12)' : '1px solid #cbd5e1'),
+                            bgcolor: isSelected
+                              ? (isDarkMode ? 'rgba(37, 99, 235, 0.25)' : '#dbeafe')
+                              : (isDarkMode ? '#0f172a' : '#ffffff'),
+                            transition: 'all 0.2s ease',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            position: 'relative',
+                            '&:hover': {
+                              borderColor: '#2563eb',
+                              transform: 'translateY(-1px)',
+                              boxShadow: '0 4px 12px rgba(37, 99, 235, 0.15)'
+                            }
+                          }}
+                        >
+                          <Box sx={{ overflow: 'hidden', pr: 1, flex: 1 }}>
+                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, mb: 0.25 }}>
+                              <Typography
+                                variant="body2"
+                                sx={{
+                                  fontWeight: 700,
+                                  color: isSelected ? '#2563eb' : Nn.text,
+                                  fontSize: '12.5px',
+                                  whiteSpace: 'nowrap',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis'
+                                }}
+                              >
+                                {item.name || item.filename}
+                              </Typography>
+                              {isSelected && (
+                                <Chip
+                                  label="Selected"
+                                  size="small"
+                                  sx={{ height: 16, fontSize: '9px', fontWeight: 800, bgcolor: '#2563eb', color: '#ffffff', px: 0.5 }}
+                                />
+                              )}
+                            </Box>
+                            <Typography variant="caption" sx={{ color: Nn.muted, fontSize: '11px', display: 'block' }}>
+                              {item.rowCount ? `${item.rowCount} rows` : ''} {item.savedAt ? `• ${new Date(item.savedAt).toLocaleDateString()}` : ''}
+                            </Typography>
+                          </Box>
+
+                          {/* Action Buttons: View Preview | Unselect or Delete */}
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.2 }}>
+                            {/* 1. View/Preview Sheet */}
+                            <Tooltip title="View sheet data" arrow placement="top">
+                              <IconButton
+                                size="small"
+                                onClick={(e) => handleViewSavedSheetJoinComparison(item, e)}
+                                sx={{
+                                  color: isDarkMode ? '#94a3b8' : '#64748b',
+                                  p: 0.5,
+                                  '&:hover': { color: '#3b82f6', bgcolor: 'rgba(59, 130, 246, 0.12)' }
+                                }}
+                              >
+                                <VisibilityIcon fontSize="small" />
+                              </IconButton>
+                            </Tooltip>
+
+                            {/* 2. If selected: Unselect button (removes selection, doesn't delete book) */}
+                            {isSelected ? (
+                              <Tooltip title="Unselect merge sheet" arrow placement="top">
+                                <IconButton
+                                  size="small"
+                                  onClick={(e) => handleUnselectSavedSheetJoinComparison(e)}
+                                  sx={{
+                                    color: '#2563eb',
+                                    p: 0.5,
+                                    '&:hover': { color: '#ef4444', bgcolor: 'rgba(239, 68, 68, 0.12)' }
+                                  }}
+                                >
+                                  <CloseIcon fontSize="small" />
+                                </IconButton>
+                              </Tooltip>
+                            ) : (
+                              /* 3. If not selected: Delete trash icon */
+                              <Tooltip title="Delete saved book" arrow placement="top">
+                                <IconButton
+                                  size="small"
+                                  onClick={(e) => handleDeleteSavedSheetJoinComparison(item.id, e)}
+                                  sx={{
+                                    color: isDarkMode ? '#64748b' : '#94a3b8',
+                                    p: 0.5,
+                                    '&:hover': { color: '#ef4444', bgcolor: 'rgba(239, 68, 68, 0.12)' }
+                                  }}
+                                >
+                                  <DeleteOutlineIcon fontSize="small" />
+                                </IconButton>
+                              </Tooltip>
+                            )}
+                          </Box>
+                        </Box>
+                      );
+                    })}
+                </Box>
+              </Box>
+            )}
+
             <Grid container spacing={2.5}>
               {/* Client File Dropzone Column */}
               <Grid item xs={12} md={6}>
                 <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 700, fontSize: 14, mb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
                   Client File
-                  <Chip label="Required" size="small" sx={{ height: 20, fontSize: 11, bgcolor: 'rgba(37, 99, 235, 0.2)', color: '#60a5fa', fontWeight: 700 }} />
+                  <Chip label="Required" size="small" sx={{ height: 20, fontSize: 11, bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.2)' : 'rgba(37, 99, 235, 0.1)', color: isDarkMode ? '#60a5fa' : '#1d4ed8', fontWeight: 700 }} />
                 </Typography>
 
                 <Box
@@ -2019,20 +2389,23 @@ const UploadFiles = () => {
                     variant="contained"
                     size="small"
                     sx={{
-                      bgcolor: isDarkMode ? 'rgba(255,255,255,0.12)' : '#ffffff',
-                      color: isDarkMode ? '#ffffff' : '#1e293b',
-                      fontWeight: 600,
-                      borderRadius: '20px',
+                      background: userFile
+                        ? 'linear-gradient(135deg, #16a34a 0%, #059669 100%)'
+                        : 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
+                      color: '#ffffff !important',
+                      fontWeight: 800,
+                      borderRadius: '999px',
                       px: 2.5,
                       py: 0.7,
                       fontSize: '0.85rem',
                       textTransform: 'none',
-                      border: isDarkMode ? '1px solid rgba(255,255,255,0.18)' : '1px solid rgba(15,23,42,0.15)',
-                      boxShadow: 'none',
+                      border: 'none',
+                      boxShadow: userFile ? '0 12px 24px -16px rgba(22, 163, 74, 0.9)' : '0 12px 24px -16px rgba(37, 99, 235, 0.9)',
                       '&:hover': {
-                        bgcolor: isDarkMode ? 'rgba(255,255,255,0.2)' : '#f1f5f9',
-                        boxShadow: 'none',
-                        border: isDarkMode ? '1px solid rgba(255,255,255,0.3)' : '1px solid rgba(15,23,42,0.25)'
+                        background: userFile
+                          ? 'linear-gradient(135deg, #15803d 0%, #047857 100%)'
+                          : 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
+                        boxShadow: userFile ? '0 16px 30px -18px rgba(22, 163, 74, 0.95)' : '0 16px 30px -18px rgba(37, 99, 235, 0.95)'
                       }
                     }}
                   >
@@ -2150,9 +2523,22 @@ const UploadFiles = () => {
                                 setSheetJoinStage('match');
                                 setSheetJoinDialogOpen(true);
                               }}
-                              sx={{ textTransform: 'none', borderRadius: '8px', fontSize: 12, fontWeight: 700, borderColor: 'rgba(96, 165, 250, 0.4)', color: '#60a5fa' }}
+                              sx={{
+                                textTransform: 'none',
+                                borderRadius: '999px',
+                                px: 2,
+                                fontSize: 12,
+                                fontWeight: 800,
+                                borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.45)' : 'rgba(37, 99, 235, 0.28)',
+                                color: isDarkMode ? '#93c5fd' : '#2563eb',
+                                bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff',
+                                '&:hover': {
+                                  borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.7)' : 'rgba(37, 99, 235, 0.45)',
+                                  bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.18)' : '#dbeafe'
+                                }
+                              }}
                             >
-                              + MERGE SHEETS
+                              MERGE SHEETS
                             </Button>
                           </Box>
                         )}
@@ -2217,20 +2603,23 @@ const UploadFiles = () => {
                     variant="contained"
                     size="small"
                     sx={{
-                      bgcolor: isDarkMode ? 'rgba(255,255,255,0.12)' : '#ffffff',
-                      color: isDarkMode ? '#ffffff' : '#1e293b',
-                      fontWeight: 600,
-                      borderRadius: '20px',
+                      background: templateFile
+                        ? 'linear-gradient(135deg, #0891b2 0%, #0284c7 100%)'
+                        : 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
+                      color: '#ffffff !important',
+                      fontWeight: 800,
+                      borderRadius: '999px',
                       px: 2.5,
                       py: 0.7,
                       fontSize: '0.85rem',
                       textTransform: 'none',
-                      border: isDarkMode ? '1px solid rgba(255,255,255,0.18)' : '1px solid rgba(15,23,42,0.15)',
-                      boxShadow: 'none',
+                      border: 'none',
+                      boxShadow: templateFile ? '0 12px 24px -16px rgba(8, 145, 178, 0.9)' : '0 12px 24px -16px rgba(37, 99, 235, 0.9)',
                       '&:hover': {
-                        bgcolor: isDarkMode ? 'rgba(255,255,255,0.2)' : '#f1f5f9',
-                        boxShadow: 'none',
-                        border: isDarkMode ? '1px solid rgba(255,255,255,0.3)' : '1px solid rgba(15,23,42,0.25)'
+                        background: templateFile
+                          ? 'linear-gradient(135deg, #0e7490 0%, #0369a1 100%)'
+                          : 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
+                        boxShadow: templateFile ? '0 16px 30px -18px rgba(8, 145, 178, 0.95)' : '0 16px 30px -18px rgba(37, 99, 235, 0.95)'
                       }
                     }}
                   >
@@ -2331,22 +2720,24 @@ const UploadFiles = () => {
                 onClick={() => userFile ? setWizardStep(1) : setError('Please select a client file')}
                 disabled={!userFile}
                 sx={{
-                  borderRadius: '20px',
-                  fontWeight: 600,
+                  borderRadius: '999px',
+                  fontWeight: 800,
                   px: 3.5,
                   py: 0.9,
                   textTransform: 'none',
+                  background: userFile ? 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)' : (isDarkMode ? 'rgba(255,255,255,0.06)' : '#e2e8f0'),
                   bgcolor: userFile ? '#2563eb' : (isDarkMode ? 'rgba(255,255,255,0.06)' : '#e2e8f0'),
-                  color: userFile ? '#ffffff' : (isDarkMode ? '#64748b' : '#94a3b8'),
+                  color: userFile ? '#ffffff !important' : (isDarkMode ? '#64748b' : '#94a3b8'),
                   border: userFile ? 'none' : (isDarkMode ? '1px solid rgba(255,255,255,0.08)' : '1px solid rgba(15,23,42,0.12)'),
-                  boxShadow: userFile ? '0 4px 14px rgba(37, 99, 235, 0.35)' : 'none',
+                  boxShadow: userFile ? '0 14px 28px -16px rgba(37, 99, 235, 0.9)' : 'none',
                   '&.Mui-disabled': {
                     bgcolor: isDarkMode ? 'rgba(255,255,255,0.06)' : '#e2e8f0',
                     color: isDarkMode ? '#64748b' : '#94a3b8'
                   },
                   '&:hover': {
+                    background: userFile ? 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)' : (isDarkMode ? 'rgba(255,255,255,0.06)' : '#e2e8f0'),
                     bgcolor: userFile ? '#1d4ed8' : (isDarkMode ? 'rgba(255,255,255,0.06)' : '#e2e8f0'),
-                    boxShadow: userFile ? '0 6px 18px rgba(37, 99, 235, 0.45)' : 'none'
+                    boxShadow: userFile ? '0 18px 34px -18px rgba(37, 99, 235, 0.95)' : 'none'
                   }
                 }}
               >
@@ -2473,12 +2864,11 @@ const UploadFiles = () => {
                 ← Back
               </Button>
               <Button
-                className="gradient-btn"
                 variant="contained"
                 onClick={handleUpload}
                 disabled={loading}
                 startIcon={loading ? <CircularProgress size={16} color="inherit" /> : null}
-                sx={{ borderRadius: '10px', fontWeight: 700, px: 4, py: 0.9, textTransform: 'none' }}
+                sx={{ ...primaryPillSx, px: 4, py: 0.9 }}
               >
                 {loading ? 'Processing...' : 'Process Upload →'}
               </Button>
@@ -2487,34 +2877,38 @@ const UploadFiles = () => {
         )}
       </Box>
 
-
-
+      {/* Merge Sheets Dialog */}
       <Dialog
         open={sheetJoinDialogOpen}
         onClose={handleCloseSheetJoinSetup}
-        fullScreen={sheetJoinStage === 'preview'}
-        maxWidth={sheetJoinStage === 'preview' ? false : 'md'}
+        maxWidth="md"
         fullWidth
+        PaperProps={{
+          sx: {
+            ...dialogPaperSx,
+            width: 'min(980px, calc(100vw - 48px))',
+          }
+        }}
       >
-        <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2 }}>
+        <DialogTitle sx={{ ...dialogHeaderSx, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
           <Box>
-            <Typography variant="h6" fontWeight="600">
+            <Typography variant="h5" fontWeight="800" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a', letterSpacing: '-0.01em', fontSize: '1.25rem' }}>
               Merge Sheets
             </Typography>
-            <Typography variant="body2" color="text.secondary">
+            <Typography variant="caption" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', fontSize: '0.82rem' }}>
               Merge related sheet data before template mapping
             </Typography>
           </Box>
-          <IconButton onClick={handleCloseSheetJoinSetup}>
+          <IconButton onClick={handleCloseSheetJoinSetup} sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', '&:hover': { color: isDarkMode ? '#ffffff' : '#0f172a', bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.05)' } }}>
             <CloseIcon />
           </IconButton>
         </DialogTitle>
-        <DialogContent sx={{ pt: 3 }}>
+        <DialogContent sx={dialogBodySx}>
           {sheetJoinStage === 'match' && (
-            <Grid container spacing={2.5}>
+            <Grid container spacing={2.5} sx={{ py: 1 }}>
               <Grid item xs={12} md={6}>
                 <FormControl fullWidth size="small" sx={{ mt: 1 }}>
-                  <InputLabel>Primary sheet</InputLabel>
+                  <InputLabel sx={{ color: isDarkMode ? '#94a3b8' : '#475569' }}>Primary sheet</InputLabel>
                   <Select
                     label="Primary sheet"
                     value={sheetJoinConfig.baseSheet}
@@ -2530,6 +2924,7 @@ const UploadFiles = () => {
                         copiedBaseColumns: defaultCopiedBaseColumns(baseHeaders)
                       }));
                     }}
+                    sx={selectFieldSx}
                   >
                     {clientSheetNames.map(sheet => (
                       <MenuItem key={sheet} value={sheet}>{sheet}</MenuItem>
@@ -2539,7 +2934,7 @@ const UploadFiles = () => {
               </Grid>
               <Grid item xs={12} md={6}>
                 <FormControl fullWidth size="small" sx={{ mt: 1 }}>
-                  <InputLabel>Secondary sheet</InputLabel>
+                  <InputLabel sx={{ color: isDarkMode ? '#94a3b8' : '#475569' }}>Secondary sheet</InputLabel>
                   <Select
                     label="Secondary sheet"
                     value={sheetJoinConfig.detailSheet}
@@ -2556,6 +2951,7 @@ const UploadFiles = () => {
                         uniqueIdDetailColumn: detailColumns[0] || detailKey
                       }));
                     }}
+                    sx={selectFieldSx}
                   >
                     {clientSheetNames.map(sheet => (
                       <MenuItem key={sheet} value={sheet}>{sheet}</MenuItem>
@@ -2582,6 +2978,8 @@ const UploadFiles = () => {
                       copiedBaseColumns: defaultCopiedBaseColumns(headers)
                     }));
                   }}
+                  InputLabelProps={{ style: { color: isDarkMode ? '#94a3b8' : '#475569' } }}
+                  sx={fieldSx}
                 />
               </Grid>
               <Grid item xs={12} md={6}>
@@ -2604,11 +3002,13 @@ const UploadFiles = () => {
                       uniqueIdDetailColumn: detailColumns[0] || detailKey
                     }));
                   }}
+                  InputLabelProps={{ style: { color: isDarkMode ? '#94a3b8' : '#475569' } }}
+                  sx={fieldSx}
                 />
               </Grid>
               <Grid item xs={12} md={6}>
                 <FormControl fullWidth size="small">
-                  <InputLabel>Common column to match on</InputLabel>
+                  <InputLabel sx={{ color: isDarkMode ? '#94a3b8' : '#475569' }}>Common column to match on</InputLabel>
                   <Select
                     label="Common column to match on"
                     value={sheetJoinConfig.baseKey}
@@ -2617,6 +3017,7 @@ const UploadFiles = () => {
                       baseKey: event.target.value,
                       uniqueIdBaseColumn: event.target.value
                     }))}
+                    sx={selectFieldSx}
                   >
                     {sheetJoinBaseHeaders.map(header => (
                       <MenuItem key={header} value={header}>{header}</MenuItem>
@@ -2626,7 +3027,7 @@ const UploadFiles = () => {
               </Grid>
               <Grid item xs={12} md={6}>
                 <FormControl fullWidth size="small">
-                  <InputLabel>Matching column in secondary sheet</InputLabel>
+                  <InputLabel sx={{ color: isDarkMode ? '#94a3b8' : '#475569' }}>Matching column in secondary sheet</InputLabel>
                   <Select
                     label="Matching column in secondary sheet"
                     value={sheetJoinConfig.detailKey}
@@ -2639,6 +3040,7 @@ const UploadFiles = () => {
                         uniqueIdDetailColumn: prev.uniqueIdDetailColumn || detailKey
                       }));
                     }}
+                    sx={selectFieldSx}
                   >
                     {sheetJoinDetailHeaders.map(header => (
                       <MenuItem key={header} value={header}>{header}</MenuItem>
@@ -2650,9 +3052,9 @@ const UploadFiles = () => {
           )}
 
           {sheetJoinStage === 'options' && (
-            <Grid container spacing={2.5}>
+            <Grid container spacing={2.5} sx={{ py: 1 }}>
               <Grid item xs={12}>
-                <Typography variant="subtitle1" fontWeight="600" gutterBottom>
+                <Typography variant="subtitle1" fontWeight="600" sx={{ color: isDarkMode ? '#ffffff' : '#0f172a' }} gutterBottom>
                   Output format
                 </Typography>
                 <RadioGroup
@@ -2660,24 +3062,24 @@ const UploadFiles = () => {
                   value={sheetJoinConfig.outputMode}
                   onChange={(event) => setSheetJoinConfig(prev => ({ ...prev, outputMode: event.target.value }))}
                 >
-                  <FormControlLabel value="grouped" control={<Radio size="small" />} label={`Add all related ${sheetJoinDetailLabel} in the same cell`} />
-                  <FormControlLabel value="expanded" control={<Radio size="small" />} label={`Create a separate row for each ${sheetJoinDetailSingularLabel}`} />
+                  <FormControlLabel value="grouped" control={<Radio size="small" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', '&.Mui-checked': { color: '#2563eb' } }} />} label={`Add all related ${sheetJoinDetailLabel} in the same cell`} sx={{ color: isDarkMode ? '#cbd5e1' : '#334155' }} />
+                  <FormControlLabel value="expanded" control={<Radio size="small" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', '&.Mui-checked': { color: '#2563eb' } }} />} label={`Create a separate row for each ${sheetJoinDetailSingularLabel}`} sx={{ color: isDarkMode ? '#cbd5e1' : '#334155' }} />
                 </RadioGroup>
               </Grid>
 
               <Grid item xs={12}>
                 <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
-                  <Typography variant="subtitle1" fontWeight="600">
+                  <Typography variant="subtitle1" fontWeight="600" sx={{ color: isDarkMode ? '#ffffff' : '#0f172a' }}>
                     Columns to bring from secondary sheet
                   </Typography>
                   <Box>
                     <Button size="small" onClick={() => setSheetJoinConfig(prev => ({
                       ...prev,
                       detailColumns: sheetJoinDetailHeaders.filter(header => header !== prev.detailKey)
-                    }))}>
+                    }))} sx={{ color: '#2563eb' }}>
                       Select all
                     </Button>
-                    <Button size="small" onClick={() => setSheetJoinConfig(prev => ({ ...prev, detailColumns: [] }))}>
+                    <Button size="small" onClick={() => setSheetJoinConfig(prev => ({ ...prev, detailColumns: [] }))} sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
                       Clear
                     </Button>
                   </Box>
@@ -2705,115 +3107,220 @@ const UploadFiles = () => {
                                   : prev.detailColumns.filter(column => column !== header)
                               }));
                             }}
+                            sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', '&.Mui-checked': { color: '#2563eb' } }}
                           />
                         }
                         label={header}
+                        sx={{ color: isDarkMode ? '#cbd5e1' : '#334155' }}
                       />
                     ))}
                 </FormGroup>
               </Grid>
-
             </Grid>
           )}
 
           {sheetJoinStage === 'preview' && sheetJoinPreview && (
             <Box>
-              <Grid container spacing={1.5} sx={{ mb: 2 }}>
-                <Grid item xs={6} md={3}>
-                  <Chip
-                    label={`${sheetJoinPreview.summary.outputRows} output rows`}
-                    color={sheetJoinPreviewFilter === 'all' ? 'primary' : 'default'}
-                    variant={sheetJoinPreviewFilter === 'all' ? 'filled' : 'outlined'}
-                    onClick={() => {
-                      setSheetJoinPreviewFilter('all');
-                      setSheetJoinPreviewPage(0);
-                    }}
-                    clickable
-                  />
-                </Grid>
-                <Grid item xs={6} md={3}>
-                  <Chip
-                    color="success"
-                    label={`${sheetJoinPreview.summary.matchedBaseRows} matched`}
-                    variant={sheetJoinPreviewFilter === 'matched' ? 'filled' : 'outlined'}
-                    onClick={() => {
-                      setSheetJoinPreviewFilter('matched');
-                      setSheetJoinPreviewPage(0);
-                    }}
-                    clickable
-                  />
-                </Grid>
-                <Grid item xs={6} md={3}>
-                  <Chip
-                    color="warning"
-                    label={`${sheetJoinPreview.summary.unmatchedBaseRows} unmatched`}
-                    variant={sheetJoinPreviewFilter === 'unmatched' ? 'filled' : 'outlined'}
-                    onClick={() => {
-                      setSheetJoinPreviewFilter('unmatched');
-                      setSheetJoinPreviewPage(0);
-                    }}
-                    clickable
-                  />
-                </Grid>
-                <Grid item xs={6} md={3}><Chip label={`${sheetJoinPreview.summary.orphanDetailKeys} secondary-only keys`} /></Grid>
-              </Grid>
-              <Alert severity="info" sx={{ mb: 2 }}>
-                Preview keeps the full merged data. Showing {visibleSheetJoinPreviewRows.length ? sheetJoinPreviewStart + 1 : 0}-{Math.min(sheetJoinPreviewStart + visibleSheetJoinPreviewRows.length, sheetJoinFilteredPreviewRows.length)} of {sheetJoinFilteredPreviewRows.length} rows to keep the page responsive.
-              </Alert>
-              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 2, mb: 1 }}>
-                <Button
-                  size="small"
-                  variant="outlined"
-                  disabled={sheetJoinPreviewPage === 0}
-                  onClick={() => setSheetJoinPreviewPage(page => Math.max(0, page - 1))}
+              {/* Metrics Summary Chips */}
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.5, mb: 2, alignItems: 'center' }}>
+                <Chip
+                  label={`${sheetJoinPreview.summary.outputRows} output rows`}
+                  sx={{
+                    height: 28,
+                    px: 1,
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    bgcolor: '#2563eb',
+                    color: '#ffffff',
+                    border: '1px solid #3b82f6',
+                    borderRadius: '999px',
+                    cursor: 'pointer'
+                  }}
+                  onClick={() => {
+                    setSheetJoinPreviewFilter('all');
+                    setSheetJoinPreviewPage(0);
+                  }}
+                />
+                <Chip
+                  label={`${sheetJoinPreview.summary.matchedBaseRows} matched`}
+                  sx={{
+                    height: 28,
+                    px: 1,
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    bgcolor: sheetJoinPreviewFilter === 'matched' ? 'rgba(16, 185, 129, 0.3)' : (isDarkMode ? 'rgba(16, 185, 129, 0.1)' : '#d1fae5'),
+                    color: isDarkMode ? '#34d399' : '#047857',
+                    border: '1px solid #10b981',
+                    borderRadius: '999px',
+                    cursor: 'pointer'
+                  }}
+                  onClick={() => {
+                    setSheetJoinPreviewFilter('matched');
+                    setSheetJoinPreviewPage(0);
+                  }}
+                />
+                <Chip
+                  label={`${sheetJoinPreview.summary.unmatchedBaseRows} unmatched`}
+                  sx={{
+                    height: 28,
+                    px: 1,
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    bgcolor: sheetJoinPreviewFilter === 'unmatched' ? 'rgba(245, 158, 11, 0.3)' : (isDarkMode ? 'rgba(245, 158, 11, 0.1)' : '#fef3c7'),
+                    color: isDarkMode ? '#fbbf24' : '#b45309',
+                    border: '1px solid #f59e0b',
+                    borderRadius: '999px',
+                    cursor: 'pointer'
+                  }}
+                  onClick={() => {
+                    setSheetJoinPreviewFilter('unmatched');
+                    setSheetJoinPreviewPage(0);
+                  }}
+                />
+                <Chip
+                  label={`${sheetJoinPreview.summary.orphanDetailKeys} secondary-only keys`}
+                  sx={{
+                    height: 28,
+                    px: 1,
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.05)' : '#f1f5f9',
+                    color: isDarkMode ? '#94a3b8' : '#475569',
+                    border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.15)' : '1px solid #cbd5e1',
+                    borderRadius: '999px'
+                  }}
+                />
+              </Box>
+
+              {/* Info Alert & Right-Aligned Controls Row */}
+              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 1.5, mb: 1.5 }}>
+                {/* Compact Rounded Pill Info Box */}
+                <Alert
+                  severity="info"
+                  sx={{
+                    py: 0.3,
+                    px: 2,
+                    borderRadius: '999px',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    bgcolor: isDarkMode ? 'rgba(14, 165, 233, 0.12)' : '#e0f2fe',
+                    color: isDarkMode ? '#bae6fd' : '#0369a1',
+                    border: isDarkMode ? '1px solid rgba(56, 189, 248, 0.25)' : '1px solid #7dd3fc',
+                    fontSize: '11.5px',
+                    lineHeight: 1.2,
+                    maxWidth: 'fit-content',
+                    '& .MuiAlert-icon': { py: 0, mr: 1, fontSize: '16px' },
+                    '& .MuiAlert-message': { p: 0 }
+                  }}
                 >
-                  Previous
-                </Button>
-                <Typography variant="body2" color="text.secondary">
-                  Page {sheetJoinPreviewPage + 1} of {sheetJoinPreviewTotalPages}
-                </Typography>
-                <FormControl size="small" sx={{ minWidth: 260 }}>
-                  <InputLabel>Visible columns</InputLabel>
-                  <Select
-                    multiple
-                    label="Visible columns"
-                    value={sheetJoinVisibleColumns}
-                    onChange={(event) => {
-                      const value = event.target.value;
-                      const selected = (typeof value === 'string' ? value.split(',') : value).filter(column => column !== '__all__');
-                      setSheetJoinVisibleColumns(selected);
-                    }}
-                    renderValue={(selected) => `${selected.length} columns shown`}
-                  >
-                    <MenuItem
-                      value="__all__"
-                      onClick={(event) => {
-                        event.preventDefault();
-                        setSheetJoinVisibleColumns(sheetJoinPreview.headers);
+                  Preview keeps the full merged data. Showing {visibleSheetJoinPreviewRows.length ? sheetJoinPreviewStart + 1 : 0}-{Math.min(sheetJoinPreviewStart + visibleSheetJoinPreviewRows.length, sheetJoinFilteredPreviewRows.length)} of {sheetJoinFilteredPreviewRows.length} rows to keep the page responsive.
+                </Alert>
+
+                {/* Right-Aligned Control Group: Select + Left Icon + Page X of Y + Right Icon */}
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.2, ml: 'auto' }}>
+                  {/* 1. Visible Columns Dropdown */}
+                  <FormControl size="small" sx={{ minWidth: 190 }}>
+                    <Select
+                      multiple
+                      value={sheetJoinVisibleColumns}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        const selected = (typeof value === 'string' ? value.split(',') : value).filter(column => column !== '__all__');
+                        setSheetJoinVisibleColumns(selected);
+                      }}
+                      renderValue={(selected) => `${selected.length} columns shown`}
+                      sx={{
+                        height: 34,
+                        fontSize: '12px',
+                        fontWeight: 600,
+                        bgcolor: isDarkMode ? '#1e293b' : '#f8fafc',
+                        color: isDarkMode ? '#ffffff' : '#0f172a',
+                        borderRadius: '10px',
+                        border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.18)' : '1px solid #cbd5e1',
+                        '& .MuiSelect-icon': { color: isDarkMode ? '#94a3b8' : '#64748b' }
                       }}
                     >
-                      <Checkbox checked={sheetJoinVisibleColumns.length === sheetJoinPreview.headers.length} />
-                      Show all columns
-                    </MenuItem>
-                    {sheetJoinPreview.headers.map(header => (
-                      <MenuItem key={header} value={header}>
-                        <Checkbox checked={sheetJoinVisibleColumns.includes(header)} />
-                        {header}
+                      <MenuItem
+                        value="__all__"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          setSheetJoinVisibleColumns(sheetJoinPreview.headers);
+                        }}
+                      >
+                        <Checkbox checked={sheetJoinVisibleColumns.length === sheetJoinPreview.headers.length} size="small" />
+                        Show all columns
                       </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-                <Button
-                  size="small"
-                  variant="outlined"
-                  disabled={sheetJoinPreviewPage >= sheetJoinPreviewTotalPages - 1}
-                  onClick={() => setSheetJoinPreviewPage(page => Math.min(sheetJoinPreviewTotalPages - 1, page + 1))}
-                >
-                  Next
-                </Button>
+                      {sheetJoinPreview.headers.map(header => (
+                        <MenuItem key={header} value={header}>
+                          <Checkbox checked={sheetJoinVisibleColumns.includes(header)} size="small" />
+                          {header}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+
+                  {/* 2. Left Button Icon Rounded */}
+                  <IconButton
+                    size="small"
+                    disabled={sheetJoinPreviewPage === 0}
+                    onClick={() => setSheetJoinPreviewPage(page => Math.max(0, page - 1))}
+                    sx={{
+                      width: 34,
+                      height: 34,
+                      borderRadius: '50%',
+                      border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.2)' : '1px solid #cbd5e1',
+                      color: isDarkMode ? '#ffffff' : '#0f172a',
+                      bgcolor: isDarkMode ? '#1e293b' : '#ffffff',
+                      boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+                      transition: 'all 0.2s ease',
+                      '&:hover:not(.Mui-disabled)': {
+                        bgcolor: '#2563eb',
+                        borderColor: '#2563eb',
+                        color: '#ffffff',
+                        transform: 'scale(1.05)'
+                      },
+                      '&.Mui-disabled': { opacity: 0.4 }
+                    }}
+                  >
+                    <ChevronLeftIcon fontSize="small" />
+                  </IconButton>
+
+                  {/* 3. Page X of Y */}
+                  <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#475569', fontSize: '12px', fontWeight: 600, px: 0.5, whiteSpace: 'nowrap' }}>
+                    Page {sheetJoinPreviewPage + 1} of {sheetJoinPreviewTotalPages}
+                  </Typography>
+
+                  {/* 4. Right Button Icon Rounded */}
+                  <IconButton
+                    size="small"
+                    disabled={sheetJoinPreviewPage >= sheetJoinPreviewTotalPages - 1}
+                    onClick={() => setSheetJoinPreviewPage(page => Math.min(sheetJoinPreviewTotalPages - 1, page + 1))}
+                    sx={{
+                      width: 34,
+                      height: 34,
+                      borderRadius: '50%',
+                      border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.2)' : '1px solid #cbd5e1',
+                      color: isDarkMode ? '#ffffff' : '#0f172a',
+                      bgcolor: isDarkMode ? '#1e293b' : '#ffffff',
+                      boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
+                      transition: 'all 0.2s ease',
+                      '&:hover:not(.Mui-disabled)': {
+                        bgcolor: '#2563eb',
+                        borderColor: '#2563eb',
+                        color: '#ffffff',
+                        transform: 'scale(1.05)'
+                      },
+                      '&.Mui-disabled': { opacity: 0.4 }
+                    }}
+                  >
+                    <ChevronRightIcon fontSize="small" />
+                  </IconButton>
+                </Box>
               </Box>
-              <Box sx={{ height: 'calc(100vh - 260px)', overflow: 'auto', border: '1px solid #e0e0e0', borderRadius: 1 }}>
-                <Box component="table" sx={{ width: 'max-content', minWidth: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', '& th, & td': { borderBottom: '1px solid #eee', p: 0.75 }, '& th': { position: 'sticky', top: 0, backgroundColor: '#fafafa', zIndex: 1, textAlign: 'left' } }}>
+
+              {/* Data Table */}
+              <Box sx={{ height: 'calc(100vh - 380px)', minHeight: 320, overflow: 'auto', border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.12)' : '1px solid #cbd5e1', borderRadius: '12px', bgcolor: isDarkMode ? '#0b1120' : '#ffffff', '&::-webkit-scrollbar-corner': { backgroundColor: 'transparent' } }}>
+                <Box component="table" sx={{ width: 'max-content', minWidth: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', '& th, & td': { borderBottom: isDarkMode ? '1px solid rgba(255, 255, 255, 0.08)' : '1px solid #e2e8f0', p: 0.85 }, '& th': { position: 'sticky', top: 0, backgroundColor: isDarkMode ? '#0f172a' : '#f1f5f9', zIndex: 2, textAlign: 'left' } }}>
                   <Box component="thead">
                     <Box component="tr">
                       {visibleSheetJoinPreviewColumns.map(header => (
@@ -2828,7 +3335,13 @@ const UploadFiles = () => {
                             whiteSpace: 'nowrap',
                             overflow: 'hidden',
                             textOverflow: 'ellipsis',
-                            pr: 2
+                            pr: 2,
+                            color: isDarkMode ? '#ffffff' : '#0f172a',
+                            fontWeight: 800,
+                            fontSize: '11px',
+                            letterSpacing: '0.04em',
+                            textTransform: 'uppercase',
+                            backgroundColor: isDarkMode ? '#0f172a' : '#f1f5f9'
                           }}
                         >
                           {header}
@@ -2850,9 +3363,8 @@ const UploadFiles = () => {
                     </Box>
                   </Box>
                   <Box component="tbody">
-                    {visibleSheetJoinPreviewRows.map(({ row, index: rowIndex }) => {
-                      return (
-                      <Box component="tr" key={`preview-row-${rowIndex}`}>
+                    {visibleSheetJoinPreviewRows.map(({ row, index: rowIndex }) => (
+                      <Box component="tr" key={`preview-row-${rowIndex}`} sx={{ '&:hover': { bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff' } }}>
                         {visibleSheetJoinPreviewColumns.map(header => (
                           <Box
                             component="td"
@@ -2872,7 +3384,9 @@ const UploadFiles = () => {
                                 border: 'none',
                                 outline: 'none',
                                 backgroundColor: 'transparent',
+                                color: isDarkMode ? '#ffffff' : '#0f172a',
                                 font: 'inherit',
+                                fontSize: '12px',
                                 p: 0,
                                 minWidth: 0,
                                 overflow: 'hidden',
@@ -2882,61 +3396,108 @@ const UploadFiles = () => {
                           </Box>
                         ))}
                       </Box>
-                    );})}
+                    ))}
                   </Box>
                 </Box>
               </Box>
             </Box>
           )}
         </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 3 }}>
-          <Button onClick={handleCloseSheetJoinSetup}>
-            Cancel
-          </Button>
-          {sheetJoinStage !== 'match' && (
-            <Button onClick={() => setSheetJoinStage(sheetJoinStage === 'preview' ? 'options' : 'match')}>
-              Back
+
+        <DialogActions sx={{ ...dialogFooterSx, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Box sx={{ display: 'flex', gap: 1 }}>
+            <Button onClick={handleCloseSheetJoinSetup} sx={{ ...pillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569', '&:hover': { bgcolor: isDarkMode ? '#1e293b' : '#e2e8f0' } }}>
+              Cancel
             </Button>
-          )}
-          {sheetJoinStage === 'preview' && (
-            <Button onClick={handleDownloadSheetJoinPreview}>
-              Download Preview
-            </Button>
-          )}
-          {sheetJoinStage === 'preview' && (
-            <Button variant="outlined" onClick={handleContinueWithBomMapping}>
-              Continue with BOM mapping
-            </Button>
-          )}
-          {sheetJoinStage === 'match' && (
-            <Button
-              variant="contained"
-              onClick={handleProceedSheetJoinOptions}
-              disabled={!sheetJoinConfig.baseKey || !sheetJoinConfig.detailKey || sheetJoinConfig.baseSheet === sheetJoinConfig.detailSheet}
-            >
-              Proceed
-            </Button>
-          )}
-          {sheetJoinStage === 'options' && (
-            <Button
-              variant="contained"
-              onClick={handlePreviewSheetJoin}
-              disabled={sheetJoinConfig.detailColumns.length === 0}
-            >
-              Preview
-            </Button>
-          )}
-          {sheetJoinStage === 'preview' && (
-            <Button
-              variant="contained"
-              onClick={() => {
-                setSheetJoinSaveName(sheetJoinConfig.relationshipName || `Merge ${new Date().toLocaleString()}`);
-                setSheetJoinSaveDialogOpen(true);
-              }}
-            >
-              Save Merge Book
-            </Button>
-          )}
+            {sheetJoinStage !== 'match' && (
+              <Button onClick={() => setSheetJoinStage(sheetJoinStage === 'preview' ? 'options' : 'match')} sx={{ ...pillButtonSx, color: '#2563eb', '&:hover': { bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff' } }}>
+                Back
+              </Button>
+            )}
+            {sheetJoinStage === 'preview' && (
+              <Button onClick={handleDownloadSheetJoinPreview} sx={{ ...pillButtonSx, color: '#2563eb', '&:hover': { bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff' } }}>
+                Download Preview
+              </Button>
+            )}
+          </Box>
+          <Box sx={{ display: 'flex', gap: 1.5 }}>
+            {sheetJoinStage === 'match' && (
+              <Button
+                variant="contained"
+                onClick={handleProceedSheetJoinOptions}
+                disabled={!sheetJoinConfig.baseKey || !sheetJoinConfig.detailKey || sheetJoinConfig.baseSheet === sheetJoinConfig.detailSheet}
+                sx={{ ...primaryPillSx, height: 40, px: 3 }}
+              >
+                Proceed →
+              </Button>
+            )}
+            {sheetJoinStage === 'options' && (
+              <Button
+                variant="contained"
+                onClick={handlePreviewSheetJoin}
+                disabled={sheetJoinConfig.detailColumns.length === 0}
+                sx={{ ...primaryPillSx, height: 40, px: 3 }}
+              >
+                Preview →
+              </Button>
+            )}
+            {sheetJoinStage === 'preview' && (
+              <>
+                <Button
+                  variant="contained"
+                  onClick={handleContinueWithBomMapping}
+                  sx={{
+                    height: 40,
+                    px: 2.5,
+                    ...primaryPillSx
+                  }}
+                >
+                  Continue with BOM Mapping →
+                </Button>
+                <Tooltip
+                  title={activeSheetJoinComparisonId ? "This merge book is already saved in your library" : "Save this merged data to your library"}
+                  arrow
+                  placement="top"
+                >
+                  <span>
+                    <Button
+                      variant="contained"
+                      disabled={Boolean(activeSheetJoinComparisonId)}
+                      onClick={() => {
+                        setSheetJoinSaveName(sheetJoinConfig.relationshipName || `Merge ${new Date().toLocaleString()}`);
+                        setSheetJoinSaveDialogOpen(true);
+                      }}
+                      sx={{
+                        height: 40,
+                        px: 2.5,
+                        fontWeight: 700,
+                        textTransform: 'none',
+                        borderRadius: '999px',
+                        background: activeSheetJoinComparisonId
+                          ? (isDarkMode ? 'rgba(255,255,255,0.08)' : '#e2e8f0')
+                          : 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
+                        color: activeSheetJoinComparisonId
+                          ? (isDarkMode ? '#64748b' : '#94a3b8')
+                          : '#ffffff',
+                        boxShadow: activeSheetJoinComparisonId ? 'none' : '0 0 16px rgba(37, 99, 235, 0.4)',
+                        '&.Mui-disabled': {
+                          background: isDarkMode ? 'rgba(255,255,255,0.08)' : '#e2e8f0',
+                          color: isDarkMode ? '#64748b' : '#94a3b8'
+                        },
+                        '&:hover': {
+                          background: activeSheetJoinComparisonId
+                            ? undefined
+                            : 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)'
+                        }
+                      }}
+                    >
+                      {activeSheetJoinComparisonId ? 'Already Saved' : 'Save Merge Book'}
+                    </Button>
+                  </span>
+                </Tooltip>
+              </>
+            )}
+          </Box>
         </DialogActions>
       </Dialog>
 
@@ -2945,10 +3506,13 @@ const UploadFiles = () => {
         onClose={() => !sheetJoinSaveLoading && setSheetJoinSaveDialogOpen(false)}
         maxWidth="sm"
         fullWidth
+        PaperProps={{ sx: dialogPaperSx }}
       >
-        <DialogTitle>Save Merge Book</DialogTitle>
-        <DialogContent>
-          <DialogContentText>
+        <DialogTitle sx={{ ...dialogHeaderSx, fontWeight: 700 }}>
+          Save Merge Book
+        </DialogTitle>
+        <DialogContent sx={dialogBodySx}>
+          <DialogContentText sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
             Name this merge book so you can reopen it later and continue BOM mapping from it.
           </DialogContentText>
           <TextField
@@ -2961,16 +3525,19 @@ const UploadFiles = () => {
             onChange={(event) => setSheetJoinSaveName(event.target.value)}
             error={!sheetJoinSaveName.trim()}
             helperText={!sheetJoinSaveName.trim() ? 'Merge book name is required' : 'This saves the generated merge book.'}
+            InputLabelProps={{ style: { color: isDarkMode ? '#94a3b8' : '#475569' } }}
+            sx={fieldSx}
           />
         </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setSheetJoinSaveDialogOpen(false)} disabled={sheetJoinSaveLoading}>
+        <DialogActions sx={{ ...dialogFooterSx, gap: 1 }}>
+          <Button onClick={() => setSheetJoinSaveDialogOpen(false)} disabled={sheetJoinSaveLoading} sx={{ ...pillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}>
             Cancel
           </Button>
           <Button
             variant="contained"
             onClick={handleSaveComparisonWithName}
             disabled={sheetJoinSaveLoading || !sheetJoinSaveName.trim()}
+            sx={primaryPillSx}
           >
             {sheetJoinSaveLoading ? 'Saving...' : 'Save Merge Book'}
           </Button>
@@ -2982,27 +3549,36 @@ const UploadFiles = () => {
         onClose={() => !sheetJoinSaveLoading && setSheetJoinDuplicateDialogOpen(false)}
         maxWidth="sm"
         fullWidth
+        PaperProps={{ sx: dialogPaperSx }}
       >
-        <DialogTitle>Merge Book Name Already Exists</DialogTitle>
-        <DialogContent>
-          <DialogContentText>
+        <DialogTitle sx={{ ...dialogHeaderSx, fontWeight: 700 }}>
+          Merge Book Name Already Exists
+        </DialogTitle>
+        <DialogContent sx={dialogBodySx}>
+          <DialogContentText sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
             A merge book named "{pendingSheetJoinDuplicate?.name}" is already saved. Replace the old one or keep both by saving this as a copy.
           </DialogContentText>
         </DialogContent>
-        <DialogActions>
+        <DialogActions sx={{ ...dialogFooterSx, gap: 1 }}>
           <Button
             onClick={() => {
               setSheetJoinDuplicateDialogOpen(false);
               setPendingSheetJoinDuplicate(null);
             }}
             disabled={sheetJoinSaveLoading}
+            sx={{ ...pillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}
           >
             Cancel
           </Button>
-          <Button onClick={handleSaveComparisonAsCopy} disabled={sheetJoinSaveLoading}>
+          <Button onClick={handleSaveComparisonAsCopy} disabled={sheetJoinSaveLoading} sx={{ ...pillButtonSx, color: '#2563eb' }}>
             Save as Copy
           </Button>
-          <Button variant="contained" color="warning" onClick={handleOverrideSavedComparison} disabled={sheetJoinSaveLoading}>
+          <Button variant="contained" onClick={handleOverrideSavedComparison} disabled={sheetJoinSaveLoading} sx={{
+            ...pillButtonSx,
+            bgcolor: '#f59e0b',
+            color: '#111827',
+            '&:hover': { bgcolor: '#d97706' }
+          }}>
             Override
           </Button>
         </DialogActions>
@@ -3025,27 +3601,34 @@ const UploadFiles = () => {
         onClose={handleCloseCompatibilityError}
         maxWidth="md"
         fullWidth
+        PaperProps={{ sx: dialogPaperSx }}
       >
         <DialogTitle sx={{ 
+          ...dialogHeaderSx,
           display: 'flex', 
           justifyContent: 'space-between',
           alignItems: 'center', 
-          gap: 2,
-          backgroundColor: '#fff3e0'
+          gap: 2
         }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-            <WarningIcon color="warning" fontSize="large" />
-            <Typography variant="h6" fontWeight="600" color="warning.main">
+            <WarningIcon sx={{ color: '#f59e0b' }} fontSize="large" />
+            <Typography variant="h6" fontWeight="700" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a' }}>
               Template Compatibility Issue
             </Typography>
           </Box>
-          <IconButton onClick={handleCloseCompatibilityError}>
+          <IconButton onClick={handleCloseCompatibilityError} sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
             <CloseIcon />
           </IconButton>
         </DialogTitle>
         
-        <DialogContent sx={{ pt: 3 }}>
-          <Alert severity="warning" sx={{ mb: 3 }}>
+        <DialogContent sx={{ ...dialogBodySx, pt: 2 }}>
+          <Alert severity="warning" sx={{
+            mb: 3,
+            borderRadius: '14px',
+            bgcolor: isDarkMode ? 'rgba(245, 158, 11, 0.12)' : '#fffbeb',
+            color: isDarkMode ? '#fde68a' : '#92400e',
+            border: isDarkMode ? '1px solid rgba(245, 158, 11, 0.24)' : '1px solid #fde68a'
+          }}>
             <Typography variant="subtitle1" fontWeight="600" gutterBottom>
               Template "{compatibilityErrorData?.templateName}" is not fully compatible with your uploaded files.
             </Typography>
@@ -3055,34 +3638,30 @@ const UploadFiles = () => {
           </Alert>
 
           {compatibilityErrorData?.compatibilityDetails && (
-            <Card variant="outlined" sx={{ p: 2, mb: 3, backgroundColor: '#fafafa' }}>
-              <Typography variant="subtitle2" fontWeight="600" sx={{ mb: 1 }}>
+            <Card variant="outlined" sx={{ p: 2, mb: 3, borderRadius: '16px', bgcolor: isDarkMode ? '#0f172a' : '#f8fafc', borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.18)' : '#e2e8f0' }}>
+              <Typography variant="subtitle2" fontWeight="600" sx={{ mb: 1, color: isDarkMode ? '#f8fafc' : '#0f172a' }}>
                 Compatibility Details:
               </Typography>
-              <Typography variant="body2" color="text.secondary">
+              <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
                 • Template expects: <strong>{compatibilityErrorData.compatibilityDetails.total_template_columns}</strong> columns
               </Typography>
-              <Typography variant="body2" color="text.secondary">
+              <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
                 • Successfully matched: <strong>{compatibilityErrorData.compatibilityDetails.matched_columns}</strong> columns
               </Typography>
-              <Typography variant="body2" color="text.secondary">
+              <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
                 • Compatibility rate: <strong>{Math.round(compatibilityErrorData.compatibilityDetails.success_rate * 100)}%</strong>
               </Typography>
             </Card>
           )}
 
-          <Typography variant="body1" sx={{ mb: 2 }}>
+          <Typography variant="body1" sx={{ mb: 2, color: isDarkMode ? '#e2e8f0' : '#334155', fontWeight: 600 }}>
             What would you like to do?
           </Typography>
 
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
             <Card 
               variant="outlined" 
-              sx={{ 
-                p: 3, 
-                cursor: 'pointer',
-                '&:hover': { backgroundColor: '#f5f5f5', borderColor: '#ff9800' }
-              }}
+              sx={{ ...dialogChoiceCardSx, p: 3 }}
               onClick={handleContinueAnyway}
             >
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
@@ -3091,7 +3670,7 @@ const UploadFiles = () => {
                   <Typography variant="h6" fontWeight="600">
                     Continue Anyway
                   </Typography>
-                  <Typography variant="body2" color="text.secondary">
+                  <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
                     Proceed to mapping page where you can manually create the missing mappings
                   </Typography>
                 </Box>
@@ -3100,11 +3679,7 @@ const UploadFiles = () => {
             
             <Card 
               variant="outlined" 
-              sx={{ 
-                p: 3, 
-                cursor: 'pointer',
-                '&:hover': { backgroundColor: '#f5f5f5', borderColor: '#1976d2' }
-              }}
+              sx={{ ...dialogChoiceCardSx, p: 3 }}
               onClick={handleTryDifferentTemplate}
             >
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
@@ -3113,7 +3688,7 @@ const UploadFiles = () => {
                   <Typography variant="h6" fontWeight="600">
                     Try Different Template
                   </Typography>
-                  <Typography variant="body2" color="text.secondary">
+                  <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
                     Go back and select a different template that might be more compatible
                   </Typography>
                 </Box>
@@ -3122,11 +3697,7 @@ const UploadFiles = () => {
 
             <Card 
               variant="outlined" 
-              sx={{ 
-                p: 3, 
-                cursor: 'pointer',
-                '&:hover': { backgroundColor: '#f5f5f5', borderColor: '#4caf50' }
-              }}
+              sx={{ ...dialogChoiceCardSx, p: 3 }}
               onClick={handleUploadWithoutTemplate}
             >
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
@@ -3135,7 +3706,7 @@ const UploadFiles = () => {
                   <Typography variant="h6" fontWeight="600">
                     Upload Without Template
                   </Typography>
-                  <Typography variant="body2" color="text.secondary">
+                  <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
                     Start fresh and create custom mappings from scratch
                   </Typography>
                 </Box>
@@ -3144,8 +3715,8 @@ const UploadFiles = () => {
           </Box>
         </DialogContent>
         
-        <DialogActions sx={{ p: 3, pt: 1 }}>
-          <Button onClick={handleCloseCompatibilityError}>
+        <DialogActions sx={{ ...dialogFooterSx, gap: 1 }}>
+          <Button onClick={handleCloseCompatibilityError} sx={{ ...pillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}>
             Cancel
           </Button>
         </DialogActions>
@@ -3157,29 +3728,25 @@ const UploadFiles = () => {
         onClose={() => setPdfChoiceDialogOpen(false)}
         maxWidth="sm"
         fullWidth
+        PaperProps={{ sx: dialogPaperSx }}
       >
-        <DialogTitle>
+        <DialogTitle sx={dialogHeaderSx}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
             <ScienceIcon color="primary" />
-            Choose PDF Processing Method
+            <Typography variant="h6" fontWeight="700" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a' }}>
+              Choose PDF Processing Method
+            </Typography>
           </Box>
         </DialogTitle>
-        <DialogContent>
-          <Typography variant="body1" sx={{ mb: 3 }}>
+        <DialogContent sx={dialogBodySx}>
+          <Typography variant="body1" sx={{ mb: 3, color: isDarkMode ? '#94a3b8' : '#64748b' }}>
             How would you like to process your PDF? Choose the method that best fits your document:
           </Typography>
 
           <Grid container spacing={3}>
             <Grid item xs={12} sm={6}>
               <Card
-                sx={{
-                  cursor: 'pointer',
-                  border: '2px solid transparent',
-                  '&:hover': {
-                    border: '2px solid #1976d2',
-                    bgcolor: 'primary.50'
-                  }
-                }}
+                sx={dialogChoiceCardSx}
                 onClick={() => handlePdfProcessingChoice('ocr')}
               >
                 <CardContent sx={{ textAlign: 'center', p: 3 }}>
@@ -3187,7 +3754,7 @@ const UploadFiles = () => {
                   <Typography variant="h6" gutterBottom>
                     Simple OCR
                   </Typography>
-                  <Typography variant="body2" color="text.secondary">
+                  <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
                     For standard documents with clear, linear layout. Faster processing with automatic table detection.
                   </Typography>
                 </CardContent>
@@ -3196,14 +3763,7 @@ const UploadFiles = () => {
 
             <Grid item xs={12} sm={6}>
               <Card
-                sx={{
-                  cursor: 'pointer',
-                  border: '2px solid transparent',
-                  '&:hover': {
-                    border: '2px solid #1976d2',
-                    bgcolor: 'primary.50'
-                  }
-                }}
+                sx={dialogChoiceCardSx}
                 onClick={() => handlePdfProcessingChoice('compare')}
               >
                 <CardContent sx={{ textAlign: 'center', p: 3 }}>
@@ -3211,7 +3771,7 @@ const UploadFiles = () => {
                   <Typography variant="h6" gutterBottom>
                     Compare
                   </Typography>
-                  <Typography variant="body2" color="text.secondary">
+                  <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
                     Runs native extraction and Azure OCR, then chooses the cleaner result for mapping.
                   </Typography>
                 </CardContent>
@@ -3220,14 +3780,7 @@ const UploadFiles = () => {
 
             <Grid item xs={12} sm={6}>
               <Card
-                sx={{
-                  cursor: 'pointer',
-                  border: '2px solid transparent',
-                  '&:hover': {
-                    border: '2px solid #1976d2',
-                    bgcolor: 'primary.50'
-                  }
-                }}
+                sx={dialogChoiceCardSx}
                 onClick={() => handlePdfProcessingChoice('zonal')}
               >
                 <CardContent sx={{ textAlign: 'center', p: 3 }}>
@@ -3235,7 +3788,7 @@ const UploadFiles = () => {
                   <Typography variant="h6" gutterBottom>
                     Zone Mapping
                   </Typography>
-                  <Typography variant="body2" color="text.secondary">
+                  <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
                     For complex BOMs or documents with irregular layouts. Manual zone selection for precise extraction.
                   </Typography>
                 </CardContent>
@@ -3243,10 +3796,10 @@ const UploadFiles = () => {
             </Grid>
           </Grid>
         </DialogContent>
-        <DialogActions>
+        <DialogActions sx={{ ...dialogFooterSx, gap: 1 }}>
           <Button
             onClick={() => setPdfChoiceDialogOpen(false)}
-            color="secondary"
+            sx={{ ...pillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}
           >
             Cancel
           </Button>
@@ -3258,22 +3811,24 @@ const UploadFiles = () => {
         open={primaryColumnDialogOpen}
         maxWidth="sm"
         fullWidth
+        PaperProps={{ sx: dialogPaperSx }}
       >
-        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        <DialogTitle sx={{ ...dialogHeaderSx, display: 'flex', alignItems: 'center', gap: 1 }}>
           <ScienceIcon color="primary" />
-          <Typography variant="h6" fontWeight="600">Select Primary Column</Typography>
+          <Typography variant="h6" fontWeight="700" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a' }}>Select Primary Column</Typography>
         </DialogTitle>
-        <DialogContent>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+        <DialogContent sx={dialogBodySx}>
+          <Typography variant="body2" sx={{ mb: 2, color: isDarkMode ? '#94a3b8' : '#64748b' }}>
             Select the column that should always have data. Rows where this column is empty
             will be removed (cleans up merged cells, notes, and junk rows).
           </Typography>
           <FormControl fullWidth sx={{ mt: 1 }}>
-            <InputLabel>Primary Column</InputLabel>
+            <InputLabel sx={{ color: isDarkMode ? '#94a3b8' : '#475569' }}>Primary Column</InputLabel>
             <Select
               value={selectedPrimaryColumn}
               label="Primary Column"
               onChange={(e) => setSelectedPrimaryColumn(e.target.value)}
+              sx={selectFieldSx}
             >
               {primaryColumnHeaders.map(h => (
                 <MenuItem key={h} value={h}>{h}</MenuItem>
@@ -3281,13 +3836,19 @@ const UploadFiles = () => {
             </Select>
           </FormControl>
           {cleanupResult && (
-            <Alert severity="success" sx={{ mt: 2 }}>
+            <Alert severity="success" sx={{
+              mt: 2,
+              borderRadius: '14px',
+              bgcolor: isDarkMode ? 'rgba(16, 185, 129, 0.12)' : '#ecfdf5',
+              color: isDarkMode ? '#a7f3d0' : '#166534',
+              border: isDarkMode ? '1px solid rgba(16, 185, 129, 0.24)' : '1px solid #bbf7d0'
+            }}>
               Removed {cleanupResult.rows_deleted} empty rows ({cleanupResult.total_rows_before} → {cleanupResult.total_rows_after} rows)
             </Alert>
           )}
         </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2 }}>
-          <Button onClick={handleSkipCleanup} color="inherit">
+        <DialogActions sx={{ ...dialogFooterSx, gap: 1 }}>
+          <Button onClick={handleSkipCleanup} sx={{ ...pillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}>
             Skip
           </Button>
           <Button
@@ -3295,6 +3856,7 @@ const UploadFiles = () => {
             variant="contained"
             disabled={!selectedPrimaryColumn || cleanupLoading}
             startIcon={cleanupLoading ? <CircularProgress size={16} /> : null}
+            sx={primaryPillSx}
           >
             {cleanupLoading ? 'Cleaning...' : 'Clean & Continue'}
           </Button>

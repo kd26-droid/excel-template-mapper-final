@@ -33,15 +33,15 @@ const buildTokens = (isDark) => {
       primaryLight:   '#60a5fa',
       primarySoftText: a ? '#bfdbfe' : '#1d4ed8',
       secondary:      '#7c3aed',
-      cyan:           '#38bdf8',
-      cyanStrong:     '#06b6d4',
-      purple:         '#a855f7',
-      gold:           '#fbbf24',
-      bronze:         '#fdba74',
-      silver:         '#cbd5e1',
-      info:           '#38bdf8',
-      infoText:       a ? '#bae6fd' : '#155e75',
-      success:        '#34d399',
+      cyan:           '#0284c7',
+      cyanStrong:     '#0369a1',
+      purple:         '#9333ea',
+      gold:           a ? '#fbbf24' : '#b45309',
+      bronze:         a ? '#fdba74' : '#c2410c',
+      silver:         a ? '#cbd5e1' : '#475569',
+      info:           '#0284c7',
+      infoText:       a ? '#bae6fd' : '#0369a1',
+      success:        a ? '#34d399' : '#059669',
       successText:    a ? '#a7f3d0' : '#047857',
       warning:        '#f59e0b',
       warningText:    a ? '#fbbf24' : '#b45309',
@@ -52,60 +52,62 @@ const buildTokens = (isDark) => {
 
     /* ── backgrounds ───────────────────────────────────────────────────── */
     background: {
-      app:  a ? '#0b0f19' : '#f4f7fb',
-      glow: 'radial-gradient(circle, var(--color-brand, #2383e2) 0%, transparent 70%)',
+      app:  a ? '#0b0f19' : '#f8fafc',
+      glow: a
+        ? 'radial-gradient(circle, rgba(35, 131, 226, 0.25) 0%, transparent 70%)'
+        : 'radial-gradient(circle, rgba(37, 99, 235, 0.08) 0%, transparent 70%)',
     },
 
     /* ── text ──────────────────────────────────────────────────────────── */
     text: {
-      primary:   a ? '#f8fafc' : '#111827',
-      secondary: a ? '#94a3b8' : '#64748b',
+      primary:   a ? '#f8fafc' : '#0f172a',
+      secondary: a ? '#94a3b8' : '#475569',
       disabled:  a ? '#64748b' : '#94a3b8',
       inverse:   '#ffffff',
-      accent:    a ? '#93c5fd' : '#1d4ed8',
+      accent:    a ? '#93c5fd' : '#2563eb',
       onAccent:  '#ffffff',
-      table:     a ? '#e2e8f0' : '#334155',
+      table:     a ? '#e2e8f0' : '#1e293b',
       heading:   a ? '#f8fafc' : '#0f172a',
     },
 
     /* ── surfaces ──────────────────────────────────────────────────────── */
     surface: {
-      page:       a ? '#0b0f19' : '#f4f7fb',
+      page:       a ? '#0b0f19' : '#f8fafc',
       paper:      a ? '#111827' : '#ffffff',
-      card:       a ? 'rgba(19, 24, 35, 0.75)' : 'rgba(255, 255, 255, 0.86)',
+      card:       a ? 'rgba(19, 24, 35, 0.75)' : '#ffffff',
       cardSolid:  a ? '#131823' : '#ffffff',
       cardGradient: a
         ? 'linear-gradient(135deg, rgba(20, 27, 41, 0.72) 0%, rgba(12, 17, 26, 0.82) 100%)'
-        : 'linear-gradient(135deg, rgba(255, 255, 255, 0.86) 0%, rgba(248, 250, 252, 0.92) 100%)',
-      elevated:   a ? 'rgba(20, 27, 44, 0.98)' : 'rgba(255, 255, 255, 0.98)',
-      elevatedSoft: a ? 'rgba(11, 16, 26, 0.98)' : 'rgba(248, 250, 252, 0.98)',
+        : 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)',
+      elevated:   a ? 'rgba(20, 27, 44, 0.98)' : '#ffffff',
+      elevatedSoft: a ? 'rgba(11, 16, 26, 0.98)' : '#f8fafc',
       elevatedGradient: a
         ? 'linear-gradient(145deg, rgba(20, 27, 44, 0.98) 0%, rgba(11, 16, 26, 0.99) 100%)'
-        : 'linear-gradient(145deg, rgba(255, 255, 255, 0.98) 0%, rgba(241, 245, 249, 0.98) 100%)',
+        : 'linear-gradient(145deg, #ffffff 0%, #f8fafc 100%)',
       elevatedSoftGradient: a
         ? 'linear-gradient(145deg, rgba(20, 27, 44, 0.96) 0%, rgba(11, 16, 26, 0.98) 100%)'
-        : 'linear-gradient(145deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 250, 252, 0.98) 100%)',
-      muted:      a ? '#1e293b' : '#eef2f7',
-      subtle:     a ? 'rgba(11, 15, 25, 0.45)' : 'rgba(255, 255, 255, 0.72)',
+        : 'linear-gradient(145deg, #ffffff 0%, #f8fafc 100%)',
+      muted:      a ? '#1e293b' : '#f1f5f9',
+      subtle:     a ? 'rgba(11, 15, 25, 0.45)' : '#f8fafc',
       input:      a ? 'rgba(15, 23, 42, 0.58)' : '#ffffff',
       inputStrong: a ? 'rgba(15, 23, 42, 0.65)' : '#ffffff',
-      control:    a ? 'rgba(10, 14, 23, 0.85)' : 'rgba(241,245,249,0.88)',
-      controlSoft: a ? 'rgba(255, 255, 255, 0.04)' : 'rgba(241, 245, 249, 0.9)',
+      control:    a ? 'rgba(10, 14, 23, 0.85)' : '#e2e8f0',
+      controlSoft: a ? 'rgba(255, 255, 255, 0.04)' : '#f1f5f9',
       menu:       a ? '#0d1527' : '#ffffff',
-      footer:     a ? 'rgba(11, 16, 26, 0.92)' : 'rgba(248, 250, 252, 0.94)',
-      panel:      a ? 'rgba(15, 23, 42, 0.85)' : 'rgba(255, 255, 255, 0.92)',
+      footer:     a ? 'rgba(11, 16, 26, 0.92)' : '#f8fafc',
+      panel:      a ? 'rgba(15, 23, 42, 0.85)' : '#ffffff',
     },
 
     /* ── borders ───────────────────────────────────────────────────────── */
     border: {
-      default:     a ? 'rgba(255,255,255,0.14)' : 'rgba(15,23,42,0.12)',
-      subtle:      a ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.08)',
-      strong:      a ? 'rgba(255,255,255,0.2)'  : 'rgba(15,23,42,0.18)',
-      hover:       a ? 'rgba(255,255,255,0.28)' : 'rgba(37,99,235,0.32)',
-      focus:       '#3b82f6',
-      input:       a ? 'rgba(255, 255, 255, 0.18)' : 'rgba(15, 23, 42, 0.16)',
-      panelAccent: a ? 'rgba(59, 130, 246, 0.35)' : 'rgba(37, 99, 235, 0.22)',
-      modal:       a ? 'rgba(255, 255, 255, 0.16)' : 'rgba(15, 23, 42, 0.12)',
+      default:     a ? 'rgba(255,255,255,0.14)' : 'rgba(226, 232, 240, 0.8)',
+      subtle:      a ? 'rgba(255,255,255,0.08)' : 'rgba(226, 232, 240, 0.6)',
+      strong:      a ? 'rgba(255,255,255,0.2)'  : 'rgba(203, 213, 225, 0.8)',
+      hover:       a ? 'rgba(255,255,255,0.28)' : '#2563eb',
+      focus:       '#2563eb',
+      input:       a ? 'rgba(255, 255, 255, 0.18)' : '#cbd5e1',
+      panelAccent: a ? 'rgba(59, 130, 246, 0.35)' : 'rgba(37, 99, 235, 0.25)',
+      modal:       a ? 'rgba(255, 255, 255, 0.16)' : '#e2e8f0',
     },
 
     /* ── actions ────────────────────────────────────────────────────────── */
@@ -141,25 +143,25 @@ const buildTokens = (isDark) => {
       hover:       a ? 'rgba(37, 99, 235, 0.08)' : '#eff6ff',
       selected:    a ? 'rgba(35, 131, 226, 0.12)' : 'rgba(37, 99, 235, 0.08)',
       rowExpanded: a ? 'rgba(15, 20, 30, 0.9)' : '#f8fafc',
-      line:        a ? 'rgba(255,255,255,0.08)' : 'rgba(15,23,42,0.1)',
-      rowLine:     a ? 'rgba(255,255,255,0.04)' : 'rgba(15,23,42,0.08)',
+      line:        a ? 'rgba(255,255,255,0.08)' : 'rgba(226, 232, 240, 0.8)',
+      rowLine:     a ? 'rgba(255,255,255,0.04)' : 'rgba(241, 245, 249, 0.9)',
     },
 
     /* ── dropzone ──────────────────────────────────────────────────────── */
     dropzone: {
-      background: a ? 'rgba(11, 15, 25, 0.65)' : 'rgba(248, 250, 252, 0.9)',
+      background: a ? 'rgba(11, 15, 25, 0.65)' : '#ffffff',
       selected:   a
         ? 'linear-gradient(180deg, rgba(37, 99, 235, 0.12), rgba(15, 23, 42, 0.92))'
-        : 'linear-gradient(180deg, rgba(37, 99, 235, 0.1), rgba(255, 255, 255, 0.94))',
+        : 'linear-gradient(180deg, rgba(37, 99, 235, 0.06), #ffffff)',
       active:     a
         ? 'linear-gradient(180deg, rgba(37, 99, 235, 0.18), rgba(15, 23, 42, 0.95))'
-        : 'linear-gradient(180deg, rgba(37, 99, 235, 0.14), rgba(255, 255, 255, 0.96))',
+        : 'linear-gradient(180deg, rgba(37, 99, 235, 0.1), #ffffff)',
     },
 
     /* ── header ────────────────────────────────────────────────────────── */
     header: {
-      background: a ? 'rgba(13, 17, 26, 0.88)' : 'rgba(255, 255, 255, 0.86)',
-      capsule:    a ? 'rgba(0, 0, 0, 0.4)' : 'rgba(226, 232, 240, 0.72)',
+      background: a ? 'rgba(13, 17, 26, 0.88)' : 'rgba(255, 255, 255, 0.95)',
+      capsule:    a ? 'rgba(0, 0, 0, 0.4)' : 'rgba(241, 245, 249, 0.9)',
       topLine:    'linear-gradient(90deg, transparent 0%, rgba(35, 131, 226, 0.8) 30%, rgba(6, 182, 212, 0.9) 50%, rgba(35, 131, 226, 0.8) 70%, transparent 100%)',
     },
 
@@ -180,18 +182,18 @@ const buildTokens = (isDark) => {
     shadow: {
       card:    a
         ? '0 1px 1px 0 rgba(255,255,255,0.1) inset, 0 12px 32px -4px rgba(0,0,0,0.5)'
-        : 'inset 0 1px 0 rgba(255,255,255,0.85), 0 16px 36px -20px rgba(15,23,42,0.32)',
+        : '0 4px 20px -2px rgba(15, 23, 42, 0.06), 0 2px 6px -1px rgba(15, 23, 42, 0.04)',
       modal:   a
         ? 'inset 0 1px 0 0 rgba(255,255,255,0.18), 0 32px 90px -12px rgba(0,0,0,0.85), 0 0 45px rgba(37,99,235,0.18)'
-        : '0 28px 70px -18px rgba(15,23,42,0.32), 0 0 36px rgba(37,99,235,0.1)',
+        : '0 20px 50px -12px rgba(15, 23, 42, 0.12), 0 0 1px 1px rgba(15, 23, 42, 0.05)',
       control: a
         ? 'inset 0 1px 3px rgba(0,0,0,0.6), 0 2px 10px rgba(0,0,0,0.3)'
-        : 'inset 0 1px 0 rgba(255,255,255,0.8)',
+        : 'inset 0 1px 2px rgba(0,0,0,0.05)',
     },
 
     /* ── overlays ──────────────────────────────────────────────────────── */
     overlay: {
-      backdrop: a ? 'rgba(2, 6, 23, 0.72)' : 'rgba(15, 23, 42, 0.32)',
+      backdrop: a ? 'rgba(2, 6, 23, 0.72)' : 'rgba(15, 23, 42, 0.25)',
     },
   };
 };

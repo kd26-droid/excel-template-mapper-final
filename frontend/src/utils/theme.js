@@ -57,8 +57,36 @@ export const buildTheme = (mode, tokens) =>
       MuiDialog: {
         styleOverrides: {
           paper: {
-            border: `1px solid ${tokens.border.default}`,
+            border: `1px solid ${tokens.border.modal}`,
+            borderRadius: 18,
+            backgroundColor: mode === 'dark'
+              ? 'rgba(17, 24, 39, 0.84)'
+              : 'rgba(255, 255, 255, 0.84)',
+            backgroundImage: tokens.surface.elevatedGradient,
+            backdropFilter: 'blur(22px) saturate(180%)',
+            WebkitBackdropFilter: 'blur(22px) saturate(180%)',
             color: tokens.text.primary,
+            boxShadow: tokens.shadow.modal,
+          },
+        },
+      },
+      MuiDialogTitle: {
+        styleOverrides: {
+          root: {
+            fontWeight: 800,
+            letterSpacing: '-0.01em',
+            color: tokens.text.heading,
+          },
+        },
+      },
+      MuiDialogActions: {
+        styleOverrides: {
+          root: {
+            borderTop: `1px solid ${tokens.border.subtle}`,
+            backgroundColor: mode === 'dark'
+              ? 'rgba(11, 16, 26, 0.48)'
+              : 'rgba(248, 250, 252, 0.58)',
+            padding: '16px 24px',
           },
         },
       },
@@ -127,7 +155,7 @@ export const buildTheme = (mode, tokens) =>
       MuiButton: {
         styleOverrides: {
           root: {
-            borderRadius: 10,
+            borderRadius: 999,
             textTransform: 'none',
             fontWeight: 700,
           },
@@ -140,8 +168,13 @@ export const buildTheme = (mode, tokens) =>
             },
           },
           containedPrimary: {
-            backgroundColor: tokens.action.primary,
-            '&:hover': { backgroundColor: tokens.action.primaryHover },
+            background: 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
+            color: '#ffffff',
+            boxShadow: '0 12px 26px -14px rgba(37, 99, 235, 0.9)',
+            '&:hover': {
+              background: 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
+              boxShadow: '0 16px 32px -16px rgba(37, 99, 235, 0.95)',
+            },
           },
         },
       },
@@ -173,11 +206,24 @@ export const buildTheme = (mode, tokens) =>
 
       /* ── Tooltip ─────────────────────────────────────────────────────── */
       MuiTooltip: {
+        defaultProps: {
+          arrow: true,
+        },
         styleOverrides: {
           tooltip: {
-            backgroundColor: tokens.color.dark,
-            color: tokens.color.white,
+            backgroundColor: mode === 'dark' ? '#1e293b' : '#0f172a',
+            color: '#ffffff',
+            fontSize: '12px',
             fontWeight: 600,
+            borderRadius: 10,
+            padding: '7px 14px',
+            border: mode === 'dark' ? '1px solid rgba(255, 255, 255, 0.14)' : '1px solid rgba(15, 23, 42, 0.2)',
+            boxShadow: mode === 'dark'
+              ? '0 12px 28px -4px rgba(0, 0, 0, 0.65), 0 0 15px rgba(37, 99, 235, 0.15)'
+              : '0 12px 28px -4px rgba(15, 23, 42, 0.3)',
+          },
+          arrow: {
+            color: mode === 'dark' ? '#1e293b' : '#0f172a',
           },
         },
       },
