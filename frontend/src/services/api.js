@@ -112,6 +112,17 @@ const api = {
     return axios.post(`${API_URL}/sheet-join/apply/`, payload, { timeout: 120000 });
   },
 
+  getManufacturerDirectory: () => {
+    return axios.get(`${API_URL}/manufacturers/`, { timeout: 120000 });
+  },
+
+  searchManufacturers: (query, limit = 25) => {
+    return axios.get(`${API_URL}/manufacturers/search/`, {
+      params: { q: query, limit },
+      timeout: 60000
+    });
+  },
+
   /**
    * Upload files with optional template application
    * @param {FormData} formData - File upload data

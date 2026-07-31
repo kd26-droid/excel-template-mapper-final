@@ -216,6 +216,25 @@ def create_mapping_session_from_dataframe(pdf_session: PDFSession, session_id: s
     return session_data
 
 
+def serialize_pdf_tables_for_frontend(extraction_result: Dict[str, Any]) -> list:
+    """Return per-table PDF extraction data in a stable frontend shape."""
+    tables = []
+    for index, table in enumerate((extraction_result or {}).get('tables') or []):
+        headers = table.get('headers') or []
+        rows = table.get('data') or table.get('rows') or []
+        if not headers or not rows:
+            continue
+        tables.append({
+            'table_id': table.get('table_id') or table.get('zone_table_id') or f'table_{index + 1}',
+            'page_number': table.get('page_number'),
+            'headers': headers,
+            'data': rows,
+            'row_count': len(rows),
+            'column_count': len(headers),
+        })
+    return tables
+
+
 def analyze_pdf_complexity(pdf_path: str, total_pages: int) -> dict:
     """
     Analyze PDF complexity to determine if zonal mapping is needed
@@ -344,6 +363,7 @@ def get_pdf_session(request, session_id):
                 extraction_summary = {
                     'extraction_id': latest.id,
                     'headers': latest.extracted_headers,
+                    'data': latest.extracted_data,
                     'row_count': len(latest.extracted_data or []),
                     'column_count': len(latest.extracted_headers or []),
                     'table_count': latest.table_count,
@@ -677,6 +697,7 @@ def process_pdf_ocr(request):
                 'headers': list(df.columns) if not df.empty else [],
                 'data': df.values.tolist() if not df.empty else [],
                 'table_count': extraction_result['table_count'],
+                'tables': serialize_pdf_tables_for_frontend(extraction_result or {}),
                 'quality_metrics': extraction_result['quality_metrics'],
                 'validation': validation_result,
                 # Provide header-level confidence scores for immediate UI use
@@ -828,6 +849,7 @@ def process_pdf_compare(request):
             'row_count': len(chosen_df),
             'column_count': len(chosen_df.columns),
             'table_count': (chosen_result or {}).get('table_count', 0),
+            'tables': serialize_pdf_tables_for_frontend(chosen_result or {}),
             'status': 'completed',
             'alignment_mode': alignment_mode,
             'decision': decision,

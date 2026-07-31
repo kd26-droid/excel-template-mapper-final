@@ -574,6 +574,7 @@ class AzureOCRService:
             # Initialize table structure
             table_data = {
                 'table_id': f"table_{table_idx}",
+                'page_number': self._get_table_page_number(table),
                 'row_count': table.row_count,
                 'column_count': table.column_count,
                 'headers': [],
@@ -656,6 +657,15 @@ class AzureOCRService:
         except Exception as e:
             logger.error(f"Error extracting table data: {e}")
             raise
+
+    def _get_table_page_number(self, table) -> int:
+        try:
+            regions = getattr(table, 'bounding_regions', None) or []
+            if regions:
+                return getattr(regions[0], 'page_number', None) or 0
+        except Exception:
+            return 0
+        return 0
 
     def _calculate_quality_metrics(self, extraction_data: Dict[str, any]) -> Dict[str, any]:
         """

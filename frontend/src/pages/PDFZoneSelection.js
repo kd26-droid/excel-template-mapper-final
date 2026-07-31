@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import {
   Box,
   Paper,
@@ -36,6 +36,8 @@ const ZONE_TYPES = {
 export default function PDFZoneSelection() {
   const { sessionId } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
+  const fromBomNormalizer = Boolean(location.state?.fromBomNormalizer);
 
   const [session, setSession] = useState(null);
   const [currentPage, setCurrentPage] = useState(1);
@@ -267,12 +269,19 @@ export default function PDFZoneSelection() {
   };
 
   const loadPageImage = async (canvas, canvasWidth, canvasHeight) => {
+    let objectUrl = null;
     try {
-      const imageUrl = `/api/pdf/page/${sessionId}/${currentPage}/`;
+      const response = await api.getPDFPageImage(sessionId, currentPage);
+      objectUrl = URL.createObjectURL(response.data);
 
-      FabricImage.fromURL(imageUrl).then((img) => {
+      FabricImage.fromURL(objectUrl).then((img) => {
+        if (objectUrl) {
+          URL.revokeObjectURL(objectUrl);
+          objectUrl = null;
+        }
         if (!img) {
           console.error('Failed to load image');
+          setError('Failed to load PDF page image');
           return;
         }
 
@@ -299,9 +308,15 @@ export default function PDFZoneSelection() {
 
         // Load existing zones for this page
         loadExistingZones(canvas, canvasWidth, canvasHeight);
+      }).catch((err) => {
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+        console.error('Error loading PDF page image into canvas:', err);
+        setError('Failed to load PDF page image');
       });
     } catch (err) {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
       console.error('Error loading page image:', err);
+      setError('Failed to load PDF page image');
     }
   };
 
@@ -521,6 +536,20 @@ export default function PDFZoneSelection() {
     return updatedZones;
   };
 
+  const continueAfterProcessing = (payload = {}) => {
+    if (fromBomNormalizer) {
+      navigate('/bom-normaliser', {
+        state: {
+          fromPdfZone: true,
+          pdfSessionId: sessionId,
+          pdfZonePayload: payload,
+        },
+      });
+      return;
+    }
+    navigate(`/mapping/${sessionId}`);
+  };
+
   const processZones = async () => {
     if (zones.length === 0) {
       setError('Please draw at least one zone');
@@ -531,8 +560,8 @@ export default function PDFZoneSelection() {
       setProcessing(true);
       setError(null);
       const updatedZones = await syncAndSaveZones();
-      await api.processPDFZones(sessionId, updatedZones.map(z => z.zone_id));
-      navigate(`/mapping/${sessionId}`);
+      const response = await api.processPDFZones(sessionId, updatedZones.map(z => z.zone_id));
+      continueAfterProcessing(response.data || {});
     } catch (err) {
       console.error('Error processing zones:', err);
       setError('Failed to process zones. Please try again.');
@@ -570,7 +599,7 @@ export default function PDFZoneSelection() {
           `${d.words_outside_columns} words fell outside your columns — widen the zones if that looks wrong.`
         );
       }
-      navigate(`/mapping/${sessionId}`);
+      continueAfterProcessing(d);
     } catch (err) {
       console.error('Error extracting column zones:', err);
       setError(err.response?.data?.error || 'Could not read the table. If your PDF is a scan, use "Extract with OCR (scanned PDF)" instead.');

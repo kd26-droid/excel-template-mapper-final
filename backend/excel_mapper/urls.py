@@ -108,6 +108,10 @@ from .mpn_views import (
     mpn_split_cells,
     analyze_mpn_pairing,
 )
+from .manufacturer_views import (
+    manufacturer_directory,
+    manufacturer_search,
+)
 
 # Column Parser views
 from .parser_views import (
@@ -219,6 +223,10 @@ urlpatterns = [
     path('pdf/zones/<str:session_id>/process-columns/', process_column_zones, name='process-column-zones'),
     path('pdf/zones/<str:session_id>/status/', get_zone_processing_status, name='get-zone-processing-status'),
     path('pdf/continuations/<str:session_id>/link/', manage_zone_links, name='manage-zone-links'),
+
+    # MPN Validation + OAuth
+    path('manufacturers/', manufacturer_directory, name='manufacturer-directory'),
+    path('manufacturers/search/', manufacturer_search, name='manufacturer-search'),
 
     # MPN Validation + OAuth
     path('mpn/auth/status/', mpn_auth_status, name='mpn-auth-status'),
