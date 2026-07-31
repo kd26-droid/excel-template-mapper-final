@@ -86,6 +86,7 @@ import * as XLSX from 'xlsx';
 import FormulaBuilder from './FormulaBuilder';
 import ColumnParser from './ColumnParser/ColumnParser';
 import { getDataSynchronizer, cleanupSynchronizer } from '../utils/DataSynchronizer';
+import { useThemeContext } from '../utils/ThemeContext';
 
 // The manufacturer groups a review row currently represents: either the manually
 // typed override, or the word tokens joined at the un-cut boundaries.
@@ -145,8 +146,10 @@ const EnhancedDataEditor = () => {
   const { sessionId } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
+  const { isDarkMode, tokens: themeTokens } = useThemeContext();
   const synchronizer = useRef(null);
   const scrollContainerRef = useRef(null);
+  const [mousePos, setMousePos] = useState({ x: 50, y: 50 });
 
   // ─── STATE MANAGEMENT ───────────────────────────────────────────────────────
   const [loading, setLoading] = useState(true);
@@ -463,12 +466,9 @@ const EnhancedDataEditor = () => {
     const digikeyColumns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'Category'];
     // Mouser columns
     const mouserColumns = ['MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'Mouser Canonical MPN', 'Mouser Category'];
-    // Element14 columns
-    const element14Columns = ['MPN valid (Element14)', 'Element14 Status', 'Element14 Part Number', 'Element14 Canonical MPN', 'Element14 Category'];
 
     return digikeyColumns.includes(columnName) ||
            mouserColumns.includes(columnName) ||
-           element14Columns.includes(columnName) ||
            columnName === 'Canonical MPN' ||
            /^Canonical MPN \d+$/.test(columnName) ||
            /^MPN_\d+_DigiKey_(Valid|Canonical|PN)$/.test(columnName);
@@ -557,13 +557,7 @@ const EnhancedDataEditor = () => {
       'Mouser Status': 'Current production status from Mouser',
       'MPNR': 'Mouser part number for ordering',
       'Mouser Canonical MPN': 'Official manufacturer part number from Mouser (standardized)',
-      'Mouser Category': 'Product category from Mouser',
-      // Element14 columns
-      'MPN valid (Element14)': 'Whether this part exists in Element14 database (Yes/No)',
-      'Element14 Status': 'Current production status from Element14',
-      'Element14 Part Number': 'Element14 part number for ordering',
-      'Element14 Canonical MPN': 'Official manufacturer part number from Element14 (standardized)',
-      'Element14 Category': 'Product category from Element14'
+      'Mouser Category': 'Product category from Mouser'
     };
 
     // Handle numbered canonical MPN columns
@@ -640,6 +634,17 @@ const EnhancedDataEditor = () => {
   }, []);
 
   // ─── INITIALIZATION AND CLEANUP ─────────────────────────────────────────────
+  useEffect(() => {
+    const handleMouseMove = (event) => {
+      setMousePos({
+        x: (event.clientX / window.innerWidth) * 100,
+        y: (event.clientY / window.innerHeight) * 100
+      });
+    };
+    window.addEventListener('mousemove', handleMouseMove);
+    return () => window.removeEventListener('mousemove', handleMouseMove);
+  }, []);
+
   useEffect(() => {
     if (sessionId) {
       // Initialize synchronizer
@@ -1037,9 +1042,9 @@ const EnhancedDataEditor = () => {
         }
 
         // Check if MPN validation columns already exist (including all canonical MPN variants)
-        const baseMpnValidationColumns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'MPN valid (Element14)', 'Element14 Status', 'Element14 Part Number'];
+        const baseMpnValidationColumns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'MPN valid (Mouser)', 'Mouser Status', 'MPNR'];
         const canonicalMpnColumns = viewHeaders.filter(header =>
-          header === 'Canonical MPN' || /^Canonical MPN \d+$/.test(header) || header === 'Mouser Canonical MPN' || header === 'Element14 Canonical MPN'
+          header === 'Canonical MPN' || /^Canonical MPN \d+$/.test(header) || header === 'Mouser Canonical MPN'
         );
         const hasMpnValidation = baseMpnValidationColumns.some(col => viewHeaders.includes(col)) || canonicalMpnColumns.length > 0;
         if (hasMpnValidation) {
@@ -1114,7 +1119,7 @@ const EnhancedDataEditor = () => {
           const isUnmapped = data.unmapped_columns && data.unmapped_columns.includes(displayName);
           const isSpecificationColumn = displayName.toLowerCase().includes('specification');
           const isFormulaColumn = detectedFormulaColumns.includes(col) || col.startsWith('Tag_') || col.startsWith('Specification_') || col.startsWith('Customer_Identification_') || col === 'Tag' || col.includes('Specification') || col.includes('Customer identification') || col.includes('Custom identification') || col === 'Factwise ID';
-          const isMpnValidationColumn = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'Mouser Canonical MPN', 'Mouser Category', 'MPN valid (Element14)', 'Element14 Status', 'Element14 Part Number', 'Element14 Canonical MPN', 'Element14 Category', 'Category'].includes(col) ||
+          const isMpnValidationColumn = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'Mouser Canonical MPN', 'Mouser Category', 'Category'].includes(col) ||
             col === 'Canonical MPN' || /^Canonical MPN \d+$/.test(col) || /^MPN_\d+_DigiKey_(Valid|Canonical|PN)$/.test(col);
           const columnWidth = Math.max(180, Math.min(400, displayName.length * 10 + 40));
           
@@ -3329,8 +3334,180 @@ const EnhancedDataEditor = () => {
   }
 
   // ─── MAIN RENDER ────────────────────────────────────────────────────────────
+  const t = themeTokens;
+  const editorPageSx = {
+    height: '100vh',
+    display: 'flex',
+    flexDirection: 'column',
+    position: 'relative',
+    overflow: 'hidden',
+    bgcolor: t.background.app,
+    color: t.text.primary,
+    '& > :not(.fw-editor-bg-layer)': {
+      position: 'relative',
+      zIndex: 1
+    }
+  };
+  const editorHeaderSx = {
+    borderRadius: 0,
+    background: t.surface.elevatedGradient,
+    color: t.text.primary,
+    position: 'sticky',
+    top: 0,
+    zIndex: 1000,
+    borderBottom: `1px solid ${t.border.default}`,
+    boxShadow: isDarkMode
+      ? '0 18px 45px -28px rgba(0,0,0,0.9)'
+      : '0 14px 34px -28px rgba(15,23,42,0.35)'
+  };
+  const iconButtonSx = {
+    color: t.text.primary,
+    backgroundColor: t.surface.controlSoft,
+    border: `1px solid ${t.border.default}`,
+    '&:hover': {
+      backgroundColor: t.action.hover,
+      borderColor: t.border.hover
+    },
+    '&:disabled': {
+      color: t.text.disabled,
+      backgroundColor: t.surface.controlSoft
+    }
+  };
+  const toolbarButtonSx = {
+    borderRadius: '999px',
+    textTransform: 'none',
+    fontWeight: 700,
+    px: 2.25,
+    minHeight: 36
+  };
+  const outlinedActionSx = {
+    ...toolbarButtonSx,
+    color: t.text.primary,
+    borderColor: t.border.default,
+    backgroundColor: t.surface.controlSoft,
+    '&:hover': {
+      backgroundColor: t.action.hover,
+      borderColor: t.border.hover
+    }
+  };
+  const primaryActionSx = {
+    ...toolbarButtonSx,
+    color: '#ffffff !important',
+    border: 'none',
+    background: 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
+    boxShadow: '0 14px 28px -16px rgba(37, 99, 235, 0.9)',
+    '&:hover': {
+      background: 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
+      boxShadow: '0 18px 34px -18px rgba(37, 99, 235, 0.95)'
+    },
+    '&.Mui-disabled': {
+      background: isDarkMode ? 'rgba(30, 41, 59, 0.78)' : '#dbeafe',
+      color: isDarkMode ? 'rgba(226, 232, 240, 0.58) !important' : 'rgba(30, 64, 175, 0.46) !important',
+      boxShadow: 'none'
+    }
+  };
+  const orangeActionSx = {
+    ...toolbarButtonSx,
+    color: '#ffffff !important',
+    border: 'none',
+    background: 'linear-gradient(135deg, #f97316 0%, #ea580c 100%)',
+    boxShadow: '0 14px 28px -16px rgba(249, 115, 22, 0.9)',
+    '&:hover': {
+      background: 'linear-gradient(135deg, #ea580c 0%, #c2410c 100%)',
+      boxShadow: '0 18px 34px -18px rgba(249, 115, 22, 0.95)'
+    },
+    '&.Mui-disabled': {
+      background: isDarkMode ? 'rgba(30, 41, 59, 0.78)' : '#fed7aa',
+      color: isDarkMode ? 'rgba(226, 232, 240, 0.58) !important' : 'rgba(154, 52, 18, 0.48) !important',
+      boxShadow: 'none'
+    }
+  };
+  const HoverActionButton = ({
+    label,
+    icon,
+    onClick,
+    disabled,
+    background,
+    shadow
+  }) => (
+    <button
+      type="button"
+      className="fw-expand-action"
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        background,
+        boxShadow: shadow
+      }}
+    >
+      {icon}
+      <span className="fw-expand-label">{label}</span>
+    </button>
+  );
+  const gridPanelSx = {
+    height: '100%',
+    overflow: 'hidden',
+    borderRadius: '8px',
+    border: `1px solid ${t.border.default}`,
+    background: t.table.background,
+    boxShadow: t.shadow.card
+  };
+  const paginationBarSx = {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 2,
+    flexWrap: 'wrap',
+    p: 1.5,
+    borderRadius: '8px',
+    backgroundColor: t.surface.elevatedSoft,
+    border: `1px solid ${t.border.subtle}`
+  };
+  const tableHeaderStyle = {
+    backgroundColor: t.table.header,
+    borderBottom: `1px solid ${t.border.strong}`
+  };
+  const tableBaseStyle = {
+    width: '100%',
+    borderCollapse: 'separate',
+    borderSpacing: 0,
+    tableLayout: 'fixed',
+    fontSize: '13px',
+    fontFamily: '"Inter", "Roboto", "Helvetica", "Arial", sans-serif',
+    color: t.text.table
+  };
+  const tableScrollStyle = {
+    overflowX: 'auto',
+    overflowY: 'auto',
+    maxHeight: 'calc(100vh - 288px)',
+    borderRadius: '8px',
+    border: `1px solid ${t.table.line}`,
+    backgroundColor: t.table.background
+  };
   return (
-    <Box sx={{ height: '100vh', display: 'flex', flexDirection: 'column', bgcolor: '#f8fafc' }}>
+    <Box sx={editorPageSx}>
+      <Box
+        className="fw-editor-bg-layer"
+        sx={{
+          pointerEvents: 'none',
+          position: 'absolute',
+          transition: 'all 0.7s cubic-bezier(0.16, 1, 0.3, 1)',
+          borderRadius: '50%',
+          opacity: isDarkMode ? 0.34 : 0.26,
+          width: '62vw',
+          height: '62vw',
+          left: `${mousePos.x}%`,
+          top: `${mousePos.y}%`,
+          transform: 'translate(-50%, -50%)',
+          filter: 'blur(90px)',
+          background: 'radial-gradient(circle, var(--color-brand, #2383e2) 0%, transparent 70%)',
+          zIndex: 0
+        }}
+      />
+      <Box
+        className="auth-grid-pattern fw-editor-bg-layer"
+        sx={{ position: 'absolute', inset: 0, pointerEvents: 'none', opacity: isDarkMode ? 0.38 : 0.42, zIndex: 0 }}
+      />
       {/* Sync Status Indicator */}
       {syncStatus.inProgress && (
         <LinearProgress 
@@ -3556,85 +3733,86 @@ const EnhancedDataEditor = () => {
 
       {/* Enhanced Header */}
       <Paper
-        elevation={3}
-        sx={{
-          borderRadius: 0,
-          background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-          color: 'white',
-          position: 'sticky',
-          top: 0,
-          zIndex: 1000
-        }}
+        elevation={0}
+        sx={editorHeaderSx}
       >
         <Container maxWidth={false} sx={{ px: { xs: 2, sm: 4 } }}>
           <Box sx={{ 
-            py: 3,
+            py: 2,
             display: 'flex', 
             flexDirection: 'column',
-            gap: 3
+            gap: 2
           }}>
             
-            {/* Top Row - Back Arrow, Title, and Status */}
+            {/* Top Row - Back Arrow, Center Title, and Primary Actions */}
             <Box sx={{ 
               display: 'flex',
               alignItems: 'center',
-              justifyContent: 'space-between'
+              justifyContent: 'space-between',
+              gap: 2,
+              position: 'relative'
             }}>
               
               {/* Left - Back Arrow */}
-              <Box sx={{ display: 'flex', alignItems: 'center' }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', minWidth: 44, zIndex: 2 }}>
                 <IconButton
                   onClick={handleBackToMapping}
-                  sx={{ 
-                    color: 'white',
-                    backgroundColor: 'rgba(255,255,255,0.1)',
-                    '&:hover': { backgroundColor: 'rgba(255,255,255,0.2)' }
-                  }}
+                  sx={iconButtonSx}
                 >
                   <ArrowBackIcon />
                 </IconButton>
               </Box>
 
               {/* Center - Title */}
-              <Box sx={{ textAlign: 'center', flex: 1 }}>
-                <Typography variant="h4" fontWeight="700" sx={{ lineHeight: 1.2 }}>
+              <Box sx={{
+                textAlign: 'center',
+                position: { xs: 'static', lg: 'absolute' },
+                left: { lg: '50%' },
+                transform: { lg: 'translateX(-50%)' },
+                width: { xs: 'auto', lg: 'min(420px, 34vw)' },
+                flex: { xs: 1, lg: 'none' },
+                px: 1
+              }}>
+                <Typography variant="h5" fontWeight="800" sx={{ lineHeight: 1.15, color: t.text.heading, fontSize: { xs: '1.35rem', md: '1.55rem' } }}>
                   Enhanced Data Editor
-                </Typography>
-                <Typography variant="body2" sx={{ opacity: 0.9, fontSize: '0.9rem' }}>
-                  Real-time synchronized editing with Azure deployment support
                 </Typography>
               </Box>
 
-              {/* Right - Status and Actions */}
-              <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                {/* Data Integrity Status */}
-                {dataIntegrity.consistent ? (
-                  <Tooltip title="Data is synchronized and consistent">
-                    <CheckCircleIcon sx={{ color: '#4caf50' }} />
-                  </Tooltip>
-                ) : (
-                  <Tooltip title="Data integrity issues detected">
-                    <ErrorIcon sx={{ color: '#ff9800' }} />
-                  </Tooltip>
-                )}
+              {/* Right - Primary Actions */}
+              <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', justifyContent: 'flex-end', flexWrap: 'wrap', minWidth: { lg: 360 }, zIndex: 2 }}>
+                <HoverActionButton
+                  label="Refresh"
+                  icon={<RefreshIcon sx={{ fontSize: 18 }} />}
+                  onClick={handleManualRefresh}
+                  disabled={syncStatus.inProgress}
+                  background={isDarkMode ? 'linear-gradient(135deg, #334155 0%, #0f172a 100%)' : 'linear-gradient(135deg, #475569 0%, #1e293b 100%)'}
+                  shadow="0 14px 28px -16px rgba(15, 23, 42, 0.85)"
+                />
+                <HoverActionButton
+                  label="Export"
+                  icon={<FolderOpenIcon sx={{ fontSize: 18 }} />}
+                  onClick={() => runGuardedExport(handleExportToProject)}
+                  disabled={downloadLoading || syncStatus.inProgress}
+                  background="linear-gradient(135deg, #2563eb 0%, #0284c7 100%)"
+                  shadow="0 14px 28px -16px rgba(37, 99, 235, 0.9)"
+                />
+                <HoverActionButton
+                  label="Download"
+                  icon={<DownloadIcon sx={{ fontSize: 18 }} />}
+                  onClick={() => runGuardedExport(handleDownloadConverted)}
+                  disabled={downloadLoading || syncStatus.inProgress}
+                  background="linear-gradient(135deg, #16a34a 0%, #059669 100%)"
+                  shadow="0 14px 28px -16px rgba(22, 163, 74, 0.9)"
+                />
 
               {/* Auto-fit All */}
-              <Tooltip title="Auto-fit all columns to content">
+              <Tooltip title="Auto-fit all columns to content" sx={{ display: 'none' }}>
                 <span>
                   <Button
                     size="small"
                     onClick={handleAutoFitAll}
                     disabled={syncStatus.inProgress}
-                    sx={{ 
-                      color: 'white',
-                      borderColor: 'rgba(255,255,255,0.6)',
-                      backgroundColor: 'rgba(255,255,255,0.1)',
-                      '&:hover': { backgroundColor: 'rgba(255,255,255,0.2)' },
-                      '&:disabled': { 
-                        color: 'rgba(255,255,255,0.5)',
-                        backgroundColor: 'rgba(255,255,255,0.05)'
-                      }
-                    }}
+                    sx={{ ...outlinedActionSx, display: 'none' }}
                     variant="outlined"
                   >
                     Auto‑fit All
@@ -3642,24 +3820,16 @@ const EnhancedDataEditor = () => {
                 </span>
               </Tooltip>
 
-              {/* Manual Refresh */}
-              <Tooltip title="Manual refresh with synchronization">
-                <IconButton
-                  onClick={handleManualRefresh}
-                  disabled={syncStatus.inProgress}
-                  sx={{ 
-                    color: 'white',
-                    backgroundColor: 'rgba(255,255,255,0.1)',
-                    '&:hover': { backgroundColor: 'rgba(255,255,255,0.2)' },
-                    '&:disabled': { 
-                      color: 'rgba(255,255,255,0.5)',
-                      backgroundColor: 'rgba(255,255,255,0.05)'
-                    }
-                  }}
-                >
-                  <RefreshIcon />
-                </IconButton>
-              </Tooltip>
+              <Button
+                size="small"
+                onClick={handleOpenCreateColumnDialog}
+                disabled={createColumnSaving || syncStatus.inProgress}
+                startIcon={<AutoAwesomeIcon sx={{ fontSize: 18 }} />}
+                sx={{ ...outlinedActionSx, display: 'none' }}
+                variant="outlined"
+              >
+                Create Column
+              </Button>
               {/* Rebuild Columns */}
               <Tooltip title="Rebuild template columns">
                 <span>
@@ -3667,15 +3837,7 @@ const EnhancedDataEditor = () => {
                     size="small"
                     onClick={handleRebuildColumns}
                     disabled={rebuildingColumns || syncStatus.inProgress}
-                    sx={{
-                      color: 'white',
-                      borderColor: 'rgba(255,255,255,0.6)',
-                      borderWidth: 1,
-                      borderStyle: 'solid',
-                      ml: 1,
-                      textTransform: 'none',
-                      '&:hover': { backgroundColor: 'rgba(255,255,255,0.1)' }
-                    }}
+                    sx={{ ...outlinedActionSx, display: 'none' }}
                   >
                     {rebuildingColumns ? 'Rebuilding…' : 'Rebuild Columns'}
                   </Button>
@@ -3684,7 +3846,7 @@ const EnhancedDataEditor = () => {
               </Box>
             </Box>
 
-            {/* Second Row - Clean Grouped Action Bar */}
+            {/* Second Row - Secondary Tools */}
             <Box sx={{
               display: 'flex',
               gap: 1.5,
@@ -3692,68 +3854,46 @@ const EnhancedDataEditor = () => {
               alignItems: 'center',
               flexWrap: 'wrap'
             }}>
-              {/* PRIMARY: Download File */}
-              <Button
-                onClick={() => runGuardedExport(handleDownloadConverted)}
-                variant="contained"
-                startIcon={<DownloadIcon />}
-                disabled={downloadLoading || syncStatus.inProgress}
-                sx={{
-                  backgroundColor: '#1565c0',
-                  color: 'white',
-                  '&:hover': { backgroundColor: '#0d47a1' },
-                  textTransform: 'none',
-                  fontWeight: 600,
-                  borderRadius: '8px',
-                  px: 2.5
-                }}
-              >
-                Download
-              </Button>
-
-              {/* PRIMARY: Export to Project */}
-              <Button
-                onClick={() => runGuardedExport(handleExportToProject)}
-                variant="contained"
-                startIcon={<FolderOpenIcon />}
-                disabled={downloadLoading || syncStatus.inProgress}
-                sx={{
-                  backgroundColor: '#e65100',
-                  color: 'white',
-                  '&:hover': { backgroundColor: '#bf360c' },
-                  textTransform: 'none',
-                  fontWeight: 600,
-                  borderRadius: '8px',
-                  px: 2.5
-                }}
-              >
-                Export to Project
-              </Button>
-
               {/* "Manufacturer Match" button removed — it now lives inside
                   Tools ▸ Expand Alternates into Rows (the "two matching lists"
                   arrangement), alongside the other alternate shapes. */}
 
+              <Tooltip title="Auto-fit all columns to content">
+                <span>
+                  <Button
+                    size="small"
+                    onClick={handleAutoFitAll}
+                    disabled={syncStatus.inProgress}
+                    sx={outlinedActionSx}
+                    variant="outlined"
+                  >
+                    Auto-fit All
+                  </Button>
+                </span>
+              </Tooltip>
               <Button
+                size="small"
                 onClick={handleOpenCreateColumnDialog}
-                variant="contained"
-                startIcon={<AutoAwesomeIcon />}
                 disabled={createColumnSaving || syncStatus.inProgress}
-                sx={{
-                  backgroundColor: '#455a64',
-                  color: 'white',
-                  '&:hover': { backgroundColor: '#263238' },
-                  textTransform: 'none',
-                  fontWeight: 600,
-                  borderRadius: '8px',
-                  px: 2.5
-                }}
+                startIcon={<AutoAwesomeIcon sx={{ fontSize: 18 }} />}
+                sx={outlinedActionSx}
+                variant="outlined"
               >
                 Create Column
               </Button>
-
-              {/* Divider */}
-              <Divider orientation="vertical" flexItem sx={{ borderColor: 'rgba(255,255,255,0.3)', mx: 0.5 }} />
+              <Tooltip title="Rebuild template columns">
+                <span>
+                  <Button
+                    size="small"
+                    onClick={handleRebuildColumns}
+                    disabled={rebuildingColumns || syncStatus.inProgress}
+                    sx={outlinedActionSx}
+                    variant="outlined"
+                  >
+                    {rebuildingColumns ? 'Rebuilding...' : 'Rebuild Columns'}
+                  </Button>
+                </span>
+              </Tooltip>
 
               {/* TOOLS dropdown */}
               <Button
@@ -3761,14 +3901,7 @@ const EnhancedDataEditor = () => {
                 variant="outlined"
                 endIcon={<KeyboardArrowDownIcon />}
                 startIcon={<BuildIcon />}
-                sx={{
-                  color: 'white',
-                  borderColor: 'rgba(255,255,255,0.5)',
-                  '&:hover': { backgroundColor: 'rgba(255,255,255,0.1)', borderColor: 'white' },
-                  textTransform: 'none',
-                  fontWeight: 600,
-                  borderRadius: '8px'
-                }}
+                sx={outlinedActionSx}
               >
                 Tools
               </Button>
@@ -3776,7 +3909,7 @@ const EnhancedDataEditor = () => {
                 anchorEl={toolsMenuAnchor}
                 open={Boolean(toolsMenuAnchor)}
                 onClose={() => setToolsMenuAnchor(null)}
-                PaperProps={{ sx: { borderRadius: '10px', mt: 1, minWidth: 220, boxShadow: '0 8px 32px rgba(0,0,0,0.2)' } }}
+                PaperProps={{ sx: { borderRadius: '8px', mt: 1, minWidth: 220, border: `1px solid ${t.border.default}`, boxShadow: t.shadow.card } }}
               >
                 <MenuItem onClick={() => { setToolsMenuAnchor(null); handleOpenFormulaBuilder(); }} disabled={syncStatus.inProgress}>
                   <ListItemIcon><AutoAwesomeIcon sx={{ color: '#9c27b0' }} /></ListItemIcon>
@@ -3822,15 +3955,15 @@ const EnhancedDataEditor = () => {
                 onClick={(e) => setMpnMenuAnchor(e.currentTarget)}
                 variant="outlined"
                 endIcon={<KeyboardArrowDownIcon />}
-                startIcon={mpnValidating ? <CircularProgress size={16} sx={{ color: 'white' }} /> : <VerifiedUserIcon />}
+                startIcon={mpnValidating ? <CircularProgress size={16} sx={{ color: t.text.primary }} /> : <VerifiedUserIcon />}
                 sx={{
-                  color: 'white',
-                  borderColor: mpnValidationCompleted ? '#4caf50' : 'rgba(255,255,255,0.5)',
-                  backgroundColor: mpnValidationCompleted ? 'rgba(76,175,80,0.15)' : 'transparent',
-                  '&:hover': { backgroundColor: mpnValidationCompleted ? 'rgba(76,175,80,0.25)' : 'rgba(255,255,255,0.1)', borderColor: 'white' },
-                  textTransform: 'none',
-                  fontWeight: 600,
-                  borderRadius: '8px'
+                  ...outlinedActionSx,
+                  borderColor: mpnValidationCompleted ? t.color.success : t.border.default,
+                  backgroundColor: mpnValidationCompleted ? t.state.successBg : t.surface.controlSoft,
+                  '&:hover': {
+                    backgroundColor: mpnValidationCompleted ? t.state.successBg : t.action.hover,
+                    borderColor: mpnValidationCompleted ? t.color.success : t.border.hover
+                  }
                 }}
               >
                 {mpnValidating
@@ -3841,7 +3974,7 @@ const EnhancedDataEditor = () => {
                 anchorEl={mpnMenuAnchor}
                 open={Boolean(mpnMenuAnchor)}
                 onClose={() => setMpnMenuAnchor(null)}
-                PaperProps={{ sx: { borderRadius: '10px', mt: 1, minWidth: 280, boxShadow: '0 8px 32px rgba(0,0,0,0.2)' } }}
+                PaperProps={{ sx: { borderRadius: '8px', mt: 1, minWidth: 280, border: `1px solid ${t.border.default}`, boxShadow: t.shadow.card } }}
               >
                 {/* MPN Column selector inline */}
                 <Box sx={{ px: 2, py: 1 }}>
@@ -3998,12 +4131,7 @@ const EnhancedDataEditor = () => {
                   <Tooltip title="More actions">
                     <IconButton
                       onClick={(e) => setMoreMenuAnchor(e.currentTarget)}
-                      sx={{
-                        color: 'white',
-                        border: '1px solid rgba(255,255,255,0.5)',
-                        borderRadius: '8px',
-                        '&:hover': { backgroundColor: 'rgba(255,255,255,0.1)' }
-                      }}
+                      sx={{ ...iconButtonSx, borderRadius: '8px' }}
                     >
                       <MoreVertIcon />
                     </IconButton>
@@ -4012,7 +4140,7 @@ const EnhancedDataEditor = () => {
                     anchorEl={moreMenuAnchor}
                     open={Boolean(moreMenuAnchor)}
                     onClose={() => setMoreMenuAnchor(null)}
-                    PaperProps={{ sx: { borderRadius: '10px', mt: 1, minWidth: 220, boxShadow: '0 8px 32px rgba(0,0,0,0.2)' } }}
+                    PaperProps={{ sx: { borderRadius: '8px', mt: 1, minWidth: 220, border: `1px solid ${t.border.default}`, boxShadow: t.shadow.card } }}
                   >
                     <MenuItem onClick={() => { setMoreMenuAnchor(null); handleExportForCorrection(); }} disabled={downloadLoading || syncStatus.inProgress}>
                       <ListItemIcon><EditIcon sx={{ color: '#7b1fa2' }} /></ListItemIcon>
@@ -4030,7 +4158,7 @@ const EnhancedDataEditor = () => {
             {/* MPN Validation Progress Bar */}
             {mpnValidating && (
               <Box sx={{ mt: 2, px: 4 }}>
-                <Typography variant="body2" sx={{ color: 'rgba(255,255,255,0.9)', mb: 1 }}>
+                <Typography variant="body2" sx={{ color: t.text.secondary, mb: 1 }}>
                   Validating MPNs with Digi-Key, Mouser, and Element14. This can take a few minutes...
                 </Typography>
                 <LinearProgress
@@ -4038,14 +4166,14 @@ const EnhancedDataEditor = () => {
                   sx={{
                     height: 6,
                     borderRadius: 3,
-                    backgroundColor: 'rgba(255,255,255,0.2)',
+                    backgroundColor: t.surface.controlSoft,
                     '& .MuiLinearProgress-bar': {
-                      backgroundColor: '#4caf50',
+                      backgroundColor: t.color.success,
                       borderRadius: 3
                     }
                   }}
                 />
-                <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.8)', mt: 1, display: 'block' }}>
+                <Typography variant="caption" sx={{ color: t.text.secondary, mt: 1, display: 'block' }}>
                   Checking supplier APIs and updating validation columns
                 </Typography>
               </Box>
@@ -4059,23 +4187,24 @@ const EnhancedDataEditor = () => {
       {isFromPdf && showQualityPanel && (
         <Box sx={{ p: 2, pb: 0 }}>
           <Paper
-            elevation={1}
+            elevation={0}
             sx={{
               p: 3,
               mb: 2,
-              border: '1px solid #e3f2fd',
-              borderRadius: 2,
-              background: 'linear-gradient(135deg, #e3f2fd 0%, #f8f9fa 100%)'
+              border: `1px solid ${t.border.default}`,
+              borderRadius: '8px',
+              background: t.surface.elevatedGradient,
+              boxShadow: t.shadow.card
             }}
           >
             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
-              <Typography variant="h6" sx={{ fontWeight: 600, color: '#1976d2' }}>
+              <Typography variant="h6" sx={{ fontWeight: 700, color: t.text.primary }}>
                 Column Quality
               </Typography>
               <IconButton
                 size="small"
                 onClick={() => setShowQualityPanel(false)}
-                sx={{ color: '#666' }}
+                sx={iconButtonSx}
                 title="Hide column quality"
               >
                 <CloseIcon />
@@ -4132,29 +4261,11 @@ const EnhancedDataEditor = () => {
       {/* Main Grid Container */}
       <Box sx={{ flexGrow: 1, p: 2, overflow: 'hidden' }}>
         <Paper 
-          elevation={2} 
-          sx={{ 
-            height: '100%', 
-            overflow: 'auto',
-            borderRadius: 2,
-            border: '1px solid #e0e0e0'
-          }}
+          elevation={0} 
+          sx={gridPanelSx}
           ref={scrollContainerRef}
         >
-          <Box sx={{ p: 2 }}>
-            {/* Top pagination controls */}
-            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                <Typography variant="body2" color="text.secondary">Rows per page</Typography>
-                <Select size="small" value={pageSize} onChange={(e) => { const v = parseInt(e.target.value, 10); setPage(1); setPageSize(v); fetchPageData(1, v); }}>
-                  {[50,100,200,500,1000,2000,3000].map(sz => <MenuItem key={sz} value={sz}>{sz}</MenuItem>)}
-                </Select>
-                <Typography variant="body2" color="text.secondary">
-                  Total: {totalRows.toLocaleString()} | Showing {((page - 1) * pageSize + 1).toLocaleString()}-{Math.min(page * pageSize, totalRows).toLocaleString()}
-                </Typography>
-              </Box>
-              <Pagination count={Math.max(1, totalPages)} page={page} onChange={(_, p) => { setPage(p); fetchPageData(p, pageSize); }} color="primary" size="small" shape="rounded" />
-            </Box>
+          <Box sx={{ p: 1.5, height: '100%', display: 'flex', flexDirection: 'column', gap: 1.25 }}>
             {dupHighlight && (
               <Alert
                 severity="warning"
@@ -4165,14 +4276,8 @@ const EnhancedDataEditor = () => {
               </Alert>
             )}
             {pageLoading && <LinearProgress sx={{ mb: 1 }} />}
-            <div style={{ overflowX: 'auto', overflowY: 'auto', maxHeight: 'calc(100vh - 260px)' }}>
-              <table style={{
-                width: '100%',
-                borderCollapse: 'collapse',
-                tableLayout: 'fixed',
-                fontSize: '14px',
-                fontFamily: 'Segoe UI, Tahoma, Geneva, Verdana, sans-serif'
-              }}>
+            <div style={tableScrollStyle}>
+              <table style={tableBaseStyle}>
                 <colgroup>
                   {getVisibleColumnDefs().map(col => {
                     const field = col.field;
@@ -4184,7 +4289,7 @@ const EnhancedDataEditor = () => {
                   })}
                 </colgroup>
                 <thead>
-                  <tr style={{ backgroundColor: '#f8f9fa', borderBottom: '2px solid #dee2e6' }}>
+                  <tr style={tableHeaderStyle}>
                     {getVisibleColumnDefs().map((col, index) => (
                       <th
                         key={col.field}
@@ -4222,12 +4327,13 @@ const EnhancedDataEditor = () => {
                           window.addEventListener('mouseup', onUp);
                         }}
                         style={{
-                          padding: '12px 16px',
+                          padding: '12px 14px',
                           textAlign: 'left',
-                          fontWeight: 600,
-                          color: '#2c3e50',
-                          border: '1px solid #e9ecef',
-                          backgroundColor: '#f8f9fa',
+                          fontWeight: 700,
+                          color: t.text.primary,
+                          borderRight: `1px solid ${t.table.line}`,
+                          borderBottom: `1px solid ${t.table.line}`,
+                          backgroundColor: t.table.header,
                           position: 'sticky',
                           top: 0,
                           zIndex: 3,
@@ -4247,10 +4353,10 @@ const EnhancedDataEditor = () => {
                                   <InfoIcon
                                     sx={{
                                       fontSize: 14,
-                                      color: '#666',
+                                      color: t.text.secondary,
                                       cursor: 'help',
                                       ml: 0.5,
-                                      '&:hover': { color: '#1976d2' }
+                                      '&:hover': { color: t.color.primary }
                                     }}
                                     onClick={(e) => e.stopPropagation()} // Prevent column resize on icon click
                                   />
@@ -4305,7 +4411,9 @@ const EnhancedDataEditor = () => {
                     })
                     .map((row, realIndex) => {
                     // Neutral zebra striping; no quality-based highlighting
-                    const rowBackgroundColor = realIndex % 2 === 0 ? '#f8f9fa' : 'white';
+                    const rowBackgroundColor = realIndex % 2 === 0
+                      ? t.table.rowExpanded
+                      : t.table.background;
 
                     return (
                       <tr key={realIndex} style={{
@@ -4320,15 +4428,16 @@ const EnhancedDataEditor = () => {
                           const isDupHighlighted = !!(dupHighlight && col.field === dupHighlight.field && cellValue.trim() && dupHighlight.values.has(cellValue.trim()));
                           return (
                             <td key={`${col.field}-${realIndex}`} style={{
-                              padding: '12px 16px',
-                              border: isDupHighlighted ? '2px solid #f59e0b' : '1px solid #e9ecef',
-                              backgroundColor: isDupHighlighted ? '#fff3cd' : (isUnknown ? '#ffebee' : 'inherit'),
-                              color: isDupHighlighted ? '#92400e' : (isInvalidMpn ? '#d32f2f' : (isUnknown ? '#c62828' : 'inherit')),
+                              padding: '10px 14px',
+                              borderRight: isDupHighlighted ? '2px solid #f59e0b' : `1px solid ${t.table.rowLine}`,
+                              borderBottom: isDupHighlighted ? '2px solid #f59e0b' : `1px solid ${t.table.rowLine}`,
+                              backgroundColor: isDupHighlighted ? t.state.warningBg : (isUnknown ? t.state.dangerBg : 'inherit'),
+                              color: isDupHighlighted ? t.color.warningText : (isInvalidMpn ? t.color.danger : (isUnknown ? t.color.danger : t.text.table)),
                               fontWeight: (isDupHighlighted || isInvalidMpn) ? '700' : (isUnknown ? '500' : 'normal'),
                               width: `${columnWidths[col.field] || (col.field === '__row_number__' ? 80 : 180)}px`
                             }}>
                               {col.field === 'datasheet' && cellValue.startsWith('http') ? (
-                                <a href={cellValue} target="_blank" rel="noopener noreferrer">{cellValue}</a>
+                                <a href={cellValue} target="_blank" rel="noopener noreferrer" style={{ color: t.color.primarySoftText }}>{cellValue}</a>
                               ) : (
                                 <input
                                   type="text"
@@ -4342,7 +4451,8 @@ const EnhancedDataEditor = () => {
                                     fontFamily: 'inherit',
                                     color: 'inherit',
                                     fontWeight: 'inherit',
-                                    outline: 'none'
+                                    outline: 'none',
+                                    caretColor: t.color.primary
                                   }}
                                   onFocus={(e) => e.target.select()}
                                 />
@@ -4357,8 +4467,8 @@ const EnhancedDataEditor = () => {
               </table>
             </div>
             {/* Bottom pagination controls */}
-            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 1 }}>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <Box sx={paginationBarSx}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
                 <Typography variant="body2" color="text.secondary">Rows per page</Typography>
                 <Select size="small" value={pageSize} onChange={(e) => { const v = parseInt(e.target.value, 10); setPage(1); setPageSize(v); fetchPageData(1, v); }}>
                   {[50,100,200,500,1000,2000,3000].map(sz => <MenuItem key={sz} value={sz}>{sz}</MenuItem>)}
@@ -4409,7 +4519,17 @@ const EnhancedDataEditor = () => {
           short assistant-style analysis, then applies the right transform in one
           click. The manual chooser below is the "Configure manually" fallback. */}
       <Dialog open={smartExpandOpen} onClose={() => smartPhase !== 'applying' && setSmartExpandOpen(false)} maxWidth="sm" fullWidth
-        PaperProps={{ sx: { borderRadius: 3 } }}>
+        PaperProps={{
+          sx: {
+            borderRadius: '18px',
+            width: 'min(520px, calc(100vw - 40px))',
+            bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.92)' : 'rgba(255, 255, 255, 0.9)',
+            color: isDarkMode ? '#f8fafc' : '#0f172a',
+            border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.22)' : '1px solid rgba(203, 213, 225, 0.9)',
+            backdropFilter: 'blur(18px)',
+            boxShadow: isDarkMode ? '0 28px 80px rgba(0,0,0,0.72)' : '0 24px 70px rgba(15,23,42,0.18)'
+          }
+        }}>
         <DialogTitle sx={{ pb: 0.5 }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
             <AutoAwesomeIcon sx={{ color: '#7c3aed' }} />
@@ -4442,7 +4562,12 @@ const EnhancedDataEditor = () => {
             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
               {smartPlan && (
                 <Alert icon={<AutoAwesomeIcon fontSize="inherit" />} severity="info"
-                  sx={{ bgcolor: 'rgba(124,58,237,0.06)', border: '1px solid rgba(124,58,237,0.2)', color: '#4c1d95', '& .MuiAlert-icon': { color: '#7c3aed' } }}>
+                  sx={{
+                    bgcolor: isDarkMode ? 'rgba(124, 58, 237, 0.16)' : 'rgba(124,58,237,0.06)',
+                    border: isDarkMode ? '1px solid rgba(168, 85, 247, 0.28)' : '1px solid rgba(124,58,237,0.2)',
+                    color: isDarkMode ? '#c4b5fd' : '#4c1d95',
+                    '& .MuiAlert-icon': { color: isDarkMode ? '#a78bfa' : '#7c3aed' }
+                  }}>
                   {smartPlan.headline}
                 </Alert>
               )}
@@ -4488,7 +4613,13 @@ const EnhancedDataEditor = () => {
                 </Grid>
               </Grid>
               {!smartMfrCol ? (
-                <Alert severity="warning" sx={{ py: 0.5 }}>
+                <Alert severity="warning" sx={{
+                  py: 0.5,
+                  bgcolor: isDarkMode ? 'rgba(245, 158, 11, 0.13)' : '#fffbeb',
+                  color: isDarkMode ? '#fde68a' : '#92400e',
+                  border: isDarkMode ? '1px solid rgba(245, 158, 11, 0.26)' : '1px solid #fde68a',
+                  '& .MuiAlert-icon': { color: isDarkMode ? '#fbbf24' : '#d97706' }
+                }}>
                   Right now only the <strong>part numbers</strong> will expand into rows — manufacturers won't be paired.
                   If you mapped manufacturers to a column, pick it in <strong>“Where are the manufacturers?”</strong> so each part
                   pairs with its maker. Leave it as-is only if there are no manufacturers.
@@ -5584,6 +5715,16 @@ const EnhancedDataEditor = () => {
         onClose={handleCloseFactwiseIdDialog}
         maxWidth="sm"
         fullWidth
+        PaperProps={{
+          sx: {
+            borderRadius: '18px',
+            bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.92)' : 'rgba(255, 255, 255, 0.9)',
+            color: isDarkMode ? '#f8fafc' : '#0f172a',
+            border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.22)' : '1px solid rgba(203, 213, 225, 0.9)',
+            backdropFilter: 'blur(18px)',
+            boxShadow: isDarkMode ? '0 28px 80px rgba(0,0,0,0.72)' : '0 24px 70px rgba(15,23,42,0.18)'
+          }
+        }}
       >
         <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           Create FactWise ID (Synchronized)
@@ -5743,26 +5884,44 @@ const EnhancedDataEditor = () => {
           </Box>
 
           {factwiseGenerationMode === 'columns' && firstColumn && secondColumn && (
-            <Box sx={{ mt: 2, p: 2, backgroundColor: '#f5f5f5', borderRadius: 1 }}>
-              <Typography variant="body2" color="text.secondary">
+            <Box sx={{
+              mt: 2,
+              p: 2,
+              bgcolor: isDarkMode ? 'rgba(30, 41, 59, 0.72)' : '#f8fafc',
+              border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.18)' : '1px solid #e2e8f0',
+              borderRadius: '12px'
+            }}>
+              <Typography variant="body2" sx={{ color: isDarkMode ? '#cbd5e1' : '#64748b' }}>
                 Preview: {firstColumn} + "{operator}" + {secondColumn} = "FactWise ID"
               </Typography>
-              <Typography variant="body2" color="text.secondary">
+              <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
                 Example: "A123" + "{operator}" + "XYZ" = "A123{operator}XYZ"
               </Typography>
             </Box>
           )}
 
           {factwiseGenerationMode === 'serial' && (
-            <Box sx={{ mt: 2, p: 2, backgroundColor: '#f5f5f5', borderRadius: 1 }}>
-              <Typography variant="body2" color="text.secondary">
+            <Box sx={{
+              mt: 2,
+              p: 2,
+              bgcolor: isDarkMode ? 'rgba(30, 41, 59, 0.72)' : '#f8fafc',
+              border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.18)' : '1px solid #e2e8f0',
+              borderRadius: '12px'
+            }}>
+              <Typography variant="body2" sx={{ color: isDarkMode ? '#cbd5e1' : '#64748b' }}>
                 Preview: {(factwiseSerialPrefix || '')}{String(Number(factwiseSerialStart) || 1).padStart(Math.max(0, Number(factwiseSerialPadding) || 0), '0')}
                 {factwiseSerialIncrement ? `, ${(factwiseSerialPrefix || '')}${String((Number(factwiseSerialStart) || 1) + 1).padStart(Math.max(0, Number(factwiseSerialPadding) || 0), '0')}` : ' for every row'}
               </Typography>
             </Box>
           )}
 
-          <Alert severity="info" sx={{ mt: 2 }}>
+          <Alert severity="info" sx={{
+            mt: 2,
+            bgcolor: isDarkMode ? 'rgba(14, 165, 233, 0.12)' : '#eff6ff',
+            color: isDarkMode ? '#bae6fd' : '#1e40af',
+            border: isDarkMode ? '1px solid rgba(14, 165, 233, 0.26)' : '1px solid #bfdbfe',
+            '& .MuiAlert-icon': { color: isDarkMode ? '#38bdf8' : '#2563eb' }
+          }}>
             This operation will be synchronized across all data views and validated for consistency.
           </Alert>
         </DialogContent>
@@ -6220,15 +6379,22 @@ const EnhancedDataEditor = () => {
       {/* Snackbar for notifications */}
       <Snackbar
         open={snackbar.open}
-        autoHideDuration={6000}
+        autoHideDuration={3500}
         onClose={closeSnackbar}
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+        anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
+        sx={{ mt: 8, maxWidth: 420 }}
       >
         <Alert 
           onClose={closeSnackbar} 
           severity={snackbar.severity}
           variant="filled"
-          sx={{ width: '100%' }}
+          sx={{
+            width: 'auto',
+            maxWidth: 420,
+            borderRadius: '14px',
+            boxShadow: isDarkMode ? '0 18px 50px rgba(0,0,0,0.55)' : '0 18px 50px rgba(15,23,42,0.2)',
+            alignItems: 'center'
+          }}
         >
           {snackbar.message}
         </Alert>

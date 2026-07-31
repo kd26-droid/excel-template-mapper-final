@@ -19,7 +19,6 @@ import {
   Brain,
   CheckCircle,
   AlertCircle,
-  Users,
   FileText,
   Info,
   RefreshCw,
@@ -50,6 +49,7 @@ import {
 import api, { setGlobalLoaderCallback } from '../services/api';
 import ExpandColumnGroupsDialog from '../components/ExpandColumnGroupsDialog';
 import CarryForwardDialog from '../components/CarryForwardDialog';
+import { useThemeContext } from '../utils/ThemeContext';
 // Optional: lightweight import of synchronizer helpers later if needed
 // import { getDataSynchronizer } from '../utils/DataSynchronizer';
 // Inline helper functions to avoid module initialization issues
@@ -112,6 +112,7 @@ const CustomNode = ({ data, id }) => {
   const isOptional = data.isOptional || false;
   const onDelete = data.onDelete;
   const isDynamic = data.isDynamic || false;  // true for dynamically added columns (Tag_1, etc.)
+  const isDark = data.isDarkMode || false;
 
   // Header editing state (for source nodes)
   const [isEditing, setIsEditing] = React.useState(false);
@@ -175,8 +176,8 @@ const CustomNode = ({ data, id }) => {
   
   return (
     <div className={`
-      relative group cursor-pointer transition-all duration-300 transform hover:scale-105
-      ${isSource ? 'hover:translate-x-2' : 'hover:-translate-x-2'}
+      relative group cursor-pointer transition-all duration-300 transform hover:scale-[1.02]
+      ${isSource ? 'hover:translate-x-1' : 'hover:-translate-x-1'}
     `}>
       {/* Pair grouping visual indicators */}
       {!isSource && pairType !== 'single' && (
@@ -192,20 +193,32 @@ const CustomNode = ({ data, id }) => {
       
       {/* Main node container */}
       <div className={`
-        relative px-5 py-4 rounded-xl border-2 transition-all duration-300 shadow-lg
-        w-60 text-center font-medium text-sm min-h-[70px] flex items-center justify-center
+        relative px-5 py-4 rounded-2xl border transition-all duration-300 shadow-[0_14px_35px_-24px_rgba(15,23,42,0.55)]
+        w-[280px] text-center font-semibold text-sm min-h-[76px] flex items-center justify-center
         ${isSource 
-          ? `bg-gradient-to-br from-blue-50 to-blue-100 border-blue-300 text-blue-900 
-             hover:from-blue-100 hover:to-blue-200 hover:border-blue-400 hover:shadow-xl
-             group-hover:shadow-blue-200` 
-          : `bg-gradient-to-br from-emerald-50 to-emerald-100 border-emerald-300 text-emerald-900 
-             hover:from-emerald-100 hover:to-emerald-200 hover:border-emerald-400 hover:shadow-xl
-             group-hover:shadow-emerald-200`
+            ? isDark
+              ? `bg-gradient-to-br from-blue-950/85 via-slate-900 to-sky-950/75 border-blue-700/50 text-blue-50 
+               hover:border-blue-500/70 hover:shadow-[0_20px_42px_-28px_rgba(59,130,246,0.55)]`
+            : `bg-gradient-to-br from-blue-100 via-sky-50 to-cyan-50 border-blue-300 text-blue-950 
+               hover:border-blue-400 hover:shadow-[0_20px_42px_-26px_rgba(37,99,235,0.65)]`
+          : isDark
+            ? `bg-gradient-to-br from-emerald-950/85 via-slate-900 to-teal-950/75 border-emerald-700/50 text-emerald-50 
+               hover:border-emerald-500/70 hover:shadow-[0_20px_42px_-28px_rgba(16,185,129,0.55)]`
+            : `bg-gradient-to-br from-emerald-100 via-teal-50 to-cyan-50 border-emerald-300 text-emerald-950 
+               hover:border-emerald-400 hover:shadow-[0_20px_42px_-26px_rgba(16,185,129,0.65)]`
         }
-        ${isConnected ? 'ring-3 ring-yellow-400 ring-opacity-60 shadow-2xl scale-105' : ''}
-        ${isSelected ? 'ring-4 ring-purple-500 ring-opacity-80 scale-110 shadow-2xl' : ''}
-        ${isFromTemplate ? 'ring-2 ring-green-400 ring-opacity-50' : ''}
-        ${isSpecificationMapping ? 'ring-2 ring-orange-400 ring-opacity-50' : ''}
+        ${isConnected
+          ? isSource
+            ? isDark
+              ? 'ring-1 ring-blue-400/50 shadow-[0_22px_48px_-32px_rgba(59,130,246,0.55)]'
+              : 'ring-1 ring-blue-300/80 shadow-[0_22px_48px_-30px_rgba(37,99,235,0.42)]'
+            : isDark
+              ? 'ring-1 ring-emerald-400/50 shadow-[0_22px_48px_-32px_rgba(16,185,129,0.55)]'
+              : 'ring-1 ring-emerald-300/80 shadow-[0_22px_48px_-30px_rgba(16,185,129,0.45)]'
+          : ''}
+        ${isSelected ? 'ring-2 ring-purple-500/70 scale-[1.02] shadow-xl' : ''}
+        ${isFromTemplate ? 'ring-1 ring-emerald-400/55' : ''}
+        ${isSpecificationMapping ? 'ring-1 ring-orange-400/55' : ''}
         ${!isSource && pairType !== 'single' ? 'ml-2' : ''}
       `}>
         
@@ -342,7 +355,7 @@ const CustomNode = ({ data, id }) => {
         {/* Status indicators */}
         {isConnected && (
           <div className={`absolute -top-3 -left-3 text-white text-xs w-6 h-6 rounded-full flex items-center justify-center shadow-lg
-            ${isSpecificationMapping ? 'bg-orange-500 animate-pulse' : isFromTemplate ? 'bg-green-500 animate-pulse' : 'bg-blue-500'}
+            ${isSpecificationMapping ? 'bg-orange-500 animate-pulse' : isSource ? 'bg-blue-500' : 'bg-emerald-500'}
           `}>
             {isSpecificationMapping ? <Settings size={14} /> : isFromTemplate ? <Library size={14} /> : <CheckCircle size={14} />}
           </div>
@@ -350,35 +363,35 @@ const CustomNode = ({ data, id }) => {
         
         {/* Source node mapping indicator */}
         {isSource && isConnected && mappedFromLabel && mappedFromLabel.trim() !== '' && (
-          <div className="absolute -bottom-2 -right-2 bg-blue-500 text-white text-xs px-2 py-1 rounded-full font-bold shadow-lg">
+          <div className="absolute -bottom-3 right-3 max-w-[240px] truncate bg-blue-600 text-white text-xs px-3 py-1.5 rounded-full font-extrabold shadow-lg shadow-blue-500/25">
             Map-{mappedFromLabel}
           </div>
         )}
         
         {/* Template indicator - Show Map-{Column Name} for manual/template mappings. A.Map reserved for AI */}
         {!isSource && !isSpecificationMapping && mappedToLabel && mappedToLabel.trim() !== '' && !data.isAiGenerated && (
-          <div className="absolute -bottom-2 -right-2 bg-green-500 text-white text-xs px-2 py-1 rounded-full font-bold shadow-lg">
+          <div className="absolute -bottom-3 right-3 max-w-[240px] truncate bg-emerald-600 text-white text-xs px-3 py-1.5 rounded-full font-extrabold shadow-lg shadow-emerald-500/25">
             Map-{mappedToLabel}
           </div>
         )}
         
         {/* AI mapping indicator - Show A.Map-{Column Name} when auto-mapped */}
         {(isSpecificationMapping || data.isAiGenerated) && mappedToLabel && mappedToLabel.trim() !== '' && (
-          <div className="absolute -bottom-2 -right-2 bg-orange-500 text-white text-xs px-2 py-1 rounded-full font-bold shadow-lg">
+          <div className="absolute -bottom-3 right-3 max-w-[240px] truncate bg-orange-500 text-white text-xs px-3 py-1.5 rounded-full font-extrabold shadow-lg shadow-orange-500/25">
             A.Map-{mappedToLabel}
           </div>
         )}
         
         {/* Default value indicator for template fields */}
         {!isSource && hasDefaultValue && (
-          <div className="absolute -bottom-2 -right-2 bg-blue-500 text-white text-xs px-2 py-1 rounded-full font-bold shadow-lg">
+          <div className="absolute -bottom-3 right-3 max-w-[240px] truncate bg-blue-600 text-white text-xs px-3 py-1.5 rounded-full font-extrabold shadow-lg shadow-blue-500/25">
             Default: {data.defaultValue}
           </div>
         )}
         
         {/* FactWise ID formula indicator */}
         {!isSource && data.factwiseFormula && (
-          <div className="absolute -bottom-2 -right-2 bg-purple-500 text-white text-xs px-2 py-1 rounded-full font-bold shadow-lg">
+          <div className="absolute -bottom-3 right-3 max-w-[240px] truncate bg-purple-600 text-white text-xs px-3 py-1.5 rounded-full font-extrabold shadow-lg shadow-purple-500/25">
             {data.factwiseFormula}
           </div>
         )}
@@ -394,11 +407,11 @@ const CustomNode = ({ data, id }) => {
         
         {/* Hover effect overlay */}
         <div className="absolute inset-0 rounded-xl bg-white bg-opacity-0 group-hover:bg-opacity-10 transition-all duration-200 pointer-events-none"></div>
-        {/* Optional field delete button (template side only) */}
-        {!isSource && isOptional && (
+        {/* Dynamic field delete button (template side only) */}
+        {!isSource && isOptional && isDynamic && (
           <button
             type="button"
-            title="Delete optional field"
+            title="Delete added field"
             className="absolute -top-3 -right-3 w-7 h-7 rounded-full bg-red-500 text-white flex items-center justify-center shadow-md opacity-80 hover:opacity-100"
             onClick={(e) => {
               e.stopPropagation();
@@ -434,7 +447,64 @@ const nodeTypes = {
   custom: CustomNode
 };
 
+const AnimatedMenuGlyph = ({ open = false, stroke = 'currentColor' }) => (
+  <svg
+    viewBox="0 0 32 32"
+    aria-hidden="true"
+    className={`h-5 w-5 transition-transform duration-500 ease-out ${open ? '-rotate-45' : ''}`}
+  >
+    <path
+      d="M27 10 13 10C10.8 10 9 8.2 9 6 9 3.5 10.8 2 13 2 15.2 2 17 3.8 17 6L17 26C17 28.2 18.8 30 21 30 23.2 30 25 28.2 25 26 25 23.8 23.2 22 21 22L7 22"
+      fill="none"
+      stroke={stroke}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="3"
+      style={{
+        strokeDasharray: open ? '20 300' : '12 63',
+        strokeDashoffset: open ? -32.42 : 0,
+        transition: 'stroke-dasharray 500ms cubic-bezier(0.4, 0, 0.2, 1), stroke-dashoffset 500ms cubic-bezier(0.4, 0, 0.2, 1)'
+      }}
+    />
+    <path
+      d="M7 16 27 16"
+      fill="none"
+      stroke={stroke}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="3"
+    />
+  </svg>
+);
+
+const clampNumber = (value, min, max) => Math.min(max, Math.max(min, value));
+
+const getFlowLayout = () => {
+  const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 1366;
+  const defaultZoom = 0.9;
+  const nodeWidth = 280;
+  const nodeHeight = 86;
+  const nodeSpacing = 34;
+  const startY = 52;
+  const laneGap = clampNumber(Math.round(viewportWidth * 0.34), 460, 760);
+  const workflowWidth = nodeWidth * 2 + laneGap;
+  const sourceX = Math.max(32, Math.round(((viewportWidth / defaultZoom) - workflowWidth) / 2));
+
+  return {
+    defaultZoom,
+    nodeWidth,
+    nodeHeight,
+    nodeSpacing,
+    startY,
+    laneGap,
+    workflowWidth,
+    sourceX,
+    targetX: sourceX + nodeWidth + laneGap
+  };
+};
+
 export default function ColumnMapping() {
+  const { isDarkMode } = useThemeContext();
   const { sessionId } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
@@ -597,6 +667,8 @@ export default function ColumnMapping() {
   const [statusPolling, setStatusPolling] = useState(false);
   const [rebuildingColumns, setRebuildingColumns] = useState(false);
   const [rulesOpen, setRulesOpen] = useState(false);
+  const [sideMenuOpen, setSideMenuOpen] = useState(false);
+  const [flowLayoutTick, setFlowLayoutTick] = useState(0);
 
   // Persisted session metadata for formula/factwise re-application during fast review
   const formulaRulesRef = useRef([]);
@@ -635,6 +707,51 @@ export default function ColumnMapping() {
   const [templateVersion, setTemplateVersion] = useState(0);
   const [expectedTemplateVersion, setExpectedTemplateVersion] = useState(0);
   const [isReady, setIsReady] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+
+    let resizeTimer = null;
+    const recenterFlow = () => {
+      window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(() => {
+        const layout = getFlowLayout();
+        setFlowLayoutTick(v => v + 1);
+        setNodes(currentNodes => currentNodes.map(node => {
+          const index = Number.isFinite(node.data?.index) ? node.data.index : 0;
+          const isSourceNode = node.id.startsWith('c-');
+          return {
+            ...node,
+            position: {
+              x: isSourceNode ? layout.sourceX : layout.targetX,
+              y: layout.startY + index * (layout.nodeHeight + layout.nodeSpacing)
+            },
+            style: {
+              ...node.style,
+              width: layout.nodeWidth,
+              height: layout.nodeHeight
+            }
+          };
+        }));
+      }, 120);
+    };
+
+    window.addEventListener('resize', recenterFlow);
+    return () => {
+      window.clearTimeout(resizeTimer);
+      window.removeEventListener('resize', recenterFlow);
+    };
+  }, [setNodes]);
+
+  useEffect(() => {
+    setNodes(currentNodes => currentNodes.map(node => ({
+      ...node,
+      data: {
+        ...node.data,
+        isDarkMode
+      }
+    })));
+  }, [isDarkMode, setNodes]);
   
   // Existing mappings and default values state
   const [existingMappings, setExistingMappings] = useState([]);
@@ -659,20 +776,19 @@ export default function ColumnMapping() {
     } catch (_) {}
   }
   
-  // Determine if there is a meaningful undo state available
   const hasMeaningfulHistory = useCallback(() => {
     if (!mappingHistory || mappingHistory.length === 0) return false;
     const last = mappingHistory[mappingHistory.length - 1];
     if (!last || !Array.isArray(last.edges) || !Array.isArray(edges)) return false;
-    if (last.edges.length !== edges.length) return true; // edge count changed
-    // quick label diff for same-length edge lists
+    if (last.edges.length !== edges.length) return true;
+
     try {
       const curPairs = new Set(edges.map(e => `${e.source}->${e.target}`));
       for (const e of last.edges) {
-        const key = `${e.source}->${e.target}`;
-        if (!curPairs.has(key)) return true;
+        if (!curPairs.has(`${e.source}->${e.target}`)) return true;
       }
     } catch (_) {}
+
     return false;
   }, [mappingHistory, edges]);
 
@@ -1453,8 +1569,8 @@ export default function ColumnMapping() {
     // Generate unique edge ID by including timestamp to allow multiple edges to same target
     const edgeId = `e-c-${sourceIdx}-t-${targetIdx}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
     
-    let strokeColor = '#10b981'; // Always green for perfect mappings
-    let strokeWidth = 3;
+    let strokeColor = '#10b981';
+    let strokeWidth = 2.5;
     let animated = true;
     
     return {
@@ -1466,13 +1582,13 @@ export default function ColumnMapping() {
       style: { 
         stroke: strokeColor, 
         strokeWidth,
-        strokeOpacity: 0.8
+        strokeOpacity: 0.74
       },
       markerEnd: {
         type: MarkerType.ArrowClosed,
         color: strokeColor,
-        width: 20,
-        height: 20
+        width: 14,
+        height: 14
       },
       data: { 
         confidence, 
@@ -1560,6 +1676,11 @@ export default function ColumnMapping() {
 
     const nodeData = node.data || {};
     const fieldName = nodeData.originalLabel;
+
+    if (!isDynamicColumn(fieldName)) {
+      window.alert('Only added dynamic fields can be deleted. FactWise template fields are locked.');
+      return;
+    }
     
     // Check if any of the target nodes are mapped
     const hasMapping = edges.some(e => e.target === nodeId);
@@ -1610,10 +1731,14 @@ export default function ColumnMapping() {
   // Function declaration for initializeNodes - hoisted to avoid TDZ
   function initializeNodes(clientHdrs, templateHdrs, aiMappings = null, factwiseRules = [], defaultValues = {}, setIsInitializingMappings = null) {
     
-    const nodeHeight = 90;
-    const nodeWidth = 200; // Add missing nodeWidth
-    const nodeSpacing = 30;
-    const startY = 40; // Space for frozen headers
+    const {
+      nodeHeight,
+      nodeWidth,
+      nodeSpacing,
+      startY,
+      sourceX,
+      targetX
+    } = getFlowLayout();
     
     // Create stable delete handler using imported function
     const stableDeleteHandler = (nodeId) => {
@@ -1621,11 +1746,11 @@ export default function ColumnMapping() {
       handleDeleteOptionalFieldUpdated(nodeId, nodes, edges, columnCounts, updateColumnCounts);
     };
 
-    // Create source nodes (adjusted for sidebar)
+    // Create source nodes
     const clientNodes = clientHdrs.map((header, idx) => ({
       id: `c-${idx}`,
       type: 'custom',
-      position: { x: 20, y: startY + idx * (nodeHeight + nodeSpacing) },
+      position: { x: sourceX, y: startY + idx * (nodeHeight + nodeSpacing) },
       data: {
         label: header,
         originalLabel: header,
@@ -1635,16 +1760,13 @@ export default function ColumnMapping() {
         isFromPDF: isFromPDF,
         confidence: headerConfidenceScores[header] || null,
         isCorrected: !!headerCorrections[header],
+        isDarkMode,
         onHeaderEdit: handleHeaderEdit
       },
       draggable: false,
       style: { width: nodeWidth, height: nodeHeight }
     }));
 
-    // Calculate template node positions
-    const templateStartX = 900;
-    const templateNodeStartY = startY;
-    
     let specPairIndex = 1;
     let customerPairIndex = 1;
     
@@ -1689,6 +1811,7 @@ export default function ColumnMapping() {
       const pairType = getPairTypeUpdated(header);
       const pairIndex = getPairIndexUpdated(header);
       const pairColor = getPairColorUpdated(header, pairColors);
+      const isDynamicTemplateField = isDynamicColumn(header);
 
       // Check for custom formula rule from factwise
       const factwiseFormula = factwiseRules?.find(rule => rule.target_column === header)?.formula_expression || null;
@@ -1702,7 +1825,7 @@ export default function ColumnMapping() {
       return {
         id: `t-${idx}`,
         type: 'custom',
-        position: { x: templateStartX, y: templateNodeStartY + idx * (nodeHeight + nodeSpacing) },
+        position: { x: targetX, y: startY + idx * (nodeHeight + nodeSpacing) },
         data: {
           label: header,
           originalLabel: header,
@@ -1714,19 +1837,19 @@ export default function ColumnMapping() {
           pairType: pairType,
           pairColor: pairColor,
           pairIndex: pairIndex,
-          isOptional: isOptionalFieldUpdated(header, templateOptionals, idx),
+          isOptional: isDynamicTemplateField && isOptionalFieldUpdated(header, templateOptionals, idx),
           onDelete: stableDeleteHandler,
           factwiseFormula: factwiseFormula,
           hasDefaultValue: hasDefaultValue,
           defaultValue: defaultValue,
           atBadge: tagBadges.get(header) || null,
-          isDynamic: isDynamicColumn(header),  // true for Tag_1, Specification_Name_1, etc.
+          isDarkMode,
+          isDynamic: isDynamicTemplateField,  // true for Tag_1, Specification_Name_1, etc.
         },
         draggable: false,
         style: { 
           width: nodeWidth, 
-          height: nodeHeight, 
-          backgroundColor: isPairStart || isPairEnd ? `${pairColor}20` : '#f3f4f6' 
+          height: nodeHeight
         }
       };
     });
@@ -1757,7 +1880,7 @@ export default function ColumnMapping() {
   const updateColumnCounts = async (newCounts) => {
     setColumnCountLoading(true);
     try {
-      // Allow any just-applied state changes (like Clear All) to settle before snapshot
+      // Allow any just-applied state changes to settle before snapshot
       await new Promise(r => setTimeout(r, 50));
       // Ensure immutable counts object with all required keys
       const safeNewCounts = {
@@ -2712,10 +2835,7 @@ export default function ColumnMapping() {
       });
     }, 100);
     
-    // Save to mapping history
     setTimeout(() => {
-      setMappingHistory([{ nodes, edges: newEdges }]);
-      
       // Set flag to false after mappings are applied
       if (setIsInitializingMappings) {
         setIsInitializingMappings(false);
@@ -3168,9 +3288,8 @@ export default function ColumnMapping() {
         const sourceIdx = parseInt(selectedSourceNode.replace('c-', ''));
         const targetIdx = parseInt(node.id.replace('t-', ''));
         
-        // Save state for undo
         setMappingHistory(prev => [...prev, { nodes, edges }]);
-        
+
         // Allow multiple connections from one source and multiple connections to same target
         const newEdge = createEdge(sourceIdx, targetIdx, false);
         setEdges(prev => addEdge(newEdge, prev));
@@ -3410,9 +3529,8 @@ export default function ColumnMapping() {
     }
 
     try {
-      // Save state for undo
       setMappingHistory(prev => [...prev, { nodes, edges }]);
-      
+
       // Allow multiple connections from one source and multiple connections to same target
       const newEdge = createEdge(
         parseInt(connection.source.replace('c-', '')),
@@ -3479,7 +3597,7 @@ export default function ColumnMapping() {
       // Prevent automatic mapping restore after dynamic +/- right after a deletion
       suppressRestoreRef.current = true;
       setMappingHistory(prev => [...prev, { nodes, edges }]);
-      
+
       const edgeToDelete = edges.find(e => e.id === selectedEdge);
       const newEdges = edges.filter(edge => edge.id !== selectedEdge);
       // If this is a virtual edge (green arrow), suppress it so it won't reappear on refresh
@@ -3565,16 +3683,12 @@ export default function ColumnMapping() {
     } catch (_) {}
   };
 
-  // Clear all mappings (preserve default values so they are not lost)
   const clearMappings = () => {
-    // Prevent auto-restore right after clear if user adjusts +/-
+    setMappingHistory(prev => [...prev, { nodes, edges }]);
     suppressRestoreRef.current = true;
-    // Do not record a history entry for Clear All; treat it as a reset
     setEdges([]);
-    // Clear default values as well (blue tags)
     setDefaultValueMappings({});
     mappingsCacheRef.current = [];
-    // Reset mapping counter when clearing all mappings
     resetMappingCounter();
     setNodes(prev => prev.map(node => ({
       ...node,
@@ -3598,43 +3712,32 @@ export default function ColumnMapping() {
     setSpecificationMappingsApplied(false);
     setOriginalTemplateId(null);
     setTemplateSuccess(false);
-    
-    // Clear saved mappings from sessionStorage
+
     sessionStorage.removeItem('currentMapping');
-    // Persist cleared defaults and mappings permanently
-    try { api.saveColumnMappings(sessionId, { mappings: [], default_values: {}, header_corrections: {}, force_persist: true }); } catch (_) {}
-    // eslint-disable-next-line no-console
-    // Also clear local undo history so Undo is disabled after Clear All
-    setMappingHistory([]);
+    try {
+      api.saveColumnMappings(sessionId, { mappings: [], default_values: {}, header_corrections: {}, force_persist: true });
+    } catch (_) {}
   };
 
-  // Undo last action with better error handling
   const undoLastAction = () => {
-    if (mappingHistory.length > 0) {
-      const lastState = mappingHistory[mappingHistory.length - 1];
-      
-      // Ensure we have valid state to restore
-      if (lastState && lastState.nodes && Array.isArray(lastState.nodes)) {
-        // eslint-disable-next-line no-console
-        setNodes(lastState.nodes);
-        setEdges(lastState.edges || []);
-        setMappingHistory(prev => prev.slice(0, -1));
-        setSelectedSourceNode(null);
-        setSelectedEdge(null);
-        // Reset counter when undoing to maintain consistent behavior
-        resetMappingCounter();
-      } else {
-        // eslint-disable-next-line no-console
-        console.warn('Invalid state in mapping history, reinitializing nodes');
-        // Fallback: reinitialize nodes if state is corrupted
-        initializeNodes(clientHeaders, templateHeaders, null, [], defaultValueMappings, setIsInitializingMappings);
-        setEdges([]);
-        setMappingHistory([]);
-        resetMappingCounter();
-      }
-    } else {
-      // eslint-disable-next-line no-console
+    if (mappingHistory.length === 0) return;
+
+    const lastState = mappingHistory[mappingHistory.length - 1];
+    if (lastState && lastState.nodes && Array.isArray(lastState.nodes)) {
+      setNodes(lastState.nodes);
+      setEdges(lastState.edges || []);
+      setMappingHistory(prev => prev.slice(0, -1));
+      setSelectedSourceNode(null);
+      setSelectedEdge(null);
+      resetMappingCounter();
+      return;
     }
+
+    console.warn('Invalid state in mapping history, reinitializing nodes');
+    initializeNodes(clientHeaders, templateHeaders, null, [], defaultValueMappings, setIsInitializingMappings);
+    setEdges([]);
+    setMappingHistory([]);
+    resetMappingCounter();
   };
 
   // Clear selection when clicking elsewhere or pressing escape
@@ -4275,202 +4378,614 @@ export default function ColumnMapping() {
     );
   }
 
+  const flowLayout = getFlowLayout();
+  const flowRowHeight = flowLayout.nodeHeight + flowLayout.nodeSpacing;
+  const sourceHeaderCenter = Math.round((flowLayout.sourceX + flowLayout.nodeWidth / 2) * flowLayout.defaultZoom);
+  const targetHeaderCenter = Math.round((flowLayout.targetX + flowLayout.nodeWidth / 2) * flowLayout.defaultZoom);
+  const appHeaderOffset = '54px';
+  const topActionBase = 'h-10 rounded-full border text-sm font-bold shadow-sm transition-colors disabled:pointer-events-none';
+  const sidebarButtonBase = 'w-full h-11 px-4 rounded-full flex items-center gap-3 text-sm font-medium transition-all disabled:opacity-50';
+  const sidePanelClass = `rounded-2xl border p-4 ${
+    isDarkMode ? 'bg-slate-900/70 border-slate-800' : 'bg-slate-50 border-slate-200'
+  }`;
+  const sideSectionLabelClass = `text-[11px] font-medium uppercase tracking-[0.06em] mb-2.5 ${
+    isDarkMode ? 'text-slate-400' : 'text-slate-500'
+  }`;
+  const primaryBluePillClass = `rounded-full bg-blue-600 text-white shadow-[0_14px_28px_-16px_rgba(37,99,235,0.9)] hover:bg-blue-700 hover:shadow-[0_18px_34px_-18px_rgba(37,99,235,0.95)] hover:-translate-y-0.5 ${
+    isDarkMode ? 'disabled:bg-slate-800 disabled:text-slate-500' : 'disabled:bg-slate-200 disabled:text-slate-400'
+  }`;
+  const muiPillButtonSx = {
+    borderRadius: '999px',
+    px: 2.5,
+    py: 0.85,
+    fontWeight: 700,
+    textTransform: 'none',
+    boxShadow: 'none'
+  };
+  const muiPrimaryPillSx = {
+    ...muiPillButtonSx,
+    bgcolor: '#2563eb',
+    color: '#ffffff',
+    boxShadow: '0 14px 28px -16px rgba(37, 99, 235, 0.9)',
+    '&:hover': {
+      bgcolor: '#1d4ed8',
+      boxShadow: '0 18px 34px -18px rgba(37, 99, 235, 0.95)'
+    }
+  };
+  const mappingDialogPaperSx = {
+    borderRadius: '18px',
+    overflow: 'hidden',
+    bgcolor: isDarkMode ? '#111827' : '#ffffff',
+    color: isDarkMode ? '#f8fafc' : '#0f172a',
+    border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.18)' : '1px solid #e2e8f0',
+    boxShadow: isDarkMode
+      ? '0 28px 80px rgba(0, 0, 0, 0.72)'
+      : '0 24px 70px rgba(15, 23, 42, 0.18)'
+  };
+  const mappingDialogHeaderSx = {
+    px: 3,
+    pt: 2.5,
+    pb: 1.25,
+    bgcolor: isDarkMode ? '#111827' : '#ffffff'
+  };
+  const mappingDialogBodySx = {
+    px: 3,
+    py: 1.5,
+    bgcolor: isDarkMode ? '#111827' : '#ffffff'
+  };
+  const mappingDialogFooterSx = {
+    px: 3,
+    py: 2,
+    gap: 1,
+    bgcolor: isDarkMode ? '#111827' : '#f8fafc',
+    borderTop: isDarkMode ? '1px solid rgba(148, 163, 184, 0.12)' : '1px solid #e2e8f0'
+  };
+  const dialogInputClass = `w-full rounded-xl border px-4 py-3 text-sm outline-none transition-colors focus:ring-2 focus:ring-blue-500 ${
+    isDarkMode
+      ? 'bg-slate-950/60 border-slate-700 text-slate-100 placeholder:text-slate-500'
+      : 'bg-slate-50 border-slate-200 text-slate-900 placeholder:text-slate-400'
+  }`;
+  const dialogSelectClass = `rounded-xl border px-3 py-2 text-sm outline-none transition-colors focus:ring-2 focus:ring-blue-500 ${
+    isDarkMode
+      ? 'bg-slate-950/60 border-slate-700 text-slate-100'
+      : 'bg-slate-50 border-slate-200 text-slate-900'
+  }`;
+  const dialogLabelClass = `block text-sm font-medium mb-2 ${isDarkMode ? 'text-slate-300' : 'text-slate-700'}`;
+
   return (
     <div className="w-full h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex flex-col">
 
 
-      {/* Clean Top Header - Just essentials */}
-      <div className="bg-white shadow-xl border-b border-gray-200 px-8 py-4">
-        <div className="flex justify-between items-center">
+      {/* Clean Top Header - Theme Adaptive & Premium */}
+      <div className={`px-6 py-3.5 border-b shadow-md transition-colors ${
+        isDarkMode ? 'bg-[#0b101b] border-slate-800 text-white' : 'bg-white/95 backdrop-blur-md border-slate-200 text-slate-800'
+      }`}>
+        <div className="flex flex-wrap justify-between items-center gap-3">
           {/* Left side - Back button, Logo and Template Status */}
-          <div className="flex items-center gap-4">
-            <button
-              onClick={() => navigate('/upload')}
-              className="flex items-center gap-2 px-4 py-2 text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg transition-colors"
-              title="Back to Upload Files"
-            >
-              <ArrowLeft size={20} />
-              <span className="text-sm font-medium">Back</span>
-            </button>
-            <div className="w-12 h-12 bg-gradient-to-br from-blue-600 to-blue-800 rounded-xl flex items-center justify-center shadow-lg">
-              <div className="w-6 h-6 bg-white rounded-md opacity-90"></div>
+          <div className="flex items-center gap-3">
+            <Tooltip title="Back to Upload Files" arrow placement="bottom">
+              <button
+                onClick={() => navigate('/upload')}
+                aria-label="Back to Upload Files"
+                className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full border text-sm font-semibold shadow-sm transition-all ${
+                  isDarkMode
+                    ? 'bg-slate-900 border-slate-700 text-slate-200 hover:bg-slate-800 hover:text-white'
+                    : 'bg-white border-slate-200 text-slate-700 hover:bg-blue-50 hover:border-blue-200 hover:text-blue-700'
+                }`}
+              >
+                <ArrowLeft size={18} />
+              </button>
+            </Tooltip>
+
+            <div className={`text-base font-extrabold tracking-tight ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
+              Column Mapping
             </div>
-            <div className="text-lg font-semibold text-gray-700">Column Mapping</div>
-            <div className="ml-4 text-sm text-gray-500 flex items-center gap-2">
-              <span className={`px-2 py-0.5 text-xs rounded ${syncNotice.visible ? 'bg-yellow-100 text-yellow-700 border border-yellow-300' : 'bg-green-100 text-green-700 border border-green-300'}`}>
+
+            <div className="ml-2 flex items-center gap-2">
+              <span className={`px-2.5 py-0.5 text-xs font-bold rounded-full transition-all ${
+                syncNotice.visible
+                  ? 'bg-amber-500/15 text-amber-500 border border-amber-500/30'
+                  : 'bg-emerald-500/15 text-emerald-500 border border-emerald-500/30'
+              }`}>
                 {syncNotice.visible ? 'Cache' : 'Fresh'}
               </span>
             </div>
           </div>
           
-          {/* Right side - Action buttons. Uniform height + wrapping so they never
-              overflow or collide on narrower viewports. Secondary utilities are
-              subtle; primary actions (Auto Map / Apply Template / Review) carry color. */}
+          {/* Right side - Action buttons */}
           <div className="flex flex-wrap items-center justify-end gap-2">
-            <button
-              onClick={() => { try { if (loadDataRef.current) loadDataRef.current(); } catch(_) {} }}
-              className={`h-10 px-3 rounded-lg text-sm border bg-white hover:bg-gray-100 text-gray-700 shadow-sm transition-all ${statusPolling ? 'opacity-70' : ''}`}
-              title="Refresh headers and mappings"
-            >
-              {statusPolling ? 'Syncing…' : 'Refresh'}
-            </button>
-            <button
-              onClick={handleRebuildColumns}
-              disabled={rebuildingColumns || isRebuildingRef.current}
-              className={`h-10 px-3 rounded-lg text-sm font-medium border shadow-sm transition-all ${rebuildingColumns ? 'bg-gray-200 text-gray-500' : 'bg-white hover:bg-gray-100 text-gray-700'}`}
-              title="Regenerate canonical template headers from counts"
-            >
-              {rebuildingColumns ? 'Rebuilding…' : 'Rebuild Columns'}
-            </button>
-            <button
-              onClick={handleAutoMap}
-              disabled={isAutoMapping || isRebuildingRef.current}
-              className={`
-                h-10 px-4 rounded-lg text-sm font-semibold flex items-center gap-2 shadow-sm transition-all
-                ${isAutoMapping
-                  ? 'bg-gray-200 text-gray-500'
-                  : 'bg-blue-600 hover:bg-blue-700 text-white'
-                }
-              `}
-            >
-              {isAutoMapping ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></div>
-                  Mapping...
-                </>
-              ) : (
-                <>
-                  <Brain size={16} />
-                  Auto Map
-                </>
-              )}
-            </button>
+            <Tooltip title="Refresh headers and mappings" arrow placement="bottom">
+              <button
+                onClick={() => { try { if (loadDataRef.current) loadDataRef.current(); } catch(_) {} }}
+                className={`${topActionBase} px-4 flex items-center gap-2 ${
+                  isDarkMode
+                    ? 'bg-slate-900 border-slate-700 text-slate-200'
+                    : 'bg-white border-blue-100 text-slate-700'
+                } ${statusPolling ? 'opacity-70' : ''}`}
+              >
+                <span>{statusPolling ? 'Syncing...' : 'Refresh'}</span>
+                <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${
+                  isDarkMode ? 'bg-blue-500/20 text-blue-200' : 'bg-blue-600 text-white'
+                }`}>
+                  <RefreshCw size={15} className={statusPolling ? 'animate-spin' : ''} />
+                </span>
+              </button>
+            </Tooltip>
 
-            {/* Save Template removed from Column Mapping as per request */}
+            <Tooltip title="Review mapped data" arrow placement="bottom">
+              <button
+                onClick={handleReview}
+                disabled={edges.length === 0 || isReviewing || isRebuildingRef.current || !isReady || isProcessingMappings || applyingTemplate}
+                className={`
+                  h-10 px-5 text-sm font-bold flex items-center gap-2 transition-all disabled:pointer-events-none
+                  ${edges.length > 0 && !isReviewing && !isProcessingMappings
+                    ? primaryBluePillClass
+                    : `${primaryBluePillClass} opacity-60`
+                  }
+                `}
+              >
+                {isReviewing ? (
+                  <>
+                    <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                    <span>Preparing…</span>
+                  </>
+                ) : (
+                  <>
+                    <ArrowRight size={15} />
+                    <span>Review</span>
+                  </>
+                )}
+              </button>
+            </Tooltip>
 
-            <button
-              onClick={() => {
-                setShowTemplateDialog(true);
-                loadAvailableTemplates();
-              }}
-              disabled={applyingTemplate || templatesLoading}
-              className={`
-                h-10 px-4 rounded-lg text-sm font-semibold flex items-center gap-2 shadow-sm transition-all
-                ${applyingTemplate || templatesLoading
-                  ? 'bg-gray-200 text-gray-500'
-                  : 'bg-green-600 hover:bg-green-700 text-white'
-                }
-              `}
-            >
-              {applyingTemplate || templatesLoading ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-gray-400 border-t-transparent rounded-full animate-spin"></div>
-                  Loading...
-                </>
-              ) : (
-                <>
-                  <Library size={16} />
-                  Apply Template
-                </>
-              )}
-            </button>
-
-            <button
-              onClick={undoLastAction}
-              disabled={
-                !hasMeaningfulHistory() || applyingTemplate || templateApplied ||
-                edges.length === 0 || isReviewing || isRebuildingRef.current || !isReady || isProcessingMappings
-              }
-              className="h-10 px-3 bg-white hover:bg-gray-100 disabled:opacity-50 disabled:bg-gray-100 text-gray-700 border rounded-lg shadow-sm transition-all flex items-center gap-1.5 text-sm"
-            >
-              <RotateCcw size={16} />
-              Undo
-            </button>
-
-            <button
-              onClick={clearMappings}
-              className="h-10 px-3 bg-white hover:bg-red-50 text-red-600 border border-red-200 rounded-lg flex items-center gap-1.5 shadow-sm transition-all text-sm"
-            >
-              <Trash2 size={16} />
-              Clear All
-            </button>
-
-            {/* "Allow alternates" toggle + "Stack into rows" removed — alternate
-                row-expansion now lives in the editor's "Expand Alternates into
-                Rows" tool. A destination takes one source; 1 → many is allowed. */}
-
-            <button
-              onClick={handleReview}
-              disabled={edges.length === 0 || isReviewing || isRebuildingRef.current || !isReady || isProcessingMappings || applyingTemplate}
-              className={`
-                h-10 px-5 rounded-lg text-sm font-semibold flex items-center gap-2 shadow-sm transition-all
-                ${edges.length > 0 && !isReviewing && !isProcessingMappings
-                  ? 'bg-purple-600 hover:bg-purple-700 text-white'
-                  : 'bg-gray-200 text-gray-500'
-                }
-              `}
-            >
-              {isReviewing ? (
-                <>
-                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                  <span>Preparing…</span>
-                </>
-              ) : (
-                <>
-                  <ArrowRight size={16} />
-                  Review
-                </>
-              )}
-            </button>
-
-            <button
-              onClick={() => setRulesOpen(true)}
-              className="h-10 px-3 rounded-lg text-sm font-medium border bg-white hover:bg-gray-100 text-gray-700 shadow-sm"
-              title="View active Tag rules"
-            >
-              Tag Rules
-            </button>
+            <Tooltip title="Open mapping menu" arrow placement="bottom">
+              <button
+                type="button"
+                onClick={() => {
+                  setRulesOpen(false);
+                  setSideMenuOpen(true);
+                }}
+                className={`h-10 w-10 rounded-full border shadow-sm transition-all flex items-center justify-center ${
+                  isDarkMode
+                    ? 'bg-blue-600 hover:bg-blue-500 border-blue-500 text-white shadow-blue-950/25'
+                    : 'bg-blue-600 hover:bg-blue-700 border-blue-600 text-white shadow-blue-500/25'
+                }`}
+                aria-label="Open mapping menu"
+              >
+                <AnimatedMenuGlyph open={sideMenuOpen} stroke="currentColor" />
+              </button>
+            </Tooltip>
           </div>
         </div>
       </div>
 
+      {/* Right Action Sidebar */}
+      {sideMenuOpen && (
+        <div
+          className="fixed left-0 right-0 bottom-0 z-50 flex justify-end"
+          style={{ top: appHeaderOffset, height: `calc(100vh - ${appHeaderOffset})` }}
+        >
+          <button
+            type="button"
+            aria-label="Close mapping menu"
+            onClick={() => setSideMenuOpen(false)}
+            className={`absolute inset-0 ${
+              isDarkMode ? 'bg-slate-950/70' : 'bg-slate-900/25'
+            }`}
+          />
+          <aside className={`relative h-full w-full max-w-[400px] border-l shadow-2xl flex flex-col font-sans transition-colors ${
+            isDarkMode
+              ? 'bg-[#0b101b] border-slate-800 text-white'
+              : 'bg-white border-slate-200 text-slate-900'
+          }`}>
+            <div className={`px-5 py-4 border-b flex items-center justify-between ${
+              isDarkMode ? 'border-slate-800' : 'border-slate-200'
+            }`}>
+              <div className="min-w-0 pr-3">
+                <div className={`text-[11px] font-medium uppercase tracking-[0.06em] ${
+                  isDarkMode ? 'text-slate-400' : 'text-slate-500'
+                }`}>
+                  Tools
+                </div>
+                <div className="text-base font-semibold mt-1 truncate">Column Mapping</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSideMenuOpen(false)}
+                className={`h-9 w-9 rounded-full flex items-center justify-center transition-colors ${
+                  isDarkMode ? 'hover:bg-slate-800 text-slate-300' : 'hover:bg-slate-100 text-slate-600'
+                }`}
+                aria-label="Close mapping menu"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
+              <section>
+                <h3 className={sideSectionLabelClass}>
+                  Data
+                </h3>
+                <div className="space-y-2">
+                  <button
+                    type="button"
+                    onClick={() => { try { if (loadDataRef.current) loadDataRef.current(); } catch(_) {} }}
+                    className={`${sidebarButtonBase} ${
+                      isDarkMode ? 'hover:bg-slate-800 text-slate-200' : 'hover:bg-slate-100 text-slate-700'
+                    } ${statusPolling ? 'opacity-70' : ''}`}
+                  >
+                    <RefreshCw size={18} />
+                    <span>{statusPolling ? 'Syncing...' : 'Refresh'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleRebuildColumns}
+                    disabled={rebuildingColumns || isRebuildingRef.current}
+                    className={`${sidebarButtonBase} ${
+                      isDarkMode ? 'hover:bg-slate-800 text-slate-200' : 'hover:bg-slate-100 text-slate-700'
+                    }`}
+                  >
+                    <Settings size={18} />
+                    <span>{rebuildingColumns ? 'Rebuilding...' : 'Rebuild Columns'}</span>
+                  </button>
+                </div>
+              </section>
+
+              <section>
+                <h3 className={sideSectionLabelClass}>
+                  Mapping
+                </h3>
+                <div className="space-y-2">
+                  <button
+                    type="button"
+                    onClick={handleAutoMap}
+                    disabled={isAutoMapping || isRebuildingRef.current}
+                    className={`${sidebarButtonBase} disabled:opacity-60 ${
+                      isAutoMapping
+                        ? isDarkMode ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-500'
+                        : 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md shadow-blue-500/25 hover:from-blue-700 hover:to-indigo-700'
+                    }`}
+                  >
+                    {isAutoMapping ? (
+                      <div className="w-4 h-4 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <Brain size={18} />
+                    )}
+                    <span>{isAutoMapping ? 'Mapping...' : 'Auto Map'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowTemplateDialog(true);
+                      loadAvailableTemplates();
+                    }}
+                    disabled={applyingTemplate || templatesLoading}
+                    className={`${sidebarButtonBase} border ${
+                      isDarkMode
+                        ? 'border-slate-700 hover:bg-slate-800 text-slate-200'
+                        : 'border-slate-200 hover:bg-slate-100 text-slate-700'
+                    }`}
+                  >
+                    <Library size={18} />
+                    <span>{applyingTemplate || templatesLoading ? 'Loading...' : 'Apply Template'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSideMenuOpen(false);
+                      setRulesOpen(true);
+                    }}
+                    className={`${sidebarButtonBase} ${
+                      isDarkMode ? 'hover:bg-slate-800 text-slate-200' : 'hover:bg-slate-100 text-slate-700'
+                    }`}
+                  >
+                    <FileText size={18} />
+                    <span>Tag Rules</span>
+                  </button>
+                </div>
+              </section>
+
+              <section>
+                <h3 className={sideSectionLabelClass}>
+                  History
+                </h3>
+                <div className="space-y-2">
+                  <button
+                    type="button"
+                    onClick={undoLastAction}
+                    disabled={
+                      !hasMeaningfulHistory() || applyingTemplate || templateApplied ||
+                      isReviewing || isRebuildingRef.current || isProcessingMappings
+                    }
+                    className={`${sidebarButtonBase} disabled:opacity-45 ${
+                      isDarkMode ? 'hover:bg-slate-800 text-slate-200' : 'hover:bg-slate-100 text-slate-700'
+                    }`}
+                  >
+                    <RotateCcw size={17} />
+                    <span>Undo</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={clearMappings}
+                    className={`${sidebarButtonBase} ${
+                      isDarkMode ? 'hover:bg-red-500/10 text-red-300' : 'hover:bg-red-50 text-red-600'
+                    }`}
+                  >
+                    <Trash2 size={17} />
+                    <span>Clear All</span>
+                  </button>
+                </div>
+              </section>
+
+              <section className={sidePanelClass}>
+                <h3 className={`${sideSectionLabelClass} mb-4`}>
+                  Template Column Counts
+                </h3>
+                <div className="space-y-3.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm font-medium">Tags</span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => updateColumnCounts({
+                          tags_count: Math.max(1, columnCounts.tags_count - 1),
+                          spec_pairs_count: columnCounts.spec_pairs_count || 3,
+                          customer_id_pairs_count: columnCounts.customer_id_pairs_count || 1
+                        })}
+                        className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
+                          isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
+                        }`}
+                        disabled={columnCounts.tags_count <= 1 || columnCountLoading}
+                      >
+                        -
+                      </button>
+                      <span className="w-7 text-center text-sm font-semibold">{columnCounts.tags_count}</span>
+                      <button
+                        type="button"
+                        onClick={() => updateColumnCounts({
+                          tags_count: columnCounts.tags_count + 1,
+                          spec_pairs_count: columnCounts.spec_pairs_count || 3,
+                          customer_id_pairs_count: columnCounts.customer_id_pairs_count || 1
+                        })}
+                        className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
+                          isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
+                        }`}
+                        disabled={columnCountLoading}
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm font-medium">Spec Pairs</span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => updateColumnCounts({
+                          tags_count: columnCounts.tags_count || 3,
+                          spec_pairs_count: Math.max(1, columnCounts.spec_pairs_count - 1),
+                          customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
+                        })}
+                        className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
+                          isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
+                        }`}
+                        disabled={columnCounts.spec_pairs_count <= 1 || columnCountLoading}
+                      >
+                        -
+                      </button>
+                      <span className="w-7 text-center text-sm font-semibold">{columnCounts.spec_pairs_count}</span>
+                      <button
+                        type="button"
+                        onClick={() => updateColumnCounts({
+                          tags_count: columnCounts.tags_count || 3,
+                          spec_pairs_count: columnCounts.spec_pairs_count + 1,
+                          customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
+                        })}
+                        className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
+                          isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
+                        }`}
+                        disabled={columnCountLoading}
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm font-medium">Customer ID Pairs</span>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => updateColumnCounts({
+                          tags_count: columnCounts.tags_count || 3,
+                          spec_pairs_count: columnCounts.spec_pairs_count || 0,
+                          customer_id_pairs_count: Math.max(1, columnCounts.customer_id_pairs_count - 1)
+                        })}
+                        className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
+                          isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
+                        }`}
+                        disabled={columnCounts.customer_id_pairs_count <= 1 || columnCountLoading}
+                      >
+                        -
+                      </button>
+                      <span className="w-7 text-center text-sm font-semibold">{columnCounts.customer_id_pairs_count}</span>
+                      <button
+                        type="button"
+                        onClick={() => updateColumnCounts({
+                          tags_count: columnCounts.tags_count || 3,
+                          spec_pairs_count: columnCounts.spec_pairs_count || 0,
+                          customer_id_pairs_count: columnCounts.customer_id_pairs_count + 1
+                        })}
+                        className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
+                          isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
+                        }`}
+                        disabled={columnCountLoading}
+                      >
+                        +
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div className={`mt-4 pt-3 border-t flex items-center justify-between text-sm ${
+                  isDarkMode ? 'border-slate-800 text-slate-400' : 'border-slate-200 text-slate-500'
+                }`}>
+                  <span>Total columns</span>
+                  <span className={`font-semibold ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>{templateHeaders.length}</span>
+                </div>
+              </section>
+
+              <section className={sidePanelClass}>
+                <h3 className={`${sideSectionLabelClass} mb-4`}>
+                  Mapping Statistics
+                </h3>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className={`rounded-lg border p-3 ${
+                    isDarkMode ? 'bg-blue-950/30 border-blue-800/40 text-blue-200' : 'bg-blue-50 border-blue-200 text-blue-800'
+                  }`}>
+                    <div className="text-xl font-semibold">{mappingStats.total}</div>
+                    <div className="text-xs font-medium mt-1">Total Mapped</div>
+                  </div>
+                  <div className={`rounded-lg border p-3 ${
+                    isDarkMode ? 'bg-emerald-950/30 border-emerald-800/40 text-emerald-200' : 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  }`}>
+                    <div className="text-xl font-semibold">{mappingStats.template}</div>
+                    <div className="text-xs font-medium mt-1">From Template</div>
+                  </div>
+                  <div className={`rounded-lg border p-3 ${
+                    isDarkMode ? 'bg-teal-950/30 border-teal-800/40 text-teal-200' : 'bg-teal-50 border-teal-200 text-teal-800'
+                  }`}>
+                    <div className="text-xl font-semibold">{mappingStats.ai}</div>
+                    <div className="text-xs font-medium mt-1">AI Suggested</div>
+                  </div>
+                  <div className={`rounded-lg border p-3 ${
+                    isDarkMode ? 'bg-purple-950/30 border-purple-800/40 text-purple-200' : 'bg-purple-50 border-purple-200 text-purple-800'
+                  }`}>
+                    <div className="text-xl font-semibold">{mappingStats.manual}</div>
+                    <div className="text-xs font-medium mt-1">Manual</div>
+                  </div>
+                </div>
+                <div className={`mt-4 rounded-full h-2 overflow-hidden ${isDarkMode ? 'bg-slate-800' : 'bg-slate-200'}`}>
+                  <div
+                    className="h-2 rounded-full bg-gradient-to-r from-blue-600 to-indigo-600 transition-all duration-300"
+                    style={{
+                      width: `${templateHeaders.length > 0 ? Math.min(100, (mappingStats.total / templateHeaders.length) * 100) : 0}%`
+                    }}
+                  />
+                </div>
+                <div className={`mt-2 text-xs font-semibold ${
+                  isDarkMode ? 'text-slate-400' : 'text-slate-500'
+                }`}>
+                  {mappingStats.total} of {templateHeaders.length} columns mapped
+                </div>
+              </section>
+            </div>
+
+            <div className={`p-5 border-t ${
+              isDarkMode ? 'border-slate-800' : 'border-slate-200'
+            }`}>
+              <button
+                type="button"
+                onClick={handleReview}
+                disabled={edges.length === 0 || isReviewing || isRebuildingRef.current || !isReady || isProcessingMappings || applyingTemplate}
+                className={`w-full h-12 text-sm font-bold flex items-center justify-center gap-2 transition-all disabled:opacity-60 disabled:pointer-events-none ${
+                  edges.length > 0 && !isReviewing && !isProcessingMappings
+                    ? primaryBluePillClass
+                    : `${primaryBluePillClass} opacity-60`
+                }`}
+              >
+                {isReviewing ? (
+                  <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <ArrowRight size={17} />
+                )}
+                <span>{isReviewing ? 'Preparing...' : 'Review'}</span>
+              </button>
+            </div>
+          </aside>
+        </div>
+      )}
+
       {/* Tag Rules Drawer */}
       {rulesOpen && (
-        <div className="fixed top-0 right-0 h-full w-full md:w-96 bg-white shadow-2xl border-l border-gray-200 z-50 flex flex-col">
-          <div className="px-4 py-3 border-b flex items-center justify-between">
-            <div className="font-semibold">Active Tag Rules</div>
-            <button onClick={() => setRulesOpen(false)} className="px-2 py-1 text-gray-600 hover:bg-gray-100 rounded">✕</button>
+        <div
+          className="fixed left-0 right-0 bottom-0 z-50 flex justify-end"
+          style={{ top: appHeaderOffset, height: `calc(100vh - ${appHeaderOffset})` }}
+        >
+          <button
+            type="button"
+            aria-label="Close tag rules"
+            onClick={() => setRulesOpen(false)}
+            className={`absolute inset-0 ${
+              isDarkMode ? 'bg-slate-950/70' : 'bg-slate-900/25'
+            }`}
+          />
+          <div className={`relative h-full w-full max-w-[420px] shadow-2xl border-l flex flex-col font-sans transition-colors ${
+            isDarkMode ? 'bg-[#0b101b] border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'
+          }`}>
+          <div className={`px-5 py-4 border-b flex items-center justify-between ${
+            isDarkMode ? 'border-slate-800' : 'border-slate-200'
+          }`}>
+            <div className="min-w-0 pr-3">
+              <div className={`text-[11px] font-medium uppercase tracking-[0.06em] ${
+                isDarkMode ? 'text-slate-400' : 'text-slate-500'
+              }`}>
+                Rules
+              </div>
+              <div className="text-base font-semibold mt-1 truncate">Active Tag Rules</div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setRulesOpen(false)}
+              className={`h-9 w-9 rounded-full flex items-center justify-center transition-colors ${
+                isDarkMode ? 'hover:bg-slate-800 text-slate-300' : 'hover:bg-slate-100 text-slate-600'
+              }`}
+              aria-label="Close tag rules"
+            >
+              <X size={18} />
+            </button>
           </div>
-          <div className="p-4 overflow-auto">
+          <div className="p-5 overflow-auto">
             {Array.isArray(sessionMetadata?.formula_rules) && sessionMetadata.formula_rules.length > 0 ? (
               sessionMetadata.formula_rules.map((rule, idx) => (
-                <div key={idx} className="mb-4 p-3 rounded-lg border bg-gray-50">
+                <div key={idx} className={`mb-4 p-4 rounded-xl border ${
+                  isDarkMode ? 'bg-slate-900/80 border-slate-800' : 'bg-slate-50 border-slate-200'
+                }`}>
                   <div className="flex items-center justify-between mb-2">
                     <div className="text-sm font-semibold">Rule {idx + 1}</div>
-                    <span className="text-xs px-2 py-0.5 rounded bg-green-100 text-green-700">{rule.column_type || 'Tag'}</span>
+                    <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+                      isDarkMode ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/25' : 'bg-emerald-100 text-emerald-700 border border-emerald-200'
+                    }`}>{rule.column_type || 'Tag'}</span>
                   </div>
-                  <div className="text-xs text-gray-600 mb-1">Source: <span className="font-mono">{rule.source_column || '-'}</span></div>
-                  <div className="text-xs text-gray-600 mb-1">Target: <span className="font-mono">{rule.target_column || 'Tag'}</span></div>
+                  <div className={`text-xs mb-1 ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>Source: <span className="font-mono">{rule.source_column || '-'}</span></div>
+                  <div className={`text-xs mb-1 ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>Target: <span className="font-mono">{rule.target_column || 'Tag'}</span></div>
                   {rule.column_type === 'Specification Value' && (
-                    <div className="text-xs text-gray-600 mb-1">Spec Name: <span className="font-mono">{rule.specification_name || '-'}</span></div>
+                    <div className={`text-xs mb-1 ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>Spec Name: <span className="font-mono">{rule.specification_name || '-'}</span></div>
                   )}
                   <div className="mt-2">
-                    <div className="text-xs text-gray-700 font-semibold mb-1">Conditions:</div>
+                    <div className={`text-xs font-semibold mb-1 ${isDarkMode ? 'text-slate-300' : 'text-slate-700'}`}>Conditions:</div>
                     {(rule.sub_rules || []).map((sr, j) => (
-                      <div key={j} className="text-xs text-gray-700 flex justify-between border-b py-1">
+                      <div key={j} className={`text-xs flex justify-between border-b py-1 gap-3 ${
+                        isDarkMode ? 'text-slate-300 border-slate-800' : 'text-slate-700 border-slate-200'
+                      }`}>
                         <div className="truncate mr-2">if contains <span className="font-mono">{sr.search_text}</span></div>
                         <div className="truncate">then <span className="font-mono">{sr.output_value}</span></div>
                       </div>
                     ))}
                     {(!rule.sub_rules || rule.sub_rules.length === 0) && (
-                      <div className="text-xs text-gray-500 italic">No conditions defined</div>
+                      <div className={`text-xs italic ${isDarkMode ? 'text-slate-500' : 'text-slate-500'}`}>No conditions defined</div>
                     )}
                   </div>
                 </div>
               ))
             ) : (
-              <div className="text-sm text-gray-600">No Tag rules active for this session.</div>
+              <div className={`text-sm ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>No Tag rules active for this session.</div>
             )}
+          </div>
           </div>
         </div>
       )}
@@ -4589,225 +5104,60 @@ export default function ColumnMapping() {
         </div>
       )}
 
-      {/* Main Flow Area with side stats */}
-      <div className="flex-1 relative bg-gradient-to-br from-slate-50 to-blue-50 overflow-hidden flex">
+      {/* Main Flow Area */}
+      <div className={`flex-1 relative overflow-hidden flex transition-colors ${
+        isDarkMode ? 'bg-[#070d18]' : 'bg-slate-50'
+      }`} data-layout-tick={flowLayoutTick}>
         
-        {/* Left Stats Panel - with Template Column Counts at top */}
-        <div className="w-64 bg-white shadow-lg border-r border-gray-200 p-4">
-          {/* Column Count Controls (moved to top) */}
-          <div className="p-3 bg-gray-50 rounded-xl">
-            <h4 className="text-sm font-semibold text-gray-700 mb-3">Template Column Counts</h4>
-
-            <div className="space-y-3">
-              {/* Tags Count */}
-              <div className="flex items-center justify-between">
-                <label className="text-xs text-gray-600">Tags:</label>
-                <div className="flex items-center gap-2">
-                  <button 
-                    onClick={() => updateColumnCounts({
-                      tags_count: Math.max(1, columnCounts.tags_count - 1),
-                      spec_pairs_count: columnCounts.spec_pairs_count || 3,
-                      customer_id_pairs_count: columnCounts.customer_id_pairs_count || 1
-                    })}
-                    className="w-6 h-6 bg-red-200 hover:bg-red-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-red-700"
-                    disabled={columnCounts.tags_count <= 1 || columnCountLoading}
-                  >
-                    {columnCountLoading ? '⏳' : '-'}
-                  </button>
-                  <span className="w-8 text-center text-sm font-semibold">{columnCounts.tags_count}</span>
-                  <button 
-                    onClick={() => updateColumnCounts({
-                      tags_count: columnCounts.tags_count + 1,
-                      spec_pairs_count: columnCounts.spec_pairs_count || 3,
-                      customer_id_pairs_count: columnCounts.customer_id_pairs_count || 1
-                    })}
-                    className="w-6 h-6 bg-green-200 hover:bg-green-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-green-700"
-                    disabled={columnCountLoading}
-                  >
-                    {columnCountLoading ? '⏳' : '+'}
-                  </button>
-                </div>
-              </div>
-
-              {/* Specification Pairs Count */}
-              <div className="flex items-center justify-between">
-                <label className="text-xs text-gray-600">Spec Pairs:</label>
-                <div className="flex items-center gap-2">
-                  <button 
-                    onClick={() => updateColumnCounts({
-                      tags_count: columnCounts.tags_count || 3,
-                      spec_pairs_count: Math.max(1, columnCounts.spec_pairs_count - 1),
-                      customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
-                    })}
-                    className="w-6 h-6 bg-red-200 hover:bg-red-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-red-700"
-                    disabled={columnCounts.spec_pairs_count <= 1 || columnCountLoading}
-                  >
-                    {columnCountLoading ? '⏳' : '-'}
-                  </button>
-                  <span className="w-8 text-center text-sm font-semibold">{columnCounts.spec_pairs_count}</span>
-                  <button 
-                    onClick={() => updateColumnCounts({
-                      tags_count: columnCounts.tags_count || 3,
-                      spec_pairs_count: columnCounts.spec_pairs_count + 1,
-                      customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
-                    })}
-                    className="w-6 h-6 bg-green-200 hover:bg-green-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-green-700"
-                    disabled={columnCountLoading}
-                  >
-                    {columnCountLoading ? '⏳' : '+'}
-                  </button>
-                </div>
-              </div>
-
-              {/* Customer ID Pairs Count */}
-              <div className="flex items-center justify-between">
-                <label className="text-xs text-gray-600">Customer ID Pairs:</label>
-                <div className="flex items-center gap-2">
-                  <button 
-                    onClick={() => updateColumnCounts({
-                      tags_count: columnCounts.tags_count || 3,
-                      spec_pairs_count: columnCounts.spec_pairs_count || 0,
-                      customer_id_pairs_count: Math.max(1, columnCounts.customer_id_pairs_count - 1)
-                    })}
-                    className="w-6 h-6 bg-red-200 hover:bg-red-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-red-700"
-                    disabled={columnCounts.customer_id_pairs_count <= 1 || columnCountLoading}
-                  >
-                    {columnCountLoading ? '⏳' : '-'}
-                  </button>
-                  <span className="w-8 text-center text-sm font-semibold">{columnCounts.customer_id_pairs_count}</span>
-                  <button 
-                    onClick={() => updateColumnCounts({
-                      tags_count: columnCounts.tags_count || 3,
-                      spec_pairs_count: columnCounts.spec_pairs_count || 0,
-                      customer_id_pairs_count: columnCounts.customer_id_pairs_count + 1
-                    })}
-                    className="w-6 h-6 bg-green-200 hover:bg-green-300 rounded flex items-center justify-center text-[10px] font-bold transition-colors text-green-700"
-                    disabled={columnCountLoading}
-                  >
-                    {columnCountLoading ? '⏳' : '+'}
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-3 text-xs text-gray-500">
-              Total template columns: {templateHeaders.length}
-            </div>
-          </div>
-
-          <h3 className="text-sm font-bold text-gray-800 mt-4 mb-3">Mapping Statistics</h3>
-          
-          <div className="space-y-3">
-            <div className="bg-blue-50 rounded-xl p-3 border border-blue-200">
-              <div className="text-xl font-bold text-blue-600">{mappingStats.total}</div>
-              <div className="text-xs text-blue-700 font-medium">Total Mapped</div>
-            </div>
-            
-            {mappingStats.template > 0 && (
-              <div className="bg-green-50 rounded-xl p-3 border border-green-200">
-                <div className="flex items-center gap-2 mb-1.5">
-                  <Library size={18} className="text-green-600" />
-                  <div className="text-lg font-bold text-green-600">{mappingStats.template}</div>
-                </div>
-                <div className="text-xs text-green-700 font-medium">From Template</div>
-              </div>
-            )}
-            
-            {mappingStats.specification > 0 && (
-              <div className="bg-orange-50 rounded-xl p-3 border border-orange-200">
-                <div className="flex items-center gap-2 mb-1.5">
-                  <Settings size={18} className="text-orange-600" />
-                  <div className="text-lg font-bold text-orange-600">{mappingStats.specification}</div>
-                </div>
-                <div className="text-xs text-orange-700 font-medium">Specification</div>
-              </div>
-            )}
-            
-            <div className="bg-emerald-50 rounded-xl p-3 border border-emerald-200">
-              <div className="flex items-center gap-2 mb-1.5">
-                <Brain size={18} className="text-emerald-600" />
-                <div className="text-lg font-bold text-emerald-600">{mappingStats.ai}</div>
-              </div>
-              <div className="text-xs text-emerald-700 font-medium">AI Suggested</div>
-            </div>
-            
-            <div className="bg-purple-50 rounded-xl p-3 border border-purple-200">
-              <div className="flex items-center gap-2 mb-1.5">
-                <Users size={18} className="text-purple-600" />
-                <div className="text-lg font-bold text-purple-600">{mappingStats.manual}</div>
-              </div>
-              <div className="text-xs text-purple-700 font-medium">Manual</div>
-            </div>
-            
-            <div className="bg-amber-50 rounded-xl p-3 border border-amber-200">
-              <div className="text-lg font-bold text-amber-600">{mappingStats.confidence.high}</div>
-              <div className="text-xs text-amber-700 font-medium">High Confidence</div>
-            </div>
-          </div>
-          
-          {/* Progress indicator */}
-          <div className="mt-4 p-3 bg-gray-50 rounded-xl">
-            <div className="text-sm text-gray-600 mb-2">Mapping Progress</div>
-            <div className="w-full bg-gray-200 rounded-full h-2">
-              <div 
-                className="bg-blue-600 h-2 rounded-full transition-all duration-300" 
-                style={{ 
-                  width: `${
-                    templateHeaders.length > 0 
-                      ? (mappingStats.total / templateHeaders.length) * 100 
-                      : 0
-                  }%` 
-                }}
-              ></div>
-            </div>
-            <div className="text-xs text-gray-500 mt-1">
-              {mappingStats.total} of {templateHeaders.length} columns mapped
-            </div>
-          </div>
-
-          {/* COMMENTED OUT: Specification overflow stats */}
-          {/* {specificationOverflow && (
-            <div className="mt-6 p-4 bg-red-50 rounded-xl border border-red-200">
-              <div className="text-sm text-red-600 mb-2">Specification Overflow</div>
-              <div className="text-lg font-bold text-red-600">{specificationOverflow.missingColumns}</div>
-              <div className="text-xs text-red-500">specifications lost</div>
-            </div>
-          )} */}
-        </div>
-
-        {/* Main mapping area with visual section separation */}
+        {/* Main mapping area */}
         <div className="flex-1 relative">
-          {/* Background color sections to visually separate left and right */}
-          <div className="absolute left-0 top-0 w-1/2 h-full bg-blue-50 opacity-30 pointer-events-none"></div>
-          <div className="absolute right-0 top-0 w-1/2 h-full bg-emerald-50 opacity-30 pointer-events-none"></div>
-          
-          {/* Vertical divider line */}
-          <div className="absolute left-1/2 top-0 w-px h-full bg-gray-300 opacity-50 pointer-events-none transform -translate-x-1/2"></div>
-
-          {/* Fixed section headers. Split into two halves that track the left
-              (source) and right (template) columns, so the source-prep buttons
-              stay inside the left half and never overlap the template badge. */}
-          <div className="sticky top-0 z-30 bg-white bg-opacity-95 backdrop-blur-sm border-b border-gray-200">
-            <div className="flex items-start">
-              {/* Left half: source badge + source-prep tools */}
-              <div className="w-1/2 flex flex-wrap items-center gap-2 px-6 py-4 min-w-0">
-                <div className="bg-blue-600 text-white px-4 py-2.5 rounded-xl shadow-md font-bold flex items-center gap-2 whitespace-nowrap">
+          {/* Fixed section headers aligned to the centered node lanes. */}
+          <div className={`sticky top-0 z-30 h-[78px] backdrop-blur-xl ${
+            isDarkMode
+              ? 'bg-[#070d18]/94'
+              : 'bg-white/88'
+          }`}>
+            <div
+              className="relative h-full w-full"
+            >
+              <div
+                className="absolute top-1/2 min-w-0 -translate-x-1/2 -translate-y-1/2"
+                style={{ left: `${sourceHeaderCenter}px` }}
+              >
+                <div className={`rounded-xl border px-4 py-2.5 font-extrabold flex items-center gap-2.5 whitespace-nowrap transition-colors ${
+                  isDarkMode
+                    ? 'bg-blue-500/10 border-blue-400/25 text-blue-100 shadow-[0_14px_30px_-24px_rgba(59,130,246,0.8)]'
+                    : 'bg-gradient-to-r from-blue-50 to-cyan-50 border-blue-300 text-blue-800 shadow-[0_14px_30px_-24px_rgba(37,99,235,0.7)]'
+                }`}>
+                  <span className={`h-7 w-7 rounded-lg flex items-center justify-center ${
+                    isDarkMode ? 'bg-blue-400/15 text-blue-200' : 'bg-blue-50 text-blue-600'
+                  }`}>
+                    <FileText size={16} />
+                  </span>
                   <span>Client File ({clientHeaders.length} fields)</span>
                   <Tooltip title={clientFileName ? `File: ${clientFileName}` : 'Client file'} placement="bottom">
-                    <span><Info size={16} className="opacity-90 cursor-default" /></span>
+                    <span><Info size={15} className="opacity-70 cursor-default" /></span>
                   </Tooltip>
                 </div>
-                {/* Row-expansion tools (alternates, header/detail grouping) all
-                    live in the editor now, so nothing extra sits on the mapping
-                    header beside the source badge. */}
               </div>
 
-              {/* Right half: template badge */}
-              <div className="w-1/2 flex items-center px-6 py-4 min-w-0">
-                <div className="bg-emerald-600 text-white px-4 py-2.5 rounded-xl shadow-md font-bold flex items-center gap-2 whitespace-nowrap">
+              <div
+                className="absolute top-1/2 min-w-0 -translate-x-1/2 -translate-y-1/2"
+                style={{ left: `${targetHeaderCenter}px` }}
+              >
+                <div className={`rounded-xl border px-4 py-2.5 font-extrabold flex items-center gap-2.5 whitespace-nowrap transition-colors ${
+                  isDarkMode
+                    ? 'bg-emerald-500/10 border-emerald-400/25 text-emerald-100 shadow-[0_14px_30px_-24px_rgba(16,185,129,0.8)]'
+                    : 'bg-gradient-to-r from-emerald-50 to-teal-50 border-emerald-300 text-emerald-800 shadow-[0_14px_30px_-24px_rgba(5,150,105,0.65)]'
+                }`}>
+                  <span className={`h-7 w-7 rounded-lg flex items-center justify-center ${
+                    isDarkMode ? 'bg-emerald-400/15 text-emerald-200' : 'bg-emerald-50 text-emerald-600'
+                  }`}>
+                    <Library size={16} />
+                  </span>
                   <span>FW Item Template ({templateHeaders.length} fields)</span>
                   <Tooltip title={templateFileName ? `File: ${templateFileName}` : 'Template file'} placement="bottom">
-                    <span><Info size={16} className="opacity-90 cursor-default" /></span>
+                    <span><Info size={15} className="opacity-70 cursor-default" /></span>
                   </Tooltip>
                 </div>
               </div>
@@ -4816,10 +5166,14 @@ export default function ColumnMapping() {
 
           {/* Instructions */}
           {selectedSourceNode && (
-            <div className="fixed left-1/2 transform -translate-x-1/2 z-30 bg-purple-100 border-2 border-purple-300 rounded-xl shadow-lg px-6 py-3" style={{ top: '220px' }}>
+            <div className={`fixed left-1/2 transform -translate-x-1/2 z-30 rounded-xl border shadow-lg px-4 py-2 ${
+              isDarkMode
+                ? 'bg-purple-950/82 border-purple-500/35 text-purple-100'
+                : 'bg-purple-50/96 border-purple-200 text-purple-800'
+            }`} style={{ top: '218px' }}>
               <div className="flex items-center gap-2">
-                <div className="w-3 h-3 bg-purple-500 rounded-full animate-pulse"></div>
-                <span className="text-purple-800 font-semibold">
+                <div className="w-2.5 h-2.5 bg-purple-500 rounded-full animate-pulse"></div>
+                <span className="text-sm font-semibold">
                   Click on a Template column to create mapping
                 </span>
               </div>
@@ -4827,12 +5181,17 @@ export default function ColumnMapping() {
           )}
 
           {selectedEdge && (
-            <div className="fixed left-1/2 transform -translate-x-1/2 z-30 bg-red-100 border-2 border-red-300 rounded-xl shadow-lg px-6 py-3" style={{ top: '220px' }}>
+            <div className={`fixed left-1/2 transform -translate-x-1/2 z-30 rounded-xl border shadow-lg px-4 py-2.5 ${
+              isDarkMode
+                ? 'bg-red-950/90 border-red-700/70 text-red-100'
+                : 'bg-red-50/95 border-red-200 text-red-800'
+            }`} style={{ top: '214px' }}>
               <div className="flex items-center gap-3">
-                <span className="text-red-800 font-semibold">Connection selected (Press ESC to cancel)</span>
+                <span className="text-sm font-bold">Connection selected</span>
+                <span className={`text-xs font-semibold ${isDarkMode ? 'text-red-300' : 'text-red-600'}`}>ESC to cancel</span>
                 <button
                   onClick={deleteSelectedEdge}
-                  className="px-3 py-1 bg-red-500 hover:bg-red-600 text-white rounded-lg font-semibold transition-colors"
+                  className="px-3 py-1 bg-red-500 hover:bg-red-600 text-white rounded-lg text-xs font-extrabold transition-colors"
                 >
                   Delete
                 </button>
@@ -4841,10 +5200,10 @@ export default function ColumnMapping() {
           )}
 
           {/* React Flow Container with padding for headers */}
-          <div className="w-full h-full overflow-auto" style={{ paddingTop: '50px' }}>
+          <div className="w-full h-full overflow-auto" style={{ paddingTop: 28 }}>
             <div style={{ 
               width: '100%', 
-              height: Math.max(700, Math.max(clientHeaders.length, templateHeaders.length) * 120 + 200) 
+              height: Math.max(760, Math.max(clientHeaders.length, templateHeaders.length) * flowRowHeight + 220) 
             }}>
               <ReactFlowProvider>
                 <ReactFlow
@@ -4857,20 +5216,21 @@ export default function ColumnMapping() {
                       ...edge,
                       style: {
                         ...edge.style,
-                        strokeWidth: isSelected ? 6 : edge.style.strokeWidth,
+                        strokeWidth: isSelected ? 3.5 : edge.style.strokeWidth,
                         stroke: isSelected 
-                          ? '#dc2626'
+                          ? '#ef4444'
                           : edge.style.stroke,
-                        opacity: isOtherSelected ? 0.3 : 1,
+                        strokeOpacity: isSelected ? 0.96 : edge.style.strokeOpacity,
+                        opacity: isOtherSelected ? 0.2 : 1,
                         filter: isSelected 
-                          ? 'drop-shadow(0 6px 12px rgba(220, 38, 38, 0.4))' 
+                          ? 'drop-shadow(0 5px 8px rgba(239, 68, 68, 0.22))' 
                           : edge.style.filter
                       },
                       markerEnd: {
                         ...edge.markerEnd,
-                        color: isSelected ? '#dc2626' : edge.markerEnd.color,
-                        width: isSelected ? 30 : edge.markerEnd.width,
-                        height: isSelected ? 30 : edge.markerEnd.height
+                        color: isSelected ? '#ef4444' : edge.markerEnd.color,
+                        width: isSelected ? 17 : edge.markerEnd.width,
+                        height: isSelected ? 17 : edge.markerEnd.height
                       }
                     };
                   })}
@@ -4881,9 +5241,9 @@ export default function ColumnMapping() {
                   onNodeClick={onNodeClick}
                   onPaneClick={onPaneClick}
                   nodeTypes={nodeTypes}
-                  connectionLineStyle={{ stroke: '#6366f1', strokeWidth: 4 }}
+                  connectionLineStyle={{ stroke: isDarkMode ? '#60a5fa' : '#2563eb', strokeWidth: 2.5, strokeOpacity: 0.85 }}
                   connectionLineType="bezier"
-                  defaultViewport={{ x: 0, y: 0, zoom: 0.9 }}
+                  defaultViewport={{ x: 0, y: 0, zoom: flowLayout.defaultZoom }}
                   minZoom={0.4}
                   maxZoom={1.2}
                   zoomOnScroll={true}
@@ -4896,13 +5256,13 @@ export default function ColumnMapping() {
                   nodesConnectable={true}
                   elementsSelectable={true}
                   fitView={false}
-                  className="bg-gradient-to-br from-slate-50 to-blue-50"
+                  className={isDarkMode ? 'bg-[#070d18]' : 'bg-slate-50'}
                 >
                   <Background 
-                    gap={25} 
-                    size={1.5} 
-                    color="#e2e8f0" 
-                    style={{ opacity: 0.6 }}
+                    gap={24} 
+                    size={1.2} 
+                    color={isDarkMode ? '#1e293b' : '#dbeafe'} 
+                    style={{ opacity: isDarkMode ? 0.35 : 0.55 }}
                   />
                 </ReactFlow>
               </ReactFlowProvider>
@@ -4917,19 +5277,33 @@ export default function ColumnMapping() {
         onClose={handleCancelDefaultValue}
         maxWidth="sm"
         fullWidth
+        PaperProps={{
+          sx: {
+            borderRadius: '18px',
+            overflow: 'hidden',
+            bgcolor: isDarkMode ? '#111827' : '#ffffff',
+            color: isDarkMode ? '#f8fafc' : '#0f172a',
+            border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.18)' : '1px solid #e2e8f0',
+            boxShadow: isDarkMode
+              ? '0 28px 80px rgba(0, 0, 0, 0.72)'
+              : '0 24px 70px rgba(15, 23, 42, 0.18)'
+          }
+        }}
       >
-        <DialogContent className="p-6">
+        <DialogContent sx={{ p: 3, bgcolor: isDarkMode ? '#111827' : '#ffffff' }}>
           <div className="space-y-6">
             <div className="text-center">
-              <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                <FileText className="w-8 h-8 text-blue-600" />
+              <div className={`w-14 h-14 rounded-full flex items-center justify-center mx-auto mb-4 ${
+                isDarkMode ? 'bg-blue-500/15 text-blue-300' : 'bg-blue-50 text-blue-600'
+              }`}>
+                <FileText className="w-7 h-7" />
               </div>
-              <h2 className="text-xl font-bold text-gray-800 mb-2">
+              <h2 className={`text-xl font-semibold mb-2 ${isDarkMode ? 'text-slate-50' : 'text-slate-900'}`}>
                 Set Default Value
               </h2>
-              <p className="text-gray-600">
+              <p className={isDarkMode ? 'text-slate-400' : 'text-slate-600'}>
                 Set the value for:{' '}
-                <span className="font-semibold text-blue-600">
+                <span className={isDarkMode ? 'font-semibold text-blue-300' : 'font-semibold text-blue-600'}>
                   {selectedTemplateField?.name}
                 </span>
               </p>
@@ -4941,14 +5315,14 @@ export default function ColumnMapping() {
                 <button
                   type="button"
                   onClick={() => setDvMode('always')}
-                  className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition-colors ${dvMode === 'always' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'}`}
+                  className={`flex-1 px-3 py-2 rounded-full text-sm font-medium border transition-colors ${dvMode === 'always' ? 'bg-blue-600 text-white border-blue-600 shadow-[0_12px_24px_-16px_rgba(37,99,235,0.9)]' : isDarkMode ? 'bg-slate-950/60 text-slate-300 border-slate-700 hover:bg-slate-800' : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'}`}
                 >
                   Same value for every row
                 </button>
                 <button
                   type="button"
                   onClick={() => setDvMode('conditional')}
-                  className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium border transition-colors ${dvMode === 'conditional' ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-50'}`}
+                  className={`flex-1 px-3 py-2 rounded-full text-sm font-medium border transition-colors ${dvMode === 'conditional' ? 'bg-blue-600 text-white border-blue-600 shadow-[0_12px_24px_-16px_rgba(37,99,235,0.9)]' : isDarkMode ? 'bg-slate-950/60 text-slate-300 border-slate-700 hover:bg-slate-800' : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'}`}
                 >
                   If / else rule
                 </button>
@@ -4956,24 +5330,26 @@ export default function ColumnMapping() {
 
               {dvMode === 'always' ? (
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Default Text</label>
+                  <label className={dialogLabelClass}>Default Text</label>
                   <input
                     type="text"
                     value={defaultValueText}
                     onChange={(e) => setDefaultValueText(e.target.value)}
                     placeholder="Enter text to fill all cells in this column..."
-                    className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    className={dialogInputClass}
                     autoFocus
                   />
                 </div>
               ) : (
-                <div className="space-y-3 border border-gray-200 rounded-lg p-3">
+                <div className={`space-y-3 border rounded-2xl p-3 ${
+                  isDarkMode ? 'border-slate-700 bg-slate-950/25' : 'border-slate-200 bg-slate-50/70'
+                }`}>
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-semibold text-gray-700">If</span>
+                    <span className={`text-sm font-semibold ${isDarkMode ? 'text-slate-300' : 'text-slate-700'}`}>If</span>
                     <select
                       value={dvCondCol}
                       onChange={(e) => setDvCondCol(e.target.value)}
-                      className="flex-1 min-w-[140px] px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                      className={`flex-1 min-w-[140px] ${dialogSelectClass}`}
                     >
                       <option value="">Choose column…</option>
                       {((useDynamicTemplate && templateColumns.length > 0) ? templateColumns : templateHeaders)
@@ -4983,7 +5359,7 @@ export default function ColumnMapping() {
                     <select
                       value={dvCondOp}
                       onChange={(e) => setDvCondOp(e.target.value)}
-                      className="px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                      className={dialogSelectClass}
                     >
                       <option value="is_empty">is empty</option>
                       <option value="not_empty">is not empty</option>
@@ -4997,29 +5373,31 @@ export default function ColumnMapping() {
                         value={dvCondCompare}
                         onChange={(e) => setDvCondCompare(e.target.value)}
                         placeholder="text"
-                        className="flex-1 min-w-[100px] px-3 py-2 border border-gray-300 rounded-lg text-sm"
+                        className={`flex-1 min-w-[100px] ${dialogSelectClass}`}
                       />
                     )}
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">then set the value to</label>
+                    <label className={`block text-xs font-medium mb-1 ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>then set the value to</label>
                     <input type="text" value={dvThen} onChange={(e) => setDvThen(e.target.value)}
                       placeholder='e.g. "Finished good"'
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                      className={dialogInputClass} />
                   </div>
                   <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">otherwise set the value to</label>
+                    <label className={`block text-xs font-medium mb-1 ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>otherwise set the value to</label>
                     <input type="text" value={dvElse} onChange={(e) => setDvElse(e.target.value)}
                       placeholder="leave empty to keep existing value"
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm" />
+                      className={dialogInputClass} />
                   </div>
                 </div>
               )}
 
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+              <div className={`border rounded-2xl p-4 ${
+                isDarkMode ? 'bg-blue-500/10 border-blue-500/25' : 'bg-blue-50 border-blue-200'
+              }`}>
                 <div className="flex items-start gap-3">
-                  <Info className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
-                  <div className="text-sm text-blue-800">
+                  <Info className={`w-5 h-5 flex-shrink-0 mt-0.5 ${isDarkMode ? 'text-blue-300' : 'text-blue-600'}`} />
+                  <div className={`text-sm ${isDarkMode ? 'text-blue-100' : 'text-blue-800'}`}>
                     <p className="font-medium mb-1">How this works:</p>
                     <p>
                       Fills the "{selectedTemplateField?.name}" column when the data is processed —
@@ -5031,10 +5409,12 @@ export default function ColumnMapping() {
               </div>
             </div>
 
-              <div className="flex justify-end gap-3 pt-4 border-t border-gray-200">
+              <div className={`flex justify-end gap-3 pt-4 border-t ${isDarkMode ? 'border-slate-800' : 'border-slate-200'}`}>
                 <button
                   onClick={handleCancelDefaultValue}
-                  className="px-6 py-2 text-gray-600 hover:text-gray-800 font-medium transition-colors"
+                  className={`px-5 py-2 rounded-full font-medium transition-colors ${
+                    isDarkMode ? 'text-slate-300 hover:bg-slate-800 hover:text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                  }`}
                 >
                   Cancel
                 </button>
@@ -5045,7 +5425,9 @@ export default function ColumnMapping() {
                   <button
                     onClick={handleClearDefaultValue}
                     disabled={defaultValueLoading}
-                    className="px-6 py-2 bg-red-50 text-red-600 hover:bg-red-100 rounded-lg font-medium transition-colors flex items-center gap-2 disabled:opacity-50"
+                    className={`px-5 py-2 rounded-full font-medium transition-colors flex items-center gap-2 disabled:opacity-50 ${
+                      isDarkMode ? 'bg-red-500/10 text-red-300 hover:bg-red-500/15' : 'bg-red-50 text-red-600 hover:bg-red-100'
+                    }`}
                   >
                     {defaultValueLoading && (
                       <div className="w-4 h-4 border-2 border-red-600 border-t-transparent rounded-full animate-spin"></div>
@@ -5056,7 +5438,7 @@ export default function ColumnMapping() {
                 <button
                   onClick={handleSaveDefaultValue}
                   disabled={defaultValueLoading || (dvMode === 'always' ? !defaultValueText.trim() : !dvCondCol)}
-                  className="px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:bg-gray-300 text-white rounded-lg font-medium transition-colors flex items-center gap-2"
+                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:bg-slate-400 text-white rounded-full font-medium transition-colors flex items-center gap-2 shadow-[0_14px_28px_-16px_rgba(37,99,235,0.9)]"
                 >
                   {defaultValueLoading && (
                     <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
@@ -5074,16 +5456,30 @@ export default function ColumnMapping() {
         onClose={() => setShowAutoMapConfirm(false)}
         maxWidth="sm"
         fullWidth
+        PaperProps={{
+          sx: {
+            borderRadius: '18px',
+            overflow: 'hidden',
+            bgcolor: isDarkMode ? '#111827' : '#ffffff',
+            color: isDarkMode ? '#f8fafc' : '#0f172a',
+            border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.18)' : '1px solid #e2e8f0',
+            boxShadow: isDarkMode
+              ? '0 28px 80px rgba(0, 0, 0, 0.72)'
+              : '0 24px 70px rgba(15, 23, 42, 0.18)'
+          }
+        }}
       >
-        <DialogTitle>Confirm Auto-Mapping</DialogTitle>
-        <DialogContent>
-          <Typography>
+        <DialogTitle sx={{ px: 3, pt: 2.5, pb: 1.25, fontWeight: 700, color: isDarkMode ? '#f8fafc' : '#0f172a' }}>
+          Confirm Auto-Mapping
+        </DialogTitle>
+        <DialogContent sx={{ px: 3, py: 1.5, bgcolor: isDarkMode ? '#111827' : '#ffffff' }}>
+          <Typography sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
             This will remove all existing mappings. Are you sure you want to proceed?
           </Typography>
         </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setShowAutoMapConfirm(false)}>Cancel</Button>
-          <Button onClick={proceedWithAutoMap} color="primary">
+        <DialogActions sx={{ px: 3, py: 2, gap: 1, bgcolor: isDarkMode ? '#111827' : '#ffffff', borderTop: isDarkMode ? '1px solid rgba(148, 163, 184, 0.12)' : '1px solid #e2e8f0' }}>
+          <Button onClick={() => setShowAutoMapConfirm(false)} sx={{ ...muiPillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}>Cancel</Button>
+          <Button onClick={proceedWithAutoMap} variant="contained" sx={muiPrimaryPillSx}>
             Proceed
           </Button>
         </DialogActions>
@@ -5122,19 +5518,54 @@ export default function ColumnMapping() {
       />
 
       {/* Primary-key cleanup before the editor (all source types) */}
-      <Dialog open={primaryDialogOpen} disableEscapeKeyDown maxWidth="sm" fullWidth>
-        <DialogTitle>Which column identifies each item?</DialogTitle>
-        <DialogContent>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+      <Dialog
+        open={primaryDialogOpen}
+        disableEscapeKeyDown
+        maxWidth="xs"
+        fullWidth
+        PaperProps={{
+          sx: {
+            borderRadius: '18px',
+            overflow: 'hidden',
+            bgcolor: isDarkMode ? 'rgba(17, 24, 39, 0.88)' : 'rgba(255, 255, 255, 0.86)',
+            backdropFilter: 'blur(18px)',
+            color: isDarkMode ? '#f8fafc' : '#0f172a',
+            border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.18)' : '1px solid #e2e8f0',
+            boxShadow: isDarkMode
+              ? '0 28px 80px rgba(0, 0, 0, 0.72)'
+              : '0 24px 70px rgba(15, 23, 42, 0.18)',
+            width: 'min(440px, calc(100vw - 40px))'
+          }
+        }}
+      >
+        <DialogTitle sx={{ px: 2.5, pt: 2.25, pb: 1, fontWeight: 800, fontSize: '1.05rem', color: isDarkMode ? '#f8fafc' : '#0f172a' }}>
+          Which column identifies each item?
+        </DialogTitle>
+        <DialogContent sx={{ px: 2.5, py: 1.25, bgcolor: 'transparent' }}>
+          <Typography variant="body2" sx={{ mb: 1.75, color: isDarkMode ? '#94a3b8' : '#64748b', lineHeight: 1.45 }}>
             Rows where this column is empty will be removed (e.g. blank part numbers or leftover header lines).
             Pick the key column, or skip to keep every row.
           </Typography>
           <FormControl fullWidth size="small">
-            <InputLabel>Key column</InputLabel>
+            <InputLabel sx={{ color: isDarkMode ? '#94a3b8' : '#475569' }}>Key column</InputLabel>
             <Select
               label="Key column"
               value={primaryKeyColumn}
               onChange={(e) => setPrimaryKeyColumn(e.target.value)}
+              sx={{
+                borderRadius: '10px',
+                bgcolor: isDarkMode ? '#0f172a' : '#f8fafc',
+                color: isDarkMode ? '#f8fafc' : '#0f172a',
+                '& .MuiOutlinedInput-notchedOutline': {
+                  borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.28)' : '#cbd5e1'
+                },
+                '&:hover .MuiOutlinedInput-notchedOutline': {
+                  borderColor: isDarkMode ? '#60a5fa' : '#2563eb'
+                },
+                '& .MuiSelect-icon': {
+                  color: isDarkMode ? '#94a3b8' : '#64748b'
+                }
+              }}
             >
               {primaryKeyOptions.map(col => (
                 <MenuItem key={col} value={col}>
@@ -5146,17 +5577,35 @@ export default function ColumnMapping() {
           {primaryKeyColumn && (
             <Box sx={{ mt: 2 }}>
               {primaryEmptyLoading ? (
-                <Typography variant="body2" color="text.secondary">
+                <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
                   Checking how many rows are empty...
                 </Typography>
               ) : primaryEmptyInfo ? (
                 primaryEmptyInfo.empty > 0 ? (
-                  <Alert severity="warning" sx={{ py: 0.5 }}>
+                  <Alert
+                    severity="warning"
+                    sx={{
+                      py: 0.75,
+                      borderRadius: '10px',
+                      bgcolor: isDarkMode ? 'rgba(245, 158, 11, 0.12)' : '#fffbeb',
+                      color: isDarkMode ? '#fbbf24' : '#92400e',
+                      border: isDarkMode ? '1px solid rgba(245, 158, 11, 0.24)' : '1px solid #fde68a'
+                    }}
+                  >
                     <strong>{primaryEmptyInfo.empty}</strong> of <strong>{primaryEmptyInfo.total}</strong> rows are empty
                     in this column and will be removed. <strong>{primaryEmptyInfo.total - primaryEmptyInfo.empty}</strong> will remain.
                   </Alert>
                 ) : (
-                  <Alert severity="success" sx={{ py: 0.5 }}>
+                  <Alert
+                    severity="success"
+                    sx={{
+                      py: 0.75,
+                      borderRadius: '10px',
+                      bgcolor: isDarkMode ? 'rgba(16, 185, 129, 0.12)' : '#ecfdf5',
+                      color: isDarkMode ? '#a7f3d0' : '#166534',
+                      border: isDarkMode ? '1px solid rgba(16, 185, 129, 0.24)' : '1px solid #bbf7d0'
+                    }}
+                  >
                     No empty rows in this column ({primaryEmptyInfo.total} rows). Nothing will be removed.
                   </Alert>
                 )
@@ -5164,15 +5613,12 @@ export default function ColumnMapping() {
             </Box>
           )}
         </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setPrimaryDialogOpen(false)} disabled={primaryCleaning}>
+        <DialogActions sx={{ px: 2.5, py: 1.75, gap: 1, bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.42)' : 'rgba(248, 250, 252, 0.68)', borderTop: isDarkMode ? '1px solid rgba(148, 163, 184, 0.12)' : '1px solid #e2e8f0' }}>
+          <Button onClick={() => setPrimaryDialogOpen(false)} disabled={primaryCleaning} sx={{ ...muiPillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}>
             Cancel
           </Button>
-          <Button onClick={goToEditor} disabled={primaryCleaning} color="secondary">
+          <Button onClick={goToEditor} disabled={primaryCleaning} sx={{ ...muiPillButtonSx, color: isDarkMode ? '#93c5fd' : '#2563eb' }}>
             Skip and keep all rows
-          </Button>
-          <Button onClick={handleCleanupAndReview} variant="contained" disabled={primaryCleaning || !primaryKeyColumn}>
-            {primaryCleaning ? 'Cleaning...' : 'Remove empty & continue'}
           </Button>
         </DialogActions>
       </Dialog>
@@ -5197,37 +5643,38 @@ export default function ColumnMapping() {
         onClose={handleNavigationCancel}
         maxWidth="sm"
         fullWidth
+        PaperProps={{ sx: mappingDialogPaperSx }}
       >
-        <DialogTitle>
+        <DialogTitle sx={mappingDialogHeaderSx}>
           <div className="flex items-center gap-3">
             <AlertCircle className="w-6 h-6 text-amber-600" />
             <div>
-              <div className="text-xl font-semibold">Unsaved Changes</div>
-              <div className="text-sm text-gray-600">Your mappings may be lost</div>
+              <div className={`text-xl font-semibold ${isDarkMode ? 'text-slate-50' : 'text-slate-900'}`}>Unsaved Changes</div>
+              <div className={`text-sm ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>Your mappings may be lost</div>
             </div>
           </div>
         </DialogTitle>
-        <DialogContent>
+        <DialogContent sx={mappingDialogBodySx}>
           <div className="py-4">
-            <p className="text-gray-700 mb-4">
+            <p className={`mb-4 ${isDarkMode ? 'text-slate-300' : 'text-slate-700'}`}>
               You have unsaved column mappings. Going back will refresh the page and restore your mappings from the server.
             </p>
-            <p className="text-sm text-amber-600 font-medium">
+            <p className={`text-sm font-medium ${isDarkMode ? 'text-amber-300' : 'text-amber-600'}`}>
               This will refresh the Column Mapping page to ensure your mappings are properly loaded.
             </p>
           </div>
         </DialogContent>
-        <DialogActions>
+        <DialogActions sx={mappingDialogFooterSx}>
           <Button
             onClick={handleNavigationCancel}
-            color="secondary"
+            sx={{ ...muiPillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}
           >
             Stay Here
           </Button>
           <Button
             onClick={handleNavigationConfirm}
-            color="primary"
             variant="contained"
+            sx={muiPrimaryPillSx}
           >
             Refresh Mapping Page
           </Button>
@@ -5240,28 +5687,29 @@ export default function ColumnMapping() {
         onClose={() => setShowTemplateDialog(false)}
         maxWidth="md"
         fullWidth
+        PaperProps={{ sx: mappingDialogPaperSx }}
       >
-        <DialogTitle>
+        <DialogTitle sx={mappingDialogHeaderSx}>
           <div className="flex items-center gap-3">
-            <Library className="w-6 h-6 text-green-600" />
+            <Library className={`w-6 h-6 ${isDarkMode ? 'text-emerald-300' : 'text-emerald-600'}`} />
             <div>
-              <div className="text-xl font-semibold">Apply Mapping Template</div>
-              <div className="text-sm text-gray-600">Choose a template to apply to your current data</div>
+              <div className={`text-xl font-semibold ${isDarkMode ? 'text-slate-50' : 'text-slate-900'}`}>Apply Mapping Template</div>
+              <div className={`text-sm ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>Choose a template to apply to your current data</div>
             </div>
           </div>
         </DialogTitle>
-        <DialogContent>
+        <DialogContent sx={mappingDialogBodySx}>
           <div className="py-4">
             {templatesLoading ? (
               <div className="flex items-center justify-center py-8">
-                <div className="w-8 h-8 border-4 border-green-600 border-t-transparent rounded-full animate-spin"></div>
-                <span className="ml-3 text-gray-600">Loading templates...</span>
+                <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
+                <span className={`ml-3 ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>Loading templates...</span>
               </div>
             ) : availableTemplates.length === 0 ? (
               <div className="text-center py-8">
-                <Library className="w-16 h-16 text-gray-400 mx-auto mb-4" />
-                <p className="text-gray-600 mb-4">No templates available</p>
-                <p className="text-sm text-gray-500">
+                <Library className={`w-16 h-16 mx-auto mb-4 ${isDarkMode ? 'text-slate-600' : 'text-slate-400'}`} />
+                <p className={`mb-4 ${isDarkMode ? 'text-slate-300' : 'text-slate-600'}`}>No templates available</p>
+                <p className={`text-sm ${isDarkMode ? 'text-slate-500' : 'text-slate-500'}`}>
                   Create templates in the Data Editor to use them here
                 </p>
               </div>
@@ -5270,10 +5718,14 @@ export default function ColumnMapping() {
                 {availableTemplates.map((template) => (
                   <div
                     key={template.id}
-                    className={`border border-gray-200 rounded-lg p-4 transition-colors ${
+                    className={`border rounded-2xl p-4 transition-all ${
                       applyingTemplate 
                         ? 'cursor-not-allowed opacity-50' 
-                        : 'hover:border-green-400 cursor-pointer'
+                        : 'cursor-pointer hover:-translate-y-0.5'
+                    } ${
+                      isDarkMode
+                        ? 'bg-slate-950/40 border-slate-700 hover:border-blue-500/70 hover:bg-blue-500/10'
+                        : 'bg-white border-slate-200 hover:border-blue-300 hover:bg-blue-50/60'
                     }`}
                     onClick={() => {
                       if (!applyingTemplate) {
@@ -5283,18 +5735,18 @@ export default function ColumnMapping() {
                   >
                     <div className="flex items-start justify-between">
                       <div className="flex-1">
-                        <div className="font-semibold text-gray-900 mb-1">
+                        <div className={`font-semibold mb-1 ${isDarkMode ? 'text-slate-50' : 'text-slate-900'}`}>
                           {template.name}
                         </div>
                         {template.description && (
-                          <div className="text-sm text-gray-600 mb-2">
+                          <div className={`text-sm mb-2 ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>
                             {template.description}
                           </div>
                         )}
-                        <div className="text-xs text-gray-500">
+                        <div className={`text-xs ${isDarkMode ? 'text-slate-500' : 'text-slate-500'}`}>
                           Created: {new Date(template.created_at).toLocaleDateString()}
                         </div>
-                        <div className="text-xs text-gray-500">
+                        <div className={`text-xs ${isDarkMode ? 'text-slate-500' : 'text-slate-500'}`}>
                           Column counts: Tags={template.tags_count}, Spec={template.spec_pairs_count}, Customer={template.customer_id_pairs_count}
                         </div>
                       </div>
@@ -5302,7 +5754,9 @@ export default function ColumnMapping() {
                         <button
                           onClick={(e) => { e.stopPropagation(); handleExportTemplate(template); }}
                           title="Download this template as a file to move to another environment"
-                          className="px-3 py-2 bg-white border border-gray-300 hover:bg-gray-100 text-gray-700 rounded-lg text-sm font-medium transition-colors"
+                          className={`px-4 py-2 border rounded-full text-sm font-medium transition-colors ${
+                            isDarkMode ? 'bg-slate-900 border-slate-700 hover:bg-slate-800 text-slate-200' : 'bg-white border-slate-200 hover:bg-slate-100 text-slate-700'
+                          }`}
                         >
                           Export
                         </button>
@@ -5312,7 +5766,7 @@ export default function ColumnMapping() {
                             handleApplyTemplate(template);
                           }}
                           disabled={applyingTemplate && applyingTemplateId === template.id}
-                          className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+                          className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-full text-sm font-medium transition-colors disabled:opacity-50 shadow-[0_14px_28px_-16px_rgba(37,99,235,0.9)]"
                         >
                           {applyingTemplate && applyingTemplateId === template.id ? 'Applying...' : 'Apply'}
                         </button>
@@ -5324,7 +5778,7 @@ export default function ColumnMapping() {
             )}
           </div>
         </DialogContent>
-        <DialogActions>
+        <DialogActions sx={mappingDialogFooterSx}>
           <input
             ref={templateImportInputRef}
             type="file"
@@ -5334,13 +5788,13 @@ export default function ColumnMapping() {
           />
           <Button
             onClick={() => templateImportInputRef.current && templateImportInputRef.current.click()}
-            sx={{ mr: 'auto' }}
+            sx={{ ...muiPillButtonSx, mr: 'auto', color: '#2563eb' }}
           >
             Import template…
           </Button>
           <Button
             onClick={() => setShowTemplateDialog(false)}
-            color="secondary"
+            sx={{ ...muiPillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}
           >
             Cancel
           </Button>

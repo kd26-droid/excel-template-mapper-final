@@ -24,7 +24,8 @@ import {
   MenuItem,
   Avatar,
   Stack,
-  TablePagination
+  TablePagination,
+  Collapse
 } from '@mui/material';
 import { useNavigate } from 'react-router-dom';
 import StandaloneFormulaBuilder from '../components/StandaloneFormulaBuilder';
@@ -60,13 +61,13 @@ const DownloadButtonWrapper = styled.div`
     width: 100%;
     height: 32px;
     border-radius: 8px;
-    background: ${props => props.color || 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)'};
-    color: #ffffff;
+    background: ${props => props.disabled ? 'rgba(255, 255, 255, 0.05)' : props.color || 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)'};
+    color: ${props => props.disabled ? 'rgba(255, 255, 255, 0.3)' : '#ffffff'};
     font-size: 11px;
     font-weight: 600;
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.25);
-    cursor: pointer;
+    border: 1px solid ${props => props.disabled ? 'rgba(255, 255, 255, 0.08)' : 'rgba(255, 255, 255, 0.2)'};
+    box-shadow: ${props => props.disabled ? 'none' : '0 3px 10px rgba(0, 0, 0, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.25)'};
+    cursor: ${props => props.disabled ? 'not-allowed' : 'pointer'};
     transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
   }
   .icon-container {
@@ -77,13 +78,13 @@ const DownloadButtonWrapper = styled.div`
     gap: 1px;
   }
   .dl-svg-icon {
-    color: rgba(255, 255, 255, 0.9);
+    color: ${props => props.disabled ? 'rgba(255, 255, 255, 0.3)' : 'rgba(255, 255, 255, 0.9)'};
     transition: all 0.2s ease;
   }
   .tray-bar {
     width: 14px;
     height: 2px;
-    background-color: rgba(255, 255, 255, 0.7);
+    background-color: ${props => props.disabled ? 'rgba(255, 255, 255, 0.2)' : 'rgba(255, 255, 255, 0.7)'};
     border-radius: 1px;
     transition: all 0.2s ease;
   }
@@ -109,9 +110,10 @@ const DownloadButtonWrapper = styled.div`
 
 const DownloadButton = ({ onClick, label = 'Download',
   color = 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
-  hoverColor = 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)' }) => (
-  <DownloadButtonWrapper color={color} hoverColor={hoverColor}>
-    <button className="download-btn" onClick={onClick} type="button">
+  hoverColor = 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
+  disabled = false }) => (
+  <DownloadButtonWrapper color={color} hoverColor={hoverColor} disabled={disabled}>
+    <button className="download-btn" onClick={onClick} disabled={disabled} type="button">
       <div className="icon-container">
         <svg className="dl-svg-icon" viewBox="0 0 384 512" height="13" width="13" xmlns="http://www.w3.org/2000/svg">
           <path fill="currentColor" d="M169.4 470.6c12.5 12.5 32.8 12.5 45.3 0l160-160c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0L224 370.8 224 64c0-17.7-14.3-32-32-32s-32 14.3-32 32l0 306.7L54.6 265.4c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3l160 160z" />
@@ -123,66 +125,303 @@ const DownloadButton = ({ onClick, label = 'Download',
   </DownloadButtonWrapper>
 );
 
-const ToggleButtonWrapper = styled.div`
+const OpenEditorButtonWrapper = styled.div`
   display: inline-flex;
-  .toggle-btn {
+
+  .folder-button {
     display: inline-flex;
     align-items: center;
     justify-content: flex-start;
-    height: 28px;
-    width: 28px;
+    height: ${props => props.size || 30}px;
+    width: ${props => props.size || 30}px;
     padding: 0 6px;
-    border-radius: 14px;
-    background: ${props => props.isExpanded ? 'rgba(35, 131, 226, 0.25)' : 'rgba(255, 255, 255, 0.05)'};
-    border: 1px solid ${props => props.isExpanded ? 'rgba(35, 131, 226, 0.5)' : 'rgba(255, 255, 255, 0.1)'};
-    color: ${props => props.isExpanded ? '#60a5fa' : '#8992a5'};
-    font-size: 11px;
-    font-weight: 600;
+    border-radius: ${props => (props.size || 30) / 2}px;
+    background: ${props => props.isDarkMode === false 
+      ? 'linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%)' 
+      : 'linear-gradient(135deg, rgba(59, 130, 246, 0.18) 0%, rgba(37, 99, 235, 0.28) 100%)'};
+    border: 1px solid ${props => props.isDarkMode === false ? '#3b82f6' : 'rgba(59, 130, 246, 0.4)'};
+    box-shadow: ${props => props.isDarkMode === false ? '0 2px 8px rgba(37, 99, 235, 0.25)' : '0 2px 8px rgba(59, 130, 246, 0.2)'};
     cursor: pointer;
     transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
     overflow: hidden;
     white-space: nowrap;
   }
+
+  .folder-icon-box {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: ${props => (props.size || 30) - 14}px;
+  }
+
+  .folder {
+    position: relative;
+    width: 14px;
+    height: 11px;
+  }
+
+  .folder-back {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    background: ${props => props.isDarkMode === false ? '#2563eb' : '#3b82f6'};
+    border-radius: 1px 3px 2px 2px;
+  }
+
+  .paper {
+    position: absolute;
+    bottom: 1px;
+    left: 15%;
+    width: 70%;
+    height: 60%;
+    background: #ffffff;
+    border-radius: 1px;
+    transition: transform 0.3s ease;
+  }
+
+  .folder-front {
+    position: absolute;
+    bottom: 0;
+    width: 100%;
+    height: 75%;
+    background: ${props => props.isDarkMode === false ? '#1d4ed8' : '#60a5fa'};
+    border-radius: 0 0 2px 2px;
+    transform-origin: bottom;
+    transition: transform 0.3s ease;
+  }
+
+  .btn-label {
+    opacity: 0;
+    max-width: 0;
+    font-size: 11px;
+    font-weight: 600;
+    color: ${props => props.isDarkMode === false ? '#1e3a8a' : '#ffffff'};
+    transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    margin-left: 0;
+  }
+
+  .folder-button:hover .paper {
+    transform: translateY(-3px);
+  }
+
+  .folder-button:hover .folder-front {
+    transform: skewX(-10deg) scaleY(0.85);
+  }
+
+  .folder-button:hover {
+    width: 105px;
+    padding: 0 10px;
+    background: ${props => props.isDarkMode === false ? '#2563eb' : 'linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%)'};
+    border-color: ${props => props.isDarkMode === false ? '#1d4ed8' : '#93c5fd'};
+    box-shadow: 0 4px 14px rgba(37, 99, 235, 0.5);
+    transform: translateY(-1px);
+  }
+
+  .folder-button:hover .btn-label {
+    opacity: 1;
+    max-width: 70px;
+    margin-left: 5px;
+    color: #ffffff;
+  }
+
+  .folder-button:active {
+    transform: scale(0.95);
+  }
+`;
+
+const OpenEditorButton = ({ onClick, size = 30, title = 'Open Session in Editor' }) => {
+  const { isDarkMode } = useThemeContext();
+  return (
+    <OpenEditorButtonWrapper size={size} isDarkMode={isDarkMode}>
+      <button className="folder-button" onClick={onClick} type="button" title={title}>
+        <div className="folder-icon-box">
+          <div className="folder">
+            <div className="folder-back">
+              <div className="paper" />
+            </div>
+            <div className="folder-front" />
+          </div>
+        </div>
+        <span className="btn-label">Open Editor</span>
+      </button>
+    </OpenEditorButtonWrapper>
+  );
+};
+
+const DeleteButtonWrapper = styled.div`
+  display: inline-flex;
+
+  .bin-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-start;
+    height: ${props => props.size || 30}px;
+    width: ${props => props.size || 30}px;
+    padding: 0 7px;
+    border-radius: ${props => (props.size || 30) / 2}px;
+    background: ${props => props.isDarkMode === false 
+      ? 'linear-gradient(135deg, #fee2e2 0%, #fca5a5 100%)' 
+      : 'linear-gradient(135deg, rgba(239, 68, 68, 0.2) 0%, rgba(220, 38, 38, 0.3) 100%)'};
+    cursor: ${props => props.disabled ? 'not-allowed' : 'pointer'};
+    border: 1px solid ${props => props.isDarkMode === false ? '#ef4444' : 'rgba(239, 68, 68, 0.4)'};
+    box-shadow: ${props => props.isDarkMode === false ? '0 2px 8px rgba(239, 68, 68, 0.25)' : '0 2px 8px rgba(239, 68, 68, 0.25)'};
+    transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    opacity: ${props => props.disabled ? 0.5 : 1};
+    overflow: hidden;
+    white-space: nowrap;
+    color: ${props => props.isDarkMode === false ? '#dc2626' : '#ffffff'};
+  }
+
+  .icon-box {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-width: ${props => (props.size || 30) - 14}px;
+  }
+
+  .bin-top {
+    width: 13px;
+    transform-origin: right;
+    transition: transform 0.3s ease, stroke 0.2s ease;
+    margin-bottom: 1px;
+    color: ${props => props.isDarkMode === false ? '#dc2626' : '#ffffff'};
+  }
+
+  .bin-bottom {
+    width: 11px;
+    transition: color 0.2s ease, fill 0.2s ease;
+    color: ${props => props.isDarkMode === false ? '#dc2626' : '#ffffff'};
+  }
+
+  .btn-label {
+    opacity: 0;
+    max-width: 0;
+    font-size: 11px;
+    font-weight: 600;
+    color: ${props => props.isDarkMode === false ? '#991b1b' : '#ffffff'};
+    transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    margin-left: 0;
+  }
+
+  .bin-button:hover:not(:disabled) .bin-top {
+    transform: rotate(45deg);
+    color: #ffffff;
+  }
+
+  .bin-button:hover:not(:disabled) .bin-bottom {
+    color: #ffffff;
+  }
+
+  .bin-button:hover:not(:disabled) {
+    width: 82px;
+    padding: 0 10px;
+    background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+    border-color: #fca5a5;
+    box-shadow: 0 4px 14px rgba(239, 68, 68, 0.5);
+    transform: translateY(-1px);
+    color: #ffffff;
+  }
+
+  .bin-button:hover:not(:disabled) .btn-label {
+    opacity: 1;
+    max-width: 50px;
+    margin-left: 5px;
+    color: #ffffff;
+  }
+
+  .bin-button:active:not(:disabled) {
+    transform: scale(0.95);
+  }
+`;
+
+const DeleteActionButton = ({ onClick, disabled = false, loading = false, size = 30, title = 'Delete Session' }) => {
+  const { isDarkMode } = useThemeContext();
+  return (
+    <DeleteButtonWrapper size={size} disabled={disabled} isDarkMode={isDarkMode}>
+      <button
+        className="bin-button"
+        onClick={disabled || loading ? undefined : onClick}
+        type="button"
+        disabled={disabled || loading}
+        title={title}
+      >
+        {loading ? (
+          <CircularProgress size={0.45 * size} color="inherit" />
+        ) : (
+          <>
+            <div className="icon-box">
+              <svg className="bin-top" viewBox="0 0 39 7" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <line y1="5" x2="39" y2="5" stroke="currentColor" strokeWidth="4" />
+                <line x1="12" y1="1.5" x2="26.0357" y2="1.5" stroke="currentColor" strokeWidth="3" />
+              </svg>
+              <svg className="bin-bottom" viewBox="0 0 33 39" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <mask id="bin-mask-path" fill="white">
+                  <path d="M0 0H33V35C33 37.2091 31.2091 39 29 39H4C1.79086 39 0 37.2091 0 35V0Z" />
+                </mask>
+                <path d="M0 0H33H0ZM37 35C37 39.4183 33.4183 43 29 43H4C-0.418278 43 -4 39.4183 -4 35H4H29H37ZM4 43C-0.418278 43 -4 39.4183 -4 35V0H4V35V43ZM37 0V35C37 39.4183 33.4183 43 29 43V35V0H37Z" fill="currentColor" mask="url(#bin-mask-path)" />
+                <path d="M12 6L12 29" stroke="currentColor" strokeWidth="4" />
+                <path d="M21 6V29" stroke="currentColor" strokeWidth="4" />
+              </svg>
+            </div>
+            <span className="btn-label">Delete</span>
+          </>
+        )}
+      </button>
+    </DeleteButtonWrapper>
+  );
+};
+
+const ToggleButtonWrapper = styled.div`
+  display: inline-flex;
+  .toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 24px;
+    width: 24px;
+    padding: 0;
+    border-radius: 12px;
+    background: ${props => props.isExpanded 
+      ? (props.isDarkMode ? 'rgba(35, 131, 226, 0.25)' : '#dbeafe') 
+      : (props.isDarkMode ? 'rgba(255, 255, 255, 0.05)' : '#f1f5f9')};
+    border: 1px solid ${props => props.isExpanded 
+      ? (props.isDarkMode ? 'rgba(35, 131, 226, 0.5)' : '#3b82f6') 
+      : (props.isDarkMode ? 'rgba(255, 255, 255, 0.1)' : '#cbd5e1')};
+    color: ${props => props.isExpanded 
+      ? (props.isDarkMode ? '#60a5fa' : '#2563eb') 
+      : (props.isDarkMode ? '#8992a5' : '#64748b')};
+    cursor: pointer;
+    transition: all 0.2s ease;
+  }
   .chevron-icon {
-    min-width: 14px;
     width: 14px;
     height: 14px;
     transform: ${props => props.isExpanded ? 'rotate(180deg)' : 'rotate(0deg)'};
     transition: transform 0.3s ease;
   }
-  .btn-label {
-    opacity: 0;
-    max-width: 0;
-    transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
-    margin-left: 0;
-  }
   .toggle-btn:hover {
-    width: 78px;
-    padding: 0 10px;
-    background: rgba(35, 131, 226, 0.3);
+    background: ${props => props.isExpanded 
+      ? (props.isDarkMode ? 'rgba(35, 131, 226, 0.35)' : '#bfdbfe') 
+      : (props.isDarkMode ? 'rgba(255, 255, 255, 0.12)' : '#e2e8f0')};
     border-color: #2383e2;
-    color: #ffffff;
-    box-shadow: 0 0 14px rgba(35, 131, 226, 0.4);
-    transform: translateY(-1px);
+    color: #2383e2;
   }
-  .toggle-btn:hover .btn-label {
-    opacity: 1;
-    max-width: 50px;
-    margin-left: 5px;
-  }
-  .toggle-btn:active { transform: scale(0.94); }
+  .toggle-btn:active { transform: scale(0.92); }
 `;
 
-const ToggleButton = ({ isExpanded, onClick }) => (
-  <ToggleButtonWrapper isExpanded={isExpanded}>
-    <button className="toggle-btn" onClick={onClick} type="button">
-      <svg className="chevron-icon" viewBox="0 0 24 24" fill="currentColor">
-        <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z" />
-      </svg>
-      <span className="btn-label">{isExpanded ? 'Collapse' : 'Expand'}</span>
-    </button>
-  </ToggleButtonWrapper>
-);
+const ToggleButton = ({ isExpanded, onClick }) => {
+  const { isDarkMode } = useThemeContext();
+  return (
+    <ToggleButtonWrapper isExpanded={isExpanded} isDarkMode={isDarkMode}>
+      <button className="toggle-btn" onClick={onClick} type="button" title={isExpanded ? 'Collapse Session' : 'Expand Session'}>
+        <svg className="chevron-icon" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z" />
+        </svg>
+      </button>
+    </ToggleButtonWrapper>
+  );
+};
 
 const UseButtonWrapper = styled.div`
   display: inline-flex;
@@ -190,17 +429,17 @@ const UseButtonWrapper = styled.div`
     display: inline-flex;
     align-items: center;
     justify-content: flex-start;
-    height: 32px;
-    width: 32px;
+    height: ${props => props.size || 24}px;
+    width: ${props => props.size || 24}px;
     padding: 0;
-    border-radius: 16px;
+    border-radius: ${props => (props.size || 24) / 2}px;
     background: ${props => props.color};
     border: 1px solid rgba(255, 255, 255, 0.2);
     color: #ffffff;
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 600;
     cursor: pointer;
-    box-shadow: 0 3px 10px ${props => props.glowColor}, inset 0 1px 0 rgba(255, 255, 255, 0.3);
+    box-shadow: 0 2px 8px ${props => props.glowColor}, inset 0 1px 0 rgba(255, 255, 255, 0.3);
     transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
     overflow: hidden;
     white-space: nowrap;
@@ -209,14 +448,14 @@ const UseButtonWrapper = styled.div`
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 30px;
-    min-width: 30px;
-    height: 30px;
+    width: ${props => props.size || 24}px;
+    min-width: ${props => props.size || 24}px;
+    height: ${props => props.size || 24}px;
     transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
   }
   .play-icon {
-    width: 16px;
-    height: 16px;
+    width: ${props => Math.round((props.size || 24) * 0.5)}px;
+    height: ${props => Math.round((props.size || 24) * 0.5)}px;
     margin-left: 1px;
     transition: transform 0.25s ease;
   }
@@ -224,31 +463,33 @@ const UseButtonWrapper = styled.div`
     opacity: 0;
     max-width: 0;
     color: #ffffff;
+    font-size: 11px;
     transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1);
     margin-left: 0;
   }
   .use-btn:hover {
-    width: 125px;
-    padding: 0 10px;
+    width: 80px;
+    padding: 0 8px;
     background: ${props => props.hoverColor};
     border-color: rgba(255, 255, 255, 0.4);
-    box-shadow: 0 5px 16px ${props => props.glowColor}, inset 0 1px 0 rgba(255, 255, 255, 0.4);
+    box-shadow: 0 4px 14px ${props => props.glowColor}, inset 0 1px 0 rgba(255, 255, 255, 0.4);
     transform: translateY(-1px);
   }
-  .use-btn:hover .icon-box { width: 18px; min-width: 18px; }
+  .use-btn:hover .icon-box { width: 14px; min-width: 14px; }
   .use-btn:hover .play-icon { transform: translateX(1px) scale(1.1); }
-  .use-btn:hover .btn-label { opacity: 1; max-width: 95px; margin-left: 6px; }
+  .use-btn:hover .btn-label { opacity: 1; max-width: 55px; margin-left: 4px; }
   .use-btn:active { transform: scale(0.95); }
 `;
 
 const UseButton = ({
   onClick,
-  label = 'Use Template',
+  label = 'Use',
+  size = 24,
   color = 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
   hoverColor = 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
   glowColor = 'rgba(37, 99, 235, 0.45)'
 }) => (
-  <UseButtonWrapper color={color} hoverColor={hoverColor} glowColor={glowColor}>
+  <UseButtonWrapper size={size} color={color} hoverColor={hoverColor} glowColor={glowColor}>
     <button className="use-btn" onClick={onClick} type="button">
       <div className="icon-box">
         <svg className="play-icon" viewBox="0 0 24 24" fill="currentColor">
@@ -281,6 +522,19 @@ const formatDisplayDate = (value) => {
         hour12: true,
       })
     : 'Unknown time';
+};
+
+const cleanFileName = (filename) => {
+  if (!filename) return 'Unknown File';
+  const parts = String(filename).split('_');
+  if (parts.length > 1) {
+    const last = parts[parts.length - 1];
+    const extMatch = last.match(/\.(xlsx|xls|csv|pdf)$/i);
+    const ext = extMatch ? extMatch[0] : '.xlsx';
+    const nameWithoutExt = last.replace(/\.(xlsx|xls|csv|pdf)$/i, '');
+    return `${nameWithoutExt}${ext}`;
+  }
+  return String(filename).length > 30 ? `${String(filename).substring(0, 30)}...` : filename;
 };
 
 const Dashboard = () => {
@@ -532,6 +786,36 @@ const Dashboard = () => {
     }
   };
 
+  const handleDeleteMappingTemplate = async (templateId) => {
+    if (!window.confirm('Are you sure you want to delete this mapping template?')) return;
+    try {
+      await api.deleteMappingTemplate(templateId);
+      fetchData();
+    } catch (err) {
+      console.error('Error deleting mapping template:', err);
+      alert(err.message || 'Failed to delete template');
+    }
+  };
+
+  const handleDeleteTagTemplate = async (templateId) => {
+    if (!window.confirm('Are you sure you want to delete this tag template?')) return;
+    try {
+      await api.deleteTagTemplate(templateId);
+      fetchData();
+    } catch (err) {
+      console.error('Error deleting tag template:', err);
+      alert(err.message || 'Failed to delete tag template');
+    }
+  };
+
+  const handleDownloadFile = async (sessionId, fileType) => {
+    try {
+      await api.downloadFileEnhanced(sessionId, fileType);
+    } catch (err) {
+      console.error(`Download error (${fileType}):`, err);
+    }
+  };
+
   return (
     <Box
       sx={{
@@ -627,8 +911,8 @@ const Dashboard = () => {
                 </Box>
                 <Grid container spacing={1}>
                   <Grid item xs={4}>
-                    <Box sx={{ p: 1.25, bgcolor: 'rgba(59, 130, 246, 0.08)', borderRadius: '10px', border: '1px solid rgba(59, 130, 246, 0.2)' }}>
-                      <Typography variant="caption" fontWeight="600" sx={{ color: '#93c5fd', fontSize: '10px', display: 'block', mb: 0.25 }}>
+                    <Box sx={{ p: 1.25, bgcolor: isDarkMode ? 'rgba(59, 130, 246, 0.08)' : 'rgba(37, 99, 235, 0.06)', borderRadius: '10px', border: isDarkMode ? '1px solid rgba(59, 130, 246, 0.2)' : '1px solid rgba(37, 99, 235, 0.2)' }}>
+                      <Typography variant="caption" fontWeight="600" sx={{ color: isDarkMode ? '#93c5fd' : '#1d4ed8', fontSize: '10px', display: 'block', mb: 0.25 }}>
                         Mapping
                       </Typography>
                       <Typography variant="h6" fontWeight="700" sx={{ color: Ze.text, fontFamily: '"JetBrains Mono", monospace' }}>
@@ -637,8 +921,8 @@ const Dashboard = () => {
                     </Box>
                   </Grid>
                   <Grid item xs={4}>
-                    <Box sx={{ p: 1.25, bgcolor: 'rgba(168, 85, 247, 0.08)', borderRadius: '10px', border: '1px solid rgba(168, 85, 247, 0.2)' }}>
-                      <Typography variant="caption" fontWeight="600" sx={{ color: '#e9d5ff', fontSize: '10px', display: 'block', mb: 0.25 }}>
+                    <Box sx={{ p: 1.25, bgcolor: isDarkMode ? 'rgba(168, 85, 247, 0.08)' : 'rgba(124, 58, 237, 0.06)', borderRadius: '10px', border: isDarkMode ? '1px solid rgba(168, 85, 247, 0.2)' : '1px solid rgba(124, 58, 237, 0.2)' }}>
+                      <Typography variant="caption" fontWeight="600" sx={{ color: isDarkMode ? '#e9d5ff' : '#6d28d9', fontSize: '10px', display: 'block', mb: 0.25 }}>
                         Tag Rules
                       </Typography>
                       <Typography variant="h6" fontWeight="700" sx={{ color: Ze.text, fontFamily: '"JetBrains Mono", monospace' }}>
@@ -647,8 +931,8 @@ const Dashboard = () => {
                     </Box>
                   </Grid>
                   <Grid item xs={4}>
-                    <Box sx={{ p: 1.25, bgcolor: 'rgba(16, 185, 129, 0.08)', borderRadius: '10px', border: '1px solid rgba(16, 185, 129, 0.2)' }}>
-                      <Typography variant="caption" fontWeight="600" sx={{ color: '#a7f3d0', fontSize: '10px', display: 'block', mb: 0.25 }}>
+                    <Box sx={{ p: 1.25, bgcolor: isDarkMode ? 'rgba(16, 185, 129, 0.08)' : 'rgba(5, 150, 105, 0.06)', borderRadius: '10px', border: isDarkMode ? '1px solid rgba(16, 185, 129, 0.2)' : '1px solid rgba(5, 150, 105, 0.2)' }}>
+                      <Typography variant="caption" fontWeight="600" sx={{ color: isDarkMode ? '#a7f3d0' : '#047857', fontSize: '10px', display: 'block', mb: 0.25 }}>
                         Uploads
                       </Typography>
                       <Typography variant="h6" fontWeight="700" sx={{ color: Ze.text, fontFamily: '"JetBrains Mono", monospace' }}>
@@ -675,16 +959,16 @@ const Dashboard = () => {
                   <Chip
                     label="Leaderboard"
                     size="small"
-                    sx={{ height: 18, fontSize: '10px', bgcolor: 'rgba(245, 158, 11, 0.12)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.2)', borderRadius: '4px' }}
+                    sx={{ height: 18, fontSize: '10px', bgcolor: isDarkMode ? 'rgba(245, 158, 11, 0.12)' : 'rgba(245, 158, 11, 0.15)', color: isDarkMode ? '#fbbf24' : '#b45309', border: '1px solid rgba(245, 158, 11, 0.3)', borderRadius: '4px' }}
                   />
                 </Box>
                 {templateStats.top3Templates && templateStats.top3Templates.length > 0 ? (
                   <Stack spacing={0.6} sx={{ flexGrow: 1, justifyContent: 'center' }}>
                     {templateStats.top3Templates.slice(0, 3).map((tmpl, idx) => {
                       const ranks = [
-                        { bg: 'rgba(245, 158, 11, 0.2)', text: '#fbbf24', label: '#1' },
-                        { bg: 'rgba(148, 163, 184, 0.2)', text: '#cbd5e1', label: '#2' },
-                        { bg: 'rgba(217, 119, 6, 0.2)', text: '#fdba74', label: '#3' }
+                        { bg: isDarkMode ? 'rgba(245, 158, 11, 0.2)' : 'rgba(245, 158, 11, 0.15)', text: isDarkMode ? '#fbbf24' : '#b45309', label: '#1' },
+                        { bg: isDarkMode ? 'rgba(148, 163, 184, 0.2)' : 'rgba(100, 116, 139, 0.15)', text: isDarkMode ? '#cbd5e1' : '#334155', label: '#2' },
+                        { bg: isDarkMode ? 'rgba(217, 119, 6, 0.2)' : 'rgba(217, 119, 6, 0.15)', text: isDarkMode ? '#fdba74' : '#c2410c', label: '#3' }
                       ];
                       const rank = ranks[idx] || ranks[1];
                       return (
@@ -701,7 +985,7 @@ const Dashboard = () => {
                             bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.03)' : '#ffffff',
                             border: `1px solid ${Ze.subtleBorder}`,
                             cursor: 'pointer',
-                            height: 28,
+                            height: 32,
                             transition: 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
                             '&:hover': {
                               bgcolor: isDarkMode ? 'rgba(35, 131, 226, 0.12)' : '#eff6ff',
@@ -737,10 +1021,11 @@ const Dashboard = () => {
                               size="small"
                               sx={{ height: 16, fontSize: '9px', bgcolor: isDarkMode ? 'rgba(255,255,255,0.06)' : '#eef2f7', color: Ze.muted }}
                             />
-                            {/* Animated expand-on-hover Use button (final-2 style) */}
+                            {/* Animated expand-on-hover Use button (fits cleanly inside row surface) */}
                             <UseButton
                               onClick={(e) => { e.stopPropagation(); handleApplyTemplate(tmpl); }}
                               label="Use"
+                              size={22}
                               color="linear-gradient(135deg, #2563eb 0%, #0284c7 100%)"
                               hoverColor="linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)"
                               glowColor="rgba(37, 99, 235, 0.45)"
@@ -978,95 +1263,220 @@ const Dashboard = () => {
                                     />
                                   </TableCell>
                                   <TableCell onClick={() => setExpandedSessionId(isExpanded ? null : session.session_id)}>
-                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                      <DescriptionIcon sx={{ fontSize: 16, color: '#60a5fa' }} />
-                                      <Typography variant="body2" fontWeight="600" sx={{ fontSize: '13px' }}>
-                                        {session.client_file || session.session_id}
+                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
+                                      <Box
+                                        sx={{
+                                          width: 22,
+                                          height: 22,
+                                          borderRadius: '5px',
+                                          bgcolor: '#2383e2',
+                                          display: 'flex',
+                                          alignItems: 'center',
+                                          justifyContent: 'center',
+                                          color: '#ffffff',
+                                          boxShadow: '0 2px 6px rgba(35, 131, 226, 0.4)'
+                                        }}
+                                      >
+                                        <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                                          <path d="M10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z" />
+                                        </svg>
+                                      </Box>
+                                      <Typography variant="body2" fontWeight="700" sx={{ fontSize: '13px', color: Ze.text }}>
+                                        {cleanFileName(session.client_file || session.original_client_name || session.file_name || session.session_id)}
                                       </Typography>
                                     </Box>
                                   </TableCell>
-                                  <TableCell onClick={() => setExpandedSessionId(isExpanded ? null : session.session_id)} sx={{ color: Ze.muted, fontSize: '12px' }}>
-                                    {formatDisplayDate(session.created)}
+                                  <TableCell onClick={() => setExpandedSessionId(isExpanded ? null : session.session_id)} sx={{ color: Ze.text, fontSize: '12px', fontWeight: 500 }}>
+                                    {formatDisplayDate(session.created || session.upload_date || session.created_at)}
                                   </TableCell>
                                   <TableCell onClick={() => setExpandedSessionId(isExpanded ? null : session.session_id)}>
                                     <Chip
-                                      label={session.has_mappings ? 'Mapped' : 'Uploaded'}
+                                      label="Completed"
                                       size="small"
                                       sx={{
-                                        height: 20,
-                                        fontSize: '10px',
-                                        fontWeight: 700,
-                                        bgcolor: session.has_mappings ? 'rgba(52, 211, 153, 0.15)' : 'rgba(59, 130, 246, 0.15)',
-                                        color: session.has_mappings ? '#34d399' : '#60a5fa'
+                                        height: 22,
+                                        px: 1,
+                                        fontSize: '11px',
+                                        fontWeight: 600,
+                                        borderRadius: '999px',
+                                        bgcolor: isDarkMode ? 'rgba(16, 185, 129, 0.15)' : 'rgba(16, 185, 129, 0.12)',
+                                        color: isDarkMode ? '#34d399' : '#047857',
+                                        border: isDarkMode ? '1px solid rgba(16, 185, 129, 0.3)' : '1px solid rgba(16, 185, 129, 0.25)'
                                       }}
                                     />
                                   </TableCell>
                                   <TableCell align="right" onClick={(e) => e.stopPropagation()}>
                                     <Stack direction="row" spacing={1} justifyContent="flex-end" alignItems="center">
-                                      <Button
-                                        size="small"
-                                        variant="outlined"
-                                        startIcon={<PlayArrowIcon sx={{ fontSize: 14 }} />}
-                                        onClick={() => navigate(`/mapping/${session.session_id}`)}
-                                        sx={{ height: 26, fontSize: '11px', textTransform: 'none', borderRadius: '6px', color: Ze.text, borderColor: Ze.subtleBorder }}
-                                      >
-                                        Mapping
-                                      </Button>
-                                      <Box sx={{ width: 90 }}>
-                                        <DownloadButton
-                                          label="Download"
-                                          onClick={() => navigate(`/editor/${session.session_id}`)}
-                                        />
-                                      </Box>
-                                      <IconButton
-                                        size="small"
-                                        onClick={() => handleDeleteSession(session.session_id)}
-                                        sx={{ color: '#ef4444', opacity: 0.8, '&:hover': { opacity: 1 } }}
-                                      >
-                                        <DeleteIcon sx={{ fontSize: 16 }} />
-                                      </IconButton>
+                                      <OpenEditorButton onClick={() => navigate(`/editor/${session.session_id}`)} />
+                                      <DeleteActionButton onClick={() => handleDeleteSession(session.session_id)} />
                                     </Stack>
                                   </TableCell>
                                 </TableRow>
                                 {isExpanded && (
                                   <TableRow sx={{ bgcolor: Ze.activeRow }}>
                                     <TableCell colSpan={5} sx={{ p: 2, borderBottom: `1px solid ${Ze.rowLine}` }}>
-                                      <Box sx={{ p: 2, borderRadius: '12px', bgcolor: Ze.controlBg, border: `1px solid ${Ze.subtleBorder}` }}>
+                                      <Box
+                                        sx={{
+                                          p: 2.5,
+                                          borderRadius: '14px',
+                                          bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.75)' : '#ffffff',
+                                          border: `1px solid ${Ze.subtleBorder}`,
+                                          boxShadow: isDarkMode ? 'inset 0 1px 3px rgba(0, 0, 0, 0.5)' : '0 4px 12px rgba(0, 0, 0, 0.05)'
+                                        }}
+                                      >
+                                        <Typography
+                                          variant="caption"
+                                          fontWeight="700"
+                                          sx={{
+                                            color: Ze.muted,
+                                            letterSpacing: '0.06em',
+                                            fontSize: '11px',
+                                            textTransform: 'uppercase',
+                                            display: 'block',
+                                            mb: 2
+                                          }}
+                                        >
+                                          SESSION FILES & DOWNLOAD ACTIONS
+                                        </Typography>
+
                                         <Grid container spacing={2}>
+                                          {/* Client Original File Card */}
                                           <Grid item xs={12} sm={4}>
-                                            <Typography variant="caption" sx={{ color: Ze.muted, display: 'block' }}>Client File</Typography>
-                                            <Typography variant="body2" fontWeight="600" sx={{ color: Ze.text }}>{session.client_file || 'N/A'}</Typography>
+                                            <Box
+                                              sx={{
+                                                p: 2,
+                                                borderRadius: '12px',
+                                                bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.6)' : 'rgba(37, 99, 235, 0.04)',
+                                                border: isDarkMode ? '1px solid rgba(59, 130, 246, 0.25)' : '1px solid rgba(37, 99, 235, 0.2)',
+                                                display: 'flex',
+                                                flexDirection: 'column',
+                                                justifyContent: 'space-between',
+                                                height: '100%',
+                                                minHeight: 125,
+                                                transition: 'all 0.2s ease',
+                                                '&:hover': { borderColor: 'rgba(59, 130, 246, 0.5)', bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.8)' : 'rgba(37, 99, 235, 0.08)' }
+                                              }}
+                                            >
+                                              <Box>
+                                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                                                  <Avatar sx={{ width: 22, height: 22, bgcolor: isDarkMode ? 'rgba(59, 130, 246, 0.25)' : 'rgba(37, 99, 235, 0.15)', color: isDarkMode ? '#60a5fa' : '#2563eb' }}>
+                                                    <DescriptionIcon sx={{ fontSize: 13 }} />
+                                                  </Avatar>
+                                                  <Typography variant="subtitle2" fontWeight="700" sx={{ color: isDarkMode ? '#60a5fa' : '#1d4ed8', fontSize: '13px' }}>
+                                                    Client Original File
+                                                  </Typography>
+                                                </Box>
+                                                <Typography variant="body2" fontWeight="700" sx={{ color: Ze.text, fontSize: '13px', mb: 2, wordBreak: 'break-all' }}>
+                                                  {cleanFileName(session.client_file || session.original_client_name || session.file_name || session.session_id)}
+                                                </Typography>
+                                              </Box>
+                                              <DownloadButton
+                                                label="Download Original"
+                                                color="linear-gradient(135deg, #2563eb 0%, #0284c7 100%)"
+                                                hoverColor="linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)"
+                                                onClick={() => handleDownloadFile(session.session_id, 'original')}
+                                              />
+                                            </Box>
                                           </Grid>
+
+                                          {/* FW Mapped Sheet Card */}
                                           <Grid item xs={12} sm={4}>
-                                            <Typography variant="caption" sx={{ color: Ze.muted, display: 'block' }}>Template File</Typography>
-                                            <Typography variant="body2" fontWeight="600" sx={{ color: Ze.text }}>{session.template_file || 'Default Item.xlsx'}</Typography>
+                                            <Box
+                                              sx={{
+                                                p: 2,
+                                                borderRadius: '12px',
+                                                bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.6)' : 'rgba(16, 185, 129, 0.04)',
+                                                border: session.has_mappings ? (isDarkMode ? '1px solid rgba(16, 185, 129, 0.25)' : '1px solid rgba(16, 185, 129, 0.25)') : `1px solid ${Ze.subtleBorder}`,
+                                                display: 'flex',
+                                                flexDirection: 'column',
+                                                justifyContent: 'space-between',
+                                                height: '100%',
+                                                minHeight: 125,
+                                                transition: 'all 0.2s ease',
+                                                '&:hover': { borderColor: session.has_mappings ? 'rgba(16, 185, 129, 0.5)' : Ze.border, bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.8)' : 'rgba(16, 185, 129, 0.08)' }
+                                              }}
+                                            >
+                                              <Box>
+                                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                                                  <Avatar sx={{ width: 22, height: 22, bgcolor: isDarkMode ? 'rgba(16, 185, 129, 0.25)' : 'rgba(16, 185, 129, 0.15)', color: isDarkMode ? '#34d399' : '#059669' }}>
+                                                    <DescriptionIcon sx={{ fontSize: 13 }} />
+                                                  </Avatar>
+                                                  <Typography variant="subtitle2" fontWeight="700" sx={{ color: isDarkMode ? '#34d399' : '#047857', fontSize: '13px' }}>
+                                                    FW Mapped Sheet
+                                                  </Typography>
+                                                </Box>
+                                                <Typography
+                                                  variant="body2"
+                                                  fontWeight="700"
+                                                  sx={{
+                                                    color: session.has_mappings ? Ze.text : Ze.muted,
+                                                    fontSize: '13px',
+                                                    mb: 2,
+                                                    wordBreak: 'break-all'
+                                                  }}
+                                                >
+                                                  {session.filled_sheet_name || (session.has_mappings !== false ? 'Mapped Sheet Ready' : 'Not Mapped')}
+                                                </Typography>
+                                              </Box>
+                                              <DownloadButton
+                                                label="Download Mapped Sheet"
+                                                color="linear-gradient(135deg, #059669 0%, #10b981 100%)"
+                                                hoverColor="linear-gradient(135deg, #047857 0%, #059669 100%)"
+                                                disabled={!session.has_mappings}
+                                                onClick={() => handleDownloadFile(session.session_id, 'converted')}
+                                              />
+                                            </Box>
                                           </Grid>
+
+                                          {/* FW Template File Card */}
                                           <Grid item xs={12} sm={4}>
-                                            <Typography variant="caption" sx={{ color: Ze.muted, display: 'block' }}>Rows Processed</Typography>
-                                            <Typography variant="body2" fontWeight="600" sx={{ color: Ze.text }}>{session.rows_processed || 'N/A'}</Typography>
+                                            <Box
+                                              sx={{
+                                                p: 2,
+                                                borderRadius: '12px',
+                                                bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.6)' : 'rgba(168, 85, 247, 0.04)',
+                                                border: isDarkMode ? '1px solid rgba(168, 85, 247, 0.25)' : '1px solid rgba(124, 58, 237, 0.2)',
+                                                display: 'flex',
+                                                flexDirection: 'column',
+                                                justifyContent: 'space-between',
+                                                height: '100%',
+                                                minHeight: 125,
+                                                transition: 'all 0.2s ease',
+                                                '&:hover': { borderColor: 'rgba(168, 85, 247, 0.5)', bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.8)' : 'rgba(168, 85, 247, 0.08)' }
+                                              }}
+                                            >
+                                              <Box>
+                                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                                                  <Avatar sx={{ width: 22, height: 22, bgcolor: isDarkMode ? 'rgba(168, 85, 247, 0.25)' : 'rgba(124, 58, 237, 0.15)', color: isDarkMode ? '#c084fc' : '#6d28d9' }}>
+                                                    <DescriptionIcon sx={{ fontSize: 13 }} />
+                                                  </Avatar>
+                                                  <Typography variant="subtitle2" fontWeight="700" sx={{ color: isDarkMode ? '#c084fc' : '#6d28d9', fontSize: '13px' }}>
+                                                    FW Template File
+                                                  </Typography>
+                                                </Box>
+                                                <Typography variant="body2" fontWeight="700" sx={{ color: Ze.text, fontSize: '13px', mb: 2, wordBreak: 'break-all' }}>
+                                                  {cleanFileName(session.template_file || session.template_name || 'Standard Template')}
+                                                </Typography>
+                                              </Box>
+                                              <DownloadButton
+                                                label="Download Template"
+                                                color="linear-gradient(135deg, #7c3aed 0%, #a855f7 100%)"
+                                                hoverColor="linear-gradient(135deg, #6d28d9 0%, #9333ea 100%)"
+                                                onClick={() => handleDownloadFile(session.session_id, 'template')}
+                                              />
+                                            </Box>
                                           </Grid>
                                         </Grid>
-                                        <Stack direction="row" spacing={1.5} sx={{ mt: 2 }} justifyContent="flex-end">
-                                          <Button
-                                            size="small"
-                                            className="gradient-btn"
-                                            startIcon={<PlayArrowIcon sx={{ fontSize: 14 }} />}
-                                            onClick={() => navigate(`/mapping/${session.session_id}`)}
-                                            sx={{ height: 28, px: 2, fontSize: '11px', textTransform: 'none' }}
-                                          >
-                                            Continue to Mapping
-                                          </Button>
-                                          {session.has_mappings && (
-                                            <Button
-                                              size="small"
-                                              variant="outlined"
-                                              onClick={() => navigate(`/editor/${session.session_id}`)}
-                                              sx={{ height: 28, px: 2, fontSize: '11px', textTransform: 'none', color: Ze.text, borderColor: Ze.subtleBorder }}
-                                            >
-                                              Open Data Editor
-                                            </Button>
-                                          )}
-                                        </Stack>
+
+                                        {/* Footer details row */}
+                                        <Box sx={{ mt: 2.5, display: 'flex', alignItems: 'center', gap: 3, fontSize: '12px', color: Ze.muted }}>
+                                          <Typography variant="caption" sx={{ color: Ze.muted, fontSize: '12px' }}>
+                                            Rows Processed: <span style={{ color: isDarkMode ? '#ffffff' : '#0f172a', fontWeight: 700 }}>{session.rows_processed || 0}</span>
+                                          </Typography>
+                                          <Typography variant="caption" sx={{ color: Ze.muted, fontSize: '12px' }}>
+                                            Date: <span style={{ color: isDarkMode ? '#ffffff' : '#0f172a', fontWeight: 700 }}>{formatDisplayDate(session.created || session.upload_date || session.created_at)}</span>
+                                          </Typography>
+                                        </Box>
                                       </Box>
                                     </TableCell>
                                   </TableRow>
@@ -1138,27 +1548,82 @@ const Dashboard = () => {
                   </Box>
                 ) : (
                   <>
-                    <Grid container spacing={2}>
+                    <Stack spacing={1.25}>
                       {pagedTemplates.map((tmpl) => (
-                        <Grid item xs={12} sm={6} md={4} key={tmpl.id}>
-                          <Card sx={{ bgcolor: Ze.inputBg, border: `1px solid ${Ze.subtleBorder}`, borderRadius: '12px', transition: 'all 0.2s ease', '&:hover': { borderColor: '#2383e2', transform: 'translateY(-1px)' } }}>
-                            <CardContent sx={{ p: 2 }}>
-                              <Typography variant="subtitle2" fontWeight="700" sx={{ color: Ze.text, mb: 0.5 }}>{tmpl.name}</Typography>
-                              <Typography variant="caption" sx={{ color: Ze.muted, display: 'block', mb: 1.5 }}>
-                                {tmpl.total_mappings || 0} mapped columns • Used {tmpl.usage_count || 0} times
-                              </Typography>
-                              <UseButton
-                                onClick={() => handleApplyTemplate(tmpl)}
-                                label="Apply Template"
-                                color="linear-gradient(135deg, #2563eb 0%, #0284c7 100%)"
-                                hoverColor="linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)"
-                                glowColor="rgba(37, 99, 235, 0.45)"
-                              />
-                            </CardContent>
-                          </Card>
-                        </Grid>
+                        <Box
+                          key={tmpl.id}
+                          sx={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            p: 1.5,
+                            px: 2,
+                            borderRadius: '12px',
+                            bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.03)' : '#ffffff',
+                            border: `1px solid ${Ze.subtleBorder}`,
+                            transition: 'all 0.2s ease',
+                            '&:hover': {
+                              bgcolor: isDarkMode ? 'rgba(35, 131, 226, 0.12)' : '#eff6ff',
+                              borderColor: '#2383e2',
+                              transform: 'translateY(-1px)'
+                            }
+                          }}
+                        >
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, minWidth: 0 }}>
+                            <Avatar
+                              sx={{
+                                bgcolor: 'rgba(35, 131, 226, 0.15)',
+                                color: '#60a5fa',
+                                width: 34,
+                                height: 34,
+                                border: '1px solid rgba(35, 131, 226, 0.3)'
+                              }}
+                            >
+                              <LibraryBooksIcon sx={{ fontSize: 18 }} />
+                            </Avatar>
+                            <Box sx={{ minWidth: 0 }}>
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                <Typography variant="subtitle2" fontWeight="600" noWrap sx={{ color: Ze.text, fontSize: '13px' }}>
+                                  {tmpl.name}
+                                </Typography>
+                                {(tmpl.usage_count || 0) >= 5 && <StarIcon sx={{ fontSize: 14, color: '#fbbf24' }} />}
+                              </Box>
+                              <Box sx={{ display: 'flex', gap: 1, mt: 0.5, alignItems: 'center', flexWrap: 'wrap' }}>
+                                <Chip
+                                  label={`${tmpl.total_mappings || 0} mappings`}
+                                  size="small"
+                                  sx={{ height: 18, fontSize: '10px', bgcolor: isDarkMode ? 'rgba(255,255,255,0.06)' : '#eef2f7', color: Ze.muted }}
+                                />
+                                <Chip
+                                  label={`Used ${tmpl.usage_count || 0}×`}
+                                  size="small"
+                                  sx={{ height: 18, fontSize: '10px', bgcolor: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8' }}
+                                />
+                                <Typography variant="caption" sx={{ color: Ze.muted, fontSize: '10px' }}>
+                                  {formatDisplayDate(tmpl.created_at || tmpl.created)}
+                                </Typography>
+                              </Box>
+                            </Box>
+                          </Box>
+                          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                            <UseButton
+                              onClick={() => handleApplyTemplate(tmpl)}
+                              label="Use"
+                              size={30}
+                              color="linear-gradient(135deg, #2563eb 0%, #0284c7 100%)"
+                              hoverColor="linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)"
+                              glowColor="rgba(37, 99, 235, 0.45)"
+                              title="Use Mapping Template"
+                            />
+                            <DeleteActionButton
+                              onClick={() => handleDeleteMappingTemplate(tmpl.id)}
+                              size={30}
+                              title="Delete Mapping Template"
+                            />
+                          </Box>
+                        </Box>
                       ))}
-                    </Grid>
+                    </Stack>
                     <TablePagination
                       component="div"
                       count={filteredTemplates.length}
@@ -1166,8 +1631,8 @@ const Dashboard = () => {
                       onPageChange={(_, p) => setTmplPage(p)}
                       rowsPerPage={tmplRowsPerPage}
                       onRowsPerPageChange={(e) => { setTmplRowsPerPage(parseInt(e.target.value, 10)); setTmplPage(0); }}
-                      rowsPerPageOptions={[6, 12, 24]}
-                      sx={{ color: Ze.muted, fontSize: '12px' }}
+                      rowsPerPageOptions={[5, 10, 25]}
+                      sx={{ color: Ze.muted, fontSize: '12px', mt: 1, borderTop: `1px solid ${Ze.subtleBorder}` }}
                     />
                   </>
                 )}
@@ -1212,6 +1677,22 @@ const Dashboard = () => {
                       <MenuItem value="asc">Low → High</MenuItem>
                     </Select>
                   </FormControl>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={<ScienceIcon sx={{ fontSize: 14 }} />}
+                    onClick={() => setShowFormulaModal(true)}
+                    sx={{
+                      height: 38,
+                      fontSize: '12px',
+                      textTransform: 'none',
+                      borderColor: '#10b981',
+                      color: '#34d399',
+                      '&:hover': { bgcolor: 'rgba(16, 185, 129, 0.15)' }
+                    }}
+                  >
+                    New Template
+                  </Button>
                 </Stack>
                 {filteredTags.length === 0 ? (
                   <Box sx={{ textAlign: 'center', py: 5, color: Ze.muted }}>
@@ -1220,25 +1701,79 @@ const Dashboard = () => {
                   </Box>
                 ) : (
                   <>
-                    <Grid container spacing={2}>
+                    <Stack spacing={1.25}>
                       {pagedTags.map((tmpl) => (
-                        <Grid item xs={12} sm={6} md={4} key={tmpl.id}>
-                          <Card sx={{ bgcolor: Ze.inputBg, border: `1px solid ${Ze.subtleBorder}`, borderRadius: '12px', transition: 'all 0.2s ease', '&:hover': { borderColor: '#a78bfa', transform: 'translateY(-1px)' } }}>
-                            <CardContent sx={{ p: 2 }}>
-                              <Typography variant="subtitle2" fontWeight="700" sx={{ color: Ze.text, mb: 0.5 }}>{tmpl.name}</Typography>
-                              <Typography variant="caption" sx={{ color: Ze.muted, display: 'block', mb: 1 }}>
-                                {tmpl.rules?.length || 0} tag rules{tmpl.usage_count ? ` • Used ${tmpl.usage_count} times` : ''}
+                        <Box
+                          key={tmpl.id}
+                          sx={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            p: 1.5,
+                            px: 2,
+                            borderRadius: '12px',
+                            bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.03)' : '#ffffff',
+                            border: `1px solid ${Ze.subtleBorder}`,
+                            transition: 'all 0.2s ease',
+                            '&:hover': {
+                              bgcolor: isDarkMode ? 'rgba(16, 185, 129, 0.12)' : '#ecfdf5',
+                              borderColor: '#10b981',
+                              transform: 'translateY(-1px)'
+                            }
+                          }}
+                        >
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, minWidth: 0 }}>
+                            <Avatar
+                              sx={{
+                                bgcolor: 'rgba(16, 185, 129, 0.15)',
+                                color: '#34d399',
+                                width: 34,
+                                height: 34,
+                                border: '1px solid rgba(16, 185, 129, 0.3)'
+                              }}
+                            >
+                              <ScienceIcon sx={{ fontSize: 18 }} />
+                            </Avatar>
+                            <Box sx={{ minWidth: 0 }}>
+                              <Typography variant="subtitle2" fontWeight="600" noWrap sx={{ color: Ze.text, fontSize: '13px' }}>
+                                {tmpl.name}
                               </Typography>
-                              <Chip
-                                label="Tag Template"
-                                size="small"
-                                sx={{ height: 18, fontSize: '10px', bgcolor: 'rgba(168, 85, 247, 0.12)', color: '#a78bfa', border: '1px solid rgba(168, 85, 247, 0.25)', borderRadius: '4px' }}
-                              />
-                            </CardContent>
-                          </Card>
-                        </Grid>
+                              <Box sx={{ display: 'flex', gap: 1, mt: 0.5, alignItems: 'center', flexWrap: 'wrap' }}>
+                                <Chip
+                                  label={`${(tmpl.formula_rules || tmpl.rules || []).length} rules`}
+                                  size="small"
+                                  sx={{ height: 18, fontSize: '10px', bgcolor: 'rgba(16, 185, 129, 0.15)', color: '#34d399' }}
+                                />
+                                <Chip
+                                  label={`Used ${tmpl.usage_count || 0}×`}
+                                  size="small"
+                                  sx={{ height: 18, fontSize: '10px', bgcolor: 'rgba(52, 211, 153, 0.15)', color: '#34d399' }}
+                                />
+                                <Typography variant="caption" sx={{ color: Ze.muted, fontSize: '10px' }}>
+                                  {formatDisplayDate(tmpl.created_at || tmpl.created)}
+                                </Typography>
+                              </Box>
+                            </Box>
+                          </Box>
+                          <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+                            <UseButton
+                              onClick={() => navigate('/upload', { state: { selectedTagTemplate: tmpl, smartTagFormulaRules: tmpl.formula_rules || tmpl.rules || [] } })}
+                              label="Use"
+                              size={30}
+                              color="linear-gradient(135deg, #10b981 0%, #059669 100%)"
+                              hoverColor="linear-gradient(135deg, #059669 0%, #047857 100%)"
+                              glowColor="rgba(16, 185, 129, 0.45)"
+                              title="Use Tag Template"
+                            />
+                            <DeleteActionButton
+                              onClick={() => handleDeleteTagTemplate(tmpl.id)}
+                              size={30}
+                              title="Delete Tag Template"
+                            />
+                          </Box>
+                        </Box>
                       ))}
-                    </Grid>
+                    </Stack>
                     <TablePagination
                       component="div"
                       count={filteredTags.length}
@@ -1246,8 +1781,8 @@ const Dashboard = () => {
                       onPageChange={(_, p) => setTagPage(p)}
                       rowsPerPage={tagRowsPerPage}
                       onRowsPerPageChange={(e) => { setTagRowsPerPage(parseInt(e.target.value, 10)); setTagPage(0); }}
-                      rowsPerPageOptions={[6, 12, 24]}
-                      sx={{ color: Ze.muted, fontSize: '12px' }}
+                      rowsPerPageOptions={[5, 10, 25]}
+                      sx={{ color: Ze.muted, fontSize: '12px', mt: 1, borderTop: `1px solid ${Ze.subtleBorder}` }}
                     />
                   </>
                 )}
