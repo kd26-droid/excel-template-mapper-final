@@ -39,6 +39,9 @@ from .views import (
     column_source_map,
     source_columns_preview,
     cleanup_grid_rows,
+    delete_rows_conditional,
+    download_demo_bom_sheet,
+    demo_bom_tree,
     expand_alternate_columns,
 
     # Unified Template + Formula views (MappingTemplate based)
@@ -166,6 +169,7 @@ urlpatterns = [
     path('transforms/column-source-map/<str:session_id>/', column_source_map, name='column-source-map'),
     path('transforms/source-columns-preview/<str:session_id>/', source_columns_preview, name='source-columns-preview'),
     path('transforms/cleanup-grid-rows/', cleanup_grid_rows, name='cleanup-grid-rows'),
+    path('transforms/delete-rows/', delete_rows_conditional, name='delete-rows-conditional'),
     path('transforms/expand-alternate-columns/', expand_alternate_columns, name='expand-alternate-columns'),
 
     # Download endpoints
@@ -175,6 +179,8 @@ urlpatterns = [
     path('download/<str:session_id>/template/', download_template_file, name='download-template-file'),
     path('download/original/', download_original_file, name='download-original-file-legacy'),
     path('download/grid-excel/', download_grid_excel, name='download-grid-excel'),
+    path('download/demo-bom/<str:session_id>/', download_demo_bom_sheet, name='download-demo-bom-sheet'),
+    path('demo/bom-tree/<str:session_id>/', demo_bom_tree, name='demo-bom-tree'),
 
     # Dashboard
     path('dashboard/', dashboard_view, name='dashboard'),

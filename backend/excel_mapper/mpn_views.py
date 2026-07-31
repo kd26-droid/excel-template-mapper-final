@@ -415,6 +415,11 @@ def _mfr_options_cache_key(options):
 
 
 def normalize_manufacturer_options(options=None):
+    # Already-normalized options are passed back in downstream (e.g. parse_producer_cell
+    # → _find_known_manufacturer_label). Return them as-is — recomputing the JSON cache
+    # key over their 7500-element known_phrases SET would be O(N) on every call.
+    if isinstance(options, dict) and '_key' in options:
+        return options
     cache_key = _mfr_options_cache_key(options)
     if cache_key is not None and cache_key in _MFR_OPTIONS_CACHE:
         return _MFR_OPTIONS_CACHE[cache_key]
@@ -512,15 +517,13 @@ def manufacturer_phrase_tokens(value) -> List[str]:
 
 
 def _manufacturer_phrase_index(manufacturer_options):
-    """Return (alias_phrases, phrase_tokens) for these options, built ONCE and cached.
+    """Return (alias_dict, alias_max_len, phrase_set, phrase_max_len), built ONCE and
+    cached. The dict/set let the greedy splitter test only the O(max_len) possible
+    token-runs at each position instead of scanning all ~7500 phrases — the difference
+    between an O(tokens x 7500)-per-cell hang and instant.
 
-    - alias_phrases: [(phrase, tokens, alias_value)] for multi-word aliases
-    - phrase_tokens: [(phrase, tokens)] for every known phrase
-
-    Both are length-sorted (longest first, alphabetical tiebreak) so the greedy
-    splitter is deterministic. Building this over the ~7500-name directory is the
-    single most expensive step in a split; caching it turns an O(N²)-per-cell hang
-    into a one-time cost.
+    - alias_dict: {tuple(tokens): alias_value} for multi-word aliases
+    - phrase_set: {tuple(tokens)} for every known phrase
     """
     key = manufacturer_options.get('_key')
     if key is not None:
@@ -528,28 +531,33 @@ def _manufacturer_phrase_index(manufacturer_options):
         if cached is not None:
             return cached
     aliases = manufacturer_options['aliases']
-    alias_phrases = [
-        (phrase, manufacturer_phrase_tokens(phrase), aliases.get(phrase))
-        for phrase in sorted(aliases.keys(), key=lambda item: (-len(item.split()), item))
-        if len(manufacturer_phrase_tokens(phrase)) > 1
-    ]
-    phrase_tokens = [
-        (phrase, manufacturer_phrase_tokens(phrase))
-        for phrase in sorted(
-            manufacturer_options.get('known_phrases') or KNOWN_MANUFACTURER_PHRASES,
-            key=lambda item: (-len(item.split()), item)
-        )
-    ]
-    result = (alias_phrases, phrase_tokens)
+    alias_dict = {}
+    alias_max_len = 0
+    for phrase, alias_value in aliases.items():
+        parts = tuple(manufacturer_phrase_tokens(phrase))
+        if len(parts) > 1:
+            alias_dict[parts] = alias_value
+            if len(parts) > alias_max_len:
+                alias_max_len = len(parts)
+    phrase_set = set()
+    phrase_max_len = 0
+    for phrase in (manufacturer_options.get('known_phrases') or KNOWN_MANUFACTURER_PHRASES):
+        parts = tuple(manufacturer_phrase_tokens(phrase))
+        if parts:
+            phrase_set.add(parts)
+            if len(parts) > phrase_max_len:
+                phrase_max_len = len(parts)
+    result = (alias_dict, alias_max_len, phrase_set, phrase_max_len)
     if key is not None:
         _MFR_PHRASE_INDEX_CACHE[key] = result
     return result
 
 
 def _manufacturer_label_index(manufacturer_options, options=None):
-    """Pre-tokenized (parts, canonical) list for producer-label lookup, built once
-    over the ~7500-name directory and cached. Without this, every colon of every
-    Producer cell rebuilt the whole map (7500 normalize calls) — the 2-minute hang."""
+    """A dict {tuple(tokens): canonical} + the longest phrase length, built once over
+    the ~7500-name directory and cached. The dict lets producer-label lookup test only
+    the O(max_len) possible suffixes of a cell instead of scanning all 7500 phrases —
+    the difference between a per-cell hang and instant."""
     key = manufacturer_options.get('_key')
     if key is not None:
         cached = _MFR_LABEL_MAP_CACHE.get(key)
@@ -565,14 +573,18 @@ def _manufacturer_label_index(manufacturer_options, options=None):
             phrase_map[str(source).upper()] = str(target or '').strip()
         if target:
             phrase_map[str(target).upper()] = str(target).strip()
-    index = []
+    phrase_dict = {}
+    max_len = 0
     for phrase, canonical in phrase_map.items():
-        parts = manufacturer_phrase_tokens(phrase)
+        parts = tuple(manufacturer_phrase_tokens(phrase))
         if parts:
-            index.append((parts, canonical))
+            phrase_dict[parts] = canonical
+            if len(parts) > max_len:
+                max_len = len(parts)
+    result = (phrase_dict, max_len)
     if key is not None:
-        _MFR_LABEL_MAP_CACHE[key] = index
-    return index
+        _MFR_LABEL_MAP_CACHE[key] = result
+    return result
 
 
 def _find_known_manufacturer_label(prefix: str, options=None) -> Optional[Tuple[int, str]]:
@@ -586,21 +598,22 @@ def _find_known_manufacturer_label(prefix: str, options=None) -> Optional[Tuple[
         return None
 
     manufacturer_options = normalize_manufacturer_options(options)
-    label_index = _manufacturer_label_index(manufacturer_options, options)
+    phrase_dict, max_len = _manufacturer_label_index(manufacturer_options, options)
 
-    candidates = []
-    for parts, canonical in label_index:
-        if len(parts) > len(match_tokens):
-            continue
-        if match_tokens[-len(parts):] == parts:
-            start = tokens[len(tokens) - len(parts)][1]
-            candidates.append((len(parts), start, canonical or prefix[start:].strip()))
-
-    if not candidates:
-        return None
-
-    _, start, label = max(candidates, key=lambda item: (item[0], item[1]))
-    return start, label
+    # The manufacturer sits at the END of the label (right before the colon), so the
+    # answer is the LONGEST known phrase that is a suffix of match_tokens. Test suffixes
+    # longest-first via O(1) dict lookups — max_len iterations, not 7500.
+    upper = min(len(match_tokens), max_len)
+    for n in range(upper, 0, -1):
+        canonical = phrase_dict.get(tuple(match_tokens[-n:]))
+        if canonical is not None:
+            # Map back to the producer token where the match starts. When the label
+            # has hyphens/dots, match_tokens can be longer than tokens; clamp to the
+            # first token (the whole hyphenated name), matching the old behavior and
+            # avoiding the negative-index it would otherwise hit.
+            start = tokens[max(0, len(tokens) - n)][1]
+            return start, canonical or prefix[start:].strip()
+    return None
 
 
 def _infer_producer_label(prefix: str, options=None) -> Tuple[int, str]:
@@ -703,19 +716,21 @@ def split_manufacturer_cell(value, expected_count: int, options=None) -> List[st
     manufacturer_options = normalize_manufacturer_options(options)
     aliases = manufacturer_options['aliases']
     discard_tokens = manufacturer_options['discard_tokens']
-    # Length-sorted (longest first, alphabetical tiebreak → deterministic) phrase
-    # lists, built once per options set and cached rather than rebuilt per cell.
-    alias_phrases, phrase_tokens = _manufacturer_phrase_index(manufacturer_options)
+    # Dict/set phrase index (built once per options set, cached). Greedy longest-match
+    # via O(max_len) suffix lookups instead of scanning all ~7500 phrases per token.
+    alias_dict, alias_max_len, phrase_set, phrase_max_len = _manufacturer_phrase_index(manufacturer_options)
 
     manufacturers = []
     index = 0
     while index < len(upper_tokens):
         token = upper_tokens[index]
+        remaining = len(match_tokens) - index
 
         matched_alias = None
-        for phrase, parts, alias_value in alias_phrases:
-            if match_tokens[index:index + len(parts)] == parts:
-                matched_alias = (len(parts), alias_value)
+        for n in range(min(alias_max_len, remaining), 1, -1):
+            alias_value = alias_dict.get(tuple(match_tokens[index:index + n]))
+            if alias_value is not None:
+                matched_alias = (n, alias_value)
                 break
         if matched_alias:
             matched_len, alias_value = matched_alias
@@ -732,9 +747,9 @@ def split_manufacturer_cell(value, expected_count: int, options=None) -> List[st
             continue
 
         matched = None
-        for phrase, parts in phrase_tokens:
-            if match_tokens[index:index + len(parts)] == parts:
-                matched = len(parts)
+        for n in range(min(phrase_max_len, remaining), 0, -1):
+            if tuple(match_tokens[index:index + n]) in phrase_set:
+                matched = n
                 break
 
         if matched:
@@ -1460,6 +1475,27 @@ def mpn_validate_warm(request):
         chunk = unique[offset:offset + limit]
         if chunk:
             client.validate_mpns([m for m, _ in chunk], [f for _, f in chunk])
+            # Also warm Mouser for this batch. Mouser has no persistent cache, so we
+            # store its results on the session; mpn_validate reads them to fill the
+            # Mouser columns progressively (no live Mouser API call in the grid build).
+            try:
+                mouser = MouserClient()
+                if mouser.api_key:
+                    mouser_store = info.get('mouser_results') or {}
+                    added = 0
+                    for raw, _ in chunk:
+                        mnorm = mouser.normalize_mpn(raw)
+                        if mnorm and mnorm not in mouser_store:
+                            res = mouser.validate_mpn(raw)
+                            if res is not None:
+                                mouser_store[mnorm] = res
+                                added += 1
+                    if added:
+                        info['mouser_results'] = mouser_store
+                        save_session(session_id, info)
+                        logger.info(f"📊 MOUSER_WARM: cached {added} Mouser results this batch ({len(mouser_store)} total)")
+            except Exception as _me:
+                logger.warning(f"Mouser warm skipped (non-critical): {_me}")
 
         done = (offset + limit) >= total
         return Response({
@@ -1671,42 +1707,28 @@ def mpn_validate(request):
                 result['canonical_mpn'] = similar_canonicals[0]
                 result['all_canonical_mpns'] = similar_canonicals[:5]
 
-        # ========== MOUSER VALIDATION (optional, same MPNs) ==========
-        include_mouser = request.data.get('include_mouser') in (True, 'true', 'True', '1', 1)
-        logger.info("=" * 80)
-        logger.info("🔍 MOUSER_VALIDATION_START: Beginning Mouser validation")
-        logger.info("=" * 80)
-        mouser_results_map = {}
-        try:
-            mouser_client = MouserClient()
-            if include_mouser and mouser_client.api_key:
-                logger.info(f"📊 MOUSER_VALIDATION: Validating {len(mpns)} MPNs via Mouser API")
-                for raw_mpn in mpns:
-                    norm_mpn = mouser_client.normalize_mpn(raw_mpn)
-                    if norm_mpn:
-                        result = mouser_client.validate_mpn(raw_mpn)
-                        if result:
-                            mouser_results_map[norm_mpn] = result
-                logger.info(f"✅ MOUSER_VALIDATION: Completed for {len(mouser_results_map)} MPNs")
-                logger.info(f"📋 MOUSER_VALIDATION_STATS: Valid={sum(1 for r in mouser_results_map.values() if r.get('valid'))}, Invalid={sum(1 for r in mouser_results_map.values() if not r.get('valid'))}")
-            elif not include_mouser:
-                logger.info("MOUSER_VALIDATION: Skipping Mouser validation for main MPN validation flow")
-            else:
-                logger.warning("⚠️ MOUSER_VALIDATION: MOUSER_API_KEY not configured, skipping Mouser validation")
-        except Exception as e:
-            logger.warning(f"⚠️ MOUSER_VALIDATION: Failed (non-critical): {e}")
-        logger.info("=" * 80)
+        # ========== MOUSER VALIDATION ==========
+        # Mouser has no persistent cache like Digi-Key, so calling its API here (for
+        # every MPN, on every cache_only rebuild) would be slow and timeout-prone.
+        # Instead mpn_validate_warm warms Mouser one batch at a time and stores the
+        # results on the session; we just read them here so Mouser columns fill in
+        # progressively alongside Digi-Key, without any live API call in this path.
+        mouser_client = MouserClient()
+        mouser_results_map = info.get('mouser_results') or {}
+        if mouser_results_map:
+            logger.info(f"📊 MOUSER: using {len(mouser_results_map)} warmed Mouser results "
+                        f"(valid={sum(1 for r in mouser_results_map.values() if r.get('valid'))})")
 
         # Add new columns with validation results to the data
-        validation_columns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN']
+        validation_columns = ['MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number']
 
         # For canonical MPNs, only add one column (no multiple columns for invalid data)
-        validation_columns.append('Canonical MPN')
+        validation_columns.append('DigiKey Canonical MPN')
 
         # Only add category if there are valid results
         has_valid_results = any(r.get('valid') for r in results_map.values())
         if has_valid_results:
-            validation_columns.append('Category')
+            validation_columns.append('DigiKey Category')
 
         # Add Mouser columns if we have Mouser results
         if mouser_results_map:
@@ -1745,24 +1767,29 @@ def mpn_validate(request):
                 rows[i].append('')
 
             # Set validation data in the corresponding columns
-            mpn_valid_idx = headers.index('MPN valid')
-            mpn_status_idx = headers.index('MPN Status')
-            eol_status_idx = headers.index('EOL Status')
-            discontinued_idx = headers.index('Discontinued')
-            dkpn_idx = headers.index('DKPN')
-            canonical_idx = headers.index('Canonical MPN')
+            mpn_valid_idx = headers.index('MPN valid (DigiKey)')
+            mpn_status_idx = headers.index('DigiKey Status')
+            eol_status_idx = headers.index('DigiKey EOL Status')
+            discontinued_idx = headers.index('DigiKey Discontinued')
+            dkpn_idx = headers.index('DigiKey Part Number')
+            canonical_idx = headers.index('DigiKey Canonical MPN')
 
             is_valid = validation_result.get('valid', False)
+            has_result = norm_mpn in results_map
 
-            if not norm_mpn:
+            if not norm_mpn or not has_result:
+                # No MPN, OR this MPN hasn't been validated yet (a cache miss during
+                # the progressive/cache_only fill). Leave the columns BLANK — an
+                # unvalidated row must not show a false "No". It fills in once its
+                # batch is validated.
                 rows[i][mpn_valid_idx] = ''
                 rows[i][mpn_status_idx] = ''
                 rows[i][eol_status_idx] = ''
                 rows[i][discontinued_idx] = ''
                 rows[i][dkpn_idx] = ''
                 rows[i][canonical_idx] = ''
-                if 'Category' in headers:
-                    rows[i][headers.index('Category')] = ''
+                if 'DigiKey Category' in headers:
+                    rows[i][headers.index('DigiKey Category')] = ''
                 continue
 
             rows[i][mpn_valid_idx] = 'Yes' if is_valid else 'No'
@@ -1779,8 +1806,8 @@ def mpn_validate(request):
                 rows[i][canonical_idx] = validation_result.get('canonical_mpn') or ''
 
                 # Only add category if column exists and MPN is valid
-                if 'Category' in headers:
-                    category_idx = headers.index('Category')
+                if 'DigiKey Category' in headers:
+                    category_idx = headers.index('DigiKey Category')
                     category_info = validation_result.get('category', {}) or {}
                     rows[i][category_idx] = category_info.get('name') or ''
             else:
@@ -1796,23 +1823,30 @@ def mpn_validate(request):
                 rows[i][canonical_idx] = similar_canonicals[0] if similar_canonicals else ''
 
                 # Leave category empty for invalid MPNs
-                if 'Category' in headers:
-                    category_idx = headers.index('Category')
+                if 'DigiKey Category' in headers:
+                    category_idx = headers.index('DigiKey Category')
                     rows[i][category_idx] = ''
 
             # Populate Mouser data if we have Mouser results
-            if mouser_results_map:
+            if mouser_results_map and 'MPN valid (Mouser)' in headers:
                 mouser_norm_mpn = mouser_client.normalize_mpn(raw_mpn)
                 mouser_result = mouser_results_map.get(mouser_norm_mpn, {})
                 mouser_lifecycle = mouser_result.get('lifecycle') or {}
 
-                # Get Mouser column indices
-                if 'MPN valid (Mouser)' in headers:
-                    mouser_valid_idx = headers.index('MPN valid (Mouser)')
-                    mouser_status_idx = headers.index('Mouser Status')
-                    mpnr_idx = headers.index('MPNR')
-                    mouser_canonical_idx = headers.index('Mouser Canonical MPN')
+                mouser_valid_idx = headers.index('MPN valid (Mouser)')
+                mouser_status_idx = headers.index('Mouser Status')
+                mpnr_idx = headers.index('MPNR')
+                mouser_canonical_idx = headers.index('Mouser Canonical MPN')
+                mouser_cat_idx = headers.index('Mouser Category') if 'Mouser Category' in headers else None
 
+                if not mouser_result:
+                    # This MPN's Mouser lookup hasn't been warmed yet — keep the Mouser
+                    # columns blank (never a false "No" for an unreached row).
+                    for ix in [mouser_valid_idx, mouser_status_idx, mpnr_idx, mouser_canonical_idx]:
+                        rows[i][ix] = ''
+                    if mouser_cat_idx is not None:
+                        rows[i][mouser_cat_idx] = ''
+                else:
                     mouser_is_valid = mouser_result.get('valid', False)
                     rows[i][mouser_valid_idx] = 'Yes' if mouser_is_valid else 'No'
 
@@ -2064,15 +2098,15 @@ def mpn_restore_from_cache(request):
                 uncached_mfrs.append(d.get(manufacturer_header) if manufacturer_header else None)
 
         # Add validation columns
-        validation_columns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN']
+        validation_columns = ['MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number']
 
         # Only add one canonical MPN column (simplified approach)
-        validation_columns.append('Canonical MPN')
+        validation_columns.append('DigiKey Canonical MPN')
 
         # Only add category column if there are valid cached results
         has_valid_cached = any(r.get('valid') for r in cached_results.values())
         if has_valid_cached:
-            validation_columns.append('Category')
+            validation_columns.append('DigiKey Category')
 
         # Add columns if they don't exist
         columns_added = []
@@ -2099,44 +2133,44 @@ def mpn_restore_from_cache(request):
                 is_valid = validation_result.get('valid', False)
 
                 # Set validation data
-                if 'MPN valid' in headers:
-                    rows[i][headers.index('MPN valid')] = 'Yes' if is_valid else 'No'
+                if 'MPN valid (DigiKey)' in headers:
+                    rows[i][headers.index('MPN valid (DigiKey)')] = 'Yes' if is_valid else 'No'
 
                 if is_valid:
                     # Only populate detailed data for valid cached MPNs
                     lifecycle = validation_result.get('lifecycle') or {}
                     category_info = validation_result.get('category') or {}
 
-                    if 'MPN Status' in headers:
-                        rows[i][headers.index('MPN Status')] = lifecycle.get('status') or 'Unknown'
-                    if 'EOL Status' in headers:
-                        rows[i][headers.index('EOL Status')] = 'Yes' if lifecycle.get('endOfLife') else 'No'
-                    if 'Discontinued' in headers:
-                        rows[i][headers.index('Discontinued')] = 'Yes' if lifecycle.get('discontinued') else 'No'
-                    if 'DKPN' in headers:
-                        rows[i][headers.index('DKPN')] = validation_result.get('dkpn') or ''
-                    if 'Canonical MPN' in headers:
-                        rows[i][headers.index('Canonical MPN')] = validation_result.get('canonical_mpn') or ''
-                    if 'Category' in headers:
-                        rows[i][headers.index('Category')] = category_info.get('name') or ''
+                    if 'DigiKey Status' in headers:
+                        rows[i][headers.index('DigiKey Status')] = lifecycle.get('status') or 'Unknown'
+                    if 'DigiKey EOL Status' in headers:
+                        rows[i][headers.index('DigiKey EOL Status')] = 'Yes' if lifecycle.get('endOfLife') else 'No'
+                    if 'DigiKey Discontinued' in headers:
+                        rows[i][headers.index('DigiKey Discontinued')] = 'Yes' if lifecycle.get('discontinued') else 'No'
+                    if 'DigiKey Part Number' in headers:
+                        rows[i][headers.index('DigiKey Part Number')] = validation_result.get('dkpn') or ''
+                    if 'DigiKey Canonical MPN' in headers:
+                        rows[i][headers.index('DigiKey Canonical MPN')] = validation_result.get('canonical_mpn') or ''
+                    if 'DigiKey Category' in headers:
+                        rows[i][headers.index('DigiKey Category')] = category_info.get('name') or ''
                 else:
                     # Invalid cached MPN: set appropriate values
-                    if 'MPN Status' in headers:
-                        rows[i][headers.index('MPN Status')] = 'Unknown'
-                    if 'EOL Status' in headers:
-                        rows[i][headers.index('EOL Status')] = 'No'
-                    if 'Discontinued' in headers:
-                        rows[i][headers.index('Discontinued')] = 'No'
-                    if 'DKPN' in headers:
-                        rows[i][headers.index('DKPN')] = ''
-                    if 'Canonical MPN' in headers:
+                    if 'DigiKey Status' in headers:
+                        rows[i][headers.index('DigiKey Status')] = 'Unknown'
+                    if 'DigiKey EOL Status' in headers:
+                        rows[i][headers.index('DigiKey EOL Status')] = 'No'
+                    if 'DigiKey Discontinued' in headers:
+                        rows[i][headers.index('DigiKey Discontinued')] = 'No'
+                    if 'DigiKey Part Number' in headers:
+                        rows[i][headers.index('DigiKey Part Number')] = ''
+                    if 'DigiKey Canonical MPN' in headers:
                         similar_canonicals = client.filter_similar_canonical_mpns(
                             raw_mpn,
                             validation_result.get('all_canonical_mpns') or [validation_result.get('canonical_mpn')]
                         )
-                        rows[i][headers.index('Canonical MPN')] = similar_canonicals[0] if similar_canonicals else ''
-                    if 'Category' in headers:
-                        rows[i][headers.index('Category')] = ''
+                        rows[i][headers.index('DigiKey Canonical MPN')] = similar_canonicals[0] if similar_canonicals else ''
+                    if 'DigiKey Category' in headers:
+                        rows[i][headers.index('DigiKey Category')] = ''
             else:
                 # Set empty values for uncached MPNs
                 for col in validation_columns:

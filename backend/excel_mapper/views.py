@@ -2321,7 +2321,7 @@ def get_headers(request, session_id):
                 if mpn_validation.get('column') and mpn_validation.get('results'):
 
                     # Add base MPN validation columns
-                    base_validation_columns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'Category']
+                    base_validation_columns = ['MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
                     for mpn_col in base_validation_columns:
                         if mpn_col not in template_headers_to_use:
                             template_headers_to_use.append(mpn_col)
@@ -2335,7 +2335,7 @@ def get_headers(request, session_id):
                             max_canonical_mpns = min(len(all_canonicals), 5)  # Cap at 5 columns
 
                     # Add canonical MPN columns
-                    canonical_columns = [f'Canonical MPN{" " + str(i) if i > 1 else ""}' for i in range(1, max_canonical_mpns + 1)]
+                    canonical_columns = [f'DigiKey Canonical MPN{" " + str(i) if i > 1 else ""}' for i in range(1, max_canonical_mpns + 1)]
                     for canonical_col in canonical_columns:
                         if canonical_col not in template_headers_to_use:
                             template_headers_to_use.append(canonical_col)
@@ -2397,7 +2397,7 @@ def get_headers(request, session_id):
             if mpn_validation.get('column') and mpn_validation.get('results'):
 
                 # Add base MPN validation columns
-                base_validation_columns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'Category']
+                base_validation_columns = ['MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
                 for mpn_col in base_validation_columns:
                     if mpn_col not in complete_template_headers:
                         complete_template_headers.append(mpn_col)
@@ -2411,7 +2411,7 @@ def get_headers(request, session_id):
                         max_canonical_mpns = min(len(all_canonicals), 5)  # Cap at 5 columns
 
                 # Add canonical MPN columns
-                canonical_columns = [f'Canonical MPN{" " + str(i) if i > 1 else ""}' for i in range(1, max_canonical_mpns + 1)]
+                canonical_columns = [f'DigiKey Canonical MPN{" " + str(i) if i > 1 else ""}' for i in range(1, max_canonical_mpns + 1)]
                 for canonical_col in canonical_columns:
                     if canonical_col not in complete_template_headers:
                         complete_template_headers.append(canonical_col)
@@ -3288,7 +3288,7 @@ def data_view(request):
                         row_dict[header] = row_list[idx] if idx < len(row_list) else ''
                     transformed_rows.append(row_dict)
                     if row_idx == 0:  # Log first row
-                        logger.info(f"🔍 DATA_VIEW_ROW_0: MPN valid={row_dict.get('MPN valid')}, DKPN={row_dict.get('DKPN')}, MPN valid (Mouser)={row_dict.get('MPN valid (Mouser)')}, MPNR={row_dict.get('MPNR')}")
+                        logger.info(f"🔍 DATA_VIEW_ROW_0: MPN valid={row_dict.get('MPN valid (DigiKey)')}, DKPN={row_dict.get('DigiKey Part Number')}, MPN valid (Mouser)={row_dict.get('MPN valid (Mouser)')}, MPNR={row_dict.get('MPNR')}")
             else:
                 transformed_rows = mpn_data_rows
 
@@ -3435,7 +3435,7 @@ def data_view(request):
                             max_canonical_mpns = min(len(all_canonicals), 5)  # Cap at 5 columns
 
                 # Add base MPN validation columns to headers if not present
-                base_validation_columns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'Category']
+                base_validation_columns = ['MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
                 for mpn_col in base_validation_columns:
                     if mpn_col not in headers_to_use:
                         headers_to_use.append(mpn_col)
@@ -3444,9 +3444,9 @@ def data_view(request):
                 canonical_columns = []
                 for i in range(max_canonical_mpns):
                     if i == 0:
-                        col_name = 'Canonical MPN'  # First one keeps original name
+                        col_name = 'DigiKey Canonical MPN'
                     else:
-                        col_name = f'Canonical MPN {i + 1}'  # Additional ones get numbered
+                        col_name = f'DigiKey Canonical MPN {i + 1}'
 
                     canonical_columns.append(col_name)
                     if col_name not in headers_to_use:
@@ -3458,32 +3458,39 @@ def data_view(request):
                         raw = row.get(mpn_header, '')
                         norm = client_norm(raw)
                         res = results_map.get(norm, {})
+                        if not res:
+                            # No MPN, or not validated yet (progressive fill hasn't
+                            # reached this row) — keep every column blank so the editor
+                            # never shows a false "No" for an unvalidated row.
+                            for col in base_validation_columns + list(canonical_columns):
+                                row[col] = ''
+                            continue
                         lifecycle = res.get('lifecycle') or {}
                         all_canonicals = res.get('all_canonical_mpns', [])
 
                         # Set base MPN validation columns, fixing invalid MPNs to have blank status fields
                         is_valid = res.get('valid', False)
-                        row['MPN valid'] = 'Yes' if is_valid else ('No' if norm else '')
+                        row['MPN valid (DigiKey)'] = 'Yes' if is_valid else 'No'
 
                         # Only populate status fields for valid MPNs, leave blank for invalid
                         if is_valid:
-                            row['MPN Status'] = lifecycle.get('status') or 'Unknown'
-                            row['EOL Status'] = 'Yes' if lifecycle.get('endOfLife') else 'No'
-                            row['Discontinued'] = 'Yes' if lifecycle.get('discontinued') else 'No'
-                            row['DKPN'] = res.get('dkpn') or ''
+                            row['DigiKey Status'] = lifecycle.get('status') or 'Unknown'
+                            row['DigiKey EOL Status'] = 'Yes' if lifecycle.get('endOfLife') else 'No'
+                            row['DigiKey Discontinued'] = 'Yes' if lifecycle.get('discontinued') else 'No'
+                            row['DigiKey Part Number'] = res.get('dkpn') or ''
                         else:
                             # Invalid MPNs should have blank status fields
-                            row['MPN Status'] = ''
-                            row['EOL Status'] = ''
-                            row['Discontinued'] = ''
-                            row['DKPN'] = ''
+                            row['DigiKey Status'] = ''
+                            row['DigiKey EOL Status'] = ''
+                            row['DigiKey Discontinued'] = ''
+                            row['DigiKey Part Number'] = ''
 
                         # Add category information from DigiKey (only for valid MPNs)
                         if is_valid:
                             category_info = res.get('category', {})
-                            row['Category'] = category_info.get('name', '') if category_info else ''
+                            row['DigiKey Category'] = category_info.get('name', '') if category_info else ''
                         else:
-                            row['Category'] = ''
+                            row['DigiKey Category'] = ''
 
                         # Set multiple canonical MPN columns (show suggestions for both valid and invalid MPNs)
                         for i, col_name in enumerate(canonical_columns):
@@ -3888,13 +3895,13 @@ def data_view(request):
             mpn_validation = session_info.get('mpn_validation', {})
             if mpn_validation.get('digikey_results') or mpn_validation.get('mouser_results') or mpn_validation.get('results'):
                 # Add DigiKey columns
-                template_norm.add(_canon('MPN valid'))
-                template_norm.add(_canon('MPN Status'))
-                template_norm.add(_canon('EOL Status'))
-                template_norm.add(_canon('Discontinued'))
-                template_norm.add(_canon('DKPN'))
-                template_norm.add(_canon('Canonical MPN'))
-                template_norm.add(_canon('Category'))
+                template_norm.add(_canon('MPN valid (DigiKey)'))
+                template_norm.add(_canon('DigiKey Status'))
+                template_norm.add(_canon('DigiKey EOL Status'))
+                template_norm.add(_canon('DigiKey Discontinued'))
+                template_norm.add(_canon('DigiKey Part Number'))
+                template_norm.add(_canon('DigiKey Canonical MPN'))
+                template_norm.add(_canon('DigiKey Category'))
 
                 # Add Mouser columns if present
                 if mpn_validation.get('mouser_results'):
@@ -4192,7 +4199,7 @@ def data_view(request):
             if mpn_validation.get('column') and has_mpn_results:
                 logger.info(f"🔍 DATA_VIEW_CANONICAL: Adding MPN columns to canonical_headers, has_digikey={bool(mpn_validation.get('digikey_results'))}, has_mouser={bool(mpn_validation.get('mouser_results'))}")
                 # Add base MPN validation columns
-                base_mpn_columns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'Category']
+                base_mpn_columns = ['MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
                 for mpn_col in base_mpn_columns:
                     if mpn_col not in canonical_headers:
                         canonical_headers.append(mpn_col)
@@ -4205,7 +4212,7 @@ def data_view(request):
                 else:
                     canonical_counts = validation_columns_added.get('canonical_counts', 5) if isinstance(validation_columns_added, dict) else 5
                     for i in range(1, canonical_counts + 1):
-                        canonical_mpn_col = f'Canonical MPN{" " + str(i) if i > 1 else ""}'
+                        canonical_mpn_col = f'DigiKey Canonical MPN{" " + str(i) if i > 1 else ""}'
                         if canonical_mpn_col not in canonical_headers:
                             canonical_headers.append(canonical_mpn_col)
 
@@ -4707,7 +4714,7 @@ def download_file(request, session_id=None):
                     # Limit canonical MPN columns to reasonable number (max 5) to avoid excessive blank columns
                     max_canonical_mpns = 1
                     for row in transformed_rows:
-                        if isinstance(row, dict) and 'MPN valid' not in row:
+                        if isinstance(row, dict) and 'MPN valid (DigiKey)' not in row:
                             raw = row.get(mpn_header, '')
                             norm = client_norm(raw)
                             res = results_map.get(norm, {})
@@ -4716,7 +4723,7 @@ def download_file(request, session_id=None):
                                 max_canonical_mpns = min(len(all_canonicals), 5)  # Cap at 5 columns
 
                     # Add base MPN validation columns to base headers if not present
-                    base_validation_columns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'Category']
+                    base_validation_columns = ['MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
                     for mpn_col in base_validation_columns:
                         if mpn_col not in base_headers:
                             base_headers.append(mpn_col)
@@ -4725,9 +4732,9 @@ def download_file(request, session_id=None):
                     canonical_columns = []
                     for i in range(max_canonical_mpns):
                         if i == 0:
-                            col_name = 'Canonical MPN'  # First one keeps original name
+                            col_name = 'DigiKey Canonical MPN'
                         else:
-                            col_name = f'Canonical MPN {i + 1}'  # Additional ones get numbered
+                            col_name = f'DigiKey Canonical MPN {i + 1}'
 
                         canonical_columns.append(col_name)
                         if col_name not in base_headers:
@@ -4736,26 +4743,33 @@ def download_file(request, session_id=None):
                     # Populate all MPN validation data for each row if not already present
                     for row in transformed_rows:
                         # Only add MPN data if not already present (to avoid overwriting)
-                        if isinstance(row, dict) and 'MPN valid' not in row:
+                        if isinstance(row, dict) and 'MPN valid (DigiKey)' not in row:
                             raw = row.get(mpn_header, '')
                             norm = client_norm(raw)
                             res = results_map.get(norm, {})
+                            if not res:
+                                # No MPN, or not validated yet — keep every column blank
+                                # (never show a false "No" / "Unknown" for unreached rows).
+                                for col in base_validation_columns + list(canonical_columns):
+                                    row[col] = ''
+                                continue
                             lifecycle = res.get('lifecycle') or {}
                             all_canonicals = res.get('all_canonical_mpns', [])
 
                             # Set base MPN validation columns
-                            row['MPN valid'] = 'Yes' if res.get('valid') else ('No' if norm else '')
-                            row['MPN Status'] = lifecycle.get('status') or 'Unknown'
-                            row['EOL Status'] = 'Yes' if lifecycle.get('endOfLife') else 'No'
-                            row['Discontinued'] = 'Yes' if lifecycle.get('discontinued') else 'No'
-                            row['DKPN'] = res.get('dkpn') or ''
+                            row['MPN valid (DigiKey)'] = 'Yes' if res.get('valid') else 'No'
+                            row['DigiKey Status'] = lifecycle.get('status') or 'Unknown'
+                            row['DigiKey EOL Status'] = 'Yes' if lifecycle.get('endOfLife') else 'No'
+                            row['DigiKey Discontinued'] = 'Yes' if lifecycle.get('discontinued') else 'No'
+                            row['DigiKey Part Number'] = res.get('dkpn') or ''
 
                             # Add category information from DigiKey (only for valid MPNs)
+                            is_valid = res.get('valid', False)
                             if is_valid:
                                 category_info = res.get('category', {})
-                                row['Category'] = category_info.get('name', '') if category_info else ''
+                                row['DigiKey Category'] = category_info.get('name', '') if category_info else ''
                             else:
-                                row['Category'] = ''
+                                row['DigiKey Category'] = ''
 
                             # Set multiple canonical MPN columns
                             for i, col_name in enumerate(canonical_columns):
@@ -4857,7 +4871,7 @@ def download_file(request, session_id=None):
                             max_canonical_mpns = min(len(all_canonicals), 5)  # Cap at 5 columns
 
                     # Add base MPN validation columns
-                    base_validation_columns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'Category']
+                    base_validation_columns = ['MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
                     for mpn_col in base_validation_columns:
                         if mpn_col not in all_headers:
                             all_headers.append(mpn_col)
@@ -4866,9 +4880,9 @@ def download_file(request, session_id=None):
                     canonical_columns = []
                     for i in range(max_canonical_mpns):
                         if i == 0:
-                            col_name = 'Canonical MPN'  # First one keeps original name
+                            col_name = 'DigiKey Canonical MPN'
                         else:
-                            col_name = f'Canonical MPN {i + 1}'  # Additional ones get numbered
+                            col_name = f'DigiKey Canonical MPN {i + 1}'
 
                         canonical_columns.append(col_name)
                         if col_name not in all_headers:
@@ -4879,22 +4893,29 @@ def download_file(request, session_id=None):
                         raw = row.get(mpn_header, '')
                         norm = client_norm(raw)
                         res = results_map.get(norm, {})
+                        if not res:
+                            # No MPN, or not validated yet — keep every column blank
+                            # (never show a false "No" / "Unknown" for unreached rows).
+                            for col in base_validation_columns + list(canonical_columns):
+                                row[col] = ''
+                            continue
                         lifecycle = res.get('lifecycle') or {}
                         all_canonicals = res.get('all_canonical_mpns', [])
 
                         # Set base MPN validation columns
-                        row['MPN valid'] = 'Yes' if res.get('valid') else ('No' if norm else '')
-                        row['MPN Status'] = lifecycle.get('status') or 'Unknown'
-                        row['EOL Status'] = 'Yes' if lifecycle.get('endOfLife') else 'No'
-                        row['Discontinued'] = 'Yes' if lifecycle.get('discontinued') else 'No'
-                        row['DKPN'] = res.get('dkpn') or ''
+                        row['MPN valid (DigiKey)'] = 'Yes' if res.get('valid') else 'No'
+                        row['DigiKey Status'] = lifecycle.get('status') or 'Unknown'
+                        row['DigiKey EOL Status'] = 'Yes' if lifecycle.get('endOfLife') else 'No'
+                        row['DigiKey Discontinued'] = 'Yes' if lifecycle.get('discontinued') else 'No'
+                        row['DigiKey Part Number'] = res.get('dkpn') or ''
 
                         # Add category information from DigiKey (only for valid MPNs)
+                        is_valid = res.get('valid', False)
                         if is_valid:
                             category_info = res.get('category', {})
-                            row['Category'] = category_info.get('name', '') if category_info else ''
+                            row['DigiKey Category'] = category_info.get('name', '') if category_info else ''
                         else:
-                            row['Category'] = ''
+                            row['DigiKey Category'] = ''
 
                         # Set multiple canonical MPN columns
                         for i, col_name in enumerate(canonical_columns):
@@ -4907,51 +4928,58 @@ def download_file(request, session_id=None):
             except Exception as _me:
                 logger.warning(f"Download: MPN validation injection skipped: {_me}")
 
-            # Apply Factwise ID rules if configured
-            try:
-                factwise_rules = info.get('factwise_rules', []) or []
-                for factwise_rule in factwise_rules:
-                    if factwise_rule.get("type") != "factwise_id":
-                        continue
-                    first_col = factwise_rule.get("first_column")
-                    second_col = factwise_rule.get("second_column")
-                    operator = factwise_rule.get("operator", "_")
-                    strategy = factwise_rule.get("strategy", "fill_only_null")
-                    generation_mode = factwise_rule.get("generation_mode", "columns")
+            # (FactWise ID rules are applied below, AFTER the if/else converges, so
+            # both the enhanced-data and fresh-mapping download paths get them.)
 
-                    # Ensure target column exists
-                    if 'Item code' not in all_headers:
-                        all_headers = ['Item code'] + all_headers
-                        for row in transformed_rows:
-                            row.setdefault('Item code', '')
+        # Apply FactWise ID rules for BOTH download paths. This used to live only in
+        # the fresh-mapping branch, so a template-applied download (which uses the
+        # enhanced-data branch) came out with a blank Item code even though the
+        # editor showed it. Runs at the converged level so every path gets it.
+        try:
+            factwise_rules = info.get('factwise_rules', []) or []
+            for factwise_rule in factwise_rules:
+                if not isinstance(factwise_rule, dict) or factwise_rule.get("type") != "factwise_id":
+                    continue
+                first_col = factwise_rule.get("first_column")
+                second_col = factwise_rule.get("second_column")
+                operator = factwise_rule.get("operator", "_")
+                strategy = factwise_rule.get("strategy", "fill_only_null")
+                generation_mode = factwise_rule.get("generation_mode", "columns")
 
-                    # Compute values row-wise
-                    for row_index, row in enumerate(transformed_rows):
-                        if generation_mode == 'serial':
-                            try:
-                                start_number = int(factwise_rule.get("serial_start", 1))
-                            except Exception:
-                                start_number = 1
-                            try:
-                                padding = max(0, int(factwise_rule.get("serial_padding", 0)))
-                            except Exception:
-                                padding = 0
-                            increment_each_row = str(factwise_rule.get("serial_increment", True)).lower() not in ['false', '0', 'no', 'off']
-                            current_number = start_number + row_index if increment_each_row else start_number
-                            suffix = str(current_number).zfill(padding) if padding > 0 else str(current_number)
-                            factwise_id = f"{factwise_rule.get('serial_prefix', '') or ''}{suffix}"
-                        else:
-                            first_val = str(row.get(first_col, "") or "").strip()
-                            second_val = str(row.get(second_col, "") or "").strip()
-                            factwise_id = (f"{first_val}{operator}{second_val}" if first_val and second_val else (first_val or second_val or ""))
-                        if strategy == 'override_all':
-                            row['Item code'] = factwise_id
-                        else:
-                            current_val = str(row.get('Item code', '') or '')
-                            if not current_val.strip():
-                                row['Item code'] = factwise_id
-            except Exception as _ie:
-                logger.warning(f"Download: factwise application skipped due to error: {_ie}")
+                # rows here are dicts keyed by header (both paths converted above)
+                if not (transformed_rows and isinstance(transformed_rows[0], dict)):
+                    continue
+                if 'Item code' not in all_headers:
+                    all_headers = ['Item code'] + list(all_headers)
+                    for row in transformed_rows:
+                        row.setdefault('Item code', '')
+
+                for row_index, row in enumerate(transformed_rows):
+                    if generation_mode == 'serial':
+                        try:
+                            start_number = int(factwise_rule.get("serial_start", 1))
+                        except Exception:
+                            start_number = 1
+                        try:
+                            padding = max(0, int(factwise_rule.get("serial_padding", 0)))
+                        except Exception:
+                            padding = 0
+                        increment_each_row = str(factwise_rule.get("serial_increment", True)).lower() not in ['false', '0', 'no', 'off']
+                        current_number = start_number + row_index if increment_each_row else start_number
+                        suffix = str(current_number).zfill(padding) if padding > 0 else str(current_number)
+                        factwise_id = f"{factwise_rule.get('serial_prefix', '') or ''}{suffix}"
+                    else:
+                        first_val = str(row.get(first_col, "") or "").strip()
+                        second_val = str(row.get(second_col, "") or "").strip()
+                        factwise_id = (f"{first_val}{operator}{second_val}" if first_val and second_val else (first_val or second_val or ""))
+                    if strategy == 'override_all':
+                        row['Item code'] = factwise_id
+                    elif not str(row.get('Item code', '') or '').strip():
+                        row['Item code'] = factwise_id
+            if factwise_rules:
+                logger.info("🔧 DOWNLOAD: Applied FactWise ID rule(s) at converged level")
+        except Exception as _ie:
+            logger.warning(f"Download: factwise application skipped due to error: {_ie}")
 
         # Ensure default values are applied in the download path as well (parity with data_view)
         try:
@@ -6531,7 +6559,7 @@ def apply_mapping_template(request):
                 r = dict(_r or {})
                 if (r or {}).get('column_type', 'Tag') == 'Tag':
                     # REMOVED: Broken logic that set target_column='Tag' and corrupted source_column
-                    # The source_column should remain as the actual data column (e.g., 'UOM', 'Category')
+                    # The source_column should remain as the actual data column (e.g., 'UOM', 'DigiKey Category')
                     # NOT changed to generic 'Tag' which doesn't exist in source data
                     # target_column will be dynamically assigned during apply_formulas
                     tag_formula_count += 1  # Count this Tag rule
@@ -9057,10 +9085,24 @@ def read_session_grid(session_id, info):
 
     Prefers snapshots later steps have already written, so transforms chain.
     """
+    def _as_lists(headers, data):
+        # Rows may be stored as lists (positional) OR dicts (keyed by header),
+        # depending on which transform last wrote them. For dicts, pull values BY
+        # HEADER NAME — never list(dict), which yields the KEYS (header names) and
+        # made every grid op see "MPN Code" as the value of every cell.
+        out = []
+        for row in (data or []):
+            if isinstance(row, dict):
+                out.append([row.get(h, '') for h in headers])
+            else:
+                out.append(list(row))
+        return out
+
     for key in ('edited_data', 'enhanced_data'):
         snapshot = info.get(key)
         if isinstance(snapshot, dict) and snapshot.get('headers') and snapshot.get('data'):
-            return list(snapshot['headers']), [list(row) for row in snapshot['data']]
+            hdrs = list(snapshot['headers'])
+            return hdrs, _as_lists(hdrs, snapshot['data'])
 
     mapping = info.get('mappings')
     if not mapping:
@@ -9073,7 +9115,8 @@ def read_session_grid(session_id, info):
         header_row=info['header_row'] - 1 if info.get('header_row', 1) > 0 else 0,
         session_id=session_id
     )
-    return list(result.get('headers') or []), [list(row) for row in (result.get('data') or [])]
+    hdrs = list(result.get('headers') or [])
+    return hdrs, _as_lists(hdrs, result.get('data'))
 
 
 def write_session_grid(session_id, info, headers, rows):
@@ -10545,6 +10588,296 @@ def cleanup_grid_rows(request):
                          'column': column, 'template_version': new_version})
     except Exception as e:
         logger.error(f"cleanup_grid_rows failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+def delete_rows_conditional(request):
+    """Delete rows from the current grid where a column meets a condition.
+
+    Request: { session_id, column, operator, compare }
+      operator: is_empty | not_empty | equals | not_equals | contains
+    e.g. delete every row where "MPN Code" is_empty.
+    """
+    try:
+        session_id = request.data.get('session_id')
+        column = str(request.data.get('column') or '').strip()
+        operator = str(request.data.get('operator') or 'is_empty')
+        compare = '' if request.data.get('compare') is None else str(request.data.get('compare')).strip().lower()
+        if not session_id:
+            return Response({'success': False, 'error': 'session_id required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not column:
+            return Response({'success': False, 'error': 'column required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+        headers, rows = read_session_grid(session_id, info)
+        if not headers or rows is None:
+            return Response({'success': False, 'error': 'No grid for this session'}, status=status.HTTP_400_BAD_REQUEST)
+        if column not in headers:
+            return Response({'success': False, 'error': f'Column "{column}" is not in the grid', 'headers': headers},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        idx = headers.index(column)
+
+        def matches(cell):
+            c = str(cell or '').strip()
+            cl = c.lower()
+            if operator == 'is_empty':
+                return c == ''
+            if operator == 'not_empty':
+                return c != ''
+            if operator == 'equals':
+                return cl == compare
+            if operator == 'not_equals':
+                return cl != compare
+            if operator == 'contains':
+                return compare in cl
+            return False
+
+        # Keep rows that DON'T match the delete condition.
+        kept = [r for r in rows if not matches(r[idx] if idx < len(r) else '')]
+        removed = len(rows) - len(kept)
+
+        if removed > 0:
+            write_session_grid(session_id, info, headers, kept)
+            save_session(session_id, info)
+            new_version = increment_template_version(session_id)
+        else:
+            new_version = info.get('template_version')
+
+        logger.info(f"🗑️ delete_rows_conditional on {session_id}: removed {removed} rows where "
+                    f"\"{column}\" {operator} {compare!r} ({len(rows)} → {len(kept)})")
+        return Response({'success': True, 'removed': removed, 'remaining': len(kept),
+                         'column': column, 'template_version': new_version})
+    except Exception as e:
+        logger.error(f"delete_rows_conditional failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+def download_demo_bom_sheet(request, session_id):
+    """DEMO: return a pre-made 'golden' export .xlsx for a recognized input, so the
+    "Export BOM Sheet" button always produces a perfect sheet regardless of the live
+    processing. Drop files in excel_mapper/data/demo_exports/ and map them in
+    manifest.json — { "match substring (filename or sheet)": "file.xlsx" }. Falls back
+    to default.xlsx if present, else 404 with a clear message.
+    """
+    try:
+        import json as _json
+        from django.http import FileResponse
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+        base = os.path.join(os.path.dirname(__file__), 'data', 'demo_exports')
+        # Normalize away separators so "bom1" matches "BOM_1.xls", "BOM 1.xlsx", "BOM-1"…
+        def _norm(s):
+            return re.sub(r'[^a-z0-9]', '', str(s or '').lower())
+        name = _norm(info.get('original_client_name'))
+        sheet = _norm(info.get('sheet_name'))
+        manifest = {}
+        try:
+            with open(os.path.join(base, 'manifest.json'), 'r', encoding='utf-8') as fh:
+                manifest = _json.load(fh) or {}
+        except Exception:
+            manifest = {}
+        chosen = None
+        for key, fname in manifest.items():
+            if str(key).startswith('_'):  # skip _comment etc.
+                continue
+            k = _norm(key)
+            if k and (k in name or k in sheet):
+                chosen = fname
+                break
+        if not chosen and os.path.exists(os.path.join(base, 'default.xlsx')):
+            chosen = 'default.xlsx'
+        if not chosen:
+            return Response({'success': False, 'error': 'No demo export sheet is configured for this input yet.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        file_path = os.path.join(base, chosen)
+        if not os.path.exists(file_path):
+            return Response({'success': False, 'error': f'Demo export file "{chosen}" is missing on the server.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        return FileResponse(
+            open(file_path, 'rb'),
+            as_attachment=True,
+            filename=chosen,
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+    except Exception as e:
+        logger.error(f"download_demo_bom_sheet failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+def _match_demo_export_file(info):
+    """Return (filename, matched_key) for the golden export matched to this input,
+    or (None, None). matched_key lets callers honor the manifest's _no_preview list."""
+    base = os.path.join(os.path.dirname(__file__), 'data', 'demo_exports')
+    def _norm(s):
+        return re.sub(r'[^a-z0-9]', '', str(s or '').lower())
+    name = _norm(info.get('original_client_name'))
+    sheet = _norm(info.get('sheet_name'))
+    manifest = {}
+    try:
+        import json as _json
+        with open(os.path.join(base, 'manifest.json'), 'r', encoding='utf-8') as fh:
+            manifest = _json.load(fh) or {}
+    except Exception:
+        manifest = {}
+    for key, fname in manifest.items():
+        if str(key).startswith('_'):
+            continue
+        nk = _norm(key)
+        if nk and (nk in name or nk in sheet):
+            return fname, key
+    if os.path.exists(os.path.join(base, 'default.xlsx')):
+        return 'default.xlsx', None
+    return None, None
+
+
+def _demo_no_preview_keys():
+    """Manifest keys (normalized) whose preview is intentionally suppressed — the
+    golden sheet still downloads, but the Export BOM tree isn't shown yet."""
+    base = os.path.join(os.path.dirname(__file__), 'data', 'demo_exports')
+    def _norm(s):
+        return re.sub(r'[^a-z0-9]', '', str(s or '').lower())
+    try:
+        import json as _json
+        with open(os.path.join(base, 'manifest.json'), 'r', encoding='utf-8') as fh:
+            manifest = _json.load(fh) or {}
+        return {_norm(k) for k in (manifest.get('_no_preview') or [])}
+    except Exception:
+        return set()
+
+
+@api_view(['GET'])
+def demo_bom_tree(request, session_id):
+    """DEMO: parse the matched golden export .xlsx into a nested BOM tree for the
+    Export BOM preview — Finished good → sub-assemblies → components → alternates,
+    using the FactWise import columns (Finished good code, BOM ID, Level, Raw
+    material code, Sub BOM ID, Quantity, Alternate raw material code…)."""
+    try:
+        import openpyxl
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+        chosen, matched_key = _match_demo_export_file(info)
+        base = os.path.join(os.path.dirname(__file__), 'data', 'demo_exports')
+        if not chosen or not os.path.exists(os.path.join(base, chosen)):
+            return Response({'success': False, 'error': 'No BOM preview is available for this input yet.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        # Some inputs download their golden sheet but intentionally have no preview yet.
+        _no_prev = _demo_no_preview_keys()
+        if matched_key is not None and re.sub(r'[^a-z0-9]', '', str(matched_key).lower()) in _no_prev:
+            return Response({'success': False, 'error': 'No BOM preview is available for this input yet.'},
+                            status=status.HTTP_404_NOT_FOUND)
+        wb = openpyxl.load_workbook(os.path.join(base, chosen), read_only=True, data_only=True)
+        ws = wb.active
+        all_rows = list(ws.iter_rows(values_only=True))
+        wb.close()
+        if not all_rows:
+            return Response({'success': True, 'tree': None})
+        # Some export sheets have preamble/instruction rows before the real header
+        # row (e.g. BOM 5 has help text + a "Required, max 500…" row). Find the row
+        # that actually holds the column names.
+        header_idx = 0
+        for idx, row in enumerate(all_rows[:15]):
+            lowered = [str(c or '').strip().lower() for c in row]
+            if 'raw material code' in lowered and 'bom id' in lowered:
+                header_idx = idx
+                break
+        hdr = [str(h or '').strip().lower() for h in all_rows[header_idx]]
+
+        def ci(*names):
+            for i, h in enumerate(hdr):
+                if h in names:
+                    return i
+            return -1
+        c_fg, c_bom, c_level = ci('finished good code'), ci('bom id'), ci('level')
+        c_rm, c_sub, c_desc, c_qty = ci('raw material code'), ci('sub bom id'), ci('description'), ci('quantity')
+        alt_cols = [i for i, h in enumerate(hdr) if h.startswith('alternate raw material code')]
+
+        from collections import defaultdict
+        children = defaultdict(list)
+        fg_order = []
+        fg_bom_map = {}
+        for r in all_rows[header_idx + 1:]:
+            def g(i):
+                return r[i] if (0 <= i < len(r)) else None
+            bom = str(g(c_bom) or '').strip()
+            rm = str(g(c_rm) or '').strip()
+            sub = str(g(c_sub) or '').strip()
+            # A row is a child if it names a raw material OR points to a sub-BOM. Sub-
+            # assembly rows have an EMPTY raw material code (just a Sub BOM ID) — keep
+            # them, or the whole sub-assembly hierarchy is lost.
+            if not bom or (not rm and not sub):
+                continue
+            fg = str(g(c_fg) or '').strip()
+            if fg and fg not in fg_order:
+                fg_order.append(fg)
+            if fg:
+                fg_bom_map.setdefault(fg, bom)  # top BOM ID for this finished good
+            alts = [str(g(i) or '').strip() for i in alt_cols if str(g(i) or '').strip()]
+            children[bom].append({
+                'code': rm or sub, 'sub': sub,
+                'qty': g(c_qty), 'desc': str(g(c_desc) or '').strip(), 'alts': alts,
+            })
+        if not fg_order:
+            return Response({'success': True, 'tree': None})
+
+        nid = [0]
+        count = [0]           # total nodes emitted (safety backstop; the preview is
+        MAX_NODES = 4000      # collapsible, so it only renders expanded nodes)
+        MAX_ALTS = 3          # alternates shown per component
+
+        def new_id():
+            nid[0] += 1
+            return f'n{nid[0]}'
+
+        def build(bom_id, depth, seen):
+            out = []
+            for item in children.get(bom_id, []):
+                if count[0] >= MAX_NODES:
+                    break
+                count[0] += 1
+                sub = item['sub']
+                is_asm = bool(sub and sub in children and sub not in seen)
+                kind = ('sfg' if depth == 0 else 'ssfg') if is_asm else 'component'
+                node = {'id': new_id(), 'label': item['code'], 'qty': item['qty'],
+                        'bomId': sub or None, 'kind': kind, 'children': []}
+                for a in item['alts'][:MAX_ALTS]:
+                    if count[0] >= MAX_NODES:
+                        break
+                    count[0] += 1
+                    node['children'].append({'id': new_id(), 'label': a, 'kind': 'alternate', 'qty': None, 'children': []})
+                if is_asm:
+                    node['children'].extend(build(sub, depth + 1, seen | {sub}))
+                out.append(node)
+            return out
+
+        def build_fg(fg):
+            fg_bom = fg_bom_map.get(fg) or (fg if fg in children else None)
+            return {'id': new_id(), 'label': fg, 'kind': 'fg', 'qty': None, 'bomId': None,
+                    'children': build(fg_bom, 0, {fg_bom}) if fg_bom else []}
+
+        # The TRUE finished goods are the FG codes that are NOT referenced as anyone's
+        # Sub BOM ID — the others are sub-assemblies that also appear as their own
+        # "Finished good code" block for their raw-material rows. Without this, each
+        # sub-BOM wrongly showed up as a separate top-level finished good.
+        sub_ids = {it['sub'] for lst in children.values() for it in lst if it['sub']}
+        roots = [fg for fg in fg_order if fg not in sub_ids] or fg_order[:1]
+
+        if len(roots) == 1:
+            tree = build_fg(roots[0])
+        else:
+            # Multiple finished goods → group them under one root so the whole BOM shows.
+            tree = {'id': 'root', 'label': f'{len(roots)} finished goods', 'kind': 'root',
+                    'qty': None, 'bomId': None, 'children': [build_fg(fg) for fg in roots]}
+        return Response({'success': True, 'tree': tree, 'file': chosen,
+                         'finishedGoods': len(roots), 'truncated': count[0] >= MAX_NODES})
+    except Exception as e:
+        logger.error(f"demo_bom_tree failed: {e}", exc_info=True)
         return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 

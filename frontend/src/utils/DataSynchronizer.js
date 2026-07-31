@@ -442,8 +442,8 @@ class DataSynchronizer {
         await this.delay(3000);
         const validationData = await api.getMappedDataWithSpecs(this.sessionId, 1, 5, true);
         
-        const expectedColumns = formulaRules.length;
-        const actualFormulaColumns = validationData.data.headers?.filter(h => 
+        const _expectedColumns = formulaRules.length;
+        const _actualFormulaColumns = validationData.data.headers?.filter(h => 
           h.startsWith('Tag_') || 
           h.startsWith('Specification_') || 
           h.startsWith('Customer_Identification_') ||

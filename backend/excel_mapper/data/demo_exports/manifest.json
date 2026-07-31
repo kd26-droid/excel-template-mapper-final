@@ -1,0 +1,10 @@
+{
+  "_comment": "Maps the uploaded input to a pre-made export .xlsx in this folder. The key is matched (separator-insensitive: 'bom1' matches 'BOM_1.xls', 'BOM 1.xlsx', 'BOM-1') against the uploaded file name, then the sheet name. First match wins. Add bom3 / bom5 here when their import files are dropped in.",
+  "_no_preview_comment": "Keys listed here still DOWNLOAD their golden sheet, but the Export BOM tree preview is suppressed (frontend shows 'no preview available'). Remove a key from this list once its preview is ready.",
+  "_no_preview": ["bom3"],
+  "bom1": "BOM_1_import.xlsx",
+  "bom2": "BOM_2_import.xlsx",
+  "bom3": "BOM_3_import.xlsx",
+  "bom4": "BOM_4_import.xlsx",
+  "bom5": "BOM_5_import.xlsx"
+}

@@ -1828,65 +1828,7 @@ const api = {
     };
   },
 
-  // ==========================================
-  // DASHBOARD AND DOWNLOAD ENDPOINTS
-  // ==========================================
 
-  /**
-   * Get dashboard data including uploads and templates
-   */
-  getUploadDashboard: () =>
-    axios.get(`${API_URL}/dashboard/`),
-
-  /**
-   * Enhanced file download with proper file type handling
-   * @param {string} sessionId - Session ID
-   * @param {string} fileType - File type ('original', 'converted', or 'template')
-   */
-  downloadFileEnhanced: async (sessionId, fileType = 'converted', customFilename = null, columnOrder = null, workbookId = null) => {
-    try {
-      let response;
-      if (fileType === 'original') {
-        response = await api.downloadOriginalFile(sessionId);
-      } else if (fileType === 'template') {
-        response = await api.downloadTemplateFile(sessionId);
-      } else {
-        response = await api.downloadProcessedFile(sessionId, 'excel', columnOrder);
-      }
-
-      // Get filename from response headers
-      const contentDisposition = response.headers['content-disposition'];
-      let filename = customFilename || `download_${sessionId}.xlsx`;
-      
-      if (contentDisposition) {
-        const filenameMatch = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
-        if (filenameMatch && filenameMatch[1]) {
-          filename = filenameMatch[1].replace(/['"]/g, '');
-        }
-      }
-
-      // Create download link
-      const blob = new Blob([response.data], {
-        type: response.headers['content-type'] || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-      });
-      const url = window.URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.setAttribute('download', filename);
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.URL.revokeObjectURL(url);
-
-      return {
-        success: true,
-        filename: filename
-      };
-    } catch (error) {
-      console.error(`Error downloading ${fileType} file:`, error);
-      throw new Error(`Failed to download ${fileType} file: ${error.response?.data?.error || error.message}`);
-    }
-  },
 
   /**
    * Update session data with corrected values while preserving structure
