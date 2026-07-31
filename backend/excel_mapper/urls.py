@@ -115,6 +115,17 @@ from .manufacturer_views import (
     manufacturer_directory,
     manufacturer_search,
 )
+from .provider_credentials import (
+    provider_credentials,
+    provider_credential_detail,
+    provider_credential_test,
+)
+from .intermediate_artifacts import (
+    intermediate_artifacts,
+    save_intermediate_artifact,
+    download_intermediate_artifact,
+    delete_intermediate_artifact,
+)
 
 # Column Parser views
 from .parser_views import (
@@ -233,6 +244,13 @@ urlpatterns = [
     # MPN Validation + OAuth
     path('manufacturers/', manufacturer_directory, name='manufacturer-directory'),
     path('manufacturers/search/', manufacturer_search, name='manufacturer-search'),
+    path('settings/provider-credentials/', provider_credentials, name='provider-credentials'),
+    path('settings/provider-credentials/<str:provider>/test/', provider_credential_test, name='provider-credential-test'),
+    path('settings/provider-credentials/<str:provider>/', provider_credential_detail, name='provider-credential-detail'),
+    path('intermediate-artifacts/', intermediate_artifacts, name='intermediate-artifacts'),
+    path('intermediate-artifacts/save/', save_intermediate_artifact, name='save-intermediate-artifact'),
+    path('intermediate-artifacts/<int:artifact_id>/download/', download_intermediate_artifact, name='download-intermediate-artifact'),
+    path('intermediate-artifacts/<int:artifact_id>/', delete_intermediate_artifact, name='delete-intermediate-artifact'),
 
     # MPN Validation + OAuth
     path('mpn/auth/status/', mpn_auth_status, name='mpn-auth-status'),

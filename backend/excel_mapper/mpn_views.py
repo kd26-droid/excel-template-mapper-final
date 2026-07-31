@@ -15,9 +15,58 @@ from rest_framework import status
 
 from .services.digikey_service import DigiKeyClient
 from .services.mouser_service import MouserClient
+from .services.element14_service import Element14Client
+from .provider_credentials import (
+    get_saved_provider_credentials,
+    request_allows_local_env_credentials,
+)
 from .views import get_session_consistent, save_session, apply_column_mappings, read_session_grid, write_session_grid
 
 logger = logging.getLogger(__name__)
+
+VALIDATION_PROVIDER_IDS = {'digikey', 'mouser', 'element14'}
+
+
+def _provider_scope_id(request):
+    data = getattr(request, 'data', {}) or {}
+    query_params = getattr(request, 'query_params', None)
+    if query_params is None:
+        query_params = getattr(request, 'GET', {}) or {}
+    return data.get('provider_credential_scope_id') or data.get('credential_scope_id') or query_params.get('provider_credential_scope_id')
+
+
+def _selected_validation_providers(request):
+    data = getattr(request, 'data', {}) or {}
+    raw = data.get('validation_providers')
+    if raw is None:
+        return set(VALIDATION_PROVIDER_IDS)
+    if isinstance(raw, str):
+        raw = [part.strip() for part in raw.split(',')]
+    if not isinstance(raw, list):
+        return set(VALIDATION_PROVIDER_IDS)
+    selected = {str(provider).strip().lower() for provider in raw if str(provider).strip().lower() in VALIDATION_PROVIDER_IDS}
+    return selected or {'digikey'}
+
+
+def _provider_client_kwargs(request, provider):
+    scope_id = _provider_scope_id(request)
+    credentials = get_saved_provider_credentials(scope_id, provider) if scope_id else {}
+    return {
+        'credentials': credentials,
+        'allow_env_fallback': request_allows_local_env_credentials(request) and not credentials,
+    }
+
+
+def _digikey_client_for_request(request):
+    return DigiKeyClient(**_provider_client_kwargs(request, 'digikey'))
+
+
+def _mouser_client_for_request(request):
+    return MouserClient(**_provider_client_kwargs(request, 'mouser'))
+
+
+def _element14_client_for_request(request):
+    return Element14Client(**_provider_client_kwargs(request, 'element14'))
 
 
 def detect_mpn_header(headers: List[str]) -> Optional[str]:
@@ -1369,13 +1418,13 @@ def mpn_split_cells(request):
 
 @api_view(['GET'])
 def mpn_auth_status(request):
-    client = DigiKeyClient()
+    client = _digikey_client_for_request(request)
     return Response({ 'authorized': client.is_authorized() })
 
 
 @require_GET
 def mpn_auth_start(request):
-    client = DigiKeyClient()
+    client = _digikey_client_for_request(request)
     # Use minimal authorize URL per working example
     url = client.get_authorize_url()
     return HttpResponseRedirect(url)
@@ -1388,7 +1437,7 @@ def mpn_auth_callback(request):
     if not code:
         return Response({ 'success': False, 'error': 'Missing code' }, status=status.HTTP_400_BAD_REQUEST)
     try:
-        client = DigiKeyClient()
+        client = _digikey_client_for_request(request)
         client.exchange_code(code)
         return Response({ 'success': True })
     except Exception as e:
@@ -1449,7 +1498,8 @@ def mpn_validate_warm(request):
         mi = headers.index(mpn_header)
         fi = headers.index(manufacturer_header) if manufacturer_header else None
 
-        client = DigiKeyClient()
+        selected_providers = _selected_validation_providers(request)
+        client = _digikey_client_for_request(request) if 'digikey' in selected_providers else DigiKeyClient(allow_env_fallback=False)
         unique = []
         seen = set()
         for row in rows:
@@ -1474,13 +1524,14 @@ def mpn_validate_warm(request):
 
         chunk = unique[offset:offset + limit]
         if chunk:
-            client.validate_mpns([m for m, _ in chunk], [f for _, f in chunk])
+            if 'digikey' in selected_providers:
+                client.validate_mpns([m for m, _ in chunk], [f for _, f in chunk])
             # Also warm Mouser for this batch. Mouser has no persistent cache, so we
             # store its results on the session; mpn_validate reads them to fill the
             # Mouser columns progressively (no live Mouser API call in the grid build).
             try:
-                mouser = MouserClient()
-                if mouser.api_key:
+                mouser = _mouser_client_for_request(request)
+                if mouser.api_key and 'mouser' in selected_providers:
                     mouser_store = info.get('mouser_results') or {}
                     added = 0
                     for raw, _ in chunk:
@@ -1497,6 +1548,25 @@ def mpn_validate_warm(request):
             except Exception as _me:
                 logger.warning(f"Mouser warm skipped (non-critical): {_me}")
 
+            try:
+                element14 = _element14_client_for_request(request)
+                if element14.api_key and 'element14' in selected_providers:
+                    element14_store = info.get('element14_results') or {}
+                    added = 0
+                    for raw, _ in chunk:
+                        mnorm = element14.normalize_mpn(raw)
+                        if mnorm and mnorm not in element14_store:
+                            res = element14.validate_mpn(raw)
+                            if res is not None:
+                                element14_store[mnorm] = res
+                                added += 1
+                    if added:
+                        info['element14_results'] = element14_store
+                        save_session(session_id, info)
+                        logger.info(f"ELEMENT14_WARM: cached {added} Element14 results this batch ({len(element14_store)} total)")
+            except Exception as _e14:
+                logger.warning(f"Element14 warm skipped (non-critical): {_e14}")
+
         done = (offset + limit) >= total
         return Response({
             'success': True,
@@ -1506,6 +1576,7 @@ def mpn_validate_warm(request):
             'total': total,
             'validated': min(offset + limit, total),
             'done': done,
+            'validation_providers': sorted(selected_providers),
         })
     except Exception as e:
         logger.error(f"mpn_validate_warm failed: {e}", exc_info=True)
@@ -1533,6 +1604,7 @@ def mpn_validate(request):
         # calls). The client fires this after each warm batch to fill the columns
         # progressively, so it must not make API calls or contend on the run lock.
         cache_only = str(request.data.get('cache_only', '')).lower() in ('1', 'true', 'yes', 'on')
+        selected_providers = _selected_validation_providers(request)
 
         validation_lock_key = f"mpn_validation_lock:{session_id}"
         if not cache_only:
@@ -1609,7 +1681,7 @@ def mpn_validate(request):
             dict_rows.append(d)
 
         # Extract MPN list (deduplicate by normalized)
-        client = DigiKeyClient()
+        client = _digikey_client_for_request(request) if 'digikey' in selected_providers else DigiKeyClient(allow_env_fallback=False)
         mpns: List[str] = []
         mfrs: List[Optional[str]] = []
         seen_norm = set()
@@ -1658,7 +1730,7 @@ def mpn_validate(request):
             if cached_result:
                 cached_results[norm_mpn] = cached_result
                 logger.debug(f"Cache HIT for MPN: {norm_mpn}")
-            elif not cache_only:
+            elif not cache_only and 'digikey' in selected_providers:
                 api_mpns.append(raw_mpn)
                 api_mfrs.append(mfr)
                 logger.debug(f"Cache MISS for MPN: {norm_mpn} - needs API validation")
@@ -1713,22 +1785,30 @@ def mpn_validate(request):
         # Instead mpn_validate_warm warms Mouser one batch at a time and stores the
         # results on the session; we just read them here so Mouser columns fill in
         # progressively alongside Digi-Key, without any live API call in this path.
-        mouser_client = MouserClient()
-        mouser_results_map = info.get('mouser_results') or {}
+        mouser_client = _mouser_client_for_request(request)
+        mouser_results_map = (info.get('mouser_results') or {}) if 'mouser' in selected_providers else {}
         if mouser_results_map:
             logger.info(f"📊 MOUSER: using {len(mouser_results_map)} warmed Mouser results "
                         f"(valid={sum(1 for r in mouser_results_map.values() if r.get('valid'))})")
 
+        element14_client = _element14_client_for_request(request)
+        element14_results_map = (info.get('element14_results') or {}) if 'element14' in selected_providers else {}
+        if element14_results_map:
+            logger.info(f"ELEMENT14: using {len(element14_results_map)} warmed Element14 results "
+                        f"(valid={sum(1 for r in element14_results_map.values() if r.get('valid'))})")
+
         # Add new columns with validation results to the data
-        validation_columns = ['MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number']
+        validation_columns = []
+        if 'digikey' in selected_providers:
+            validation_columns = ['MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number']
 
-        # For canonical MPNs, only add one column (no multiple columns for invalid data)
-        validation_columns.append('DigiKey Canonical MPN')
+            # For canonical MPNs, only add one column (no multiple columns for invalid data)
+            validation_columns.append('DigiKey Canonical MPN')
 
-        # Only add category if there are valid results
-        has_valid_results = any(r.get('valid') for r in results_map.values())
-        if has_valid_results:
-            validation_columns.append('DigiKey Category')
+            # Only add category if there are valid results
+            has_valid_results = any(r.get('valid') for r in results_map.values())
+            if has_valid_results:
+                validation_columns.append('DigiKey Category')
 
         # Add Mouser columns if we have Mouser results
         if mouser_results_map:
@@ -1738,6 +1818,14 @@ def mpn_validate(request):
                 mouser_columns.append('Mouser Category')
             validation_columns.extend(mouser_columns)
             logger.info(f"📊 MOUSER_VALIDATION_COLUMNS: Adding {len(mouser_columns)} Mouser columns: {mouser_columns}")
+
+        if element14_results_map:
+            element14_columns = ['MPN valid (Element14)', 'Element14 Status', 'Element14 Part Number', 'Element14 Canonical MPN']
+            has_valid_element14_results = any(r.get('valid') for r in element14_results_map.values())
+            if has_valid_element14_results:
+                element14_columns.append('Element14 Category')
+            validation_columns.extend(element14_columns)
+            logger.info(f"ELEMENT14_VALIDATION_COLUMNS: Adding {len(element14_columns)} Element14 columns: {element14_columns}")
 
         logger.info(f"📊 MPN_VALIDATION_COLUMNS: Adding {len(validation_columns)} columns: {validation_columns}")
 
@@ -1766,67 +1854,68 @@ def mpn_validate(request):
             while len(rows[i]) < len(headers):
                 rows[i].append('')
 
-            # Set validation data in the corresponding columns
-            mpn_valid_idx = headers.index('MPN valid (DigiKey)')
-            mpn_status_idx = headers.index('DigiKey Status')
-            eol_status_idx = headers.index('DigiKey EOL Status')
-            discontinued_idx = headers.index('DigiKey Discontinued')
-            dkpn_idx = headers.index('DigiKey Part Number')
-            canonical_idx = headers.index('DigiKey Canonical MPN')
-
-            is_valid = validation_result.get('valid', False)
-            has_result = norm_mpn in results_map
-
-            if not norm_mpn or not has_result:
-                # No MPN, OR this MPN hasn't been validated yet (a cache miss during
-                # the progressive/cache_only fill). Leave the columns BLANK — an
-                # unvalidated row must not show a false "No". It fills in once its
-                # batch is validated.
-                rows[i][mpn_valid_idx] = ''
-                rows[i][mpn_status_idx] = ''
-                rows[i][eol_status_idx] = ''
-                rows[i][discontinued_idx] = ''
-                rows[i][dkpn_idx] = ''
-                rows[i][canonical_idx] = ''
-                if 'DigiKey Category' in headers:
-                    rows[i][headers.index('DigiKey Category')] = ''
-                continue
-
-            rows[i][mpn_valid_idx] = 'Yes' if is_valid else 'No'
-
-            if i == 0:  # Log first row data assignment
-                logger.info(f"🔍 MPN_DATA_ROW_0_ASSIGN: Setting rows[0][{mpn_valid_idx}] = '{rows[i][mpn_valid_idx]}'")
-
-            if is_valid:
-                # Only populate detailed data for valid MPNs
-                rows[i][mpn_status_idx] = lifecycle.get('status') or 'Unknown'
-                rows[i][eol_status_idx] = 'Yes' if lifecycle.get('endOfLife') else 'No'
-                rows[i][discontinued_idx] = 'Yes' if lifecycle.get('discontinued') else 'No'
-                rows[i][dkpn_idx] = validation_result.get('dkpn') or ''
-                rows[i][canonical_idx] = validation_result.get('canonical_mpn') or ''
-
-                # Only add category if column exists and MPN is valid
-                if 'DigiKey Category' in headers:
-                    category_idx = headers.index('DigiKey Category')
-                    category_info = validation_result.get('category', {}) or {}
-                    rows[i][category_idx] = category_info.get('name') or ''
-            else:
-                # For invalid MPNs, show empty/unknown values
-                rows[i][mpn_status_idx] = 'Unknown'
-                rows[i][eol_status_idx] = 'No'
-                rows[i][discontinued_idx] = 'No'
-                rows[i][dkpn_idx] = ''
-                similar_canonicals = client.filter_similar_canonical_mpns(
-                    raw_mpn,
-                    validation_result.get('all_canonical_mpns') or [validation_result.get('canonical_mpn')]
-                )
-                rows[i][canonical_idx] = similar_canonicals[0] if similar_canonicals else ''
-
-                # Leave category empty for invalid MPNs
-                if 'DigiKey Category' in headers:
-                    category_idx = headers.index('DigiKey Category')
-                    rows[i][category_idx] = ''
-
+            if 'digikey' in selected_providers:
+                # Set validation data in the corresponding columns
+                mpn_valid_idx = headers.index('MPN valid (DigiKey)')
+                mpn_status_idx = headers.index('DigiKey Status')
+                eol_status_idx = headers.index('DigiKey EOL Status')
+                discontinued_idx = headers.index('DigiKey Discontinued')
+                dkpn_idx = headers.index('DigiKey Part Number')
+                canonical_idx = headers.index('DigiKey Canonical MPN')
+    
+                is_valid = validation_result.get('valid', False)
+                has_result = norm_mpn in results_map
+    
+                if not norm_mpn or not has_result:
+                    # No MPN, OR this MPN hasn't been validated yet (a cache miss during
+                    # the progressive/cache_only fill). Leave the columns BLANK — an
+                    # unvalidated row must not show a false "No". It fills in once its
+                    # batch is validated.
+                    rows[i][mpn_valid_idx] = ''
+                    rows[i][mpn_status_idx] = ''
+                    rows[i][eol_status_idx] = ''
+                    rows[i][discontinued_idx] = ''
+                    rows[i][dkpn_idx] = ''
+                    rows[i][canonical_idx] = ''
+                    if 'DigiKey Category' in headers:
+                        rows[i][headers.index('DigiKey Category')] = ''
+                    continue
+    
+                rows[i][mpn_valid_idx] = 'Yes' if is_valid else 'No'
+    
+                if i == 0:  # Log first row data assignment
+                    logger.info(f"🔍 MPN_DATA_ROW_0_ASSIGN: Setting rows[0][{mpn_valid_idx}] = '{rows[i][mpn_valid_idx]}'")
+    
+                if is_valid:
+                    # Only populate detailed data for valid MPNs
+                    rows[i][mpn_status_idx] = lifecycle.get('status') or 'Unknown'
+                    rows[i][eol_status_idx] = 'Yes' if lifecycle.get('endOfLife') else 'No'
+                    rows[i][discontinued_idx] = 'Yes' if lifecycle.get('discontinued') else 'No'
+                    rows[i][dkpn_idx] = validation_result.get('dkpn') or ''
+                    rows[i][canonical_idx] = validation_result.get('canonical_mpn') or ''
+    
+                    # Only add category if column exists and MPN is valid
+                    if 'DigiKey Category' in headers:
+                        category_idx = headers.index('DigiKey Category')
+                        category_info = validation_result.get('category', {}) or {}
+                        rows[i][category_idx] = category_info.get('name') or ''
+                else:
+                    # For invalid MPNs, show empty/unknown values
+                    rows[i][mpn_status_idx] = 'Unknown'
+                    rows[i][eol_status_idx] = 'No'
+                    rows[i][discontinued_idx] = 'No'
+                    rows[i][dkpn_idx] = ''
+                    similar_canonicals = client.filter_similar_canonical_mpns(
+                        raw_mpn,
+                        validation_result.get('all_canonical_mpns') or [validation_result.get('canonical_mpn')]
+                    )
+                    rows[i][canonical_idx] = similar_canonicals[0] if similar_canonicals else ''
+    
+                    # Leave category empty for invalid MPNs
+                    if 'DigiKey Category' in headers:
+                        category_idx = headers.index('DigiKey Category')
+                        rows[i][category_idx] = ''
+    
             # Populate Mouser data if we have Mouser results
             if mouser_results_map and 'MPN valid (Mouser)' in headers:
                 mouser_norm_mpn = mouser_client.normalize_mpn(raw_mpn)
@@ -1871,6 +1960,40 @@ def mpn_validate(request):
                             mouser_category_idx = headers.index('Mouser Category')
                             rows[i][mouser_category_idx] = ''
 
+            # Populate Element14 data if we have Element14 results
+            if element14_results_map and 'MPN valid (Element14)' in headers:
+                element14_norm_mpn = element14_client.normalize_mpn(raw_mpn)
+                element14_result = element14_results_map.get(element14_norm_mpn, {})
+                element14_lifecycle = element14_result.get('lifecycle') or {}
+
+                element14_valid_idx = headers.index('MPN valid (Element14)')
+                element14_status_idx = headers.index('Element14 Status')
+                element14_part_idx = headers.index('Element14 Part Number')
+                element14_canonical_idx = headers.index('Element14 Canonical MPN')
+                element14_cat_idx = headers.index('Element14 Category') if 'Element14 Category' in headers else None
+
+                if not element14_result:
+                    for ix in [element14_valid_idx, element14_status_idx, element14_part_idx, element14_canonical_idx]:
+                        rows[i][ix] = ''
+                    if element14_cat_idx is not None:
+                        rows[i][element14_cat_idx] = ''
+                else:
+                    element14_is_valid = element14_result.get('valid', False)
+                    rows[i][element14_valid_idx] = 'Yes' if element14_is_valid else 'No'
+
+                    if element14_is_valid:
+                        rows[i][element14_status_idx] = element14_lifecycle.get('status') or 'Unknown'
+                        rows[i][element14_part_idx] = element14_result.get('element14_part_number') or ''
+                        rows[i][element14_canonical_idx] = element14_result.get('canonical_mpn') or ''
+                        if element14_cat_idx is not None:
+                            rows[i][element14_cat_idx] = element14_result.get('category') or ''
+                    else:
+                        rows[i][element14_status_idx] = 'Unknown'
+                        rows[i][element14_part_idx] = ''
+                        rows[i][element14_canonical_idx] = ''
+                        if element14_cat_idx is not None:
+                            rows[i][element14_cat_idx] = ''
+
         # Update the session with enhanced data
         enhanced_result = {
             'headers': headers,
@@ -1891,12 +2014,14 @@ def mpn_validate(request):
             'currency': client.currency,
             'digikey_results': { **(mpn_validation.get('digikey_results') or {}), **results_map },
             'mouser_results': { **(mpn_validation.get('mouser_results') or {}), **mouser_results_map },
+            'element14_results': { **(mpn_validation.get('element14_results') or {}), **element14_results_map },
+            'validation_providers': sorted(selected_providers),
             'validation_columns_added': validation_columns
         })
         info['mpn_validation'] = mpn_validation
         save_session(session_id, info)
 
-        logger.info(f"💾 SESSION_SAVE: Saved DigiKey results: {len(results_map)}, Mouser results: {len(mouser_results_map)}")
+        logger.info(f"💾 SESSION_SAVE: Saved DigiKey results: {len(results_map)}, Mouser results: {len(mouser_results_map)}, Element14 results: {len(element14_results_map)}")
 
         # Summary with optimized cache reporting
         total_unique = len(seen_norm)
@@ -1927,6 +2052,7 @@ def mpn_validate(request):
             'valid': valid,
             'invalid': invalid,
             'optimization_ratio': f"{cache_hits}/{total_unique}" if total_unique > 0 else "0/0",
+            'validation_providers': sorted(selected_providers),
         })
     except Exception as e:
         logger.error(f"MPN validate failed: {e}")
@@ -1946,7 +2072,7 @@ def mpn_admin_exchange_code(request):
         code = request.data.get('code')
         if not code:
             return Response({'success': False, 'error': 'code is required'}, status=status.HTTP_400_BAD_REQUEST)
-        client = DigiKeyClient()
+        client = _digikey_client_for_request(request)
         client.exchange_code(code)
         return Response({'success': True})
     except Exception as e:
@@ -1966,7 +2092,7 @@ def mpn_batch_validate_eol(request):
             return Response({'success': False, 'error': 'mpns (array) required'}, status=status.HTTP_400_BAD_REQUEST)
         manufacturer_id = data.get('manufacturerId')
 
-        client = DigiKeyClient()
+        client = _digikey_client_for_request(request)
         try:
             results_map = client.validate_mpns(mpns, manufacturer_names=None, manufacturer_id=str(manufacturer_id) if manufacturer_id else None)
         except Exception as e:
@@ -2067,7 +2193,7 @@ def mpn_restore_from_cache(request):
 
         # Extract MPN list and check cache
         from .models import GlobalMpnCache
-        client = DigiKeyClient()
+        client = _digikey_client_for_request(request)
 
         cached_results = {}
         uncached_mpns = []
@@ -2267,7 +2393,7 @@ def mpn_validate_parser_specs(request):
                         if not logged_first:
                             logger.info(f"   Sample value in {vc}: '{val}'")
                             logged_first = True
-                        client = DigiKeyClient()
+                        client = _digikey_client_for_request(request)
                         norm = client.normalize_mpn(val)
                         if norm and norm not in all_mpn_values:
                             all_mpn_values[norm] = val
@@ -2283,7 +2409,7 @@ def mpn_validate_parser_specs(request):
 
         # Instant validation: cache-only, no API calls during request
         from .models import GlobalMpnCache
-        client = DigiKeyClient()
+        client = _digikey_client_for_request(request)
         results_map = {}
         cache_hits = 0
         uncached_count = 0

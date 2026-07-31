@@ -45,6 +45,11 @@ export const STRUCTURE_OPTIONS = [
     label: 'Each row has one MPN and one MFR',
     description: 'Use this when each row already represents one MPN/manufacturer pair and only needs light cleanup.',
   },
+  {
+    value: 'grouped_rows',
+    label: 'Grouped rows with alternates below',
+    description: 'Use this when a group row carries item details/quantity and the rows below carry primary and alternate MPN/MFR pairs.',
+  },
 ];
 
 export const ALTERNATE_LAYOUT_OPTIONS = [
@@ -69,6 +74,24 @@ export const QTY_OPTIONS = [
   { value: 'every_row', label: 'Every row has its own quantity and UOM' },
   { value: 'inherit_primary', label: 'Alternates use the primary row quantity and UOM' },
   { value: 'alternate_columns', label: 'Alternate quantity and UOM are in nearby columns' },
+];
+
+export const GROUP_HEADER_OPTIONS = [
+  {
+    value: 'auto',
+    label: 'Auto detect',
+    description: 'Rows with MPN/MFR become materials; rows with only item details become group context.',
+  },
+  {
+    value: 'context_only',
+    label: 'Header row is only item details',
+    description: 'The group header is not exported. The first MPN/MFR row below it becomes Primary.',
+  },
+  {
+    value: 'header_primary',
+    label: 'Header row is the primary material',
+    description: 'The group header is exported as Primary and rows below it become alternates.',
+  },
 ];
 
 export const DELIMITER_OPTIONS = [

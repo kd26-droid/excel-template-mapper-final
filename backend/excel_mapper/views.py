@@ -5262,6 +5262,21 @@ def download_file(request, session_id=None):
             df.to_excel(output_file, index=False, engine='openpyxl')
             content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
+        try:
+            from .intermediate_artifacts import save_file_artifact
+            save_file_artifact(
+                session_id=session_id,
+                artifact_type='mapped_download',
+                source_path=output_file,
+                label='Mapped workbook download',
+                file_format='csv' if format_type == 'csv' else 'xlsx',
+                row_count=len(df.index),
+                column_count=len(df.columns),
+                metadata={'source': 'download_file'},
+            )
+        except Exception as artifact_error:
+            logger.warning(f"Intermediate artifact save skipped for download_file: {artifact_error}")
+
         response = FileResponse(
             open(output_file, 'rb'),
             as_attachment=True,
@@ -5414,6 +5429,21 @@ def download_grid_excel(request):
         
         # Save to Excel
         df.to_excel(temp_file, index=False)
+
+        try:
+            from .intermediate_artifacts import save_file_artifact
+            save_file_artifact(
+                session_id=session_id,
+                artifact_type='grid_download',
+                source_path=temp_file,
+                label='Grid workbook download',
+                file_format='xlsx',
+                row_count=len(df.index),
+                column_count=len(df.columns),
+                metadata={'source': 'download_grid_excel'},
+            )
+        except Exception as artifact_error:
+            logger.warning(f"Intermediate artifact save skipped for download_grid_excel: {artifact_error}")
         
         # Return file response
         response = FileResponse(

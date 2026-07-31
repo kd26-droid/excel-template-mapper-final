@@ -600,6 +600,79 @@ class GlobalMpnCache(models.Model):
         return count
 
 
+class ProviderCredential(models.Model):
+    """Encrypted provider credentials for MPN validation.
+
+    The current app does not have user accounts yet, so credentials are scoped
+    by a caller-provided scope_id. A later auth/workspace model can map to this
+    field without changing the provider records.
+    """
+    PROVIDER_DIGIKEY = 'digikey'
+    PROVIDER_MOUSER = 'mouser'
+    PROVIDER_ELEMENT14 = 'element14'
+    PROVIDER_CHOICES = [
+        (PROVIDER_DIGIKEY, 'DigiKey'),
+        (PROVIDER_MOUSER, 'Mouser'),
+        (PROVIDER_ELEMENT14, 'Element14'),
+    ]
+
+    scope_id = models.CharField(max_length=120, default='default', db_index=True)
+    provider = models.CharField(max_length=30, choices=PROVIDER_CHOICES)
+    encrypted_credentials = models.TextField(blank=True)
+    configured = models.BooleanField(default=False)
+    last_test_success = models.BooleanField(null=True, blank=True)
+    last_test_message = models.CharField(max_length=500, blank=True)
+    last_tested_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'excel_mapper_provider_credential'
+        unique_together = [['scope_id', 'provider']]
+        indexes = [
+            models.Index(fields=['scope_id', 'provider']),
+            models.Index(fields=['provider', 'configured']),
+        ]
+        ordering = ['scope_id', 'provider']
+
+    def __str__(self):
+        return f"{self.scope_id}:{self.provider} configured={self.configured}"
+
+
+class IntermediateArtifact(models.Model):
+    """Durable file snapshot for merge, normalization, and mapping checkpoints."""
+
+    FORMAT_XLSX = 'xlsx'
+    FORMAT_CSV = 'csv'
+    FORMAT_JSON = 'json'
+    FORMAT_CHOICES = [
+        (FORMAT_XLSX, 'Excel workbook'),
+        (FORMAT_CSV, 'CSV'),
+        (FORMAT_JSON, 'JSON'),
+    ]
+
+    session_id = models.CharField(max_length=120, db_index=True)
+    artifact_type = models.CharField(max_length=80, db_index=True)
+    label = models.CharField(max_length=255, blank=True)
+    file_path = models.CharField(max_length=500)
+    file_format = models.CharField(max_length=20, choices=FORMAT_CHOICES, default=FORMAT_XLSX)
+    row_count = models.IntegerField(default=0)
+    column_count = models.IntegerField(default=0)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'excel_mapper_intermediate_artifact'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['session_id', '-created_at']),
+            models.Index(fields=['artifact_type', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.session_id}:{self.artifact_type}:{self.label or self.id}"
+
+
 class Project(models.Model):
     """
     Model for storing projects that data can be exported to.

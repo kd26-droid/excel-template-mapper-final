@@ -15,8 +15,9 @@ class MouserClient:
 
     API_BASE = "https://api.mouser.com/api/v1"
 
-    def __init__(self):
-        self.api_key = os.environ.get('MOUSER_API_KEY')
+    def __init__(self, credentials=None, allow_env_fallback=True):
+        credentials = credentials or {}
+        self.api_key = credentials.get('api_key') or (os.environ.get('MOUSER_API_KEY') if allow_env_fallback else None)
         if not self.api_key:
             logger.warning("MOUSER_API_KEY not configured")
 

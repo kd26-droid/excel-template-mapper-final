@@ -4,6 +4,29 @@ import axios from 'axios';
 
 // Use environment variable for API URL, fallback to relative path for production  
 const API_URL = process.env.REACT_APP_API_BASE_URL || '/api';
+const CREDENTIAL_SCOPE_KEY = 'mpn_provider_credential_scope_id';
+const VALIDATION_PROVIDERS_KEY = 'mpn_validation_providers';
+
+const getProviderCredentialScopeId = () => {
+  if (typeof window === 'undefined') return null;
+  let existing = window.localStorage.getItem(CREDENTIAL_SCOPE_KEY);
+  if (existing) return existing;
+  existing = window.crypto?.randomUUID?.() || `scope-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  window.localStorage.setItem(CREDENTIAL_SCOPE_KEY, existing);
+  return existing;
+};
+
+const getSelectedValidationProviders = () => {
+  if (typeof window === 'undefined') return ['digikey', 'mouser', 'element14'];
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(VALIDATION_PROVIDERS_KEY) || '[]');
+    const allowed = new Set(['digikey', 'mouser', 'element14']);
+    const selected = Array.isArray(saved) ? saved.filter((provider) => allowed.has(provider)) : [];
+    return selected.length ? selected : ['digikey'];
+  } catch {
+    return ['digikey'];
+  }
+};
 
 // Auto-create demo session when needed
 let demoSessionId = null;
@@ -121,6 +144,34 @@ const api = {
       params: { q: query, limit },
       timeout: 60000
     });
+  },
+
+  getProviderCredentials: (scopeId = 'default') => {
+    return axios.get(`${API_URL}/settings/provider-credentials/`, {
+      params: { scope_id: scopeId },
+      timeout: 30000
+    });
+  },
+
+  saveProviderCredentials: (scopeId = 'default', providers = {}) => {
+    return axios.post(`${API_URL}/settings/provider-credentials/`, {
+      scope_id: scopeId,
+      providers
+    }, { timeout: 30000 });
+  },
+
+  deleteProviderCredential: (provider, scopeId = 'default') => {
+    return axios.delete(`${API_URL}/settings/provider-credentials/${provider}/`, {
+      params: { scope_id: scopeId },
+      timeout: 30000
+    });
+  },
+
+  testProviderCredential: (provider, scopeId = 'default', mpn = '1N4148') => {
+    return axios.post(`${API_URL}/settings/provider-credentials/${provider}/test/`, {
+      scope_id: scopeId,
+      mpn
+    }, { timeout: 60000 });
   },
 
   /**
@@ -574,6 +625,43 @@ const api = {
     }, {
       responseType: 'blob'
     }),
+
+  getIntermediateArtifacts: (sessionId, artifactType = null) =>
+    axios.get(`${API_URL}/intermediate-artifacts/`, {
+      params: {
+        session_id: sessionId,
+        ...(artifactType ? { artifact_type: artifactType } : {})
+      },
+      timeout: 30000
+    }),
+
+  saveIntermediateArtifact: ({
+    sessionId,
+    artifactType,
+    headers = [],
+    rows = [],
+    label = '',
+    metadata = {},
+    fileFormat = 'xlsx'
+  }) =>
+    axios.post(`${API_URL}/intermediate-artifacts/save/`, {
+      session_id: sessionId,
+      artifact_type: artifactType,
+      headers,
+      rows,
+      label,
+      metadata,
+      file_format: fileFormat
+    }, { timeout: 120000 }),
+
+  downloadIntermediateArtifact: (artifactId) =>
+    axios.get(`${API_URL}/intermediate-artifacts/${artifactId}/download/`, {
+      responseType: 'blob',
+      timeout: 120000
+    }),
+
+  deleteIntermediateArtifact: (artifactId) =>
+    axios.delete(`${API_URL}/intermediate-artifacts/${artifactId}/`, { timeout: 30000 }),
 
   // ==========================================
   // 5️⃣ DASHBOARD ENDPOINTS
@@ -1210,6 +1298,9 @@ const api = {
    */
   validateMPNs: (sessionId, mpnHeader = null, manufacturerHeader = null, cacheOnly = false) => {
     const payload = { session_id: sessionId };
+    const providerScopeId = getProviderCredentialScopeId();
+    if (providerScopeId) payload.provider_credential_scope_id = providerScopeId;
+    payload.validation_providers = getSelectedValidationProviders();
     if (mpnHeader) payload.mpn_header = mpnHeader;
     if (manufacturerHeader) payload.manufacturer_header = manufacturerHeader;
     if (cacheOnly) payload.cache_only = true;
@@ -1224,6 +1315,9 @@ const api = {
    */
   warmMPNs: (sessionId, mpnHeader = null, offset = 0, limit = 8, manufacturerHeader = null) => {
     const payload = { session_id: sessionId, offset, limit };
+    const providerScopeId = getProviderCredentialScopeId();
+    if (providerScopeId) payload.provider_credential_scope_id = providerScopeId;
+    payload.validation_providers = getSelectedValidationProviders();
     if (mpnHeader) payload.mpn_header = mpnHeader;
     if (manufacturerHeader) payload.manufacturer_header = manufacturerHeader;
     return axios.post(`${API_URL}/mpn/validate-warm/`, payload, { timeout: 120000 });
@@ -1448,7 +1542,11 @@ const api = {
    * Validate MPNs from parser Specification columns
    */
   validateParserSpecMPNs: (sessionId) => {
-    return axios.post(`${API_URL}/mpn/validate-parser-specs/`, { session_id: sessionId }, { timeout: 300000 });
+    const payload = { session_id: sessionId };
+    const providerScopeId = getProviderCredentialScopeId();
+    if (providerScopeId) payload.provider_credential_scope_id = providerScopeId;
+    payload.validation_providers = getSelectedValidationProviders();
+    return axios.post(`${API_URL}/mpn/validate-parser-specs/`, payload, { timeout: 300000 });
   },
 
   /**

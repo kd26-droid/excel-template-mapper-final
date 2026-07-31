@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.utils.html import format_html
-from .models import MappingTemplate, GlobalMpnCache
+from .models import MappingTemplate, GlobalMpnCache, ProviderCredential, IntermediateArtifact
 
 @admin.register(MappingTemplate)
 class MappingTemplateAdmin(admin.ModelAdmin):
@@ -58,3 +58,21 @@ class GlobalMpnCacheAdmin(admin.ModelAdmin):
             'classes': ('collapse',)
         })
     )
+
+
+@admin.register(ProviderCredential)
+class ProviderCredentialAdmin(admin.ModelAdmin):
+    list_display = ('scope_id', 'provider', 'configured', 'last_test_success', 'updated_at')
+    list_filter = ('provider', 'configured', 'last_test_success', 'updated_at')
+    search_fields = ('scope_id', 'provider')
+    readonly_fields = ('created_at', 'updated_at', 'encrypted_credentials')
+    ordering = ('scope_id', 'provider')
+
+
+@admin.register(IntermediateArtifact)
+class IntermediateArtifactAdmin(admin.ModelAdmin):
+    list_display = ('session_id', 'artifact_type', 'label', 'file_format', 'row_count', 'column_count', 'created_at')
+    list_filter = ('artifact_type', 'file_format', 'created_at')
+    search_fields = ('session_id', 'artifact_type', 'label', 'file_path')
+    readonly_fields = ('created_at', 'file_path', 'metadata')
+    ordering = ('-created_at',)

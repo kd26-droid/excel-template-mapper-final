@@ -58,6 +58,7 @@ import {
   ALTERNATE_LAYOUT_OPTIONS,
   CLEANUP_OPTIONS,
   DELIMITER_OPTIONS,
+  GROUP_HEADER_OPTIONS,
   KNOWN_MANUFACTURERS,
   MANUFACTURER_SUFFIX_WORDS,
   MPN_CONNECTOR_WORDS,
@@ -199,7 +200,7 @@ const inferRoles = (headers) => {
     /\bmfg part/,
     /producer/,
   ]);
-  const genericPartHeader = findHeader([/^part number$/, /^part no$/, /^part$/], [/manufacturer/, /\bmpn\b/, /\bmfr\b/, /\bmfg\b/]);
+  const genericPartHeader = findHeader([/^part number$/, /^part no$/, /^part$/, /^partno$/], [/manufacturer/, /\bmpn\b/, /\bmfr\b/, /\bmfg\b/]);
   const learnedMpn = findLearnedHeader('mpn');
   const learnedCpn = findLearnedHeader('cpn');
   const mpnHeader = strongMpnHeader || learnedMpn || findHeader([/manufacturer equivalent/, /manufacturer part/, /\bmpn\b/, /producer/, /part number/]);
@@ -212,10 +213,10 @@ const inferRoles = (headers) => {
     manufacturer: findLearnedHeader('manufacturer') || findHeader([/^manufacturer$/, /\bmfr\b/, /manufacturer name/, /producer/], [/equivalent/, /part/, /\bmpn\b/]) ||
       findHeader([/manufacturer/], [/equivalent/, /part/, /\bmpn\b/]),
     description: findLearnedHeader('description') || findHeader([/description/, /item name/, /\bname\b/]),
-    quantity: findLearnedHeader('quantity') || findHeader([/quantity/, /\bqty\b/]),
+    quantity: findLearnedHeader('quantity') || findHeader([/quantity/, /\bqty\b/, /^count$/, /\bcount\b/]),
     uom: findLearnedHeader('uom') || findHeader([/\buom\b/, /measurement unit/, /\bunit\b/]),
     level: findLearnedHeader('level') || findHeader([/\blevel\b/]),
-    parent: findLearnedHeader('parent') || findHeader([/parent/, /finished good/, /bom id/, /item code/]),
+    parent: findLearnedHeader('parent') || findHeader([/parent/, /finished good/, /bom id/, /item code/, /assembly/]),
   };
 };
 
@@ -450,6 +451,11 @@ const splitManufacturerCell = (value, expectedCount, config = {}) => {
 
 const getCell = (row, header) => (header ? fmt(row[header]) : '');
 
+const isPlaceholderCell = (value) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ').trim().toLowerCase();
+  return !text || /^[-–—]+$/.test(text) || ['n/a', 'na', 'null', 'none'].includes(text);
+};
+
 const rowValues = (row, headers) => headers
   .map((header) => getCell(row, header))
   .filter(Boolean);
@@ -491,10 +497,20 @@ const rowLooksLikeSectionTitle = (row, headers, roles) => {
   return Boolean(descriptionValue) && !mpnValue && !quantityValue;
 };
 
+const hasGroupedRowContext = (row, roles) => Boolean(
+  getCell(row, roles.parent) ||
+  getCell(row, roles.cpn) ||
+  getCell(row, roles.description) ||
+  getCell(row, roles.quantity) ||
+  getCell(row, roles.uom) ||
+  getCell(row, roles.level)
+);
+
 const shouldSkipSourceRow = (row, headers, roles, config) => {
   if (!rowValues(row, headers).length) return true;
   if (config.skipRepeatedHeaders && rowLooksLikeRepeatedHeader(row, headers)) return true;
   if (config.skipDoNotPopulate && rowLooksLikeDoNotPopulate(row, headers)) return true;
+  if (config.structure === 'grouped_rows' && hasGroupedRowContext(row, roles)) return false;
   if (config.skipTitleRows && rowLooksLikeSectionTitle(row, headers, roles)) return true;
   return false;
 };
@@ -780,12 +796,120 @@ const normalizeManufacturerOnly = (rows, roles, config, splitCells) => {
   return output;
 };
 
+const normalizeGroupedRows = (rows, roles, config) => {
+  const output = [];
+  let currentGroup = null;
+
+  const groupValuesFromRow = (row, rowIndex) => {
+    const sourceRow = row.__sourceRow || rowIndex + 1;
+    const cpn = getCell(row, roles.cpn);
+    const parentKey = getCell(row, roles.parent) || cpn || getCell(row, roles.description) || `Source row ${sourceRow}`;
+    return {
+      sourceRow,
+      parentKey,
+      cpn,
+      description: getCell(row, roles.description),
+      quantity: getCell(row, roles.quantity),
+      uom: getCell(row, roles.uom),
+      level: getCell(row, roles.level) || '1',
+      relationCount: 0,
+    };
+  };
+
+  const rowStartsGroup = (row) => {
+    const nextParentKey = getCell(row, roles.parent) || getCell(row, roles.cpn) || getCell(row, roles.description);
+    const hasIdentity = Boolean(getCell(row, roles.parent) || getCell(row, roles.cpn) || getCell(row, roles.description));
+    const hasRealContext = Boolean(
+      !isPlaceholderCell(getCell(row, roles.quantity)) ||
+      !isPlaceholderCell(getCell(row, roles.uom)) ||
+      !isPlaceholderCell(getCell(row, roles.level))
+    );
+    const hasPart = Boolean(getCell(row, roles.mpn) || getCell(row, roles.manufacturer));
+    if (hasPart) {
+      if (!currentGroup) return hasIdentity && hasRealContext;
+      return Boolean(nextParentKey && nextParentKey !== currentGroup.parentKey && hasRealContext);
+    }
+    return hasIdentity;
+  };
+
+  rows.forEach((row, rowIndex) => {
+    const sourceRow = row.__sourceRow || rowIndex + 1;
+    const rawMpn = getCell(row, roles.mpn);
+    const manufacturer = getCell(row, roles.manufacturer);
+    const rowHasPart = Boolean(rawMpn || manufacturer);
+    const startsGroup = rowStartsGroup(row);
+
+    if (startsGroup || !currentGroup) {
+      const nextGroup = groupValuesFromRow(row, rowIndex);
+      currentGroup = currentGroup && !startsGroup ? {
+        ...currentGroup,
+        ...Object.fromEntries(Object.entries(nextGroup).filter(([, value]) => value)),
+      } : nextGroup;
+
+      const contextPrimaryMpn = currentGroup.cpn || getCell(row, roles.parent);
+      const shouldEmitHeaderPrimary = config.groupHeaderMode === 'header_primary';
+      if (startsGroup && !rowHasPart && contextPrimaryMpn && shouldEmitHeaderPrimary) {
+        const primaryMpn = contextPrimaryMpn;
+        output.push(withSourceColumns({
+          sourceRow: currentGroup.sourceRow || sourceRow,
+          parentKey: currentGroup.parentKey,
+          relation: 'Primary',
+          level: currentGroup.level || '1',
+          cpn: currentGroup.cpn,
+          description: currentGroup.description,
+          mpn: stripVendorPrefix(primaryMpn),
+          manufacturer: '',
+          quantity: currentGroup.quantity,
+          uom: currentGroup.uom,
+          rule: 'grouped_rows_context_primary',
+          confidence: confidenceForRow(primaryMpn, '', 'grouped_rows'),
+          discardedText: '',
+        }, row, config));
+        currentGroup.relationCount = 1;
+      }
+    }
+
+    if (!rowHasPart) return;
+
+    const mpns = splitMpnCell(rawMpn, config);
+    const manufacturerParts = rawMpn && manufacturer
+      ? splitManufacturerCell(manufacturer, mpns.length, config)
+      : [manufacturer].filter(Boolean);
+    const relationStart = currentGroup.relationCount;
+
+    const partsToEmit = mpns.length ? mpns : [''];
+    partsToEmit.forEach((mpn, partIndex) => {
+      const relationIndex = relationStart + partIndex;
+      output.push(withSourceColumns({
+        sourceRow: currentGroup.sourceRow || sourceRow,
+        parentKey: currentGroup.parentKey,
+        relation: relationIndex === 0 ? 'Primary' : `Alternate ${relationIndex}`,
+        level: currentGroup.level || getCell(row, roles.level) || '1',
+        cpn: currentGroup.cpn || getCell(row, roles.cpn),
+        description: currentGroup.description || getCell(row, roles.description),
+        mpn: stripVendorPrefix(mpn),
+        manufacturer: manufacturerParts[partIndex] || manufacturerParts[0] || manufacturer,
+        quantity: currentGroup.quantity || getCell(row, roles.quantity),
+        uom: currentGroup.uom || getCell(row, roles.uom),
+        rule: mpns.length > 1 ? 'grouped_rows_split_child_mpn' : 'grouped_rows_inherit_context',
+        confidence: Math.min(confidenceForRow(mpn, manufacturerParts[partIndex] || manufacturer, 'grouped_rows') + 10, 98),
+        discardedText: '',
+      }, row, config));
+    });
+
+    currentGroup.relationCount += partsToEmit.length;
+  });
+
+  return output;
+};
+
 const normalizeRows = (rows, headers, roles, config) => {
   const configWithSourceHeaders = {
     ...config,
     sourceHeaders: headers,
     consumedSourceHeaders: getConsumedSourceHeaders(roles, config, headers),
   };
+  if (config.structure === 'grouped_rows') return normalizeGroupedRows(rows, roles, configWithSourceHeaders);
   if (config.structure === 'mpn_only_same_cell') return normalizeSeparateCells(rows, roles, configWithSourceHeaders);
   if (config.structure === 'mpn_only_rows') return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
   if (config.structure === 'mfr_only_same_cell') return normalizeManufacturerOnly(rows, roles, configWithSourceHeaders, true);
@@ -798,6 +922,27 @@ const normalizeRows = (rows, headers, roles, config) => {
 };
 
 const normalizeRowsChunked = async (rows, headers, roles, config, onProgress) => {
+  if (config.structure === 'grouped_rows') {
+    const dataRows = [];
+    let skippedRows = 0;
+    rows.forEach((row) => {
+      const skip = shouldSkipSourceRow(row, headers, roles, config);
+      if (skip) skippedRows += 1;
+      else dataRows.push(row);
+    });
+    const output = normalizeRows(dataRows, headers, roles, config);
+    if (onProgress) {
+      onProgress({
+        processed: rows.length,
+        total: rows.length,
+        outputRows: output.length,
+        skippedRows,
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return output;
+  }
+
   const chunkSize = rows.length > 1000 ? 80 : 50;
   const output = [];
   let skippedRows = 0;
@@ -884,6 +1029,22 @@ const rebalanceRelations = (rows) => {
 
 const detectBestStructure = (headers, roles, sampleRows) => {
   if (roles.mpn && roles.manufacturer && roles.mpn === roles.manufacturer) return 'same_cell';
+  const groupedSignals = sampleRows.reduce((score, row, index) => {
+    const hasGroupContext = Boolean(
+      getCell(row, roles.parent) ||
+      getCell(row, roles.cpn) ||
+      getCell(row, roles.description) ||
+      getCell(row, roles.quantity)
+    );
+    const hasPart = Boolean(getCell(row, roles.mpn) || getCell(row, roles.manufacturer));
+    const nextRow = sampleRows[index + 1];
+    const nextHasPart = Boolean(nextRow && (getCell(nextRow, roles.mpn) || getCell(nextRow, roles.manufacturer)));
+    return score + (hasGroupContext && !hasPart && nextHasPart ? 1 : 0);
+  }, 0);
+  if (groupedSignals >= 1 && (roles.mpn || roles.manufacturer) && (roles.parent || roles.cpn || roles.description)) {
+    return 'grouped_rows';
+  }
+
   if (roles.mpn && !roles.manufacturer) {
     const mpnSamples = sampleRows.map((row) => getCell(row, roles.mpn)).filter(Boolean);
     const multiMpn = mpnSamples.filter((value) => splitMpnCell(value).length > 1).length;
@@ -917,6 +1078,14 @@ const nextConfigForDetectedStructure = (previousConfig, detectedStructure) => {
       ...previousConfig,
       structure: 'separate_cells',
       alternateLayout: 'separate_columns',
+    };
+  }
+
+  if (detectedStructure === 'grouped_rows') {
+    return {
+      ...previousConfig,
+      structure: 'grouped_rows',
+      alternateLayout: 'already_separate_rows',
     };
   }
 
@@ -956,15 +1125,15 @@ const getStructureOptionsForRoles = (roles) => {
   }
 
   if (roles.mpn && !roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => ['mpn_only_same_cell', 'mpn_only_rows'].includes(option.value));
+    return STRUCTURE_OPTIONS.filter((option) => ['mpn_only_same_cell', 'mpn_only_rows', 'grouped_rows'].includes(option.value));
   }
 
   if (!roles.mpn && roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => ['mfr_only_same_cell', 'mfr_only_rows'].includes(option.value));
+    return STRUCTURE_OPTIONS.filter((option) => ['mfr_only_same_cell', 'mfr_only_rows', 'grouped_rows'].includes(option.value));
   }
 
   if (roles.mpn && roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => ['separate_cells', 'same_cell', 'one_per_row'].includes(option.value));
+    return STRUCTURE_OPTIONS.filter((option) => ['separate_cells', 'same_cell', 'one_per_row', 'grouped_rows'].includes(option.value));
   }
 
   return STRUCTURE_OPTIONS;
@@ -1622,6 +1791,7 @@ const BomNormalizer = () => {
     alternateLayout: 'inside_selected_mpn_columns',
     delimiterMode: 'auto',
     customDelimiter: '',
+    groupHeaderMode: 'auto',
     quantityMode: 'inherit_primary',
     inheritLevels: true,
     skipTitleRows: true,
@@ -1634,6 +1804,8 @@ const BomNormalizer = () => {
   const [currentStep, setCurrentStep] = useState(0);
   const [progress, setProgress] = useState({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
   const [delimiterTouched, setDelimiterTouched] = useState(false);
+  const [parserTouched, setParserTouched] = useState(false);
+  const [skipSourceSetupForMerge, setSkipSourceSetupForMerge] = useState(false);
   const [normalizationSummary, setNormalizationSummary] = useState(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [lowConfidenceOnly, setLowConfidenceOnly] = useState(false);
@@ -1734,6 +1906,11 @@ const BomNormalizer = () => {
     [config.quantityMode]
   );
 
+  const selectedGroupHeaderOption = useMemo(
+    () => GROUP_HEADER_OPTIONS.find((option) => option.value === config.groupHeaderMode),
+    [config.groupHeaderMode]
+  );
+
   const normalizedColumnOptions = useMemo(() => (
     getNormalizedExportColumns(normalizedRows)
       .filter((column) => !['sourceRow', 'rule', 'confidence', 'discardedText'].includes(column))
@@ -1807,6 +1984,19 @@ const BomNormalizer = () => {
 
   const canPrepareMerge = mergeCandidateCount >= 2;
   const canUseWithoutMerge = combineItems.length === 1;
+  const displayedStep = !workbook && mergeStage !== 'sources'
+    ? 1
+    : (currentStep >= 4 ? 3 : currentStep);
+  const sourcePanelTitle = mergeStage === 'preview'
+    ? 'Review merged source'
+    : mergeStage === 'match' || mergeStage === 'options'
+      ? 'Prepare merged source'
+      : 'Upload source';
+  const sourcePanelDescription = mergeStage === 'preview'
+    ? 'Review the merged sheet once, adjust visible columns if needed, then continue directly to configuration.'
+    : mergeStage === 'match' || mergeStage === 'options'
+      ? 'Choose the matching columns and output shape for the merged source.'
+      : 'Upload Excel, CSV, or PDF data. Continue directly, or add another source and merge before normalization.';
   const pdfRangeConfig = useMemo(() => ({
     enabled: pdfRangeEnabled,
     ranges: pdfRanges
@@ -1944,6 +2134,8 @@ const BomNormalizer = () => {
     setCurrentStep(1);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
     setDelimiterTouched(false);
+    setParserTouched(false);
+    setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
     setError('');
@@ -2377,15 +2569,6 @@ const BomNormalizer = () => {
     window.addEventListener('mouseup', handleUp);
   }, [mergeColumnWidths]);
 
-  const handleDownloadMergePreview = useCallback(() => {
-    if (!mergePreview) return;
-    const { headers: exportHeaders, rows: exportRows } = getMergePreviewExport(mergePreview, mergeVisibleColumns, mergePreviewFilter);
-    const worksheet = XLSX.utils.json_to_sheet(exportRows, { header: exportHeaders });
-    const nextWorkbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(nextWorkbook, worksheet, 'Merge_Preview');
-    XLSX.writeFile(nextWorkbook, `${mergeConfig.relationshipName || 'bom_merge'}_preview.xlsx`);
-  }, [mergeConfig.relationshipName, mergePreview, mergePreviewFilter, mergeVisibleColumns]);
-
   const handleUseMergePreview = useCallback(() => {
     if (!mergePreview) {
       setCombineError('Build the merge preview first.');
@@ -2394,46 +2577,68 @@ const BomNormalizer = () => {
     const { headers: outputHeaders, rows: cleanRows } = getMergePreviewExport(mergePreview, mergeVisibleColumns, mergePreviewFilter);
     const nextWorkbook = createWorkbookFromObjects(cleanRows, outputHeaders, 'Merged');
     handleWorkbookLoaded(nextWorkbook, `Merged source (${mergePrimarySource?.label || 'primary'} + ${mergeSecondarySource?.label || 'secondary'})`);
+    setSkipSourceSetupForMerge(true);
+    setCurrentStep(2);
     setMergeStage('preview');
     setCombineError('');
   }, [handleWorkbookLoaded, mergePreview, mergePreviewFilter, mergePrimarySource?.label, mergeSecondarySource?.label, mergeVisibleColumns]);
 
-  const handleUseMergeAsBase = useCallback(() => {
-    if (!mergePreview) {
-      setCombineError('Build the merge preview first.');
+  const handleUseNormalizedAsBase = useCallback(() => {
+    if (!normalizedRows.length) {
+      setError('Run normalization before using this sheet as a merge base.');
       return;
     }
 
-    const { headers: outputHeaders, rows: cleanRows } = getMergePreviewExport(mergePreview, mergeVisibleColumns, mergePreviewFilter);
-    if (!outputHeaders.length || !cleanRows.length) {
-      setCombineError('The current merge preview has no rows to use as the next base.');
-      return;
-    }
-
-    const label = `Merged base (${cleanRows.length} rows, ${outputHeaders.length} columns)`;
-    const baseId = `merged-base:${Date.now()}`;
-    const baseWorkbook = createWorkbookFromObjects(cleanRows, outputHeaders, 'Merged_Base');
+    const outputHeaders = getNormalizedExportColumns(normalizedRows);
+    const cleanRows = normalizedRows.map((row) => {
+      const output = {};
+      outputHeaders.forEach((header) => {
+        output[header] = row[header] || '';
+      });
+      return output;
+    });
+    const label = `Normalized base (${cleanRows.length} rows, ${outputHeaders.length} columns)`;
+    const baseWorkbook = createWorkbookFromObjects(cleanRows, outputHeaders, 'Normalized_Base');
     const baseItem = {
-      id: baseId,
+      id: `normalized-base:${Date.now()}`,
       fileName: label,
       type: 'workbook',
-      status: 'Merged result ready as base',
+      status: 'Normalized sheet ready as base',
       workbook: baseWorkbook,
-      sheetName: 'Merged_Base',
-      selectedSheetNames: ['Merged_Base'],
+      sheetName: 'Normalized_Base',
+      selectedSheetNames: ['Normalized_Base'],
       headerRowIndex: 0,
       rowCount: cleanRows.length,
       isMergedBase: true,
     };
 
+    setWorkbook(null);
+    setFileName('');
+    setSheetName('');
+    setSheetScope('single');
+    setSelectedSheetNames([]);
+    setSheetRows([]);
+    setHeaderRowIndex(0);
+    setPreparedHeaders([]);
+    setPreparedDataRows([]);
+    setRoles(emptyRoles);
+    setNormalizedRows([]);
+    setCurrentStep(0);
+    setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
+    setNormalizationSummary(null);
+    setParserTouched(false);
+    setSkipSourceSetupForMerge(false);
+    setConfirmOpen(false);
+    setLowConfidenceOnly(false);
+    setDownloadMenuAnchor(null);
+    setToolsMenuAnchor(null);
+    setCombineItems([baseItem]);
+    setMergeSources([]);
     setMergePreview(null);
     setMergePreviewFilter('all');
     setMergePreviewPage(0);
     setMergeVisibleColumns([]);
     setMergeColumnWidths({});
-    setCombineItems([baseItem]);
-    setMergeChainMessage('Merged sheet is ready as the base. Add another Excel source, then click Prepare merge setup to merge it into this base.');
-    setMergeSources([]);
     setMergeConfig({
       primarySourceId: '',
       secondarySourceId: '',
@@ -2444,12 +2649,38 @@ const BomNormalizer = () => {
       detailColumns: [],
     });
     setMergeStage('sources');
+    setMergeChainMessage('Normalized sheet is ready as the base. Add another source, then click Prepare merge setup to merge it into this base.');
     setCombineError('');
-  }, [
-    mergePreview,
-    mergePreviewFilter,
-    mergeVisibleColumns,
-  ]);
+    setError('');
+  }, [normalizedRows]);
+
+  const handleBackFromConfigure = useCallback(() => {
+    if (skipSourceSetupForMerge && mergePreview) {
+      setWorkbook(null);
+      setFileName('');
+      setSheetName('');
+      setSheetScope('single');
+      setSelectedSheetNames([]);
+      setSheetRows([]);
+      setHeaderRowIndex(0);
+      setPreparedHeaders([]);
+      setPreparedDataRows([]);
+      setRoles(emptyRoles);
+      setNormalizedRows([]);
+      setCurrentStep(0);
+      setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
+      setDelimiterTouched(false);
+      setParserTouched(false);
+      setSkipSourceSetupForMerge(false);
+      setNormalizationSummary(null);
+      setConfirmOpen(false);
+      setMergeStage('preview');
+      setError('');
+      return;
+    }
+
+    setCurrentStep(1);
+  }, [mergePreview, skipSourceSetupForMerge]);
 
   const handleSheetChange = useCallback((nextSheetName) => {
     if (!workbook) return;
@@ -2469,6 +2700,8 @@ const BomNormalizer = () => {
     setCurrentStep(1);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
     setDelimiterTouched(false);
+    setParserTouched(false);
+    setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
   }, [workbook]);
@@ -2497,6 +2730,8 @@ const BomNormalizer = () => {
     setCurrentStep(1);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
     setDelimiterTouched(false);
+    setParserTouched(false);
+    setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
   }, [workbook]);
@@ -2529,6 +2764,8 @@ const BomNormalizer = () => {
     setNormalizedRows([]);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
     setNormalizationSummary(null);
+    setParserTouched(false);
+    setSkipSourceSetupForMerge(false);
     setConfirmOpen(false);
   }, [sheetRows]);
 
@@ -2661,6 +2898,7 @@ const BomNormalizer = () => {
       alternateLayout: 'inside_selected_mpn_columns',
       delimiterMode: 'auto',
       customDelimiter: '',
+      groupHeaderMode: 'auto',
       quantityMode: 'inherit_primary',
       inheritLevels: true,
       skipTitleRows: true,
@@ -2672,6 +2910,8 @@ const BomNormalizer = () => {
     setCurrentStep(0);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
     setDelimiterTouched(false);
+    setParserTouched(false);
+    setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
     setLowConfidenceOnly(false);
@@ -2731,6 +2971,7 @@ const BomNormalizer = () => {
       alternateLayout: 'inside_selected_mpn_columns',
       delimiterMode: 'auto',
       customDelimiter: '',
+      groupHeaderMode: 'auto',
       quantityMode: 'inherit_primary',
       inheritLevels: true,
       skipTitleRows: true,
@@ -2742,6 +2983,8 @@ const BomNormalizer = () => {
     setCurrentStep(0);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
     setDelimiterTouched(false);
+    setParserTouched(false);
+    setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
     setLowConfidenceOnly(false);
@@ -2763,12 +3006,13 @@ const BomNormalizer = () => {
   }, [manufacturerMatchOpen, manufacturerMatchPreview]);
 
   useEffect(() => {
+    if (parserTouched) return;
     setConfig((prev) => {
       const nextStructure = detectBestStructure(headers, roles, dataRows.slice(0, 40));
       if (nextStructure === prev.structure) return prev;
       return nextConfigForDetectedStructure(prev, nextStructure);
     });
-  }, [dataRows, headers, roles]);
+  }, [dataRows, headers, parserTouched, roles]);
 
   useEffect(() => {
     if (!availableStructureOptions.length) return;
@@ -2800,6 +3044,7 @@ const BomNormalizer = () => {
   }, [dataRows, delimiterTouched, roles]);
 
   useEffect(() => {
+    if (parserTouched) return;
     if (!roles.mpn || !dataRows.length) return;
     const sampleValues = dataRows.slice(0, 80).map((row) => getCell(row, roles.mpn)).filter(Boolean);
     const multiMpnCount = sampleValues.filter((value) => splitMpnCell(value, config).length > 1).length;
@@ -2813,7 +3058,7 @@ const BomNormalizer = () => {
         alternateLayout: 'inside_selected_mpn_columns',
       };
     });
-  }, [config, dataRows, roles.mpn]);
+  }, [config, dataRows, parserTouched, roles.mpn]);
 
   return (
     <Box sx={{ minHeight: '100vh', bgcolor: '#f4f6f8', color: '#1f2933' }}>
@@ -2838,7 +3083,7 @@ const BomNormalizer = () => {
       </Box>
 
       <Box sx={{ px: { xs: 2, lg: 4 }, py: 3 }}>
-        <Stepper activeStep={currentStep >= 4 ? 3 : currentStep} alternativeLabel sx={{ mb: 3 }}>
+        <Stepper activeStep={displayedStep} alternativeLabel sx={{ mb: 3 }}>
           {['Upload', 'Source', 'Configure', 'Results'].map((label) => (
             <Step key={label}>
               <StepLabel>{label}</StepLabel>
@@ -2865,9 +3110,9 @@ const BomNormalizer = () => {
               <Paper elevation={0} sx={{ border: '1px solid #dce2e8', bgcolor: '#fff', p: 3 }}>
                 <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'flex-start', sm: 'center' }} justifyContent="space-between" gap={1}>
                   <Box>
-                    <Typography sx={{ fontSize: 20, fontWeight: 800 }}>Upload source</Typography>
+                    <Typography sx={{ fontSize: 20, fontWeight: 800 }}>{sourcePanelTitle}</Typography>
                     <Typography sx={{ mt: 0.8, color: '#687684', fontSize: 14 }}>
-                      Upload Excel, CSV, or PDF data. Continue directly, or add another source and merge before normalization.
+                      {sourcePanelDescription}
                     </Typography>
                   </Box>
                   <Button component="label" variant="outlined" startIcon={<CloudUploadIcon />} disabled={busy || combineBusy}>
@@ -3214,8 +3459,6 @@ const BomNormalizer = () => {
                         <Stack direction="row" justifyContent="space-between" gap={1} sx={{ mt: 1.5 }}>
                           <Button variant="outlined" onClick={() => setMergeStage('options')}>Back</Button>
                           <Stack direction="row" gap={1} flexWrap="wrap" justifyContent="flex-end">
-                            <Button variant="outlined" onClick={handleDownloadMergePreview}>Download Preview</Button>
-                            <Button variant="outlined" onClick={handleUseMergeAsBase}>Use merged sheet as base</Button>
                             <Button variant="contained" onClick={handleUseMergePreview}>Continue with normalizer</Button>
                           </Stack>
                         </Stack>
@@ -3376,11 +3619,14 @@ const BomNormalizer = () => {
                         <Select
                           value={config.structure}
                           label="Where are MPN and MFR?"
-                          onChange={(event) => setConfig((prev) => ({
-                            ...prev,
-                            structure: event.target.value,
-                            alternateLayout: event.target.value === 'one_per_row' ? 'already_separate_rows' : prev.alternateLayout,
-                          }))}
+                          onChange={(event) => {
+                            setParserTouched(true);
+                            setConfig((prev) => ({
+                              ...prev,
+                              structure: event.target.value,
+                              alternateLayout: ['one_per_row', 'grouped_rows'].includes(event.target.value) ? 'already_separate_rows' : prev.alternateLayout,
+                            }));
+                          }}
                         >
                           {availableStructureOptions.map((option) => (
                             <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
@@ -3453,8 +3699,24 @@ const BomNormalizer = () => {
                         />
                       </Grid>
                     )}
+                    {config.structure === 'grouped_rows' && (
+                      <Grid item xs={12} md={3}>
+                        <FormControl fullWidth size="small">
+                          <InputLabel>Group header handling</InputLabel>
+                          <Select
+                            value={config.groupHeaderMode || 'auto'}
+                            label="Group header handling"
+                            onChange={(event) => setConfig((prev) => ({ ...prev, groupHeaderMode: event.target.value }))}
+                          >
+                            {GROUP_HEADER_OPTIONS.map((option) => (
+                              <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                            ))}
+                          </Select>
+                        </FormControl>
+                      </Grid>
+                    )}
                   </Grid>
-                  {config.alternateLayout === 'separate_columns' && (
+                  {config.alternateLayout === 'separate_columns' && config.structure !== 'grouped_rows' && (
                     <Paper elevation={0} sx={{ mt: 1.5, p: 1.25, border: '1px solid #e1e6ec', bgcolor: '#fff' }}>
                       <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'flex-start', sm: 'center' }} justifyContent="space-between" gap={1}>
                         <Box>
@@ -3556,6 +3818,7 @@ const BomNormalizer = () => {
                   )}
                   <Typography sx={{ mt: 1, fontSize: 13, color: '#536171', lineHeight: 1.45 }}>
                     <strong>Detected rule:</strong> {selectedStructureOption?.description || '-'}
+                    {config.structure === 'grouped_rows' && selectedGroupHeaderOption ? ` ${selectedGroupHeaderOption.description}` : ''}
                     {' '}<strong>Delimiter:</strong> {delimiterLabel}.
                     {' '}Blank BOM levels will be treated as level 1.
                   </Typography>
@@ -3587,7 +3850,7 @@ const BomNormalizer = () => {
                   )}
                 </Paper>
                 <Stack direction="row" justifyContent="space-between" sx={{ mt: 2 }}>
-                  <Button variant="outlined" onClick={() => setCurrentStep(1)} disabled={busy}>Back</Button>
+                  <Button variant="outlined" onClick={handleBackFromConfigure} disabled={busy}>Back</Button>
                   <Button variant="contained" startIcon={<PlayArrowIcon />} onClick={handleNormalize} disabled={busy}>Run normalization</Button>
                 </Stack>
               </Paper>
@@ -3710,7 +3973,11 @@ const BomNormalizer = () => {
                 />
                 <Stack direction="row" justifyContent="space-between" sx={{ mt: 2 }}>
                   <Button variant="outlined" onClick={() => setCurrentStep(2)} disabled={busy}>Back to configure</Button>
-                  <Button variant="contained" onClick={handleNormalize} disabled={busy}>Run again</Button>
+                  <Stack direction="row" gap={1} flexWrap="wrap" justifyContent="flex-end">
+                    <Button variant="outlined" onClick={() => downloadRowsAsXlsx(normalizedRows)} disabled={busy || !normalizedRows.length}>Download Preview</Button>
+                    <Button variant="outlined" onClick={handleUseNormalizedAsBase} disabled={busy || !normalizedRows.length}>Use merged sheet as base</Button>
+                    <Button variant="contained" onClick={handleNormalize} disabled={busy}>Run again</Button>
+                  </Stack>
                 </Stack>
               </Paper>
             )}

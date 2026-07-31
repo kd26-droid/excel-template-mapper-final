@@ -16,122 +16,447 @@ import {
   InputLabel,
   Select,
   MenuItem,
-  Table,
-  TableBody,
-  TableCell,
   TableContainer,
+  Table,
   TableHead,
+  TableBody,
   TableRow,
+  TableCell,
   Paper,
-  Tooltip,
   Avatar,
-  Stack,
-  Switch,
-  FormControlLabel
+  CircularProgress,
+  Checkbox,
+  ListItemText,
+  Snackbar
 } from '@mui/material';
 import {
   Visibility,
   VisibilityOff,
   Save as SaveIcon,
-  Settings as SettingsIcon,
   VpnKey as VpnKeyIcon,
-  TableChart as TableChartIcon,
   CheckCircle as CheckCircleIcon,
   Error as ErrorIcon,
-  Info as InfoIcon
+  Delete as DeleteIcon
 } from '@mui/icons-material';
+import api from '../services/api';
+
+const CREDENTIAL_SCOPE_KEY = 'mpn_provider_credential_scope_id';
+const VALIDATION_PROVIDERS_KEY = 'mpn_validation_providers';
+const PROVIDER_OPTIONS = [
+  { id: 'digikey', label: 'DigiKey' },
+  { id: 'mouser', label: 'Mouser' },
+  { id: 'element14', label: 'Element14' }
+];
+
+const getCredentialScopeId = () => {
+  if (typeof window === 'undefined') return 'default';
+  const existing = window.localStorage.getItem(CREDENTIAL_SCOPE_KEY);
+  if (existing) return existing;
+  const generated = window.crypto?.randomUUID?.() || `scope-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  window.localStorage.setItem(CREDENTIAL_SCOPE_KEY, generated);
+  return generated;
+};
+
+const emptyProviderStatus = {
+  digikey: { configured: false, has_credentials: false, masked: {}, public: {}, last_test_message: '' },
+  mouser: { configured: false, has_credentials: false, masked: {}, public: {}, last_test_message: '' },
+  element14: { configured: false, has_credentials: false, masked: {}, public: {}, last_test_message: '' }
+};
+
+const DEFAULT_COLUMN_MAPPINGS = [
+  { column: 'MPN valid', description: 'Part validation status', providers: ['digikey'] },
+  { column: 'MPN Status', description: 'Lifecycle status (Active/NRND/Obsolete)', providers: ['digikey'] },
+  { column: 'EOL Status', description: 'End of life flag', providers: ['digikey'] },
+  { column: 'Discontinued', description: 'Discontinued status', providers: ['digikey'] },
+  { column: 'DKPN', description: 'DigiKey part number', providers: ['digikey'] },
+  { column: 'Canonical MPN', description: 'Standardized manufacturer part number', providers: ['digikey'] },
+  { column: 'Category', description: 'Product category', providers: ['digikey'] }
+];
+
+const COLUMN_PROVIDER_MAPPINGS_KEY = 'mpn_column_provider_mappings';
+const MASK_VALUE = '************';
+
+const normalizeProviders = (value, fallback = ['digikey']) => {
+  const allowed = new Set(PROVIDER_OPTIONS.map((provider) => provider.id));
+  const raw = Array.isArray(value) ? value : (value ? [value] : fallback);
+  const next = raw.filter((provider) => allowed.has(provider));
+  return next.length ? Array.from(new Set(next)) : fallback;
+};
+
+const providersFromColumnMappings = (mappings) => {
+  const selected = Array.from(new Set((mappings || []).flatMap((mapping) => normalizeProviders(mapping.providers || mapping.provider))));
+  return selected.length ? selected : ['digikey'];
+};
+
+const getInitialColumnMappings = () => {
+  if (typeof window === 'undefined') return DEFAULT_COLUMN_MAPPINGS;
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(COLUMN_PROVIDER_MAPPINGS_KEY) || '[]');
+    if (!Array.isArray(saved) || saved.length === 0) return DEFAULT_COLUMN_MAPPINGS;
+    const allowed = new Set(PROVIDER_OPTIONS.map((provider) => provider.id));
+    const savedByColumn = new Map(saved.map((mapping) => [mapping.column, mapping.provider]));
+    const savedProvidersByColumn = new Map(saved.map((mapping) => [mapping.column, mapping.providers]));
+    return DEFAULT_COLUMN_MAPPINGS.map((mapping) => {
+      const provider = savedByColumn.get(mapping.column);
+      const providers = savedProvidersByColumn.get(mapping.column);
+      return {
+        ...mapping,
+        providers: normalizeProviders(providers || provider, mapping.providers)
+      };
+    });
+  } catch {
+    return DEFAULT_COLUMN_MAPPINGS;
+  }
+};
+
+const getInitialValidationProviders = (mappings = null) => {
+  if (mappings) return providersFromColumnMappings(mappings);
+  if (typeof window === 'undefined') return ['digikey'];
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(VALIDATION_PROVIDERS_KEY) || '[]');
+    const allowed = new Set(PROVIDER_OPTIONS.map((provider) => provider.id));
+    const selected = Array.isArray(saved) ? saved.filter((provider) => allowed.has(provider)) : [];
+    return selected.length ? selected : ['digikey'];
+  } catch {
+    return ['digikey'];
+  }
+};
 
 const Settings = () => {
+  const [columnMappings, setColumnMappings] = useState(getInitialColumnMappings);
   // API Keys State
   const [digikeyClientId, setDigikeyClientId] = useState('');
   const [digikeyClientSecret, setDigikeyClientSecret] = useState('');
   const [digikeyRedirectUri, setDigikeyRedirectUri] = useState('');
   const [mouserApiKey, setMouserApiKey] = useState('');
+  const [element14ApiKey, setElement14ApiKey] = useState('');
 
   // Show/Hide passwords
   const [showDigikeySecret, setShowDigikeySecret] = useState(false);
   const [showMouserKey, setShowMouserKey] = useState(false);
+  const [showElement14Key, setShowElement14Key] = useState(false);
 
   // Provider selection
-  const [selectedProvider, setSelectedProvider] = useState('digikey'); // 'digikey' or 'mouser'
+  const [, setSelectedValidationProviders] = useState(() => getInitialValidationProviders(columnMappings));
+  const [credentialScopeId] = useState(getCredentialScopeId);
+  const [providerStatus, setProviderStatus] = useState(emptyProviderStatus);
+  const [loadingCredentials, setLoadingCredentials] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [deletingProvider, setDeletingProvider] = useState('');
+  const [testingProvider, setTestingProvider] = useState('');
+  const [providerMessages, setProviderMessages] = useState({
+    digikey: null,
+    mouser: null,
+    element14: null
+  });
 
   // Feedback state
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [snackbarMessage, setSnackbarMessage] = useState('Settings saved successfully');
   const [saveError, setSaveError] = useState('');
 
-  // Column mapping state - defines which columns are retrieved from which provider
-  const [columnMappings, setColumnMappings] = useState([
-    { column: 'MPN valid', provider: 'digikey', description: 'Part validation status' },
-    { column: 'MPN Status', provider: 'digikey', description: 'Lifecycle status (Active/NRND/Obsolete)' },
-    { column: 'EOL Status', provider: 'digikey', description: 'End of life flag' },
-    { column: 'Discontinued', provider: 'digikey', description: 'Discontinued status' },
-    { column: 'DKPN', provider: 'digikey', description: 'DigiKey part number' },
-    { column: 'Canonical MPN', provider: 'digikey', description: 'Standardized manufacturer part number' },
-    { column: 'Category', provider: 'digikey', description: 'Product category' },
-  ]);
+  useEffect(() => {
+    let cancelled = false;
 
-  // Handle column provider change
-  const handleColumnProviderChange = (columnName, newProvider) => {
-    setColumnMappings(prev =>
-      prev.map(mapping =>
-        mapping.column === columnName
-          ? { ...mapping, provider: newProvider }
-          : mapping
-      )
-    );
+    const loadCredentials = async () => {
+      setLoadingCredentials(true);
+      try {
+        const response = await api.getProviderCredentials(credentialScopeId);
+        if (cancelled) return;
+
+        const nextStatus = { ...emptyProviderStatus };
+        (response.data.providers || []).forEach((provider) => {
+          nextStatus[provider.provider] = provider;
+        });
+        setProviderStatus(nextStatus);
+
+        const digikey = nextStatus.digikey || {};
+        setDigikeyClientId(digikey.public?.client_id || '');
+        setDigikeyRedirectUri(digikey.public?.redirect_uri || '');
+        setDigikeyClientSecret(digikey.masked?.client_secret ? MASK_VALUE : '');
+        setMouserApiKey(nextStatus.mouser?.masked?.api_key ? MASK_VALUE : '');
+        setElement14ApiKey(nextStatus.element14?.masked?.api_key ? MASK_VALUE : '');
+      } catch (error) {
+        if (!cancelled) {
+          setSaveError(error.response?.data?.error || error.message || 'Failed to load provider settings');
+        }
+      } finally {
+        if (!cancelled) setLoadingCredentials(false);
+      }
+    };
+
+    loadCredentials();
+    return () => {
+      cancelled = true;
+    };
+  }, [credentialScopeId]);
+
+  const persistColumnMappings = (nextMappings) => {
+    const nextProviders = providersFromColumnMappings(nextMappings);
+    setSelectedValidationProviders(nextProviders);
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(COLUMN_PROVIDER_MAPPINGS_KEY, JSON.stringify(nextMappings));
+      window.localStorage.setItem(VALIDATION_PROVIDERS_KEY, JSON.stringify(nextProviders));
+    }
+  };
+
+  const handleColumnProviderChange = (column, value) => {
+    const providers = normalizeProviders(typeof value === 'string' ? value.split(',') : value);
+    const nextMappings = columnMappings.map((mapping) => (
+      mapping.column === column ? { ...mapping, providers } : mapping
+    ));
+    setColumnMappings(nextMappings);
+    persistColumnMappings(nextMappings);
+  };
+
+  const applySavedProviderStatus = (providers = []) => {
+    setProviderStatus((prev) => {
+      const next = { ...prev };
+      providers.forEach((provider) => {
+        next[provider.provider] = provider;
+      });
+      return next;
+    });
+  };
+
+  const buildProviderPayload = () => {
+    const isMaskedValue = (value, provider, field) => {
+      const text = String(value || '');
+      return text === MASK_VALUE || Boolean(providerStatus[provider]?.masked?.[field] && text === providerStatus[provider].masked[field]);
+    };
+
+    const digikey = {
+      client_id: digikeyClientId,
+      redirect_uri: digikeyRedirectUri
+    };
+    if (digikeyClientSecret.trim() && !isMaskedValue(digikeyClientSecret, 'digikey', 'client_secret')) {
+      digikey.client_secret = digikeyClientSecret;
+    }
+
+    const mouser = {};
+    if (mouserApiKey.trim() && !isMaskedValue(mouserApiKey, 'mouser', 'api_key')) {
+      mouser.api_key = mouserApiKey;
+    }
+
+    const element14 = {};
+    if (element14ApiKey.trim() && !isMaskedValue(element14ApiKey, 'element14', 'api_key')) {
+      element14.api_key = element14ApiKey;
+    }
+
+    return { digikey, mouser, element14 };
+  };
+
+  const hasProviderRequiredDetails = (provider) => {
+    if (provider === 'digikey') {
+      return Boolean(digikeyClientId && (digikeyClientSecret || providerStatus.digikey?.has_credentials));
+    }
+    if (provider === 'mouser') {
+      return Boolean(mouserApiKey || providerStatus.mouser?.has_credentials);
+    }
+    if (provider === 'element14') {
+      return Boolean(element14ApiKey || providerStatus.element14?.has_credentials);
+    }
+    return false;
+  };
+
+  const setProviderMessage = (provider, type, message) => {
+    setProviderMessages((prev) => ({
+      ...prev,
+      [provider]: message ? { type, message } : null
+    }));
+  };
+
+  const setMaskedFieldsFromStatus = (nextStatus) => {
+    if (nextStatus.digikey?.masked?.client_secret) setDigikeyClientSecret(MASK_VALUE);
+    if (nextStatus.mouser?.masked?.api_key) setMouserApiKey(MASK_VALUE);
+    if (nextStatus.element14?.masked?.api_key) setElement14ApiKey(MASK_VALUE);
+  };
+
+  const isSavedMaskedValue = (value, provider, field) => (
+    value === MASK_VALUE || Boolean(providerStatus[provider]?.masked?.[field] && value === providerStatus[provider].masked[field])
+  );
+
+  const toggleSavedSecretVisibility = (provider) => {
+    if (provider === 'digikey') {
+      const saved = providerStatus.digikey?.masked?.client_secret || '';
+      if (isSavedMaskedValue(digikeyClientSecret, 'digikey', 'client_secret') && saved) {
+        setDigikeyClientSecret(showDigikeySecret ? MASK_VALUE : saved);
+      }
+      setShowDigikeySecret((prev) => !prev);
+      return;
+    }
+    if (provider === 'mouser') {
+      const saved = providerStatus.mouser?.masked?.api_key || '';
+      if (isSavedMaskedValue(mouserApiKey, 'mouser', 'api_key') && saved) {
+        setMouserApiKey(showMouserKey ? MASK_VALUE : saved);
+      }
+      setShowMouserKey((prev) => !prev);
+      return;
+    }
+    if (provider === 'element14') {
+      const saved = providerStatus.element14?.masked?.api_key || '';
+      if (isSavedMaskedValue(element14ApiKey, 'element14', 'api_key') && saved) {
+        setElement14ApiKey(showElement14Key ? MASK_VALUE : saved);
+      }
+      setShowElement14Key((prev) => !prev);
+    }
   };
 
   // Save settings
-  const handleSaveSettings = () => {
-    // Validate at least one provider is configured
-    const hasDigikey = digikeyClientId && digikeyClientSecret;
-    const hasMouser = mouserApiKey;
+  const handleSaveSettings = async () => {
+    const hasDigikey = hasProviderRequiredDetails('digikey');
+    const hasMouser = hasProviderRequiredDetails('mouser');
+    const hasElement14 = hasProviderRequiredDetails('element14');
 
-    if (!hasDigikey && !hasMouser) {
-      setSaveError('Please configure at least one API provider (DigiKey or Mouser)');
+    if (!hasDigikey && !hasMouser && !hasElement14) {
+      setSaveError('Please configure at least one API provider (DigiKey, Mouser, or Element14)');
       return;
     }
 
-    // Validate column mappings - ensure selected provider is configured
-    const invalidMappings = columnMappings.filter(mapping => {
-      if (mapping.provider === 'digikey' && !hasDigikey) return true;
-      if (mapping.provider === 'mouser' && !hasMouser) return true;
-      return false;
-    });
+    const nextValidationProviders = providersFromColumnMappings(columnMappings);
+    const providerConfigured = { digikey: hasDigikey, mouser: hasMouser, element14: hasElement14 };
+    const invalidProviders = nextValidationProviders.filter((provider) => !providerConfigured[provider]);
 
-    if (invalidMappings.length > 0) {
-      setSaveError(`Some columns are mapped to unconfigured providers: ${invalidMappings.map(m => m.column).join(', ')}`);
+    if (invalidProviders.length > 0) {
+      const names = invalidProviders.map((provider) => PROVIDER_OPTIONS.find((option) => option.id === provider)?.label || provider);
+      setSaveError(`Column mappings use providers that are not configured: ${names.join(', ')}`);
       return;
     }
 
-    // TODO: Call backend API to save settings
-    console.log('Saving settings:', {
-      digikey: { clientId: digikeyClientId, clientSecret: digikeyClientSecret, redirectUri: digikeyRedirectUri },
-      mouser: { apiKey: mouserApiKey },
-      defaultProvider: selectedProvider,
-      columnMappings
-    });
-
-    setSaveSuccess(true);
-    setSaveError('');
-    setTimeout(() => setSaveSuccess(false), 3000);
+    setSavingSettings(true);
+    try {
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(COLUMN_PROVIDER_MAPPINGS_KEY, JSON.stringify(columnMappings));
+        window.localStorage.setItem(VALIDATION_PROVIDERS_KEY, JSON.stringify(nextValidationProviders));
+      }
+      setSelectedValidationProviders(nextValidationProviders);
+      const response = await api.saveProviderCredentials(credentialScopeId, buildProviderPayload());
+      applySavedProviderStatus(response.data.providers || []);
+      const nextStatus = { ...providerStatus };
+      (response.data.providers || []).forEach((provider) => {
+        nextStatus[provider.provider] = provider;
+      });
+      setMaskedFieldsFromStatus(nextStatus);
+      setSnackbarMessage('Settings saved successfully');
+      setSaveSuccess(true);
+      setSaveError('');
+    } catch (error) {
+      setSaveError(error.response?.data?.error || error.message || 'Failed to save provider settings');
+    } finally {
+      setSavingSettings(false);
+    }
   };
 
-  // Get provider badge color
-  const getProviderColor = (provider) => {
-    return provider === 'digikey' ? '#3b82f6' : '#10b981';
+  const handleDeleteProvider = async (provider) => {
+    setDeletingProvider(provider);
+    setSaveError('');
+    try {
+      await api.deleteProviderCredential(provider, credentialScopeId);
+      setProviderStatus((prev) => ({
+        ...prev,
+        [provider]: { ...emptyProviderStatus[provider] }
+      }));
+      if (provider === 'digikey') {
+        setDigikeyClientId('');
+        setDigikeyClientSecret('');
+        setDigikeyRedirectUri('');
+      } else if (provider === 'mouser') {
+        setMouserApiKey('');
+      } else if (provider === 'element14') {
+        setElement14ApiKey('');
+      }
+      setProviderMessage(provider, null, '');
+      setSnackbarMessage(`${providerLabel(provider)} removed successfully`);
+      setSaveSuccess(true);
+    } catch (error) {
+      setSaveError(error.response?.data?.error || error.message || `Failed to remove ${provider} settings`);
+    } finally {
+      setDeletingProvider('');
+    }
+  };
+
+  const handleTestProvider = async (provider) => {
+    const providerPayload = buildProviderPayload()[provider] || {};
+    const hasAnyInput = Object.values(providerPayload).some((value) => String(value || '').trim());
+    if (!hasProviderRequiredDetails(provider)) {
+      setProviderMessage(provider, 'error', 'Enter the required details before testing.');
+      return;
+    }
+
+    setTestingProvider(provider);
+    setProviderMessage(provider, null, '');
+    try {
+      if (hasAnyInput) {
+        const saveResponse = await api.saveProviderCredentials(credentialScopeId, { [provider]: providerPayload });
+        applySavedProviderStatus(saveResponse.data.providers || []);
+        const nextStatus = { ...providerStatus };
+        (saveResponse.data.providers || []).forEach((item) => {
+          nextStatus[item.provider] = item;
+        });
+        setMaskedFieldsFromStatus(nextStatus);
+      }
+
+      const response = await api.testProviderCredential(provider, credentialScopeId);
+      applySavedProviderStatus(response.data.provider_status ? [response.data.provider_status] : []);
+      setProviderMessage(provider, null, '');
+      setSnackbarMessage(`${providerLabel(provider)} configured successfully`);
+      setSaveSuccess(true);
+    } catch (error) {
+      const providerStatusUpdate = error.response?.data?.provider_status;
+      if (providerStatusUpdate) {
+        applySavedProviderStatus([providerStatusUpdate]);
+      }
+      setProviderMessage(provider, 'error', error.response?.data?.error || error.response?.data?.message || 'Details unverified. Please check the entered details.');
+    } finally {
+      setTestingProvider('');
+    }
   };
 
   // Check if provider is configured
   const isProviderConfigured = (provider) => {
-    if (provider === 'digikey') {
-      return digikeyClientId && digikeyClientSecret;
-    }
-    if (provider === 'mouser') {
-      return mouserApiKey;
-    }
-    return false;
+    return Boolean(providerStatus[provider]?.configured);
   };
+
+  const getProviderColor = (provider) => {
+    if (provider === 'mouser') return '#10b981';
+    if (provider === 'element14') return '#f59e0b';
+    return '#3b82f6';
+  };
+
+  const providerLabel = (provider) => PROVIDER_OPTIONS.find((option) => option.id === provider)?.label || provider;
+
+  const secretInputSx = {
+    '& input': {
+      fontFamily: '"Roboto Mono", Consolas, "Courier New", monospace',
+      letterSpacing: 0
+    }
+  };
+
+  const providerLabels = (providers) => normalizeProviders(providers)
+    .map((provider) => providerLabel(provider))
+    .join(', ');
+
+  const mappingProvidersReady = (providers) => normalizeProviders(providers).every((provider) => isProviderConfigured(provider));
+
+  const renderProviderStatus = (provider) => (
+    <>
+      {isProviderConfigured(provider) ? (
+        <Chip icon={<CheckCircleIcon />} label="Configured" color="success" size="small" />
+      ) : (
+        <Chip icon={<ErrorIcon />} label="Not Configured" color="default" size="small" />
+      )}
+      {providerMessages[provider]?.type === 'error' && (
+        <Chip
+          icon={<ErrorIcon />}
+          label={providerMessages[provider].message}
+          color="error"
+          size="small"
+          variant="outlined"
+          sx={{ maxWidth: 360, '& .MuiChip-label': { overflow: 'hidden', textOverflow: 'ellipsis' } }}
+        />
+      )}
+    </>
+  );
 
   return (
     <Box sx={{ p: 3, backgroundColor: '#f8fafc', minHeight: '100vh' }}>
@@ -146,11 +471,27 @@ const Settings = () => {
       </Box>
 
       {/* Success/Error Messages */}
-      {saveSuccess && (
-        <Alert severity="success" sx={{ mb: 3 }} onClose={() => setSaveSuccess(false)}>
-          Settings saved successfully!
+      <Snackbar
+        open={saveSuccess}
+        autoHideDuration={5000}
+        onClose={() => setSaveSuccess(false)}
+        anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
+        sx={{ mt: 2 }}
+      >
+        <Alert
+          severity="success"
+          variant="filled"
+          onClose={() => setSaveSuccess(false)}
+          sx={{
+            minWidth: 360,
+            boxShadow: '0 12px 32px rgba(15, 23, 42, 0.22)',
+            fontWeight: 700,
+            alignItems: 'center'
+          }}
+        >
+          {snackbarMessage}
         </Alert>
-      )}
+      </Snackbar>
       {saveError && (
         <Alert severity="error" sx={{ mb: 3 }} onClose={() => setSaveError('')}>
           {saveError}
@@ -171,9 +512,10 @@ const Settings = () => {
                     API Provider Configuration
                   </Typography>
                   <Typography variant="body2" color="#64748b">
-                    Configure one or both providers for MPN validation
+                    Configure one or more providers for MPN validation
                   </Typography>
                 </Box>
+                {loadingCredentials && <CircularProgress size={22} sx={{ ml: 'auto' }} />}
               </Box>
 
               <Divider sx={{ my: 3 }} />
@@ -184,21 +526,28 @@ const Settings = () => {
                   <Typography variant="h6" fontWeight="600" color="#1e293b">
                     DigiKey API
                   </Typography>
-                  {isProviderConfigured('digikey') ? (
-                    <Chip
-                      icon={<CheckCircleIcon />}
-                      label="Configured"
-                      color="success"
+                  {renderProviderStatus('digikey')}
+                  <Box sx={{ ml: 'auto', display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <Button
                       size="small"
-                    />
-                  ) : (
-                    <Chip
-                      icon={<ErrorIcon />}
-                      label="Not Configured"
-                      color="default"
+                      variant="outlined"
+                      onClick={() => handleTestProvider('digikey')}
+                      disabled={Boolean(testingProvider || deletingProvider) || !hasProviderRequiredDetails('digikey')}
+                      startIcon={testingProvider === 'digikey' ? <CircularProgress size={14} /> : <CheckCircleIcon />}
+                    >
+                      Test
+                    </Button>
+                    <Button
                       size="small"
-                    />
-                  )}
+                      color="error"
+                      variant="outlined"
+                      startIcon={deletingProvider === 'digikey' ? <CircularProgress size={14} /> : <DeleteIcon />}
+                      onClick={() => handleDeleteProvider('digikey')}
+                      disabled={Boolean(deletingProvider) || !providerStatus.digikey?.has_credentials}
+                    >
+                      Remove
+                    </Button>
+                  </Box>
                 </Box>
                 <Typography variant="body2" color="#64748b" sx={{ mb: 2 }}>
                   OAuth-based authentication for DigiKey product database
@@ -222,13 +571,18 @@ const Settings = () => {
                       type={showDigikeySecret ? 'text' : 'password'}
                       value={digikeyClientSecret}
                       onChange={(e) => setDigikeyClientSecret(e.target.value)}
-                      placeholder="Enter DigiKey Client Secret"
+                      onFocus={() => {
+                        if (isSavedMaskedValue(digikeyClientSecret, 'digikey', 'client_secret')) setDigikeyClientSecret('');
+                      }}
+                      placeholder={providerStatus.digikey?.masked?.client_secret || 'Enter DigiKey Client Secret'}
                       variant="outlined"
+                      sx={secretInputSx}
+                      helperText={providerStatus.digikey?.has_credentials ? 'Saved secret is hidden. Type a new value to replace it.' : ''}
                       InputProps={{
                         endAdornment: (
                           <InputAdornment position="end">
                             <IconButton
-                              onClick={() => setShowDigikeySecret(!showDigikeySecret)}
+                              onClick={() => toggleSavedSecretVisibility('digikey')}
                               edge="end"
                             >
                               {showDigikeySecret ? <VisibilityOff /> : <Visibility />}
@@ -260,21 +614,28 @@ const Settings = () => {
                   <Typography variant="h6" fontWeight="600" color="#1e293b">
                     Mouser API
                   </Typography>
-                  {isProviderConfigured('mouser') ? (
-                    <Chip
-                      icon={<CheckCircleIcon />}
-                      label="Configured"
-                      color="success"
+                  {renderProviderStatus('mouser')}
+                  <Box sx={{ ml: 'auto', display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <Button
                       size="small"
-                    />
-                  ) : (
-                    <Chip
-                      icon={<ErrorIcon />}
-                      label="Not Configured"
-                      color="default"
+                      variant="outlined"
+                      onClick={() => handleTestProvider('mouser')}
+                      disabled={Boolean(testingProvider || deletingProvider) || !hasProviderRequiredDetails('mouser')}
+                      startIcon={testingProvider === 'mouser' ? <CircularProgress size={14} /> : <CheckCircleIcon />}
+                    >
+                      Test
+                    </Button>
+                    <Button
                       size="small"
-                    />
-                  )}
+                      color="error"
+                      variant="outlined"
+                      startIcon={deletingProvider === 'mouser' ? <CircularProgress size={14} /> : <DeleteIcon />}
+                      onClick={() => handleDeleteProvider('mouser')}
+                      disabled={Boolean(deletingProvider) || !providerStatus.mouser?.has_credentials}
+                    >
+                      Remove
+                    </Button>
+                  </Box>
                 </Box>
                 <Typography variant="body2" color="#64748b" sx={{ mb: 2 }}>
                   API key-based authentication for Mouser Electronics
@@ -288,13 +649,17 @@ const Settings = () => {
                       type={showMouserKey ? 'text' : 'password'}
                       value={mouserApiKey}
                       onChange={(e) => setMouserApiKey(e.target.value)}
-                      placeholder="Enter Mouser API Key"
+                      onFocus={() => {
+                        if (isSavedMaskedValue(mouserApiKey, 'mouser', 'api_key')) setMouserApiKey('');
+                      }}
+                      placeholder={providerStatus.mouser?.masked?.api_key || 'Enter Mouser API Key'}
                       variant="outlined"
+                      sx={secretInputSx}
                       InputProps={{
                         endAdornment: (
                           <InputAdornment position="end">
                             <IconButton
-                              onClick={() => setShowMouserKey(!showMouserKey)}
+                              onClick={() => toggleSavedSecretVisibility('mouser')}
                               edge="end"
                             >
                               {showMouserKey ? <VisibilityOff /> : <Visibility />}
@@ -302,7 +667,7 @@ const Settings = () => {
                           </InputAdornment>
                         ),
                       }}
-                      helperText="Get your API key from Mouser developer portal"
+                      helperText={providerStatus.mouser?.has_credentials ? 'Saved key is hidden. Type a new value to replace it.' : 'Get your API key from Mouser developer portal'}
                     />
                   </Grid>
                 </Grid>
@@ -310,36 +675,71 @@ const Settings = () => {
 
               <Divider sx={{ my: 3 }} />
 
-              {/* Default Provider Selection */}
+              {/* Element14 Configuration */}
               <Box>
-                <Typography variant="h6" fontWeight="600" color="#1e293b" sx={{ mb: 2 }}>
-                  Default Provider
-                </Typography>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 2 }}>
+                  <Typography variant="h6" fontWeight="600" color="#1e293b">
+                    Element14 API
+                  </Typography>
+                  {renderProviderStatus('element14')}
+                  <Box sx={{ ml: 'auto', display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={() => handleTestProvider('element14')}
+                      disabled={Boolean(testingProvider || deletingProvider) || !hasProviderRequiredDetails('element14')}
+                      startIcon={testingProvider === 'element14' ? <CircularProgress size={14} /> : <CheckCircleIcon />}
+                    >
+                      Test
+                    </Button>
+                    <Button
+                      size="small"
+                      color="error"
+                      variant="outlined"
+                      startIcon={deletingProvider === 'element14' ? <CircularProgress size={14} /> : <DeleteIcon />}
+                      onClick={() => handleDeleteProvider('element14')}
+                      disabled={Boolean(deletingProvider) || !providerStatus.element14?.has_credentials}
+                    >
+                      Remove
+                    </Button>
+                  </Box>
+                </Box>
                 <Typography variant="body2" color="#64748b" sx={{ mb: 2 }}>
-                  Choose which provider to use by default for MPN validation
+                  API key-based authentication for Element14 product validation
                 </Typography>
-                <FormControl fullWidth sx={{ maxWidth: 300 }}>
-                  <InputLabel>Default Provider</InputLabel>
-                  <Select
-                    value={selectedProvider}
-                    label="Default Provider"
-                    onChange={(e) => setSelectedProvider(e.target.value)}
-                  >
-                    <MenuItem value="digikey">
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        DigiKey
-                        {isProviderConfigured('digikey') && <CheckCircleIcon fontSize="small" color="success" />}
-                      </Box>
-                    </MenuItem>
-                    <MenuItem value="mouser">
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        Mouser
-                        {isProviderConfigured('mouser') && <CheckCircleIcon fontSize="small" color="success" />}
-                      </Box>
-                    </MenuItem>
-                  </Select>
-                </FormControl>
+
+                <Grid container spacing={2}>
+                  <Grid item xs={12} md={6}>
+                    <TextField
+                      fullWidth
+                      label="API Key"
+                      type={showElement14Key ? 'text' : 'password'}
+                      value={element14ApiKey}
+                      onChange={(e) => setElement14ApiKey(e.target.value)}
+                      onFocus={() => {
+                        if (isSavedMaskedValue(element14ApiKey, 'element14', 'api_key')) setElement14ApiKey('');
+                      }}
+                      placeholder={providerStatus.element14?.masked?.api_key || 'Enter Element14 API Key'}
+                      variant="outlined"
+                      sx={secretInputSx}
+                      InputProps={{
+                        endAdornment: (
+                          <InputAdornment position="end">
+                            <IconButton
+                              onClick={() => toggleSavedSecretVisibility('element14')}
+                              edge="end"
+                            >
+                              {showElement14Key ? <VisibilityOff /> : <Visibility />}
+                            </IconButton>
+                          </InputAdornment>
+                        ),
+                      }}
+                      helperText={providerStatus.element14?.has_credentials ? 'Saved key is hidden. Type a new value to replace it.' : 'Get your API key from Element14 developer portal'}
+                    />
+                  </Grid>
+                </Grid>
               </Box>
+
             </CardContent>
           </Card>
         </Grid>
@@ -350,23 +750,23 @@ const Settings = () => {
             <CardContent sx={{ p: 3 }}>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 3 }}>
                 <Avatar sx={{ bgcolor: '#10b981', width: 48, height: 48 }}>
-                  <TableChartIcon />
+                  <CheckCircleIcon />
                 </Avatar>
                 <Box>
                   <Typography variant="h5" fontWeight="600" color="#1e293b">
                     Column Provider Mapping
                   </Typography>
                   <Typography variant="body2" color="#64748b">
-                    Choose which provider to use for each MPN validation column
+                    Choose which provider should source each MPN validation column.
                   </Typography>
                 </Box>
               </Box>
 
-              <Alert severity="info" icon={<InfoIcon />} sx={{ mb: 3 }}>
-                Each column can be sourced from either DigiKey or Mouser. Configure the providers above first.
+              <Alert severity="info" sx={{ mb: 3 }}>
+                Each column can be sourced from DigiKey, Mouser, or Element14. Configure the providers above first.
               </Alert>
 
-              <TableContainer component={Paper} variant="outlined">
+              <TableContainer component={Paper} variant="outlined" sx={{ borderRadius: 2 }}>
                 <Table>
                   <TableHead>
                     <TableRow sx={{ bgcolor: '#f8fafc' }}>
@@ -390,34 +790,31 @@ const Settings = () => {
                           </Typography>
                         </TableCell>
                         <TableCell>
-                          <FormControl size="small" sx={{ minWidth: 150 }}>
+                          <FormControl size="small" sx={{ minWidth: 160 }}>
                             <Select
-                              value={mapping.provider}
-                              onChange={(e) => handleColumnProviderChange(mapping.column, e.target.value)}
+                              multiple
+                              value={normalizeProviders(mapping.providers || mapping.provider)}
+                              onChange={(event) => handleColumnProviderChange(mapping.column, event.target.value)}
+                              renderValue={(selected) => providerLabels(selected)}
                               sx={{
-                                bgcolor: mapping.provider === 'digikey' ? '#eff6ff' : '#f0fdf4',
+                                bgcolor: `${getProviderColor(normalizeProviders(mapping.providers || mapping.provider)[0])}14`,
                                 '& .MuiOutlinedInput-notchedOutline': {
-                                  borderColor: getProviderColor(mapping.provider)
+                                  borderColor: getProviderColor(normalizeProviders(mapping.providers || mapping.provider)[0])
                                 }
                               }}
                             >
-                              <MenuItem value="digikey">
-                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                  <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: '#3b82f6' }} />
-                                  DigiKey
-                                </Box>
-                              </MenuItem>
-                              <MenuItem value="mouser">
-                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                  <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: '#10b981' }} />
-                                  Mouser
-                                </Box>
-                              </MenuItem>
+                              {PROVIDER_OPTIONS.map((provider) => (
+                                <MenuItem key={provider.id} value={provider.id}>
+                                  <Checkbox checked={normalizeProviders(mapping.providers || mapping.provider).includes(provider.id)} />
+                                  <ListItemText primary={provider.label} />
+                                  <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: getProviderColor(provider.id), ml: 1 }} />
+                                </MenuItem>
+                              ))}
                             </Select>
                           </FormControl>
                         </TableCell>
                         <TableCell align="center">
-                          {isProviderConfigured(mapping.provider) ? (
+                          {mappingProvidersReady(mapping.providers || mapping.provider) ? (
                             <Chip
                               icon={<CheckCircleIcon />}
                               label="Ready"
@@ -450,6 +847,7 @@ const Settings = () => {
               size="large"
               startIcon={<SaveIcon />}
               onClick={handleSaveSettings}
+              disabled={savingSettings || loadingCredentials}
               sx={{
                 bgcolor: '#3b82f6',
                 '&:hover': { bgcolor: '#2563eb' },
@@ -457,7 +855,7 @@ const Settings = () => {
                 py: 1.5
               }}
             >
-              Save Settings
+              {savingSettings ? 'Saving...' : 'Save Settings'}
             </Button>
           </Box>
         </Grid>

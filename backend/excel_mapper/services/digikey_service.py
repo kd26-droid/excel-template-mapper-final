@@ -26,12 +26,14 @@ class DigiKeyClient:
     AUTH_BASE = "https://api.digikey.com/v1/oauth2"
     PROD_BASE = "https://api.digikey.com/products/v4"
 
-    def __init__(self):
+    def __init__(self, credentials: Optional[Dict[str, Any]] = None, allow_env_fallback: bool = True):
         # Best-effort load of a local .env file to ease dev setups
-        self._load_local_env()
-        self.client_id = os.environ.get('DIGIKEY_CLIENT_ID')
-        self.client_secret = os.environ.get('DIGIKEY_CLIENT_SECRET')
-        self.redirect_uri = os.environ.get('DIGIKEY_REDIRECT_URI')
+        if allow_env_fallback:
+            self._load_local_env()
+        credentials = credentials or {}
+        self.client_id = credentials.get('client_id') or (os.environ.get('DIGIKEY_CLIENT_ID') if allow_env_fallback else None)
+        self.client_secret = credentials.get('client_secret') or (os.environ.get('DIGIKEY_CLIENT_SECRET') if allow_env_fallback else None)
+        self.redirect_uri = credentials.get('redirect_uri') or (os.environ.get('DIGIKEY_REDIRECT_URI') if allow_env_fallback else None)
         self.scope = os.environ.get('DIGIKEY_SCOPE', 'productinformation')
         # Locale headers – defaults match mpn_check.sh
         self.site = os.environ.get('DIGIKEY_SITE', 'IN')
@@ -82,6 +84,8 @@ class DigiKeyClient:
         """Build minimal authorize URL as per working example.
         Only include response_type, client_id, redirect_uri.
         """
+        if not self.client_id or not self.redirect_uri:
+            raise RuntimeError("Digi-Key OAuth start requires client_id and redirect_uri")
         from urllib.parse import urlencode
         params = {
             'response_type': 'code',
@@ -91,6 +95,8 @@ class DigiKeyClient:
         return f"{self.AUTH_BASE}/authorize?{urlencode(params)}"
 
     def exchange_code(self, code: str) -> Dict[str, Any]:
+        if not self.client_id or not self.client_secret or not self.redirect_uri:
+            raise RuntimeError("Digi-Key OAuth callback requires client_id, client_secret, and redirect_uri")
         data = {
             'client_id': self.client_id,
             'client_secret': self.client_secret,
@@ -105,6 +111,8 @@ class DigiKeyClient:
         return token
 
     def refresh(self) -> Dict[str, Any]:
+        if not self.client_id or not self.client_secret:
+            raise RuntimeError("Digi-Key credentials are not configured")
         tok = self._get_token()
         if not tok:
             raise RuntimeError("No refresh token stored")
@@ -127,6 +135,8 @@ class DigiKeyClient:
 
     def get_client_credentials_token(self) -> Dict[str, Any]:
         """Get a new token using client credentials flow"""
+        if not self.client_id or not self.client_secret:
+            raise RuntimeError("Digi-Key credentials are not configured")
         data = {
             'client_id': self.client_id,
             'client_secret': self.client_secret,
@@ -153,6 +163,8 @@ class DigiKeyClient:
         return tok and tok.expires_at > timezone.now() + dt.timedelta(seconds=60)
 
     def ensure_access_token(self) -> str:
+        if not self.client_id or not self.client_secret:
+            raise RuntimeError("Not authorized with Digi-Key - credentials are not configured")
         tok = self._get_token()
 
         # If no token exists, get one using client credentials

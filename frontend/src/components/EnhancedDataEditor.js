@@ -463,9 +463,12 @@ const EnhancedDataEditor = () => {
     const digikeyColumns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'Category'];
     // Mouser columns
     const mouserColumns = ['MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'Mouser Canonical MPN', 'Mouser Category'];
+    // Element14 columns
+    const element14Columns = ['MPN valid (Element14)', 'Element14 Status', 'Element14 Part Number', 'Element14 Canonical MPN', 'Element14 Category'];
 
     return digikeyColumns.includes(columnName) ||
            mouserColumns.includes(columnName) ||
+           element14Columns.includes(columnName) ||
            columnName === 'Canonical MPN' ||
            /^Canonical MPN \d+$/.test(columnName) ||
            /^MPN_\d+_DigiKey_(Valid|Canonical|PN)$/.test(columnName);
@@ -554,7 +557,13 @@ const EnhancedDataEditor = () => {
       'Mouser Status': 'Current production status from Mouser',
       'MPNR': 'Mouser part number for ordering',
       'Mouser Canonical MPN': 'Official manufacturer part number from Mouser (standardized)',
-      'Mouser Category': 'Product category from Mouser'
+      'Mouser Category': 'Product category from Mouser',
+      // Element14 columns
+      'MPN valid (Element14)': 'Whether this part exists in Element14 database (Yes/No)',
+      'Element14 Status': 'Current production status from Element14',
+      'Element14 Part Number': 'Element14 part number for ordering',
+      'Element14 Canonical MPN': 'Official manufacturer part number from Element14 (standardized)',
+      'Element14 Category': 'Product category from Element14'
     };
 
     // Handle numbered canonical MPN columns
@@ -1028,9 +1037,9 @@ const EnhancedDataEditor = () => {
         }
 
         // Check if MPN validation columns already exist (including all canonical MPN variants)
-        const baseMpnValidationColumns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'MPN valid (Mouser)', 'Mouser Status', 'MPNR'];
+        const baseMpnValidationColumns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'MPN valid (Element14)', 'Element14 Status', 'Element14 Part Number'];
         const canonicalMpnColumns = viewHeaders.filter(header =>
-          header === 'Canonical MPN' || /^Canonical MPN \d+$/.test(header) || header === 'Mouser Canonical MPN'
+          header === 'Canonical MPN' || /^Canonical MPN \d+$/.test(header) || header === 'Mouser Canonical MPN' || header === 'Element14 Canonical MPN'
         );
         const hasMpnValidation = baseMpnValidationColumns.some(col => viewHeaders.includes(col)) || canonicalMpnColumns.length > 0;
         if (hasMpnValidation) {
@@ -1105,7 +1114,7 @@ const EnhancedDataEditor = () => {
           const isUnmapped = data.unmapped_columns && data.unmapped_columns.includes(displayName);
           const isSpecificationColumn = displayName.toLowerCase().includes('specification');
           const isFormulaColumn = detectedFormulaColumns.includes(col) || col.startsWith('Tag_') || col.startsWith('Specification_') || col.startsWith('Customer_Identification_') || col === 'Tag' || col.includes('Specification') || col.includes('Customer identification') || col.includes('Custom identification') || col === 'Factwise ID';
-          const isMpnValidationColumn = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'Mouser Canonical MPN', 'Mouser Category', 'Category'].includes(col) ||
+          const isMpnValidationColumn = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'Mouser Canonical MPN', 'Mouser Category', 'MPN valid (Element14)', 'Element14 Status', 'Element14 Part Number', 'Element14 Canonical MPN', 'Element14 Category', 'Category'].includes(col) ||
             col === 'Canonical MPN' || /^Canonical MPN \d+$/.test(col) || /^MPN_\d+_DigiKey_(Valid|Canonical|PN)$/.test(col);
           const columnWidth = Math.max(180, Math.min(400, displayName.length * 10 + 40));
           
@@ -4022,7 +4031,7 @@ const EnhancedDataEditor = () => {
             {mpnValidating && (
               <Box sx={{ mt: 2, px: 4 }}>
                 <Typography variant="body2" sx={{ color: 'rgba(255,255,255,0.9)', mb: 1 }}>
-                  Validating MPNs with Digi-Key and Mouser. This can take a few minutes...
+                  Validating MPNs with Digi-Key, Mouser, and Element14. This can take a few minutes...
                 </Typography>
                 <LinearProgress
                   variant="indeterminate"
