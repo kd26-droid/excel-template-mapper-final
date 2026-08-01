@@ -160,9 +160,15 @@ const buildTokens = (isDark) => {
 
     /* ── header ────────────────────────────────────────────────────────── */
     header: {
-      background: a ? 'rgba(13, 17, 26, 0.88)' : 'rgba(255, 255, 255, 0.95)',
-      capsule:    a ? 'rgba(0, 0, 0, 0.4)' : 'rgba(241, 245, 249, 0.9)',
-      topLine:    'linear-gradient(90deg, transparent 0%, rgba(35, 131, 226, 0.8) 30%, rgba(6, 182, 212, 0.9) 50%, rgba(35, 131, 226, 0.8) 70%, transparent 100%)',
+      background: a ? 'rgba(11, 16, 26, 0.65)' : 'rgba(255, 255, 255, 0.75)',
+      capsule: a
+        ? 'linear-gradient(135deg, rgba(255, 255, 255, 0.07) 0%, rgba(255, 255, 255, 0.03) 100%)'
+        : 'linear-gradient(135deg, rgba(255, 255, 255, 0.85) 0%, rgba(248, 250, 252, 0.65) 100%)',
+      capsuleBorder: a ? 'rgba(255, 255, 255, 0.12)' : 'rgba(226, 232, 240, 0.8)',
+      capsuleShadow: a
+        ? '0 8px 32px 0 rgba(0, 0, 0, 0.37), inset 0 1px 1px 0 rgba(255, 255, 255, 0.15)'
+        : '0 4px 20px 0 rgba(15, 23, 42, 0.06), inset 0 1px 1px 0 rgba(255, 255, 255, 0.9)',
+      topLine: 'linear-gradient(90deg, transparent 0%, rgba(35, 131, 226, 0.8) 30%, rgba(6, 182, 212, 0.9) 50%, rgba(35, 131, 226, 0.8) 70%, transparent 100%)',
     },
 
     /* ── light / dark toggle ───────────────────────────────────────────── */

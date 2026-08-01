@@ -34,10 +34,12 @@ import {
   Typography,
 } from '@mui/material';
 import CloudUploadIcon from '@mui/icons-material/CloudUpload';
+import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
+import DescriptionOutlinedIcon from '@mui/icons-material/DescriptionOutlined';
 import DownloadIcon from '@mui/icons-material/Download';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
-import RestartAltIcon from '@mui/icons-material/RestartAlt';
+import { useThemeContext } from '../utils/ThemeContext';
 
 const ROLE_FIELDS = [
   { key: 'cpn', label: 'CPN / customer part number' },
@@ -1049,32 +1051,66 @@ const prepareMultipleSheets = (currentWorkbook, sheetNames) => {
   };
 };
 
-const SourcePreview = ({ headers, rows }) => (
-  <TableContainer sx={{ mt: 1, maxHeight: 320, border: '1px solid #e1e6ec' }}>
-    <Table stickyHeader size="small">
-      <TableHead>
-        <TableRow>
-          {headers.slice(0, 12).map((header) => (
-            <TableCell key={header} sx={{ fontWeight: 800, bgcolor: '#f8fafc' }}>{header}</TableCell>
-          ))}
-        </TableRow>
-      </TableHead>
-      <TableBody>
-        {rows.map((row, index) => (
-          <TableRow key={`source-${index}`}>
+const SourcePreview = ({ headers, rows }) => {
+  const { isDarkMode, tokens: t } = useThemeContext();
+  return (
+    <TableContainer
+      sx={{
+        mt: 1,
+        maxHeight: 300,
+        borderRadius: '8px',
+        border: `1px solid ${isDarkMode ? 'rgba(125, 154, 205, 0.22)' : 'rgba(203, 213, 225, 0.9)'}`,
+        backgroundColor: isDarkMode ? 'rgba(8, 13, 24, 0.78)' : '#ffffff'
+      }}
+    >
+      <Table stickyHeader size="small">
+        <TableHead>
+          <TableRow>
             {headers.slice(0, 12).map((header) => (
-              <TableCell key={header} sx={{ maxWidth: 220, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {row[header]}
+              <TableCell
+                key={header}
+                sx={{
+                  fontWeight: 740,
+                  fontSize: 12.5,
+                  bgcolor: isDarkMode ? 'rgba(24, 35, 56, 0.96)' : '#f8fafc',
+                  color: t.text.heading,
+                  py: 1.05
+                }}
+              >
+                {header}
               </TableCell>
             ))}
           </TableRow>
-        ))}
-      </TableBody>
-    </Table>
-  </TableContainer>
-);
+        </TableHead>
+        <TableBody>
+          {rows.map((row, index) => (
+            <TableRow key={`source-${index}`}>
+              {headers.slice(0, 12).map((header) => (
+                <TableCell
+                  key={header}
+                  sx={{
+                    maxWidth: 220,
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    fontSize: 12.5,
+                    py: 0.85,
+                    color: t.text.primary
+                  }}
+                >
+                  {row[header]}
+                </TableCell>
+              ))}
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </TableContainer>
+  );
+};
 
 const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenceOnlyChange }) => {
+  const { isDarkMode, tokens: t } = useThemeContext();
   const columns = [
     { key: 'sourceRow', label: 'Source row', editable: false, width: 86 },
     { key: 'parentKey', label: 'Parent / group', editable: true, width: 190 },
@@ -1135,10 +1171,10 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
 
   return (
     <>
-    <Paper elevation={0} sx={{ mt: 1.5, p: 1.2, border: '1px solid #e1e6ec', bgcolor: '#fbfcfd' }}>
+    <Paper elevation={0} sx={{ mt: 1.5, p: 1.2 }}>
       <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1}>
         <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap">
-          <Typography sx={{ fontSize: 13, fontWeight: 800 }}>Sheet view</Typography>
+          <Typography sx={{ fontSize: 13, fontWeight: 740, color: t.text.heading }}>Sheet view</Typography>
           <Chip size="small" label={`${filteredRows.length} of ${rows.length} rows`} />
           {lowConfidenceOnly && (
             <Chip
@@ -1177,13 +1213,13 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
         </Stack>
       </Stack>
     </Paper>
-    <TableContainer sx={{ mt: 1, maxHeight: 520, border: '1px solid #e1e6ec' }}>
+    <TableContainer sx={{ mt: 1, maxHeight: 520, borderRadius: '8px', border: `1px solid ${isDarkMode ? 'rgba(125, 154, 205, 0.22)' : 'rgba(203, 213, 225, 0.9)'}` }}>
       <Table stickyHeader size="small">
         <TableHead>
           <TableRow>
-            <TableCell sx={{ fontWeight: 800, bgcolor: '#f8fafc', width: 56 }}>Actions</TableCell>
+            <TableCell sx={{ fontWeight: 740, fontSize: 12.5, bgcolor: isDarkMode ? 'rgba(24, 35, 56, 0.96)' : '#f8fafc', color: t.text.heading, width: 56 }}>Actions</TableCell>
             {visibleColumns.map((column) => (
-              <TableCell key={column.key} sx={{ fontWeight: 800, bgcolor: '#f8fafc', minWidth: column.width }}>
+              <TableCell key={column.key} sx={{ fontWeight: 740, fontSize: 12.5, bgcolor: isDarkMode ? 'rgba(24, 35, 56, 0.96)' : '#f8fafc', color: t.text.heading, minWidth: column.width }}>
                 {column.label}
               </TableCell>
             ))}
@@ -1193,7 +1229,7 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
           {rows.length === 0 ? (
             <TableRow>
               <TableCell colSpan={visibleColumns.length + 1}>
-                <Typography sx={{ py: 3, textAlign: 'center', color: '#66717f' }}>
+                <Typography sx={{ py: 3, textAlign: 'center', color: t.text.secondary }}>
                   Run normalization to see parsed MPNs, manufacturers, alternates, levels, and confidence.
                 </Typography>
               </TableCell>
@@ -1201,13 +1237,13 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
           ) : filteredRows.length === 0 ? (
             <TableRow>
               <TableCell colSpan={visibleColumns.length + 1}>
-                <Typography sx={{ py: 3, textAlign: 'center', color: '#66717f' }}>
+                <Typography sx={{ py: 3, textAlign: 'center', color: t.text.secondary }}>
                   No rows match the current filter.
                 </Typography>
               </TableCell>
             </TableRow>
           ) : filteredRows.slice(0, 250).map(({ row, originalIndex }) => (
-            <TableRow key={`${row.sourceRow}-${row.relation}-${originalIndex}`} sx={{ bgcolor: row.confidence < 70 ? '#fff8e5' : 'inherit' }}>
+            <TableRow key={`${row.sourceRow}-${row.relation}-${originalIndex}`} sx={{ bgcolor: row.confidence < 70 ? t.state.warningBg : 'inherit' }}>
               <TableCell>
                 <IconButton size="small" color="error" onClick={() => handleDeleteRow(originalIndex)}>
                   <DeleteOutlineIcon fontSize="small" />
@@ -1230,8 +1266,8 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
                         py: 0.55,
                         font: 'inherit',
                         '&:focus': {
-                          bgcolor: '#fff',
-                          borderColor: '#1976d2',
+                          bgcolor: t.surface.input,
+                          borderColor: t.color.primary,
                           outline: 'none',
                         },
                       }}
@@ -1248,8 +1284,8 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
         </TableBody>
       </Table>
       {rows.length > 250 && (
-        <Box sx={{ p: 1, bgcolor: '#f8fafc', borderTop: '1px solid #e1e6ec' }}>
-          <Typography sx={{ fontSize: 12, color: '#66717f' }}>Showing first 250 rows for prototype performance.</Typography>
+        <Box sx={{ p: 1, bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.58)' : '#f8fafc', borderTop: `1px solid ${isDarkMode ? 'rgba(125, 154, 205, 0.18)' : 'rgba(226, 232, 240, 0.9)'}` }}>
+          <Typography sx={{ fontSize: 12, color: t.text.secondary }}>Showing first 250 rows for prototype performance.</Typography>
         </Box>
       )}
     </TableContainer>
@@ -1280,6 +1316,7 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
 };
 
 const BomNormalizer = () => {
+  const { isDarkMode, tokens: t } = useThemeContext();
   const [workbook, setWorkbook] = useState(null);
   const [fileName, setFileName] = useState('');
   const [sheetName, setSheetName] = useState('');
@@ -1309,6 +1346,7 @@ const BomNormalizer = () => {
   const [normalizationSummary, setNormalizationSummary] = useState(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [lowConfidenceOnly, setLowConfidenceOnly] = useState(false);
+  const [isUploadDragging, setIsUploadDragging] = useState(false);
   const [error, setError] = useState('');
 
   const headers = useMemo(
@@ -1418,8 +1456,7 @@ const BomNormalizer = () => {
     setError('');
   }, []);
 
-  const handleFileChange = useCallback(async (event) => {
-    const file = event.target.files?.[0];
+  const handleWorkbookFile = useCallback(async (file) => {
     if (!file) return;
 
     try {
@@ -1432,9 +1469,24 @@ const BomNormalizer = () => {
       setError(err.message || 'Unable to read workbook.');
     } finally {
       setBusy(false);
-      event.target.value = '';
+      setIsUploadDragging(false);
     }
   }, [handleWorkbookLoaded]);
+
+  const handleFileChange = useCallback(async (event) => {
+    const file = event.target.files?.[0];
+    try {
+      await handleWorkbookFile(file);
+    } finally {
+      event.target.value = '';
+    }
+  }, [handleWorkbookFile]);
+
+  const handleUploadDrop = useCallback((event) => {
+    event.preventDefault();
+    const file = event.dataTransfer.files?.[0];
+    handleWorkbookFile(file);
+  }, [handleWorkbookFile]);
 
   const handleSheetChange = useCallback((nextSheetName) => {
     if (!workbook) return;
@@ -1616,29 +1668,158 @@ const BomNormalizer = () => {
     ));
   }, [dataRows, delimiterTouched, roles]);
 
+  const pageSx = {
+    minHeight: 'calc(100vh - 68px)',
+    bgcolor: 'transparent',
+    color: t.text.primary,
+    px: { xs: 2, lg: 4 },
+    py: { xs: 2.5, lg: 3 },
+    '& .MuiPaper-root': {
+      borderRadius: '8px',
+      border: `1px solid ${t.border.default}`,
+      background: isDarkMode
+        ? 'linear-gradient(145deg, rgba(16, 24, 39, 0.86) 0%, rgba(8, 13, 24, 0.9) 100%)'
+        : 'rgba(255, 255, 255, 0.88)',
+      color: t.text.primary,
+      boxShadow: isDarkMode
+        ? '0 24px 70px rgba(0,0,0,0.32), inset 0 1px 0 rgba(255,255,255,0.04)'
+        : '0 18px 50px rgba(15,23,42,0.08)',
+      backdropFilter: 'blur(18px)'
+    },
+    '& .MuiTypography-root': {
+      letterSpacing: 0
+    },
+    '& .MuiTypography-body2, & .MuiFormHelperText-root': {
+      color: t.text.secondary
+    },
+    '& .MuiStepLabel-label': {
+      color: `${t.text.secondary} !important`,
+      fontWeight: 650
+    },
+    '& .MuiStepIcon-root': {
+      color: isDarkMode ? 'rgba(148, 163, 184, 0.36)' : 'rgba(148, 163, 184, 0.55)'
+    },
+    '& .MuiStepIcon-root.Mui-active, & .MuiStepIcon-root.Mui-completed': {
+      color: t.color.primary
+    },
+    '& .MuiStepConnector-line': {
+      borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.2)' : 'rgba(148, 163, 184, 0.42)'
+    },
+    '& .MuiOutlinedInput-root, & .MuiInputBase-root': {
+      borderRadius: '8px',
+      color: t.text.primary,
+      backgroundColor: t.surface.controlSoft
+    },
+    '& .MuiOutlinedInput-notchedOutline': {
+      borderColor: t.border.default
+    },
+    '& .MuiInputLabel-root': {
+      color: t.text.secondary
+    },
+    '& .MuiChip-root': {
+      borderRadius: '999px',
+      bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : 'rgba(37, 99, 235, 0.08)',
+      color: isDarkMode ? '#bfdbfe' : '#1d4ed8',
+      border: `1px solid ${isDarkMode ? 'rgba(96, 165, 250, 0.2)' : 'rgba(37, 99, 235, 0.14)'}`
+    },
+    '& .MuiTableCell-root': {
+      color: t.text.primary,
+      borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.14)' : 'rgba(226, 232, 240, 0.9)'
+    },
+    '& .MuiTableHead-root .MuiTableCell-root': {
+      bgcolor: isDarkMode ? 'rgba(24, 35, 56, 0.96)' : '#f8fafc',
+      color: t.text.heading,
+      fontWeight: 750
+    },
+    '& .MuiTableBody-root .MuiTableRow-root:nth-of-type(even)': {
+      bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.48)' : 'rgba(248, 250, 252, 0.72)'
+    },
+    '& .MuiButton-root': {
+      borderRadius: '999px',
+      textTransform: 'none',
+      fontWeight: 720,
+      minHeight: 36,
+      px: 2
+    },
+    '& .MuiButton-contained': {
+      color: '#fff',
+      background: 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
+      boxShadow: '0 14px 28px -16px rgba(37, 99, 235, 0.9)'
+    },
+    '& .MuiButton-contained:hover': {
+      background: 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
+      boxShadow: '0 18px 34px -18px rgba(37, 99, 235, 0.95)'
+    },
+    '& .MuiButton-outlined': {
+      color: t.text.primary,
+      borderColor: t.border.default,
+      backgroundColor: t.surface.controlSoft
+    },
+    '& .MuiButton-outlined:hover': {
+      borderColor: t.border.hover,
+      backgroundColor: t.action.hover
+    }
+  };
+
+  const heroSx = {
+    mb: 2.5,
+    px: { xs: 0.25, md: 0.5 },
+    py: { xs: 0.5, md: 0.75 }
+  };
+
+  const primaryButtonSx = {
+    borderRadius: '999px',
+    px: 2.25,
+    minHeight: 38,
+    textTransform: 'none',
+    fontWeight: 750,
+    color: '#fff',
+    background: 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
+    boxShadow: '0 14px 28px -16px rgba(37, 99, 235, 0.9)',
+    '&:hover': {
+      background: 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
+      boxShadow: '0 18px 34px -18px rgba(37, 99, 235, 0.95)'
+    }
+  };
+
+  const uploadPanelSx = {
+    border: `1.5px dashed ${isUploadDragging ? t.color.primary : (isDarkMode ? 'rgba(37, 99, 235, 0.72)' : 'rgba(37, 99, 235, 0.58)')}`,
+    borderRadius: '16px',
+    minHeight: 280,
+    p: { xs: 3.5, md: 4 },
+    textAlign: 'center',
+    cursor: 'pointer',
+    display: 'flex',
+    flexDirection: 'column',
+    justifyContent: 'center',
+    alignItems: 'center',
+    background: isDarkMode
+      ? (isUploadDragging
+        ? 'linear-gradient(145deg, rgba(21, 45, 82, 0.9) 0%, rgba(10, 18, 33, 0.94) 100%)'
+        : 'linear-gradient(145deg, rgba(15, 32, 61, 0.78) 0%, rgba(10, 18, 33, 0.88) 100%)')
+      : (isUploadDragging
+        ? 'linear-gradient(145deg, rgba(219, 234, 254, 0.98) 0%, rgba(255, 255, 255, 0.98) 100%)'
+        : 'linear-gradient(145deg, rgba(239, 246, 255, 0.9) 0%, rgba(255, 255, 255, 0.9) 100%)'),
+    transition: 'all 0.22s cubic-bezier(0.16, 1, 0.3, 1)',
+    '&:hover': {
+      borderColor: t.color.primary,
+      background: isDarkMode
+        ? 'linear-gradient(145deg, rgba(21, 45, 82, 0.84) 0%, rgba(10, 18, 33, 0.92) 100%)'
+        : 'linear-gradient(145deg, rgba(219, 234, 254, 0.95) 0%, rgba(255, 255, 255, 0.96) 100%)'
+    }
+  };
+
   return (
-    <Box sx={{ minHeight: '100vh', bgcolor: '#f4f6f8', color: '#1f2933' }}>
-      <Box sx={{ px: { xs: 2, lg: 4 }, py: 2.5, borderBottom: '1px solid #dce2e8', bgcolor: '#fff' }}>
+    <Box sx={pageSx}>
+      <Box sx={heroSx}>
         <Stack direction={{ xs: 'column', md: 'row' }} alignItems={{ xs: 'flex-start', md: 'center' }} justifyContent="space-between" gap={2}>
           <Box>
-            <Typography sx={{ fontSize: 24, fontWeight: 800 }}>BOM Normalizer</Typography>
-            <Typography sx={{ mt: 0.4, fontSize: 13, color: '#66717f' }}>
-              Prototype workbench for turning messy BOM sheets into a normalized MPN/MFR/alternate table.
-            </Typography>
+            <Typography sx={{ fontSize: { xs: 23, md: 26 }, fontWeight: 760, color: t.text.heading, lineHeight: 1.15 }}>BOM Normalizer</Typography>
           </Box>
-          <Stack direction="row" gap={1}>
-            <Button component="label" variant="contained" startIcon={<CloudUploadIcon />} disabled={busy}>
-              Upload workbook
-              <input hidden type="file" accept=".xlsx,.xls,.csv" onChange={handleFileChange} />
-            </Button>
-            <Button variant="outlined" startIcon={<RestartAltIcon />} onClick={handleReset}>
-              Reset
-            </Button>
-          </Stack>
         </Stack>
       </Box>
 
-      <Box sx={{ px: { xs: 2, lg: 4 }, py: 3 }}>
+      <Box>
         <Stepper activeStep={currentStep >= 4 ? 3 : currentStep} alternativeLabel sx={{ mb: 3 }}>
           {['Upload', 'Source', 'Configure', 'Results'].map((label) => (
             <Step key={label}>
@@ -1649,7 +1830,7 @@ const BomNormalizer = () => {
 
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
         {busy && (
-          <Paper elevation={0} sx={{ mb: 2, p: 1.5, border: '1px solid #dce2e8' }}>
+          <Paper elevation={0} sx={{ mb: 2, p: 1.5 }}>
             <Typography sx={{ mb: 1, fontSize: 13, fontWeight: 700 }}>
               Processing workbook{progress.total ? `: ${progress.processed}/${progress.total} rows, ${progress.outputRows} output rows, ${progress.skippedRows || 0} skipped` : '...'}
             </Typography>
@@ -1661,23 +1842,96 @@ const BomNormalizer = () => {
         )}
 
         {!workbook ? (
-          <Paper elevation={0} sx={{ border: '1px dashed #aeb7c2', bgcolor: '#fff', p: 5, textAlign: 'center' }}>
-            <CloudUploadIcon sx={{ fontSize: 44, color: '#5b6b7d' }} />
-            <Typography sx={{ mt: 1, fontSize: 20, fontWeight: 800 }}>Upload an Excel or CSV BOM</Typography>
-            <Typography sx={{ mt: 0.8, color: '#687684' }}>
-              The prototype will detect headers, suggest column roles, and let you test parser scenarios.
+          <Box>
+            <Typography variant="subtitle2" sx={{ color: t.text.heading, fontWeight: 740, fontSize: 14, mb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
+              BOM File
+              <Chip label="Required" size="small" sx={{ height: 20, fontSize: 11, fontWeight: 740 }} />
             </Typography>
-            <Button component="label" variant="contained" sx={{ mt: 2 }} startIcon={<CloudUploadIcon />} disabled={busy}>
-              Choose file
+            <Paper
+              component="label"
+              elevation={0}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setIsUploadDragging(true);
+              }}
+              onDragLeave={() => setIsUploadDragging(false)}
+              onDrop={handleUploadDrop}
+              sx={uploadPanelSx}
+            >
+              <Box sx={{ position: 'relative', width: 118, height: 84, mb: 2.2 }}>
+                <Box
+                  sx={{
+                    position: 'absolute',
+                    left: 4,
+                    top: 28,
+                    width: 42,
+                    height: 58,
+                    borderRadius: '10px',
+                    border: `2px solid ${isDarkMode ? 'rgba(148, 163, 184, 0.42)' : 'rgba(100, 116, 139, 0.42)'}`,
+                    transform: 'rotate(-14deg)',
+                    display: 'grid',
+                    placeItems: 'center',
+                    color: '#22c55e',
+                    backgroundColor: isDarkMode ? 'rgba(15, 23, 42, 0.7)' : 'rgba(255,255,255,0.75)'
+                  }}
+                >
+                  <CheckCircleOutlineIcon sx={{ fontSize: 24 }} />
+                </Box>
+                <Box
+                  sx={{
+                    position: 'absolute',
+                    left: 40,
+                    top: 2,
+                    width: 48,
+                    height: 66,
+                    borderRadius: '10px',
+                    border: `2px solid ${t.color.primary}`,
+                    display: 'grid',
+                    placeItems: 'center',
+                    color: t.color.primary,
+                    backgroundColor: isDarkMode ? 'rgba(15, 23, 42, 0.88)' : '#ffffff',
+                    boxShadow: '0 18px 46px rgba(37, 99, 235, 0.28)'
+                  }}
+                >
+                  <CloudUploadIcon sx={{ fontSize: 28 }} />
+                </Box>
+                <Box
+                  sx={{
+                    position: 'absolute',
+                    right: 0,
+                    top: 24,
+                    width: 44,
+                    height: 58,
+                    borderRadius: '10px',
+                    border: `2px solid ${isDarkMode ? 'rgba(148, 163, 184, 0.42)' : 'rgba(100, 116, 139, 0.42)'}`,
+                    transform: 'rotate(14deg)',
+                    display: 'grid',
+                    placeItems: 'center',
+                    color: t.text.secondary,
+                    backgroundColor: isDarkMode ? 'rgba(15, 23, 42, 0.7)' : 'rgba(255,255,255,0.75)'
+                  }}
+                >
+                  <DescriptionOutlinedIcon sx={{ fontSize: 26 }} />
+                </Box>
+              </Box>
+              <Typography sx={{ fontSize: 20, fontWeight: 760, color: t.text.heading }}>
+                Drag and drop or select files
+              </Typography>
+              <Typography sx={{ mt: 0.65, color: t.text.secondary, fontSize: 14 }}>
+                Supported files: .xlsx, .xls, .csv
+              </Typography>
+              <Button component="span" variant="contained" sx={{ mt: 2.4, ...primaryButtonSx }} disabled={busy}>
+                Select files
+              </Button>
               <input hidden type="file" accept=".xlsx,.xls,.csv" onChange={handleFileChange} />
-            </Button>
-          </Paper>
+            </Paper>
+          </Box>
         ) : (
-          <Stack spacing={2.5}>
+          <Stack spacing={2}>
             {currentStep === 1 && (
-              <Paper elevation={0} sx={{ p: 2.5, border: '1px solid #dce2e8' }}>
-                <Typography sx={{ fontSize: 18, fontWeight: 800 }}>Source setup</Typography>
-                <Typography sx={{ mt: 0.5, fontSize: 13, color: '#66717f', wordBreak: 'break-word' }}>{fileName}</Typography>
+              <Paper elevation={0} sx={{ p: 2 }}>
+                <Typography sx={{ fontSize: 16, fontWeight: 740, color: t.text.heading }}>Source setup</Typography>
+                <Typography sx={{ mt: 0.35, fontSize: 12.5, color: t.text.secondary, wordBreak: 'break-word' }}>{fileName}</Typography>
                 {workbook.SheetNames.length > 1 && (
                   <Alert severity="info" sx={{ mt: 1.5 }}>
                     This workbook has {workbook.SheetNames.length} sheets. Choose one sheet, selected sheets, or all sheets before continuing.
@@ -1762,7 +2016,7 @@ const BomNormalizer = () => {
                   <Chip size="small" label={sheetScope === 'single' ? `Header row ${headerRowIndex + 1}` : `${selectedSheetNames.length} sheets merged`} />
                 </Stack>
                 <Box sx={{ mt: 2 }}>
-                  <Typography sx={{ fontWeight: 800 }}>Source preview</Typography>
+                  <Typography sx={{ fontSize: 15, fontWeight: 740, color: t.text.heading }}>Source preview</Typography>
                   <SourcePreview headers={headers} rows={dataRows.slice(0, 8)} />
                 </Box>
                 <Stack direction="row" justifyContent="space-between" sx={{ mt: 2 }}>
@@ -1773,9 +2027,9 @@ const BomNormalizer = () => {
             )}
 
             {currentStep === 2 && (
-              <Paper elevation={0} sx={{ p: 2.5, border: '1px solid #dce2e8' }}>
-                <Typography sx={{ fontSize: 18, fontWeight: 800 }}>Configure source columns and parsing</Typography>
-                <Typography sx={{ mt: 0.5, fontSize: 13, color: '#66717f' }}>
+              <Paper elevation={0} sx={{ p: 2 }}>
+                <Typography sx={{ fontSize: 16, fontWeight: 740, color: t.text.heading }}>Configure source columns and parsing</Typography>
+                <Typography sx={{ mt: 0.35, fontSize: 12.5, color: t.text.secondary }}>
                   Pick the important columns first. Parser assumptions update automatically from those choices.
                 </Typography>
                 <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 1.2 }}>
@@ -1784,7 +2038,7 @@ const BomNormalizer = () => {
                   <Chip size="small" label={sheetScope === 'single' ? `Header row ${headerRowIndex + 1}` : `${selectedSheetNames.length} sheets merged`} />
                 </Stack>
                 <Box sx={{ mt: 2 }}>
-                  <Typography sx={{ fontWeight: 800 }}>Source preview</Typography>
+                  <Typography sx={{ fontSize: 15, fontWeight: 740, color: t.text.heading }}>Source preview</Typography>
                   <SourcePreview headers={headers} rows={dataRows.slice(0, 8)} />
                 </Box>
                 <Grid container spacing={1.5} sx={{ mt: 1 }}>
@@ -1806,9 +2060,9 @@ const BomNormalizer = () => {
                     </Grid>
                   ))}
                 </Grid>
-                <Paper elevation={0} sx={{ mt: 2, p: 1.5, bgcolor: '#f8fafc', border: '1px solid #e1e6ec' }}>
-                  <Typography sx={{ fontSize: 14, fontWeight: 800 }}>Detected setup</Typography>
-                  <Typography sx={{ mt: 0.4, fontSize: 13, color: '#536171' }}>{roleCombinationHint}</Typography>
+                <Paper elevation={0} sx={{ mt: 2, p: 1.5 }}>
+                  <Typography sx={{ fontSize: 13.5, fontWeight: 740, color: t.text.heading }}>Detected setup</Typography>
+                  <Typography sx={{ mt: 0.35, fontSize: 12.5, color: t.text.secondary }}>{roleCombinationHint}</Typography>
                   <Grid container spacing={1.5} sx={{ mt: 0.5 }}>
                     <Grid item xs={12} md={3}>
                       <FormControl fullWidth size="small">
@@ -1885,18 +2139,18 @@ const BomNormalizer = () => {
                       </Grid>
                     )}
                   </Grid>
-                  <Typography sx={{ mt: 1, fontSize: 13, color: '#536171', lineHeight: 1.45 }}>
+                  <Typography sx={{ mt: 1, fontSize: 12.5, color: t.text.secondary, lineHeight: 1.45 }}>
                     <strong>Detected rule:</strong> {selectedStructureOption?.description || '-'}
                     {' '}<strong>Delimiter:</strong> {delimiterLabel}.
                     {' '}Blank BOM levels will be treated as level 1.
                   </Typography>
                   {detectedCleanupOptions.length > 0 && (
                     <Box sx={{ mt: 1.5 }}>
-                      <Typography sx={{ fontSize: 13, fontWeight: 800 }}>Clean visual rows before parsing</Typography>
+                      <Typography sx={{ fontSize: 13, fontWeight: 740, color: t.text.heading }}>Clean visual rows before parsing</Typography>
                       <Grid container spacing={1} sx={{ mt: 0.25 }}>
                         {detectedCleanupOptions.map((option) => (
                           <Grid item xs={12} md={4} key={option.key}>
-                            <Paper elevation={0} sx={{ p: 1, border: '1px solid #e1e6ec', bgcolor: '#fff' }}>
+                            <Paper elevation={0} sx={{ p: 1 }}>
                               <Stack direction="row" alignItems="center" gap={0.5}>
                                 <Switch
                                   size="small"
@@ -1904,8 +2158,8 @@ const BomNormalizer = () => {
                                   onChange={(event) => setConfig((prev) => ({ ...prev, [option.key]: event.target.checked }))}
                                 />
                                 <Box>
-                                  <Typography sx={{ fontSize: 12.5, fontWeight: 800 }}>{option.label}</Typography>
-                                  <Typography sx={{ fontSize: 12, color: '#66717f' }}>
+                                  <Typography sx={{ fontSize: 12.5, fontWeight: 720, color: t.text.heading }}>{option.label}</Typography>
+                                  <Typography sx={{ fontSize: 12, color: t.text.secondary }}>
                                     {cleanupDetections[option.key]} detected
                                   </Typography>
                                 </Box>
@@ -1925,11 +2179,11 @@ const BomNormalizer = () => {
             )}
 
             {currentStep === 4 && (
-              <Paper elevation={0} sx={{ p: 2.5, border: '1px solid #dce2e8' }}>
+              <Paper elevation={0} sx={{ p: 2 }}>
                 <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
                   <Box>
-                    <Typography sx={{ fontSize: 18, fontWeight: 800 }}>Normalized editable sheet</Typography>
-                    <Typography sx={{ mt: 0.5, fontSize: 13, color: '#66717f' }}>
+                    <Typography sx={{ fontSize: 16, fontWeight: 740, color: t.text.heading }}>Normalized editable sheet</Typography>
+                    <Typography sx={{ mt: 0.35, fontSize: 12.5, color: t.text.secondary }}>
                       Review the parsed output, edit cells directly, or delete rows before downloading.
                     </Typography>
                   </Box>
@@ -1969,8 +2223,8 @@ const BomNormalizer = () => {
                     <LinearProgress variant="determinate" value={quality.average} sx={{ height: 7, borderRadius: 2 }} />
                   </Box>
                 )}
-                <Paper elevation={0} sx={{ mt: 1.5, p: 1.2, bgcolor: '#f8fafc', border: '1px solid #e1e6ec' }}>
-                  <Typography sx={{ fontSize: 13, fontWeight: 800 }}>Parser settings used</Typography>
+                <Paper elevation={0} sx={{ mt: 1.5, p: 1.2 }}>
+                  <Typography sx={{ fontSize: 13, fontWeight: 740, color: t.text.heading }}>Parser settings used</Typography>
                   <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 0.8 }}>
                     <Chip size="small" label={selectedStructureOption?.label || 'Parser: auto'} />
                     <Chip size="small" label={`Delimiter: ${delimiterLabel}`} />

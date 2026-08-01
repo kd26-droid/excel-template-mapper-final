@@ -17,7 +17,7 @@ function App() {
   const { tokens, isDarkMode } = useThemeContext();
   const [mousePos, setMousePos] = useState({ x: 50, y: 50 });
   const normalizedPath = location.pathname.replace(/\/+$/, '') || '/';
-  const isStandaloneRoute = ['/preview', '/bom-normalizer', '/bom-normaliser'].includes(normalizedPath);
+  const isStandaloneRoute = ['/preview'].includes(normalizedPath);
 
   useEffect(() => {
     const handleMouseMove = (event) => {
@@ -34,8 +34,6 @@ function App() {
     return (
       <Routes>
         <Route path="/preview" element={<BomPreview />} />
-        <Route path="/bom-normalizer" element={<BomNormalizer />} />
-        <Route path="/bom-normaliser" element={<BomNormalizer />} />
       </Routes>
     );
   }

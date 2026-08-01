@@ -73,6 +73,7 @@ import {
   FolderOpen as FolderOpenIcon,
   AccountTree as AccountTreeIcon,
   Search as SearchIcon,
+  FilterList as FilterListIcon,
   KeyboardArrowDown as KeyboardArrowDownIcon,
   MoreVert as MoreVertIcon,
   Build as BuildIcon,
@@ -158,6 +159,7 @@ const EnhancedDataEditor = () => {
   const [error, setError] = useState(null);
   const [rowData, setRowData] = useState([]);
   const [columnDefs, setColumnDefs] = useState([]);
+  const [rowSearchTerm, setRowSearchTerm] = useState('');
   const [columnWidths, setColumnWidths] = useState({});
   const [autoFitApplied, setAutoFitApplied] = useState(false);
   const resizingRef = useRef({ active: false, field: null, startX: 0, startWidth: 0 });
@@ -324,6 +326,8 @@ const EnhancedDataEditor = () => {
   // Toolbar dropdown menu anchors
   const [toolsMenuAnchor, setToolsMenuAnchor] = useState(null);
   const [mpnMenuAnchor, setMpnMenuAnchor] = useState(null);
+  const [rowFilterMenuAnchor, setRowFilterMenuAnchor] = useState(null);
+  const [rowFilterMode, setRowFilterMode] = useState('all');
   const [moreMenuAnchor, setMoreMenuAnchor] = useState(null);
 
   // Parser MPN validation state
@@ -3350,15 +3354,13 @@ const EnhancedDataEditor = () => {
   };
   const editorHeaderSx = {
     borderRadius: 0,
-    background: t.surface.elevatedGradient,
+    background: 'transparent',
     color: t.text.primary,
     position: 'sticky',
     top: 0,
     zIndex: 1000,
-    borderBottom: `1px solid ${t.border.default}`,
-    boxShadow: isDarkMode
-      ? '0 18px 45px -28px rgba(0,0,0,0.9)'
-      : '0 14px 34px -28px rgba(15,23,42,0.35)'
+    borderBottom: 'none',
+    boxShadow: 'none'
   };
   const iconButtonSx = {
     color: t.text.primary,
@@ -3444,13 +3446,46 @@ const EnhancedDataEditor = () => {
       <span className="fw-expand-label">{label}</span>
     </button>
   );
+  const tableTone = isDarkMode
+    ? {
+        panel: 'linear-gradient(180deg, rgba(13, 22, 38, 0.96) 0%, rgba(8, 15, 27, 0.98) 100%)',
+        scroll: 'rgba(7, 13, 24, 0.96)',
+        header: 'linear-gradient(180deg, rgba(24, 35, 56, 0.98) 0%, rgba(17, 27, 44, 0.98) 100%)',
+        headerText: '#f1f5f9',
+        rowEven: 'rgba(18, 27, 42, 0.92)',
+        rowOdd: 'rgba(8, 15, 27, 0.94)',
+        rowHover: 'rgba(37, 99, 235, 0.1)',
+        line: 'rgba(113, 138, 183, 0.14)',
+        rowLine: 'rgba(113, 138, 183, 0.08)',
+        outerLine: 'rgba(125, 154, 205, 0.2)',
+        footer: 'rgba(9, 16, 29, 0.82)',
+        footerBorder: 'rgba(113, 138, 183, 0.16)',
+        text: '#d6deeb'
+      }
+    : {
+        panel: t.table.background,
+        scroll: t.table.background,
+        header: t.table.header,
+        headerText: t.text.primary,
+        rowEven: t.table.rowExpanded,
+        rowOdd: t.table.background,
+        rowHover: t.table.hover,
+        line: t.table.line,
+        rowLine: t.table.rowLine,
+        outerLine: t.table.line,
+        footer: t.surface.elevatedSoft,
+        footerBorder: t.border.subtle,
+        text: t.text.table
+      };
   const gridPanelSx = {
     height: '100%',
     overflow: 'hidden',
     borderRadius: '8px',
-    border: `1px solid ${t.border.default}`,
-    background: t.table.background,
-    boxShadow: t.shadow.card
+    border: `1px solid ${tableTone.outerLine}`,
+    background: tableTone.panel,
+    boxShadow: isDarkMode
+      ? '0 24px 70px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.03)'
+      : t.shadow.card
   };
   const paginationBarSx = {
     display: 'flex',
@@ -3460,12 +3495,13 @@ const EnhancedDataEditor = () => {
     flexWrap: 'wrap',
     p: 1.5,
     borderRadius: '8px',
-    backgroundColor: t.surface.elevatedSoft,
-    border: `1px solid ${t.border.subtle}`
+    backgroundColor: tableTone.footer,
+    border: `1px solid ${tableTone.footerBorder}`,
+    color: t.text.secondary
   };
   const tableHeaderStyle = {
-    backgroundColor: t.table.header,
-    borderBottom: `1px solid ${t.border.strong}`
+    background: tableTone.header,
+    borderBottom: `1px solid ${tableTone.outerLine}`
   };
   const tableBaseStyle = {
     width: '100%',
@@ -3474,16 +3510,37 @@ const EnhancedDataEditor = () => {
     tableLayout: 'fixed',
     fontSize: '13px',
     fontFamily: '"Inter", "Roboto", "Helvetica", "Arial", sans-serif',
-    color: t.text.table
+    color: tableTone.text
   };
   const tableScrollStyle = {
     overflowX: 'auto',
     overflowY: 'auto',
-    maxHeight: 'calc(100vh - 288px)',
+    maxHeight: 'calc(100vh - 312px)',
     borderRadius: '8px',
-    border: `1px solid ${t.table.line}`,
-    backgroundColor: t.table.background
+    border: `1px solid ${tableTone.outerLine}`,
+    backgroundColor: tableTone.scroll
   };
+  const rowSearchQuery = rowSearchTerm.trim().toLowerCase();
+  const displayedRows = (rowData || [])
+    .map((row, rowIndex) => ({ row, rowIndex }))
+    .filter(({ row }) => {
+      if (!mpnFilterInvalidOnly && rowFilterMode !== 'invalid_mpn') return true;
+      const mv = row['MPN valid'];
+      return String(mv || '').toLowerCase() === 'no';
+    })
+    .filter(({ row }) => {
+      if (rowFilterMode !== 'unknown') return true;
+      return Object.values(row || {}).some(value =>
+        String(value ?? '').trim().toLowerCase() === 'unknown'
+      );
+    })
+    .filter(({ row }) => {
+      if (!rowSearchQuery) return true;
+      return Object.values(row || {}).some(value =>
+        String(value ?? '').toLowerCase().includes(rowSearchQuery)
+      );
+    });
+  const editorSubtitle = `${sessionId ? `Session ${sessionId}` : 'Active workbook'} - ${totalRows.toLocaleString()} rows`;
   return (
     <Box sx={editorPageSx}>
       <Box
@@ -3738,48 +3795,63 @@ const EnhancedDataEditor = () => {
       >
         <Container maxWidth={false} sx={{ px: { xs: 2, sm: 4 } }}>
           <Box sx={{ 
-            py: 2,
+            pt: { xs: 2.5, md: 3 },
+            pb: { xs: 1.25, md: 1.35 },
             display: 'flex', 
             flexDirection: 'column',
-            gap: 2
+            gap: 1.35
           }}>
             
-            {/* Top Row - Back Arrow, Center Title, and Primary Actions */}
+            {/* Top Row - Back Arrow, Title, and Primary Actions */}
             <Box sx={{ 
               display: 'flex',
               alignItems: 'center',
               justifyContent: 'space-between',
-              gap: 2,
-              position: 'relative'
+              gap: 2.5,
+              flexWrap: { xs: 'wrap', lg: 'nowrap' }
             }}>
               
-              {/* Left - Back Arrow */}
-              <Box sx={{ display: 'flex', alignItems: 'center', minWidth: 44, zIndex: 2 }}>
+              {/* Left - Back Arrow and Context */}
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, minWidth: 0, flex: '1 1 360px' }}>
                 <IconButton
                   onClick={handleBackToMapping}
                   sx={iconButtonSx}
+                  aria-label="Back to mapping"
                 >
                   <ArrowBackIcon />
                 </IconButton>
-              </Box>
-
-              {/* Center - Title */}
-              <Box sx={{
-                textAlign: 'center',
-                position: { xs: 'static', lg: 'absolute' },
-                left: { lg: '50%' },
-                transform: { lg: 'translateX(-50%)' },
-                width: { xs: 'auto', lg: 'min(420px, 34vw)' },
-                flex: { xs: 1, lg: 'none' },
-                px: 1
-              }}>
-                <Typography variant="h5" fontWeight="800" sx={{ lineHeight: 1.15, color: t.text.heading, fontSize: { xs: '1.35rem', md: '1.55rem' } }}>
-                  Enhanced Data Editor
-                </Typography>
+                <Box sx={{ minWidth: 0 }}>
+                  <Typography
+                    variant="h5"
+                    fontWeight={760}
+                    sx={{
+                      lineHeight: 1.15,
+                      color: t.text.heading,
+                      fontSize: { xs: '1.18rem', md: '1.38rem' },
+                      letterSpacing: 0
+                    }}
+                  >
+                    Enhanced Data Editor
+                  </Typography>
+                  <Typography
+                    variant="body2"
+                    sx={{
+                      mt: 0.45,
+                      color: t.text.secondary,
+                      fontSize: '0.82rem',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      maxWidth: { xs: '64vw', md: 520 }
+                    }}
+                  >
+                    {editorSubtitle}
+                  </Typography>
+                </Box>
               </Box>
 
               {/* Right - Primary Actions */}
-              <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', justifyContent: 'flex-end', flexWrap: 'wrap', minWidth: { lg: 360 }, zIndex: 2 }}>
+              <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', justifyContent: { xs: 'flex-start', lg: 'flex-end' }, flexWrap: 'wrap', flex: { xs: '1 1 100%', lg: '0 0 auto' } }}>
                 <HoverActionButton
                   label="Refresh"
                   icon={<RefreshIcon sx={{ fontSize: 18 }} />}
@@ -3806,6 +3878,7 @@ const EnhancedDataEditor = () => {
                 />
 
               {/* Auto-fit All */}
+              {false && (
               <Tooltip title="Auto-fit all columns to content" sx={{ display: 'none' }}>
                 <span>
                   <Button
@@ -3819,6 +3892,7 @@ const EnhancedDataEditor = () => {
                   </Button>
                 </span>
               </Tooltip>
+              )}
 
               <Button
                 size="small"
@@ -3846,40 +3920,38 @@ const EnhancedDataEditor = () => {
               </Box>
             </Box>
 
-            {/* Second Row - Secondary Tools */}
+            {/* Second Row - Secondary Tools and Search */}
             <Box sx={{
               display: 'flex',
-              gap: 1.5,
-              justifyContent: 'center',
+              gap: 1.25,
+              justifyContent: 'space-between',
               alignItems: 'center',
-              flexWrap: 'wrap'
+              flexWrap: 'wrap',
+              pt: 0.75
             }}>
               {/* "Manufacturer Match" button removed — it now lives inside
                   Tools ▸ Expand Alternates into Rows (the "two matching lists"
                   arrangement), alongside the other alternate shapes. */}
 
-              <Tooltip title="Auto-fit all columns to content">
-                <span>
-                  <Button
-                    size="small"
-                    onClick={handleAutoFitAll}
-                    disabled={syncStatus.inProgress}
-                    sx={outlinedActionSx}
-                    variant="outlined"
-                  >
-                    Auto-fit All
-                  </Button>
-                </span>
-              </Tooltip>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap', minWidth: 0 }}>
               <Button
                 size="small"
                 onClick={handleOpenCreateColumnDialog}
                 disabled={createColumnSaving || syncStatus.inProgress}
                 startIcon={<AutoAwesomeIcon sx={{ fontSize: 18 }} />}
+                sx={primaryActionSx}
+                variant="contained"
+              >
+                Create Column
+              </Button>
+              <Button
+                size="small"
+                onClick={handleAutoFitAll}
+                disabled={syncStatus.inProgress}
                 sx={outlinedActionSx}
                 variant="outlined"
               >
-                Create Column
+                Auto-fit All
               </Button>
               <Tooltip title="Rebuild template columns">
                 <span>
@@ -3905,6 +3977,7 @@ const EnhancedDataEditor = () => {
               >
                 Tools
               </Button>
+              </Box>
               <Menu
                 anchorEl={toolsMenuAnchor}
                 open={Boolean(toolsMenuAnchor)}
@@ -3970,6 +4043,71 @@ const EnhancedDataEditor = () => {
                   ? (mpnProgress && mpnProgress.total ? `MPN ${mpnProgress.done}/${mpnProgress.total}` : 'MPN...')
                   : 'MPN'}
               </Button>
+              <Button
+                onClick={(e) => setRowFilterMenuAnchor(e.currentTarget)}
+                variant="outlined"
+                endIcon={<KeyboardArrowDownIcon />}
+                startIcon={<FilterListIcon />}
+                sx={{
+                  ...outlinedActionSx,
+                  ml: { xs: 0, md: 'auto' },
+                  borderColor: (rowFilterMode !== 'all' || mpnFilterInvalidOnly) ? t.color.primary : t.border.default,
+                  backgroundColor: (rowFilterMode !== 'all' || mpnFilterInvalidOnly) ? t.state.infoBg : t.surface.controlSoft,
+                  '&:hover': {
+                    backgroundColor: (rowFilterMode !== 'all' || mpnFilterInvalidOnly) ? t.state.infoBg : t.action.hover,
+                    borderColor: (rowFilterMode !== 'all' || mpnFilterInvalidOnly) ? t.color.primary : t.border.hover
+                  }
+                }}
+              >
+                Filter
+              </Button>
+              <Menu
+                anchorEl={rowFilterMenuAnchor}
+                open={Boolean(rowFilterMenuAnchor)}
+                onClose={() => setRowFilterMenuAnchor(null)}
+                PaperProps={{ sx: { borderRadius: '8px', mt: 1, minWidth: 210, border: `1px solid ${t.border.default}`, boxShadow: t.shadow.card } }}
+              >
+                <MenuItem onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('all'); setMpnFilterInvalidOnly(false); }}>
+                  <ListItemIcon>{rowFilterMode === 'all' && !mpnFilterInvalidOnly ? <CheckIcon sx={{ color: t.color.primary }} /> : null}</ListItemIcon>
+                  <ListItemText>All rows</ListItemText>
+                </MenuItem>
+                <MenuItem onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('unknown'); setMpnFilterInvalidOnly(false); }}>
+                  <ListItemIcon>{rowFilterMode === 'unknown' ? <CheckIcon sx={{ color: t.color.warningText }} /> : <ErrorIcon sx={{ color: t.color.warningText }} />}</ListItemIcon>
+                  <ListItemText>Unknown values</ListItemText>
+                </MenuItem>
+                <MenuItem
+                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('invalid_mpn'); setMpnFilterInvalidOnly(false); }}
+                  disabled={!hasMpnValidationColumns}
+                >
+                  <ListItemIcon>{(rowFilterMode === 'invalid_mpn' || mpnFilterInvalidOnly) ? <CheckIcon sx={{ color: t.color.danger }} /> : <VerifiedUserIcon sx={{ color: t.color.danger }} />}</ListItemIcon>
+                  <ListItemText>Invalid MPN rows</ListItemText>
+                </MenuItem>
+              </Menu>
+              <TextField
+                value={rowSearchTerm}
+                onChange={(e) => setRowSearchTerm(e.target.value)}
+                placeholder="Search rows..."
+                size="small"
+                sx={{
+                  width: { xs: '100%', sm: 260, lg: 320 },
+                  '& .MuiOutlinedInput-root': {
+                    minHeight: 38,
+                    borderRadius: '999px',
+                    color: t.text.primary,
+                    backgroundColor: t.surface.controlSoft,
+                    '& fieldset': { borderColor: t.border.default },
+                    '&:hover fieldset': { borderColor: t.border.hover },
+                    '&.Mui-focused fieldset': { borderColor: t.color.primary }
+                  },
+                  '& .MuiInputBase-input': {
+                    py: 0.9,
+                    fontSize: '0.88rem'
+                  }
+                }}
+                InputProps={{
+                  startAdornment: <SearchIcon sx={{ mr: 1, fontSize: 18, color: t.text.secondary }} />
+                }}
+              />
               <Menu
                 anchorEl={mpnMenuAnchor}
                 open={Boolean(mpnMenuAnchor)}
@@ -4259,7 +4397,7 @@ const EnhancedDataEditor = () => {
       )}
 
       {/* Main Grid Container */}
-      <Box sx={{ flexGrow: 1, p: 2, overflow: 'hidden' }}>
+      <Box sx={{ flexGrow: 1, px: 2, pt: 1.5, pb: 2, overflow: 'hidden' }}>
         <Paper 
           elevation={0} 
           sx={gridPanelSx}
@@ -4330,10 +4468,10 @@ const EnhancedDataEditor = () => {
                           padding: '12px 14px',
                           textAlign: 'left',
                           fontWeight: 700,
-                          color: t.text.primary,
-                          borderRight: `1px solid ${t.table.line}`,
-                          borderBottom: `1px solid ${t.table.line}`,
-                          backgroundColor: t.table.header,
+                          color: tableTone.headerText,
+                          borderRight: `1px solid ${tableTone.line}`,
+                          borderBottom: `1px solid ${tableTone.outerLine}`,
+                          background: tableTone.header,
                           position: 'sticky',
                           top: 0,
                           zIndex: 3,
@@ -4403,23 +4541,21 @@ const EnhancedDataEditor = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {rowData
-                    .filter(row => {
-                      if (!mpnFilterInvalidOnly) return true;
-                      const mv = row['MPN valid'];
-                      return String(mv || '').toLowerCase() === 'no';
-                    })
-                    .map((row, realIndex) => {
+                  {displayedRows
+                    .map(({ row, rowIndex }, displayIndex) => {
                     // Neutral zebra striping; no quality-based highlighting
-                    const rowBackgroundColor = realIndex % 2 === 0
-                      ? t.table.rowExpanded
-                      : t.table.background;
+                    const rowBackgroundColor = displayIndex % 2 === 0
+                      ? tableTone.rowEven
+                      : tableTone.rowOdd;
 
                     return (
-                      <tr key={realIndex} style={{
+                      <tr key={rowIndex} style={{
                         backgroundColor: rowBackgroundColor,
-                        height: `${rowHeight}px`
-                      }}>
+                        height: `${rowHeight}px`,
+                        transition: 'background-color 120ms ease'
+                      }}
+                      onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = tableTone.rowHover; }}
+                      onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = rowBackgroundColor; }}>
                         {getVisibleColumnDefs().map((col, colIndex) => {
                           const raw = row[col.field];
                           const cellValue = raw == null ? '' : String(raw);
@@ -4427,12 +4563,12 @@ const EnhancedDataEditor = () => {
                           const isInvalidMpn = (mpnColumn && col.field === mpnColumn && String(row['MPN valid'] || '').toLowerCase() === 'no');
                           const isDupHighlighted = !!(dupHighlight && col.field === dupHighlight.field && cellValue.trim() && dupHighlight.values.has(cellValue.trim()));
                           return (
-                            <td key={`${col.field}-${realIndex}`} style={{
+                            <td key={`${col.field}-${rowIndex}`} style={{
                               padding: '10px 14px',
-                              borderRight: isDupHighlighted ? '2px solid #f59e0b' : `1px solid ${t.table.rowLine}`,
-                              borderBottom: isDupHighlighted ? '2px solid #f59e0b' : `1px solid ${t.table.rowLine}`,
+                              borderRight: isDupHighlighted ? '2px solid #f59e0b' : `1px solid ${tableTone.rowLine}`,
+                              borderBottom: isDupHighlighted ? '2px solid #f59e0b' : `1px solid ${tableTone.rowLine}`,
                               backgroundColor: isDupHighlighted ? t.state.warningBg : (isUnknown ? t.state.dangerBg : 'inherit'),
-                              color: isDupHighlighted ? t.color.warningText : (isInvalidMpn ? t.color.danger : (isUnknown ? t.color.danger : t.text.table)),
+                              color: isDupHighlighted ? t.color.warningText : (isInvalidMpn ? t.color.danger : (isUnknown ? t.color.danger : tableTone.text)),
                               fontWeight: (isDupHighlighted || isInvalidMpn) ? '700' : (isUnknown ? '500' : 'normal'),
                               width: `${columnWidths[col.field] || (col.field === '__row_number__' ? 80 : 180)}px`
                             }}>
@@ -4442,7 +4578,7 @@ const EnhancedDataEditor = () => {
                                 <input
                                   type="text"
                                   value={cellValue}
-                                  onChange={(e) => handleCellEdit(realIndex, colIndex, e.target.value)}
+                                  onChange={(e) => handleCellEdit(rowIndex, colIndex, e.target.value)}
                                   style={{
                                     border: 'none',
                                     background: 'transparent',
