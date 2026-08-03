@@ -16,6 +16,7 @@ import {
   InputLabel,
   LinearProgress,
   ListItemText,
+  Menu,
   MenuItem,
   Paper,
   Select,
@@ -33,10 +34,8 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
-import CloudUploadIcon from '@mui/icons-material/CloudUpload';
-import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
-import DescriptionOutlinedIcon from '@mui/icons-material/DescriptionOutlined';
 import DownloadIcon from '@mui/icons-material/Download';
+import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import { useThemeContext } from '../utils/ThemeContext';
@@ -190,6 +189,67 @@ const MANUFACTURER_SUFFIX_WORDS = new Set([
   'TECHNOLOGIES',
   'TECHNOLOGY',
 ]);
+
+const DropzoneFileStackIcon = ({ color = '#3b82f6', glowColor = '#22c55e', selected = false, isHovered = false, isDarkMode = true }) => {
+  const cardBg = isDarkMode ? '#0f172a' : '#ffffff';
+  const backCardBg = isDarkMode ? '#1e293b' : '#f8fafc';
+  const strokeColor = isDarkMode ? 'rgba(255,255,255,0.28)' : 'rgba(15,23,42,0.16)';
+  const cornerFill = isDarkMode ? 'rgba(255,255,255,0.12)' : 'rgba(37,99,235,0.08)';
+  const lineMuted = isDarkMode ? '#94a3b8' : '#64748b';
+
+  return (
+    <Box sx={{ position: 'relative', width: 130, height: 86, mx: 'auto', mb: 1.5, display: 'flex', justifyContent: 'center', alignItems: 'center', overflow: 'visible' }}>
+      <Box
+        sx={{
+          position: 'absolute',
+          width: isHovered ? 110 : 84,
+          height: isHovered ? 78 : 56,
+          borderRadius: '50%',
+          background: selected
+            ? `radial-gradient(circle, ${color}dd 0%, transparent 70%)`
+            : `radial-gradient(circle, ${glowColor}bb 0%, transparent 70%)`,
+          filter: isHovered ? 'blur(22px)' : 'blur(15px)',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          zIndex: 0,
+          transition: 'all 0.45s cubic-bezier(0.34, 1.56, 0.64, 1)'
+        }}
+      />
+      <svg width="120" height="84" viewBox="0 0 120 84" fill="none" xmlns="http://www.w3.org/2000/svg" style={{ position: 'relative', zIndex: 1, overflow: 'visible' }}>
+        <g style={{
+          transform: isHovered ? 'translate(12px, 16px) rotate(-16deg)' : 'translate(40px, 10px) rotate(0deg)',
+          opacity: isHovered ? 0.95 : 0.4,
+          transition: 'all 0.45s cubic-bezier(0.34, 1.56, 0.64, 1)',
+          transformOrigin: 'bottom center'
+        }}>
+          <rect x="0" y="0" width="34" height="46" rx="6" fill={backCardBg} stroke={strokeColor} strokeWidth="1.5" />
+          <path d="M10 22L15 27L24 18" stroke="#4ade80" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+        </g>
+        <g style={{
+          transform: isHovered ? 'translate(68px, 18px) rotate(16deg)' : 'translate(40px, 10px) rotate(0deg)',
+          opacity: isHovered ? 0.95 : 0.4,
+          transition: 'all 0.45s cubic-bezier(0.34, 1.56, 0.64, 1)',
+          transformOrigin: 'bottom center'
+        }}>
+          <rect x="0" y="0" width="34" height="46" rx="6" fill={backCardBg} stroke={strokeColor} strokeWidth="1.5" />
+          <line x1="8" y1="14" x2="26" y2="14" stroke={lineMuted} strokeWidth="2" strokeLinecap="round" />
+          <line x1="8" y1="22" x2="22" y2="22" stroke={lineMuted} strokeWidth="2" strokeLinecap="round" />
+          <line x1="8" y1="30" x2="18" y2="30" stroke={lineMuted} strokeWidth="2" strokeLinecap="round" />
+        </g>
+        <g style={{
+          transform: isHovered ? 'translate(40px, 4px)' : 'translate(40px, 10px)',
+          transition: 'all 0.45s cubic-bezier(0.34, 1.56, 0.64, 1)'
+        }}>
+          <rect x="0" y="0" width="40" height="54" rx="7" fill={cardBg} stroke={selected || isHovered ? color : strokeColor} strokeWidth="2" />
+          <path d="M28 0V12H40" fill={cornerFill} stroke={strokeColor} strokeWidth="1.5" />
+          <circle cx="20" cy="30" r="11" fill={isDarkMode ? 'rgba(37, 99, 235, 0.25)' : 'rgba(37, 99, 235, 0.15)'} stroke={color} strokeWidth="1.5" />
+          <path d="M20 35V25M20 25L16 29M20 25L24 29" stroke={isDarkMode ? '#93c5fd' : '#1d4ed8'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        </g>
+      </svg>
+    </Box>
+  );
+};
 
 const MPN_NOISE_RE = /(%|ppm\b|ohm\b|pf\b|nf\b|uf\b|\u00b5f\b|mh\b|mm\b|hz\b|khz\b|mhz\b|vac\b|vdc\b|watt\b|rohs\b|case\b|smd\b|esd\b)/i;
 
@@ -1347,7 +1407,10 @@ const BomNormalizer = () => {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [lowConfidenceOnly, setLowConfidenceOnly] = useState(false);
   const [isUploadDragging, setIsUploadDragging] = useState(false);
+  const [isUploadHovered, setIsUploadHovered] = useState(false);
+  const [downloadMenuAnchor, setDownloadMenuAnchor] = useState(null);
   const [error, setError] = useState('');
+  const downloadMenuOpen = Boolean(downloadMenuAnchor);
 
   const headers = useMemo(
     () => preparedHeaders.length ? preparedHeaders : makeUniqueHeaders(sheetRows[headerRowIndex] || []),
@@ -1694,7 +1757,10 @@ const BomNormalizer = () => {
     },
     '& .MuiStepLabel-label': {
       color: `${t.text.secondary} !important`,
-      fontWeight: 650
+      fontWeight: '500 !important'
+    },
+    '& .MuiStepLabel-label.Mui-active, & .MuiStepLabel-label.Mui-completed': {
+      fontWeight: '500 !important'
     },
     '& .MuiStepIcon-root': {
       color: isDarkMode ? 'rgba(148, 163, 184, 0.36)' : 'rgba(148, 163, 184, 0.55)'
@@ -1737,7 +1803,7 @@ const BomNormalizer = () => {
     '& .MuiButton-root': {
       borderRadius: '999px',
       textTransform: 'none',
-      fontWeight: 720,
+      fontWeight: 650,
       minHeight: 36,
       px: 2
     },
@@ -1783,10 +1849,14 @@ const BomNormalizer = () => {
   };
 
   const uploadPanelSx = {
-    border: `1.5px dashed ${isUploadDragging ? t.color.primary : (isDarkMode ? 'rgba(37, 99, 235, 0.72)' : 'rgba(37, 99, 235, 0.58)')}`,
+    maxWidth: 860,
+    mx: 'auto',
+    width: '100%',
+    border: `1.5px dashed ${(isUploadDragging || isUploadHovered) ? t.color.primary : (isDarkMode ? 'rgba(37, 99, 235, 0.72)' : 'rgba(37, 99, 235, 0.58)')}`,
     borderRadius: '16px',
-    minHeight: 280,
-    p: { xs: 3.5, md: 4 },
+    minHeight: 340,
+    py: 4.5,
+    px: 2.5,
     textAlign: 'center',
     cursor: 'pointer',
     display: 'flex',
@@ -1794,10 +1864,10 @@ const BomNormalizer = () => {
     justifyContent: 'center',
     alignItems: 'center',
     background: isDarkMode
-      ? (isUploadDragging
+      ? ((isUploadDragging || isUploadHovered)
         ? 'linear-gradient(145deg, rgba(21, 45, 82, 0.9) 0%, rgba(10, 18, 33, 0.94) 100%)'
         : 'linear-gradient(145deg, rgba(15, 32, 61, 0.78) 0%, rgba(10, 18, 33, 0.88) 100%)')
-      : (isUploadDragging
+      : ((isUploadDragging || isUploadHovered)
         ? 'linear-gradient(145deg, rgba(219, 234, 254, 0.98) 0%, rgba(255, 255, 255, 0.98) 100%)'
         : 'linear-gradient(145deg, rgba(239, 246, 255, 0.9) 0%, rgba(255, 255, 255, 0.9) 100%)'),
     transition: 'all 0.22s cubic-bezier(0.16, 1, 0.3, 1)',
@@ -1809,9 +1879,29 @@ const BomNormalizer = () => {
     }
   };
 
+  const uploadStageSx = {
+    maxWidth: 860,
+    mx: 'auto',
+    width: '100%'
+  };
+
+  const workflowStageSx = {
+    maxWidth: 1120,
+    mx: 'auto',
+    width: 'min(1120px, calc(100vw - 96px))',
+    '@media (max-width: 900px)': {
+      width: '100%'
+    }
+  };
+
+  const workflowPanelSx = {
+    width: '100%',
+    minHeight: { xs: 520, md: 'calc(100vh - 230px)' }
+  };
+
   return (
     <Box sx={pageSx}>
-      <Box sx={heroSx}>
+      <Box sx={{ ...heroSx, ...workflowStageSx }}>
         <Stack direction={{ xs: 'column', md: 'row' }} alignItems={{ xs: 'flex-start', md: 'center' }} justifyContent="space-between" gap={2}>
           <Box>
             <Typography sx={{ fontSize: { xs: 23, md: 26 }, fontWeight: 760, color: t.text.heading, lineHeight: 1.15 }}>BOM Normalizer</Typography>
@@ -1819,8 +1909,8 @@ const BomNormalizer = () => {
         </Stack>
       </Box>
 
-      <Box>
-        <Stepper activeStep={currentStep >= 4 ? 3 : currentStep} alternativeLabel sx={{ mb: 3 }}>
+      <Box sx={{ width: '100%' }}>
+        <Stepper activeStep={currentStep >= 4 ? 3 : currentStep} alternativeLabel sx={{ ...workflowStageSx, mb: 3 }}>
           {['Upload', 'Source', 'Configure', 'Results'].map((label) => (
             <Step key={label}>
               <StepLabel>{label}</StepLabel>
@@ -1842,11 +1932,7 @@ const BomNormalizer = () => {
         )}
 
         {!workbook ? (
-          <Box>
-            <Typography variant="subtitle2" sx={{ color: t.text.heading, fontWeight: 740, fontSize: 14, mb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
-              BOM File
-              <Chip label="Required" size="small" sx={{ height: 20, fontSize: 11, fontWeight: 740 }} />
-            </Typography>
+          <Box sx={uploadStageSx}>
             <Paper
               component="label"
               elevation={0}
@@ -1856,80 +1942,48 @@ const BomNormalizer = () => {
               }}
               onDragLeave={() => setIsUploadDragging(false)}
               onDrop={handleUploadDrop}
+              onMouseEnter={() => setIsUploadHovered(true)}
+              onMouseLeave={() => setIsUploadHovered(false)}
               sx={uploadPanelSx}
             >
-              <Box sx={{ position: 'relative', width: 118, height: 84, mb: 2.2 }}>
-                <Box
-                  sx={{
-                    position: 'absolute',
-                    left: 4,
-                    top: 28,
-                    width: 42,
-                    height: 58,
-                    borderRadius: '10px',
-                    border: `2px solid ${isDarkMode ? 'rgba(148, 163, 184, 0.42)' : 'rgba(100, 116, 139, 0.42)'}`,
-                    transform: 'rotate(-14deg)',
-                    display: 'grid',
-                    placeItems: 'center',
-                    color: '#22c55e',
-                    backgroundColor: isDarkMode ? 'rgba(15, 23, 42, 0.7)' : 'rgba(255,255,255,0.75)'
-                  }}
-                >
-                  <CheckCircleOutlineIcon sx={{ fontSize: 24 }} />
-                </Box>
-                <Box
-                  sx={{
-                    position: 'absolute',
-                    left: 40,
-                    top: 2,
-                    width: 48,
-                    height: 66,
-                    borderRadius: '10px',
-                    border: `2px solid ${t.color.primary}`,
-                    display: 'grid',
-                    placeItems: 'center',
-                    color: t.color.primary,
-                    backgroundColor: isDarkMode ? 'rgba(15, 23, 42, 0.88)' : '#ffffff',
-                    boxShadow: '0 18px 46px rgba(37, 99, 235, 0.28)'
-                  }}
-                >
-                  <CloudUploadIcon sx={{ fontSize: 28 }} />
-                </Box>
-                <Box
-                  sx={{
-                    position: 'absolute',
-                    right: 0,
-                    top: 24,
-                    width: 44,
-                    height: 58,
-                    borderRadius: '10px',
-                    border: `2px solid ${isDarkMode ? 'rgba(148, 163, 184, 0.42)' : 'rgba(100, 116, 139, 0.42)'}`,
-                    transform: 'rotate(14deg)',
-                    display: 'grid',
-                    placeItems: 'center',
-                    color: t.text.secondary,
-                    backgroundColor: isDarkMode ? 'rgba(15, 23, 42, 0.7)' : 'rgba(255,255,255,0.75)'
-                  }}
-                >
-                  <DescriptionOutlinedIcon sx={{ fontSize: 26 }} />
-                </Box>
-              </Box>
+              <DropzoneFileStackIcon
+                color="#3b82f6"
+                glowColor="#22c55e"
+                selected={false}
+                isHovered={isUploadDragging || isUploadHovered}
+                isDarkMode={isDarkMode}
+              />
               <Typography sx={{ fontSize: 20, fontWeight: 760, color: t.text.heading }}>
                 Drag and drop or select files
               </Typography>
               <Typography sx={{ mt: 0.65, color: t.text.secondary, fontSize: 14 }}>
                 Supported files: .xlsx, .xls, .csv
               </Typography>
-              <Button component="span" variant="contained" sx={{ mt: 2.4, ...primaryButtonSx }} disabled={busy}>
+              <Button
+                component="span"
+                variant="contained"
+                size="small"
+                sx={{
+                  mt: 2,
+                  ...primaryButtonSx,
+                  fontWeight: 800,
+                  px: 2.5,
+                  py: 0.7,
+                  fontSize: '0.85rem',
+                  minHeight: 36
+                }}
+                disabled={busy}
+              >
                 Select files
               </Button>
               <input hidden type="file" accept=".xlsx,.xls,.csv" onChange={handleFileChange} />
             </Paper>
           </Box>
         ) : (
+          <Box sx={workflowStageSx}>
           <Stack spacing={2}>
             {currentStep === 1 && (
-              <Paper elevation={0} sx={{ p: 2 }}>
+              <Paper elevation={0} sx={{ ...workflowPanelSx, p: 2 }}>
                 <Typography sx={{ fontSize: 16, fontWeight: 740, color: t.text.heading }}>Source setup</Typography>
                 <Typography sx={{ mt: 0.35, fontSize: 12.5, color: t.text.secondary, wordBreak: 'break-word' }}>{fileName}</Typography>
                 {workbook.SheetNames.length > 1 && (
@@ -2027,7 +2081,7 @@ const BomNormalizer = () => {
             )}
 
             {currentStep === 2 && (
-              <Paper elevation={0} sx={{ p: 2 }}>
+              <Paper elevation={0} sx={{ ...workflowPanelSx, p: 2 }}>
                 <Typography sx={{ fontSize: 16, fontWeight: 740, color: t.text.heading }}>Configure source columns and parsing</Typography>
                 <Typography sx={{ mt: 0.35, fontSize: 12.5, color: t.text.secondary }}>
                   Pick the important columns first. Parser assumptions update automatically from those choices.
@@ -2179,7 +2233,7 @@ const BomNormalizer = () => {
             )}
 
             {currentStep === 4 && (
-              <Paper elevation={0} sx={{ p: 2 }}>
+              <Paper elevation={0} sx={{ ...workflowPanelSx, p: 2 }}>
                 <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
                   <Box>
                     <Typography sx={{ fontSize: 16, fontWeight: 740, color: t.text.heading }}>Normalized editable sheet</Typography>
@@ -2192,30 +2246,40 @@ const BomNormalizer = () => {
                       size="small"
                       variant="contained"
                       startIcon={<DownloadIcon />}
+                      endIcon={<KeyboardArrowDownIcon />}
                       disabled={!normalizedRows.length}
-                      onClick={() => downloadRowsAsXlsx(normalizedRows)}
+                      onClick={(event) => setDownloadMenuAnchor(event.currentTarget)}
+                      aria-controls={downloadMenuOpen ? 'normalizer-download-menu' : undefined}
+                      aria-haspopup="true"
+                      aria-expanded={downloadMenuOpen ? 'true' : undefined}
                     >
-                      Download XLSX
+                      Download
                     </Button>
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      startIcon={<DownloadIcon />}
-                      disabled={!normalizedRows.length}
-                      onClick={() => downloadRowsAsCsv(normalizedRows)}
+                    <Menu
+                      id="normalizer-download-menu"
+                      anchorEl={downloadMenuAnchor}
+                      open={downloadMenuOpen}
+                      onClose={() => setDownloadMenuAnchor(null)}
+                      anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+                      transformOrigin={{ vertical: 'top', horizontal: 'right' }}
                     >
-                      Download CSV
-                    </Button>
-                    <Chip size="small" color={normalizedRows.length ? 'primary' : 'default'} label={`${normalizedRows.length} output rows`} />
-                    <Chip size="small" label={`${quality.average}% avg confidence`} />
-                    <Chip
-                      size="small"
-                      clickable={quality.lowConfidence > 0}
-                      color={lowConfidenceOnly ? 'warning' : quality.lowConfidence ? 'warning' : 'success'}
-                      variant={lowConfidenceOnly ? 'filled' : 'outlined'}
-                      label={`${quality.lowConfidence} low confidence`}
-                      onClick={() => quality.lowConfidence > 0 && setLowConfidenceOnly((prev) => !prev)}
-                    />
+                      <MenuItem
+                        onClick={() => {
+                          setDownloadMenuAnchor(null);
+                          downloadRowsAsXlsx(normalizedRows);
+                        }}
+                      >
+                        Download XLSX
+                      </MenuItem>
+                      <MenuItem
+                        onClick={() => {
+                          setDownloadMenuAnchor(null);
+                          downloadRowsAsCsv(normalizedRows);
+                        }}
+                      >
+                        Download CSV
+                      </MenuItem>
+                    </Menu>
                   </Stack>
                 </Stack>
                 {normalizedRows.length > 0 && (
@@ -2246,6 +2310,7 @@ const BomNormalizer = () => {
               </Paper>
             )}
           </Stack>
+          </Box>
         )}
       </Box>
       <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)} maxWidth="sm" fullWidth>

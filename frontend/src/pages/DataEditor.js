@@ -2217,7 +2217,11 @@ const DataEditor = () => {
       `}</style>
 
       {/* Global Loader Overlay */}
-      <LoaderOverlay visible={globalLoading} label="Processing..." />
+      <LoaderOverlay
+        visible={globalLoading}
+        title="Processing changes..."
+        message="Saving the latest updates for review."
+      />
     </Box>
   );
 };
