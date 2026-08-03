@@ -519,6 +519,10 @@ const UploadFiles = () => {
   const [sheetJoinSaveLoading, setSheetJoinSaveLoading] = useState(false);
   const [sheetJoinDuplicateDialogOpen, setSheetJoinDuplicateDialogOpen] = useState(false);
   const [pendingSheetJoinDuplicate, setPendingSheetJoinDuplicate] = useState(null);
+  const isSheetJoinPreviewStage = sheetJoinStage === 'preview';
+  const sheetJoinDialogWidth = isSheetJoinPreviewStage
+    ? 'min(1240px, calc(100vw - 32px))'
+    : 'min(920px, calc(100vw - 32px))';
 
   const navigate = useNavigate();
   const location = useLocation();
@@ -2929,12 +2933,12 @@ const UploadFiles = () => {
       <Dialog
         open={sheetJoinDialogOpen}
         onClose={handleCloseSheetJoinSetup}
-        maxWidth="xl"
+        maxWidth={isSheetJoinPreviewStage ? 'xl' : 'md'}
         fullWidth
         PaperProps={{
           sx: {
             ...dialogPaperSx,
-            width: 'min(1240px, calc(100vw - 32px))',
+            width: sheetJoinDialogWidth,
           }
         }}
       >
@@ -3866,7 +3870,11 @@ const UploadFiles = () => {
       </Dialog>
 
       {/* Global Loader Overlay */}
-      <LoaderOverlay visible={globalLoading} label="Processing..." />
+      <LoaderOverlay
+        visible={globalLoading}
+        title="Processing upload..."
+        message="Reading the file and preparing the next step."
+      />
     </Box>
   );
 };

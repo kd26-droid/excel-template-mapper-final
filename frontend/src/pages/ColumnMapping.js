@@ -481,14 +481,17 @@ const clampNumber = (value, min, max) => Math.min(max, Math.max(min, value));
 
 const getFlowLayout = () => {
   const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 1366;
+  const hasLeftStatsRail = viewportWidth >= 1280;
+  const leftStatsRailWidth = hasLeftStatsRail ? 340 : 0;
+  const availableWidth = Math.max(720, viewportWidth - leftStatsRailWidth);
   const defaultZoom = 0.9;
   const nodeWidth = 280;
   const nodeHeight = 86;
   const nodeSpacing = 34;
   const startY = 52;
-  const laneGap = clampNumber(Math.round(viewportWidth * 0.34), 460, 760);
+  const laneGap = clampNumber(Math.round(availableWidth * 0.24), 360, 560);
   const workflowWidth = nodeWidth * 2 + laneGap;
-  const sourceX = Math.max(32, Math.round(((viewportWidth / defaultZoom) - workflowWidth) / 2));
+  const sourceX = Math.max(32, Math.round(((availableWidth / defaultZoom) - workflowWidth) / 2));
 
   return {
     defaultZoom,
@@ -4350,13 +4353,11 @@ export default function ColumnMapping() {
   // Loading state
   if (loading) {
     return (
-      <div className="w-full h-screen bg-gradient-to-br from-slate-50 to-blue-50 flex items-center justify-center">
-        <div className="text-center bg-white rounded-2xl shadow-2xl p-10">
-          <div className="w-16 h-16 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-6"></div>
-          <h2 className="text-xl font-bold text-gray-800 mb-2">Loading Mapping Data</h2>
-          <p className="text-gray-600">Analyzing your columns for intelligent mapping...</p>
-        </div>
-      </div>
+      <LoaderOverlay
+        visible
+        title="Loading Mapping Data"
+        message="Analyzing your columns for intelligent mapping..."
+      />
     );
   }
 
@@ -4380,8 +4381,6 @@ export default function ColumnMapping() {
 
   const flowLayout = getFlowLayout();
   const flowRowHeight = flowLayout.nodeHeight + flowLayout.nodeSpacing;
-  const sourceHeaderCenter = Math.round((flowLayout.sourceX + flowLayout.nodeWidth / 2) * flowLayout.defaultZoom);
-  const targetHeaderCenter = Math.round((flowLayout.targetX + flowLayout.nodeWidth / 2) * flowLayout.defaultZoom);
   const appHeaderOffset = '54px';
   const topActionBase = 'h-10 rounded-full border text-sm font-bold shadow-sm transition-colors disabled:pointer-events-none';
   const sidebarButtonBase = 'w-full h-11 px-4 rounded-full flex items-center gap-3 text-sm font-medium transition-all disabled:opacity-50';
@@ -4512,6 +4511,49 @@ export default function ColumnMapping() {
               </button>
             </Tooltip>
 
+            <Tooltip title="Automatically match the strongest column pairs" arrow placement="bottom">
+              <button
+                type="button"
+                onClick={handleAutoMap}
+                disabled={isAutoMapping || isRebuildingRef.current}
+                className={`h-10 px-4 rounded-full border text-sm font-medium flex items-center gap-2 transition-all disabled:pointer-events-none disabled:opacity-60 ${
+                  isAutoMapping
+                    ? isDarkMode
+                      ? 'bg-slate-900 border-slate-700 text-slate-400'
+                      : 'bg-slate-100 border-slate-200 text-slate-500'
+                    : isDarkMode
+                      ? 'bg-blue-600 hover:bg-blue-500 border-blue-500 text-white shadow-sm shadow-blue-950/30'
+                      : 'bg-blue-600 hover:bg-blue-700 border-blue-600 text-white shadow-sm shadow-blue-500/25'
+                }`}
+              >
+                {isAutoMapping ? (
+                  <div className="w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <Brain size={15} />
+                )}
+                <span>{isAutoMapping ? 'Mapping...' : 'Auto Map'}</span>
+              </button>
+            </Tooltip>
+
+            <Tooltip title="Apply a saved mapping template" arrow placement="bottom">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowTemplateDialog(true);
+                  loadAvailableTemplates();
+                }}
+                disabled={applyingTemplate || templatesLoading}
+                className={`h-10 px-4 rounded-full border text-sm font-medium flex items-center gap-2 transition-all disabled:pointer-events-none disabled:opacity-60 ${
+                  isDarkMode
+                    ? 'bg-slate-900 border-slate-700 text-slate-200 hover:bg-slate-800 hover:border-slate-600'
+                    : 'bg-white border-blue-100 text-slate-700 hover:bg-blue-50 hover:border-blue-200 hover:text-blue-700'
+                }`}
+              >
+                <Library size={15} />
+                <span>{applyingTemplate || templatesLoading ? 'Loading...' : 'Apply Template'}</span>
+              </button>
+            </Tooltip>
+
             <Tooltip title="Review mapped data" arrow placement="bottom">
               <button
                 onClick={handleReview}
@@ -4639,41 +4681,6 @@ export default function ColumnMapping() {
                 <div className="space-y-2">
                   <button
                     type="button"
-                    onClick={handleAutoMap}
-                    disabled={isAutoMapping || isRebuildingRef.current}
-                    className={`${sidebarButtonBase} disabled:opacity-60 ${
-                      isAutoMapping
-                        ? isDarkMode ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-500'
-                        : 'bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md shadow-blue-500/25 hover:from-blue-700 hover:to-indigo-700'
-                    }`}
-                  >
-                    {isAutoMapping ? (
-                      <div className="w-4 h-4 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
-                    ) : (
-                      <Brain size={18} />
-                    )}
-                    <span>{isAutoMapping ? 'Mapping...' : 'Auto Map'}</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowTemplateDialog(true);
-                      loadAvailableTemplates();
-                    }}
-                    disabled={applyingTemplate || templatesLoading}
-                    className={`${sidebarButtonBase} border ${
-                      isDarkMode
-                        ? 'border-slate-700 hover:bg-slate-800 text-slate-200'
-                        : 'border-slate-200 hover:bg-slate-100 text-slate-700'
-                    }`}
-                  >
-                    <Library size={18} />
-                    <span>{applyingTemplate || templatesLoading ? 'Loading...' : 'Apply Template'}</span>
-                  </button>
-
-                  <button
-                    type="button"
                     onClick={() => {
                       setSideMenuOpen(false);
                       setRulesOpen(true);
@@ -4718,169 +4725,6 @@ export default function ColumnMapping() {
                     <Trash2 size={17} />
                     <span>Clear All</span>
                   </button>
-                </div>
-              </section>
-
-              <section className={sidePanelClass}>
-                <h3 className={`${sideSectionLabelClass} mb-4`}>
-                  Template Column Counts
-                </h3>
-                <div className="space-y-3.5">
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-sm font-medium">Tags</span>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => updateColumnCounts({
-                          tags_count: Math.max(1, columnCounts.tags_count - 1),
-                          spec_pairs_count: columnCounts.spec_pairs_count || 3,
-                          customer_id_pairs_count: columnCounts.customer_id_pairs_count || 1
-                        })}
-                        className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
-                          isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
-                        }`}
-                        disabled={columnCounts.tags_count <= 1 || columnCountLoading}
-                      >
-                        -
-                      </button>
-                      <span className="w-7 text-center text-sm font-semibold">{columnCounts.tags_count}</span>
-                      <button
-                        type="button"
-                        onClick={() => updateColumnCounts({
-                          tags_count: columnCounts.tags_count + 1,
-                          spec_pairs_count: columnCounts.spec_pairs_count || 3,
-                          customer_id_pairs_count: columnCounts.customer_id_pairs_count || 1
-                        })}
-                        className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
-                          isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
-                        }`}
-                        disabled={columnCountLoading}
-                      >
-                        +
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-sm font-medium">Spec Pairs</span>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => updateColumnCounts({
-                          tags_count: columnCounts.tags_count || 3,
-                          spec_pairs_count: Math.max(1, columnCounts.spec_pairs_count - 1),
-                          customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
-                        })}
-                        className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
-                          isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
-                        }`}
-                        disabled={columnCounts.spec_pairs_count <= 1 || columnCountLoading}
-                      >
-                        -
-                      </button>
-                      <span className="w-7 text-center text-sm font-semibold">{columnCounts.spec_pairs_count}</span>
-                      <button
-                        type="button"
-                        onClick={() => updateColumnCounts({
-                          tags_count: columnCounts.tags_count || 3,
-                          spec_pairs_count: columnCounts.spec_pairs_count + 1,
-                          customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
-                        })}
-                        className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
-                          isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
-                        }`}
-                        disabled={columnCountLoading}
-                      >
-                        +
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="text-sm font-medium">Customer ID Pairs</span>
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => updateColumnCounts({
-                          tags_count: columnCounts.tags_count || 3,
-                          spec_pairs_count: columnCounts.spec_pairs_count || 0,
-                          customer_id_pairs_count: Math.max(1, columnCounts.customer_id_pairs_count - 1)
-                        })}
-                        className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
-                          isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
-                        }`}
-                        disabled={columnCounts.customer_id_pairs_count <= 1 || columnCountLoading}
-                      >
-                        -
-                      </button>
-                      <span className="w-7 text-center text-sm font-semibold">{columnCounts.customer_id_pairs_count}</span>
-                      <button
-                        type="button"
-                        onClick={() => updateColumnCounts({
-                          tags_count: columnCounts.tags_count || 3,
-                          spec_pairs_count: columnCounts.spec_pairs_count || 0,
-                          customer_id_pairs_count: columnCounts.customer_id_pairs_count + 1
-                        })}
-                        className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
-                          isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
-                        }`}
-                        disabled={columnCountLoading}
-                      >
-                        +
-                      </button>
-                    </div>
-                  </div>
-                </div>
-                <div className={`mt-4 pt-3 border-t flex items-center justify-between text-sm ${
-                  isDarkMode ? 'border-slate-800 text-slate-400' : 'border-slate-200 text-slate-500'
-                }`}>
-                  <span>Total columns</span>
-                  <span className={`font-semibold ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>{templateHeaders.length}</span>
-                </div>
-              </section>
-
-              <section className={sidePanelClass}>
-                <h3 className={`${sideSectionLabelClass} mb-4`}>
-                  Mapping Statistics
-                </h3>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className={`rounded-lg border p-3 ${
-                    isDarkMode ? 'bg-blue-950/30 border-blue-800/40 text-blue-200' : 'bg-blue-50 border-blue-200 text-blue-800'
-                  }`}>
-                    <div className="text-xl font-semibold">{mappingStats.total}</div>
-                    <div className="text-xs font-medium mt-1">Total Mapped</div>
-                  </div>
-                  <div className={`rounded-lg border p-3 ${
-                    isDarkMode ? 'bg-emerald-950/30 border-emerald-800/40 text-emerald-200' : 'bg-emerald-50 border-emerald-200 text-emerald-800'
-                  }`}>
-                    <div className="text-xl font-semibold">{mappingStats.template}</div>
-                    <div className="text-xs font-medium mt-1">From Template</div>
-                  </div>
-                  <div className={`rounded-lg border p-3 ${
-                    isDarkMode ? 'bg-teal-950/30 border-teal-800/40 text-teal-200' : 'bg-teal-50 border-teal-200 text-teal-800'
-                  }`}>
-                    <div className="text-xl font-semibold">{mappingStats.ai}</div>
-                    <div className="text-xs font-medium mt-1">AI Suggested</div>
-                  </div>
-                  <div className={`rounded-lg border p-3 ${
-                    isDarkMode ? 'bg-purple-950/30 border-purple-800/40 text-purple-200' : 'bg-purple-50 border-purple-200 text-purple-800'
-                  }`}>
-                    <div className="text-xl font-semibold">{mappingStats.manual}</div>
-                    <div className="text-xs font-medium mt-1">Manual</div>
-                  </div>
-                </div>
-                <div className={`mt-4 rounded-full h-2 overflow-hidden ${isDarkMode ? 'bg-slate-800' : 'bg-slate-200'}`}>
-                  <div
-                    className="h-2 rounded-full bg-gradient-to-r from-blue-600 to-indigo-600 transition-all duration-300"
-                    style={{
-                      width: `${templateHeaders.length > 0 ? Math.min(100, (mappingStats.total / templateHeaders.length) * 100) : 0}%`
-                    }}
-                  />
-                </div>
-                <div className={`mt-2 text-xs font-semibold ${
-                  isDarkMode ? 'text-slate-400' : 'text-slate-500'
-                }`}>
-                  {mappingStats.total} of {templateHeaders.length} columns mapped
                 </div>
               </section>
             </div>
@@ -5108,6 +4952,174 @@ export default function ColumnMapping() {
       <div className={`flex-1 relative overflow-hidden flex transition-colors ${
         isDarkMode ? 'bg-[#070d18]' : 'bg-slate-50'
       }`} data-layout-tick={flowLayoutTick}>
+        <aside className={`hidden xl:flex w-[340px] shrink-0 border-r flex-col overflow-y-auto px-5 py-5 space-y-5 ${
+          isDarkMode
+            ? 'bg-[#0b101b]/92 border-slate-800 text-white'
+            : 'bg-white/88 border-slate-200 text-slate-900'
+        }`}>
+          <section className={sidePanelClass}>
+            <h3 className={`${sideSectionLabelClass} mb-4`}>
+              Template Column Counts
+            </h3>
+            <div className="space-y-3.5">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-sm font-medium">Tags</span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => updateColumnCounts({
+                      tags_count: Math.max(1, columnCounts.tags_count - 1),
+                      spec_pairs_count: columnCounts.spec_pairs_count || 3,
+                      customer_id_pairs_count: columnCounts.customer_id_pairs_count || 1
+                    })}
+                    className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
+                      isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
+                    }`}
+                    disabled={columnCounts.tags_count <= 1 || columnCountLoading}
+                  >
+                    -
+                  </button>
+                  <span className="w-7 text-center text-sm font-semibold">{columnCounts.tags_count}</span>
+                  <button
+                    type="button"
+                    onClick={() => updateColumnCounts({
+                      tags_count: columnCounts.tags_count + 1,
+                      spec_pairs_count: columnCounts.spec_pairs_count || 3,
+                      customer_id_pairs_count: columnCounts.customer_id_pairs_count || 1
+                    })}
+                    className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
+                      isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
+                    }`}
+                    disabled={columnCountLoading}
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-sm font-medium">Spec Pairs</span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => updateColumnCounts({
+                      tags_count: columnCounts.tags_count || 3,
+                      spec_pairs_count: Math.max(1, columnCounts.spec_pairs_count - 1),
+                      customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
+                    })}
+                    className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
+                      isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
+                    }`}
+                    disabled={columnCounts.spec_pairs_count <= 1 || columnCountLoading}
+                  >
+                    -
+                  </button>
+                  <span className="w-7 text-center text-sm font-semibold">{columnCounts.spec_pairs_count}</span>
+                  <button
+                    type="button"
+                    onClick={() => updateColumnCounts({
+                      tags_count: columnCounts.tags_count || 3,
+                      spec_pairs_count: columnCounts.spec_pairs_count + 1,
+                      customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
+                    })}
+                    className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
+                      isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
+                    }`}
+                    disabled={columnCountLoading}
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-sm font-medium">Customer ID Pairs</span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => updateColumnCounts({
+                      tags_count: columnCounts.tags_count || 3,
+                      spec_pairs_count: columnCounts.spec_pairs_count || 0,
+                      customer_id_pairs_count: Math.max(1, columnCounts.customer_id_pairs_count - 1)
+                    })}
+                    className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
+                      isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
+                    }`}
+                    disabled={columnCounts.customer_id_pairs_count <= 1 || columnCountLoading}
+                  >
+                    -
+                  </button>
+                  <span className="w-7 text-center text-sm font-semibold">{columnCounts.customer_id_pairs_count}</span>
+                  <button
+                    type="button"
+                    onClick={() => updateColumnCounts({
+                      tags_count: columnCounts.tags_count || 3,
+                      spec_pairs_count: columnCounts.spec_pairs_count || 0,
+                      customer_id_pairs_count: columnCounts.customer_id_pairs_count + 1
+                    })}
+                    className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
+                      isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
+                    }`}
+                    disabled={columnCountLoading}
+                  >
+                    +
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div className={`mt-4 pt-3 border-t flex items-center justify-between text-sm ${
+              isDarkMode ? 'border-slate-800 text-slate-400' : 'border-slate-200 text-slate-500'
+            }`}>
+              <span>Total columns</span>
+              <span className={`font-semibold ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>{templateHeaders.length}</span>
+            </div>
+          </section>
+
+          <section className={sidePanelClass}>
+            <h3 className={`${sideSectionLabelClass} mb-4`}>
+              Mapping Statistics
+            </h3>
+            <div className="grid grid-cols-2 gap-3">
+              <div className={`rounded-lg border p-3 ${
+                isDarkMode ? 'bg-blue-950/30 border-blue-800/40 text-blue-200' : 'bg-blue-50 border-blue-200 text-blue-800'
+              }`}>
+                <div className="text-xl font-semibold">{mappingStats.total}</div>
+                <div className="text-xs font-medium mt-1">Total Mapped</div>
+              </div>
+              <div className={`rounded-lg border p-3 ${
+                isDarkMode ? 'bg-emerald-950/30 border-emerald-800/40 text-emerald-200' : 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              }`}>
+                <div className="text-xl font-semibold">{mappingStats.template}</div>
+                <div className="text-xs font-medium mt-1">From Template</div>
+              </div>
+              <div className={`rounded-lg border p-3 ${
+                isDarkMode ? 'bg-teal-950/30 border-teal-800/40 text-teal-200' : 'bg-teal-50 border-teal-200 text-teal-800'
+              }`}>
+                <div className="text-xl font-semibold">{mappingStats.ai}</div>
+                <div className="text-xs font-medium mt-1">AI Suggested</div>
+              </div>
+              <div className={`rounded-lg border p-3 ${
+                isDarkMode ? 'bg-purple-950/30 border-purple-800/40 text-purple-200' : 'bg-purple-50 border-purple-200 text-purple-800'
+              }`}>
+                <div className="text-xl font-semibold">{mappingStats.manual}</div>
+                <div className="text-xs font-medium mt-1">Manual</div>
+              </div>
+            </div>
+            <div className={`mt-4 rounded-full h-2 overflow-hidden ${isDarkMode ? 'bg-slate-800' : 'bg-slate-200'}`}>
+              <div
+                className="h-2 rounded-full bg-gradient-to-r from-blue-600 to-indigo-600 transition-all duration-300"
+                style={{
+                  width: `${templateHeaders.length > 0 ? Math.min(100, (mappingStats.total / templateHeaders.length) * 100) : 0}%`
+                }}
+              />
+            </div>
+            <div className={`mt-2 text-xs font-semibold ${
+              isDarkMode ? 'text-slate-400' : 'text-slate-500'
+            }`}>
+              {mappingStats.total} of {templateHeaders.length} columns mapped
+            </div>
+          </section>
+        </aside>
         
         {/* Main mapping area */}
         <div className="flex-1 relative">
@@ -5117,14 +5129,9 @@ export default function ColumnMapping() {
               ? 'bg-[#070d18]/94'
               : 'bg-white/88'
           }`}>
-            <div
-              className="relative h-full w-full"
-            >
-              <div
-                className="absolute top-1/2 min-w-0 -translate-x-1/2 -translate-y-1/2"
-                style={{ left: `${sourceHeaderCenter}px` }}
-              >
-                <div className={`rounded-xl border px-4 py-2.5 font-extrabold flex items-center gap-2.5 whitespace-nowrap transition-colors ${
+            <div className="h-full w-full grid grid-cols-2 items-center gap-8 px-10">
+              <div className="flex justify-center min-w-0">
+                <div className={`max-w-full rounded-xl border px-4 py-2.5 font-extrabold flex items-center gap-2.5 whitespace-nowrap transition-colors ${
                   isDarkMode
                     ? 'bg-blue-500/10 border-blue-400/25 text-blue-100 shadow-[0_14px_30px_-24px_rgba(59,130,246,0.8)]'
                     : 'bg-gradient-to-r from-blue-50 to-cyan-50 border-blue-300 text-blue-800 shadow-[0_14px_30px_-24px_rgba(37,99,235,0.7)]'
@@ -5141,11 +5148,8 @@ export default function ColumnMapping() {
                 </div>
               </div>
 
-              <div
-                className="absolute top-1/2 min-w-0 -translate-x-1/2 -translate-y-1/2"
-                style={{ left: `${targetHeaderCenter}px` }}
-              >
-                <div className={`rounded-xl border px-4 py-2.5 font-extrabold flex items-center gap-2.5 whitespace-nowrap transition-colors ${
+              <div className="flex justify-center min-w-0">
+                <div className={`max-w-full rounded-xl border px-4 py-2.5 font-extrabold flex items-center gap-2.5 whitespace-nowrap transition-colors ${
                   isDarkMode
                     ? 'bg-emerald-500/10 border-emerald-400/25 text-emerald-100 shadow-[0_14px_30px_-24px_rgba(16,185,129,0.8)]'
                     : 'bg-gradient-to-r from-emerald-50 to-teal-50 border-emerald-300 text-emerald-800 shadow-[0_14px_30px_-24px_rgba(5,150,105,0.65)]'
@@ -5802,7 +5806,11 @@ export default function ColumnMapping() {
       </Dialog>
 
       {/* Global Loader Overlay */}
-      <LoaderOverlay visible={globalLoading || mappingActionLoading} label={mappingActionLoading ? "Creating mapping..." : "Processing..."} />
+      <LoaderOverlay
+        visible={globalLoading || mappingActionLoading}
+        title={mappingActionLoading ? "Creating mapping..." : "Finalizing mappings..."}
+        message={mappingActionLoading ? "Connecting selected columns." : "Syncing the latest data before review."}
+      />
     </div>
   );
 }

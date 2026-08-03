@@ -65,7 +65,6 @@ import {
   Close as CloseIcon,
   Map as MapIcon,
   Refresh as RefreshIcon,
-  Sync as SyncIcon,
   Info as InfoIcon,
   ExpandMore as ExpandMoreIcon,
   ExpandLess as ExpandLessIcon,
@@ -86,6 +85,7 @@ import api from '../services/api';
 import * as XLSX from 'xlsx';
 import FormulaBuilder from './FormulaBuilder';
 import ColumnParser from './ColumnParser/ColumnParser';
+import { LoaderCard } from './LoaderOverlay';
 import { getDataSynchronizer, cleanupSynchronizer } from '../utils/DataSynchronizer';
 import { useThemeContext } from '../utils/ThemeContext';
 
@@ -288,6 +288,10 @@ const EnhancedDataEditor = () => {
   const [exportProjectSelectAll, setExportProjectSelectAll] = useState(true);
   const [selectedExistingProject, setSelectedExistingProject] = useState(null);
   const [exportProjectSuccess, setExportProjectSuccess] = useState(false);
+  const [factwiseExportDialogOpen, setFactwiseExportDialogOpen] = useState(false);
+  const [factwisePreviewOpen, setFactwisePreviewOpen] = useState(false);
+  const [factwisePreviewType, setFactwisePreviewType] = useState('item');
+  const [factwisePreviewDownloading, setFactwisePreviewDownloading] = useState('');
 
   // Mock existing projects
   const existingProjects = useMemo(() => [
@@ -1946,23 +1950,6 @@ const EnhancedDataEditor = () => {
   }, [sessionId, templateName, dynamicColumnCounts, defaultValues, appliedFormulas, factwiseIdRule, mpnValidationCompleted, originalMpnColumn, mpnColumn, mpnManufacturerColumn, showSnackbar, handleCloseSaveTemplateDialog]);
 
   // ─── DOWNLOAD HANDLERS ─────────────────────────────────────────────────────
-  const handleDownloadConverted = useCallback(async () => {
-    try {
-      setDownloadLoading(true);
-      // Extract column order from current columnDefs (excluding row number column)
-      const currentColumnOrder = columnDefs
-        .filter(col => col.field && col.field !== '__row_number__')
-        .map(col => col.field);
-
-
-      await api.downloadFileEnhanced(sessionId, 'converted', null, currentColumnOrder);
-    } catch (e) {
-      showSnackbar(e.message || 'Failed to download converted file', 'error');
-    } finally {
-      setDownloadLoading(false);
-    }
-  }, [sessionId, showSnackbar, columnDefs]);
-
   // FactWise import sheets require these fields on every row. If the sheet looks
   // like a FactWise sheet (it has these columns) and any are blank, we warn on
   // export so the user can fill them — with a default, or by going back.
@@ -2097,6 +2084,96 @@ const EnhancedDataEditor = () => {
     setExportProjectSuccess(false);
     setExportProjectDialogOpen(true);
   }, [columnDefs]);
+
+  const getCurrentExportColumnOrder = useCallback(() => (
+    columnDefs
+      .filter(col => col.field && col.field !== '__row_number__')
+      .map(col => col.field)
+  ), [columnDefs]);
+
+  const openFactwisePreview = useCallback((type) => {
+    setFactwisePreviewType(type);
+    setFactwisePreviewOpen(true);
+  }, []);
+
+  const handleChooseFactwiseDestination = useCallback((destination) => {
+    setFactwiseExportDialogOpen(false);
+    if (destination === 'project') {
+      handleExportToProject();
+      return;
+    }
+    runGuardedExport(() => openFactwisePreview(destination));
+  }, [handleExportToProject, runGuardedExport, openFactwisePreview]);
+
+  const downloadFactwisePreview = useCallback(async (format) => {
+    const columnOrder = getCurrentExportColumnOrder();
+    const label = factwisePreviewType === 'bom' ? 'bom_directory' : 'item_directory';
+    const extension = format === 'csv' ? 'csv' : 'xlsx';
+    const mime = format === 'csv'
+      ? 'text/csv'
+      : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+    try {
+      setFactwisePreviewDownloading(format);
+      const response = await api.downloadProcessedFile(sessionId, format === 'csv' ? 'csv' : 'excel', columnOrder);
+      const contentDisposition = response.headers?.['content-disposition'];
+      let filename = `factwise_${label}_${sessionId}.${extension}`;
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+        if (filenameMatch && filenameMatch[1]) {
+          filename = filenameMatch[1].replace(/['"]/g, '');
+        }
+      }
+      const blob = new Blob([response.data], { type: response.headers?.['content-type'] || mime });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+      showSnackbar(`${factwisePreviewType === 'bom' ? 'BOM' : 'Item'} directory downloaded`, 'success');
+    } catch (e) {
+      showSnackbar(e.message || 'Failed to download export file', 'error');
+    } finally {
+      setFactwisePreviewDownloading('');
+    }
+  }, [factwisePreviewType, getCurrentExportColumnOrder, sessionId, showSnackbar]);
+
+  const factwiseBomPreview = useMemo(() => {
+    const rows = Array.isArray(rowData) ? rowData : [];
+    const cols = (columnDefs || []).filter(col => col.field && col.field !== '__row_number__');
+    const findField = (...needles) => {
+      const loweredNeedles = needles.map(n => String(n).toLowerCase());
+      const match = cols.find(col => {
+        const name = String(col.headerName || col.field || '').toLowerCase();
+        return loweredNeedles.some(needle => name.includes(needle));
+      });
+      return match?.field || null;
+    };
+    const itemCodeField = findField('item code', 'item_code', 'factwise id', 'part number');
+    const mpnField = findField('mpn', 'manufacturer part', 'part no');
+    const manufacturerField = findField('manufacturer', 'mfr', 'producer');
+    const qtyField = findField('qty', 'quantity');
+    const parent = rows.find(row => itemCodeField && row[itemCodeField])?.[itemCodeField]
+      || rows.find(row => mpnField && row[mpnField])?.[mpnField]
+      || 'BOM Preview';
+    const materialRows = rows
+      .filter(row => row && Object.values(row).some(v => v !== null && v !== undefined && String(v).trim() !== ''))
+      .slice(0, 5);
+    const children = materialRows.slice(0, 4).map((row, index) => {
+      const code = (mpnField && row[mpnField]) || (itemCodeField && row[itemCodeField]) || `RAW MATERIAL ${index + 1}`;
+      const maker = manufacturerField && row[manufacturerField] ? `_${row[manufacturerField]}` : '';
+      const qty = qtyField && row[qtyField] ? ` (${row[qtyField]})` : ` (${index === 0 ? '7.0' : index === 1 ? '2.0' : index === 2 ? '4.0' : '1.0'})`;
+      return `${String(code).trim()}${String(maker).trim()}${qty}`;
+    });
+    return {
+      parent: String(parent).trim(),
+      children,
+      overflow: Math.max(0, Math.max(totalRows || rows.length, rows.length) - children.length)
+    };
+  }, [columnDefs, rowData, totalRows]);
 
   const handleExportProjectConfirm = useCallback(() => {
     const selectedCols = Object.entries(exportProjectSelectedColumns)
@@ -3261,27 +3338,15 @@ const EnhancedDataEditor = () => {
     return (
       <Box sx={{ 
         display: 'flex', 
-        flexDirection: 'column',
         justifyContent: 'center', 
         alignItems: 'center',
         minHeight: '60vh',
-        gap: 2
+        px: 2
       }}>
-        <CircularProgress size={60} thickness={4} />
-        <Typography variant="h6" color="text.secondary">
-          {syncStatus.inProgress ? `${syncStatus.operation}...` : 'Loading your mapped data...'}
-        </Typography>
-        {syncStatus.inProgress && (
-          <Typography variant="body2" color="text.secondary">
-            <SyncIcon sx={{ fontSize: 16, mr: 1 }} />
-            Synchronizing data with backend...
-          </Typography>
-        )}
-        {dataIntegrity.lastValidated && (
-          <Typography variant="body2" color="text.secondary">
-            Last validated: {new Date(dataIntegrity.lastValidated).toLocaleTimeString()}
-          </Typography>
-        )}
+        <LoaderCard
+          title={syncStatus.inProgress ? `${syncStatus.operation}...` : 'Loading mapped data...'}
+          message={syncStatus.inProgress ? 'Synchronizing data with backend.' : 'Preparing your mapped data for review.'}
+        />
       </Box>
     );
   }
@@ -3408,6 +3473,25 @@ const EnhancedDataEditor = () => {
       boxShadow: 'none'
     }
   };
+  const exportFactwiseActionSx = {
+    ...toolbarButtonSx,
+    color: '#ffffff !important',
+    borderColor: '#2563eb',
+    backgroundColor: '#2563eb',
+    boxShadow: 'none',
+    '&:hover': {
+      color: '#ffffff !important',
+      borderColor: '#2563eb',
+      backgroundColor: '#2563eb',
+      boxShadow: 'none'
+    },
+    '&.Mui-disabled': {
+      color: t.text.disabled,
+      borderColor: t.border.default,
+      backgroundColor: t.surface.controlSoft,
+      boxShadow: 'none'
+    }
+  };
   const orangeActionSx = {
     ...toolbarButtonSx,
     color: '#ffffff !important',
@@ -3424,28 +3508,6 @@ const EnhancedDataEditor = () => {
       boxShadow: 'none'
     }
   };
-  const HoverActionButton = ({
-    label,
-    icon,
-    onClick,
-    disabled,
-    background,
-    shadow
-  }) => (
-    <button
-      type="button"
-      className="fw-expand-action"
-      onClick={onClick}
-      disabled={disabled}
-      style={{
-        background,
-        boxShadow: shadow
-      }}
-    >
-      {icon}
-      <span className="fw-expand-label">{label}</span>
-    </button>
-  );
   const tableTone = isDarkMode
     ? {
         panel: 'linear-gradient(180deg, rgba(13, 22, 38, 0.96) 0%, rgba(8, 15, 27, 0.98) 100%)',
@@ -3586,8 +3648,8 @@ const EnhancedDataEditor = () => {
       {/* Create Column Dialog */}
       <Dialog open={createColumnDialogOpen} onClose={() => setCreateColumnDialogOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Create Column</DialogTitle>
-        <DialogContent>
-          <DialogContentText sx={{ mb: 2 }}>
+        <DialogContent sx={{ px: 3, pt: 1, pb: 2 }}>
+          <DialogContentText sx={{ mb: 2.25, color: t.text.secondary, fontSize: 14.5, lineHeight: 1.55 }}>
             Fill a required column by joining two existing columns.
           </DialogContentText>
           <Grid container spacing={2}>
@@ -3681,7 +3743,13 @@ const EnhancedDataEditor = () => {
               : 'Blank source values are skipped, so no extra separator is added when one side is empty.'}
           </Alert>
         </DialogContent>
-        <DialogActions>
+        <DialogActions sx={{
+          px: 3,
+          py: 2,
+          borderTop: `1px solid ${t.border.subtle}`,
+          bgcolor: isDarkMode ? 'rgba(8, 13, 24, 0.72)' : 'rgba(248, 250, 252, 0.9)',
+          gap: 1
+        }}>
           <Button onClick={() => setCreateColumnDialogOpen(false)} disabled={createColumnSaving}>
             Cancel
           </Button>
@@ -3852,30 +3920,26 @@ const EnhancedDataEditor = () => {
 
               {/* Right - Primary Actions */}
               <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', justifyContent: { xs: 'flex-start', lg: 'flex-end' }, flexWrap: 'wrap', flex: { xs: '1 1 100%', lg: '0 0 auto' } }}>
-                <HoverActionButton
-                  label="Refresh"
-                  icon={<RefreshIcon sx={{ fontSize: 18 }} />}
+                <IconButton
                   onClick={handleManualRefresh}
                   disabled={syncStatus.inProgress}
-                  background={isDarkMode ? 'linear-gradient(135deg, #334155 0%, #0f172a 100%)' : 'linear-gradient(135deg, #475569 0%, #1e293b 100%)'}
-                  shadow="0 14px 28px -16px rgba(15, 23, 42, 0.85)"
-                />
-                <HoverActionButton
-                  label="Export"
-                  icon={<FolderOpenIcon sx={{ fontSize: 18 }} />}
-                  onClick={() => runGuardedExport(handleExportToProject)}
-                  disabled={downloadLoading || syncStatus.inProgress}
-                  background="linear-gradient(135deg, #2563eb 0%, #0284c7 100%)"
-                  shadow="0 14px 28px -16px rgba(37, 99, 235, 0.9)"
-                />
-                <HoverActionButton
-                  label="Download"
-                  icon={<DownloadIcon sx={{ fontSize: 18 }} />}
-                  onClick={() => runGuardedExport(handleDownloadConverted)}
-                  disabled={downloadLoading || syncStatus.inProgress}
-                  background="linear-gradient(135deg, #16a34a 0%, #059669 100%)"
-                  shadow="0 14px 28px -16px rgba(22, 163, 74, 0.9)"
-                />
+                  sx={{
+                    width: 40,
+                    height: 40,
+                    color: '#ffffff',
+                    bgcolor: isDarkMode ? '#334155' : '#1e293b',
+                    '&:hover': {
+                      bgcolor: isDarkMode ? '#334155' : '#1e293b'
+                    },
+                    '&.Mui-disabled': {
+                      bgcolor: isDarkMode ? '#1e293b' : '#cbd5e1',
+                      color: isDarkMode ? '#64748b' : '#64748b'
+                    }
+                  }}
+                  aria-label="Refresh"
+                >
+                  <RefreshIcon sx={{ fontSize: 20 }} />
+                </IconButton>
 
               {/* Auto-fit All */}
               {false && (
@@ -3943,6 +4007,16 @@ const EnhancedDataEditor = () => {
                 variant="contained"
               >
                 Create Column
+              </Button>
+              <Button
+                size="small"
+                onClick={() => setFactwiseExportDialogOpen(true)}
+                disabled={downloadLoading || syncStatus.inProgress}
+                startIcon={<FolderOpenIcon sx={{ fontSize: 18 }} />}
+                sx={exportFactwiseActionSx}
+                variant="outlined"
+              >
+                Export to FactWise
               </Button>
               <Button
                 size="small"
@@ -5312,7 +5386,20 @@ const EnhancedDataEditor = () => {
       </Dialog>
 
       {/* FactWise required-fields + Item-code guard before export */}
-      <Dialog open={requiredDialogOpen} onClose={() => setRequiredDialogOpen(false)} maxWidth="sm" fullWidth>
+      <Dialog
+        open={requiredDialogOpen}
+        onClose={() => setRequiredDialogOpen(false)}
+        maxWidth="md"
+        fullWidth
+        PaperProps={{
+          sx: {
+            width: 'min(760px, calc(100vw - 40px))',
+            maxHeight: 'min(760px, calc(100vh - 48px))',
+            borderRadius: '16px',
+            overflow: 'hidden'
+          }
+        }}
+      >
         <DialogTitle>Before export — fix these for FactWise</DialogTitle>
         <DialogContent>
           <DialogContentText sx={{ mb: 2 }}>
@@ -5321,8 +5408,14 @@ const EnhancedDataEditor = () => {
 
           {/* Item code — must be filled AND unique */}
           {itemCodeIssue && (
-            <Box sx={{ border: '1px solid #d8dee9', borderRadius: 2, p: 2, mb: 2 }}>
-              <Typography variant="body2" sx={{ fontWeight: 700 }}>Item code</Typography>
+            <Box sx={{
+              border: `1px solid ${t.border.default}`,
+              borderRadius: '14px',
+              p: 2,
+              mb: 2,
+              bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.58)' : '#ffffff'
+            }}>
+              <Typography variant="body2" sx={{ fontWeight: 760, color: t.text.heading }}>Item code</Typography>
               <Typography variant="caption" color="error" sx={{ display: 'block', mb: 1.5 }}>
                 {[itemCodeIssue.blanks > 0 && `${itemCodeIssue.blanks} blank`,
                   itemCodeIssue.dupRows > 0 && `${itemCodeIssue.dupRows} duplicate rows`]
@@ -5356,13 +5449,13 @@ const EnhancedDataEditor = () => {
 
               {((itemCodeIssue.blanks > 0 && itemCodeCfg.blank === 'prefix_sequence') ||
                 (itemCodeIssue.dupRows > 0 && itemCodeCfg.duplicate === 'prefix_sequence')) && (
-                <Box sx={{ display: 'flex', gap: 1.5 }}>
+                <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '2fr 1fr 1fr' }, gap: 1.25 }}>
                   <TextField size="small" label="Prefix" value={itemCodeCfg.prefix}
-                    onChange={(e) => setItemCodeCfg(prev => ({ ...prev, prefix: e.target.value }))} sx={{ flex: 2 }} />
+                    onChange={(e) => setItemCodeCfg(prev => ({ ...prev, prefix: e.target.value }))} />
                   <TextField size="small" label="Start #" type="number" value={itemCodeCfg.start}
-                    onChange={(e) => setItemCodeCfg(prev => ({ ...prev, start: e.target.value }))} sx={{ flex: 1 }} />
+                    onChange={(e) => setItemCodeCfg(prev => ({ ...prev, start: e.target.value }))} />
                   <TextField size="small" label="Digits" type="number" value={itemCodeCfg.padding}
-                    onChange={(e) => setItemCodeCfg(prev => ({ ...prev, padding: e.target.value }))} sx={{ flex: 1 }} />
+                    onChange={(e) => setItemCodeCfg(prev => ({ ...prev, padding: e.target.value }))} />
                 </Box>
               )}
               {itemCodeIssue.dupRows > 0 && itemCodeCfg.duplicate === 'suffix' && (
@@ -5373,10 +5466,19 @@ const EnhancedDataEditor = () => {
           )}
 
           {/* Other required fields — one value fills every blank */}
+          <Box sx={{ display: 'grid', gap: 1.25 }}>
           {requiredGaps.map(g => (
-            <Box key={g.field} sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 1.5 }}>
-              <Box sx={{ minWidth: 200 }}>
-                <Typography variant="body2" sx={{ fontWeight: 600 }}>{g.headerName}</Typography>
+            <Box
+              key={g.field}
+              sx={{
+                display: 'grid',
+                gridTemplateColumns: { xs: '1fr', sm: '220px minmax(0, 1fr)' },
+                alignItems: 'center',
+                gap: 1.5
+              }}
+            >
+              <Box>
+                <Typography variant="body2" sx={{ fontWeight: 700, color: t.text.heading }}>{g.headerName}</Typography>
                 <Typography variant="caption" color="error">{g.emptyCount} blank {g.emptyCount === 1 ? 'cell' : 'cells'}</Typography>
               </Box>
               <TextField
@@ -5388,7 +5490,8 @@ const EnhancedDataEditor = () => {
               />
             </Box>
           ))}
-          <Alert severity="info" sx={{ mt: 1 }}>
+          </Box>
+          <Alert severity="info" sx={{ mt: 2, borderRadius: '12px' }}>
             Anything set to “leave” exports as-is. Blank required fields left empty may be rejected by FactWise.
           </Alert>
         </DialogContent>
@@ -6107,6 +6210,400 @@ const EnhancedDataEditor = () => {
           >
             Override All
           </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* FactWise export destination chooser */}
+      <Dialog
+        open={factwiseExportDialogOpen}
+        onClose={() => setFactwiseExportDialogOpen(false)}
+        maxWidth="sm"
+        fullWidth
+        PaperProps={{ sx: { borderRadius: '14px', overflow: 'hidden', maxWidth: 560 } }}
+      >
+        <DialogTitle sx={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          px: 3,
+          py: 2,
+          borderBottom: '1px solid #e5e7eb',
+          bgcolor: '#f8fafc'
+        }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
+            <FolderOpenIcon sx={{ color: '#2563eb' }} />
+            <Typography variant="h6" sx={{ fontSize: 18, fontWeight: 650 }}>
+              Export to FactWise
+            </Typography>
+          </Box>
+          <IconButton onClick={() => setFactwiseExportDialogOpen(false)} size="small">
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent sx={{ px: 3, py: 2.5 }}>
+          <Typography variant="body2" sx={{ color: '#64748b', mb: 2 }}>
+            Choose where this prepared sheet should go.
+          </Typography>
+          <Box sx={{ display: 'grid', gap: 1.25 }}>
+            {[
+              {
+                key: 'project',
+                title: 'Export to Project',
+                helper: 'Send selected columns into a new or existing project.',
+                icon: <FolderOpenIcon sx={{ color: '#ea580c' }} />
+              },
+              {
+                key: 'item',
+                title: 'Export to Item Directory',
+                helper: 'Fix required item fields, preview the directory sheet, then download.',
+                icon: <BadgeIcon sx={{ color: '#2563eb' }} />
+              },
+              {
+                key: 'bom',
+                title: 'Export to BOM Directory',
+                helper: 'Fix required BOM fields, preview the BOM export, then download.',
+                icon: <AccountTreeIcon sx={{ color: '#16a34a' }} />
+              }
+            ].map(option => (
+              <ListItemButton
+                key={option.key}
+                onClick={() => handleChooseFactwiseDestination(option.key)}
+                sx={{
+                  border: '1px solid #e2e8f0',
+                  borderRadius: '12px',
+                  px: 2,
+                  py: 1.4,
+                  bgcolor: '#fff',
+                  '&:hover': { bgcolor: '#f8fafc', borderColor: '#bfdbfe' }
+                }}
+              >
+                <ListItemIcon sx={{ minWidth: 38 }}>{option.icon}</ListItemIcon>
+                <ListItemText
+                  primary={option.title}
+                  secondary={option.helper}
+                  primaryTypographyProps={{ fontWeight: 650, fontSize: 14, color: '#0f172a' }}
+                  secondaryTypographyProps={{ fontSize: 12.5, color: '#64748b', mt: 0.25 }}
+                />
+              </ListItemButton>
+            ))}
+          </Box>
+        </DialogContent>
+      </Dialog>
+
+      {/* FactWise item/BOM export preview */}
+      <Dialog
+        open={factwisePreviewOpen}
+        onClose={() => {
+          if (!factwisePreviewDownloading) setFactwisePreviewOpen(false);
+        }}
+        maxWidth="lg"
+        fullWidth
+        PaperProps={{ sx: { borderRadius: '12px', overflow: 'hidden', maxWidth: factwisePreviewType === 'bom' ? 1068 : 980 } }}
+      >
+        <DialogTitle sx={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          px: 3,
+          py: 2,
+          borderBottom: '1px solid #e5e7eb',
+          bgcolor: '#fff'
+        }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
+            {factwisePreviewType === 'bom'
+              ? <AccountTreeIcon sx={{ color: '#16a34a' }} />
+              : <BadgeIcon sx={{ color: '#2563eb' }} />}
+            <Typography variant="h6" sx={{ fontSize: 18, fontWeight: 650 }}>
+              {factwisePreviewType === 'bom' ? 'Export BOM' : 'Export Item Directory'}
+            </Typography>
+          </Box>
+          {factwisePreviewType === 'bom' ? (
+            <Button sx={{ fontSize: 12, fontWeight: 700, color: '#1976d2' }}>
+              FULL SCREEN
+            </Button>
+          ) : (
+            <Button
+              onClick={() => setFactwisePreviewOpen(false)}
+              disabled={Boolean(factwisePreviewDownloading)}
+              sx={{ minWidth: 0, color: '#64748b' }}
+            >
+              <CloseIcon fontSize="small" />
+            </Button>
+          )}
+        </DialogTitle>
+        <DialogContent sx={{ px: 3, py: 2.5 }}>
+          {factwisePreviewType === 'bom' ? (
+            <>
+              <Typography variant="body2" sx={{ color: '#64748b', mb: 2 }}>
+                Review the BOM below, then export it as an Excel sheet, or to FactWise.
+              </Typography>
+              <Typography variant="caption" sx={{ color: '#64748b', display: 'block', mb: 1.5 }}>
+                High-level view - open full screen to drill into every raw material.
+              </Typography>
+              <Box
+                sx={{
+                  position: 'relative',
+                  height: 374,
+                  overflow: 'hidden',
+                  border: '1px solid #e5e7eb',
+                  borderRadius: '8px',
+                  bgcolor: '#fff',
+                  backgroundImage: 'radial-gradient(#e5e7eb 0.8px, transparent 0.8px)',
+                  backgroundSize: '22px 22px'
+                }}
+              >
+                <Box sx={{ position: 'absolute', left: '50%', top: 56, width: 2, height: 68, bgcolor: '#9ca3af' }} />
+                <Box sx={{ position: 'absolute', left: '14%', right: '9%', top: 124, height: 2, bgcolor: '#c4c9d1' }} />
+                {[14, 33, 52, 71, 88].map((left, index) => (
+                  <Box
+                    key={left}
+                    sx={{
+                      position: 'absolute',
+                      left: `${left}%`,
+                      top: 124,
+                      width: 2,
+                      height: 40,
+                      bgcolor: '#c4c9d1',
+                      display: index >= Math.min(factwiseBomPreview.children.length, 4) && !(index === 4 && factwiseBomPreview.overflow > 0) ? 'none' : 'block'
+                    }}
+                  />
+                ))}
+                <Box
+                  sx={{
+                    position: 'absolute',
+                    left: '50%',
+                    top: 54,
+                    transform: 'translateX(-50%)',
+                    minWidth: 176,
+                    height: 46,
+                    px: 2,
+                    border: '1px solid #aeb7c2',
+                    borderRadius: '8px',
+                    bgcolor: '#fff',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: 13,
+                    fontWeight: 800,
+                    color: '#0f172a',
+                    boxShadow: '0 1px 2px rgba(15,23,42,0.06)'
+                  }}
+                >
+                  <Box component="span" sx={{ maxWidth: 210, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {factwiseBomPreview.parent}
+                  </Box>
+                  <KeyboardArrowDownIcon sx={{ fontSize: 16, ml: 0.5 }} />
+                </Box>
+                {(factwiseBomPreview.children.length ? factwiseBomPreview.children : ['Raw material preview']).slice(0, 4).map((label, index) => {
+                  const positions = [14, 33, 52, 71];
+                  return (
+                    <Box
+                      key={`${label}-${index}`}
+                      sx={{
+                        position: 'absolute',
+                        left: `${positions[index]}%`,
+                        top: 164,
+                        transform: 'translateX(-50%)',
+                        width: 174,
+                        minHeight: 48,
+                        px: 1.5,
+                        py: 0.8,
+                        borderRadius: '8px',
+                        bgcolor: '#fde047',
+                        border: '1px solid #eab308',
+                        color: '#854d0e',
+                        fontSize: 11,
+                        fontWeight: 800,
+                        textAlign: 'center',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        boxShadow: '0 8px 18px -14px rgba(161,98,7,0.8)'
+                      }}
+                    >
+                      <Box component="span" sx={{ display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+                        {label}
+                      </Box>
+                    </Box>
+                  );
+                })}
+                {factwiseBomPreview.overflow > 0 && (
+                  <Box
+                    sx={{
+                      position: 'absolute',
+                      left: '88%',
+                      top: 164,
+                      transform: 'translateX(-50%)',
+                      width: 174,
+                      minHeight: 32,
+                      px: 1.5,
+                      py: 0.8,
+                      borderRadius: '8px',
+                      border: '1px dashed #cbd5e1',
+                      bgcolor: '#f8fafc',
+                      color: '#64748b',
+                      fontSize: 11,
+                      fontWeight: 800,
+                      textAlign: 'center'
+                    }}
+                  >
+                    +{factwiseBomPreview.overflow} more raw materials
+                  </Box>
+                )}
+                <Box sx={{ position: 'absolute', left: 14, bottom: 14, display: 'grid', gap: 3 }}>
+                  <Button size="small" sx={{ minWidth: 28, width: 28, height: 28, p: 0, bgcolor: '#fff', color: '#111827', border: '1px solid #e5e7eb' }}>+</Button>
+                  <Button size="small" sx={{ minWidth: 28, width: 28, height: 28, p: 0, bgcolor: '#fff', color: '#111827', border: '1px solid #e5e7eb' }}>-</Button>
+                  <Button size="small" sx={{ minWidth: 28, width: 28, height: 28, p: 0, bgcolor: '#fff', color: '#111827', border: '1px solid #e5e7eb' }}>⛶</Button>
+                </Box>
+              </Box>
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2, mt: 1.2 }}>
+                {[
+                  ['#ffffff', 'Finished good'],
+                  ['#93c5fd', 'Sub-assembly'],
+                  ['#bbf7d0', 'Sub-sub-assembly'],
+                  ['#fde047', 'Raw material'],
+                  ['#d1d5db', 'Alternate']
+                ].map(([color, label]) => (
+                  <Box key={label} sx={{ display: 'flex', alignItems: 'center', gap: 0.5, fontSize: 12, color: '#64748b' }}>
+                    <Box sx={{ width: 10, height: 10, borderRadius: 0.5, bgcolor: color, border: '1px solid #cbd5e1' }} />
+                    {label}
+                  </Box>
+                ))}
+              </Box>
+            </>
+          ) : (
+            <>
+              <Typography variant="body2" sx={{ color: '#64748b', mb: 1 }}>
+                Review the item directory below, then download it for FactWise.
+              </Typography>
+              <Typography variant="caption" sx={{ color: '#64748b', display: 'block', mb: 1.5 }}>
+                Preview shows the current page. The downloaded file includes the full processed sheet.
+              </Typography>
+              <TableContainer component={Paper} variant="outlined" sx={{ maxHeight: 360, borderRadius: '10px' }}>
+                <Table stickyHeader size="small">
+                  <TableHead>
+                    <TableRow>
+                      {columnDefs
+                        .filter(col => col.field && col.field !== '__row_number__')
+                        .slice(0, 10)
+                        .map(col => (
+                          <TableCell key={col.field} sx={{ fontWeight: 700, bgcolor: '#f8fafc', whiteSpace: 'nowrap' }}>
+                            {col.headerName || col.field}
+                          </TableCell>
+                        ))}
+                    </TableRow>
+                  </TableHead>
+                  <TableBody>
+                    {(rowData || []).slice(0, 8).map((row, rowIndex) => (
+                      <TableRow key={row.id || rowIndex} hover>
+                        {columnDefs
+                          .filter(col => col.field && col.field !== '__row_number__')
+                          .slice(0, 10)
+                          .map(col => (
+                            <TableCell
+                              key={col.field}
+                              sx={{
+                                maxWidth: 180,
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                                color: '#334155'
+                              }}
+                            >
+                              {row[col.field] ?? ''}
+                            </TableCell>
+                          ))}
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </TableContainer>
+              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mt: 1.25 }}>
+                <Typography variant="caption" sx={{ color: '#64748b' }}>
+                  Showing {Math.min((rowData || []).length, 8)} rows and {Math.min(getCurrentExportColumnOrder().length, 10)} columns in preview
+                </Typography>
+                {getCurrentExportColumnOrder().length > 10 && (
+                  <Chip size="small" label={`+${getCurrentExportColumnOrder().length - 10} more columns`} sx={{ bgcolor: '#eff6ff', color: '#1d4ed8' }} />
+                )}
+              </Box>
+            </>
+          )}
+        </DialogContent>
+        <DialogActions sx={{
+          px: 3,
+          py: 2,
+          gap: 1,
+          borderTop: '1px solid #e5e7eb',
+          bgcolor: '#f8fafc'
+        }}>
+          <Button
+            onClick={() => setFactwisePreviewOpen(false)}
+            disabled={Boolean(factwisePreviewDownloading)}
+            sx={{
+              textTransform: 'none',
+              borderRadius: '8px',
+              color: factwisePreviewType === 'bom' ? '#1976d2' : '#475569',
+              mr: factwisePreviewType === 'bom' ? 'auto' : 0,
+              fontWeight: factwisePreviewType === 'bom' ? 700 : 500
+            }}
+          >
+            Cancel
+          </Button>
+          {factwisePreviewType === 'bom' ? (
+            <>
+              <Button
+                variant="contained"
+                onClick={() => downloadFactwisePreview('excel')}
+                disabled={Boolean(factwisePreviewDownloading)}
+                startIcon={factwisePreviewDownloading === 'excel' ? <CircularProgress size={16} sx={{ color: '#fff' }} /> : <FolderOpenIcon />}
+                sx={{
+                  textTransform: 'none',
+                  borderRadius: '4px',
+                  fontWeight: 700,
+                  bgcolor: '#ea580c',
+                  '&:hover': { bgcolor: '#c2410c' }
+                }}
+              >
+                Export to FactWise
+              </Button>
+              <Button
+                variant="contained"
+                onClick={() => downloadFactwisePreview('excel')}
+                disabled={Boolean(factwisePreviewDownloading)}
+                startIcon={factwisePreviewDownloading === 'excel' ? <CircularProgress size={16} sx={{ color: '#fff' }} /> : <DownloadIcon />}
+                sx={{
+                  textTransform: 'none',
+                  borderRadius: '4px',
+                  fontWeight: 700,
+                  bgcolor: '#ea580c',
+                  '&:hover': { bgcolor: '#c2410c' }
+                }}
+              >
+                Export Sheet
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button
+                variant="outlined"
+                onClick={() => downloadFactwisePreview('csv')}
+                disabled={Boolean(factwisePreviewDownloading)}
+                startIcon={factwisePreviewDownloading === 'csv' ? <CircularProgress size={16} /> : <DownloadIcon />}
+                sx={{ textTransform: 'none', borderRadius: '8px' }}
+              >
+                Download CSV
+              </Button>
+              <Button
+                variant="contained"
+                onClick={() => downloadFactwisePreview('excel')}
+                disabled={Boolean(factwisePreviewDownloading)}
+                startIcon={factwisePreviewDownloading === 'excel' ? <CircularProgress size={16} sx={{ color: '#fff' }} /> : <DownloadIcon />}
+                sx={{ textTransform: 'none', borderRadius: '8px', fontWeight: 650 }}
+              >
+                Download XLSX
+              </Button>
+            </>
+          )}
         </DialogActions>
       </Dialog>
 
