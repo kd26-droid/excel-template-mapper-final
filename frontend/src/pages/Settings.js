@@ -61,13 +61,13 @@ const Settings = () => {
 
   // Column mapping state - defines which columns are retrieved from which provider
   const [columnMappings, setColumnMappings] = useState([
-    { column: 'MPN valid', provider: 'digikey', description: 'Part validation status' },
-    { column: 'MPN Status', provider: 'digikey', description: 'Lifecycle status (Active/NRND/Obsolete)' },
-    { column: 'EOL Status', provider: 'digikey', description: 'End of life flag' },
-    { column: 'Discontinued', provider: 'digikey', description: 'Discontinued status' },
-    { column: 'DKPN', provider: 'digikey', description: 'DigiKey part number' },
-    { column: 'Canonical MPN', provider: 'digikey', description: 'Standardized manufacturer part number' },
-    { column: 'Category', provider: 'digikey', description: 'Product category' },
+    { column: 'MPN valid (DigiKey)', provider: 'digikey', description: 'Part validation status' },
+    { column: 'DigiKey Status', provider: 'digikey', description: 'Lifecycle status (Active/NRND/Obsolete)' },
+    { column: 'DigiKey EOL Status', provider: 'digikey', description: 'End of life flag' },
+    { column: 'DigiKey Discontinued', provider: 'digikey', description: 'Discontinued status' },
+    { column: 'DigiKey Part Number', provider: 'digikey', description: 'DigiKey part number' },
+    { column: 'DigiKey Canonical MPN', provider: 'digikey', description: 'Standardized manufacturer part number' },
+    { column: 'DigiKey Category', provider: 'digikey', description: 'Product category' },
   ]);
 
   // Handle column provider change

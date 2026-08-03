@@ -470,6 +470,34 @@ const UploadFiles = () => {
     return { blob, filename, workbook, comparisonName, id: comparisonId };
   }, [openSheetJoinDraftDb, sheetJoinBomDraftKey, sheetJoinComparisonListKey, sheetJoinDraftStoreName]);
 
+  // Delete a saved merge book: remove its draft blob (IndexedDB) and its list entry.
+  const handleDeleteSavedComparison = useCallback(async (comparison) => {
+    if (!comparison || !comparison.id) return;
+    if (!window.confirm(`Delete the merge book "${comparison.name}"? This can't be undone.`)) return;
+    try {
+      try {
+        const db = await openSheetJoinDraftDb();
+        await new Promise((resolve) => {
+          const tx = db.transaction(sheetJoinDraftStoreName, 'readwrite');
+          tx.objectStore(sheetJoinDraftStoreName).delete(comparison.id);
+          tx.oncomplete = resolve;
+          tx.onerror = resolve; // best-effort — still drop the list entry below
+        });
+        db.close();
+      } catch (_) { /* ignore IndexedDB errors, still remove the list entry */ }
+
+      const raw = localStorage.getItem(sheetJoinComparisonListKey);
+      const list = raw ? JSON.parse(raw) : [];
+      const nextList = (Array.isArray(list) ? list : []).filter(item => item.id !== comparison.id);
+      localStorage.setItem(sheetJoinComparisonListKey, JSON.stringify(nextList));
+      setSavedSheetJoinComparisons(nextList);
+      setActiveSheetJoinComparisonId(prev => (prev === comparison.id ? null : prev));
+      setSuccess(`Deleted merge book "${comparison.name}".`);
+    } catch (err) {
+      setError('Failed to delete merge book: ' + (err.message || err));
+    }
+  }, [openSheetJoinDraftDb, sheetJoinComparisonListKey, sheetJoinDraftStoreName]);
+
   const applySheetJoinDraftToUpload = useCallback((draft, activeComparisonId = null) => {
     if (!draft?.blob || !draft?.filename) return;
     const file = new File([draft.blob], draft.filename, { type: draft.blob.type });
@@ -2002,6 +2030,13 @@ const UploadFiles = () => {
                           >
                             {isActiveComparison ? 'In use' : 'Continue'}
                           </Button>
+                          <Button
+                            size="small"
+                            color="error"
+                            onClick={() => handleDeleteSavedComparison(comparison)}
+                          >
+                            Delete
+                          </Button>
                         </Box>
                       );
                     })}
@@ -3086,34 +3121,10 @@ const UploadFiles = () => {
                 <CardContent sx={{ textAlign: 'center', p: 3 }}>
                   <PlayArrowIcon sx={{ fontSize: 48, color: 'success.main', mb: 2 }} />
                   <Typography variant="h6" gutterBottom>
-                    Simple OCR
+                    PDF with table
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
-                    For standard documents with clear, linear layout. Faster processing with automatic table detection.
-                  </Typography>
-                </CardContent>
-              </Card>
-            </Grid>
-
-            <Grid item xs={12} sm={6}>
-              <Card
-                sx={{
-                  cursor: 'pointer',
-                  border: '2px solid transparent',
-                  '&:hover': {
-                    border: '2px solid #1976d2',
-                    bgcolor: 'primary.50'
-                  }
-                }}
-                onClick={() => handlePdfProcessingChoice('compare')}
-              >
-                <CardContent sx={{ textAlign: 'center', p: 3 }}>
-                  <TrendingUpIcon sx={{ fontSize: 48, color: 'info.main', mb: 2 }} />
-                  <Typography variant="h6" gutterBottom>
-                    Compare
-                  </Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    Runs native extraction and Azure OCR, then chooses the cleaner result for mapping.
+                    For PDFs that already have a clear table layout. Automatic table detection — faster.
                   </Typography>
                 </CardContent>
               </Card>
@@ -3134,10 +3145,10 @@ const UploadFiles = () => {
                 <CardContent sx={{ textAlign: 'center', p: 3 }}>
                   <SearchIcon sx={{ fontSize: 48, color: 'warning.main', mb: 2 }} />
                   <Typography variant="h6" gutterBottom>
-                    Zone Mapping
+                    PDF without table
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
-                    For complex BOMs or documents with irregular layouts. Manual zone selection for precise extraction.
+                    For PDFs without a clean table / irregular layouts. Draw zones to mark the columns yourself.
                   </Typography>
                 </CardContent>
               </Card>

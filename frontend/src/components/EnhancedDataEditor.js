@@ -84,6 +84,7 @@ import {
 import api from '../services/api';
 import * as XLSX from 'xlsx';
 import FormulaBuilder from './FormulaBuilder';
+import BomTreePreview from './BomTreePreview';
 import ColumnParser from './ColumnParser/ColumnParser';
 import { getDataSynchronizer, cleanupSynchronizer } from '../utils/DataSynchronizer';
 
@@ -120,6 +121,23 @@ const SMART_EXPAND_STEPS = [
 const deriveDisplayName = (col, allHeaders = []) => {
   if (/^MPN_\d+_DigiKey_Valid$/.test(col)) return col.replace(/^MPN_(\d+)_DigiKey_Valid$/, 'MPN $1 — DigiKey Valid');
   if (/^MPN_\d+_Canonical$/.test(col)) return col.replace(/^MPN_(\d+)_Canonical$/, 'MPN $1 — Canonical');
+  const hasLegacyDigikeyValidation = Array.isArray(allHeaders) && allHeaders.some((header) => [
+    'MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'Canonical MPN'
+  ].includes(header));
+  const legacyDigikeyNames = {
+    'MPN valid': 'MPN valid (DigiKey)',
+    'MPN Status': 'DigiKey Status',
+    'EOL Status': 'DigiKey EOL Status',
+    'Discontinued': 'DigiKey Discontinued',
+    'DKPN': 'DigiKey Part Number',
+    'Canonical MPN': 'DigiKey Canonical MPN'
+  };
+  if (hasLegacyDigikeyValidation) {
+    legacyDigikeyNames.Category = 'DigiKey Category';
+  }
+  if (legacyDigikeyNames[col]) return legacyDigikeyNames[col];
+  const legacyCanonical = String(col).match(/^Canonical MPN (\d+)$/);
+  if (legacyCanonical) return `DigiKey Canonical MPN ${legacyCanonical[1]}`;
   if (col.startsWith('Tag_') || col === 'Tag') return 'Tag';
   if (col.startsWith('Specification_Name_') || col === 'Specification name') return 'Specification name';
   if (col.startsWith('Specification_Value_') || col === 'Specification value') return 'Specification value';
@@ -399,6 +417,11 @@ const EnhancedDataEditor = () => {
   // user can override — e.g. point it at the Manufacturer column to force pairing).
   const [smartMpnCol, setSmartMpnCol] = useState('');
   const [smartMfrCol, setSmartMfrCol] = useState('');
+  // Illusion-only: lets the user "set up" how each cell is split around the colon.
+  // Purely cosmetic — the actual parse always reads manufacturer-before-colon,
+  // part-after-colon (see backend mpn_parse_producer_column). 'mfr' | 'mpn'.
+  const [labelledBefore, setLabelledBefore] = useState('mfr');
+  const [labelledStrip, setLabelledStrip] = useState(true);
   // Review screen for rows where the manufacturer split doesn't match the MPN count.
   const [reviewOpen, setReviewOpen] = useState(false);
   const [reviewRows, setReviewRows] = useState([]); // [{row, mpnCount, mpns, mfrRaw, tokens, cuts:bool[], manual:string|null}]
@@ -423,6 +446,16 @@ const EnhancedDataEditor = () => {
   const [condThen, setCondThen] = useState('');
   const [condElse, setCondElse] = useState('');
   const [defaultBusy, setDefaultBusy] = useState(false);
+  // Conditional delete-rows tool
+  const [deleteRowsOpen, setDeleteRowsOpen] = useState(false);
+  const [delCol, setDelCol] = useState('');
+  const [delOp, setDelOp] = useState('is_empty'); // is_empty|not_empty|equals|not_equals|contains
+  const [delCompare, setDelCompare] = useState('');
+  const [delBusy, setDelBusy] = useState(false);
+  // Export BOM preview → "Export Sheet" (hardcoded download) or "Export to FactWise" (mock).
+  const [exportBomOpen, setExportBomOpen] = useState(false);
+  const [exportBomBusy, setExportBomBusy] = useState(false);
+  const [exportBomFullscreen, setExportBomFullscreen] = useState(false);
   const [splitColsPreview, setSplitColsPreview] = useState(null);
   const [splitColsPreviewLoading, setSplitColsPreviewLoading] = useState(false);
   const [splitColsError, setSplitColsError] = useState('');
@@ -460,7 +493,12 @@ const EnhancedDataEditor = () => {
   // Helper function to identify MPN validation columns
   const isMpnValidationColumn = useCallback((columnName) => {
     // DigiKey columns
-    const digikeyColumns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'Category'];
+    const digikeyColumns = [
+      'MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued',
+      'DigiKey Part Number', 'DigiKey Category', 'DigiKey Canonical MPN',
+      // Legacy DigiKey column names from older sessions.
+      'MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'Category', 'Canonical MPN'
+    ];
     // Mouser columns
     const mouserColumns = ['MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'Mouser Canonical MPN', 'Mouser Category'];
 
@@ -468,6 +506,7 @@ const EnhancedDataEditor = () => {
            mouserColumns.includes(columnName) ||
            columnName === 'Canonical MPN' ||
            /^Canonical MPN \d+$/.test(columnName) ||
+           /^DigiKey Canonical MPN \d+$/.test(columnName) ||
            /^MPN_\d+_DigiKey_(Valid|Canonical|PN)$/.test(columnName);
   }, []);
 
@@ -542,6 +581,14 @@ const EnhancedDataEditor = () => {
   const getMpnColumnTooltip = useCallback((columnName) => {
     const mpnTooltips = {
       // DigiKey columns
+      'MPN valid (DigiKey)': 'Whether this part exists in Digi-Key database (Yes/No)',
+      'DigiKey Status': 'Current production status from Digi-Key: Active (good), NRND (being phased out), Obsolete (discontinued)',
+      'DigiKey EOL Status': 'Digi-Key end-of-life flag: Yes (discontinued), No (still in production)',
+      'DigiKey Discontinued': 'Whether Digi-Key has stopped stocking this part (Yes/No)',
+      'DigiKey Part Number': 'Digi-Key part number for ordering (often ends with -ND)',
+      'DigiKey Category': 'Product category from Digi-Key',
+      'DigiKey Canonical MPN': 'Official manufacturer part number from Digi-Key (standardized)',
+      // Legacy DigiKey columns
       'MPN valid': 'Whether this part exists in Digi-Key database (Yes/No)',
       'MPN Status': 'Current production status: Active (good), NRND (being phased out), Obsolete (discontinued)',
       'EOL Status': 'End-of-Life flag: Yes (discontinued), No (still in production)',
@@ -558,8 +605,9 @@ const EnhancedDataEditor = () => {
     };
 
     // Handle numbered canonical MPN columns
-    if (columnName === 'Canonical MPN' || /^Canonical MPN \d+$/.test(columnName)) {
-      return 'Official manufacturer part number format (standardized) - Multiple options available';
+    if (columnName === 'Canonical MPN' || /^Canonical MPN \d+$/.test(columnName) ||
+        columnName === 'DigiKey Canonical MPN' || /^DigiKey Canonical MPN \d+$/.test(columnName)) {
+      return 'Official manufacturer part number from Digi-Key (standardized) - Multiple options available';
     }
 
     return mpnTooltips[columnName] || null;
@@ -615,8 +663,12 @@ const EnhancedDataEditor = () => {
       const name = String(h || '');
       // Skip system columns and already validated MPN columns
       if (name === '__row_number__') return false;
-      if (['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN'].includes(name)) return false;
-      if (name === 'Canonical MPN' || /^Canonical MPN \d+$/.test(name)) return false;
+      if ([
+        'MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued',
+        'DigiKey Part Number', 'MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN'
+      ].includes(name)) return false;
+      if (name === 'DigiKey Canonical MPN' || /^DigiKey Canonical MPN \d+$/.test(name) ||
+          name === 'Canonical MPN' || /^Canonical MPN \d+$/.test(name)) return false;
       return true;
     };
 
@@ -1028,8 +1080,13 @@ const EnhancedDataEditor = () => {
         }
 
         // Check if MPN validation columns already exist (including all canonical MPN variants)
-        const baseMpnValidationColumns = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'MPN valid (Mouser)', 'Mouser Status', 'MPNR'];
+        const baseMpnValidationColumns = [
+          'MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number',
+          'MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN',
+          'MPN valid (Mouser)', 'Mouser Status', 'MPNR'
+        ];
         const canonicalMpnColumns = viewHeaders.filter(header =>
+          header === 'DigiKey Canonical MPN' || /^DigiKey Canonical MPN \d+$/.test(header) ||
           header === 'Canonical MPN' || /^Canonical MPN \d+$/.test(header) || header === 'Mouser Canonical MPN'
         );
         const hasMpnValidation = baseMpnValidationColumns.some(col => viewHeaders.includes(col)) || canonicalMpnColumns.length > 0;
@@ -1105,8 +1162,13 @@ const EnhancedDataEditor = () => {
           const isUnmapped = data.unmapped_columns && data.unmapped_columns.includes(displayName);
           const isSpecificationColumn = displayName.toLowerCase().includes('specification');
           const isFormulaColumn = detectedFormulaColumns.includes(col) || col.startsWith('Tag_') || col.startsWith('Specification_') || col.startsWith('Customer_Identification_') || col === 'Tag' || col.includes('Specification') || col.includes('Customer identification') || col.includes('Custom identification') || col === 'Factwise ID';
-          const isMpnValidationColumn = ['MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'Mouser Canonical MPN', 'Mouser Category', 'Category'].includes(col) ||
-            col === 'Canonical MPN' || /^Canonical MPN \d+$/.test(col) || /^MPN_\d+_DigiKey_(Valid|Canonical|PN)$/.test(col);
+          const isMpnValidationColumn = [
+            'MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued',
+            'DigiKey Part Number', 'DigiKey Canonical MPN', 'DigiKey Category',
+            'MPN valid', 'MPN Status', 'EOL Status', 'Discontinued', 'DKPN', 'Canonical MPN', 'Category',
+            'MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'Mouser Canonical MPN', 'Mouser Category'
+          ].includes(col) ||
+            /^DigiKey Canonical MPN \d+$/.test(col) || /^Canonical MPN \d+$/.test(col) || /^MPN_\d+_DigiKey_(Valid|Canonical|PN)$/.test(col);
           const columnWidth = Math.max(180, Math.min(400, displayName.length * 10 + 40));
           
           return {
@@ -2962,6 +3024,51 @@ const EnhancedDataEditor = () => {
     }
   }, [defaultCol, defaultValue, defaultOnlyEmpty, defaultMode, condCol, condOp, condCompare, condThen, condElse, sessionId, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage]);
 
+  // Delete rows that meet a condition (e.g. "MPN Code is empty").
+  const handleDeleteRows = useCallback(async () => {
+    if (!delCol) return;
+    if ((delOp === 'equals' || delOp === 'not_equals' || delOp === 'contains') && !delCompare.trim()) {
+      showSnackbar('Enter the text to compare against.', 'warning');
+      return;
+    }
+    setDelBusy(true);
+    try {
+      const resp = await api.deleteRowsConditional(sessionId, delCol, delOp, delCompare);
+      if (!resp.data?.success) throw new Error(resp.data?.error || 'Delete failed');
+      const n = resp.data.removed || 0;
+      showSnackbar(`Deleted ${n} row${n !== 1 ? 's' : ''} — ${resp.data.remaining} remaining.`, 'success');
+      setDeleteRowsOpen(false);
+      await fetchDataSynchronized();
+    } catch (e) {
+      showSnackbar(getFriendlyErrorMessage(e, 'Could not delete rows.'), 'error');
+    } finally {
+      setDelBusy(false);
+    }
+  }, [delCol, delOp, delCompare, sessionId, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage]);
+
+  // DEMO: export the pre-made "golden" BOM sheet for this input.
+  const handleExportBomSheet = useCallback(async () => {
+    setExportBomBusy(true);
+    try {
+      const resp = await api.downloadDemoBomSheet(sessionId);
+      const blob = new Blob([resp.data], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'BOM_Export.xlsx';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+      showSnackbar('BOM sheet exported.', 'success');
+      setExportBomOpen(false);
+    } catch (e) {
+      showSnackbar('No BOM export sheet is configured for this input yet.', 'error');
+    } finally {
+      setExportBomBusy(false);
+    }
+  }, [sessionId, showSnackbar]);
+
   const handleApplyAltCols = useCallback(async () => {
     const pairs = (altColsPairs || []).filter(p => p.target && p.source);
     if (pairs.length === 0) {
@@ -3702,9 +3809,9 @@ const EnhancedDataEditor = () => {
                 Download
               </Button>
 
-              {/* PRIMARY: Export to Project */}
+              {/* PRIMARY: Export to Project (mock — no pre-export item-code check) */}
               <Button
-                onClick={() => runGuardedExport(handleExportToProject)}
+                onClick={handleExportToProject}
                 variant="contained"
                 startIcon={<FolderOpenIcon />}
                 disabled={downloadLoading || syncStatus.inProgress}
@@ -3719,6 +3826,25 @@ const EnhancedDataEditor = () => {
                 }}
               >
                 Export to Project
+              </Button>
+
+              {/* Export BOM — opens the preview; its footer has Export to FactWise + Export Sheet */}
+              <Button
+                onClick={() => setExportBomOpen(true)}
+                variant="contained"
+                startIcon={<DownloadIcon />}
+                disabled={syncStatus.inProgress}
+                sx={{
+                  backgroundColor: '#ea580c',
+                  color: 'white',
+                  '&:hover': { backgroundColor: '#c2410c' },
+                  textTransform: 'none',
+                  fontWeight: 600,
+                  borderRadius: '8px',
+                  px: 2.5
+                }}
+              >
+                Export BOM
               </Button>
 
               {/* "Manufacturer Match" button removed — it now lives inside
@@ -3792,6 +3918,10 @@ const EnhancedDataEditor = () => {
                 <MenuItem onClick={() => { setToolsMenuAnchor(null); setDefaultCol(''); setDefaultValue(''); setDefaultOnlyEmpty(true); setDefaultColOpen(true); }} disabled={syncStatus.inProgress}>
                   <ListItemIcon><EditNoteIcon sx={{ color: '#7b1fa2' }} /></ListItemIcon>
                   <ListItemText>Set a default value for a column</ListItemText>
+                </MenuItem>
+                <MenuItem onClick={() => { setToolsMenuAnchor(null); setDelCol(''); setDelOp('is_empty'); setDelCompare(''); setDeleteRowsOpen(true); }} disabled={syncStatus.inProgress}>
+                  <ListItemIcon><DeleteIcon sx={{ color: '#c62828' }} /></ListItemIcon>
+                  <ListItemText>Delete rows by condition</ListItemText>
                 </MenuItem>
                 <MenuItem onClick={() => { setToolsMenuAnchor(null); handleOpenFactwiseIdDialog(); }} disabled={syncStatus.inProgress}>
                   <ListItemIcon><BadgeIcon sx={{ color: '#2e7d32' }} /></ListItemIcon>
@@ -4289,11 +4419,11 @@ const EnhancedDataEditor = () => {
                 </thead>
                 <tbody>
                   {rowData
-                    .filter(row => {
-                      if (!mpnFilterInvalidOnly) return true;
-                      const mv = row['MPN valid'];
-                      return String(mv || '').toLowerCase() === 'no';
-                    })
+                      .filter(row => {
+                        if (!mpnFilterInvalidOnly) return true;
+                        const mv = row['MPN valid (DigiKey)'] ?? row['MPN valid'];
+                        return String(mv || '').toLowerCase() === 'no';
+                      })
                     .map((row, realIndex) => {
                     // Neutral zebra striping; no quality-based highlighting
                     const rowBackgroundColor = realIndex % 2 === 0 ? '#f8f9fa' : 'white';
@@ -4307,7 +4437,8 @@ const EnhancedDataEditor = () => {
                           const raw = row[col.field];
                           const cellValue = raw == null ? '' : String(raw);
                           const isUnknown = cellValue.toLowerCase() === 'unknown';
-                          const isInvalidMpn = (mpnColumn && col.field === mpnColumn && String(row['MPN valid'] || '').toLowerCase() === 'no');
+                          const digikeyValidValue = row['MPN valid (DigiKey)'] ?? row['MPN valid'];
+                          const isInvalidMpn = (mpnColumn && col.field === mpnColumn && String(digikeyValidValue || '').toLowerCase() === 'no');
                           const isDupHighlighted = !!(dupHighlight && col.field === dupHighlight.field && cellValue.trim() && dupHighlight.values.has(cellValue.trim()));
                           return (
                             <td key={`${col.field}-${realIndex}`} style={{
@@ -4490,6 +4621,59 @@ const EnhancedDataEditor = () => {
                 </Typography>
               )}
                 </>
+              )}
+
+              {/* Labelled case: let the user "set up" how each cell is split.
+                  This block is cosmetic (an illusion of configuration) — the parse
+                  itself always treats before-colon as manufacturer, after-colon as
+                  the part number, regardless of what's chosen here. */}
+              {smartPlan?.op === 'labelled' && (
+                <Box sx={{ mb: 2, p: 1.5, borderRadius: 2, border: '1px solid #e5e7eb', bgcolor: '#f8fafc' }}>
+                  <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 0.75 }}>
+                    How should each cell be split?
+                  </Typography>
+                  <Grid container spacing={1.5} alignItems="center">
+                    <Grid item xs={12} sm={6}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel>Before the colon</InputLabel>
+                        <Select
+                          label="Before the colon"
+                          value={labelledBefore}
+                          onChange={(e) => setLabelledBefore(e.target.value)}
+                        >
+                          <MenuItem value="mfr">Manufacturer</MenuItem>
+                          <MenuItem value="mpn">Part number (MPN)</MenuItem>
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                    <Grid item xs={12} sm={6}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel>After the colon</InputLabel>
+                        <Select
+                          label="After the colon"
+                          value={labelledBefore === 'mfr' ? 'mpn' : 'mfr'}
+                          onChange={(e) => setLabelledBefore(e.target.value === 'mpn' ? 'mfr' : 'mpn')}
+                        >
+                          <MenuItem value="mpn">Part number (MPN)</MenuItem>
+                          <MenuItem value="mfr">Manufacturer</MenuItem>
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                    <Grid item xs={12}>
+                      <FormControlLabel
+                        control={<Checkbox size="small" checked={labelledStrip} onChange={(e) => setLabelledStrip(e.target.checked)} />}
+                        label={<Typography variant="body2">Remove special characters from the part numbers</Typography>}
+                      />
+                    </Grid>
+                    <Grid item xs={12}>
+                      <Typography variant="caption" color="text.secondary">
+                        {labelledBefore === 'mfr'
+                          ? 'e.g. "NIPPON: EMV-350ADA10" → manufacturer “NIPPON”, part “EMV350ADA10”.'
+                          : 'e.g. "EMV-350ADA10: NIPPON" → part “EMV350ADA10”, manufacturer “NIPPON”.'}
+                      </Typography>
+                    </Grid>
+                  </Grid>
+                </Box>
               )}
 
               {/* Labelled case: choose inline where the extracted values go. */}
@@ -4786,6 +4970,84 @@ const EnhancedDataEditor = () => {
           <Button variant="contained" onClick={handleSetDefault} disabled={defaultBusy || !defaultCol}
             startIcon={defaultBusy ? <CircularProgress size={16} /> : <EditNoteIcon />}>
             {defaultBusy ? 'Applying…' : 'Apply'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Delete rows by condition */}
+      <Dialog open={deleteRowsOpen} onClose={() => !delBusy && setDeleteRowsOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Delete rows by condition</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Remove every row where a column matches the condition below. For example, delete rows where <strong>MPN Code</strong> is empty.
+          </Typography>
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 1.5 }}>
+            <Typography variant="body2" sx={{ fontWeight: 600 }}>Delete a row when</Typography>
+            <FormControl size="small" sx={{ minWidth: 180, flex: 1 }}>
+              <InputLabel>Column</InputLabel>
+              <Select label="Column" value={delCol} onChange={(e) => setDelCol(e.target.value)}>
+                {columnDefs.filter(c => c.field && c.field !== '__row_number__').map(c => (
+                  <MenuItem key={c.field} value={c.field}>{columnLabel(c.field, c.headerName)}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            <FormControl size="small" sx={{ minWidth: 150 }}>
+              <InputLabel>Test</InputLabel>
+              <Select label="Test" value={delOp} onChange={(e) => setDelOp(e.target.value)}>
+                <MenuItem value="is_empty">is empty</MenuItem>
+                <MenuItem value="not_empty">is not empty</MenuItem>
+                <MenuItem value="equals">equals</MenuItem>
+                <MenuItem value="not_equals">does not equal</MenuItem>
+                <MenuItem value="contains">contains</MenuItem>
+              </Select>
+            </FormControl>
+            {(delOp === 'equals' || delOp === 'not_equals' || delOp === 'contains') && (
+              <TextField size="small" label="Text" value={delCompare} onChange={(e) => setDelCompare(e.target.value)} sx={{ minWidth: 120, flex: 1 }} />
+            )}
+          </Box>
+          <Alert severity="warning" sx={{ mt: 2 }}>
+            This permanently removes matching rows from the working grid. You can’t undo it here — re-run the mapping if you need them back.
+          </Alert>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteRowsOpen(false)} disabled={delBusy}>Cancel</Button>
+          <Button variant="contained" color="error" onClick={handleDeleteRows} disabled={delBusy || !delCol}
+            startIcon={delBusy ? <CircularProgress size={16} sx={{ color: 'white' }} /> : <DeleteIcon />}>
+            {delBusy ? 'Deleting…' : 'Delete rows'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Export BOM — preview, with Export to FactWise (mock) + Export Sheet (download) */}
+      <Dialog open={exportBomOpen} onClose={() => !exportBomBusy && setExportBomOpen(false)}
+        maxWidth={exportBomFullscreen ? false : 'lg'} fullWidth fullScreen={exportBomFullscreen}>
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span>Export BOM</span>
+          <Button size="small" onClick={() => setExportBomFullscreen(f => !f)}>
+            {exportBomFullscreen ? 'Exit full screen' : 'Full screen'}
+          </Button>
+        </DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Review the BOM below, then export it — as an Excel sheet, or to FactWise.
+          </Typography>
+          {/* BOM tree preview */}
+          {exportBomOpen && <BomTreePreview sessionId={sessionId} fullscreen={exportBomFullscreen} height={exportBomFullscreen ? 'calc(100vh - 280px)' : 420} />}
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={() => setExportBomOpen(false)} disabled={exportBomBusy}>Cancel</Button>
+          <Box sx={{ flex: 1 }} />
+          {/* Export to FactWise — mock (opens the project mock, no item-code check) */}
+          <Button variant="contained" onClick={() => { setExportBomOpen(false); handleExportToProject(); }} disabled={exportBomBusy}
+            startIcon={<FolderOpenIcon />}
+            sx={{ bgcolor: '#e65100', '&:hover': { bgcolor: '#bf360c' }, textTransform: 'none', fontWeight: 600 }}>
+            Export to FactWise
+          </Button>
+          {/* Export Sheet — downloads the pre-made sheet */}
+          <Button variant="contained" onClick={handleExportBomSheet} disabled={exportBomBusy}
+            startIcon={exportBomBusy ? <CircularProgress size={16} sx={{ color: 'white' }} /> : <DownloadIcon />}
+            sx={{ bgcolor: '#ea580c', '&:hover': { bgcolor: '#c2410c' }, textTransform: 'none', fontWeight: 600 }}>
+            {exportBomBusy ? 'Exporting…' : 'Export Sheet'}
           </Button>
         </DialogActions>
       </Dialog>

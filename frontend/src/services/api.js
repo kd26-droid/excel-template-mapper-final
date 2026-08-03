@@ -1279,6 +1279,24 @@ const api = {
     }, { timeout: 120000 });
   },
 
+  /** Delete rows where a column meets a condition (is_empty/not_empty/equals/not_equals/contains). */
+  deleteRowsConditional: (sessionId, column, operator, compare = '') => {
+    return axios.post(`${API_URL}/transforms/delete-rows/`, {
+      session_id: sessionId,
+      column,
+      operator,
+      compare,
+    }, { timeout: 120000 });
+  },
+
+  /** DEMO: fetch the pre-made "golden" export sheet for this input (as a blob). */
+  downloadDemoBomSheet: (sessionId) =>
+    axios.get(`${API_URL}/download/demo-bom/${sessionId}/`, { responseType: 'blob', timeout: 120000 }),
+
+  /** DEMO: fetch the nested BOM tree (FG → sub-assemblies → components) for the preview. */
+  getDemoBomTree: (sessionId) =>
+    axios.get(`${API_URL}/demo/bom-tree/${sessionId}/`, { timeout: 60000 }),
+
   /**
    * Fold repeated column groups into rows.
    * groups: [["Manufacturer","Manufacturer PartNo"], ["Manufacturer S S","Manufacturer PartNo S S"]]

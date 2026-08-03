@@ -7,7 +7,6 @@ import UploadFiles from './pages/UploadFiles';
 import ColumnMapping from './pages/ColumnMapping';
 import PDFZoneSelection from './pages/PDFZoneSelection';
 import Settings from './pages/Settings';
-import BomPreview from './pages/BomPreview';
 import BomNormalizer from './pages/BomNormalizer';
 // Prefer the enhanced, Azure-friendly data editor with robust synchronization
 import EnhancedDataEditor from './components/EnhancedDataEditor';
@@ -15,12 +14,11 @@ import EnhancedDataEditor from './components/EnhancedDataEditor';
 function App() {
   const location = useLocation();
   const normalizedPath = location.pathname.replace(/\/+$/, '') || '/';
-  const isStandaloneRoute = ['/preview', '/bom-normalizer', '/bom-normaliser'].includes(normalizedPath);
+  const isStandaloneRoute = ['/bom-normalizer', '/bom-normaliser'].includes(normalizedPath);
 
   if (isStandaloneRoute) {
     return (
       <Routes>
-        <Route path="/preview" element={<BomPreview />} />
         <Route path="/bom-normalizer" element={<BomNormalizer />} />
         <Route path="/bom-normaliser" element={<BomNormalizer />} />
       </Routes>
@@ -40,7 +38,6 @@ function App() {
             <Route path="/editor/:sessionId" element={<EnhancedDataEditor />} />
             <Route path="/pdf-zones/:sessionId" element={<PDFZoneSelection />} />
             <Route path="/settings" element={<Settings />} />
-            <Route path="/preview" element={<BomPreview />} />
             <Route path="/bom-normalizer" element={<BomNormalizer />} />
             <Route path="/bom-normaliser" element={<BomNormalizer />} />
           </Routes>
