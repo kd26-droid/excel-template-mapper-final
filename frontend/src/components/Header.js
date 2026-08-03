@@ -4,7 +4,6 @@ import { Link as RouterLink, useLocation } from 'react-router-dom';
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import SettingsIcon from '@mui/icons-material/Settings';
-import SearchIcon from '@mui/icons-material/Search';
 import NotificationsNoneIcon from '@mui/icons-material/NotificationsNone';
 import WbSunnyIcon from '@mui/icons-material/WbSunny';
 import TransformIcon from '@mui/icons-material/Transform';
@@ -43,19 +42,23 @@ const Header = () => {
       {/* ── main bar ──────────────────────────────────────────────────── */}
       <Box
         sx={{
+          position: 'relative',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          px: { xs: 2, md: 3 },
-          py: 1,
+          px: { xs: 2, sm: 3, md: 4 },
+          py: 1.5,
           background: h.background,
-          backdropFilter: 'blur(16px) saturate(180%)',
-          WebkitBackdropFilter: 'blur(16px) saturate(180%)',
+          backdropFilter: 'blur(20px) saturate(190%)',
+          WebkitBackdropFilter: 'blur(20px) saturate(190%)',
           borderBottom: `1px solid ${r.border.subtle}`,
+          boxShadow: isDarkMode
+            ? '0 4px 30px rgba(0, 0, 0, 0.35)'
+            : '0 4px 30px rgba(0, 0, 0, 0.03)',
         }}
       >
-        {/* ── left: logo + nav capsule ────────────────────────────────── */}
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+        {/* ── left: logo ────────────────────────────────────────────────── */}
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2.5 }}>
           {/* Logo */}
           <Box
             component={RouterLink}
@@ -63,7 +66,7 @@ const Header = () => {
             sx={{
               display: 'flex',
               alignItems: 'center',
-              gap: 1.25,
+              gap: 1.5,
               textDecoration: 'none',
             }}
           >
@@ -72,8 +75,8 @@ const Header = () => {
               src="/Factwisesvglogo.svg"
               alt="FactWise Logo"
               sx={{
-                width: 26,
-                height: 26,
+                width: 28,
+                height: 28,
                 borderRadius: '4px 0 4px 0',
                 objectFit: 'contain',
                 filter: `drop-shadow(0 0 8px ${r.action.primarySoft})`,
@@ -83,7 +86,7 @@ const Header = () => {
             />
             <Typography
               variant="h6"
-              fontWeight="600"
+              fontWeight="700"
               sx={{
                 color: r.text.primary,
                 letterSpacing: '-0.02em',
@@ -94,102 +97,103 @@ const Header = () => {
               FactWise
             </Typography>
           </Box>
-
-          {/* Navigation capsule */}
-          <Box
-            sx={{
-              display: { xs: 'none', sm: 'flex' },
-              alignItems: 'center',
-              gap: 0.5,
-              p: 0.5,
-              borderRadius: '10px',
-              bgcolor: h.capsule,
-              border: `1px solid ${r.border.subtle}`,
-              boxShadow: r.shadow.control,
-            }}
-          >
-            {NAV_ITEMS.map((item) => {
-              const isActive =
-                currentPath === item.path ||
-                (item.path !== '/' && currentPath.startsWith(item.path));
-              const Icon = item.icon;
-              return (
-                <Box
-                  key={item.path}
-                  component={RouterLink}
-                  to={item.path}
-                  sx={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 1,
-                    px: 2,
-                    py: 0.55,
-                    borderRadius: '7px',
-                    fontSize: '13px',
-                    fontWeight: 600,
-                    textDecoration: 'none',
-                    color: isActive ? r.text.onAccent : r.text.secondary,
-                    background: isActive ? r.action.selectedStrong : 'transparent',
-                    boxShadow: isActive ? r.shadow.control : 'none',
-                    transition: 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
-                    '&:hover': {
-                      color: isActive ? r.text.onAccent : r.text.primary,
-                      background: isActive
-                        ? r.action.selectedStrongHover
-                        : r.action.hover,
-                    },
-                  }}
-                >
-                  <Icon sx={{ fontSize: 15 }} />
-                  {item.label}
-                </Box>
-              );
-            })}
-          </Box>
         </Box>
 
-        {/* ── right: search + toggle + bell + avatar ──────────────────── */}
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-          {/* Search bar placeholder */}
-          <Box
-            sx={{
-              display: { xs: 'none', md: 'flex' },
-              alignItems: 'center',
-              gap: 1.5,
-              px: 1.5,
-              py: 0.5,
-              borderRadius: '8px',
-              bgcolor: r.surface.controlSoft,
-              border: `1px solid ${r.border.subtle}`,
-              color: r.text.secondary,
-              cursor: 'pointer',
-              transition: 'all 0.2s ease',
-              '&:hover': {
-                bgcolor: r.action.hover,
-                borderColor: r.border.hover,
-              },
-            }}
-          >
-            <SearchIcon sx={{ fontSize: 14 }} />
-            <Typography
-              variant="caption"
-              sx={{ fontSize: '11px', color: r.text.secondary }}
-            >
-              Search or jump to...
-            </Typography>
-            <Chip
-              label="⌘K"
-              size="small"
-              sx={{
-                height: 18,
-                fontSize: '10px',
-                fontWeight: 700,
-                bgcolor: r.surface.muted,
-                color: r.text.secondary,
-                borderRadius: '4px',
-              }}
-            />
-          </Box>
+        {/* ── center: navigation capsule (glassmorphism & spacious) ────── */}
+        <Box
+          sx={{
+            position: { xs: 'static', lg: 'absolute' },
+            left: { lg: '50%' },
+            transform: { lg: 'translateX(-50%)' },
+            display: { xs: 'none', sm: 'flex' },
+            alignItems: 'center',
+            gap: 1.25,
+            p: '6px 8px',
+            borderRadius: '999px',
+            background: h.capsule,
+            backdropFilter: 'blur(16px) saturate(180%)',
+            WebkitBackdropFilter: 'blur(16px) saturate(180%)',
+            border: `1px solid ${h.capsuleBorder}`,
+            boxShadow: h.capsuleShadow,
+            transition: 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)',
+          }}
+        >
+          {NAV_ITEMS.map((item) => {
+            const isActive =
+              currentPath === item.path ||
+              (item.path !== '/' && currentPath.startsWith(item.path));
+            const Icon = item.icon;
+            return (
+              <Box
+                key={item.path}
+                component={RouterLink}
+                to={item.path}
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 1.25,
+                  px: 2.5,
+                  py: 0.75,
+                  borderRadius: '999px',
+                  fontSize: '13.5px',
+                  fontWeight: 600,
+                  textDecoration: 'none',
+                  position: 'relative',
+                  overflow: 'hidden',
+                  outline: 'none',
+                  WebkitTapHighlightColor: 'transparent',
+                  color: isActive
+                    ? '#ffffff'
+                    : isDarkMode
+                    ? 'rgba(255, 255, 255, 0.75)'
+                    : '#475569',
+                  background: isActive
+                    ? 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)'
+                    : 'transparent',
+                  border: isActive
+                    ? '1px solid rgba(255, 255, 255, 0.25)'
+                    : '1px solid transparent',
+                  boxShadow: isActive
+                    ? '0 4px 14px 0 rgba(37, 99, 235, 0.38), inset 0 1px 0 0 rgba(255, 255, 255, 0.35)'
+                    : 'none',
+                  backdropFilter: isActive ? 'blur(8px)' : 'none',
+                  WebkitBackdropFilter: isActive ? 'blur(8px)' : 'none',
+                  transition: 'all 0.22s cubic-bezier(0.16, 1, 0.3, 1)',
+                  '&:hover': {
+                    color: isActive
+                      ? '#ffffff'
+                      : isDarkMode
+                      ? '#ffffff'
+                      : '#0f172a',
+                    background: isActive
+                      ? 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)'
+                      : isDarkMode
+                      ? 'rgba(255, 255, 255, 0.09)'
+                      : 'rgba(15, 23, 42, 0.05)',
+                    borderColor: isActive
+                      ? 'rgba(255, 255, 255, 0.35)'
+                      : 'transparent',
+                    transform: 'translateY(-1px)',
+                    boxShadow: isActive
+                      ? '0 6px 18px 0 rgba(37, 99, 235, 0.48), inset 0 1px 0 0 rgba(255, 255, 255, 0.45)'
+                      : isDarkMode
+                      ? '0 4px 12px rgba(0, 0, 0, 0.25)'
+                      : '0 4px 12px rgba(15, 23, 42, 0.04)',
+                  },
+                  '&:focus, &:focus-visible': {
+                    outline: 'none',
+                  },
+                }}
+              >
+                <Icon sx={{ fontSize: 16 }} />
+                {item.label}
+              </Box>
+            );
+          })}
+        </Box>
+
+        {/* ── right: toggle + bell + avatar ──────────────────────────── */}
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2.25 }}>
 
           {/* ── Light / Dark Toggle ───────────────────────────────────── */}
           <Box

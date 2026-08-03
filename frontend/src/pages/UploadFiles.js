@@ -510,7 +510,6 @@ const UploadFiles = () => {
   const [sheetJoinVisibleColumns, setSheetJoinVisibleColumns] = useState([]);
   const [sheetJoinPreviewFilter, setSheetJoinPreviewFilter] = useState('all');
   const sheetJoinPreviewRowsPerPage = 50;
-  const [sheetJoinToastOpen, setSheetJoinToastOpen] = useState(false);
   const [sheetJoinLegacyHeaderWarning, setSheetJoinLegacyHeaderWarning] = useState(false);
   const [savedSheetJoinComparisons, setSavedSheetJoinComparisons] = useState([]);
   const [activeSheetJoinComparisonId, setActiveSheetJoinComparisonId] = useState(null);
@@ -1501,6 +1500,7 @@ const UploadFiles = () => {
     const preview = buildSheetJoinPreview(sheetJoinConfig);
     setSheetJoinConfig(preview.config);
     setSheetJoinPreview(preview);
+    setActiveSheetJoinComparisonId(null);
     setSheetJoinLegacyHeaderWarning(false);
     setSheetJoinVisibleColumns(preview.headers);
     setSheetJoinPreviewFilter('all');
@@ -1509,6 +1509,7 @@ const UploadFiles = () => {
   };
 
   const handleSheetJoinPreviewCellChange = (rowIndex, header, value) => {
+    setActiveSheetJoinComparisonId(null);
     setSheetJoinPreview(prev => {
       if (!prev) return prev;
       const rows = prev.rows.map((row, index) => (
@@ -1575,7 +1576,6 @@ const UploadFiles = () => {
     setSheetJoinSetup(setup);
     setSheetJoinPreview(preview);
     setSheetJoinDialogOpen(false);
-    setSheetJoinToastOpen(true);
   }, [buildSheetJoinPreview, sheetJoinConfig, sheetJoinPreview]);
 
   const getSavedSheetJoinDraft = useCallback(async (comparisonId) => {
@@ -1662,7 +1662,10 @@ const UploadFiles = () => {
   }, [applySheetJoinDraftToUpload, getSavedSheetJoinDraft]);
 
   const saveNamedSheetJoinComparison = useCallback(async (preview, name, options = {}) => {
-    await saveSheetJoinDraft(preview, name, options);
+    const saved = await saveSheetJoinDraft(preview, name, options);
+    if (saved?.id) {
+      setActiveSheetJoinComparisonId(saved.id);
+    }
     handleSaveSheetJoinSetup();
     setSheetJoinSaveDialogOpen(false);
     setSheetJoinSaveName('');
@@ -1706,9 +1709,6 @@ const UploadFiles = () => {
         pendingSheetJoinDuplicate.name,
         { overrideId: pendingSheetJoinDuplicate.existing.id }
       );
-      if (activeSheetJoinComparisonId === pendingSheetJoinDuplicate.existing.id) {
-        setActiveSheetJoinComparisonId(null);
-      }
     } catch (err) {
       setError('Failed to override merge book: ' + (err.message || err));
     } finally {
@@ -2091,6 +2091,54 @@ const UploadFiles = () => {
   const visibleSheetJoinPreviewColumns = sheetJoinPreview
     ? sheetJoinPreview.headers.filter(header => sheetJoinVisibleColumns.includes(header))
     : [];
+  const sheetJoinMetricChipSx = (tone, active) => {
+    const tones = {
+      blue: {
+        bg: '#2563eb',
+        border: '#3b82f6',
+        text: '#ffffff',
+        softBg: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#dbeafe',
+        softText: isDarkMode ? '#93c5fd' : '#1d4ed8'
+      },
+      green: {
+        bg: '#059669',
+        border: '#10b981',
+        text: '#ffffff',
+        softBg: isDarkMode ? 'rgba(16, 185, 129, 0.12)' : '#d1fae5',
+        softText: isDarkMode ? '#34d399' : '#047857'
+      },
+      yellow: {
+        bg: '#d97706',
+        border: '#f59e0b',
+        text: '#ffffff',
+        softBg: isDarkMode ? 'rgba(245, 158, 11, 0.12)' : '#fef3c7',
+        softText: isDarkMode ? '#fbbf24' : '#b45309'
+      },
+      slate: {
+        bg: isDarkMode ? '#475569' : '#64748b',
+        border: isDarkMode ? 'rgba(148, 163, 184, 0.6)' : '#94a3b8',
+        text: '#ffffff',
+        softBg: isDarkMode ? 'rgba(148, 163, 184, 0.12)' : '#f1f5f9',
+        softText: isDarkMode ? '#cbd5e1' : '#475569'
+      }
+    };
+    const c = tones[tone] || tones.slate;
+    return {
+      height: 28,
+      px: 1,
+      fontSize: '11px',
+      fontWeight: 700,
+      bgcolor: active ? c.bg : c.softBg,
+      color: active ? c.text : c.softText,
+      border: `1px solid ${c.border}`,
+      borderRadius: '999px',
+      cursor: 'pointer',
+      boxShadow: active ? `0 10px 22px -16px ${c.border}` : 'none',
+      '&:hover': {
+        bgcolor: active ? c.bg : c.softBg
+      }
+    };
+  };
 
   return (
     <Box sx={{ position: 'relative', minHeight: 'calc(100vh - 64px)', px: { xs: 1.5, md: 3 }, py: { xs: 2, md: 3 }, bgcolor: Nn.pageBg, color: Nn.text, overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -2881,12 +2929,12 @@ const UploadFiles = () => {
       <Dialog
         open={sheetJoinDialogOpen}
         onClose={handleCloseSheetJoinSetup}
-        maxWidth="md"
+        maxWidth="xl"
         fullWidth
         PaperProps={{
           sx: {
             ...dialogPaperSx,
-            width: 'min(980px, calc(100vw - 48px))',
+            width: 'min(1240px, calc(100vw - 32px))',
           }
         }}
       >
@@ -3125,17 +3173,7 @@ const UploadFiles = () => {
               <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.5, mb: 2, alignItems: 'center' }}>
                 <Chip
                   label={`${sheetJoinPreview.summary.outputRows} output rows`}
-                  sx={{
-                    height: 28,
-                    px: 1,
-                    fontSize: '11px',
-                    fontWeight: 700,
-                    bgcolor: '#2563eb',
-                    color: '#ffffff',
-                    border: '1px solid #3b82f6',
-                    borderRadius: '999px',
-                    cursor: 'pointer'
-                  }}
+                  sx={sheetJoinMetricChipSx('blue', sheetJoinPreviewFilter === 'all')}
                   onClick={() => {
                     setSheetJoinPreviewFilter('all');
                     setSheetJoinPreviewPage(0);
@@ -3143,17 +3181,7 @@ const UploadFiles = () => {
                 />
                 <Chip
                   label={`${sheetJoinPreview.summary.matchedBaseRows} matched`}
-                  sx={{
-                    height: 28,
-                    px: 1,
-                    fontSize: '11px',
-                    fontWeight: 700,
-                    bgcolor: sheetJoinPreviewFilter === 'matched' ? 'rgba(16, 185, 129, 0.3)' : (isDarkMode ? 'rgba(16, 185, 129, 0.1)' : '#d1fae5'),
-                    color: isDarkMode ? '#34d399' : '#047857',
-                    border: '1px solid #10b981',
-                    borderRadius: '999px',
-                    cursor: 'pointer'
-                  }}
+                  sx={sheetJoinMetricChipSx('green', sheetJoinPreviewFilter === 'matched')}
                   onClick={() => {
                     setSheetJoinPreviewFilter('matched');
                     setSheetJoinPreviewPage(0);
@@ -3161,17 +3189,7 @@ const UploadFiles = () => {
                 />
                 <Chip
                   label={`${sheetJoinPreview.summary.unmatchedBaseRows} unmatched`}
-                  sx={{
-                    height: 28,
-                    px: 1,
-                    fontSize: '11px',
-                    fontWeight: 700,
-                    bgcolor: sheetJoinPreviewFilter === 'unmatched' ? 'rgba(245, 158, 11, 0.3)' : (isDarkMode ? 'rgba(245, 158, 11, 0.1)' : '#fef3c7'),
-                    color: isDarkMode ? '#fbbf24' : '#b45309',
-                    border: '1px solid #f59e0b',
-                    borderRadius: '999px',
-                    cursor: 'pointer'
-                  }}
+                  sx={sheetJoinMetricChipSx('yellow', sheetJoinPreviewFilter === 'unmatched')}
                   onClick={() => {
                     setSheetJoinPreviewFilter('unmatched');
                     setSheetJoinPreviewPage(0);
@@ -3179,15 +3197,10 @@ const UploadFiles = () => {
                 />
                 <Chip
                   label={`${sheetJoinPreview.summary.orphanDetailKeys} secondary-only keys`}
-                  sx={{
-                    height: 28,
-                    px: 1,
-                    fontSize: '11px',
-                    fontWeight: 700,
-                    bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.05)' : '#f1f5f9',
-                    color: isDarkMode ? '#94a3b8' : '#475569',
-                    border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.15)' : '1px solid #cbd5e1',
-                    borderRadius: '999px'
+                  sx={sheetJoinMetricChipSx('slate', sheetJoinPreviewFilter === 'secondary-only')}
+                  onClick={() => {
+                    setSheetJoinPreviewFilter('secondary-only');
+                    setSheetJoinPreviewPage(0);
                   }}
                 />
               </Box>
@@ -3583,17 +3596,6 @@ const UploadFiles = () => {
           </Button>
         </DialogActions>
       </Dialog>
-
-      <Snackbar
-        open={sheetJoinToastOpen}
-        autoHideDuration={3500}
-        onClose={() => setSheetJoinToastOpen(false)}
-        anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
-      >
-        <Alert severity="success" onClose={() => setSheetJoinToastOpen(false)} sx={{ width: '100%' }}>
-          Step 7 completed
-        </Alert>
-      </Snackbar>
 
       {/* Template Compatibility Error Modal */}
       <Dialog 
