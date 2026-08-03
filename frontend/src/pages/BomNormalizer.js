@@ -1,12 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import {
   Alert,
   Box,
   Button,
-  Card,
-  CardContent,
   Checkbox,
   Chip,
   Dialog,
@@ -14,20 +11,14 @@ import {
   DialogContent,
   DialogTitle,
   FormControl,
-  FormControlLabel,
-  FormGroup,
   Grid,
   IconButton,
   InputLabel,
   LinearProgress,
   ListItemText,
-  Menu,
   MenuItem,
   Paper,
-  Radio,
-  RadioGroup,
   Select,
-  Snackbar,
   Stack,
   Step,
   StepLabel,
@@ -43,31 +34,164 @@ import {
   Typography,
 } from '@mui/material';
 import CloudUploadIcon from '@mui/icons-material/CloudUpload';
+import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
+import DescriptionOutlinedIcon from '@mui/icons-material/DescriptionOutlined';
 import DownloadIcon from '@mui/icons-material/Download';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
-import RestartAltIcon from '@mui/icons-material/RestartAlt';
-import api from '../services/api';
-import {
-  createFactwiseIds,
-  createTagColumn,
-  getNextTagColumn,
-  getNormalizedExportColumns,
-  getSerialPreviewValues,
-} from '../lib/bomNormalizerAlgorithms';
-import {
-  ALTERNATE_LAYOUT_OPTIONS,
-  CLEANUP_OPTIONS,
-  DELIMITER_OPTIONS,
-  GROUP_HEADER_OPTIONS,
-  KNOWN_MANUFACTURERS,
-  MANUFACTURER_SUFFIX_WORDS,
-  MPN_CONNECTOR_WORDS,
-  MPN_NOISE_RE,
-  QTY_OPTIONS,
-  ROLE_FIELDS,
-  STRUCTURE_OPTIONS,
-} from '../lib/bomNormalizerAlgorithmRegistry';
+import { useThemeContext } from '../utils/ThemeContext';
+
+const ROLE_FIELDS = [
+  { key: 'cpn', label: 'CPN / customer part number' },
+  { key: 'mpn', label: 'MPN column' },
+  { key: 'manufacturer', label: 'Manufacturer column' },
+  { key: 'description', label: 'Description / item name' },
+  { key: 'quantity', label: 'Quantity' },
+  { key: 'uom', label: 'UOM' },
+  { key: 'level', label: 'BOM level' },
+  { key: 'parent', label: 'Parent / group key' },
+];
+
+const STRUCTURE_OPTIONS = [
+  {
+    value: 'mpn_only_same_cell',
+    label: 'Only MPNs are present, all MPNs in one cell',
+    description: 'Use this when the sheet has no manufacturer column and one MPN cell contains primary plus alternates.',
+  },
+  {
+    value: 'mpn_only_rows',
+    label: 'Only MPNs are present, each row has one MPN',
+    description: 'Use this when the sheet has no manufacturer column and each row already has one MPN.',
+  },
+  {
+    value: 'mfr_only_same_cell',
+    label: 'Only MFRs are present, all MFRs in one cell',
+    description: 'Use this when the sheet has manufacturer names but no MPN column, and one cell contains multiple manufacturers.',
+  },
+  {
+    value: 'mfr_only_rows',
+    label: 'Only MFRs are present, each row has one MFR',
+    description: 'Use this when the sheet has no MPN column and each row already has one manufacturer.',
+  },
+  {
+    value: 'separate_cells',
+    label: 'All MPNs in one cell and all MFRs in another cell',
+    description: 'Use this when one column has all MPNs together and another column has all matching manufacturers together in the same order.',
+  },
+  {
+    value: 'same_cell',
+    label: 'All MPNs and MFRs are in the same cell',
+    description: 'Use this for values like "YAGEO: RC0805FR AVX: CR21-0100F-T" where manufacturer and MPN pairs are written together.',
+  },
+  {
+    value: 'one_per_row',
+    label: 'Each row has one MPN and one MFR',
+    description: 'Use this when each row already represents one MPN/manufacturer pair and only needs light cleanup.',
+  },
+];
+
+const ALTERNATE_LAYOUT_OPTIONS = [
+  {
+    value: 'inside_selected_mpn_columns',
+    label: 'Alternates are inside the selected MPN/MFR cells',
+    description: 'Use this when the selected MPN cell itself contains primary plus alternate MPNs.',
+  },
+  {
+    value: 'separate_columns',
+    label: 'Primary and alternate parts are separate columns',
+    description: 'Use this for wide sheets with columns such as Primary MPN, Alt1 MPN, Alt2 MPN, Alt1 Qty, and Alt1 UOM.',
+  },
+  {
+    value: 'already_separate_rows',
+    label: 'Alternates are already separate rows',
+    description: 'Use this when each alternate already appears as its own row in the sheet.',
+  },
+];
+
+const QTY_OPTIONS = [
+  { value: 'every_row', label: 'Every row has its own quantity and UOM' },
+  { value: 'inherit_primary', label: 'Alternates use the primary row quantity and UOM' },
+  { value: 'alternate_columns', label: 'Alternate quantity and UOM are in nearby columns' },
+];
+
+const DELIMITER_OPTIONS = [
+  { value: 'auto', label: 'Auto detect' },
+  { value: ';', label: 'Semicolon ;' },
+  { value: ',', label: 'Comma ,' },
+  { value: '|', label: 'Pipe |' },
+  { value: '\\n', label: 'New line' },
+  { value: 'custom', label: 'Custom delimiter' },
+];
+
+const CLEANUP_OPTIONS = [
+  {
+    key: 'skipTitleRows',
+    label: 'Ignore category/title rows inside the BOM',
+    description: 'Skips section labels that do not contain part data.',
+  },
+  {
+    key: 'skipRepeatedHeaders',
+    label: 'Ignore repeated header rows',
+    description: 'Skips repeated table headers inside the sheet.',
+  },
+  {
+    key: 'skipDoNotPopulate',
+    label: 'Ignore Do Not Populate rows',
+    description: 'Skips rows marked as not fitted or not populated.',
+  },
+];
+
+const KNOWN_MANUFACTURERS = [
+  'INFINEON TECHNOLOGIES AG',
+  'ON SEMICONDUCTOR',
+  'NIC COMPONENTS',
+  'TEXAS INSTRUMENTS',
+  'ANALOG DEVICES',
+  'SAMSUNG ELECTRO-MECHANICS',
+  'SAMSUNG',
+  'PANASONIC',
+  'VISHAY',
+  'YAGEO',
+  'KEMET',
+  'AVX',
+  'ROHM',
+  'NEXPERIA',
+  'NXP',
+  'DIODES',
+  'MURATA',
+  'TDK',
+  'ABRACON CORPORATION',
+  'CTS CORP',
+  'ECLIPTEK',
+  'FOX ELECTRONICS',
+  'KOA',
+  'IRC',
+];
+
+const MANUFACTURER_SUFFIX_WORDS = new Set([
+  'AG',
+  'CO',
+  'COMPONENTS',
+  'CORP',
+  'CORPORATION',
+  'DEVICES',
+  'ELECTRONIC',
+  'ELECTRONICS',
+  'GMBH',
+  'INC',
+  'INCORPORATED',
+  'INDUSTRIES',
+  'INSTRUMENTS',
+  'LIMITED',
+  'LTD',
+  'MICROCHIP',
+  'SEMICONDUCTOR',
+  'SEMICONDUCTORS',
+  'TECHNOLOGIES',
+  'TECHNOLOGY',
+]);
+
+const MPN_NOISE_RE = /(%|ppm\b|ohm\b|pf\b|nf\b|uf\b|\u00b5f\b|mh\b|mm\b|hz\b|khz\b|mhz\b|vac\b|vdc\b|watt\b|rohs\b|case\b|smd\b|esd\b)/i;
 
 const emptyRoles = ROLE_FIELDS.reduce((acc, field) => {
   acc[field.key] = '';
@@ -192,32 +316,17 @@ const inferRoles = (headers) => {
     return patterns.some((pattern) => pattern.test(normalized)) &&
       !excludePatterns.some((pattern) => pattern.test(normalized));
   }) || '';
-  const strongMpnHeader = findHeader([
-    /\bmpn\b/,
-    /manufacturer equivalent/,
-    /manufacturer part/,
-    /manufacturing part/,
-    /\bmfr part/,
-    /\bmfg part/,
-    /producer/,
-  ]);
-  const genericPartHeader = findHeader([/^part number$/, /^part no$/, /^part$/, /^partno$/], [/manufacturer/, /\bmpn\b/, /\bmfr\b/, /\bmfg\b/]);
-  const learnedMpn = findLearnedHeader('mpn');
-  const learnedCpn = findLearnedHeader('cpn');
-  const mpnHeader = strongMpnHeader || learnedMpn || findHeader([/manufacturer equivalent/, /manufacturer part/, /\bmpn\b/, /producer/, /part number/]);
-  const cpnHeader = learnedCpn || findHeader([/\bcpn\b/, /customer part/, /client part/, /internal part/, /part code/]) ||
-    (genericPartHeader && genericPartHeader !== mpnHeader ? genericPartHeader : '');
 
   return {
-    cpn: cpnHeader,
-    mpn: mpnHeader,
+    cpn: findLearnedHeader('cpn') || findHeader([/\bcpn\b/, /customer part/, /client part/, /internal part/, /part code/]),
+    mpn: findLearnedHeader('mpn') || findHeader([/\bmpn\b/, /manufacturer equivalent/, /manufacturer part/, /part number/, /producer/]),
     manufacturer: findLearnedHeader('manufacturer') || findHeader([/^manufacturer$/, /\bmfr\b/, /manufacturer name/, /producer/], [/equivalent/, /part/, /\bmpn\b/]) ||
       findHeader([/manufacturer/], [/equivalent/, /part/, /\bmpn\b/]),
     description: findLearnedHeader('description') || findHeader([/description/, /item name/, /\bname\b/]),
-    quantity: findLearnedHeader('quantity') || findHeader([/quantity/, /\bqty\b/, /^count$/, /\bcount\b/]),
+    quantity: findLearnedHeader('quantity') || findHeader([/quantity/, /\bqty\b/]),
     uom: findLearnedHeader('uom') || findHeader([/\buom\b/, /measurement unit/, /\bunit\b/]),
     level: findLearnedHeader('level') || findHeader([/\blevel\b/]),
-    parent: findLearnedHeader('parent') || findHeader([/parent/, /finished good/, /bom id/, /item code/, /assembly/]),
+    parent: findLearnedHeader('parent') || findHeader([/parent/, /finished good/, /bom id/, /item code/]),
   };
 };
 
@@ -229,20 +338,6 @@ const looksLikeMpnToken = (value) => {
   if (MPN_NOISE_RE.test(token)) return false;
   return /^[A-Za-z0-9._/#,+-]+(?:\s+[A-Za-z0-9._/#,+-]+){0,3}$/.test(token);
 };
-
-const isConnectorOnlyMpnPart = (value) => {
-  const compact = fmt(value)
-    .replace(/\u00a0/g, ' ')
-    .replace(/[()[\]{}.,;:|/\\_+-]+/g, '')
-    .replace(/\s+/g, '')
-    .toLowerCase();
-  return !compact || MPN_CONNECTOR_WORDS.has(compact);
-};
-
-const normalizeMpnParts = (parts) => parts
-  .map(stripVendorPrefix)
-  .map((part) => fmt(part).replace(/^(?:and|or|and\/or)\s+/i, '').replace(/\s+(?:and|or|and\/or)$/i, '').trim())
-  .filter((part) => part && !isConnectorOnlyMpnPart(part));
 
 const splitDelimited = (value) => {
   const text = fmt(value);
@@ -303,12 +398,7 @@ const splitMpnCell = (value, config = {}) => {
   const delimiter = selectedDelimiter(config);
   const explicitParts = splitByExplicitDelimiter(text, delimiter);
   if (explicitParts.length > 1) {
-    return normalizeMpnParts(explicitParts);
-  }
-
-  const connectorParts = text.split(/\s+(?:and\/or|and|or)\s+/i);
-  if (connectorParts.length > 1 && connectorParts.filter((part) => /\d/.test(part)).length >= 2) {
-    return normalizeMpnParts(connectorParts);
+    return explicitParts.map(stripVendorPrefix).filter(Boolean);
   }
 
   const prefixPattern = '(?:AGILE|[A-Za-z]{5,}|\\d{5})';
@@ -324,18 +414,18 @@ const splitMpnCell = (value, config = {}) => {
   }
 
   if (starts.length > 1) {
-    return normalizeMpnParts([...new Set(starts)].sort((a, b) => a - b).map((start, index, sorted) => {
+    return [...new Set(starts)].sort((a, b) => a - b).map((start, index, sorted) => {
       const end = sorted[index + 1] || text.length;
-      return text.slice(start, end);
-    }));
+      return stripVendorPrefix(text.slice(start, end));
+    }).filter(Boolean);
   }
 
   const delimited = splitDelimited(text);
   if (delimited.length > 1 && delimited.every(looksLikeMpnToken)) {
-    return normalizeMpnParts(delimited);
+    return delimited.map(stripVendorPrefix).filter(Boolean);
   }
 
-  return normalizeMpnParts([text]);
+  return [stripVendorPrefix(text)].filter(Boolean);
 };
 
 const cleanMpnSegment = (value) => {
@@ -349,8 +439,8 @@ const cleanMpnSegment = (value) => {
       if (MPN_NOISE_RE.test(token) || /[%()[\]{}=*"]/g.test(token)) break;
       kept.push(token);
     }
-    const cleaned = normalizeMpnParts([kept.join(' ')]);
-    return cleaned;
+    const cleaned = stripVendorPrefix(kept.join(' '));
+    return cleaned ? [cleaned] : [];
   });
 };
 
@@ -384,40 +474,21 @@ const parseColonSegments = (value) => {
 const splitManufacturerCell = (value, expectedCount, config = {}) => {
   const text = fmt(value).replace(/\u00a0/g, ' ');
   if (!text) return [];
-  const directory = config.manufacturerDirectory || {};
-  const directoryNames = Array.isArray(directory.names) ? directory.names : [];
-  const directoryAliases = directory.aliases || {};
-  const canonicalForManufacturer = (name) => {
-    const key = normalizeKey(name).toUpperCase();
-    return directoryAliases[key] || name;
-  };
 
   const delimiter = selectedDelimiter(config);
   const explicitParts = splitByExplicitDelimiter(text, delimiter);
-  if (explicitParts.length > 1) return explicitParts.map(canonicalForManufacturer);
+  if (explicitParts.length > 1) return explicitParts;
 
   const colonSegments = parseColonSegments(text);
-  if (colonSegments.length > 1) return colonSegments.map((segment) => canonicalForManufacturer(segment.label));
+  if (colonSegments.length > 1) return colonSegments.map((segment) => segment.label);
 
   const delimited = splitDelimited(text);
-  if (delimited.length > 1) return delimited.map(canonicalForManufacturer);
+  if (delimited.length > 1) return delimited;
 
-  const normalizedText = normalizeKey(text).toUpperCase();
-  const knownPhrases = [
-    ...directoryNames,
-    ...Object.keys(directoryAliases),
-    ...KNOWN_MANUFACTURERS,
-  ];
-  const seenPhrases = new Set();
-  const knownMatches = [...new Set(knownPhrases
-    .filter((name) => {
-      const key = normalizeKey(name).toUpperCase();
-      if (!key || seenPhrases.has(key) || !normalizedText.includes(key)) return false;
-      seenPhrases.add(key);
-      return true;
-    })
-    .sort((a, b) => normalizedText.indexOf(normalizeKey(a).toUpperCase()) - normalizedText.indexOf(normalizeKey(b).toUpperCase()))
-    .map(canonicalForManufacturer))];
+  const upperText = text.toUpperCase();
+  const knownMatches = KNOWN_MANUFACTURERS
+    .filter((name) => upperText.includes(name))
+    .sort((a, b) => upperText.indexOf(a) - upperText.indexOf(b));
   if (knownMatches.length >= Math.min(expectedCount || 1, 2)) return knownMatches;
 
   if (!expectedCount || expectedCount <= 1) return [text];
@@ -451,11 +522,6 @@ const splitManufacturerCell = (value, expectedCount, config = {}) => {
 };
 
 const getCell = (row, header) => (header ? fmt(row[header]) : '');
-
-const isPlaceholderCell = (value) => {
-  const text = fmt(value).replace(/\u00a0/g, ' ').trim().toLowerCase();
-  return !text || /^[-–—]+$/.test(text) || ['n/a', 'na', 'null', 'none'].includes(text);
-};
 
 const rowValues = (row, headers) => headers
   .map((header) => getCell(row, header))
@@ -498,20 +564,10 @@ const rowLooksLikeSectionTitle = (row, headers, roles) => {
   return Boolean(descriptionValue) && !mpnValue && !quantityValue;
 };
 
-const hasGroupedRowContext = (row, roles) => Boolean(
-  getCell(row, roles.parent) ||
-  getCell(row, roles.cpn) ||
-  getCell(row, roles.description) ||
-  getCell(row, roles.quantity) ||
-  getCell(row, roles.uom) ||
-  getCell(row, roles.level)
-);
-
 const shouldSkipSourceRow = (row, headers, roles, config) => {
   if (!rowValues(row, headers).length) return true;
   if (config.skipRepeatedHeaders && rowLooksLikeRepeatedHeader(row, headers)) return true;
   if (config.skipDoNotPopulate && rowLooksLikeDoNotPopulate(row, headers)) return true;
-  if (config.structure === 'grouped_rows' && hasGroupedRowContext(row, roles)) return false;
   if (config.skipTitleRows && rowLooksLikeSectionTitle(row, headers, roles)) return true;
   return false;
 };
@@ -522,23 +578,6 @@ const confidenceForRow = (mpn, manufacturer, ruleId) => {
   if (manufacturer) score += 15;
   if (ruleId.includes('colon') || ruleId.includes('separate')) score += 10;
   return Math.min(score, 98);
-};
-
-const withSourceColumns = (normalizedRow, sourceRow, config = {}) => {
-  const sourceHeaders = Array.isArray(config.sourceHeaders) ? config.sourceHeaders : [];
-  if (!sourceHeaders.length) return normalizedRow;
-  const consumedSourceHeaders = config.consumedSourceHeaders instanceof Set
-    ? config.consumedSourceHeaders
-    : new Set((config.consumedSourceHeaders || []).map(normalizeKey));
-
-  const carried = { ...normalizedRow };
-  sourceHeaders.forEach((header) => {
-    if (!header || header === '__sourceRow') return;
-    if (consumedSourceHeaders.has(normalizeKey(header))) return;
-    if (Object.prototype.hasOwnProperty.call(carried, header)) return;
-    carried[header] = sourceRow?.[header] ?? '';
-  });
-  return carried;
 };
 
 const normalizeSeparateCells = (rows, roles, config) => {
@@ -557,7 +596,7 @@ const normalizeSeparateCells = (rows, roles, config) => {
 
     mpns.forEach((mpn, partIndex) => {
       const isPrimary = partIndex === 0;
-      output.push(withSourceColumns({
+      output.push({
         sourceRow,
         parentKey,
         relation: isPrimary ? 'Primary' : `Alternate ${partIndex}`,
@@ -571,7 +610,7 @@ const normalizeSeparateCells = (rows, roles, config) => {
         rule,
         confidence: Math.min(confidenceForRow(mpn, manufacturers[partIndex], 'separate') + (explicitDelimiterUsed ? 25 : 0), 98),
         discardedText: '',
-      }, row, config));
+      });
     });
   });
   return output;
@@ -591,7 +630,7 @@ const normalizeSameCell = (rows, roles, config) => {
 
     if (!segments.length) {
       splitMpnCell(sourceText, config).forEach((mpn, partIndex) => {
-        output.push(withSourceColumns({
+        output.push({
           sourceRow,
           parentKey,
           relation: partIndex === 0 ? 'Primary' : `Alternate ${partIndex}`,
@@ -605,7 +644,7 @@ const normalizeSameCell = (rows, roles, config) => {
           rule: 'same_cell_fallback_mpn_split',
           confidence: confidenceForRow(mpn, '', 'same_cell'),
           discardedText: '',
-        }, row, config));
+        });
       });
       return;
     }
@@ -614,7 +653,7 @@ const normalizeSameCell = (rows, roles, config) => {
     segments.forEach((segment, segmentIndex) => {
       const mpns = segment.mpns.length ? segment.mpns : [segment.rawValue].filter(Boolean);
       mpns.forEach((mpn, mpnIndex) => {
-        output.push(withSourceColumns({
+        output.push({
           sourceRow,
           parentKey,
           relation: relationIndex === 0 ? 'Primary' : `Alternate ${relationIndex}`,
@@ -628,7 +667,7 @@ const normalizeSameCell = (rows, roles, config) => {
           rule: mpnIndex > 0 ? 'same_cell_colon_multi_mpn' : 'same_cell_colon_label',
           confidence: confidenceForRow(mpn, segment.label, 'colon'),
           discardedText: '',
-        }, row, config));
+        });
         relationIndex += 1;
       });
       if (segmentIndex === segments.length - 1 && config.quantityMode === 'inherit_primary') {
@@ -661,37 +700,9 @@ const findAlternateColumnGroups = (headers) => {
   return groups.filter((group) => group.mpn);
 };
 
-const cleanAlternateColumnGroups = (groups = [], headers = []) => groups
-  .map((group, index) => ({
-    slot: group.slot || `${index + 1}`,
-    mpn: headers.includes(group.mpn) ? group.mpn : '',
-    mfr: headers.includes(group.mfr) ? group.mfr : '',
-    qty: headers.includes(group.qty) ? group.qty : '',
-    uom: headers.includes(group.uom) ? group.uom : '',
-  }))
-  .filter((group) => group.mpn);
-
-const getConsumedSourceHeaders = (roles = {}, config = {}, headers = []) => {
-  const consumed = new Set();
-  Object.values(roles || {}).forEach((header) => {
-    if (header) consumed.add(normalizeKey(header));
-  });
-  const alternateGroups = [
-    ...(config.alternateColumnGroups || []),
-    ...(config.alternateLayout === 'separate_columns' ? findAlternateColumnGroups(headers) : []),
-  ];
-  alternateGroups.forEach((group) => {
-    ['mpn', 'mfr', 'qty', 'uom'].forEach((field) => {
-      if (group?.[field]) consumed.add(normalizeKey(group[field]));
-    });
-  });
-  return consumed;
-};
-
 const normalizeAlternateColumns = (rows, headers, roles, config) => {
   const output = [];
-  const manualGroups = cleanAlternateColumnGroups(config.alternateColumnGroups || [], headers);
-  const alternateGroups = manualGroups.length ? manualGroups : findAlternateColumnGroups(headers);
+  const alternateGroups = findAlternateColumnGroups(headers);
   rows.forEach((row, rowIndex) => {
     const sourceRow = row.__sourceRow || rowIndex + 1;
     const primaryMpn = getCell(row, roles.mpn);
@@ -703,7 +714,7 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
     const cpn = getCell(row, roles.cpn);
 
     if (primaryMpn) {
-      output.push(withSourceColumns({
+      output.push({
         sourceRow,
         parentKey,
         relation: 'Primary',
@@ -717,14 +728,14 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
         rule: 'alternate_columns_primary',
         confidence: confidenceForRow(primaryMpn, primaryManufacturer, 'alternate_columns'),
         discardedText: '',
-      }, row, config));
+      });
     }
 
     alternateGroups.forEach((group, groupIndex) => {
       const mpn = getCell(row, group.mpn);
       if (!mpn) return;
       const manufacturer = getCell(row, group.mfr);
-      output.push(withSourceColumns({
+      output.push({
         sourceRow,
         parentKey,
         relation: `Alternate ${groupIndex + 1}`,
@@ -738,17 +749,17 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
         rule: 'alternate_columns_unpivot',
         confidence: confidenceForRow(mpn, manufacturer, 'alternate_columns'),
         discardedText: '',
-      }, row, config));
+      });
     });
   });
   return output;
 };
 
-const normalizeOnePerRow = (rows, roles, config = {}) => rows.map((row, rowIndex) => {
+const normalizeOnePerRow = (rows, roles) => rows.map((row, rowIndex) => {
   const sourceRow = row.__sourceRow || rowIndex + 1;
   const mpn = stripVendorPrefix(getCell(row, roles.mpn));
   const manufacturer = getCell(row, roles.manufacturer);
-  return withSourceColumns({
+  return {
     sourceRow,
     parentKey: getCell(row, roles.parent) || getCell(row, roles.description) || `Source row ${sourceRow}`,
     relation: 'Primary',
@@ -762,7 +773,7 @@ const normalizeOnePerRow = (rows, roles, config = {}) => rows.map((row, rowIndex
     rule: 'one_per_row_passthrough',
     confidence: confidenceForRow(mpn, manufacturer, 'one_per_row'),
     discardedText: '',
-  }, row, config);
+  };
 }).filter((row) => row.mpn || row.manufacturer || row.description);
 
 const normalizeManufacturerOnly = (rows, roles, config, splitCells) => {
@@ -777,7 +788,7 @@ const normalizeManufacturerOnly = (rows, roles, config, splitCells) => {
     const cpn = getCell(row, roles.cpn);
 
     manufacturers.forEach((manufacturer, partIndex) => {
-      output.push(withSourceColumns({
+      output.push({
         sourceRow,
         parentKey,
         relation: partIndex === 0 ? 'Primary' : `Alternate ${partIndex}`,
@@ -791,159 +802,25 @@ const normalizeManufacturerOnly = (rows, roles, config, splitCells) => {
         rule: splitCells ? 'manufacturer_only_user_delimiter' : 'manufacturer_only_row',
         confidence: manufacturer ? 70 : 45,
         discardedText: '',
-      }, row, config));
+      });
     });
   });
-  return output;
-};
-
-const normalizeGroupedRows = (rows, roles, config) => {
-  const output = [];
-  let currentGroup = null;
-
-  const groupValuesFromRow = (row, rowIndex) => {
-    const sourceRow = row.__sourceRow || rowIndex + 1;
-    const cpn = getCell(row, roles.cpn);
-    const parentKey = getCell(row, roles.parent) || cpn || getCell(row, roles.description) || `Source row ${sourceRow}`;
-    return {
-      sourceRow,
-      parentKey,
-      cpn,
-      description: getCell(row, roles.description),
-      quantity: getCell(row, roles.quantity),
-      uom: getCell(row, roles.uom),
-      level: getCell(row, roles.level) || '1',
-      relationCount: 0,
-    };
-  };
-
-  const rowStartsGroup = (row) => {
-    const nextParentKey = getCell(row, roles.parent) || getCell(row, roles.cpn) || getCell(row, roles.description);
-    const hasIdentity = Boolean(getCell(row, roles.parent) || getCell(row, roles.cpn) || getCell(row, roles.description));
-    const hasRealContext = Boolean(
-      !isPlaceholderCell(getCell(row, roles.quantity)) ||
-      !isPlaceholderCell(getCell(row, roles.uom)) ||
-      !isPlaceholderCell(getCell(row, roles.level))
-    );
-    const hasPart = Boolean(getCell(row, roles.mpn) || getCell(row, roles.manufacturer));
-    if (hasPart) {
-      if (!currentGroup) return hasIdentity && hasRealContext;
-      return Boolean(nextParentKey && nextParentKey !== currentGroup.parentKey && hasRealContext);
-    }
-    return hasIdentity;
-  };
-
-  rows.forEach((row, rowIndex) => {
-    const sourceRow = row.__sourceRow || rowIndex + 1;
-    const rawMpn = getCell(row, roles.mpn);
-    const manufacturer = getCell(row, roles.manufacturer);
-    const rowHasPart = Boolean(rawMpn || manufacturer);
-    const startsGroup = rowStartsGroup(row);
-
-    if (startsGroup || !currentGroup) {
-      const nextGroup = groupValuesFromRow(row, rowIndex);
-      currentGroup = currentGroup && !startsGroup ? {
-        ...currentGroup,
-        ...Object.fromEntries(Object.entries(nextGroup).filter(([, value]) => value)),
-      } : nextGroup;
-
-      const contextPrimaryMpn = currentGroup.cpn || getCell(row, roles.parent);
-      const shouldEmitHeaderPrimary = config.groupHeaderMode === 'header_primary';
-      if (startsGroup && !rowHasPart && contextPrimaryMpn && shouldEmitHeaderPrimary) {
-        const primaryMpn = contextPrimaryMpn;
-        output.push(withSourceColumns({
-          sourceRow: currentGroup.sourceRow || sourceRow,
-          parentKey: currentGroup.parentKey,
-          relation: 'Primary',
-          level: currentGroup.level || '1',
-          cpn: currentGroup.cpn,
-          description: currentGroup.description,
-          mpn: stripVendorPrefix(primaryMpn),
-          manufacturer: '',
-          quantity: currentGroup.quantity,
-          uom: currentGroup.uom,
-          rule: 'grouped_rows_context_primary',
-          confidence: confidenceForRow(primaryMpn, '', 'grouped_rows'),
-          discardedText: '',
-        }, row, config));
-        currentGroup.relationCount = 1;
-      }
-    }
-
-    if (!rowHasPart) return;
-
-    const mpns = splitMpnCell(rawMpn, config);
-    const manufacturerParts = rawMpn && manufacturer
-      ? splitManufacturerCell(manufacturer, mpns.length, config)
-      : [manufacturer].filter(Boolean);
-    const relationStart = currentGroup.relationCount;
-
-    const partsToEmit = mpns.length ? mpns : [''];
-    partsToEmit.forEach((mpn, partIndex) => {
-      const relationIndex = relationStart + partIndex;
-      output.push(withSourceColumns({
-        sourceRow: currentGroup.sourceRow || sourceRow,
-        parentKey: currentGroup.parentKey,
-        relation: relationIndex === 0 ? 'Primary' : `Alternate ${relationIndex}`,
-        level: currentGroup.level || getCell(row, roles.level) || '1',
-        cpn: currentGroup.cpn || getCell(row, roles.cpn),
-        description: currentGroup.description || getCell(row, roles.description),
-        mpn: stripVendorPrefix(mpn),
-        manufacturer: manufacturerParts[partIndex] || manufacturerParts[0] || manufacturer,
-        quantity: currentGroup.quantity || getCell(row, roles.quantity),
-        uom: currentGroup.uom || getCell(row, roles.uom),
-        rule: mpns.length > 1 ? 'grouped_rows_split_child_mpn' : 'grouped_rows_inherit_context',
-        confidence: Math.min(confidenceForRow(mpn, manufacturerParts[partIndex] || manufacturer, 'grouped_rows') + 10, 98),
-        discardedText: '',
-      }, row, config));
-    });
-
-    currentGroup.relationCount += partsToEmit.length;
-  });
-
   return output;
 };
 
 const normalizeRows = (rows, headers, roles, config) => {
-  const configWithSourceHeaders = {
-    ...config,
-    sourceHeaders: headers,
-    consumedSourceHeaders: getConsumedSourceHeaders(roles, config, headers),
-  };
-  if (config.structure === 'grouped_rows') return normalizeGroupedRows(rows, roles, configWithSourceHeaders);
-  if (config.structure === 'mpn_only_same_cell') return normalizeSeparateCells(rows, roles, configWithSourceHeaders);
-  if (config.structure === 'mpn_only_rows') return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
-  if (config.structure === 'mfr_only_same_cell') return normalizeManufacturerOnly(rows, roles, configWithSourceHeaders, true);
-  if (config.structure === 'mfr_only_rows') return normalizeManufacturerOnly(rows, roles, configWithSourceHeaders, false);
-  if (config.alternateLayout === 'separate_columns') return normalizeAlternateColumns(rows, headers, roles, configWithSourceHeaders);
-  if (config.alternateLayout === 'already_separate_rows') return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
-  if (config.structure === 'same_cell') return normalizeSameCell(rows, roles, configWithSourceHeaders);
-  if (config.structure === 'one_per_row') return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
-  return normalizeSeparateCells(rows, roles, configWithSourceHeaders);
+  if (config.structure === 'mpn_only_same_cell') return normalizeSeparateCells(rows, roles, config);
+  if (config.structure === 'mpn_only_rows') return normalizeOnePerRow(rows, roles);
+  if (config.structure === 'mfr_only_same_cell') return normalizeManufacturerOnly(rows, roles, config, true);
+  if (config.structure === 'mfr_only_rows') return normalizeManufacturerOnly(rows, roles, config, false);
+  if (config.alternateLayout === 'separate_columns') return normalizeAlternateColumns(rows, headers, roles, config);
+  if (config.alternateLayout === 'already_separate_rows') return normalizeOnePerRow(rows, roles);
+  if (config.structure === 'same_cell') return normalizeSameCell(rows, roles, config);
+  if (config.structure === 'one_per_row') return normalizeOnePerRow(rows, roles);
+  return normalizeSeparateCells(rows, roles, config);
 };
 
 const normalizeRowsChunked = async (rows, headers, roles, config, onProgress) => {
-  if (config.structure === 'grouped_rows') {
-    const dataRows = [];
-    let skippedRows = 0;
-    rows.forEach((row) => {
-      const skip = shouldSkipSourceRow(row, headers, roles, config);
-      if (skip) skippedRows += 1;
-      else dataRows.push(row);
-    });
-    const output = normalizeRows(dataRows, headers, roles, config);
-    if (onProgress) {
-      onProgress({
-        processed: rows.length,
-        total: rows.length,
-        outputRows: output.length,
-        skippedRows,
-      });
-    }
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    return output;
-  }
-
   const chunkSize = rows.length > 1000 ? 80 : 50;
   const output = [];
   let skippedRows = 0;
@@ -972,17 +849,32 @@ const normalizeRowsChunked = async (rows, headers, roles, config, onProgress) =>
   return output;
 };
 
+const NORMALIZED_EXPORT_COLUMNS = [
+  'sourceRow',
+  'parentKey',
+  'relation',
+  'level',
+  'cpn',
+  'description',
+  'mpn',
+  'manufacturer',
+  'quantity',
+  'uom',
+  'rule',
+  'confidence',
+  'discardedText',
+];
+
 const downloadRowsAsCsv = (rows) => {
   if (!rows.length) return;
-  const columns = getNormalizedExportColumns(rows);
   const escapeCsv = (value) => {
     const text = fmt(value);
     if (/[",\n\r]/.test(text)) return `"${text.replace(/"/g, '""')}"`;
     return text;
   };
   const csv = [
-    columns.join(','),
-    ...rows.map((row) => columns.map((column) => escapeCsv(row[column])).join(',')),
+    NORMALIZED_EXPORT_COLUMNS.join(','),
+    ...rows.map((row) => NORMALIZED_EXPORT_COLUMNS.map((column) => escapeCsv(row[column])).join(',')),
   ].join('\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
@@ -997,15 +889,14 @@ const downloadRowsAsCsv = (rows) => {
 
 const downloadRowsAsXlsx = (rows) => {
   if (!rows.length) return;
-  const columns = getNormalizedExportColumns(rows);
   const worksheetRows = rows.map((row) => {
     const output = {};
-    columns.forEach((column) => {
+    NORMALIZED_EXPORT_COLUMNS.forEach((column) => {
       output[column] = row[column] || '';
     });
     return output;
   });
-  const worksheet = XLSX.utils.json_to_sheet(worksheetRows, { header: columns });
+  const worksheet = XLSX.utils.json_to_sheet(worksheetRows, { header: NORMALIZED_EXPORT_COLUMNS });
   const workbook = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(workbook, worksheet, 'Normalized BOM');
   XLSX.writeFile(workbook, 'normalized-bom-preview.xlsx');
@@ -1030,22 +921,6 @@ const rebalanceRelations = (rows) => {
 
 const detectBestStructure = (headers, roles, sampleRows) => {
   if (roles.mpn && roles.manufacturer && roles.mpn === roles.manufacturer) return 'same_cell';
-  const groupedSignals = sampleRows.reduce((score, row, index) => {
-    const hasGroupContext = Boolean(
-      getCell(row, roles.parent) ||
-      getCell(row, roles.cpn) ||
-      getCell(row, roles.description) ||
-      getCell(row, roles.quantity)
-    );
-    const hasPart = Boolean(getCell(row, roles.mpn) || getCell(row, roles.manufacturer));
-    const nextRow = sampleRows[index + 1];
-    const nextHasPart = Boolean(nextRow && (getCell(nextRow, roles.mpn) || getCell(nextRow, roles.manufacturer)));
-    return score + (hasGroupContext && !hasPart && nextHasPart ? 1 : 0);
-  }, 0);
-  if (groupedSignals >= 1 && (roles.mpn || roles.manufacturer) && (roles.parent || roles.cpn || roles.description)) {
-    return 'grouped_rows';
-  }
-
   if (roles.mpn && !roles.manufacturer) {
     const mpnSamples = sampleRows.map((row) => getCell(row, roles.mpn)).filter(Boolean);
     const multiMpn = mpnSamples.filter((value) => splitMpnCell(value).length > 1).length;
@@ -1067,8 +942,7 @@ const detectBestStructure = (headers, roles, sampleRows) => {
 
   const multiMpn = mpnSamples.filter((value) => splitMpnCell(value).length > 1).length;
   const multiMfr = mfrSamples.filter((value) => splitManufacturerCell(value, 2).length > 1).length;
-  if (multiMpn) return 'separate_cells';
-  if (!multiMpn && multiMfr) return 'one_per_row';
+  if (multiMpn || multiMfr) return 'separate_cells';
 
   return 'one_per_row';
 };
@@ -1079,14 +953,6 @@ const nextConfigForDetectedStructure = (previousConfig, detectedStructure) => {
       ...previousConfig,
       structure: 'separate_cells',
       alternateLayout: 'separate_columns',
-    };
-  }
-
-  if (detectedStructure === 'grouped_rows') {
-    return {
-      ...previousConfig,
-      structure: 'grouped_rows',
-      alternateLayout: 'already_separate_rows',
     };
   }
 
@@ -1126,37 +992,19 @@ const getStructureOptionsForRoles = (roles) => {
   }
 
   if (roles.mpn && !roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => ['mpn_only_same_cell', 'mpn_only_rows', 'grouped_rows'].includes(option.value));
+    return STRUCTURE_OPTIONS.filter((option) => ['mpn_only_same_cell', 'mpn_only_rows'].includes(option.value));
   }
 
   if (!roles.mpn && roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => ['mfr_only_same_cell', 'mfr_only_rows', 'grouped_rows'].includes(option.value));
+    return STRUCTURE_OPTIONS.filter((option) => ['mfr_only_same_cell', 'mfr_only_rows'].includes(option.value));
   }
 
   if (roles.mpn && roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => ['separate_cells', 'same_cell', 'one_per_row', 'grouped_rows'].includes(option.value));
+    return STRUCTURE_OPTIONS.filter((option) => ['separate_cells', 'same_cell', 'one_per_row'].includes(option.value));
   }
 
   return STRUCTURE_OPTIONS;
 };
-
-const findStrongMpnHeader = (headers = []) => {
-  const patterns = [
-    /\bmpn\b/,
-    /manufacturer equivalent/,
-    /manufacturer part/,
-    /manufacturing part/,
-    /\bmfr part/,
-    /\bmfg part/,
-    /producer/,
-  ];
-  return headers.find((header) => {
-    const normalized = normalizeKey(header);
-    return patterns.some((pattern) => pattern.test(normalized));
-  }) || '';
-};
-
-const isGenericPartHeader = (header) => /^part( number| no)?$/.test(normalizeKey(header));
 
 const prepareSingleSheet = (currentWorkbook, currentSheetName) => {
   const worksheet = currentWorkbook.Sheets[currentSheetName];
@@ -1203,370 +1051,80 @@ const prepareMultipleSheets = (currentWorkbook, sheetNames) => {
   };
 };
 
-const createWorkbookFromObjects = (rows, currentHeaders, sheetLabel = 'Combined') => {
-  const worksheet = XLSX.utils.aoa_to_sheet([
-    currentHeaders,
-    ...rows.map((row) => currentHeaders.map((header) => row[header] || '')),
-  ]);
-  const nextWorkbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(nextWorkbook, worksheet, sheetLabel.slice(0, 31) || 'Combined');
-  return nextWorkbook;
-};
-
-const getFileType = (fileName = '') => {
-  const lower = fileName.toLowerCase();
-  if (lower.endsWith('.pdf')) return 'pdf';
-  if (lower.endsWith('.csv')) return 'csv';
-  return 'workbook';
-};
-
-const normalizePdfRows = (payload, sourceFile) => {
-  const pdfHeaders = makeUniqueHeaders(payload?.headers || []);
-  const rawRows = Array.isArray(payload?.data) ? payload.data : [];
-  const decision = payload?.decision;
-  const decisionLabel = typeof decision === 'string'
-    ? decision
-    : (decision?.winner || decision?.method || 'best extraction');
-  if (!pdfHeaders.length || !rawRows.length) {
-    return { headers: [], rows: [] };
-  }
-
-  const rows = rawRows
-    .map((row, index) => {
-      const mapped = {
-        'Source file': sourceFile,
-        'Source sheet': `PDF ${decisionLabel}`,
-        __sourceRow: index + 1,
-      };
-      pdfHeaders.forEach((header, headerIndex) => {
-        mapped[header] = fmt(Array.isArray(row) ? row[headerIndex] : row?.[header]);
-      });
-      return mapped;
-    })
-    .filter((row) => pdfHeaders.some((header) => fmt(row[header])));
-
-  return {
-    headers: ['Source file', 'Source sheet', ...pdfHeaders],
-    rows,
-  };
-};
-
-const normalizePdfTables = (payload, sourceFile) => {
-  const decision = payload?.decision;
-  const decisionLabel = typeof decision === 'string'
-    ? decision
-    : (decision?.winner || decision?.method || 'best extraction');
-  const tables = Array.isArray(payload?.tables) ? payload.tables : [];
-
-  return tables.map((table, tableIndex) => {
-    const tableHeaders = makeUniqueHeaders(table?.headers || []);
-    const rawRows = Array.isArray(table?.data) ? table.data : [];
-    const pageLabel = table?.page_number ? `page ${table.page_number}` : `table ${tableIndex + 1}`;
-    const sourceLabel = `PDF ${pageLabel}`;
-    const rows = rawRows
-      .map((row, rowIndex) => {
-        const mapped = {
-          'Source file': sourceFile,
-          'Source sheet': sourceLabel,
-          __sourceRow: rowIndex + 1,
-        };
-        tableHeaders.forEach((header, headerIndex) => {
-          mapped[header] = fmt(Array.isArray(row) ? row[headerIndex] : row?.[header]);
-        });
-        return mapped;
-      })
-      .filter((row) => tableHeaders.some((header) => fmt(row[header])));
-
-    return {
-      id: `${table?.table_id || `table_${tableIndex + 1}`}`,
-      label: `${sourceFile} / ${sourceLabel} (${rows.length} rows, ${tableHeaders.length} columns)`,
-      fileName: sourceFile,
-      sheetName: sourceLabel,
-      decisionLabel,
-      pageNumber: Number(table?.page_number) || null,
-      headers: ['Source file', 'Source sheet', ...tableHeaders],
-      rows,
-    };
-  }).filter((source) => source.headers.length > 2 && source.rows.length);
-};
-
-const parsePdfPageRange = (value) => {
-  const pages = new Set();
-  fmt(value).split(',').forEach((part) => {
-    const text = part.trim();
-    if (!text) return;
-    const rangeMatch = text.match(/^(\d+)\s*-\s*(\d+)$/);
-    if (rangeMatch) {
-      const start = Number(rangeMatch[1]);
-      const end = Number(rangeMatch[2]);
-      if (!Number.isFinite(start) || !Number.isFinite(end)) return;
-      const low = Math.min(start, end);
-      const high = Math.max(start, end);
-      for (let page = low; page <= high; page += 1) pages.add(page);
-      return;
-    }
-    const page = Number(text);
-    if (Number.isFinite(page) && page > 0) pages.add(page);
-  });
-  return pages;
-};
-
-const groupPdfSourcesByRanges = (sources, ranges, sourceFile) => {
-  const validRanges = (ranges || [])
-    .map((range, index) => ({
-      name: fmt(range.name) || `PDF range ${index + 1}`,
-      pagesText: fmt(range.pages),
-      pages: parsePdfPageRange(range.pages),
-    }))
-    .filter((range) => range.pages.size > 0);
-
-  if (!validRanges.length) return sources;
-  const sourcesWithPages = sources.filter((source) => source.pageNumber);
-  if (!sourcesWithPages.length) return sources;
-
-  const grouped = validRanges.map((range, index) => {
-    const matchingSources = sourcesWithPages.filter((source) => range.pages.has(source.pageNumber));
-    const headers = [];
-    matchingSources.forEach((source) => {
-      source.headers.forEach((header) => {
-        if (!headers.includes(header)) headers.push(header);
-      });
-    });
-    const rows = matchingSources.flatMap((source) => source.rows.map((row) => ({
-      ...row,
-      'Source sheet': `${range.name} (${source.sheetName})`,
-    })));
-    return {
-      id: `range_${index + 1}`,
-      label: `${sourceFile} / ${range.name} pages ${range.pagesText} (${rows.length} rows, ${headers.length} columns)`,
-      fileName: sourceFile,
-      sheetName: range.name,
-      pageRange: range.pagesText,
-      headers,
-      rows,
-    };
-  }).filter((source) => source.rows.length && source.headers.length);
-
-  return grouped.length ? grouped : sources;
-};
-
-const uniqueValues = (values) => {
-  const seen = new Set();
-  return values
-    .map(fmt)
-    .filter((value) => {
-      if (!value || seen.has(value)) return false;
-      seen.add(value);
-      return true;
-    });
-};
-
-const makeUniqueName = (name, existing) => {
-  let candidate = name || 'Column';
-  let suffix = 2;
-  while (existing.includes(candidate)) {
-    candidate = `${name} ${suffix}`;
-    suffix += 1;
-  }
-  return candidate;
-};
-
-const guessKeyColumn = (currentHeaders = []) => {
-  const preferred = [
-    /\bpart\s*number\b/i,
-    /\bmpn\b/i,
-    /manufacturer.*part/i,
-    /\bitem\s*code\b/i,
-    /\bcode\b/i,
-    /\bid\b/i,
-  ];
-  return currentHeaders.find((header) => preferred.some((pattern) => pattern.test(header))) || currentHeaders[0] || '';
-};
-
-const defaultMergeDetailColumns = (currentHeaders = [], keyColumn = '') => (
-  currentHeaders.filter((header) => header !== keyColumn).slice(0, 6)
-);
-
-const buildMergePreviewFromSources = (primarySource, secondarySource, config) => {
-  if (!primarySource || !secondarySource) {
-    throw new Error('Choose both primary and secondary sources.');
-  }
-  if (!config.primaryKey || !config.secondaryKey) {
-    throw new Error('Choose common columns to match on.');
-  }
-  if (!primarySource.rows.length) {
-    throw new Error('The selected primary source has no detected data rows. Pick another sheet or check its header row/data format.');
-  }
-  if (!secondarySource.rows.length) {
-    throw new Error('The selected secondary source has no detected data rows. Pick another sheet or check its header row/data format.');
-  }
-
-  const selectedDetailColumns = (config.detailColumns || [])
-    .filter((column) => secondarySource.headers.includes(column) && column !== config.secondaryKey);
-  if (!selectedDetailColumns.length) {
-    throw new Error('Choose at least one column from the secondary source.');
-  }
-
-  const normalizeMatch = (value) => fmt(value).replace(/\u00a0/g, ' ').toLowerCase();
-  const outputMode = config.outputMode || 'grouped';
-  const relationshipName = fmt(config.relationshipName);
-  const headers = [...primarySource.headers];
-  const detailHeaderMap = {};
-
-  selectedDetailColumns.forEach((column) => {
-    const preferred = outputMode === 'grouped' && selectedDetailColumns.length === 1 && relationshipName
-      ? relationshipName
-      : column;
-    const outputName = makeUniqueName(headers.includes(preferred) ? `${preferred} (secondary)` : preferred, headers);
-    detailHeaderMap[column] = outputName;
-    headers.push(outputName);
-  });
-
-  const detailLookup = new Map();
-  secondarySource.rows.forEach((row) => {
-    const key = normalizeMatch(row[config.secondaryKey]);
-    if (!key) return;
-    if (!detailLookup.has(key)) detailLookup.set(key, []);
-    detailLookup.get(key).push(row);
-  });
-
-  const rows = [];
-  let matchedPrimaryRows = 0;
-  let unmatchedPrimaryRows = 0;
-  let expandedRows = 0;
-
-  primarySource.rows.forEach((primaryRow) => {
-    const matches = detailLookup.get(normalizeMatch(primaryRow[config.primaryKey])) || [];
-    if (matches.length) {
-      matchedPrimaryRows += 1;
-      if (outputMode === 'grouped') {
-        const row = { __mergeStatus: 'matched' };
-        primarySource.headers.forEach((header) => {
-          row[header] = primaryRow[header] ?? '';
-        });
-        selectedDetailColumns.forEach((column) => {
-          row[detailHeaderMap[column]] = uniqueValues(matches.map((match) => match[column])).join(' | ');
-        });
-        rows.push(row);
-        expandedRows += 1;
-      } else {
-        matches.forEach((match) => {
-          const row = { __mergeStatus: 'matched' };
-          primarySource.headers.forEach((header) => {
-            row[header] = primaryRow[header] ?? '';
-          });
-          selectedDetailColumns.forEach((column) => {
-            row[detailHeaderMap[column]] = match[column] ?? '';
-          });
-          rows.push(row);
-          expandedRows += 1;
-        });
-      }
-      return;
-    }
-
-    unmatchedPrimaryRows += 1;
-    const row = { __mergeStatus: 'unmatched' };
-    primarySource.headers.forEach((header) => {
-      row[header] = primaryRow[header] ?? '';
-    });
-    selectedDetailColumns.forEach((column) => {
-      row[detailHeaderMap[column]] = '';
-    });
-    rows.push(row);
-  });
-
-  const primaryKeys = new Set(primarySource.rows.map((row) => normalizeMatch(row[config.primaryKey])).filter(Boolean));
-  const secondaryKeys = new Set(secondarySource.rows.map((row) => normalizeMatch(row[config.secondaryKey])).filter(Boolean));
-  const secondaryOnlyKeys = [...secondaryKeys].filter((key) => !primaryKeys.has(key)).length;
-
-  return {
-    headers,
-    rows,
-    config: {
-      ...config,
-      detailColumns: selectedDetailColumns,
-    },
-    summary: {
-      matchedPrimaryRows,
-      unmatchedPrimaryRows,
-      expandedRows,
-      secondaryOnlyKeys,
-      outputRows: rows.length,
-    },
-  };
-};
-
-const getMergePreviewExport = (mergePreview, visibleColumns = [], filter = 'all') => {
-  if (!mergePreview) return { headers: [], rows: [] };
-  const headers = visibleColumns.length ? visibleColumns : mergePreview.headers;
-  const rows = (filter === 'all'
-    ? mergePreview.rows
-    : mergePreview.rows.filter((row) => row.__mergeStatus === filter)
-  ).map((row) => {
-    const cleanRow = {};
-    headers.forEach((header) => {
-      cleanRow[header] = row[header] ?? '';
-    });
-    return cleanRow;
-  });
-  return { headers, rows };
-};
-
-const SourcePreview = ({ headers, rows }) => (
-  <TableContainer sx={{ mt: 1, maxHeight: 320, border: '1px solid #e1e6ec' }}>
-    <Table stickyHeader size="small">
-      <TableHead>
-        <TableRow>
-          {headers.slice(0, 12).map((header) => (
-            <TableCell key={header} sx={{ fontWeight: 800, bgcolor: '#f8fafc' }}>{header}</TableCell>
-          ))}
-        </TableRow>
-      </TableHead>
-      <TableBody>
-        {rows.map((row, index) => (
-          <TableRow key={`source-${index}`}>
+const SourcePreview = ({ headers, rows }) => {
+  const { isDarkMode, tokens: t } = useThemeContext();
+  return (
+    <TableContainer
+      sx={{
+        mt: 1,
+        maxHeight: 300,
+        borderRadius: '8px',
+        border: `1px solid ${isDarkMode ? 'rgba(125, 154, 205, 0.22)' : 'rgba(203, 213, 225, 0.9)'}`,
+        backgroundColor: isDarkMode ? 'rgba(8, 13, 24, 0.78)' : '#ffffff'
+      }}
+    >
+      <Table stickyHeader size="small">
+        <TableHead>
+          <TableRow>
             {headers.slice(0, 12).map((header) => (
-              <TableCell key={header} sx={{ maxWidth: 220, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {row[header]}
+              <TableCell
+                key={header}
+                sx={{
+                  fontWeight: 740,
+                  fontSize: 12.5,
+                  bgcolor: isDarkMode ? 'rgba(24, 35, 56, 0.96)' : '#f8fafc',
+                  color: t.text.heading,
+                  py: 1.05
+                }}
+              >
+                {header}
               </TableCell>
             ))}
           </TableRow>
-        ))}
-      </TableBody>
-    </Table>
-  </TableContainer>
-);
-
-const NORMALIZED_TABLE_BASE_COLUMNS = [
-  { key: 'sourceRow', label: 'Source row', editable: false, width: 86 },
-  { key: 'parentKey', label: 'Parent / group', editable: true, width: 190 },
-  { key: 'relation', label: 'Relation', editable: true, width: 115 },
-  { key: 'level', label: 'Level', editable: true, width: 70 },
-  { key: 'cpn', label: 'CPN', editable: true, width: 150 },
-  { key: 'mpn', label: 'MPN', editable: true, width: 190 },
-  { key: 'manufacturer', label: 'Manufacturer', editable: true, width: 180 },
-  { key: 'quantity', label: 'Qty', editable: true, width: 80 },
-  { key: 'uom', label: 'UOM', editable: true, width: 90 },
-  { key: 'Item code', label: 'Item code', editable: true, width: 170 },
-  { key: 'rule', label: 'Rule', editable: false, width: 190 },
-  { key: 'confidence', label: 'Confidence', editable: false, width: 105 },
-];
+        </TableHead>
+        <TableBody>
+          {rows.map((row, index) => (
+            <TableRow key={`source-${index}`}>
+              {headers.slice(0, 12).map((header) => (
+                <TableCell
+                  key={header}
+                  sx={{
+                    maxWidth: 220,
+                    whiteSpace: 'nowrap',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    fontSize: 12.5,
+                    py: 0.85,
+                    color: t.text.primary
+                  }}
+                >
+                  {row[header]}
+                </TableCell>
+              ))}
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </TableContainer>
+  );
+};
 
 const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenceOnlyChange }) => {
-  const columns = useMemo(() => {
-    const knownKeys = new Set(NORMALIZED_TABLE_BASE_COLUMNS.map((column) => column.key));
-    const dynamicColumns = getNormalizedExportColumns(rows)
-      .filter((key) => !knownKeys.has(key))
-      .map((key) => ({
-        key,
-        label: key,
-        editable: true,
-        width: key.startsWith('Tag_') ? 130 : 160,
-      }));
-    return [...NORMALIZED_TABLE_BASE_COLUMNS, ...dynamicColumns];
-  }, [rows]);
-  const defaultVisibleColumns = ['relation', 'level', 'cpn', 'mpn', 'manufacturer', 'quantity', 'uom', 'Item code', 'confidence'];
+  const { isDarkMode, tokens: t } = useThemeContext();
+  const columns = [
+    { key: 'sourceRow', label: 'Source row', editable: false, width: 86 },
+    { key: 'parentKey', label: 'Parent / group', editable: true, width: 190 },
+    { key: 'relation', label: 'Relation', editable: true, width: 115 },
+    { key: 'level', label: 'Level', editable: true, width: 70 },
+    { key: 'cpn', label: 'CPN', editable: true, width: 150 },
+    { key: 'mpn', label: 'MPN', editable: true, width: 190 },
+    { key: 'manufacturer', label: 'Manufacturer', editable: true, width: 180 },
+    { key: 'quantity', label: 'Qty', editable: true, width: 80 },
+    { key: 'uom', label: 'UOM', editable: true, width: 90 },
+    { key: 'rule', label: 'Rule', editable: false, width: 190 },
+    { key: 'confidence', label: 'Confidence', editable: false, width: 105 },
+  ];
+  const defaultVisibleColumns = ['relation', 'level', 'cpn', 'mpn', 'manufacturer', 'quantity', 'uom', 'confidence'];
   const [visibleColumnKeys, setVisibleColumnKeys] = useState(defaultVisibleColumns);
   const [searchQuery, setSearchQuery] = useState('');
   const [pendingPrimaryDeleteIndex, setPendingPrimaryDeleteIndex] = useState(null);
@@ -1611,29 +1169,12 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
     setPendingPrimaryDeleteIndex(null);
   };
 
-  useEffect(() => {
-    const knownKeys = new Set(NORMALIZED_TABLE_BASE_COLUMNS.map((column) => column.key));
-    const usefulDynamicKeys = columns
-      .map((column) => column.key)
-      .filter((key) => (
-        !knownKeys.has(key) &&
-        key !== 'discardedText' &&
-        rows.some((row) => fmt(row[key]))
-      ));
-    const generatedKeys = columns
-      .map((column) => column.key)
-      .filter((key) => (key === 'Item code' || key.startsWith('Tag_')) && rows.some((row) => fmt(row[key])));
-    const nextKeys = [...new Set([...generatedKeys, ...usefulDynamicKeys])];
-    if (!nextKeys.length) return;
-    setVisibleColumnKeys((prev) => [...new Set([...prev, ...nextKeys])]);
-  }, [columns, rows]);
-
   return (
     <>
-    <Paper elevation={0} sx={{ mt: 1.5, p: 1.2, border: '1px solid #e1e6ec', bgcolor: '#fbfcfd' }}>
+    <Paper elevation={0} sx={{ mt: 1.5, p: 1.2 }}>
       <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1}>
         <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap">
-          <Typography sx={{ fontSize: 13, fontWeight: 800 }}>Sheet view</Typography>
+          <Typography sx={{ fontSize: 13, fontWeight: 740, color: t.text.heading }}>Sheet view</Typography>
           <Chip size="small" label={`${filteredRows.length} of ${rows.length} rows`} />
           {lowConfidenceOnly && (
             <Chip
@@ -1672,13 +1213,13 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
         </Stack>
       </Stack>
     </Paper>
-    <TableContainer sx={{ mt: 1, maxHeight: 520, border: '1px solid #e1e6ec' }}>
+    <TableContainer sx={{ mt: 1, maxHeight: 520, borderRadius: '8px', border: `1px solid ${isDarkMode ? 'rgba(125, 154, 205, 0.22)' : 'rgba(203, 213, 225, 0.9)'}` }}>
       <Table stickyHeader size="small">
         <TableHead>
           <TableRow>
-            <TableCell sx={{ fontWeight: 800, bgcolor: '#f8fafc', width: 56 }}>Actions</TableCell>
+            <TableCell sx={{ fontWeight: 740, fontSize: 12.5, bgcolor: isDarkMode ? 'rgba(24, 35, 56, 0.96)' : '#f8fafc', color: t.text.heading, width: 56 }}>Actions</TableCell>
             {visibleColumns.map((column) => (
-              <TableCell key={column.key} sx={{ fontWeight: 800, bgcolor: '#f8fafc', minWidth: column.width }}>
+              <TableCell key={column.key} sx={{ fontWeight: 740, fontSize: 12.5, bgcolor: isDarkMode ? 'rgba(24, 35, 56, 0.96)' : '#f8fafc', color: t.text.heading, minWidth: column.width }}>
                 {column.label}
               </TableCell>
             ))}
@@ -1688,7 +1229,7 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
           {rows.length === 0 ? (
             <TableRow>
               <TableCell colSpan={visibleColumns.length + 1}>
-                <Typography sx={{ py: 3, textAlign: 'center', color: '#66717f' }}>
+                <Typography sx={{ py: 3, textAlign: 'center', color: t.text.secondary }}>
                   Run normalization to see parsed MPNs, manufacturers, alternates, levels, and confidence.
                 </Typography>
               </TableCell>
@@ -1696,13 +1237,13 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
           ) : filteredRows.length === 0 ? (
             <TableRow>
               <TableCell colSpan={visibleColumns.length + 1}>
-                <Typography sx={{ py: 3, textAlign: 'center', color: '#66717f' }}>
+                <Typography sx={{ py: 3, textAlign: 'center', color: t.text.secondary }}>
                   No rows match the current filter.
                 </Typography>
               </TableCell>
             </TableRow>
           ) : filteredRows.slice(0, 250).map(({ row, originalIndex }) => (
-            <TableRow key={`${row.sourceRow}-${row.relation}-${originalIndex}`} sx={{ bgcolor: row.confidence < 70 ? '#fff8e5' : 'inherit' }}>
+            <TableRow key={`${row.sourceRow}-${row.relation}-${originalIndex}`} sx={{ bgcolor: row.confidence < 70 ? t.state.warningBg : 'inherit' }}>
               <TableCell>
                 <IconButton size="small" color="error" onClick={() => handleDeleteRow(originalIndex)}>
                   <DeleteOutlineIcon fontSize="small" />
@@ -1725,8 +1266,8 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
                         py: 0.55,
                         font: 'inherit',
                         '&:focus': {
-                          bgcolor: '#fff',
-                          borderColor: '#1976d2',
+                          bgcolor: t.surface.input,
+                          borderColor: t.color.primary,
                           outline: 'none',
                         },
                       }}
@@ -1743,8 +1284,8 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
         </TableBody>
       </Table>
       {rows.length > 250 && (
-        <Box sx={{ p: 1, bgcolor: '#f8fafc', borderTop: '1px solid #e1e6ec' }}>
-          <Typography sx={{ fontSize: 12, color: '#66717f' }}>Showing first 250 rows for prototype performance.</Typography>
+        <Box sx={{ p: 1, bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.58)' : '#f8fafc', borderTop: `1px solid ${isDarkMode ? 'rgba(125, 154, 205, 0.18)' : 'rgba(226, 232, 240, 0.9)'}` }}>
+          <Typography sx={{ fontSize: 12, color: t.text.secondary }}>Showing first 250 rows for prototype performance.</Typography>
         </Box>
       )}
     </TableContainer>
@@ -1775,8 +1316,7 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
 };
 
 const BomNormalizer = () => {
-  const navigate = useNavigate();
-  const location = useLocation();
+  const { isDarkMode, tokens: t } = useThemeContext();
   const [workbook, setWorkbook] = useState(null);
   const [fileName, setFileName] = useState('');
   const [sheetName, setSheetName] = useState('');
@@ -1792,91 +1332,21 @@ const BomNormalizer = () => {
     alternateLayout: 'inside_selected_mpn_columns',
     delimiterMode: 'auto',
     customDelimiter: '',
-    groupHeaderMode: 'auto',
     quantityMode: 'inherit_primary',
     inheritLevels: true,
     skipTitleRows: true,
     skipRepeatedHeaders: true,
     skipDoNotPopulate: false,
-    alternateColumnGroups: [],
   });
   const [normalizedRows, setNormalizedRows] = useState([]);
   const [busy, setBusy] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
   const [progress, setProgress] = useState({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
   const [delimiterTouched, setDelimiterTouched] = useState(false);
-  const [parserTouched, setParserTouched] = useState(false);
-  const [skipSourceSetupForMerge, setSkipSourceSetupForMerge] = useState(false);
   const [normalizationSummary, setNormalizationSummary] = useState(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [lowConfidenceOnly, setLowConfidenceOnly] = useState(false);
-  const [factwiseDialogOpen, setFactwiseDialogOpen] = useState(false);
-  const [factwiseConfig, setFactwiseConfig] = useState({
-    mode: 'columns',
-    firstColumn: 'manufacturer',
-    secondColumn: 'mpn',
-    separator: '_',
-    prefix: 'ITEM-',
-    start: 1,
-    padding: 4,
-    increment: true,
-    applyMode: 'overwrite',
-  });
-  const [tagDialogOpen, setTagDialogOpen] = useState(false);
-  const [tagConfig, setTagConfig] = useState({
-    targetColumn: 'Tag_1',
-    mode: 'rules',
-    sourceColumn: 'manufacturer',
-    defaultValue: '',
-    rules: [
-      {
-        sourceColumn: 'manufacturer',
-        searchText: '',
-        outputValue: '',
-        caseSensitive: false,
-      },
-    ],
-    applyMode: 'overwrite',
-  });
-  const [manufacturerDirectory, setManufacturerDirectory] = useState({ names: [], aliases: {}, loaded: false });
-  const [manufacturerMatchOpen, setManufacturerMatchOpen] = useState(false);
-  const [manufacturerMatchLoading, setManufacturerMatchLoading] = useState(false);
-  const [manufacturerMatchError, setManufacturerMatchError] = useState('');
-  const [selectedManufacturerMatches, setSelectedManufacturerMatches] = useState([]);
-  const [downloadMenuAnchor, setDownloadMenuAnchor] = useState(null);
-  const [toolsMenuAnchor, setToolsMenuAnchor] = useState(null);
-  const [combineItems, setCombineItems] = useState([]);
-  const [combineBusy, setCombineBusy] = useState(false);
-  const [combineError, setCombineError] = useState('');
-  const [mergeChainMessage, setMergeChainMessage] = useState('');
-  const [mergeSources, setMergeSources] = useState([]);
-  const [mergeStage, setMergeStage] = useState('sources');
-  const [mergeConfig, setMergeConfig] = useState({
-    primarySourceId: '',
-    secondarySourceId: '',
-    primaryKey: '',
-    secondaryKey: '',
-    relationshipName: '',
-    outputMode: 'grouped',
-    detailColumns: [],
-  });
-  const [mergePreview, setMergePreview] = useState(null);
-  const [mergePreviewFilter, setMergePreviewFilter] = useState('all');
-  const [mergePreviewPage, setMergePreviewPage] = useState(0);
-  const [mergeVisibleColumns, setMergeVisibleColumns] = useState([]);
-  const [mergeColumnWidths, setMergeColumnWidths] = useState({});
-  const [pdfChoiceOpen, setPdfChoiceOpen] = useState(false);
-  const [pendingPdfAction, setPendingPdfAction] = useState(null);
-  const [pdfRangeEnabled, setPdfRangeEnabled] = useState(false);
-  const [pdfRanges, setPdfRanges] = useState([
-    { name: 'Section 1', pages: '' },
-    { name: 'Section 2', pages: '' },
-  ]);
-  const [workflowTemplates, setWorkflowTemplates] = useState([]);
-  const [selectedWorkflowTemplateId, setSelectedWorkflowTemplateId] = useState('');
-  const [workflowTemplateLoading, setWorkflowTemplateLoading] = useState(false);
-  const [workflowTemplateSaving, setWorkflowTemplateSaving] = useState(false);
-  const [successMessage, setSuccessMessage] = useState('');
+  const [isUploadDragging, setIsUploadDragging] = useState(false);
   const [error, setError] = useState('');
 
   const headers = useMemo(
@@ -1911,104 +1381,6 @@ const BomNormalizer = () => {
     () => QTY_OPTIONS.find((option) => option.value === config.quantityMode),
     [config.quantityMode]
   );
-
-  const selectedGroupHeaderOption = useMemo(
-    () => GROUP_HEADER_OPTIONS.find((option) => option.value === config.groupHeaderMode),
-    [config.groupHeaderMode]
-  );
-
-  const normalizedColumnOptions = useMemo(() => (
-    getNormalizedExportColumns(normalizedRows)
-      .filter((column) => !['sourceRow', 'rule', 'confidence', 'discardedText'].includes(column))
-  ), [normalizedRows]);
-
-  const factwiseSerialPreview = useMemo(() => (
-    getSerialPreviewValues(factwiseConfig, 3)
-  ), [factwiseConfig]);
-
-  const manufacturerMatchPreview = useMemo(() => {
-    const aliases = manufacturerDirectory.aliases || {};
-    if (!manufacturerDirectory.loaded || !Object.keys(aliases).length) return [];
-    const seen = new Set();
-    return normalizedRows
-      .map((row, index) => {
-        const original = fmt(row.manufacturer);
-        const canonical = aliases[normalizeKey(original).toUpperCase()];
-        if (!original || !canonical || canonical === original) return null;
-        const key = `${original}=>${canonical}`;
-        if (seen.has(key)) return null;
-        seen.add(key);
-        return { index, key, original, canonical };
-      })
-      .filter(Boolean);
-  }, [manufacturerDirectory, normalizedRows]);
-
-  const allManufacturerMatchesSelected = manufacturerMatchPreview.length > 0 &&
-    manufacturerMatchPreview.every((match) => selectedManufacturerMatches.includes(match.key));
-
-  const mergePrimarySource = useMemo(
-    () => mergeSources.find((source) => source.id === mergeConfig.primarySourceId) || null,
-    [mergeConfig.primarySourceId, mergeSources]
-  );
-
-  const mergeSecondarySource = useMemo(
-    () => mergeSources.find((source) => source.id === mergeConfig.secondarySourceId) || null,
-    [mergeConfig.secondarySourceId, mergeSources]
-  );
-
-  const mergeSecondaryLabel = useMemo(() => {
-    if (mergeConfig.relationshipName.trim()) return mergeConfig.relationshipName.trim();
-    const selected = mergeConfig.detailColumns || [];
-    if (selected.length === 1) return selected[0];
-    if (selected.some((column) => /mpn|part/i.test(column))) return 'MPNs';
-    if (selected.some((column) => /mfr|manufacturer/i.test(column))) return 'manufacturers';
-    return 'secondary values';
-  }, [mergeConfig.detailColumns, mergeConfig.relationshipName]);
-
-  const mergeFilteredPreviewRows = useMemo(() => (
-    mergePreview
-      ? mergePreview.rows
-        .map((row, index) => ({ row, index }))
-        .filter(({ row }) => mergePreviewFilter === 'all' || row.__mergeStatus === mergePreviewFilter)
-      : []
-  ), [mergePreview, mergePreviewFilter]);
-
-  const mergePreviewRowsPerPage = 50;
-  const mergePreviewTotalPages = Math.max(1, Math.ceil(mergeFilteredPreviewRows.length / mergePreviewRowsPerPage));
-  const mergePreviewStart = mergePreviewPage * mergePreviewRowsPerPage;
-  const visibleMergePreviewRows = mergeFilteredPreviewRows.slice(mergePreviewStart, mergePreviewStart + mergePreviewRowsPerPage);
-  const visibleMergePreviewColumns = mergePreview
-    ? mergePreview.headers.filter((header) => mergeVisibleColumns.includes(header))
-    : [];
-
-  const mergeCandidateCount = useMemo(() => combineItems.reduce((total, item) => {
-    if (item.type === 'pdf') {
-      return total + (item.extractedSourceCount || item.pageCount || 2);
-    }
-    return total + (item.workbook?.SheetNames?.length || 0);
-  }, 0), [combineItems]);
-
-  const canPrepareMerge = mergeCandidateCount >= 2;
-  const canUseWithoutMerge = combineItems.length === 1;
-  const displayedStep = !workbook && mergeStage !== 'sources'
-    ? 1
-    : (currentStep >= 4 ? 3 : currentStep);
-  const sourcePanelTitle = mergeStage === 'preview'
-    ? 'Review merged source'
-    : mergeStage === 'match' || mergeStage === 'options'
-      ? 'Prepare merged source'
-      : 'Upload source';
-  const sourcePanelDescription = mergeStage === 'preview'
-    ? 'Review the merged sheet once, adjust visible columns if needed, then continue directly to configuration.'
-    : mergeStage === 'match' || mergeStage === 'options'
-      ? 'Choose the matching columns and output shape for the merged source.'
-      : 'Upload Excel, CSV, or PDF data. Continue directly, or add another source and merge before normalization.';
-  const pdfRangeConfig = useMemo(() => ({
-    enabled: pdfRangeEnabled,
-    ranges: pdfRanges
-      .map((range) => ({ name: fmt(range.name), pages: fmt(range.pages) }))
-      .filter((range) => range.name || range.pages),
-  }), [pdfRangeEnabled, pdfRanges]);
 
   const availableStructureOptions = useMemo(
     () => getStructureOptionsForRoles(roles),
@@ -2057,67 +1429,6 @@ const BomNormalizer = () => {
     return 'Select at least an MPN column to run normalization.';
   }, [roles.manufacturer, roles.mpn]);
 
-  const alternateColumnGroups = useMemo(
-    () => cleanAlternateColumnGroups(config.alternateColumnGroups || [], headers),
-    [config.alternateColumnGroups, headers]
-  );
-
-  const suggestAlternateColumnGroup = useCallback(() => {
-    const usedColumns = new Set([
-      roles.cpn,
-      roles.mpn,
-      roles.manufacturer,
-      roles.description,
-      roles.quantity,
-      roles.uom,
-      roles.level,
-      roles.parent,
-      ...(config.alternateColumnGroups || []).flatMap((group) => [group.mpn, group.mfr, group.qty, group.uom]),
-    ].filter(Boolean));
-    const candidates = headers.filter((header) => !usedColumns.has(header));
-    const findCandidate = (patterns) => candidates.find((header) => {
-      const normalized = normalizeKey(header);
-      return patterns.some((pattern) => pattern.test(normalized));
-    }) || '';
-    const mpn = findCandidate([/\bmpn\b/, /part/, /code/, /column/]) || candidates[0] || '';
-    const afterMpn = mpn ? candidates.slice(candidates.indexOf(mpn) + 1) : candidates;
-    const mfr = afterMpn.find((header) => /mfr|manufacturer|vendor|supplier|column/i.test(header)) || afterMpn[0] || '';
-    return {
-      slot: `${(config.alternateColumnGroups || []).length + 1}`,
-      mpn,
-      mfr: mfr === mpn ? '' : mfr,
-      qty: '',
-      uom: '',
-    };
-  }, [config.alternateColumnGroups, headers, roles]);
-
-  const addAlternateColumnGroup = useCallback(() => {
-    setConfig((prev) => ({
-      ...prev,
-      alternateLayout: 'separate_columns',
-      alternateColumnGroups: [
-        ...(prev.alternateColumnGroups || []),
-        suggestAlternateColumnGroup(),
-      ],
-    }));
-  }, [suggestAlternateColumnGroup]);
-
-  const updateAlternateColumnGroup = useCallback((index, field, value) => {
-    setConfig((prev) => ({
-      ...prev,
-      alternateColumnGroups: (prev.alternateColumnGroups || []).map((group, groupIndex) => (
-        groupIndex === index ? { ...group, [field]: value } : group
-      )),
-    }));
-  }, []);
-
-  const removeAlternateColumnGroup = useCallback((index) => {
-    setConfig((prev) => ({
-      ...prev,
-      alternateColumnGroups: (prev.alternateColumnGroups || []).filter((_, groupIndex) => groupIndex !== index),
-    }));
-  }, []);
-
   const handleWorkbookLoaded = useCallback((nextWorkbook, nextFileName) => {
     const firstSheet = nextWorkbook.SheetNames[0];
     const prepared = prepareSingleSheet(nextWorkbook, firstSheet);
@@ -2140,73 +1451,12 @@ const BomNormalizer = () => {
     setCurrentStep(1);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
     setDelimiterTouched(false);
-    setParserTouched(false);
-    setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
     setError('');
   }, []);
 
-  useEffect(() => {
-    const state = location.state || {};
-    if (!state.fromPdfZone || !state.pdfSessionId) return;
-
-    let cancelled = false;
-    const loadZonedPdf = async () => {
-      setBusy(true);
-      setError('');
-      try {
-        const payload = state.pdfZonePayload || {};
-        let headers = makeUniqueHeaders(payload.headers || []);
-        let rows = payload.data || payload.rows || [];
-        let fileLabel = payload.file_name || `PDF zone extraction ${state.pdfSessionId}`;
-
-        if (!headers.length || !rows.length) {
-          const response = await api.getPDFSession(state.pdfSessionId);
-          const sessionData = response.data || {};
-          const extraction = sessionData.extraction || {};
-          headers = makeUniqueHeaders(extraction.headers || []);
-          rows = extraction.data || [];
-          fileLabel = sessionData.file_name || fileLabel;
-        }
-
-        if (!headers.length || !rows.length) {
-          throw new Error('Zone mapping finished, but no extracted rows were returned.');
-        }
-
-        const normalized = normalizePdfRows({
-          headers,
-          data: rows,
-          decision: payload.method || payload.status || 'zone mapping',
-        }, fileLabel);
-
-        if (!normalized.rows.length) {
-          throw new Error('Zone mapping did not produce any usable table rows.');
-        }
-
-        if (!cancelled) {
-          const nextWorkbook = createWorkbookFromObjects(normalized.rows, normalized.headers, 'PDF_Zones');
-          handleWorkbookLoaded(nextWorkbook, fileLabel);
-          navigate('/bom-normaliser', { replace: true });
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setError(err.response?.data?.error || err.message || 'Could not load the zone-mapped PDF result.');
-          navigate('/bom-normaliser', { replace: true });
-        }
-      } finally {
-        if (!cancelled) setBusy(false);
-      }
-    };
-
-    loadZonedPdf();
-    return () => {
-      cancelled = true;
-    };
-  }, [handleWorkbookLoaded, location.state, navigate]);
-
-  const handleFileChange = useCallback(async (event) => {
-    const file = event.target.files?.[0];
+  const handleWorkbookFile = useCallback(async (file) => {
     if (!file) return;
 
     try {
@@ -2219,474 +1469,24 @@ const BomNormalizer = () => {
       setError(err.message || 'Unable to read workbook.');
     } finally {
       setBusy(false);
-      event.target.value = '';
+      setIsUploadDragging(false);
     }
   }, [handleWorkbookLoaded]);
 
-  const handleCombineFilesChange = useCallback(async (event) => {
-    const files = Array.from(event.target.files || []);
-    if (!files.length) return;
-    const hasMergedBase = combineItems.some((item) => item.isMergedBase);
-
-    setCombineBusy(true);
-    setCombineError('');
-    setMergeChainMessage('');
-    setMergeSources([]);
-    setMergePreview(null);
-    setMergeStage('sources');
+  const handleFileChange = useCallback(async (event) => {
+    const file = event.target.files?.[0];
     try {
-      const parsedItems = await Promise.all(files.map(async (file, index) => {
-        const type = getFileType(file.name);
-        const baseItem = {
-          id: `${Date.now()}-${index}-${file.name}`,
-          file,
-          fileName: file.name,
-          type,
-          status: type === 'pdf' ? 'Ready to extract' : 'Ready',
-          scope: 'single',
-          sheetName: '',
-          selectedSheetNames: [],
-          headerRowIndex: 0,
-          rowCount: 0,
-          error: '',
-        };
-
-        if (type === 'pdf') return baseItem;
-
-        const buffer = await file.arrayBuffer();
-        await new Promise((resolve) => setTimeout(resolve, 0));
-        const nextWorkbook = XLSX.read(buffer, { type: 'array' });
-        const firstSheet = nextWorkbook.SheetNames[0];
-        const prepared = prepareSingleSheet(nextWorkbook, firstSheet);
-        return {
-          ...baseItem,
-          workbook: nextWorkbook,
-          sheetName: firstSheet,
-          selectedSheetNames: [firstSheet],
-          headerRowIndex: prepared.headerRowIndex,
-          rowCount: prepared.dataRows.length,
-          status: `${nextWorkbook.SheetNames.length} sheet${nextWorkbook.SheetNames.length === 1 ? '' : 's'} found`,
-        };
-      }));
-      setCombineItems((prev) => [...prev, ...parsedItems]);
-      if (hasMergedBase) {
-        setMergeChainMessage('Next source added. Click Prepare merge setup to merge it into the merged base.');
-      }
-    } catch (err) {
-      setCombineError(err.message || 'Unable to read one of the selected files.');
+      await handleWorkbookFile(file);
     } finally {
-      setCombineBusy(false);
       event.target.value = '';
     }
-  }, [combineItems]);
+  }, [handleWorkbookFile]);
 
-  const removeCombineItem = useCallback((id) => {
-    setCombineItems((prev) => prev.filter((item) => item.id !== id));
-    setMergeSources([]);
-    setMergePreview(null);
-    setMergeStage('sources');
-  }, []);
-
-  const uploadPdfAndGetSession = useCallback(async (item) => {
-    const formData = new FormData();
-    formData.append('file', item.file);
-    const uploadResponse = await api.uploadPDF(formData);
-    const sessionId = uploadResponse.data?.session_id;
-    if (!sessionId) throw new Error(`${item.fileName}: PDF upload did not return a session.`);
-    return sessionId;
-  }, []);
-
-  const extractPdfSources = useCallback(async (item, processingMode = 'compare', rangeConfig = null) => {
-    const sessionId = await uploadPdfAndGetSession(item);
-    const response = processingMode === 'ocr'
-      ? await api.processPDFOCR({
-        session_id: sessionId,
-        data_alignment: 'align',
-      })
-      : await api.processPDFCompare({
-      session_id: sessionId,
-      data_alignment: 'align',
-    });
-    const normalized = normalizePdfRows(response.data, item.fileName);
-    if (!normalized.rows.length) {
-      throw new Error(`${item.fileName}: no table rows were extracted from the PDF.`);
-    }
-    const tableSources = normalizePdfTables(response.data, item.fileName);
-    const decision = response.data?.decision;
-    const winner = processingMode === 'ocr' ? 'ocr' : (decision?.winner || decision || 'best');
-    const flattenedSource = {
-      id: 'flattened',
-      label: `${item.fileName} / Combined PDF extraction (${normalized.rows.length} rows, ${normalized.headers.length} columns)`,
-      fileName: item.fileName,
-      sheetName: 'Combined PDF extraction',
-      headers: normalized.headers,
-      rows: normalized.rows,
-      status: `${normalized.rows.length} PDF rows extracted (${winner})`,
-    };
-    const extractedSources = rangeConfig?.enabled && tableSources.length
-      ? tableSources
-      : (tableSources.length > 1 ? tableSources : [flattenedSource]);
-    return rangeConfig?.enabled
-      ? groupPdfSourcesByRanges(extractedSources, rangeConfig.ranges, item.fileName)
-      : extractedSources;
-  }, [uploadPdfAndGetSession]);
-
-  const handleUseSourceWithoutMerge = useCallback(async (processingMode = null) => {
-    const selectedMode = typeof processingMode === 'string' ? processingMode : null;
-    const item = combineItems[0];
-    if (!item) {
-      setCombineError('Add a source first.');
-      return;
-    }
-    if (item.type === 'pdf' && !selectedMode) {
-      setPendingPdfAction('direct');
-      setPdfChoiceOpen(true);
-      return;
-    }
-
-    setCombineBusy(true);
-    setCombineError('');
-    setMergeChainMessage('');
-    try {
-      if (item.type === 'pdf') {
-        const pdfSources = await extractPdfSources(item, selectedMode || 'compare', pdfRangeConfig);
-        const pdfSource = pdfSources.length === 1
-          ? pdfSources[0]
-          : {
-            headers: [...new Set(pdfSources.flatMap((source) => source.headers))],
-            rows: pdfSources.flatMap((source) => source.rows),
-          };
-        const nextWorkbook = createWorkbookFromObjects(pdfSource.rows, pdfSource.headers, 'PDF_Source');
-        handleWorkbookLoaded(nextWorkbook, item.fileName);
-      } else if (item.workbook) {
-        handleWorkbookLoaded(item.workbook, item.fileName);
-      } else {
-        throw new Error('This source is not ready yet.');
-      }
-      setCombineItems([]);
-      setMergeSources([]);
-      setMergePreview(null);
-      setMergeStage('sources');
-    } catch (err) {
-      setCombineError(err.response?.data?.error || err.message || 'Could not continue with this source.');
-    } finally {
-      setCombineBusy(false);
-    }
-  }, [combineItems, extractPdfSources, handleWorkbookLoaded, pdfRangeConfig]);
-
-  const handlePrepareMergeSources = useCallback(async (processingMode = null) => {
-    const selectedMode = typeof processingMode === 'string' ? processingMode : null;
-    if (!combineItems.length || !canPrepareMerge) {
-      setCombineError('Add at least two sheets/files/PDF table sources before preparing a merge.');
-      return;
-    }
-    if (combineItems.some((item) => item.type === 'pdf') && !selectedMode) {
-      setPendingPdfAction('merge');
-      setPdfChoiceOpen(true);
-      return;
-    }
-
-    setCombineBusy(true);
-    setCombineError('');
-    setMergeChainMessage('');
-    setMergePreview(null);
-    const nextItems = [...combineItems];
-    const nextSources = [];
-
-    try {
-      for (let index = 0; index < nextItems.length; index += 1) {
-        const item = nextItems[index];
-        if (item.type === 'pdf') {
-          nextItems[index] = { ...item, status: 'Extracting PDF tables...', error: '' };
-          setCombineItems([...nextItems]);
-          const pdfSources = await extractPdfSources(item, selectedMode || 'compare', pdfRangeConfig);
-          pdfSources.forEach((source, sourceIndex) => {
-            nextSources.push({
-              ...source,
-              id: `${item.id}:pdf:${source.id || sourceIndex}`,
-            });
-          });
-          const totalRows = pdfSources.reduce((sum, source) => sum + source.rows.length, 0);
-          nextItems[index] = {
-            ...nextItems[index],
-            status: `${pdfSources.length} PDF source${pdfSources.length === 1 ? '' : 's'} extracted`,
-            rowCount: totalRows,
-            extractedSourceCount: pdfSources.length,
-            error: '',
-          };
-          setCombineItems([...nextItems]);
-          continue;
-        }
-
-        if (!item.workbook) continue;
-        const sourceCountBeforeItem = nextSources.length;
-        item.workbook.SheetNames.forEach((name) => {
-          const prepared = prepareSingleSheet(item.workbook, name);
-          nextSources.push({
-            id: `${item.id}:${name}`,
-            label: `${item.fileName} / ${name} (${prepared.dataRows.length} rows, ${prepared.headers.length} columns)`,
-            fileName: item.fileName,
-            sheetName: name,
-            headers: prepared.headers,
-            rows: prepared.dataRows,
-            headerRowIndex: prepared.headerRowIndex,
-            isMergedBase: Boolean(item.isMergedBase),
-          });
-        });
-        const itemSources = nextSources.slice(sourceCountBeforeItem);
-        const sheetsWithRows = itemSources.filter((source) => source.rows.length > 0).length;
-        nextItems[index] = {
-          ...item,
-          status: `${item.workbook.SheetNames.length} sheet${item.workbook.SheetNames.length === 1 ? '' : 's'} ready, ${sheetsWithRows} with rows`,
-          error: '',
-        };
-        setCombineItems([...nextItems]);
-      }
-
-      if (nextSources.length < 2) {
-        setCombineError('At least two usable sources are needed for merge.');
-        return;
-      }
-
-      const primary = nextSources.find((source) => source.isMergedBase && source.rows.length > 0 && source.headers.length > 0) ||
-        nextSources.find((source) => source.rows.length > 0 && source.headers.length > 0) ||
-        nextSources[0];
-      const secondary = nextSources.find((source) => source.id !== primary.id && source.rows.length > 0 && source.headers.length > 0) ||
-        nextSources.find((source) => source.id !== primary.id) ||
-        nextSources[1];
-      const primaryKey = guessKeyColumn(primary.headers);
-      const secondaryKey = guessKeyColumn(secondary.headers);
-      const detailColumns = defaultMergeDetailColumns(secondary.headers, secondaryKey);
-      setMergeSources(nextSources);
-      setMergeConfig({
-        primarySourceId: primary.id,
-        secondarySourceId: secondary.id,
-        primaryKey,
-        secondaryKey,
-        relationshipName: '',
-        outputMode: 'grouped',
-        detailColumns,
-      });
-      setMergeStage('match');
-      setMergePreviewFilter('all');
-      setMergePreviewPage(0);
-      setMergeVisibleColumns([]);
-    } catch (err) {
-      setCombineError(err.response?.data?.error || err.message || 'Could not prepare merge sources.');
-    } finally {
-      setCombineBusy(false);
-    }
-  }, [canPrepareMerge, combineItems, extractPdfSources, pdfRangeConfig]);
-
-  const handlePdfProcessingChoice = useCallback(async (processingMode) => {
-    setPdfChoiceOpen(false);
-    if (processingMode === 'zonal') {
-      const pdfItem = combineItems.find((item) => item.type === 'pdf');
-      if (!pdfItem) {
-        setCombineError('No PDF source is available for zone mapping.');
-        setPendingPdfAction(null);
-        return;
-      }
-      setCombineBusy(true);
-      setCombineError('');
-      try {
-        const sessionId = await uploadPdfAndGetSession(pdfItem);
-        navigate(`/pdf-zones/${sessionId}`, {
-          state: {
-            fromUpload: true,
-            pdfAlignment: 'align',
-            fromBomNormalizer: true,
-          },
-        });
-      } catch (err) {
-        setCombineError(err.response?.data?.error || err.message || 'Could not open PDF zone mapping.');
-      } finally {
-        setCombineBusy(false);
-        setPendingPdfAction(null);
-      }
-      return;
-    }
-
-    if (pendingPdfAction === 'merge') {
-      await handlePrepareMergeSources(processingMode);
-    } else {
-      await handleUseSourceWithoutMerge(processingMode);
-    }
-    setPendingPdfAction(null);
-  }, [combineItems, handlePrepareMergeSources, handleUseSourceWithoutMerge, navigate, pendingPdfAction, uploadPdfAndGetSession]);
-
-  const updatePdfRange = useCallback((index, field, value) => {
-    setPdfRanges((prev) => prev.map((range, rangeIndex) => (
-      rangeIndex === index ? { ...range, [field]: value } : range
-    )));
-  }, []);
-
-  const addPdfRange = useCallback(() => {
-    setPdfRanges((prev) => [...prev, { name: `PDF section ${prev.length + 1}`, pages: '' }]);
-  }, []);
-
-  const removePdfRange = useCallback((index) => {
-    setPdfRanges((prev) => prev.length <= 1 ? prev : prev.filter((_, rangeIndex) => rangeIndex !== index));
-  }, []);
-
-  const handleBuildMergePreview = useCallback(() => {
-    try {
-      const preview = buildMergePreviewFromSources(mergePrimarySource, mergeSecondarySource, mergeConfig);
-      setMergePreview(preview);
-      setMergeConfig(preview.config);
-      setMergeVisibleColumns(preview.headers);
-      setMergePreviewFilter('all');
-      setMergePreviewPage(0);
-      setMergeStage('preview');
-      setCombineError('');
-    } catch (err) {
-      setCombineError(err.message || 'Could not build merge preview.');
-    }
-  }, [mergeConfig, mergePrimarySource, mergeSecondarySource]);
-
-  const handleMergePreviewCellChange = useCallback((rowIndex, header, value) => {
-    setMergePreview((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        rows: prev.rows.map((row, index) => (
-          index === rowIndex ? { ...row, [header]: value } : row
-        )),
-      };
-    });
-  }, []);
-
-  const handleMergeColumnResize = useCallback((header, event) => {
+  const handleUploadDrop = useCallback((event) => {
     event.preventDefault();
-    const startX = event.clientX;
-    const startWidth = mergeColumnWidths[header] || 180;
-
-    const handleMove = (moveEvent) => {
-      const nextWidth = Math.max(90, startWidth + moveEvent.clientX - startX);
-      setMergeColumnWidths((prev) => ({ ...prev, [header]: nextWidth }));
-    };
-
-    const handleUp = () => {
-      window.removeEventListener('mousemove', handleMove);
-      window.removeEventListener('mouseup', handleUp);
-    };
-
-    window.addEventListener('mousemove', handleMove);
-    window.addEventListener('mouseup', handleUp);
-  }, [mergeColumnWidths]);
-
-  const handleUseMergePreview = useCallback(() => {
-    if (!mergePreview) {
-      setCombineError('Build the merge preview first.');
-      return;
-    }
-    const { headers: outputHeaders, rows: cleanRows } = getMergePreviewExport(mergePreview, mergeVisibleColumns, mergePreviewFilter);
-    const nextWorkbook = createWorkbookFromObjects(cleanRows, outputHeaders, 'Merged');
-    handleWorkbookLoaded(nextWorkbook, `Merged source (${mergePrimarySource?.label || 'primary'} + ${mergeSecondarySource?.label || 'secondary'})`);
-    setSkipSourceSetupForMerge(true);
-    setCurrentStep(2);
-    setMergeStage('preview');
-    setCombineError('');
-  }, [handleWorkbookLoaded, mergePreview, mergePreviewFilter, mergePrimarySource?.label, mergeSecondarySource?.label, mergeVisibleColumns]);
-
-  const handleUseNormalizedAsBase = useCallback(() => {
-    if (!normalizedRows.length) {
-      setError('Run normalization before using this sheet as a merge base.');
-      return;
-    }
-
-    const outputHeaders = getNormalizedExportColumns(normalizedRows);
-    const cleanRows = normalizedRows.map((row) => {
-      const output = {};
-      outputHeaders.forEach((header) => {
-        output[header] = row[header] || '';
-      });
-      return output;
-    });
-    const label = `Normalized base (${cleanRows.length} rows, ${outputHeaders.length} columns)`;
-    const baseWorkbook = createWorkbookFromObjects(cleanRows, outputHeaders, 'Normalized_Base');
-    const baseItem = {
-      id: `normalized-base:${Date.now()}`,
-      fileName: label,
-      type: 'workbook',
-      status: 'Normalized sheet ready as base',
-      workbook: baseWorkbook,
-      sheetName: 'Normalized_Base',
-      selectedSheetNames: ['Normalized_Base'],
-      headerRowIndex: 0,
-      rowCount: cleanRows.length,
-      isMergedBase: true,
-    };
-
-    setWorkbook(null);
-    setFileName('');
-    setSheetName('');
-    setSheetScope('single');
-    setSelectedSheetNames([]);
-    setSheetRows([]);
-    setHeaderRowIndex(0);
-    setPreparedHeaders([]);
-    setPreparedDataRows([]);
-    setRoles(emptyRoles);
-    setNormalizedRows([]);
-    setCurrentStep(0);
-    setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
-    setNormalizationSummary(null);
-    setParserTouched(false);
-    setSkipSourceSetupForMerge(false);
-    setConfirmOpen(false);
-    setLowConfidenceOnly(false);
-    setDownloadMenuAnchor(null);
-    setToolsMenuAnchor(null);
-    setCombineItems([baseItem]);
-    setMergeSources([]);
-    setMergePreview(null);
-    setMergePreviewFilter('all');
-    setMergePreviewPage(0);
-    setMergeVisibleColumns([]);
-    setMergeColumnWidths({});
-    setMergeConfig({
-      primarySourceId: '',
-      secondarySourceId: '',
-      primaryKey: '',
-      secondaryKey: '',
-      relationshipName: '',
-      outputMode: 'grouped',
-      detailColumns: [],
-    });
-    setMergeStage('sources');
-    setMergeChainMessage('Normalized sheet is ready as the base. Add another source, then click Prepare merge setup to merge it into this base.');
-    setCombineError('');
-    setError('');
-  }, [normalizedRows]);
-
-  const handleBackFromConfigure = useCallback(() => {
-    if (skipSourceSetupForMerge && mergePreview) {
-      setWorkbook(null);
-      setFileName('');
-      setSheetName('');
-      setSheetScope('single');
-      setSelectedSheetNames([]);
-      setSheetRows([]);
-      setHeaderRowIndex(0);
-      setPreparedHeaders([]);
-      setPreparedDataRows([]);
-      setRoles(emptyRoles);
-      setNormalizedRows([]);
-      setCurrentStep(0);
-      setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
-      setDelimiterTouched(false);
-      setParserTouched(false);
-      setSkipSourceSetupForMerge(false);
-      setNormalizationSummary(null);
-      setConfirmOpen(false);
-      setMergeStage('preview');
-      setError('');
-      return;
-    }
-
-    setCurrentStep(1);
-  }, [mergePreview, skipSourceSetupForMerge]);
+    const file = event.dataTransfer.files?.[0];
+    handleWorkbookFile(file);
+  }, [handleWorkbookFile]);
 
   const handleSheetChange = useCallback((nextSheetName) => {
     if (!workbook) return;
@@ -2706,8 +1506,6 @@ const BomNormalizer = () => {
     setCurrentStep(1);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
     setDelimiterTouched(false);
-    setParserTouched(false);
-    setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
   }, [workbook]);
@@ -2736,8 +1534,6 @@ const BomNormalizer = () => {
     setCurrentStep(1);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
     setDelimiterTouched(false);
-    setParserTouched(false);
-    setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
   }, [workbook]);
@@ -2770,8 +1566,6 @@ const BomNormalizer = () => {
     setNormalizedRows([]);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
     setNormalizationSummary(null);
-    setParserTouched(false);
-    setSkipSourceSetupForMerge(false);
     setConfirmOpen(false);
   }, [sheetRows]);
 
@@ -2779,124 +1573,6 @@ const BomNormalizer = () => {
     setRoles((prev) => ({ ...prev, [role]: header }));
     if (header) rememberRoleHeader(role, header);
   }, []);
-
-  const refreshWorkflowTemplates = useCallback(async () => {
-    setWorkflowTemplateLoading(true);
-    try {
-      const response = await api.getBomWorkflowTemplates();
-      setWorkflowTemplates(response.data.templates || []);
-    } catch (err) {
-      setError(err.response?.data?.error || err.message || 'Could not load workflow templates.');
-    } finally {
-      setWorkflowTemplateLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    refreshWorkflowTemplates();
-  }, [refreshWorkflowTemplates]);
-
-  const resolveTemplateHeader = useCallback((savedHeader) => {
-    if (!savedHeader) return '';
-    if (headers.includes(savedHeader)) return savedHeader;
-    const target = normalizeKey(savedHeader);
-    return headers.find((header) => normalizeKey(header) === target) || '';
-  }, [headers]);
-
-  const applyWorkflowTemplate = useCallback(async () => {
-    if (!selectedWorkflowTemplateId) {
-      setError('Choose a workflow template first.');
-      return;
-    }
-    if (!workbook) {
-      setError('Upload a workbook before applying a workflow template.');
-      return;
-    }
-
-    try {
-      const response = await api.getBomWorkflowTemplate(selectedWorkflowTemplateId);
-      const template = response.data.template;
-      const workflow = template?.workflow || {};
-      const savedRoles = workflow.roles || {};
-      const nextRoles = Object.keys(emptyRoles).reduce((acc, key) => {
-        acc[key] = resolveTemplateHeader(savedRoles[key]);
-        return acc;
-      }, {});
-
-      setRoles(nextRoles);
-      setConfig((prev) => ({ ...prev, ...(workflow.config || {}) }));
-      if (workflow.factwiseConfig) setFactwiseConfig((prev) => ({ ...prev, ...workflow.factwiseConfig }));
-      if (workflow.tagConfig) setTagConfig((prev) => ({ ...prev, ...workflow.tagConfig }));
-      setParserTouched(true);
-      setDelimiterTouched(true);
-      setNormalizedRows([]);
-      setNormalizationSummary(null);
-      setError('');
-      setSuccessMessage(`Applied workflow template "${template?.name || 'selected template'}".`);
-      setCurrentStep(2);
-    } catch (err) {
-      setError(err.response?.data?.error || err.message || 'Could not apply workflow template.');
-    }
-  }, [headers, resolveTemplateHeader, selectedWorkflowTemplateId, workbook]);
-
-  const saveWorkflowTemplate = useCallback(async () => {
-    const name = window.prompt('Name this workflow template');
-    if (!name || !name.trim()) return;
-
-    const sourceSignature = {
-      fileName,
-      sheetName,
-      sheetScope,
-      selectedSheetNames,
-      headerRowIndex,
-      headers,
-    };
-    const workflow = {
-      version: 1,
-      roles,
-      config,
-      factwiseConfig,
-      tagConfig,
-      sourceHints: {
-        sheetName,
-        sheetScope,
-        selectedSheetNames,
-        headerRowIndex,
-      },
-      outputColumns: getNormalizedExportColumns(normalizedRows),
-    };
-
-    setWorkflowTemplateSaving(true);
-    try {
-      const response = await api.saveBomWorkflowTemplate({
-        name: name.trim(),
-        description: `Saved from ${fileName || 'BOM Normalizer'}`,
-        sourceSignature,
-        workflow,
-      });
-      await refreshWorkflowTemplates();
-      setSelectedWorkflowTemplateId(String(response.data.template?.id || ''));
-      setError('');
-      setSuccessMessage(response.data.message || `Saved workflow template "${name.trim()}".`);
-    } catch (err) {
-      setError(err.response?.data?.error || err.message || 'Could not save workflow template.');
-    } finally {
-      setWorkflowTemplateSaving(false);
-    }
-  }, [
-    config,
-    factwiseConfig,
-    fileName,
-    headerRowIndex,
-    headers,
-    normalizedRows,
-    refreshWorkflowTemplates,
-    roles,
-    selectedSheetNames,
-    sheetName,
-    sheetScope,
-    tagConfig,
-  ]);
 
   const handleNormalize = useCallback(async () => {
     if (!dataRows.length) {
@@ -2933,79 +1609,6 @@ const BomNormalizer = () => {
     }
   }, [config, dataRows, headers, roles]);
 
-  const handleOpenFactwiseDialog = useCallback(() => {
-    setFactwiseConfig((prev) => ({
-      ...prev,
-      firstColumn: normalizedColumnOptions.includes(prev.firstColumn) ? prev.firstColumn : (normalizedColumnOptions.includes('manufacturer') ? 'manufacturer' : normalizedColumnOptions[0] || ''),
-      secondColumn: normalizedColumnOptions.includes(prev.secondColumn) ? prev.secondColumn : (normalizedColumnOptions.includes('mpn') ? 'mpn' : normalizedColumnOptions[1] || normalizedColumnOptions[0] || ''),
-    }));
-    setFactwiseDialogOpen(true);
-  }, [normalizedColumnOptions]);
-
-  const handleCreateFactwiseForNormalizer = useCallback(() => {
-    setNormalizedRows((prevRows) => createFactwiseIds(prevRows, factwiseConfig));
-    setFactwiseDialogOpen(false);
-  }, [factwiseConfig]);
-
-  const handleOpenTagDialog = useCallback(() => {
-    setTagConfig((prev) => ({
-      ...prev,
-      targetColumn: getNextTagColumn(normalizedRows),
-      sourceColumn: normalizedColumnOptions.includes(prev.sourceColumn) ? prev.sourceColumn : (normalizedColumnOptions.includes('manufacturer') ? 'manufacturer' : normalizedColumnOptions[0] || ''),
-      rules: (prev.rules?.length ? prev.rules : [{ sourceColumn: 'manufacturer', searchText: '', outputValue: '', caseSensitive: false }])
-        .map((rule) => ({
-          ...rule,
-          sourceColumn: normalizedColumnOptions.includes(rule.sourceColumn)
-            ? rule.sourceColumn
-            : (normalizedColumnOptions.includes('manufacturer') ? 'manufacturer' : normalizedColumnOptions[0] || ''),
-        })),
-    }));
-    setTagDialogOpen(true);
-  }, [normalizedColumnOptions, normalizedRows]);
-
-  const handleCreateTagForNormalizer = useCallback(() => {
-    setNormalizedRows((prevRows) => createTagColumn(prevRows, tagConfig));
-    setTagDialogOpen(false);
-  }, [tagConfig]);
-
-  const handleOpenManufacturerMatch = useCallback(async () => {
-    setManufacturerMatchOpen(true);
-    setManufacturerMatchError('');
-    if (manufacturerDirectory.loaded) return;
-
-    setManufacturerMatchLoading(true);
-    try {
-      const response = await api.getManufacturerDirectory();
-      setManufacturerDirectory({
-        names: response.data?.names || [],
-        aliases: response.data?.aliases || {},
-        loaded: true,
-        entryCount: response.data?.entry_count || 0,
-        aliasCount: response.data?.alias_count || 0,
-      });
-    } catch (err) {
-      setManufacturerMatchError('Could not load manufacturer list from backend. Restart backend and try again.');
-    } finally {
-      setManufacturerMatchLoading(false);
-    }
-  }, [manufacturerDirectory.loaded]);
-
-  const handleApplyManufacturerMatch = useCallback(() => {
-    const selectedMap = new Map(
-      manufacturerMatchPreview
-        .filter((match) => selectedManufacturerMatches.includes(match.key))
-        .map((match) => [match.original, match.canonical])
-    );
-    setNormalizedRows((prevRows) => prevRows.map((row) => {
-      const original = fmt(row.manufacturer);
-      const canonical = selectedMap.get(original);
-      return canonical && canonical !== original
-        ? { ...row, manufacturer: canonical }
-        : row;
-    }));
-    setManufacturerMatchOpen(false);
-  }, [manufacturerMatchPreview, selectedManufacturerMatches]);
-
   const handleReset = useCallback(() => {
     setWorkbook(null);
     setFileName('');
@@ -3022,102 +1625,21 @@ const BomNormalizer = () => {
       alternateLayout: 'inside_selected_mpn_columns',
       delimiterMode: 'auto',
       customDelimiter: '',
-      groupHeaderMode: 'auto',
       quantityMode: 'inherit_primary',
       inheritLevels: true,
       skipTitleRows: true,
       skipRepeatedHeaders: true,
       skipDoNotPopulate: false,
-      alternateColumnGroups: [],
     });
     setNormalizedRows([]);
     setCurrentStep(0);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
     setDelimiterTouched(false);
-    setParserTouched(false);
-    setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
     setLowConfidenceOnly(false);
-    setFactwiseDialogOpen(false);
-    setTagDialogOpen(false);
-    setManufacturerMatchOpen(false);
-    setDownloadMenuAnchor(null);
-    setToolsMenuAnchor(null);
-    setCombineItems([]);
-    setCombineBusy(false);
-    setCombineError('');
-    setMergeChainMessage('');
-    setMergeSources([]);
-    setMergeStage('sources');
-    setMergeConfig({
-      primarySourceId: '',
-      secondarySourceId: '',
-      primaryKey: '',
-      secondaryKey: '',
-      relationshipName: '',
-      outputMode: 'grouped',
-      detailColumns: [],
-    });
-    setMergePreview(null);
-    setMergePreviewFilter('all');
-    setMergePreviewPage(0);
-    setMergeVisibleColumns([]);
-    setMergeColumnWidths({});
-    setPdfChoiceOpen(false);
-    setPendingPdfAction(null);
-    setPdfRangeEnabled(false);
-    setPdfRanges([
-      { name: 'Section 1', pages: '' },
-      { name: 'Section 2', pages: '' },
-    ]);
     setError('');
   }, []);
-
-  const handleBackFromSourceSetup = useCallback(() => {
-    if (!mergePreview) {
-      handleReset();
-      return;
-    }
-
-    setWorkbook(null);
-    setFileName('');
-    setSheetName('');
-    setSheetScope('single');
-    setSelectedSheetNames([]);
-    setSheetRows([]);
-    setHeaderRowIndex(0);
-    setPreparedHeaders([]);
-    setPreparedDataRows([]);
-    setRoles(emptyRoles);
-    setConfig({
-      structure: 'separate_cells',
-      alternateLayout: 'inside_selected_mpn_columns',
-      delimiterMode: 'auto',
-      customDelimiter: '',
-      groupHeaderMode: 'auto',
-      quantityMode: 'inherit_primary',
-      inheritLevels: true,
-      skipTitleRows: true,
-      skipRepeatedHeaders: true,
-      skipDoNotPopulate: false,
-      alternateColumnGroups: [],
-    });
-    setNormalizedRows([]);
-    setCurrentStep(0);
-    setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
-    setDelimiterTouched(false);
-    setParserTouched(false);
-    setSkipSourceSetupForMerge(false);
-    setNormalizationSummary(null);
-    setConfirmOpen(false);
-    setLowConfidenceOnly(false);
-    setFactwiseDialogOpen(false);
-    setTagDialogOpen(false);
-    setManufacturerMatchOpen(false);
-    setMergeStage('preview');
-    setError('');
-  }, [handleReset, mergePreview]);
 
   useEffect(() => {
     setNormalizedRows([]);
@@ -3125,39 +1647,18 @@ const BomNormalizer = () => {
   }, [roles, config, headerRowIndex, sheetName, sheetScope, selectedSheetNames]);
 
   useEffect(() => {
-    if (!manufacturerMatchOpen) return;
-    setSelectedManufacturerMatches(manufacturerMatchPreview.map((match) => match.key));
-  }, [manufacturerMatchOpen, manufacturerMatchPreview]);
-
-  useEffect(() => {
-    if (parserTouched) return;
     setConfig((prev) => {
       const nextStructure = detectBestStructure(headers, roles, dataRows.slice(0, 40));
       if (nextStructure === prev.structure) return prev;
       return nextConfigForDetectedStructure(prev, nextStructure);
     });
-  }, [dataRows, headers, parserTouched, roles]);
+  }, [dataRows, headers, roles]);
 
   useEffect(() => {
     if (!availableStructureOptions.length) return;
     if (availableStructureOptions.some((option) => option.value === config.structure)) return;
     setConfig((prev) => ({ ...prev, structure: availableStructureOptions[0].value }));
   }, [availableStructureOptions, config.structure]);
-
-  useEffect(() => {
-    if (combineError.includes('two') && !canPrepareMerge) {
-      setCombineError('');
-    }
-  }, [canPrepareMerge, combineError]);
-
-  useEffect(() => {
-    const strongMpnHeader = findStrongMpnHeader(headers);
-    if (!strongMpnHeader || roles.mpn === strongMpnHeader) return;
-    if (!roles.mpn || isGenericPartHeader(roles.mpn) || roles.mpn === roles.cpn) {
-      setRoles((prev) => ({ ...prev, mpn: strongMpnHeader }));
-      rememberRoleHeader('mpn', strongMpnHeader);
-    }
-  }, [headers, roles.cpn, roles.mpn]);
 
   useEffect(() => {
     if (delimiterTouched || (!roles.mpn && !roles.manufacturer)) return;
@@ -3167,47 +1668,159 @@ const BomNormalizer = () => {
     ));
   }, [dataRows, delimiterTouched, roles]);
 
-  useEffect(() => {
-    if (parserTouched) return;
-    if (!roles.mpn || !dataRows.length) return;
-    const sampleValues = dataRows.slice(0, 80).map((row) => getCell(row, roles.mpn)).filter(Boolean);
-    const multiMpnCount = sampleValues.filter((value) => splitMpnCell(value, config).length > 1).length;
-    if (!multiMpnCount) return;
+  const pageSx = {
+    minHeight: 'calc(100vh - 68px)',
+    bgcolor: 'transparent',
+    color: t.text.primary,
+    px: { xs: 2, lg: 4 },
+    py: { xs: 2.5, lg: 3 },
+    '& .MuiPaper-root': {
+      borderRadius: '8px',
+      border: `1px solid ${t.border.default}`,
+      background: isDarkMode
+        ? 'linear-gradient(145deg, rgba(16, 24, 39, 0.86) 0%, rgba(8, 13, 24, 0.9) 100%)'
+        : 'rgba(255, 255, 255, 0.88)',
+      color: t.text.primary,
+      boxShadow: isDarkMode
+        ? '0 24px 70px rgba(0,0,0,0.32), inset 0 1px 0 rgba(255,255,255,0.04)'
+        : '0 18px 50px rgba(15,23,42,0.08)',
+      backdropFilter: 'blur(18px)'
+    },
+    '& .MuiTypography-root': {
+      letterSpacing: 0
+    },
+    '& .MuiTypography-body2, & .MuiFormHelperText-root': {
+      color: t.text.secondary
+    },
+    '& .MuiStepLabel-label': {
+      color: `${t.text.secondary} !important`,
+      fontWeight: 650
+    },
+    '& .MuiStepIcon-root': {
+      color: isDarkMode ? 'rgba(148, 163, 184, 0.36)' : 'rgba(148, 163, 184, 0.55)'
+    },
+    '& .MuiStepIcon-root.Mui-active, & .MuiStepIcon-root.Mui-completed': {
+      color: t.color.primary
+    },
+    '& .MuiStepConnector-line': {
+      borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.2)' : 'rgba(148, 163, 184, 0.42)'
+    },
+    '& .MuiOutlinedInput-root, & .MuiInputBase-root': {
+      borderRadius: '8px',
+      color: t.text.primary,
+      backgroundColor: t.surface.controlSoft
+    },
+    '& .MuiOutlinedInput-notchedOutline': {
+      borderColor: t.border.default
+    },
+    '& .MuiInputLabel-root': {
+      color: t.text.secondary
+    },
+    '& .MuiChip-root': {
+      borderRadius: '999px',
+      bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : 'rgba(37, 99, 235, 0.08)',
+      color: isDarkMode ? '#bfdbfe' : '#1d4ed8',
+      border: `1px solid ${isDarkMode ? 'rgba(96, 165, 250, 0.2)' : 'rgba(37, 99, 235, 0.14)'}`
+    },
+    '& .MuiTableCell-root': {
+      color: t.text.primary,
+      borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.14)' : 'rgba(226, 232, 240, 0.9)'
+    },
+    '& .MuiTableHead-root .MuiTableCell-root': {
+      bgcolor: isDarkMode ? 'rgba(24, 35, 56, 0.96)' : '#f8fafc',
+      color: t.text.heading,
+      fontWeight: 750
+    },
+    '& .MuiTableBody-root .MuiTableRow-root:nth-of-type(even)': {
+      bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.48)' : 'rgba(248, 250, 252, 0.72)'
+    },
+    '& .MuiButton-root': {
+      borderRadius: '999px',
+      textTransform: 'none',
+      fontWeight: 720,
+      minHeight: 36,
+      px: 2
+    },
+    '& .MuiButton-contained': {
+      color: '#fff',
+      background: 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
+      boxShadow: '0 14px 28px -16px rgba(37, 99, 235, 0.9)'
+    },
+    '& .MuiButton-contained:hover': {
+      background: 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
+      boxShadow: '0 18px 34px -18px rgba(37, 99, 235, 0.95)'
+    },
+    '& .MuiButton-outlined': {
+      color: t.text.primary,
+      borderColor: t.border.default,
+      backgroundColor: t.surface.controlSoft
+    },
+    '& .MuiButton-outlined:hover': {
+      borderColor: t.border.hover,
+      backgroundColor: t.action.hover
+    }
+  };
 
-    setConfig((prev) => {
-      if (prev.structure === 'separate_cells' && prev.alternateLayout === 'inside_selected_mpn_columns') return prev;
-      return {
-        ...prev,
-        structure: 'separate_cells',
-        alternateLayout: 'inside_selected_mpn_columns',
-      };
-    });
-  }, [config, dataRows, parserTouched, roles.mpn]);
+  const heroSx = {
+    mb: 2.5,
+    px: { xs: 0.25, md: 0.5 },
+    py: { xs: 0.5, md: 0.75 }
+  };
+
+  const primaryButtonSx = {
+    borderRadius: '999px',
+    px: 2.25,
+    minHeight: 38,
+    textTransform: 'none',
+    fontWeight: 750,
+    color: '#fff',
+    background: 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
+    boxShadow: '0 14px 28px -16px rgba(37, 99, 235, 0.9)',
+    '&:hover': {
+      background: 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
+      boxShadow: '0 18px 34px -18px rgba(37, 99, 235, 0.95)'
+    }
+  };
+
+  const uploadPanelSx = {
+    border: `1.5px dashed ${isUploadDragging ? t.color.primary : (isDarkMode ? 'rgba(37, 99, 235, 0.72)' : 'rgba(37, 99, 235, 0.58)')}`,
+    borderRadius: '16px',
+    minHeight: 280,
+    p: { xs: 3.5, md: 4 },
+    textAlign: 'center',
+    cursor: 'pointer',
+    display: 'flex',
+    flexDirection: 'column',
+    justifyContent: 'center',
+    alignItems: 'center',
+    background: isDarkMode
+      ? (isUploadDragging
+        ? 'linear-gradient(145deg, rgba(21, 45, 82, 0.9) 0%, rgba(10, 18, 33, 0.94) 100%)'
+        : 'linear-gradient(145deg, rgba(15, 32, 61, 0.78) 0%, rgba(10, 18, 33, 0.88) 100%)')
+      : (isUploadDragging
+        ? 'linear-gradient(145deg, rgba(219, 234, 254, 0.98) 0%, rgba(255, 255, 255, 0.98) 100%)'
+        : 'linear-gradient(145deg, rgba(239, 246, 255, 0.9) 0%, rgba(255, 255, 255, 0.9) 100%)'),
+    transition: 'all 0.22s cubic-bezier(0.16, 1, 0.3, 1)',
+    '&:hover': {
+      borderColor: t.color.primary,
+      background: isDarkMode
+        ? 'linear-gradient(145deg, rgba(21, 45, 82, 0.84) 0%, rgba(10, 18, 33, 0.92) 100%)'
+        : 'linear-gradient(145deg, rgba(219, 234, 254, 0.95) 0%, rgba(255, 255, 255, 0.96) 100%)'
+    }
+  };
 
   return (
-    <Box sx={{ minHeight: '100vh', bgcolor: '#f4f6f8', color: '#1f2933' }}>
-      <Box sx={{ px: { xs: 2, lg: 4 }, py: 2.5, borderBottom: '1px solid #dce2e8', bgcolor: '#fff' }}>
+    <Box sx={pageSx}>
+      <Box sx={heroSx}>
         <Stack direction={{ xs: 'column', md: 'row' }} alignItems={{ xs: 'flex-start', md: 'center' }} justifyContent="space-between" gap={2}>
           <Box>
-            <Typography sx={{ fontSize: 24, fontWeight: 800 }}>BOM Normalizer</Typography>
-            <Typography sx={{ mt: 0.4, fontSize: 13, color: '#66717f' }}>
-              Prototype workbench for turning messy BOM sheets into a normalized MPN/MFR/alternate table.
-            </Typography>
+            <Typography sx={{ fontSize: { xs: 23, md: 26 }, fontWeight: 760, color: t.text.heading, lineHeight: 1.15 }}>BOM Normalizer</Typography>
           </Box>
-          <Stack direction="row" gap={1}>
-            <Button component="label" variant="contained" startIcon={<CloudUploadIcon />} disabled={busy}>
-              Upload workbook
-              <input hidden type="file" accept=".xlsx,.xls,.csv" onChange={handleFileChange} />
-            </Button>
-            <Button variant="outlined" startIcon={<RestartAltIcon />} onClick={handleReset}>
-              Reset
-            </Button>
-          </Stack>
         </Stack>
       </Box>
 
-      <Box sx={{ px: { xs: 2, lg: 4 }, py: 3 }}>
-        <Stepper activeStep={displayedStep} alternativeLabel sx={{ mb: 3 }}>
+      <Box>
+        <Stepper activeStep={currentStep >= 4 ? 3 : currentStep} alternativeLabel sx={{ mb: 3 }}>
           {['Upload', 'Source', 'Configure', 'Results'].map((label) => (
             <Step key={label}>
               <StepLabel>{label}</StepLabel>
@@ -3217,7 +1830,7 @@ const BomNormalizer = () => {
 
         {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
         {busy && (
-          <Paper elevation={0} sx={{ mb: 2, p: 1.5, border: '1px solid #dce2e8' }}>
+          <Paper elevation={0} sx={{ mb: 2, p: 1.5 }}>
             <Typography sx={{ mb: 1, fontSize: 13, fontWeight: 700 }}>
               Processing workbook{progress.total ? `: ${progress.processed}/${progress.total} rows, ${progress.outputRows} output rows, ${progress.skippedRows || 0} skipped` : '...'}
             </Typography>
@@ -3228,430 +1841,97 @@ const BomNormalizer = () => {
           </Paper>
         )}
 
-        {(workbook || workflowTemplates.length > 0) && (
-          <Paper elevation={0} sx={{ mb: 2, p: 1.5, border: '1px solid #dce2e8', bgcolor: '#fff' }}>
-            <Stack direction={{ xs: 'column', md: 'row' }} alignItems={{ xs: 'stretch', md: 'center' }} justifyContent="space-between" gap={1.5}>
-              <Box sx={{ minWidth: 0 }}>
-                <Typography sx={{ fontSize: 14, fontWeight: 800 }}>Workflow template</Typography>
-                <Typography sx={{ mt: 0.25, fontSize: 12.5, color: '#66717f' }}>
-                  Reuse a saved BOM setup for similar files.
-                </Typography>
-              </Box>
-              <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ xs: 'stretch', sm: 'center' }} sx={{ minWidth: { xs: '100%', md: 520 } }}>
-                <FormControl size="small" fullWidth disabled={workflowTemplateLoading || !workflowTemplates.length}>
-                  <InputLabel>Saved workflow</InputLabel>
-                  <Select
-                    value={selectedWorkflowTemplateId}
-                    label="Saved workflow"
-                    onChange={(event) => setSelectedWorkflowTemplateId(event.target.value)}
-                  >
-                    {workflowTemplates.length ? workflowTemplates.map((template) => (
-                      <MenuItem key={template.id} value={String(template.id)}>
-                        {template.name}
-                      </MenuItem>
-                    )) : (
-                      <MenuItem value="" disabled>No saved templates</MenuItem>
-                    )}
-                  </Select>
-                </FormControl>
-                <Button
-                  variant="outlined"
-                  onClick={applyWorkflowTemplate}
-                  disabled={busy || workflowTemplateLoading || !workbook || !selectedWorkflowTemplateId}
-                  sx={{ whiteSpace: 'nowrap' }}
-                >
-                  Apply
-                </Button>
-                <Button
-                  variant="text"
-                  onClick={refreshWorkflowTemplates}
-                  disabled={workflowTemplateLoading}
-                  sx={{ whiteSpace: 'nowrap' }}
-                >
-                  Refresh
-                </Button>
-              </Stack>
-            </Stack>
-          </Paper>
-        )}
-
         {!workbook ? (
-          <Grid container spacing={2}>
-            <Grid item xs={12}>
-              <Paper elevation={0} sx={{ border: '1px solid #dce2e8', bgcolor: '#fff', p: 3 }}>
-                <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'flex-start', sm: 'center' }} justifyContent="space-between" gap={1}>
-                  <Box>
-                    <Typography sx={{ fontSize: 20, fontWeight: 800 }}>{sourcePanelTitle}</Typography>
-                    <Typography sx={{ mt: 0.8, color: '#687684', fontSize: 14 }}>
-                      {sourcePanelDescription}
-                    </Typography>
-                  </Box>
-                  <Button component="label" variant="outlined" startIcon={<CloudUploadIcon />} disabled={busy || combineBusy}>
-                    {combineItems.length ? 'Add source' : 'Choose source'}
-                    <input hidden multiple type="file" accept=".xlsx,.xls,.csv,.pdf" onChange={handleCombineFilesChange} />
-                  </Button>
-                </Stack>
-
-                {combineError && <Alert severity="error" sx={{ mt: 2 }}>{combineError}</Alert>}
-                {mergeChainMessage && <Alert severity="info" sx={{ mt: 2 }}>{mergeChainMessage}</Alert>}
-
-                {combineItems.length > 0 ? (
-                  <Stack spacing={1.25} sx={{ mt: 2 }}>
-                    {mergeStage === 'sources' && (
-                      <>
-                        {combineItems.map((item) => (
-                          <Paper key={item.id} elevation={0} sx={{ p: 1.25, border: '1px solid #e1e6ec', bgcolor: '#fbfcfd' }}>
-                            <Stack direction="row" alignItems="center" gap={1}>
-                              <Box sx={{ minWidth: 0, flex: 1 }}>
-                                <Typography sx={{ fontSize: 13.5, fontWeight: 800, wordBreak: 'break-word' }}>{item.fileName}</Typography>
-                                <Stack direction="row" gap={0.75} flexWrap="wrap" sx={{ mt: 0.5 }}>
-                                  <Chip size="small" label={item.type.toUpperCase()} />
-                                  <Chip size="small" label={item.status} />
-                                  {item.workbook?.SheetNames?.length > 0 && <Chip size="small" label={`${item.workbook.SheetNames.length} sheet${item.workbook.SheetNames.length === 1 ? '' : 's'}`} />}
-                                  {item.rowCount > 0 && <Chip size="small" label={`${item.rowCount} rows`} />}
-                                </Stack>
-                              </Box>
-                              <IconButton size="small" onClick={() => removeCombineItem(item.id)} disabled={combineBusy}>
-                                <DeleteOutlineIcon fontSize="small" />
-                              </IconButton>
-                            </Stack>
-                            {item.error && <Alert severity="warning" sx={{ mt: 1 }}>{item.error}</Alert>}
-                          </Paper>
-                        ))}
-
-                        <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1} sx={{ pt: 0.5 }}>
-                          <Button variant="outlined" onClick={() => {
-                            setCombineItems([]);
-                            setCombineError('');
-                            setMergeChainMessage('');
-                            setMergeSources([]);
-                            setMergePreview(null);
-                            setMergeStage('sources');
-                          }} disabled={combineBusy}>
-                            Clear
-                          </Button>
-                          <Stack direction="row" gap={1} justifyContent="flex-end" flexWrap="wrap">
-                            {canUseWithoutMerge && (
-                              <Button variant="outlined" onClick={handleUseSourceWithoutMerge} disabled={combineBusy}>
-                                Use without merge
-                              </Button>
-                            )}
-                            <Button variant="contained" onClick={handlePrepareMergeSources} disabled={combineBusy || !canPrepareMerge}>
-                              Prepare merge setup
-                            </Button>
-                          </Stack>
-                        </Stack>
-                        {!canPrepareMerge && (
-                          <Typography sx={{ mt: 0.5, fontSize: 12.5, color: '#66717f', textAlign: { xs: 'left', sm: 'right' } }}>
-                            Add another source or use this source without merging.
-                          </Typography>
-                        )}
-                      </>
-                    )}
-
-                    {combineBusy && <LinearProgress />}
-
-                    {mergeStage === 'match' && (
-                      <Paper elevation={0} sx={{ p: 1.5, border: '1px solid #e1e6ec', bgcolor: '#fbfcfd' }}>
-                        <Typography sx={{ fontSize: 14, fontWeight: 800, mb: 1.5 }}>Match primary and secondary sources</Typography>
-                        <Grid container spacing={1.5}>
-                          <Grid item xs={12} md={6}>
-                            <FormControl fullWidth size="small">
-                              <InputLabel>Primary source</InputLabel>
-                              <Select
-                                label="Primary source"
-                                value={mergeConfig.primarySourceId}
-                                onChange={(event) => {
-                                  const source = mergeSources.find((item) => item.id === event.target.value);
-                                  setMergeConfig((prev) => ({
-                                    ...prev,
-                                    primarySourceId: event.target.value,
-                                    primaryKey: source ? guessKeyColumn(source.headers) : '',
-                                    secondarySourceId: prev.secondarySourceId === event.target.value ? '' : prev.secondarySourceId,
-                                  }));
-                                  if (source && source.id === mergeConfig.secondarySourceId) {
-                                    setMergeConfig((prev) => ({ ...prev, secondarySourceId: '' }));
-                                  }
-                                }}
-                              >
-                                {mergeSources.map((source) => (
-                                  <MenuItem key={source.id} value={source.id}>{source.label}</MenuItem>
-                                ))}
-                              </Select>
-                            </FormControl>
-                          </Grid>
-                          <Grid item xs={12} md={6}>
-                            <FormControl fullWidth size="small">
-                              <InputLabel>Secondary source</InputLabel>
-                              <Select
-                                label="Secondary source"
-                                value={mergeConfig.secondarySourceId}
-                                onChange={(event) => {
-                                  const source = mergeSources.find((item) => item.id === event.target.value);
-                                  const secondaryKey = source ? guessKeyColumn(source.headers) : '';
-                                  setMergeConfig((prev) => ({
-                                    ...prev,
-                                    secondarySourceId: event.target.value,
-                                    secondaryKey,
-                                    detailColumns: source ? defaultMergeDetailColumns(source.headers, secondaryKey) : [],
-                                  }));
-                                }}
-                              >
-                                {mergeSources
-                                  .filter((source) => source.id !== mergeConfig.primarySourceId)
-                                  .map((source) => (
-                                    <MenuItem key={source.id} value={source.id}>{source.label}</MenuItem>
-                                  ))}
-                              </Select>
-                            </FormControl>
-                          </Grid>
-                          <Grid item xs={12} md={6}>
-                            <FormControl fullWidth size="small">
-                              <InputLabel>Common column to match on</InputLabel>
-                              <Select
-                                label="Common column to match on"
-                                value={mergeConfig.primaryKey}
-                                onChange={(event) => setMergeConfig((prev) => ({ ...prev, primaryKey: event.target.value }))}
-                              >
-                                {(mergePrimarySource?.headers || []).map((header) => (
-                                  <MenuItem key={header} value={header}>{header}</MenuItem>
-                                ))}
-                              </Select>
-                            </FormControl>
-                          </Grid>
-                          <Grid item xs={12} md={6}>
-                            <FormControl fullWidth size="small">
-                              <InputLabel>Matching column in secondary source</InputLabel>
-                              <Select
-                                label="Matching column in secondary source"
-                                value={mergeConfig.secondaryKey}
-                                onChange={(event) => setMergeConfig((prev) => ({
-                                  ...prev,
-                                  secondaryKey: event.target.value,
-                                  detailColumns: prev.detailColumns.filter((column) => column !== event.target.value),
-                                }))}
-                              >
-                                {(mergeSecondarySource?.headers || []).map((header) => (
-                                  <MenuItem key={header} value={header}>{header}</MenuItem>
-                                ))}
-                              </Select>
-                            </FormControl>
-                          </Grid>
-                        </Grid>
-                        <Stack direction="row" justifyContent="space-between" sx={{ mt: 2 }}>
-                          <Button variant="outlined" onClick={() => setMergeStage('sources')}>Back</Button>
-                          <Button
-                            variant="contained"
-                            onClick={() => setMergeStage('options')}
-                            disabled={!mergeConfig.primaryKey || !mergeConfig.secondaryKey || !mergeConfig.primarySourceId || !mergeConfig.secondarySourceId}
-                          >
-                            Proceed
-                          </Button>
-                        </Stack>
-                      </Paper>
-                    )}
-
-                    {mergeStage === 'options' && (
-                      <Paper elevation={0} sx={{ p: 1.5, border: '1px solid #e1e6ec', bgcolor: '#fbfcfd' }}>
-                        <Grid container spacing={1.5}>
-                          <Grid item xs={12}>
-                            <TextField
-                              fullWidth
-                              size="small"
-                              label="Merged column name"
-                              value={mergeConfig.relationshipName}
-                              onChange={(event) => setMergeConfig((prev) => ({ ...prev, relationshipName: event.target.value }))}
-                              helperText="Used when one secondary column is grouped into a single new column."
-                            />
-                          </Grid>
-                          <Grid item xs={12}>
-                            <Typography sx={{ fontSize: 13, fontWeight: 800, mb: 0.5 }}>Output format</Typography>
-                            <RadioGroup
-                              row
-                              value={mergeConfig.outputMode}
-                              onChange={(event) => setMergeConfig((prev) => ({ ...prev, outputMode: event.target.value }))}
-                            >
-                              <FormControlLabel value="grouped" control={<Radio size="small" />} label={`Add all related ${mergeSecondaryLabel} in the same cell`} />
-                              <FormControlLabel value="expanded" control={<Radio size="small" />} label={`Create a separate row for each ${mergeSecondaryLabel}`} />
-                            </RadioGroup>
-                          </Grid>
-                          <Grid item xs={12}>
-                            <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1}>
-                              <Typography sx={{ fontSize: 13, fontWeight: 800 }}>Columns to bring from secondary source</Typography>
-                              <Stack direction="row" gap={0.5}>
-                                <Button size="small" onClick={() => setMergeConfig((prev) => ({
-                                  ...prev,
-                                  detailColumns: (mergeSecondarySource?.headers || []).filter((header) => header !== prev.secondaryKey),
-                                }))}>
-                                  Select all
-                                </Button>
-                                <Button size="small" onClick={() => setMergeConfig((prev) => ({ ...prev, detailColumns: [] }))}>
-                                  Clear
-                                </Button>
-                              </Stack>
-                            </Stack>
-                            <FormGroup row sx={{ mt: 0.5, gap: 0.5 }}>
-                              {(mergeSecondarySource?.headers || [])
-                                .filter((header) => header !== mergeConfig.secondaryKey)
-                                .map((header) => (
-                                  <FormControlLabel
-                                    key={header}
-                                    control={
-                                      <Checkbox
-                                        size="small"
-                                        checked={mergeConfig.detailColumns.includes(header)}
-                                        onChange={(event) => setMergeConfig((prev) => ({
-                                          ...prev,
-                                          detailColumns: event.target.checked
-                                            ? [...new Set([...prev.detailColumns, header])]
-                                            : prev.detailColumns.filter((column) => column !== header),
-                                        }))}
-                                      />
-                                    }
-                                    label={header}
-                                  />
-                                ))}
-                            </FormGroup>
-                          </Grid>
-                        </Grid>
-                        <Stack direction="row" justifyContent="space-between" sx={{ mt: 2 }}>
-                          <Button variant="outlined" onClick={() => setMergeStage('match')}>Back</Button>
-                          <Button variant="contained" onClick={handleBuildMergePreview} disabled={!mergeConfig.detailColumns.length}>Preview</Button>
-                        </Stack>
-                      </Paper>
-                    )}
-
-                    {mergeStage === 'preview' && mergePreview && (
-                      <Paper elevation={0} sx={{ p: 1.5, border: '1px solid #e1e6ec', bgcolor: '#fbfcfd' }}>
-                        <Grid container spacing={1} sx={{ mb: 1.5 }}>
-                          <Grid item xs={6} md={3}>
-                            <Chip
-                              clickable
-                              label={`${mergePreview.summary.outputRows} output rows`}
-                              color={mergePreviewFilter === 'all' ? 'primary' : 'default'}
-                              variant={mergePreviewFilter === 'all' ? 'filled' : 'outlined'}
-                              onClick={() => { setMergePreviewFilter('all'); setMergePreviewPage(0); }}
-                            />
-                          </Grid>
-                          <Grid item xs={6} md={3}>
-                            <Chip
-                              clickable
-                              color="success"
-                              label={`${mergePreview.summary.matchedPrimaryRows} matched`}
-                              variant={mergePreviewFilter === 'matched' ? 'filled' : 'outlined'}
-                              onClick={() => { setMergePreviewFilter('matched'); setMergePreviewPage(0); }}
-                            />
-                          </Grid>
-                          <Grid item xs={6} md={3}>
-                            <Chip
-                              clickable
-                              color="warning"
-                              label={`${mergePreview.summary.unmatchedPrimaryRows} unmatched`}
-                              variant={mergePreviewFilter === 'unmatched' ? 'filled' : 'outlined'}
-                              onClick={() => { setMergePreviewFilter('unmatched'); setMergePreviewPage(0); }}
-                            />
-                          </Grid>
-                          <Grid item xs={6} md={3}>
-                            <Chip label={`${mergePreview.summary.secondaryOnlyKeys} secondary-only keys`} />
-                          </Grid>
-                        </Grid>
-                        <Stack direction={{ xs: 'column', md: 'row' }} alignItems={{ xs: 'stretch', md: 'center' }} justifyContent="space-between" gap={1} sx={{ mb: 1 }}>
-                          <Button size="small" variant="outlined" disabled={mergePreviewPage === 0} onClick={() => setMergePreviewPage((page) => Math.max(0, page - 1))}>
-                            Previous
-                          </Button>
-                          <Typography sx={{ fontSize: 13, color: '#66717f' }}>
-                            Showing {visibleMergePreviewRows.length ? mergePreviewStart + 1 : 0}-{Math.min(mergePreviewStart + visibleMergePreviewRows.length, mergeFilteredPreviewRows.length)} of {mergeFilteredPreviewRows.length}
-                          </Typography>
-                          <FormControl size="small" sx={{ minWidth: 230 }}>
-                            <InputLabel>Columns to keep</InputLabel>
-                            <Select
-                              multiple
-                              label="Columns to keep"
-                              value={mergeVisibleColumns}
-                              renderValue={(selected) => `${selected.length} columns kept`}
-                              onChange={(event) => {
-                                const selected = (typeof event.target.value === 'string' ? event.target.value.split(',') : event.target.value)
-                                  .filter((column) => column !== '__all__');
-                                setMergeVisibleColumns(selected);
-                              }}
-                            >
-                              <MenuItem
-                                value="__all__"
-                                onClick={(event) => {
-                                  event.preventDefault();
-                                  setMergeVisibleColumns(mergePreview.headers);
-                                }}
-                              >
-                                <Checkbox checked={mergeVisibleColumns.length === mergePreview.headers.length} />
-                                <ListItemText primary="Keep all columns" />
-                              </MenuItem>
-                              {mergePreview.headers.map((header) => (
-                                <MenuItem key={header} value={header}>
-                                  <Checkbox checked={mergeVisibleColumns.includes(header)} />
-                                  <ListItemText primary={header} />
-                                </MenuItem>
-                              ))}
-                            </Select>
-                          </FormControl>
-                          <Button size="small" variant="outlined" disabled={mergePreviewPage >= mergePreviewTotalPages - 1} onClick={() => setMergePreviewPage((page) => Math.min(mergePreviewTotalPages - 1, page + 1))}>
-                            Next
-                          </Button>
-                        </Stack>
-                        <Box sx={{ height: { xs: 430, md: 'calc(100vh - 390px)' }, minHeight: 430, overflow: 'auto', border: '1px solid #dce2e8', bgcolor: '#fff' }}>
-                          <Box component="table" sx={{ width: 'max-content', minWidth: '100%', borderCollapse: 'collapse', '& th, & td': { borderBottom: '1px solid #eef2f5', p: 0.75 }, '& th': { position: 'sticky', top: 0, backgroundColor: '#f8fafc', zIndex: 1, textAlign: 'left' } }}>
-                            <Box component="thead">
-                              <Box component="tr">
-                                {visibleMergePreviewColumns.map((header) => (
-                                  <Box component="th" key={header} sx={{ width: mergeColumnWidths[header] || 180, minWidth: mergeColumnWidths[header] || 180, maxWidth: mergeColumnWidths[header] || 180, position: 'relative', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', pr: 2 }}>
-                                    {header}
-                                    <Box onMouseDown={(event) => handleMergeColumnResize(header, event)} sx={{ position: 'absolute', top: 0, right: 0, width: 8, height: '100%', cursor: 'col-resize', '&:hover': { borderRight: '2px solid #1976d2' } }} />
-                                  </Box>
-                                ))}
-                              </Box>
-                            </Box>
-                            <Box component="tbody">
-                              {visibleMergePreviewRows.map(({ row, index: rowIndex }) => (
-                                <Box component="tr" key={`merge-preview-${rowIndex}`}>
-                                  {visibleMergePreviewColumns.map((header) => (
-                                    <Box component="td" key={`${rowIndex}-${header}`} sx={{ width: mergeColumnWidths[header] || 180, minWidth: mergeColumnWidths[header] || 180, maxWidth: mergeColumnWidths[header] || 180 }}>
-                                      <Box
-                                        component="input"
-                                        value={row[header] ?? ''}
-                                        onChange={(event) => handleMergePreviewCellChange(rowIndex, header, event.target.value)}
-                                        sx={{ width: '100%', border: 'none', outline: 'none', backgroundColor: 'transparent', font: 'inherit', p: 0, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}
-                                      />
-                                    </Box>
-                                  ))}
-                                </Box>
-                              ))}
-                            </Box>
-                          </Box>
-                        </Box>
-                        <Stack direction="row" justifyContent="space-between" gap={1} sx={{ mt: 1.5 }}>
-                          <Button variant="outlined" onClick={() => setMergeStage('options')}>Back</Button>
-                          <Stack direction="row" gap={1} flexWrap="wrap" justifyContent="flex-end">
-                            <Button variant="contained" onClick={handleUseMergePreview}>Continue with normalizer</Button>
-                          </Stack>
-                        </Stack>
-                      </Paper>
-                    )}
-                  </Stack>
-                ) : (
-                  <Paper elevation={0} sx={{ mt: 2, p: 2, border: '1px dashed #c7d0da', bgcolor: '#fbfcfd' }}>
-                    <Typography sx={{ fontSize: 13.5, color: '#66717f' }}>
-                      Choose a source to start. After upload, you can continue directly or prepare a merge.
-                    </Typography>
-                  </Paper>
-                )}
-              </Paper>
-            </Grid>
-          </Grid>
+          <Box>
+            <Typography variant="subtitle2" sx={{ color: t.text.heading, fontWeight: 740, fontSize: 14, mb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
+              BOM File
+              <Chip label="Required" size="small" sx={{ height: 20, fontSize: 11, fontWeight: 740 }} />
+            </Typography>
+            <Paper
+              component="label"
+              elevation={0}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setIsUploadDragging(true);
+              }}
+              onDragLeave={() => setIsUploadDragging(false)}
+              onDrop={handleUploadDrop}
+              sx={uploadPanelSx}
+            >
+              <Box sx={{ position: 'relative', width: 118, height: 84, mb: 2.2 }}>
+                <Box
+                  sx={{
+                    position: 'absolute',
+                    left: 4,
+                    top: 28,
+                    width: 42,
+                    height: 58,
+                    borderRadius: '10px',
+                    border: `2px solid ${isDarkMode ? 'rgba(148, 163, 184, 0.42)' : 'rgba(100, 116, 139, 0.42)'}`,
+                    transform: 'rotate(-14deg)',
+                    display: 'grid',
+                    placeItems: 'center',
+                    color: '#22c55e',
+                    backgroundColor: isDarkMode ? 'rgba(15, 23, 42, 0.7)' : 'rgba(255,255,255,0.75)'
+                  }}
+                >
+                  <CheckCircleOutlineIcon sx={{ fontSize: 24 }} />
+                </Box>
+                <Box
+                  sx={{
+                    position: 'absolute',
+                    left: 40,
+                    top: 2,
+                    width: 48,
+                    height: 66,
+                    borderRadius: '10px',
+                    border: `2px solid ${t.color.primary}`,
+                    display: 'grid',
+                    placeItems: 'center',
+                    color: t.color.primary,
+                    backgroundColor: isDarkMode ? 'rgba(15, 23, 42, 0.88)' : '#ffffff',
+                    boxShadow: '0 18px 46px rgba(37, 99, 235, 0.28)'
+                  }}
+                >
+                  <CloudUploadIcon sx={{ fontSize: 28 }} />
+                </Box>
+                <Box
+                  sx={{
+                    position: 'absolute',
+                    right: 0,
+                    top: 24,
+                    width: 44,
+                    height: 58,
+                    borderRadius: '10px',
+                    border: `2px solid ${isDarkMode ? 'rgba(148, 163, 184, 0.42)' : 'rgba(100, 116, 139, 0.42)'}`,
+                    transform: 'rotate(14deg)',
+                    display: 'grid',
+                    placeItems: 'center',
+                    color: t.text.secondary,
+                    backgroundColor: isDarkMode ? 'rgba(15, 23, 42, 0.7)' : 'rgba(255,255,255,0.75)'
+                  }}
+                >
+                  <DescriptionOutlinedIcon sx={{ fontSize: 26 }} />
+                </Box>
+              </Box>
+              <Typography sx={{ fontSize: 20, fontWeight: 760, color: t.text.heading }}>
+                Drag and drop or select files
+              </Typography>
+              <Typography sx={{ mt: 0.65, color: t.text.secondary, fontSize: 14 }}>
+                Supported files: .xlsx, .xls, .csv
+              </Typography>
+              <Button component="span" variant="contained" sx={{ mt: 2.4, ...primaryButtonSx }} disabled={busy}>
+                Select files
+              </Button>
+              <input hidden type="file" accept=".xlsx,.xls,.csv" onChange={handleFileChange} />
+            </Paper>
+          </Box>
         ) : (
-          <Stack spacing={2.5}>
+          <Stack spacing={2}>
             {currentStep === 1 && (
-              <Paper elevation={0} sx={{ p: 2.5, border: '1px solid #dce2e8' }}>
-                <Typography sx={{ fontSize: 18, fontWeight: 800 }}>Source setup</Typography>
-                <Typography sx={{ mt: 0.5, fontSize: 13, color: '#66717f', wordBreak: 'break-word' }}>{fileName}</Typography>
+              <Paper elevation={0} sx={{ p: 2 }}>
+                <Typography sx={{ fontSize: 16, fontWeight: 740, color: t.text.heading }}>Source setup</Typography>
+                <Typography sx={{ mt: 0.35, fontSize: 12.5, color: t.text.secondary, wordBreak: 'break-word' }}>{fileName}</Typography>
                 {workbook.SheetNames.length > 1 && (
                   <Alert severity="info" sx={{ mt: 1.5 }}>
                     This workbook has {workbook.SheetNames.length} sheets. Choose one sheet, selected sheets, or all sheets before continuing.
@@ -3736,20 +2016,20 @@ const BomNormalizer = () => {
                   <Chip size="small" label={sheetScope === 'single' ? `Header row ${headerRowIndex + 1}` : `${selectedSheetNames.length} sheets merged`} />
                 </Stack>
                 <Box sx={{ mt: 2 }}>
-                  <Typography sx={{ fontWeight: 800 }}>Source preview</Typography>
+                  <Typography sx={{ fontSize: 15, fontWeight: 740, color: t.text.heading }}>Source preview</Typography>
                   <SourcePreview headers={headers} rows={dataRows.slice(0, 8)} />
                 </Box>
                 <Stack direction="row" justifyContent="space-between" sx={{ mt: 2 }}>
-                  <Button variant="outlined" onClick={handleBackFromSourceSetup} disabled={busy}>Back</Button>
+                  <Button variant="outlined" onClick={handleReset} disabled={busy}>Back</Button>
                   <Button variant="contained" onClick={() => setCurrentStep(2)} disabled={busy}>Next: identify columns</Button>
                 </Stack>
               </Paper>
             )}
 
             {currentStep === 2 && (
-              <Paper elevation={0} sx={{ p: 2.5, border: '1px solid #dce2e8' }}>
-                <Typography sx={{ fontSize: 18, fontWeight: 800 }}>Configure source columns and parsing</Typography>
-                <Typography sx={{ mt: 0.5, fontSize: 13, color: '#66717f' }}>
+              <Paper elevation={0} sx={{ p: 2 }}>
+                <Typography sx={{ fontSize: 16, fontWeight: 740, color: t.text.heading }}>Configure source columns and parsing</Typography>
+                <Typography sx={{ mt: 0.35, fontSize: 12.5, color: t.text.secondary }}>
                   Pick the important columns first. Parser assumptions update automatically from those choices.
                 </Typography>
                 <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 1.2 }}>
@@ -3758,7 +2038,7 @@ const BomNormalizer = () => {
                   <Chip size="small" label={sheetScope === 'single' ? `Header row ${headerRowIndex + 1}` : `${selectedSheetNames.length} sheets merged`} />
                 </Stack>
                 <Box sx={{ mt: 2 }}>
-                  <Typography sx={{ fontWeight: 800 }}>Source preview</Typography>
+                  <Typography sx={{ fontSize: 15, fontWeight: 740, color: t.text.heading }}>Source preview</Typography>
                   <SourcePreview headers={headers} rows={dataRows.slice(0, 8)} />
                 </Box>
                 <Grid container spacing={1.5} sx={{ mt: 1 }}>
@@ -3780,9 +2060,9 @@ const BomNormalizer = () => {
                     </Grid>
                   ))}
                 </Grid>
-                <Paper elevation={0} sx={{ mt: 2, p: 1.5, bgcolor: '#f8fafc', border: '1px solid #e1e6ec' }}>
-                  <Typography sx={{ fontSize: 14, fontWeight: 800 }}>Detected setup</Typography>
-                  <Typography sx={{ mt: 0.4, fontSize: 13, color: '#536171' }}>{roleCombinationHint}</Typography>
+                <Paper elevation={0} sx={{ mt: 2, p: 1.5 }}>
+                  <Typography sx={{ fontSize: 13.5, fontWeight: 740, color: t.text.heading }}>Detected setup</Typography>
+                  <Typography sx={{ mt: 0.35, fontSize: 12.5, color: t.text.secondary }}>{roleCombinationHint}</Typography>
                   <Grid container spacing={1.5} sx={{ mt: 0.5 }}>
                     <Grid item xs={12} md={3}>
                       <FormControl fullWidth size="small">
@@ -3790,14 +2070,11 @@ const BomNormalizer = () => {
                         <Select
                           value={config.structure}
                           label="Where are MPN and MFR?"
-                          onChange={(event) => {
-                            setParserTouched(true);
-                            setConfig((prev) => ({
-                              ...prev,
-                              structure: event.target.value,
-                              alternateLayout: ['one_per_row', 'grouped_rows'].includes(event.target.value) ? 'already_separate_rows' : prev.alternateLayout,
-                            }));
-                          }}
+                          onChange={(event) => setConfig((prev) => ({
+                            ...prev,
+                            structure: event.target.value,
+                            alternateLayout: event.target.value === 'one_per_row' ? 'already_separate_rows' : prev.alternateLayout,
+                          }))}
                         >
                           {availableStructureOptions.map((option) => (
                             <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
@@ -3828,16 +2105,7 @@ const BomNormalizer = () => {
                         <Select
                           value={config.alternateLayout}
                           label="Where are alternates?"
-                          onChange={(event) => {
-                            const nextLayout = event.target.value;
-                            setConfig((prev) => ({
-                              ...prev,
-                              alternateLayout: nextLayout,
-                              alternateColumnGroups: nextLayout === 'separate_columns' && !(prev.alternateColumnGroups || []).length
-                                ? [suggestAlternateColumnGroup()]
-                                : prev.alternateColumnGroups,
-                            }));
-                          }}
+                          onChange={(event) => setConfig((prev) => ({ ...prev, alternateLayout: event.target.value }))}
                         >
                           {ALTERNATE_LAYOUT_OPTIONS.map((option) => (
                             <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
@@ -3870,136 +2138,19 @@ const BomNormalizer = () => {
                         />
                       </Grid>
                     )}
-                    {config.structure === 'grouped_rows' && (
-                      <Grid item xs={12} md={3}>
-                        <FormControl fullWidth size="small">
-                          <InputLabel>Group header handling</InputLabel>
-                          <Select
-                            value={config.groupHeaderMode || 'auto'}
-                            label="Group header handling"
-                            onChange={(event) => setConfig((prev) => ({ ...prev, groupHeaderMode: event.target.value }))}
-                          >
-                            {GROUP_HEADER_OPTIONS.map((option) => (
-                              <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
-                            ))}
-                          </Select>
-                        </FormControl>
-                      </Grid>
-                    )}
                   </Grid>
-                  {config.alternateLayout === 'separate_columns' && config.structure !== 'grouped_rows' && (
-                    <Paper elevation={0} sx={{ mt: 1.5, p: 1.25, border: '1px solid #e1e6ec', bgcolor: '#fff' }}>
-                      <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'flex-start', sm: 'center' }} justifyContent="space-between" gap={1}>
-                        <Box>
-                          <Typography sx={{ fontSize: 13, fontWeight: 800 }}>Alternate column groups</Typography>
-                          <Typography sx={{ fontSize: 12.5, color: '#66717f' }}>
-                            Add one row for each alternate MPN/MFR pair that lives in separate columns.
-                          </Typography>
-                        </Box>
-                        <Button size="small" variant="outlined" onClick={addAlternateColumnGroup}>
-                          Add alternate group
-                        </Button>
-                      </Stack>
-                      {(config.alternateColumnGroups || []).length > 0 ? (
-                        <Stack spacing={1} sx={{ mt: 1 }}>
-                          {(config.alternateColumnGroups || []).map((group, groupIndex) => (
-                            <Grid container spacing={1} alignItems="center" key={`alt-group-${groupIndex}`}>
-                              <Grid item xs={12} sm={3}>
-                                <FormControl fullWidth size="small">
-                                  <InputLabel>{`Alt ${groupIndex + 1} MPN`}</InputLabel>
-                                  <Select
-                                    label={`Alt ${groupIndex + 1} MPN`}
-                                    value={group.mpn || ''}
-                                    onChange={(event) => updateAlternateColumnGroup(groupIndex, 'mpn', event.target.value)}
-                                  >
-                                    <MenuItem value="">None</MenuItem>
-                                    {headers.map((header) => (
-                                      <MenuItem key={header} value={header}>{header}</MenuItem>
-                                    ))}
-                                  </Select>
-                                </FormControl>
-                              </Grid>
-                              <Grid item xs={12} sm={3}>
-                                <FormControl fullWidth size="small">
-                                  <InputLabel>{`Alt ${groupIndex + 1} MFR`}</InputLabel>
-                                  <Select
-                                    label={`Alt ${groupIndex + 1} MFR`}
-                                    value={group.mfr || ''}
-                                    onChange={(event) => updateAlternateColumnGroup(groupIndex, 'mfr', event.target.value)}
-                                  >
-                                    <MenuItem value="">None</MenuItem>
-                                    {headers.map((header) => (
-                                      <MenuItem key={header} value={header}>{header}</MenuItem>
-                                    ))}
-                                  </Select>
-                                </FormControl>
-                              </Grid>
-                              <Grid item xs={12} sm={2}>
-                                <FormControl fullWidth size="small">
-                                  <InputLabel>Alt Qty</InputLabel>
-                                  <Select
-                                    label="Alt Qty"
-                                    value={group.qty || ''}
-                                    onChange={(event) => updateAlternateColumnGroup(groupIndex, 'qty', event.target.value)}
-                                  >
-                                    <MenuItem value="">Use primary</MenuItem>
-                                    {headers.map((header) => (
-                                      <MenuItem key={header} value={header}>{header}</MenuItem>
-                                    ))}
-                                  </Select>
-                                </FormControl>
-                              </Grid>
-                              <Grid item xs={12} sm={2}>
-                                <FormControl fullWidth size="small">
-                                  <InputLabel>Alt UOM</InputLabel>
-                                  <Select
-                                    label="Alt UOM"
-                                    value={group.uom || ''}
-                                    onChange={(event) => updateAlternateColumnGroup(groupIndex, 'uom', event.target.value)}
-                                  >
-                                    <MenuItem value="">Use primary</MenuItem>
-                                    {headers.map((header) => (
-                                      <MenuItem key={header} value={header}>{header}</MenuItem>
-                                    ))}
-                                  </Select>
-                                </FormControl>
-                              </Grid>
-                              <Grid item xs={12} sm={2}>
-                                <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1}>
-                                  <Chip size="small" label={group.mpn ? 'Active' : 'Needs MPN'} color={group.mpn ? 'success' : 'default'} />
-                                  <IconButton size="small" color="error" onClick={() => removeAlternateColumnGroup(groupIndex)}>
-                                    <DeleteOutlineIcon fontSize="small" />
-                                  </IconButton>
-                                </Stack>
-                              </Grid>
-                            </Grid>
-                          ))}
-                        </Stack>
-                      ) : (
-                        <Alert severity="info" sx={{ mt: 1 }}>
-                          No alternate columns selected yet. Add a group and choose the alternate MPN column, plus manufacturer if available.
-                        </Alert>
-                      )}
-                      {alternateColumnGroups.length > 0 && (
-                        <Typography sx={{ mt: 1, fontSize: 12.5, color: '#536171' }}>
-                          {alternateColumnGroups.length} alternate group{alternateColumnGroups.length === 1 ? '' : 's'} will be parsed.
-                        </Typography>
-                      )}
-                    </Paper>
-                  )}
-                  <Typography sx={{ mt: 1, fontSize: 13, color: '#536171', lineHeight: 1.45 }}>
+                  <Typography sx={{ mt: 1, fontSize: 12.5, color: t.text.secondary, lineHeight: 1.45 }}>
                     <strong>Detected rule:</strong> {selectedStructureOption?.description || '-'}
-                    {config.structure === 'grouped_rows' && selectedGroupHeaderOption ? ` ${selectedGroupHeaderOption.description}` : ''}
                     {' '}<strong>Delimiter:</strong> {delimiterLabel}.
                     {' '}Blank BOM levels will be treated as level 1.
                   </Typography>
                   {detectedCleanupOptions.length > 0 && (
                     <Box sx={{ mt: 1.5 }}>
-                      <Typography sx={{ fontSize: 13, fontWeight: 800 }}>Clean visual rows before parsing</Typography>
+                      <Typography sx={{ fontSize: 13, fontWeight: 740, color: t.text.heading }}>Clean visual rows before parsing</Typography>
                       <Grid container spacing={1} sx={{ mt: 0.25 }}>
                         {detectedCleanupOptions.map((option) => (
                           <Grid item xs={12} md={4} key={option.key}>
-                            <Paper elevation={0} sx={{ p: 1, border: '1px solid #e1e6ec', bgcolor: '#fff' }}>
+                            <Paper elevation={0} sx={{ p: 1 }}>
                               <Stack direction="row" alignItems="center" gap={0.5}>
                                 <Switch
                                   size="small"
@@ -4007,8 +2158,8 @@ const BomNormalizer = () => {
                                   onChange={(event) => setConfig((prev) => ({ ...prev, [option.key]: event.target.checked }))}
                                 />
                                 <Box>
-                                  <Typography sx={{ fontSize: 12.5, fontWeight: 800 }}>{option.label}</Typography>
-                                  <Typography sx={{ fontSize: 12, color: '#66717f' }}>
+                                  <Typography sx={{ fontSize: 12.5, fontWeight: 720, color: t.text.heading }}>{option.label}</Typography>
+                                  <Typography sx={{ fontSize: 12, color: t.text.secondary }}>
                                     {cleanupDetections[option.key]} detected
                                   </Typography>
                                 </Box>
@@ -4021,113 +2172,50 @@ const BomNormalizer = () => {
                   )}
                 </Paper>
                 <Stack direction="row" justifyContent="space-between" sx={{ mt: 2 }}>
-                  <Button variant="outlined" onClick={handleBackFromConfigure} disabled={busy}>Back</Button>
+                  <Button variant="outlined" onClick={() => setCurrentStep(1)} disabled={busy}>Back</Button>
                   <Button variant="contained" startIcon={<PlayArrowIcon />} onClick={handleNormalize} disabled={busy}>Run normalization</Button>
                 </Stack>
               </Paper>
             )}
 
             {currentStep === 4 && (
-              <Paper elevation={0} sx={{ p: 2.5, border: '1px solid #dce2e8' }}>
+              <Paper elevation={0} sx={{ p: 2 }}>
                 <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
                   <Box>
-                    <Typography sx={{ fontSize: 18, fontWeight: 800 }}>Normalized editable sheet</Typography>
-                    <Typography sx={{ mt: 0.5, fontSize: 13, color: '#66717f' }}>
+                    <Typography sx={{ fontSize: 16, fontWeight: 740, color: t.text.heading }}>Normalized editable sheet</Typography>
+                    <Typography sx={{ mt: 0.35, fontSize: 12.5, color: t.text.secondary }}>
                       Review the parsed output, edit cells directly, or delete rows before downloading.
                     </Typography>
                   </Box>
                   <Stack direction="row" gap={1} flexWrap="wrap" justifyContent={{ xs: 'flex-start', md: 'flex-end' }}>
                     <Button
                       size="small"
-                      variant="outlined"
-                      disabled={!normalizedRows.length}
-                      onClick={(event) => setToolsMenuAnchor(event.currentTarget)}
-                    >
-                      Tools
-                    </Button>
-                    <Menu
-                      anchorEl={toolsMenuAnchor}
-                      open={Boolean(toolsMenuAnchor)}
-                      onClose={() => setToolsMenuAnchor(null)}
-                    >
-                      <MenuItem
-                        disabled={!normalizedRows.length || manufacturerMatchLoading}
-                        onClick={() => {
-                          setToolsMenuAnchor(null);
-                          handleOpenManufacturerMatch();
-                        }}
-                      >
-                        Manufacturer Match
-                      </MenuItem>
-                      <MenuItem
-                        disabled={!normalizedRows.length}
-                        onClick={() => {
-                          setToolsMenuAnchor(null);
-                          handleOpenFactwiseDialog();
-                        }}
-                      >
-                        Create Item Codes
-                      </MenuItem>
-                      <MenuItem
-                        disabled={!normalizedRows.length}
-                        onClick={() => {
-                          setToolsMenuAnchor(null);
-                          handleOpenTagDialog();
-                        }}
-                      >
-                        Add Tags
-                      </MenuItem>
-                      <MenuItem
-                        disabled={!normalizedRows.length || workflowTemplateSaving}
-                        onClick={() => {
-                          setToolsMenuAnchor(null);
-                          saveWorkflowTemplate();
-                        }}
-                      >
-                        Save Workflow Template
-                      </MenuItem>
-                    </Menu>
-                    <Button
-                      size="small"
                       variant="contained"
                       startIcon={<DownloadIcon />}
                       disabled={!normalizedRows.length}
-                      onClick={(event) => setDownloadMenuAnchor(event.currentTarget)}
+                      onClick={() => downloadRowsAsXlsx(normalizedRows)}
                     >
-                      Download
+                      Download XLSX
                     </Button>
-                    <Menu
-                      anchorEl={downloadMenuAnchor}
-                      open={Boolean(downloadMenuAnchor)}
-                      onClose={() => setDownloadMenuAnchor(null)}
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      startIcon={<DownloadIcon />}
+                      disabled={!normalizedRows.length}
+                      onClick={() => downloadRowsAsCsv(normalizedRows)}
                     >
-                      <MenuItem
-                        onClick={() => {
-                          setDownloadMenuAnchor(null);
-                          downloadRowsAsXlsx(normalizedRows);
-                        }}
-                      >
-                        Microsoft Excel (.xlsx)
-                      </MenuItem>
-                      <MenuItem
-                        onClick={() => {
-                          setDownloadMenuAnchor(null);
-                          downloadRowsAsCsv(normalizedRows);
-                        }}
-                      >
-                        Comma-separated values (.csv)
-                      </MenuItem>
-                    </Menu>
-                    {quality.lowConfidence > 0 && (
-                      <Chip
-                        size="small"
-                        clickable
-                        color="warning"
-                        variant={lowConfidenceOnly ? 'filled' : 'outlined'}
-                        label={`${quality.lowConfidence} low confidence`}
-                        onClick={() => setLowConfidenceOnly((prev) => !prev)}
-                      />
-                    )}
+                      Download CSV
+                    </Button>
+                    <Chip size="small" color={normalizedRows.length ? 'primary' : 'default'} label={`${normalizedRows.length} output rows`} />
+                    <Chip size="small" label={`${quality.average}% avg confidence`} />
+                    <Chip
+                      size="small"
+                      clickable={quality.lowConfidence > 0}
+                      color={lowConfidenceOnly ? 'warning' : quality.lowConfidence ? 'warning' : 'success'}
+                      variant={lowConfidenceOnly ? 'filled' : 'outlined'}
+                      label={`${quality.lowConfidence} low confidence`}
+                      onClick={() => quality.lowConfidence > 0 && setLowConfidenceOnly((prev) => !prev)}
+                    />
                   </Stack>
                 </Stack>
                 {normalizedRows.length > 0 && (
@@ -4135,8 +2223,8 @@ const BomNormalizer = () => {
                     <LinearProgress variant="determinate" value={quality.average} sx={{ height: 7, borderRadius: 2 }} />
                   </Box>
                 )}
-                <Paper elevation={0} sx={{ mt: 1.5, p: 1.2, bgcolor: '#f8fafc', border: '1px solid #e1e6ec' }}>
-                  <Typography sx={{ fontSize: 13, fontWeight: 800 }}>Parser settings used</Typography>
+                <Paper elevation={0} sx={{ mt: 1.5, p: 1.2 }}>
+                  <Typography sx={{ fontSize: 13, fontWeight: 740, color: t.text.heading }}>Parser settings used</Typography>
                   <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 0.8 }}>
                     <Chip size="small" label={selectedStructureOption?.label || 'Parser: auto'} />
                     <Chip size="small" label={`Delimiter: ${delimiterLabel}`} />
@@ -4153,562 +2241,13 @@ const BomNormalizer = () => {
                 />
                 <Stack direction="row" justifyContent="space-between" sx={{ mt: 2 }}>
                   <Button variant="outlined" onClick={() => setCurrentStep(2)} disabled={busy}>Back to configure</Button>
-                  <Stack direction="row" gap={1} flexWrap="wrap" justifyContent="flex-end">
-                    <Button variant="outlined" onClick={() => downloadRowsAsXlsx(normalizedRows)} disabled={busy || !normalizedRows.length}>Download Preview</Button>
-                    <Button variant="outlined" onClick={handleUseNormalizedAsBase} disabled={busy || !normalizedRows.length}>Use merged sheet as base</Button>
-                    <Button variant="contained" onClick={handleNormalize} disabled={busy}>Run again</Button>
-                  </Stack>
+                  <Button variant="contained" onClick={handleNormalize} disabled={busy}>Run again</Button>
                 </Stack>
               </Paper>
             )}
           </Stack>
         )}
       </Box>
-      <Snackbar
-        open={Boolean(successMessage)}
-        autoHideDuration={5000}
-        onClose={() => setSuccessMessage('')}
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
-      >
-        <Alert severity="success" variant="filled" onClose={() => setSuccessMessage('')}>
-          {successMessage}
-        </Alert>
-      </Snackbar>
-      <Dialog open={pdfChoiceOpen} onClose={() => {
-        setPdfChoiceOpen(false);
-        setPendingPdfAction(null);
-      }} maxWidth="md" fullWidth>
-        <DialogTitle>Choose PDF Processing Method</DialogTitle>
-        <DialogContent>
-          <Typography sx={{ fontSize: 14, color: '#536171', mb: 2 }}>
-            Pick the extraction method that best matches this PDF.
-          </Typography>
-          <Paper elevation={0} sx={{ p: 1.5, mb: 2, border: '1px solid #e1e6ec', bgcolor: '#fbfcfd' }}>
-            <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ xs: 'flex-start', md: 'center' }} gap={1}>
-              <Box>
-                <Typography sx={{ fontSize: 14, fontWeight: 800 }}>Split PDF by page ranges</Typography>
-                <Typography sx={{ mt: 0.35, fontSize: 12.5, color: '#66717f' }}>
-                  Use this when different page ranges should be extracted as separate sources.
-                </Typography>
-              </Box>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={pdfRangeEnabled}
-                    onChange={(event) => setPdfRangeEnabled(event.target.checked)}
-                  />
-                }
-                label={pdfRangeEnabled ? 'Enabled' : 'Off'}
-              />
-            </Stack>
-            {pdfRangeEnabled && (
-              <Stack spacing={1} sx={{ mt: 1.5 }}>
-                {pdfRanges.map((range, index) => (
-                  <Grid container spacing={1} key={`pdf-range-${index}`} alignItems="center">
-                    <Grid item xs={12} md={5}>
-                      <TextField
-                        fullWidth
-                        size="small"
-                        label="Section name"
-                        value={range.name}
-                        onChange={(event) => updatePdfRange(index, 'name', event.target.value)}
-                      />
-                    </Grid>
-                    <Grid item xs={10} md={6}>
-                      <TextField
-                        fullWidth
-                        size="small"
-                        label="Pages"
-                        placeholder="Page range"
-                        value={range.pages}
-                        onChange={(event) => updatePdfRange(index, 'pages', event.target.value)}
-                      />
-                    </Grid>
-                    <Grid item xs={2} md={1}>
-                      <IconButton
-                        size="small"
-                        color="error"
-                        disabled={pdfRanges.length <= 1}
-                        onClick={() => removePdfRange(index)}
-                      >
-                        <DeleteOutlineIcon fontSize="small" />
-                      </IconButton>
-                    </Grid>
-                  </Grid>
-                ))}
-                <Box>
-                  <Button size="small" variant="outlined" onClick={addPdfRange}>
-                    Add page range
-                  </Button>
-                </Box>
-              </Stack>
-            )}
-          </Paper>
-          <Grid container spacing={2}>
-            <Grid item xs={12} md={4}>
-              <Card
-                elevation={0}
-                onClick={() => handlePdfProcessingChoice('ocr')}
-                sx={{ height: '100%', cursor: 'pointer', border: '1px solid #dce2e8', '&:hover': { borderColor: '#1976d2', bgcolor: '#f8fafc' } }}
-              >
-                <CardContent>
-                  <Typography sx={{ fontSize: 16, fontWeight: 800 }}>Simple OCR</Typography>
-                  <Typography sx={{ mt: 0.8, fontSize: 13, color: '#66717f' }}>
-                    Use Azure OCR directly for clear table PDFs.
-                  </Typography>
-                </CardContent>
-              </Card>
-            </Grid>
-            <Grid item xs={12} md={4}>
-              <Card
-                elevation={0}
-                onClick={() => handlePdfProcessingChoice('compare')}
-                sx={{ height: '100%', cursor: 'pointer', border: '1px solid #dce2e8', '&:hover': { borderColor: '#1976d2', bgcolor: '#f8fafc' } }}
-              >
-                <CardContent>
-                  <Typography sx={{ fontSize: 16, fontWeight: 800 }}>Compare</Typography>
-                  <Typography sx={{ mt: 0.8, fontSize: 13, color: '#66717f' }}>
-                    Run native extraction and OCR, then use the cleaner result.
-                  </Typography>
-                </CardContent>
-              </Card>
-            </Grid>
-            <Grid item xs={12} md={4}>
-              <Card
-                elevation={0}
-                onClick={() => handlePdfProcessingChoice('zonal')}
-                sx={{ height: '100%', cursor: 'pointer', border: '1px solid #dce2e8', '&:hover': { borderColor: '#1976d2', bgcolor: '#f8fafc' } }}
-              >
-                <CardContent>
-                  <Typography sx={{ fontSize: 16, fontWeight: 800 }}>Zone Mapping</Typography>
-                  <Typography sx={{ mt: 0.8, fontSize: 13, color: '#66717f' }}>
-                    Use manual zones for PDFs with irregular tables or mixed layouts.
-                  </Typography>
-                </CardContent>
-              </Card>
-            </Grid>
-          </Grid>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => {
-            setPdfChoiceOpen(false);
-            setPendingPdfAction(null);
-          }}>
-            Cancel
-          </Button>
-        </DialogActions>
-      </Dialog>
-      <Dialog open={factwiseDialogOpen} onClose={() => setFactwiseDialogOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Create Item Codes</DialogTitle>
-        <DialogContent>
-          <Typography sx={{ fontSize: 14, color: '#536171', mb: 1.5 }}>
-            Generate the Item code values from normalized rows before export.
-          </Typography>
-          <Grid container spacing={1.5}>
-            <Grid item xs={12}>
-              <FormControl fullWidth size="small">
-                <InputLabel>Source</InputLabel>
-                <Select
-                  label="Source"
-                  value={factwiseConfig.mode}
-                  onChange={(event) => setFactwiseConfig((prev) => ({ ...prev, mode: event.target.value }))}
-                >
-                  <MenuItem value="columns">Combine two columns</MenuItem>
-                  <MenuItem value="serial">Prefix + sequence</MenuItem>
-                </Select>
-              </FormControl>
-            </Grid>
-            {factwiseConfig.mode === 'columns' ? (
-              <>
-                <Grid item xs={12} sm={5}>
-                  <FormControl fullWidth size="small">
-                    <InputLabel>First column</InputLabel>
-                    <Select
-                      label="First column"
-                      value={factwiseConfig.firstColumn}
-                      onChange={(event) => setFactwiseConfig((prev) => ({ ...prev, firstColumn: event.target.value }))}
-                    >
-                      {normalizedColumnOptions.map((column) => (
-                        <MenuItem key={column} value={column}>{column}</MenuItem>
-                      ))}
-                    </Select>
-                  </FormControl>
-                </Grid>
-                <Grid item xs={12} sm={2}>
-                  <TextField
-                    fullWidth
-                    size="small"
-                    label="Join"
-                    value={factwiseConfig.separator}
-                    onChange={(event) => setFactwiseConfig((prev) => ({ ...prev, separator: event.target.value }))}
-                  />
-                </Grid>
-                <Grid item xs={12} sm={5}>
-                  <FormControl fullWidth size="small">
-                    <InputLabel>Second column</InputLabel>
-                    <Select
-                      label="Second column"
-                      value={factwiseConfig.secondColumn}
-                      onChange={(event) => setFactwiseConfig((prev) => ({ ...prev, secondColumn: event.target.value }))}
-                    >
-                      {normalizedColumnOptions.map((column) => (
-                        <MenuItem key={column} value={column}>{column}</MenuItem>
-                      ))}
-                    </Select>
-                  </FormControl>
-                </Grid>
-              </>
-            ) : (
-              <>
-                <Grid item xs={12} sm={6}>
-                  <TextField
-                    fullWidth
-                    size="small"
-                    label="Prefix"
-                    value={factwiseConfig.prefix}
-                    onChange={(event) => setFactwiseConfig((prev) => ({ ...prev, prefix: event.target.value }))}
-                  />
-                </Grid>
-                <Grid item xs={6} sm={3}>
-                  <TextField
-                    fullWidth
-                    size="small"
-                    type="number"
-                    label="Start"
-                    value={factwiseConfig.start}
-                    onChange={(event) => setFactwiseConfig((prev) => ({ ...prev, start: event.target.value }))}
-                  />
-                </Grid>
-                <Grid item xs={6} sm={3}>
-                  <TextField
-                    fullWidth
-                    size="small"
-                    type="number"
-                    label="Digits"
-                    value={factwiseConfig.padding}
-                    onChange={(event) => setFactwiseConfig((prev) => ({ ...prev, padding: event.target.value }))}
-                  />
-                </Grid>
-                <Grid item xs={12}>
-                  <Stack direction="row" alignItems="center" gap={1}>
-                    <Switch
-                      checked={factwiseConfig.increment}
-                      onChange={(event) => setFactwiseConfig((prev) => ({ ...prev, increment: event.target.checked }))}
-                    />
-                    <Typography sx={{ fontSize: 13 }}>Increase number for each row</Typography>
-                  </Stack>
-                </Grid>
-                <Grid item xs={12}>
-                  <Paper elevation={0} sx={{ p: 1.2, bgcolor: '#f8fafc', border: '1px solid #e1e6ec' }}>
-                    <Typography sx={{ fontSize: 13, fontWeight: 800 }}>Preview</Typography>
-                    <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 0.8 }}>
-                      {factwiseSerialPreview.map((value, index) => (
-                        <Chip key={`${value}-${index}`} size="small" label={value || '(blank)'} />
-                      ))}
-                    </Stack>
-                  </Paper>
-                </Grid>
-              </>
-            )}
-            <Grid item xs={12}>
-              <FormControl fullWidth size="small">
-                <InputLabel>Apply mode</InputLabel>
-                <Select
-                  label="Apply mode"
-                  value={factwiseConfig.applyMode}
-                  onChange={(event) => setFactwiseConfig((prev) => ({ ...prev, applyMode: event.target.value }))}
-                >
-                  <MenuItem value="overwrite">Overwrite existing Item code values</MenuItem>
-                  <MenuItem value="fill_empty">Fill empty Item code values only</MenuItem>
-                </Select>
-              </FormControl>
-            </Grid>
-          </Grid>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setFactwiseDialogOpen(false)}>Cancel</Button>
-          <Button
-            variant="contained"
-            onClick={handleCreateFactwiseForNormalizer}
-            disabled={factwiseConfig.mode === 'columns' && (!factwiseConfig.firstColumn || !factwiseConfig.secondColumn)}
-          >
-            Create
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      <Dialog open={tagDialogOpen} onClose={() => setTagDialogOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Add Tag Column</DialogTitle>
-        <DialogContent>
-          <Typography sx={{ fontSize: 14, color: '#536171', mb: 1.5 }}>
-            Add a numbered tag column to the normalized output. Rules are checked top to bottom.
-          </Typography>
-          <Grid container spacing={1.5}>
-            <Grid item xs={12} sm={6}>
-              <TextField
-                fullWidth
-                size="small"
-                label="Target tag column"
-                value={tagConfig.targetColumn}
-                onChange={(event) => setTagConfig((prev) => ({ ...prev, targetColumn: event.target.value }))}
-              />
-            </Grid>
-            <Grid item xs={12} sm={6}>
-              <FormControl fullWidth size="small">
-                <InputLabel>Tag source</InputLabel>
-                <Select
-                  label="Tag source"
-                  value={tagConfig.mode}
-                  onChange={(event) => setTagConfig((prev) => ({ ...prev, mode: event.target.value }))}
-                >
-                  <MenuItem value="rules">Rule based mapping</MenuItem>
-                  <MenuItem value="source">Copy from a column</MenuItem>
-                  <MenuItem value="default">Use one default value</MenuItem>
-                </Select>
-              </FormControl>
-            </Grid>
-            {tagConfig.mode === 'rules' && (
-              <Grid item xs={12}>
-                <Stack spacing={1}>
-                  {tagConfig.rules.map((rule, index) => (
-                    <Paper key={`tag-rule-${index}`} elevation={0} sx={{ p: 1.2, border: '1px solid #e1e6ec', bgcolor: '#fbfcfd' }}>
-                      <Grid container spacing={1}>
-                        <Grid item xs={12} sm={4}>
-                          <FormControl fullWidth size="small">
-                            <InputLabel>Source column</InputLabel>
-                            <Select
-                              label="Source column"
-                              value={rule.sourceColumn}
-                              onChange={(event) => setTagConfig((prev) => ({
-                                ...prev,
-                                rules: prev.rules.map((currentRule, ruleIndex) => (
-                                  ruleIndex === index ? { ...currentRule, sourceColumn: event.target.value } : currentRule
-                                )),
-                              }))}
-                            >
-                              {normalizedColumnOptions.map((column) => (
-                                <MenuItem key={column} value={column}>{column}</MenuItem>
-                              ))}
-                            </Select>
-                          </FormControl>
-                        </Grid>
-                        <Grid item xs={12} sm={3}>
-                          <TextField
-                            fullWidth
-                            size="small"
-                            label="Contains"
-                            value={rule.searchText}
-                            onChange={(event) => setTagConfig((prev) => ({
-                              ...prev,
-                              rules: prev.rules.map((currentRule, ruleIndex) => (
-                                ruleIndex === index ? { ...currentRule, searchText: event.target.value } : currentRule
-                              )),
-                            }))}
-                          />
-                        </Grid>
-                        <Grid item xs={12} sm={3}>
-                          <TextField
-                            fullWidth
-                            size="small"
-                            label="Tag value"
-                            value={rule.outputValue}
-                            onChange={(event) => setTagConfig((prev) => ({
-                              ...prev,
-                              rules: prev.rules.map((currentRule, ruleIndex) => (
-                                ruleIndex === index ? { ...currentRule, outputValue: event.target.value } : currentRule
-                              )),
-                            }))}
-                          />
-                        </Grid>
-                        <Grid item xs={12} sm={2}>
-                          <Stack direction="row" alignItems="center" justifyContent="space-between" gap={0.5}>
-                            <Stack direction="row" alignItems="center" gap={0.25}>
-                              <Switch
-                                size="small"
-                                checked={Boolean(rule.caseSensitive)}
-                                onChange={(event) => setTagConfig((prev) => ({
-                                  ...prev,
-                                  rules: prev.rules.map((currentRule, ruleIndex) => (
-                                    ruleIndex === index ? { ...currentRule, caseSensitive: event.target.checked } : currentRule
-                                  )),
-                                }))}
-                              />
-                              <Typography sx={{ fontSize: 11 }}>Aa</Typography>
-                            </Stack>
-                            <IconButton
-                              size="small"
-                              color="error"
-                              disabled={tagConfig.rules.length <= 1}
-                              onClick={() => setTagConfig((prev) => ({
-                                ...prev,
-                                rules: prev.rules.filter((_, ruleIndex) => ruleIndex !== index),
-                              }))}
-                            >
-                              <DeleteOutlineIcon fontSize="small" />
-                            </IconButton>
-                          </Stack>
-                        </Grid>
-                      </Grid>
-                    </Paper>
-                  ))}
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    onClick={() => setTagConfig((prev) => ({
-                      ...prev,
-                      rules: [
-                        ...prev.rules,
-                        {
-                          sourceColumn: normalizedColumnOptions.includes('manufacturer') ? 'manufacturer' : normalizedColumnOptions[0] || '',
-                          searchText: '',
-                          outputValue: '',
-                          caseSensitive: false,
-                        },
-                      ],
-                    }))}
-                  >
-                    Add rule
-                  </Button>
-                </Stack>
-              </Grid>
-            )}
-            {tagConfig.mode === 'source' && (
-              <Grid item xs={12}>
-                <FormControl fullWidth size="small">
-                  <InputLabel>Source column</InputLabel>
-                  <Select
-                    label="Source column"
-                    value={tagConfig.sourceColumn}
-                    onChange={(event) => setTagConfig((prev) => ({ ...prev, sourceColumn: event.target.value }))}
-                  >
-                    {normalizedColumnOptions.map((column) => (
-                      <MenuItem key={column} value={column}>{column}</MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-              </Grid>
-            )}
-            {tagConfig.mode === 'default' && (
-              <Grid item xs={12}>
-                <TextField
-                  fullWidth
-                  size="small"
-                  label="Default tag value"
-                  value={tagConfig.defaultValue}
-                  onChange={(event) => setTagConfig((prev) => ({ ...prev, defaultValue: event.target.value }))}
-                />
-              </Grid>
-            )}
-            <Grid item xs={12}>
-              <FormControl fullWidth size="small">
-                <InputLabel>Apply mode</InputLabel>
-                <Select
-                  label="Apply mode"
-                  value={tagConfig.applyMode}
-                  onChange={(event) => setTagConfig((prev) => ({ ...prev, applyMode: event.target.value }))}
-                >
-                  <MenuItem value="overwrite">Overwrite this tag column</MenuItem>
-                  <MenuItem value="fill_empty">Fill empty tag values only</MenuItem>
-                </Select>
-              </FormControl>
-            </Grid>
-          </Grid>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setTagDialogOpen(false)}>Cancel</Button>
-          <Button
-            variant="contained"
-            onClick={handleCreateTagForNormalizer}
-            disabled={
-              !tagConfig.targetColumn ||
-              (tagConfig.mode === 'source' && !tagConfig.sourceColumn) ||
-              (tagConfig.mode === 'rules' && !tagConfig.rules.some((rule) => rule.sourceColumn && rule.searchText && rule.outputValue))
-            }
-          >
-            Add Tag
-          </Button>
-        </DialogActions>
-      </Dialog>
-      <Dialog open={manufacturerMatchOpen} onClose={() => setManufacturerMatchOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Manufacturer Match</DialogTitle>
-        <DialogContent>
-          {manufacturerMatchLoading && (
-            <Box sx={{ my: 2 }}>
-              <Typography sx={{ mb: 1, fontSize: 13, fontWeight: 700 }}>Loading manufacturer list...</Typography>
-              <LinearProgress />
-            </Box>
-          )}
-          {manufacturerMatchError && <Alert severity="error" sx={{ mb: 1.5 }}>{manufacturerMatchError}</Alert>}
-          {manufacturerDirectory.loaded && (
-            <>
-              <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mb: 1.5 }}>
-                <Chip size="small" color="success" label={`${manufacturerDirectory.entryCount || manufacturerDirectory.names.length} manufacturers`} />
-                <Chip size="small" label={`${manufacturerDirectory.aliasCount || Object.keys(manufacturerDirectory.aliases || {}).length} aliases`} />
-                <Chip size="small" color={manufacturerMatchPreview.length ? 'warning' : 'success'} label={`${manufacturerMatchPreview.length} changes found`} />
-              </Stack>
-              {manufacturerMatchPreview.length ? (
-                <>
-                  <TableContainer sx={{ maxHeight: 260, border: '1px solid #e1e6ec' }}>
-                    <Table stickyHeader size="small">
-                      <TableHead>
-                        <TableRow>
-                          <TableCell sx={{ fontWeight: 800, bgcolor: '#f8fafc', width: 52 }}>
-                            <Checkbox
-                              size="small"
-                              checked={allManufacturerMatchesSelected}
-                              indeterminate={selectedManufacturerMatches.length > 0 && !allManufacturerMatchesSelected}
-                              onChange={(event) => {
-                                setSelectedManufacturerMatches(event.target.checked
-                                  ? manufacturerMatchPreview.map((match) => match.key)
-                                  : []);
-                              }}
-                            />
-                          </TableCell>
-                          <TableCell sx={{ fontWeight: 800, bgcolor: '#f8fafc' }}>Current</TableCell>
-                          <TableCell sx={{ fontWeight: 800, bgcolor: '#f8fafc' }}>Matched</TableCell>
-                        </TableRow>
-                      </TableHead>
-                      <TableBody>
-                        {manufacturerMatchPreview.map((match) => (
-                          <TableRow key={`${match.original}-${match.canonical}`}>
-                            <TableCell>
-                              <Checkbox
-                                size="small"
-                                checked={selectedManufacturerMatches.includes(match.key)}
-                                onChange={(event) => {
-                                  setSelectedManufacturerMatches((prev) => (
-                                    event.target.checked
-                                      ? [...new Set([...prev, match.key])]
-                                      : prev.filter((key) => key !== match.key)
-                                  ));
-                                }}
-                              />
-                            </TableCell>
-                            <TableCell>{match.original}</TableCell>
-                            <TableCell>{match.canonical}</TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </TableContainer>
-                </>
-              ) : (
-                <Alert severity="info">No manufacturer aliases need changing in the current normalized rows.</Alert>
-              )}
-            </>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setManufacturerMatchOpen(false)}>Cancel</Button>
-          <Button
-            variant="contained"
-            onClick={handleApplyManufacturerMatch}
-            disabled={!manufacturerDirectory.loaded || !manufacturerMatchPreview.length || !selectedManufacturerMatches.length || manufacturerMatchLoading}
-          >
-            Apply {selectedManufacturerMatches.length || ''} Match{selectedManufacturerMatches.length === 1 ? '' : 'es'}
-          </Button>
-        </DialogActions>
-      </Dialog>
       <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Review normalization summary</DialogTitle>
         <DialogContent>
