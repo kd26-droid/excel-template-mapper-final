@@ -10742,9 +10742,6 @@ def download_demo_bom_sheet(request, session_id):
     to default.xlsx if present, else 404 with a clear message.
     """
     try:
-        # Old route name, live behavior: do not return pre-made golden exports.
-        return download_file(request, session_id)
-
         import json as _json
         from django.http import FileResponse
         info = get_session_consistent(session_id)
@@ -10831,148 +10828,8 @@ def _demo_no_preview_keys():
         return set()
 
 
-def _build_bom_tree_from_rows(all_rows):
-    if not all_rows:
-        return None, {'finishedGoods': 0, 'truncated': False, 'error': None}
-
-    header_idx = 0
-    for idx, row in enumerate(all_rows[:15]):
-        lowered = [str(c or '').strip().lower() for c in row]
-        if 'raw material code' in lowered and 'bom id' in lowered:
-            header_idx = idx
-            break
-    hdr = [str(h or '').strip().lower() for h in all_rows[header_idx]]
-
-    def ci(*names):
-        for i, h in enumerate(hdr):
-            if h in names:
-                return i
-        return -1
-
-    c_fg, c_bom = ci('finished good code'), ci('bom id')
-    c_rm, c_sub, c_desc, c_qty = ci('raw material code'), ci('sub bom id'), ci('description'), ci('quantity')
-    missing_required = []
-    if c_fg < 0:
-        missing_required.append('Finished good code')
-    if c_bom < 0:
-        missing_required.append('BOM ID')
-    if c_rm < 0:
-        missing_required.append('Raw material code')
-    if missing_required:
-        return None, {
-            'finishedGoods': 0,
-            'truncated': False,
-            'error': f'Current data is missing BOM preview column(s): {", ".join(missing_required)}',
-        }
-
-    alt_cols = [i for i, h in enumerate(hdr) if h.startswith('alternate raw material code')]
-    children = defaultdict(list)
-    fg_order = []
-    fg_bom_map = {}
-
-    for r in all_rows[header_idx + 1:]:
-        def g(i):
-            return r[i] if (0 <= i < len(r)) else None
-
-        bom = str(g(c_bom) or '').strip()
-        rm = str(g(c_rm) or '').strip()
-        sub = str(g(c_sub) or '').strip()
-        if not bom or (not rm and not sub):
-            continue
-        fg = str(g(c_fg) or '').strip()
-        if fg and fg not in fg_order:
-            fg_order.append(fg)
-        if fg:
-            fg_bom_map.setdefault(fg, bom)
-        alts = [str(g(i) or '').strip() for i in alt_cols if str(g(i) or '').strip()]
-        children[bom].append({
-            'code': rm or sub,
-            'sub': sub,
-            'qty': g(c_qty),
-            'desc': str(g(c_desc) or '').strip(),
-            'alts': alts,
-        })
-
-    if not fg_order:
-        return None, {'finishedGoods': 0, 'truncated': False, 'error': None}
-
-    nid = [0]
-    count = [0]
-    max_nodes = 4000
-    max_alts = 3
-
-    def new_id():
-        nid[0] += 1
-        return f'n{nid[0]}'
-
-    def build(bom_id, depth, seen):
-        out = []
-        for item in children.get(bom_id, []):
-            if count[0] >= max_nodes:
-                break
-            count[0] += 1
-            sub = item['sub']
-            is_asm = bool(sub and sub in children and sub not in seen)
-            kind = ('sfg' if depth == 0 else 'ssfg') if is_asm else 'component'
-            node = {
-                'id': new_id(),
-                'label': item['code'],
-                'qty': item['qty'],
-                'bomId': sub or None,
-                'kind': kind,
-                'children': [],
-            }
-            for alt_code in item['alts'][:max_alts]:
-                if count[0] >= max_nodes:
-                    break
-                count[0] += 1
-                node['children'].append({
-                    'id': new_id(),
-                    'label': alt_code,
-                    'kind': 'alternate',
-                    'qty': None,
-                    'children': [],
-                })
-            if is_asm:
-                node['children'].extend(build(sub, depth + 1, seen | {sub}))
-            out.append(node)
-        return out
-
-    def build_fg(fg):
-        fg_bom = fg_bom_map.get(fg) or (fg if fg in children else None)
-        return {
-            'id': new_id(),
-            'label': fg,
-            'kind': 'fg',
-            'qty': None,
-            'bomId': None,
-            'children': build(fg_bom, 0, {fg_bom}) if fg_bom else [],
-        }
-
-    sub_ids = {it['sub'] for lst in children.values() for it in lst if it['sub']}
-    roots = [fg for fg in fg_order if fg not in sub_ids] or fg_order[:1]
-
-    if len(roots) == 1:
-        tree = build_fg(roots[0])
-    else:
-        tree = {
-            'id': 'root',
-            'label': f'{len(roots)} finished goods',
-            'kind': 'root',
-            'qty': None,
-            'bomId': None,
-            'children': [build_fg(fg) for fg in roots],
-        }
-
-    return tree, {
-        'finishedGoods': len(roots),
-        'truncated': count[0] >= max_nodes,
-        'error': None,
-    }
-
-
 @api_view(['GET'])
-def demo_bom_tree_demo_golden(request, session_id):
+def demo_bom_tree(request, session_id):
     """DEMO: parse the matched golden export .xlsx into a nested BOM tree for the
     Export BOM preview — Finished good → sub-assemblies → components → alternates,
     using the FactWise import columns (Finished good code, BOM ID, Level, Raw
@@ -11096,36 +10953,6 @@ def demo_bom_tree_demo_golden(request, session_id):
                     'qty': None, 'bomId': None, 'children': [build_fg(fg) for fg in roots]}
         return Response({'success': True, 'tree': tree, 'file': chosen,
                          'finishedGoods': len(roots), 'truncated': count[0] >= MAX_NODES})
-    except Exception as e:
-        logger.error(f"demo_bom_tree failed: {e}", exc_info=True)
-        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-@api_view(['GET'])
-def demo_bom_tree(request, session_id):
-    """Build the Export BOM preview from the current session grid."""
-    try:
-        info = get_session_consistent(session_id)
-        if not info:
-            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
-
-        headers, rows = read_session_grid(session_id, info)
-        if not headers or rows is None:
-            return Response({'success': False, 'error': 'No mapped grid found for this session.'},
-                            status=status.HTTP_400_BAD_REQUEST)
-
-        headers, rows = apply_factwise_id_to_grid(headers, rows, info.get('factwise_rules') or [])
-        tree, meta = _build_bom_tree_from_rows([headers] + rows)
-        if meta.get('error'):
-            return Response({'success': False, 'error': meta['error']}, status=status.HTTP_400_BAD_REQUEST)
-
-        return Response({
-            'success': True,
-            'tree': tree,
-            'source': 'current-session',
-            'finishedGoods': meta.get('finishedGoods', 0),
-            'truncated': meta.get('truncated', False),
-        })
     except Exception as e:
         logger.error(f"demo_bom_tree failed: {e}", exc_info=True)
         return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

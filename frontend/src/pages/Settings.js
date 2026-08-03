@@ -41,13 +41,23 @@ import { useThemeContext } from '../utils/ThemeContext';
 import api from '../services/api';
 
 const initialColumnMappings = [
-  { column: 'MPN valid', providers: ['digikey'], description: 'Part validation status' },
-  { column: 'MPN Status', providers: ['digikey'], description: 'Lifecycle status' },
-  { column: 'EOL Status', providers: ['digikey'], description: 'End of life flag' },
-  { column: 'Discontinued', providers: ['digikey'], description: 'Discontinued status' },
-  { column: 'DKPN', providers: ['digikey'], description: 'DigiKey part number' },
-  { column: 'Canonical MPN', providers: ['digikey'], description: 'Standardized manufacturer part number' },
-  { column: 'Category', providers: ['digikey'], description: 'Product category' },
+  { column: 'MPN valid (DigiKey)', providers: ['digikey'], description: 'DigiKey part validation status' },
+  { column: 'DigiKey Status', providers: ['digikey'], description: 'DigiKey lifecycle status' },
+  { column: 'DigiKey EOL Status', providers: ['digikey'], description: 'DigiKey end of life flag' },
+  { column: 'DigiKey Discontinued', providers: ['digikey'], description: 'DigiKey discontinued status' },
+  { column: 'DigiKey Part Number', providers: ['digikey'], description: 'DigiKey part number' },
+  { column: 'DigiKey Canonical MPN', providers: ['digikey'], description: 'DigiKey standardized manufacturer part number' },
+  { column: 'DigiKey Category', providers: ['digikey'], description: 'DigiKey product category' },
+  { column: 'MPN valid (Mouser)', providers: ['mouser'], description: 'Mouser part validation status' },
+  { column: 'Mouser Status', providers: ['mouser'], description: 'Mouser lifecycle status' },
+  { column: 'MPNR', providers: ['mouser'], description: 'Mouser part number' },
+  { column: 'Mouser Canonical MPN', providers: ['mouser'], description: 'Mouser standardized manufacturer part number' },
+  { column: 'Mouser Category', providers: ['mouser'], description: 'Mouser product category' },
+  { column: 'MPN valid (Element14)', providers: ['element14'], description: 'Element14 part validation status' },
+  { column: 'Element14 Status', providers: ['element14'], description: 'Element14 lifecycle status' },
+  { column: 'Element14 Part Number', providers: ['element14'], description: 'Element14 part number' },
+  { column: 'Element14 Canonical MPN', providers: ['element14'], description: 'Element14 standardized manufacturer part number' },
+  { column: 'Element14 Category', providers: ['element14'], description: 'Element14 product category' },
 ];
 
 const providerMeta = {
@@ -85,7 +95,7 @@ const normalizeProviders = (value, fallback = ['digikey']) => {
 
 const providersFromColumnMappings = (mappings) => {
   const selected = Array.from(new Set((mappings || []).flatMap(mapping => normalizeProviders(mapping.providers || mapping.provider))));
-  return selected.length ? selected : ['digikey'];
+  return selected.length ? selected : ['digikey', 'mouser', 'element14'];
 };
 
 const getInitialColumnMappings = () => {

@@ -77,3 +77,8 @@ Thumbs.db
 *.tmp
 # Playwright MCP debug snapshots
 .playwright-mcp/
+SFO_Technologies/BOM_1_import.xlsx
+SFO_Technologies/BOM_2_import.xlsx
+SFO_Technologies/BOM_4_import.xlsx
+SFO_Technologies/BOM5Sheet.xlsx
+SFO_Technologies/BOM_3.xlsx

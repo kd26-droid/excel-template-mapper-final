@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import os
 
 from cryptography.fernet import Fernet, InvalidToken
 from django.conf import settings
@@ -121,7 +122,9 @@ def get_saved_provider_credentials(scope_id, provider):
 
 
 def request_allows_local_env_credentials(request):
-    """Allow .env provider keys only when the backend is reached as localhost."""
+    """Allow env provider keys for localhost, or when explicitly enabled."""
+    if str(os.environ.get('ALLOW_PROVIDER_ENV_CREDENTIALS') or '').lower() in {'1', 'true', 'yes', 'on'}:
+        return True
     host = ''
     try:
         host = (request.get_host() or '').split(':', 1)[0].lower()
@@ -270,9 +273,8 @@ def provider_credential_test(request, provider):
         if provider == ProviderCredential.PROVIDER_DIGIKEY:
             from .services.digikey_service import DigiKeyClient
             client = DigiKeyClient(credentials=credentials, allow_env_fallback=False)
-            result_map = client.validate_mpns([test_mpn])
-            result = result_map.get(client.normalize_mpn(test_mpn), {}) if isinstance(result_map, dict) else {}
-            success = bool(result.get('valid'))
+            token = client.get_client_credentials_token()
+            success = bool(token.get('access_token'))
             message = 'Connection successful' if success else 'Details unverified. Please check the entered details.'
         elif provider == ProviderCredential.PROVIDER_MOUSER:
             from .services.mouser_service import MouserClient
@@ -283,8 +285,8 @@ def provider_credential_test(request, provider):
         elif provider == ProviderCredential.PROVIDER_ELEMENT14:
             from .services.element14_service import Element14Client
             client = Element14Client(credentials=credentials, allow_env_fallback=False)
-            result = client.validate_mpn(test_mpn)
-            success = bool(result and result.get('valid'))
+            result = client.search_keyword(test_mpn)
+            success = bool(client._products_from_response(result))
             message = 'Connection successful' if success else 'Details unverified. Please check the entered details.'
     except Exception as exc:
         success = False

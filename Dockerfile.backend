@@ -46,6 +46,7 @@ RUN mkdir -p media/uploads temp_downloads uploaded_files logs static
 
 # Set permissions
 RUN chmod -R 755 media temp_downloads uploaded_files logs static
+RUN chmod +x /app/start_backend.sh
 
 # Set environment variables
 ENV PYTHONPATH=/app
@@ -60,14 +61,6 @@ RUN python manage.py migrate --verbosity 2 || echo "Migrations done"
 # Expose port
 EXPOSE 8000
 
-# Start command - using single worker for session persistence
-CMD ["gunicorn", "excel_mapping.wsgi:application", \
-     "--bind", "0.0.0.0:8000", \
-     "--workers", "1", \
-     "--timeout", "600", \
-     "--max-requests", "1000", \
-     "--max-requests-jitter", "100", \
-     "--preload", \
-     "--access-logfile", "-", \
-     "--error-logfile", "-", \
-     "--log-level", "info"]
+# Start command - run migrations against the runtime database, then use a
+# single worker for session persistence.
+CMD ["/app/start_backend.sh"]
