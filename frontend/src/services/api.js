@@ -110,6 +110,9 @@ const api = {
       } catch (error) {
         console.error(`❌ Upload attempt ${attempt} failed:`, error.message);
         lastError = error;
+        if (error.response && error.response.status >= 400 && error.response.status < 500) {
+          throw error;
+        }
         
         if (attempt < maxRetries) {
           const delay = Math.pow(2, attempt) * 1000; // Exponential backoff
@@ -118,7 +121,7 @@ const api = {
       }
     }
     
-    throw new Error(`Upload failed after ${maxRetries} attempts. Last error: ${lastError.message}`);
+    throw lastError || new Error(`Upload failed after ${maxRetries} attempts`);
   },
 
   /**
@@ -679,6 +682,60 @@ const api = {
 
   deleteBomWorkflowTemplate: (templateId) =>
     axios.delete(`${API_URL}/bom-workflow-templates/${templateId}/`, { timeout: 30000 }),
+
+  getProcessingTemplates: () =>
+    axios.get(`${API_URL}/processing-templates/`, { timeout: 30000 }),
+
+  saveProcessingTemplate: ({
+    name,
+    description = '',
+    status = 'draft',
+    version = 1,
+    sourceRequirements = {},
+    stages = [],
+    providerSnapshot = {},
+    metadata = {}
+  }) =>
+    axios.post(`${API_URL}/processing-templates/`, {
+      name,
+      description,
+      status,
+      version,
+      source_requirements: sourceRequirements,
+      stages,
+      provider_snapshot: providerSnapshot,
+      metadata
+    }, { timeout: 60000 }),
+
+  getProcessingTemplate: (templateId) =>
+    axios.get(`${API_URL}/processing-templates/${templateId}/`, { timeout: 30000 }),
+
+  updateProcessingTemplate: (templateId, payload = {}) =>
+    axios.patch(`${API_URL}/processing-templates/${templateId}/`, payload, { timeout: 60000 }),
+
+  validateProcessingTemplate: (templateId, { sourceRequirements = {}, headerMatchThreshold = 80 } = {}) =>
+    axios.post(`${API_URL}/processing-templates/${templateId}/validate/`, {
+      source_requirements: {
+        ...sourceRequirements,
+        header_match_threshold: headerMatchThreshold
+      }
+    }, { timeout: 60000 }),
+
+  createProcessingTemplateEditorSession: ({
+    templateId = null,
+    templateName = '',
+    headers = [],
+    rows = []
+  }) =>
+    axios.post(`${API_URL}/processing-templates/editor-session/`, {
+      template_id: templateId,
+      template_name: templateName,
+      headers,
+      rows
+    }, { timeout: 120000 }),
+
+  deleteProcessingTemplate: (templateId) =>
+    axios.delete(`${API_URL}/processing-templates/${templateId}/`, { timeout: 30000 }),
 
   // ==========================================
   // 5️⃣ DASHBOARD ENDPOINTS
