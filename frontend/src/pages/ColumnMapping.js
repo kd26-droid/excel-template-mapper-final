@@ -686,8 +686,8 @@ export default function ColumnMapping() {
 
   // Column count state
   const [columnCounts, setColumnCounts] = useState({
-    tags_count: 3,
-    spec_pairs_count: 3,
+    tags_count: 1,
+    spec_pairs_count: 1,
     customer_id_pairs_count: 1
   });
   const [templateColumns, setTemplateColumns] = useState([]);
@@ -1508,8 +1508,8 @@ export default function ColumnMapping() {
         if (session_metadata && session_metadata.column_counts) {
           const { tags_count, spec_pairs_count, customer_id_pairs_count } = session_metadata.column_counts;
           const newCounts = {
-            tags_count: tags_count || 3,
-            spec_pairs_count: spec_pairs_count || 3,
+            tags_count: tags_count || 1,
+            spec_pairs_count: spec_pairs_count || 1,
             customer_id_pairs_count: customer_id_pairs_count || 1
           };
           
@@ -4733,7 +4733,7 @@ export default function ColumnMapping() {
                         type="button"
                         onClick={() => updateColumnCounts({
                           tags_count: Math.max(1, columnCounts.tags_count - 1),
-                          spec_pairs_count: columnCounts.spec_pairs_count || 3,
+                          spec_pairs_count: columnCounts.spec_pairs_count || 1,
                           customer_id_pairs_count: columnCounts.customer_id_pairs_count || 1
                         })}
                         className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
@@ -4748,7 +4748,7 @@ export default function ColumnMapping() {
                         type="button"
                         onClick={() => updateColumnCounts({
                           tags_count: columnCounts.tags_count + 1,
-                          spec_pairs_count: columnCounts.spec_pairs_count || 3,
+                          spec_pairs_count: columnCounts.spec_pairs_count || 1,
                           customer_id_pairs_count: columnCounts.customer_id_pairs_count || 1
                         })}
                         className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
@@ -4767,9 +4767,9 @@ export default function ColumnMapping() {
                       <button
                         type="button"
                         onClick={() => updateColumnCounts({
-                          tags_count: columnCounts.tags_count || 3,
+                          tags_count: columnCounts.tags_count || 1,
                           spec_pairs_count: Math.max(1, columnCounts.spec_pairs_count - 1),
-                          customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
+                          customer_id_pairs_count: columnCounts.customer_id_pairs_count || 1
                         })}
                         className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
                           isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
@@ -4782,9 +4782,9 @@ export default function ColumnMapping() {
                       <button
                         type="button"
                         onClick={() => updateColumnCounts({
-                          tags_count: columnCounts.tags_count || 3,
+                          tags_count: columnCounts.tags_count || 1,
                           spec_pairs_count: columnCounts.spec_pairs_count + 1,
-                          customer_id_pairs_count: columnCounts.customer_id_pairs_count || 0
+                          customer_id_pairs_count: columnCounts.customer_id_pairs_count || 1
                         })}
                         className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
                           isDarkMode ? 'bg-slate-950/60 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100'
@@ -4802,8 +4802,8 @@ export default function ColumnMapping() {
                       <button
                         type="button"
                         onClick={() => updateColumnCounts({
-                          tags_count: columnCounts.tags_count || 3,
-                          spec_pairs_count: columnCounts.spec_pairs_count || 0,
+                          tags_count: columnCounts.tags_count || 1,
+                          spec_pairs_count: columnCounts.spec_pairs_count || 1,
                           customer_id_pairs_count: Math.max(1, columnCounts.customer_id_pairs_count - 1)
                         })}
                         className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${
@@ -4817,8 +4817,8 @@ export default function ColumnMapping() {
                       <button
                         type="button"
                         onClick={() => updateColumnCounts({
-                          tags_count: columnCounts.tags_count || 3,
-                          spec_pairs_count: columnCounts.spec_pairs_count || 0,
+                          tags_count: columnCounts.tags_count || 1,
+                          spec_pairs_count: columnCounts.spec_pairs_count || 1,
                           customer_id_pairs_count: columnCounts.customer_id_pairs_count + 1
                         })}
                         className={`h-7 w-7 rounded-md border flex items-center justify-center text-sm font-bold transition-colors ${

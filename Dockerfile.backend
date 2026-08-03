@@ -37,7 +37,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy backend source
 COPY backend/ .
 
-# Copy FACTWISE.xlsx template file for FW Template downloads
+# Copy generic template file for legacy downloads.
+# The hardcoded SFO template is copied with the backend source under /app/SFO_Technologies.
 COPY FACTWISE.xlsx /app/FACTWISE.xlsx
 
 # Create necessary directories

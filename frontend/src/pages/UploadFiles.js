@@ -416,9 +416,7 @@ const UploadFiles = () => {
   
   const [wizardStep, setWizardStep] = useState(0);
   const [isUserHovered, setIsUserHovered] = useState(false);
-  const [isTemplateHovered, setIsTemplateHovered] = useState(false);
   const [showAllSourceColumns, setShowAllSourceColumns] = useState(false);
-  const [showAllTemplateColumns, setShowAllTemplateColumns] = useState(false);
   const [userFile, setUserFile] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -436,14 +434,8 @@ const UploadFiles = () => {
   const [clientHeaderPreview, setClientHeaderPreview] = useState([]);
   const [clientHeaderAutoDetected, setClientHeaderAutoDetected] = useState(false);
 
-  // Template file state
-  const [templateFile, setTemplateFile] = useState(null);
-  const [templateSheetNames, setTemplateSheetNames] = useState([]);
-  const [selectedTemplateSheet, setSelectedTemplateSheet] = useState('');
-  const [templateHeaderRow, setTemplateHeaderRow] = useState(1);
-  const [templateWorkbook, setTemplateWorkbook] = useState(null);
-  const [templateHeaderPreview, setTemplateHeaderPreview] = useState([]);
-  const [templateHeaderAutoDetected, setTemplateHeaderAutoDetected] = useState(false);
+  const defaultDestinationSheet = 'Sheet1';
+  const defaultDestinationHeaderRow = 4;
 
   // Template selection state
   const [selectedTemplate, setSelectedTemplate] = useState(null);
@@ -1253,79 +1245,6 @@ const UploadFiles = () => {
       maxFiles: 1
     });
 
-  // Template file drop handler
-  const onDropTemplateFile = useCallback(acceptedFiles => {
-    if (acceptedFiles.length > 0) {
-      const file = acceptedFiles[0];
-      setError(null);
-      setTemplateFile(file);
-
-      const reader = new FileReader();
-      const isCSV = file.name.toLowerCase().endsWith('.csv');
-
-      reader.onload = (evt) => {
-        try {
-          const data = evt.target.result;
-          let workbook;
-
-          if (isCSV) {
-            workbook = XLSX.read(data, {
-              type: 'string',
-              codepage: 65001,
-              raw: false
-            });
-          } else {
-            workbook = XLSX.read(data, { type: 'binary' });
-          }
-
-          const sheets = workbook.SheetNames;
-          const firstSheet = sheets[0];
-          setTemplateWorkbook(workbook);
-          setTemplateSheetNames(sheets);
-          setSelectedTemplateSheet(firstSheet);
-
-          // Templates frequently carry description/"Required, Max 200 characters"
-          // rows above the real headers, so detect the header row instead of
-          // defaulting to 1 (which would map help text as column names).
-          const detectedRow = detectHeaderRow(workbook, firstSheet);
-          setTemplateHeaderRow(detectedRow);
-          setTemplateHeaderAutoDetected(detectedRow > 1);
-        } catch (err) {
-          console.error('Error reading template file:', err);
-          setError('Error reading template file. Please make sure it\'s a valid Excel or CSV file.');
-        }
-      };
-
-      if (isCSV) {
-        reader.readAsText(file, 'UTF-8');
-      } else {
-        reader.readAsBinaryString(file);
-      }
-    }
-  }, []);
-
-  const { getRootProps: getTemplateRootProps, getInputProps: getTemplateInputProps, isDragActive: isTemplateDragActive } =
-    useDropzone({
-      onDrop: onDropTemplateFile,
-      accept: {
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
-        'application/vnd.ms-excel': ['.xls'],
-        'text/csv': ['.csv'],
-        'application/csv': ['.csv'],
-        'text/plain': ['.csv']
-      },
-      maxFiles: 1
-    });
-
-  // Keep the header preview in sync with the sheet / header row actually being sent.
-  useEffect(() => {
-    if (!templateWorkbook || !selectedTemplateSheet) {
-      setTemplateHeaderPreview([]);
-      return;
-    }
-    setTemplateHeaderPreview(readHeadersAtRow(templateWorkbook, selectedTemplateSheet, templateHeaderRow));
-  }, [templateWorkbook, selectedTemplateSheet, templateHeaderRow]);
-
   // Same header-row preview for the source/client file.
   useEffect(() => {
     if (!clientWorkbook || !selectedClientSheet) {
@@ -1347,20 +1266,6 @@ const UploadFiles = () => {
     const parsed = Number(value);
     setClientHeaderRow(Number.isFinite(parsed) && parsed > 0 ? parsed : 1);
     setClientHeaderAutoDetected(false);
-  };
-
-  const handleTemplateSheetChange = (sheetName) => {
-    setSelectedTemplateSheet(sheetName);
-    if (!templateWorkbook) return;
-    const detectedRow = detectHeaderRow(templateWorkbook, sheetName);
-    setTemplateHeaderRow(detectedRow);
-    setTemplateHeaderAutoDetected(detectedRow > 1);
-  };
-
-  const handleTemplateHeaderRowChange = (value) => {
-    const parsed = Number(value);
-    setTemplateHeaderRow(Number.isFinite(parsed) && parsed > 0 ? parsed : 1);
-    setTemplateHeaderAutoDetected(false);
   };
 
   // Filter templates based on search term
@@ -1824,13 +1729,6 @@ const UploadFiles = () => {
 
     const isPDF = userFile.name.toLowerCase().endsWith('.pdf');
 
-    // Template file is required for non-PDF files. PDF uploads can still fall back
-    // to the default template, but if a template is selected it must be complete.
-    if (!isPDF && !templateFile) {
-      setError('Please select a template file');
-      return;
-    }
-
     if (!isPDF && clientSheetNames.length > 0) {
       if (combineSheetsMode) {
         if (selectedClientSheets.length < 1) {
@@ -1843,11 +1741,6 @@ const UploadFiles = () => {
       }
     }
 
-    if (templateFile && templateSheetNames.length > 0 && !selectedTemplateSheet) {
-      setError('Please select a sheet from your template file');
-      return;
-    }
-
     try {
       setLoading(true);
       setError(null);
@@ -1856,11 +1749,8 @@ const UploadFiles = () => {
       if (isPDF) {
         const formData = new FormData();
         formData.append('file', userFile);
-        if (templateFile) {
-          formData.append('templateFile', templateFile);
-          formData.append('templateSheetName', selectedTemplateSheet);
-          formData.append('templateHeaderRow', templateHeaderRow.toString());
-        }
+        formData.append('templateSheetName', defaultDestinationSheet);
+        formData.append('templateHeaderRow', defaultDestinationHeaderRow.toString());
 
         // Upload PDF file to PDF OCR endpoint
         const response = await api.uploadPDF(formData);
@@ -1898,9 +1788,8 @@ const UploadFiles = () => {
       formData.append('clientFile', uploadClientFile);
       formData.append('sheetName', uploadSheetName);
       formData.append('headerRow', uploadHeaderRow.toString());
-      formData.append('templateFile', templateFile);
-      formData.append('templateSheetName', selectedTemplateSheet);
-      formData.append('templateHeaderRow', templateHeaderRow.toString());
+      formData.append('templateSheetName', defaultDestinationSheet);
+      formData.append('templateHeaderRow', defaultDestinationHeaderRow.toString());
 
       // Add formula rules if they exist and NO mapping template is selected
       // When a template is selected, it already contains the rules, so don't send them again
@@ -2383,7 +2272,7 @@ const UploadFiles = () => {
 
             <Grid container spacing={2.5}>
               {/* Client File Dropzone Column */}
-              <Grid item xs={12} md={6}>
+              <Grid item xs={12} md={8}>
                 <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 700, fontSize: 14, mb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
                   Client File
                   <Chip label="Required" size="small" sx={{ height: 20, fontSize: 11, bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.2)' : 'rgba(37, 99, 235, 0.1)', color: isDarkMode ? '#60a5fa' : '#1d4ed8', fontWeight: 700 }} />
@@ -2596,172 +2485,12 @@ const UploadFiles = () => {
                 )}
               </Grid>
 
-              {/* Template File Dropzone Column */}
-              <Grid item xs={12} md={6}>
-                <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 700, fontSize: 14, mb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
-                  Template File
-                  <Chip label={userFile?.name?.toLowerCase().endsWith('.pdf') ? "Optional" : "Required"} size="small" sx={{ height: 20, fontSize: 11, bgcolor: 'rgba(245, 158, 11, 0.2)', color: '#f59e0b', fontWeight: 700 }} />
-                </Typography>
-
-                <Box
-                  {...getTemplateRootProps()}
-                  onMouseEnter={() => setIsTemplateHovered(true)}
-                  onMouseLeave={() => setIsTemplateHovered(false)}
-                  className="fw-upload-dropzone"
-                  sx={{
-                    border: templateFile
-                      ? `1.5px solid ${Nn.accent}`
-                      : (isTemplateDragActive || isTemplateHovered)
-                      ? `1.5px dashed ${Nn.accent}`
-                      : `1.5px dashed ${Nn.inputBorder}`,
-                    borderRadius: '16px',
-                    py: 3.5,
-                    px: 2.5,
-                    textAlign: 'center',
-                    cursor: 'pointer',
-                    minHeight: 190,
-                    display: 'flex',
-                    flexDirection: 'column',
-                    justifyContent: 'center',
-                    alignItems: 'center',
-                    position: 'relative',
-                    background: (isTemplateDragActive || isTemplateHovered)
-                      ? Nn.dropzoneActiveBg
-                      : templateFile
-                      ? Nn.dropzoneSelectedBg
-                      : Nn.dropzoneBg,
-                    transition: 'all 0.22s cubic-bezier(0.16, 1, 0.3, 1)'
-                  }}
-                >
-                  <input {...getTemplateInputProps()} />
-                  <DropzoneFileStackIcon
-                    color="#38bdf8"
-                    glowColor="#38bdf8"
-                    selected={!!templateFile}
-                    isHovered={isTemplateDragActive || isTemplateHovered}
-                    isDarkMode={isDarkMode}
-                  />
-                  <Typography variant="body1" sx={{ color: Nn.text, fontWeight: 700, fontSize: '0.95rem', mt: 0.5, mb: 0.25 }}>
-                    {templateFile ? templateFile.name : 'Drag and drop or select template'}
-                  </Typography>
-                  <Typography variant="caption" sx={{ color: Nn.muted, fontSize: '0.8rem', mb: 2 }}>
-                    Supported files: .xlsx, .xls, .csv
-                  </Typography>
-                  <Button
-                    variant="contained"
-                    size="small"
-                    sx={{
-                      background: templateFile
-                        ? 'linear-gradient(135deg, #0891b2 0%, #0284c7 100%)'
-                        : 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
-                      color: '#ffffff !important',
-                      fontWeight: 800,
-                      borderRadius: '999px',
-                      px: 2.5,
-                      py: 0.7,
-                      fontSize: '0.85rem',
-                      textTransform: 'none',
-                      border: 'none',
-                      boxShadow: templateFile ? '0 12px 24px -16px rgba(8, 145, 178, 0.9)' : '0 12px 24px -16px rgba(37, 99, 235, 0.9)',
-                      '&:hover': {
-                        background: templateFile
-                          ? 'linear-gradient(135deg, #0e7490 0%, #0369a1 100%)'
-                          : 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
-                        boxShadow: templateFile ? '0 16px 30px -18px rgba(8, 145, 178, 0.95)' : '0 16px 30px -18px rgba(37, 99, 235, 0.95)'
-                      }
-                    }}
-                  >
-                    {templateFile ? 'Change template' : 'Select template'}
-                  </Button>
-                </Box>
-
-                {/* Template File Sheet & Columns Preview Card */}
-                {templateFile && (
-                  <Box sx={{ mt: 1.5, p: 2, borderRadius: '14px', border: `1px solid ${Nn.panelBorder}`, bgcolor: Nn.panelBg, boxShadow: '0 4px 14px rgba(0,0,0,0.2)' }}>
-                    <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1.5 }}>
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        <CheckCircleIcon sx={{ color: '#38bdf8', fontSize: 18 }} />
-                        <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 800, fontSize: 14 }}>
-                          {templateFile.name}
-                        </Typography>
-                      </Box>
-                      <IconButton size="small" onClick={() => setTemplateFile(null)} sx={{ color: Nn.muted, '&:hover': { color: Nn.text } }}>
-                        <CloseIcon fontSize="small" />
-                      </IconButton>
-                    </Box>
-
-                    {templateSheetNames.length > 0 && (
-                      <Box sx={{ pt: 1, borderTop: `1px solid ${Nn.divider}` }}>
-                        <Grid container spacing={1.5} sx={{ mb: 1.5 }}>
-                          <Grid item xs={7}>
-                            <FormControl fullWidth size="small">
-                              <InputLabel sx={{ color: Nn.muted }}>Sheet Name</InputLabel>
-                              <Select
-                                value={selectedTemplateSheet}
-                                label="Sheet Name"
-                                onChange={(e) => handleTemplateSheetChange(e.target.value)}
-                                MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
-                                sx={{ borderRadius: '8px' }}
-                              >
-                                {templateSheetNames.map(s => (
-                                  <MenuItem key={s} value={s}>{s}</MenuItem>
-                                ))}
-                              </Select>
-                            </FormControl>
-                          </Grid>
-                          <Grid item xs={5}>
-                            <TextField
-                              label="Header Row"
-                              type="number"
-                              size="small"
-                              fullWidth
-                              InputProps={{ inputProps: { min: 1 } }}
-                              value={templateHeaderRow}
-                              onChange={(e) => handleTemplateHeaderRowChange(e.target.value)}
-                              sx={{ '& input': { borderRadius: '8px' } }}
-                            />
-                          </Grid>
-                        </Grid>
-
-                        {templateHeaderPreview.length > 0 && (
-                          <Box sx={{ mb: 1.5 }}>
-                            <Typography variant="caption" sx={{ color: Nn.muted, fontSize: 12, fontWeight: 600, display: 'block', mb: 0.75 }}>
-                              {templateHeaderAutoDetected
-                                ? `Header row auto-detected at row ${templateHeaderRow} — ${templateHeaderPreview.length} destination columns found.`
-                                : `${templateHeaderPreview.length} destination columns found on row ${templateHeaderRow}.`}
-                            </Typography>
-                            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.6, maxHeight: showAllTemplateColumns ? 220 : 90, overflowY: 'auto', py: 0.5 }}>
-                              {(showAllTemplateColumns ? templateHeaderPreview : templateHeaderPreview.slice(0, 12)).map((h, i) => (
-                                <Chip
-                                  key={`${h}-${i}`}
-                                  size="small"
-                                  variant="outlined"
-                                  label={h.length > 22 ? `${h.slice(0, 22)}…` : h}
-                                  sx={{ height: 24, fontSize: 11, bgcolor: a.surface.subtle, borderColor: a.border.default, color: Nn.tableText, fontWeight: 600 }}
-                                />
-                              ))}
-                              {templateHeaderPreview.length > 12 && (
-                                <Chip
-                                  size="small"
-                                  onClick={() => setShowAllTemplateColumns(!showAllTemplateColumns)}
-                                  label={showAllTemplateColumns ? 'Show less' : `+${templateHeaderPreview.length - 12} more`}
-                                  sx={{ height: 24, fontSize: 11, bgcolor: 'rgba(56, 189, 248, 0.25)', color: '#38bdf8', fontWeight: 800, cursor: 'pointer' }}
-                                />
-                              )}
-                            </Box>
-                          </Box>
-                        )}
-                      </Box>
-                    )}
-                  </Box>
-                )}
-              </Grid>
             </Grid>
 
             {/* Step 1 Bottom Action Bar */}
             <Box sx={{ mt: 'auto', pt: 3, borderTop: `1px solid ${Nn.divider}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <Typography variant="caption" sx={{ color: userFile ? '#60a5fa' : Nn.muted, fontWeight: 600 }}>
-                {userFile ? '✓ Required files ready' : 'Select client file & template to proceed'}
+                {userFile ? 'Client file ready. Destination: FactWise item default' : 'Select client file to proceed'}
               </Typography>
               <Button
                 variant="contained"

@@ -25,6 +25,7 @@ from .models import PDFSession, PDFPage, PDFExtractionResult
 from .services.pdf_processor import PDFProcessor
 from .services.azure_ocr_service import AzureOCRService
 from .services.native_pdf_service import NativePDFService
+from .default_template import get_sfo_template_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -41,20 +42,8 @@ def _parse_positive_int(value, default=1):
 
 
 def get_default_pdf_template_metadata() -> Dict[str, Any]:
-    """Return the legacy built-in template metadata for PDF sessions."""
-    from django.conf import settings
-
-    factwise_template_path = Path(settings.BASE_DIR) / 'FACTWISE.xlsx'
-    if not factwise_template_path.exists():
-        factwise_template_path = Path(settings.BASE_DIR) / 'test_files' / 'FACTWISE.xlsx'
-
-    return {
-        'template_path': str(factwise_template_path),
-        'original_template_name': 'FACTWISE.xlsx',
-        'template_sheet_name': 'Templates',
-        'template_header_row': 1,
-        'uses_uploaded_template': False,
-    }
+    """Return the built-in SFO destination template metadata for PDF sessions."""
+    return get_sfo_template_metadata()
 
 
 def get_pdf_template_metadata(pdf_session: PDFSession) -> Dict[str, Any]:
@@ -81,6 +70,29 @@ def build_pdf_mapping_session_data(
     """Build session data consumed by the normal column-mapping endpoints."""
     template_metadata = get_pdf_template_metadata(pdf_session)
     uses_uploaded_template = bool(template_metadata.get('uses_uploaded_template'))
+    template_headers = []
+    column_counts = {'tags_count': 1, 'spec_pairs_count': 1, 'customer_id_pairs_count': 1}
+
+    try:
+        from .views import hybrid_file_manager, derive_sfo_column_counts, build_sfo_clustered_headers
+        from .bom_header_mapper import BOMHeaderMapper
+
+        mapper = BOMHeaderMapper()
+        template_headers = mapper.read_excel_headers(
+            file_path=hybrid_file_manager.get_file_path(template_metadata['template_path']),
+            sheet_name=template_metadata.get('template_sheet_name'),
+            header_row=template_metadata.get('template_header_row', 1) - 1
+        )
+        if template_headers:
+            column_counts = {'tags_count': 1, 'spec_pairs_count': 1, 'customer_id_pairs_count': 1}
+            template_headers = build_sfo_clustered_headers(
+                template_headers,
+                column_counts['tags_count'],
+                column_counts['spec_pairs_count'],
+                column_counts['customer_id_pairs_count'],
+            )
+    except Exception as e:
+        logger.warning(f"Could not pre-read PDF template headers: {e}")
 
     session_data = {
         'session_id': session_id,
@@ -98,31 +110,20 @@ def build_pdf_mapping_session_data(
         'original_template_id': None,
         'template_modified': False,
         'formula_rules': [],
-        'tags_count': 0 if uses_uploaded_template else 3,
-        'spec_pairs_count': 0 if uses_uploaded_template else 3,
-        'customer_id_pairs_count': 0 if uses_uploaded_template else 1,
+        'tags_count': column_counts['tags_count'],
+        'spec_pairs_count': column_counts['spec_pairs_count'],
+        'customer_id_pairs_count': column_counts['customer_id_pairs_count'],
+        'column_counts': column_counts,
         'template_version': 0,
         'source_type': source_type,
         'client_headers': client_headers,
         'template_source': 'uploaded' if uses_uploaded_template else 'default',
     }
 
-    if uses_uploaded_template:
-        try:
-            from .views import hybrid_file_manager
-            from .bom_header_mapper import BOMHeaderMapper
-
-            mapper = BOMHeaderMapper()
-            template_headers = mapper.read_excel_headers(
-                file_path=hybrid_file_manager.get_file_path(template_metadata['template_path']),
-                sheet_name=template_metadata.get('template_sheet_name'),
-                header_row=template_metadata.get('template_header_row', 1) - 1
-            )
-            if template_headers:
-                session_data['template_headers'] = template_headers
-                session_data['current_template_headers'] = template_headers
-        except Exception as e:
-            logger.warning(f"Could not pre-read uploaded PDF template headers: {e}")
+    if template_headers:
+        session_data['template_headers'] = template_headers
+        session_data['current_template_headers'] = template_headers
+        session_data['enhanced_headers'] = template_headers
 
     return session_data
 
@@ -451,6 +452,8 @@ def upload_pdf(request):
                 'template_header_row': _parse_positive_int(request.data.get('templateHeaderRow'), 1),
                 'uses_uploaded_template': True,
             }
+        else:
+            template_metadata = get_default_pdf_template_metadata()
 
         # Generate session ID
         session_id = str(uuid.uuid4())
@@ -484,7 +487,7 @@ def upload_pdf(request):
             file_name=uploaded_file.name,
             file_size=uploaded_file.size,
             processing_status='pending',
-            processing_metadata={'template_mapping': template_metadata} if template_metadata else {}
+            processing_metadata={'template_mapping': template_metadata}
         )
 
         # Do NOT render every page here — that's what made upload take a minute for
@@ -515,7 +518,7 @@ def upload_pdf(request):
                 'total_pages': validation_result['page_count'],
                 'file_name': uploaded_file.name,
                 'file_size': uploaded_file.size,
-                'template_file': template_metadata.get('original_template_name') if template_metadata else None,
+                'template_file': template_metadata.get('original_template_name'),
                 'pages': page_info,
                 'status': 'ready_for_processing'
             }, status=status.HTTP_201_CREATED)
