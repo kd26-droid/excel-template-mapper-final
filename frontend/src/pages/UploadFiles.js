@@ -2379,8 +2379,10 @@ const UploadFiles = () => {
         sx={{
           position: 'relative',
           zIndex: 1,
-          width: wizardStep === 1 ? 'min(820px, calc(100vw - 32px))' : 'min(1100px, calc(100vw - 32px))',
-          minHeight: wizardStep === 1 ? '360px' : '580px',
+          width: wizardStep === 0
+            ? 'min(920px, calc(100vw - 32px))'
+            : 'min(1100px, calc(100vw - 32px))',
+          minHeight: '580px',
           borderRadius: '22px',
           border: `1px solid ${Nn.cardBorder}`,
           background: Nn.cardBg,
@@ -2394,9 +2396,16 @@ const UploadFiles = () => {
         }}
       >
         {/* Top Header & Progress */}
-        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: wizardStep === 1 ? 2 : 3 }}>
+        <Box sx={{
+          display: 'flex',
+          justifyContent: wizardStep === 0 ? 'center' : 'space-between',
+          alignItems: wizardStep === 0 ? 'center' : 'flex-start',
+          mb: 3,
+          position: 'relative',
+          textAlign: wizardStep === 0 ? 'center' : 'left'
+        }}>
           <Box>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 0.5 }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: wizardStep === 0 ? 'center' : 'flex-start', gap: 1.5, mb: 0.5 }}>
               <Typography variant="h5" fontWeight="800" sx={{ color: Nn.text, letterSpacing: '-0.02em', fontSize: '1.4rem' }}>
                 {wizardStep === 1 ? 'Select Template' : 'Upload Files'}
               </Typography>
@@ -2409,11 +2418,19 @@ const UploadFiles = () => {
             <Typography variant="caption" sx={{ color: Nn.muted, fontSize: '0.85rem' }}>
               {wizardStep === 1
                 ? 'Choose an existing workflow template, or continue and create a new one.'
-                : 'Upload the source data and FactWise template to start mapping.'}
+                : 'Upload the client source data. Destination: FactWise item default.'}
             </Typography>
           </Box>
           {/* Progress bar */}
-          <Box sx={{ display: 'flex', gap: 0.5, width: 80, mt: 1 }}>
+          <Box sx={{
+            display: 'flex',
+            gap: 0.5,
+            width: 80,
+            mt: 1,
+            position: wizardStep === 0 ? 'absolute' : 'static',
+            right: wizardStep === 0 ? 0 : 'auto',
+            top: wizardStep === 0 ? 0 : 'auto'
+          }}>
             <Box sx={{ height: 4, flex: 1, borderRadius: 2, bgcolor: '#2563eb' }} />
             <Box sx={{ height: 4, flex: 1, borderRadius: 2, bgcolor: wizardStep === 1 ? '#2563eb' : (isDarkMode ? 'rgba(255,255,255,0.15)' : 'rgba(15,23,42,0.12)') }} />
           </Box>
@@ -2594,10 +2611,10 @@ const UploadFiles = () => {
               </Box>
             )}
 
-            <Grid container spacing={2.5}>
+            <Grid container spacing={2.5} justifyContent="center">
               {/* Client File Dropzone Column */}
-              <Grid item xs={12} md={6}>
-                <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 700, fontSize: 14, mb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
+              <Grid item xs={12} md={10} lg={9}>
+                <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 700, fontSize: 14, mb: 1.25, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
                   Client File
                   <Chip label="Required" size="small" sx={{ height: 20, fontSize: 11, bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.2)' : 'rgba(37, 99, 235, 0.1)', color: isDarkMode ? '#60a5fa' : '#1d4ed8', fontWeight: 700 }} />
                 </Typography>
@@ -2614,11 +2631,12 @@ const UploadFiles = () => {
                       ? `1.5px dashed ${Nn.accent}`
                       : `1.5px dashed ${Nn.inputBorder}`,
                     borderRadius: '16px',
-                    py: 3.5,
-                    px: 2.5,
+                    py: { xs: 4, md: 5 },
+                    px: { xs: 2.5, md: 4 },
                     textAlign: 'center',
                     cursor: 'pointer',
-                    minHeight: 190,
+                    minHeight: { xs: 220, md: 250 },
+                    width: '100%',
                     display: 'flex',
                     flexDirection: 'column',
                     justifyContent: 'center',
@@ -2640,7 +2658,7 @@ const UploadFiles = () => {
                     isHovered={isUserDragActive || isUserHovered}
                     isDarkMode={isDarkMode}
                   />
-                  <Typography variant="body1" sx={{ color: Nn.text, fontWeight: 700, fontSize: '0.95rem', mt: 0.5, mb: 0.25 }}>
+                  <Typography variant="body1" sx={{ color: Nn.text, fontWeight: 800, fontSize: '1rem', mt: 0.5, mb: 0.25 }}>
                     {userFile ? userFile.name : 'Drag and drop or select files'}
                   </Typography>
                   <Typography variant="caption" sx={{ color: Nn.muted, fontSize: '0.8rem', mb: 2 }}>
@@ -2803,172 +2821,12 @@ const UploadFiles = () => {
                 )}
               </Grid>
 
-              {/* Template File Dropzone Column */}
-              <Grid item xs={12} md={6}>
-                <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 700, fontSize: 14, mb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
-                  Template File
-                  <Chip label={userFile?.name?.toLowerCase().endsWith('.pdf') ? "Optional" : "Required"} size="small" sx={{ height: 20, fontSize: 11, bgcolor: 'rgba(245, 158, 11, 0.2)', color: '#f59e0b', fontWeight: 700 }} />
-                </Typography>
-
-                <Box
-                  {...getTemplateRootProps()}
-                  onMouseEnter={() => setIsTemplateHovered(true)}
-                  onMouseLeave={() => setIsTemplateHovered(false)}
-                  className="fw-upload-dropzone"
-                  sx={{
-                    border: templateFile
-                      ? `1.5px solid ${Nn.accent}`
-                      : (isTemplateDragActive || isTemplateHovered)
-                      ? `1.5px dashed ${Nn.accent}`
-                      : `1.5px dashed ${Nn.inputBorder}`,
-                    borderRadius: '16px',
-                    py: 3.5,
-                    px: 2.5,
-                    textAlign: 'center',
-                    cursor: 'pointer',
-                    minHeight: 190,
-                    display: 'flex',
-                    flexDirection: 'column',
-                    justifyContent: 'center',
-                    alignItems: 'center',
-                    position: 'relative',
-                    background: (isTemplateDragActive || isTemplateHovered)
-                      ? Nn.dropzoneActiveBg
-                      : templateFile
-                      ? Nn.dropzoneSelectedBg
-                      : Nn.dropzoneBg,
-                    transition: 'all 0.22s cubic-bezier(0.16, 1, 0.3, 1)'
-                  }}
-                >
-                  <input {...getTemplateInputProps()} />
-                  <DropzoneFileStackIcon
-                    color="#38bdf8"
-                    glowColor="#38bdf8"
-                    selected={!!templateFile}
-                    isHovered={isTemplateDragActive || isTemplateHovered}
-                    isDarkMode={isDarkMode}
-                  />
-                  <Typography variant="body1" sx={{ color: Nn.text, fontWeight: 700, fontSize: '0.95rem', mt: 0.5, mb: 0.25 }}>
-                    {templateFile ? templateFile.name : 'Drag and drop or select template'}
-                  </Typography>
-                  <Typography variant="caption" sx={{ color: Nn.muted, fontSize: '0.8rem', mb: 2 }}>
-                    Supported files: .xlsx, .xls, .csv
-                  </Typography>
-                  <Button
-                    variant="contained"
-                    size="small"
-                    sx={{
-                      background: templateFile
-                        ? 'linear-gradient(135deg, #0891b2 0%, #0284c7 100%)'
-                        : 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
-                      color: '#ffffff !important',
-                      fontWeight: 800,
-                      borderRadius: '999px',
-                      px: 2.5,
-                      py: 0.7,
-                      fontSize: '0.85rem',
-                      textTransform: 'none',
-                      border: 'none',
-                      boxShadow: templateFile ? '0 12px 24px -16px rgba(8, 145, 178, 0.9)' : '0 12px 24px -16px rgba(37, 99, 235, 0.9)',
-                      '&:hover': {
-                        background: templateFile
-                          ? 'linear-gradient(135deg, #0e7490 0%, #0369a1 100%)'
-                          : 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
-                        boxShadow: templateFile ? '0 16px 30px -18px rgba(8, 145, 178, 0.95)' : '0 16px 30px -18px rgba(37, 99, 235, 0.95)'
-                      }
-                    }}
-                  >
-                    {templateFile ? 'Change template' : 'Select template'}
-                  </Button>
-                </Box>
-
-                {/* Template File Sheet & Columns Preview Card */}
-                {templateFile && (
-                  <Box sx={{ mt: 1.5, p: 2, borderRadius: '14px', border: `1px solid ${Nn.panelBorder}`, bgcolor: Nn.panelBg, boxShadow: '0 4px 14px rgba(0,0,0,0.2)' }}>
-                    <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1.5 }}>
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        <CheckCircleIcon sx={{ color: '#38bdf8', fontSize: 18 }} />
-                        <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 800, fontSize: 14 }}>
-                          {templateFile.name}
-                        </Typography>
-                      </Box>
-                      <IconButton size="small" onClick={() => setTemplateFile(null)} sx={{ color: Nn.muted, '&:hover': { color: Nn.text } }}>
-                        <CloseIcon fontSize="small" />
-                      </IconButton>
-                    </Box>
-
-                    {templateSheetNames.length > 0 && (
-                      <Box sx={{ pt: 1, borderTop: `1px solid ${Nn.divider}` }}>
-                        <Grid container spacing={1.5} sx={{ mb: 1.5 }}>
-                          <Grid item xs={7}>
-                            <FormControl fullWidth size="small">
-                              <InputLabel sx={{ color: Nn.muted }}>Sheet Name</InputLabel>
-                              <Select
-                                value={selectedTemplateSheet}
-                                label="Sheet Name"
-                                onChange={(e) => handleTemplateSheetChange(e.target.value)}
-                                MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
-                                sx={{ borderRadius: '8px' }}
-                              >
-                                {templateSheetNames.map(s => (
-                                  <MenuItem key={s} value={s}>{s}</MenuItem>
-                                ))}
-                              </Select>
-                            </FormControl>
-                          </Grid>
-                          <Grid item xs={5}>
-                            <TextField
-                              label="Header Row"
-                              type="number"
-                              size="small"
-                              fullWidth
-                              InputProps={{ inputProps: { min: 1 } }}
-                              value={templateHeaderRow}
-                              onChange={(e) => handleTemplateHeaderRowChange(e.target.value)}
-                              sx={{ '& input': { borderRadius: '8px' } }}
-                            />
-                          </Grid>
-                        </Grid>
-
-                        {templateHeaderPreview.length > 0 && (
-                          <Box sx={{ mb: 1.5 }}>
-                            <Typography variant="caption" sx={{ color: Nn.muted, fontSize: 12, fontWeight: 600, display: 'block', mb: 0.75 }}>
-                              {templateHeaderAutoDetected
-                                ? `Header row auto-detected at row ${templateHeaderRow} — ${templateHeaderPreview.length} destination columns found.`
-                                : `${templateHeaderPreview.length} destination columns found on row ${templateHeaderRow}.`}
-                            </Typography>
-                            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.6, maxHeight: showAllTemplateColumns ? 220 : 90, overflowY: 'auto', py: 0.5 }}>
-                              {(showAllTemplateColumns ? templateHeaderPreview : templateHeaderPreview.slice(0, 12)).map((h, i) => (
-                                <Chip
-                                  key={`${h}-${i}`}
-                                  size="small"
-                                  variant="outlined"
-                                  label={h.length > 22 ? `${h.slice(0, 22)}…` : h}
-                                  sx={{ height: 24, fontSize: 11, bgcolor: a.surface.subtle, borderColor: a.border.default, color: Nn.tableText, fontWeight: 600 }}
-                                />
-                              ))}
-                              {templateHeaderPreview.length > 12 && (
-                                <Chip
-                                  size="small"
-                                  onClick={() => setShowAllTemplateColumns(!showAllTemplateColumns)}
-                                  label={showAllTemplateColumns ? 'Show less' : `+${templateHeaderPreview.length - 12} more`}
-                                  sx={{ height: 24, fontSize: 11, bgcolor: 'rgba(56, 189, 248, 0.25)', color: '#38bdf8', fontWeight: 800, cursor: 'pointer' }}
-                                />
-                              )}
-                            </Box>
-                          </Box>
-                        )}
-                      </Box>
-                    )}
-                  </Box>
-                )}
-              </Grid>
             </Grid>
 
             {/* Step 1 Bottom Action Bar */}
             <Box sx={{ mt: 'auto', pt: 3, borderTop: `1px solid ${Nn.divider}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <Typography variant="caption" sx={{ color: userFile ? '#60a5fa' : Nn.muted, fontWeight: 600 }}>
-                {userFile ? '✓ Required files ready' : 'Select client file & template to proceed'}
+                {userFile ? 'Client file ready. Destination: FactWise item default' : 'Select client file to proceed'}
               </Typography>
               <Button
                 variant="contained"

@@ -4062,6 +4062,10 @@ const EnhancedDataEditor = () => {
                   <ListItemIcon><AutoAwesomeIcon sx={{ color: '#9c27b0' }} /></ListItemIcon>
                   <ListItemText>Add Tags</ListItemText>
                 </MenuItem>
+                <MenuItem onClick={() => { setToolsMenuAnchor(null); handleOpenCreateColumnDialog(); }} disabled={syncStatus.inProgress}>
+                  <ListItemIcon><AddIcon sx={{ color: '#2e7d32' }} /></ListItemIcon>
+                  <ListItemText>Add Column</ListItemText>
+                </MenuItem>
                 <MenuItem onClick={handleOpenSplitColsDialog} disabled={syncStatus.inProgress || splitColsRunning}>
                   <ListItemIcon>
                     {splitColsRunning ? <CircularProgress size={18} /> : <ContentCutIcon sx={{ color: '#0277bd' }} />}
