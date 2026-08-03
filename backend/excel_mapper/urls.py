@@ -126,6 +126,10 @@ from .intermediate_artifacts import (
     download_intermediate_artifact,
     delete_intermediate_artifact,
 )
+from .bom_workflow_templates import (
+    bom_workflow_templates,
+    bom_workflow_template_detail,
+)
 
 # Column Parser views
 from .parser_views import (
@@ -251,6 +255,8 @@ urlpatterns = [
     path('intermediate-artifacts/save/', save_intermediate_artifact, name='save-intermediate-artifact'),
     path('intermediate-artifacts/<int:artifact_id>/download/', download_intermediate_artifact, name='download-intermediate-artifact'),
     path('intermediate-artifacts/<int:artifact_id>/', delete_intermediate_artifact, name='delete-intermediate-artifact'),
+    path('bom-workflow-templates/', bom_workflow_templates, name='bom-workflow-templates'),
+    path('bom-workflow-templates/<int:template_id>/', bom_workflow_template_detail, name='bom-workflow-template-detail'),
 
     # MPN Validation + OAuth
     path('mpn/auth/status/', mpn_auth_status, name='mpn-auth-status'),

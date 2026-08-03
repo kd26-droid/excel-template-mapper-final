@@ -27,6 +27,7 @@ import {
   Radio,
   RadioGroup,
   Select,
+  Snackbar,
   Stack,
   Step,
   StepLabel,
@@ -1871,6 +1872,11 @@ const BomNormalizer = () => {
     { name: 'Section 1', pages: '' },
     { name: 'Section 2', pages: '' },
   ]);
+  const [workflowTemplates, setWorkflowTemplates] = useState([]);
+  const [selectedWorkflowTemplateId, setSelectedWorkflowTemplateId] = useState('');
+  const [workflowTemplateLoading, setWorkflowTemplateLoading] = useState(false);
+  const [workflowTemplateSaving, setWorkflowTemplateSaving] = useState(false);
+  const [successMessage, setSuccessMessage] = useState('');
   const [error, setError] = useState('');
 
   const headers = useMemo(
@@ -2774,6 +2780,124 @@ const BomNormalizer = () => {
     if (header) rememberRoleHeader(role, header);
   }, []);
 
+  const refreshWorkflowTemplates = useCallback(async () => {
+    setWorkflowTemplateLoading(true);
+    try {
+      const response = await api.getBomWorkflowTemplates();
+      setWorkflowTemplates(response.data.templates || []);
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Could not load workflow templates.');
+    } finally {
+      setWorkflowTemplateLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshWorkflowTemplates();
+  }, [refreshWorkflowTemplates]);
+
+  const resolveTemplateHeader = useCallback((savedHeader) => {
+    if (!savedHeader) return '';
+    if (headers.includes(savedHeader)) return savedHeader;
+    const target = normalizeKey(savedHeader);
+    return headers.find((header) => normalizeKey(header) === target) || '';
+  }, [headers]);
+
+  const applyWorkflowTemplate = useCallback(async () => {
+    if (!selectedWorkflowTemplateId) {
+      setError('Choose a workflow template first.');
+      return;
+    }
+    if (!workbook) {
+      setError('Upload a workbook before applying a workflow template.');
+      return;
+    }
+
+    try {
+      const response = await api.getBomWorkflowTemplate(selectedWorkflowTemplateId);
+      const template = response.data.template;
+      const workflow = template?.workflow || {};
+      const savedRoles = workflow.roles || {};
+      const nextRoles = Object.keys(emptyRoles).reduce((acc, key) => {
+        acc[key] = resolveTemplateHeader(savedRoles[key]);
+        return acc;
+      }, {});
+
+      setRoles(nextRoles);
+      setConfig((prev) => ({ ...prev, ...(workflow.config || {}) }));
+      if (workflow.factwiseConfig) setFactwiseConfig((prev) => ({ ...prev, ...workflow.factwiseConfig }));
+      if (workflow.tagConfig) setTagConfig((prev) => ({ ...prev, ...workflow.tagConfig }));
+      setParserTouched(true);
+      setDelimiterTouched(true);
+      setNormalizedRows([]);
+      setNormalizationSummary(null);
+      setError('');
+      setSuccessMessage(`Applied workflow template "${template?.name || 'selected template'}".`);
+      setCurrentStep(2);
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Could not apply workflow template.');
+    }
+  }, [headers, resolveTemplateHeader, selectedWorkflowTemplateId, workbook]);
+
+  const saveWorkflowTemplate = useCallback(async () => {
+    const name = window.prompt('Name this workflow template');
+    if (!name || !name.trim()) return;
+
+    const sourceSignature = {
+      fileName,
+      sheetName,
+      sheetScope,
+      selectedSheetNames,
+      headerRowIndex,
+      headers,
+    };
+    const workflow = {
+      version: 1,
+      roles,
+      config,
+      factwiseConfig,
+      tagConfig,
+      sourceHints: {
+        sheetName,
+        sheetScope,
+        selectedSheetNames,
+        headerRowIndex,
+      },
+      outputColumns: getNormalizedExportColumns(normalizedRows),
+    };
+
+    setWorkflowTemplateSaving(true);
+    try {
+      const response = await api.saveBomWorkflowTemplate({
+        name: name.trim(),
+        description: `Saved from ${fileName || 'BOM Normalizer'}`,
+        sourceSignature,
+        workflow,
+      });
+      await refreshWorkflowTemplates();
+      setSelectedWorkflowTemplateId(String(response.data.template?.id || ''));
+      setError('');
+      setSuccessMessage(response.data.message || `Saved workflow template "${name.trim()}".`);
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Could not save workflow template.');
+    } finally {
+      setWorkflowTemplateSaving(false);
+    }
+  }, [
+    config,
+    factwiseConfig,
+    fileName,
+    headerRowIndex,
+    headers,
+    normalizedRows,
+    refreshWorkflowTemplates,
+    roles,
+    selectedSheetNames,
+    sheetName,
+    sheetScope,
+    tagConfig,
+  ]);
+
   const handleNormalize = useCallback(async () => {
     if (!dataRows.length) {
       setError('No data rows found below the selected header row.');
@@ -3101,6 +3225,53 @@ const BomNormalizer = () => {
               variant={progress.total ? 'determinate' : 'indeterminate'}
               value={progress.total ? Math.round((progress.processed / progress.total) * 100) : undefined}
             />
+          </Paper>
+        )}
+
+        {(workbook || workflowTemplates.length > 0) && (
+          <Paper elevation={0} sx={{ mb: 2, p: 1.5, border: '1px solid #dce2e8', bgcolor: '#fff' }}>
+            <Stack direction={{ xs: 'column', md: 'row' }} alignItems={{ xs: 'stretch', md: 'center' }} justifyContent="space-between" gap={1.5}>
+              <Box sx={{ minWidth: 0 }}>
+                <Typography sx={{ fontSize: 14, fontWeight: 800 }}>Workflow template</Typography>
+                <Typography sx={{ mt: 0.25, fontSize: 12.5, color: '#66717f' }}>
+                  Reuse a saved BOM setup for similar files.
+                </Typography>
+              </Box>
+              <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ xs: 'stretch', sm: 'center' }} sx={{ minWidth: { xs: '100%', md: 520 } }}>
+                <FormControl size="small" fullWidth disabled={workflowTemplateLoading || !workflowTemplates.length}>
+                  <InputLabel>Saved workflow</InputLabel>
+                  <Select
+                    value={selectedWorkflowTemplateId}
+                    label="Saved workflow"
+                    onChange={(event) => setSelectedWorkflowTemplateId(event.target.value)}
+                  >
+                    {workflowTemplates.length ? workflowTemplates.map((template) => (
+                      <MenuItem key={template.id} value={String(template.id)}>
+                        {template.name}
+                      </MenuItem>
+                    )) : (
+                      <MenuItem value="" disabled>No saved templates</MenuItem>
+                    )}
+                  </Select>
+                </FormControl>
+                <Button
+                  variant="outlined"
+                  onClick={applyWorkflowTemplate}
+                  disabled={busy || workflowTemplateLoading || !workbook || !selectedWorkflowTemplateId}
+                  sx={{ whiteSpace: 'nowrap' }}
+                >
+                  Apply
+                </Button>
+                <Button
+                  variant="text"
+                  onClick={refreshWorkflowTemplates}
+                  disabled={workflowTemplateLoading}
+                  sx={{ whiteSpace: 'nowrap' }}
+                >
+                  Refresh
+                </Button>
+              </Stack>
+            </Stack>
           </Paper>
         )}
 
@@ -3906,6 +4077,15 @@ const BomNormalizer = () => {
                       >
                         Add Tags
                       </MenuItem>
+                      <MenuItem
+                        disabled={!normalizedRows.length || workflowTemplateSaving}
+                        onClick={() => {
+                          setToolsMenuAnchor(null);
+                          saveWorkflowTemplate();
+                        }}
+                      >
+                        Save Workflow Template
+                      </MenuItem>
                     </Menu>
                     <Button
                       size="small"
@@ -3984,6 +4164,16 @@ const BomNormalizer = () => {
           </Stack>
         )}
       </Box>
+      <Snackbar
+        open={Boolean(successMessage)}
+        autoHideDuration={5000}
+        onClose={() => setSuccessMessage('')}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+      >
+        <Alert severity="success" variant="filled" onClose={() => setSuccessMessage('')}>
+          {successMessage}
+        </Alert>
+      </Snackbar>
       <Dialog open={pdfChoiceOpen} onClose={() => {
         setPdfChoiceOpen(false);
         setPendingPdfAction(null);

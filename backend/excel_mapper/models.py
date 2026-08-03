@@ -673,6 +673,45 @@ class IntermediateArtifact(models.Model):
         return f"{self.session_id}:{self.artifact_type}:{self.label or self.id}"
 
 
+class BomWorkflowTemplate(models.Model):
+    """Reusable BOM Normalizer workflow recipe for similar future source files."""
+
+    name = models.CharField(max_length=200, unique=True)
+    description = models.TextField(blank=True, null=True)
+    source_signature = models.JSONField(default=dict, blank=True)
+    workflow = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    usage_count = models.IntegerField(default=0)
+
+    class Meta:
+        db_table = 'excel_mapper_bom_workflow_template'
+        ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['name']),
+            models.Index(fields=['-updated_at']),
+        ]
+
+    def __str__(self):
+        return self.name
+
+    def increment_usage(self):
+        self.usage_count += 1
+        self.save(update_fields=['usage_count', 'updated_at'])
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'name': self.name,
+            'description': self.description or '',
+            'source_signature': self.source_signature or {},
+            'workflow': self.workflow or {},
+            'usage_count': self.usage_count,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 class Project(models.Model):
     """
     Model for storing projects that data can be exported to.

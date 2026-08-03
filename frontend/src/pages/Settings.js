@@ -9,7 +9,6 @@ import {
   Grid,
   IconButton,
   InputAdornment,
-  InputLabel,
   MenuItem,
   Paper,
   Select,

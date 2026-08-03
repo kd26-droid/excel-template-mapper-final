@@ -663,6 +663,23 @@ const api = {
   deleteIntermediateArtifact: (artifactId) =>
     axios.delete(`${API_URL}/intermediate-artifacts/${artifactId}/`, { timeout: 30000 }),
 
+  getBomWorkflowTemplates: () =>
+    axios.get(`${API_URL}/bom-workflow-templates/`, { timeout: 30000 }),
+
+  saveBomWorkflowTemplate: ({ name, description = '', sourceSignature = {}, workflow = {} }) =>
+    axios.post(`${API_URL}/bom-workflow-templates/`, {
+      name,
+      description,
+      source_signature: sourceSignature,
+      workflow
+    }, { timeout: 60000 }),
+
+  getBomWorkflowTemplate: (templateId) =>
+    axios.get(`${API_URL}/bom-workflow-templates/${templateId}/`, { timeout: 30000 }),
+
+  deleteBomWorkflowTemplate: (templateId) =>
+    axios.delete(`${API_URL}/bom-workflow-templates/${templateId}/`, { timeout: 30000 }),
+
   // ==========================================
   // 5️⃣ DASHBOARD ENDPOINTS
   // ==========================================

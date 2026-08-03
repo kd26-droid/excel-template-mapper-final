@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.utils.html import format_html
-from .models import MappingTemplate, GlobalMpnCache, ProviderCredential, IntermediateArtifact
+from .models import MappingTemplate, GlobalMpnCache, ProviderCredential, IntermediateArtifact, BomWorkflowTemplate
 
 @admin.register(MappingTemplate)
 class MappingTemplateAdmin(admin.ModelAdmin):
@@ -76,3 +76,11 @@ class IntermediateArtifactAdmin(admin.ModelAdmin):
     search_fields = ('session_id', 'artifact_type', 'label', 'file_path')
     readonly_fields = ('created_at', 'file_path', 'metadata')
     ordering = ('-created_at',)
+
+
+@admin.register(BomWorkflowTemplate)
+class BomWorkflowTemplateAdmin(admin.ModelAdmin):
+    list_display = ('name', 'usage_count', 'created_at', 'updated_at')
+    search_fields = ('name', 'description')
+    readonly_fields = ('created_at', 'updated_at', 'usage_count')
+    ordering = ('-updated_at',)
