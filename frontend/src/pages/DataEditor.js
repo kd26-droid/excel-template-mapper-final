@@ -2196,13 +2196,20 @@ const DataEditor = () => {
         open={snackbar.open}
         autoHideDuration={4000}
         onClose={closeSnackbar}
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+        anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
+        sx={{ mt: 7, maxWidth: 420, zIndex: 1600 }}
       >
         <Alert 
           onClose={closeSnackbar} 
           severity={snackbar.severity}
           variant="filled"
-          sx={{ width: '100%' }}
+          sx={{
+            width: 'auto',
+            maxWidth: 420,
+            borderRadius: '14px',
+            boxShadow: '0 18px 50px rgba(15,23,42,0.22)',
+            alignItems: 'center'
+          }}
         >
           {snackbar.message}
         </Alert>
