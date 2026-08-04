@@ -514,7 +514,6 @@ export default function ColumnMapping() {
   
   // Global loading state
   const [globalLoading, setGlobalLoading] = useState(false);
-  useGlobalBlock(globalLoading);
   
   // Action-specific loading states
   const [mappingActionLoading, setMappingActionLoading] = useState(false);
@@ -545,6 +544,7 @@ export default function ColumnMapping() {
   const [clientHeaders, setClientHeaders] = useState([]);
   const [templateHeaders, setTemplateHeaders] = useState([]);
   const [loading, setLoading] = useState(true);
+  useGlobalBlock(globalLoading || loading || mappingActionLoading);
   const [error, setError] = useState(null);
   const [sessionMetadata, setSessionMetadata] = useState({});
 
@@ -4552,17 +4552,6 @@ export default function ColumnMapping() {
     return false;
   }, []);
 
-  // Loading state
-  if (loading) {
-    return (
-      <LoaderOverlay
-        visible
-        title="Loading Mapping Data"
-        message="Analyzing your columns for intelligent mapping..."
-      />
-    );
-  }
-
   // Error state
   if (error) {
     return (
@@ -6029,9 +6018,21 @@ export default function ColumnMapping() {
 
       {/* Global Loader Overlay */}
       <LoaderOverlay
-        visible={globalLoading || mappingActionLoading}
-        title={mappingActionLoading ? "Creating mapping..." : "Finalizing mappings..."}
-        message={mappingActionLoading ? "Connecting selected columns." : "Syncing the latest data before review."}
+        visible={loading || globalLoading || mappingActionLoading}
+        title={
+          loading
+            ? "Loading Mapping Data"
+            : mappingActionLoading
+              ? "Creating mapping..."
+              : "Finalizing mappings..."
+        }
+        message={
+          loading
+            ? "Analyzing your columns for intelligent mapping..."
+            : mappingActionLoading
+              ? "Connecting selected columns."
+              : "Syncing the latest data before review."
+        }
       />
     </div>
   );

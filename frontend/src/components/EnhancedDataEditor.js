@@ -210,6 +210,55 @@ const getConfiguredMpnValidationColumns = () => {
   return { selectedColumns, labelsByField };
 };
 
+const exportRingLoaderStyles = `
+  .fw-export-ring {
+    width: 3.25em;
+    height: 3.25em;
+    transform-origin: center;
+    animation: fw-export-rotate 2s linear infinite;
+  }
+  .fw-export-ring circle {
+    fill: none;
+    stroke: hsl(214, 97%, 59%);
+    stroke-width: 2;
+    stroke-dasharray: 1, 200;
+    stroke-dashoffset: 0;
+    stroke-linecap: round;
+    animation: fw-export-dash 1.5s ease-in-out infinite;
+  }
+  @keyframes fw-export-rotate {
+    100% { transform: rotate(360deg); }
+  }
+  @keyframes fw-export-dash {
+    0% { stroke-dasharray: 1, 200; stroke-dashoffset: 0; }
+    50% { stroke-dasharray: 90, 200; stroke-dashoffset: -35px; }
+    100% { stroke-dashoffset: -125px; }
+  }
+`;
+
+const ExportLoadingContent = ({ title, message, isDarkMode = false }) => (
+  <Box sx={{
+    px: 4,
+    py: 6,
+    textAlign: 'center',
+    bgcolor: isDarkMode ? '#0f172a' : '#ffffff',
+    color: isDarkMode ? '#e2e8f0' : '#0f172a'
+  }}>
+    <style>{exportRingLoaderStyles}</style>
+    <Box sx={{ display: 'flex', justifyContent: 'center', mb: 2.5 }}>
+      <svg className="fw-export-ring" viewBox="25 25 50 50" aria-hidden="true">
+        <circle r={20} cy={50} cx={50} />
+      </svg>
+    </Box>
+    <Typography sx={{ fontSize: 18, lineHeight: 1.25, fontWeight: 680, color: isDarkMode ? '#f8fafc' : '#0f172a', letterSpacing: 0, mb: 0.75 }}>
+      {title}
+    </Typography>
+    <Typography sx={{ fontSize: 14, lineHeight: 1.5, fontWeight: 400, color: isDarkMode ? '#94a3b8' : '#64748b', letterSpacing: 0 }}>
+      {message}
+    </Typography>
+  </Box>
+);
+
 // Turn an internal column name into the header shown in the grid.
 // Known template groups collapse to a single label (Tag_1..N -> "Tag"), and any
 // other split-generated run (e.g. "Reference Designator_1".."_33") collapses to
@@ -419,6 +468,11 @@ const EnhancedDataEditor = () => {
   const [factwisePreviewOpen, setFactwisePreviewOpen] = useState(false);
   const [factwisePreviewType, setFactwisePreviewType] = useState('item');
   const [factwisePreviewDownloading, setFactwisePreviewDownloading] = useState('');
+  const [directoryExportStatus, setDirectoryExportStatus] = useState({
+    open: false,
+    type: 'item',
+    phase: 'idle'
+  });
 
   // Mock existing projects
   const existingProjects = useMemo(() => [
@@ -2411,6 +2465,15 @@ const EnhancedDataEditor = () => {
     }
   }, [factwisePreviewType, getCurrentExportColumnOrder, sessionId, showSnackbar]);
 
+  const handleDirectoryExport = useCallback((type = factwisePreviewType) => {
+    const exportType = type === 'bom' ? 'bom' : 'item';
+    setFactwisePreviewOpen(false);
+    setDirectoryExportStatus({ open: true, type: exportType, phase: 'loading' });
+    window.setTimeout(() => {
+      setDirectoryExportStatus({ open: true, type: exportType, phase: 'success' });
+    }, 1400);
+  }, [factwisePreviewType]);
+
   const factwiseBomPreview = useMemo(() => {
     const rows = Array.isArray(rowData) ? rowData : [];
     const cols = (columnDefs || []).filter(col => col.field && col.field !== '__row_number__');
@@ -3805,6 +3868,53 @@ const EnhancedDataEditor = () => {
       borderColor: t.border.default,
       backgroundColor: t.surface.controlSoft,
       boxShadow: 'none'
+    }
+  };
+  const exportDialogTone = isDarkMode
+    ? {
+        paper: '#0f172a',
+        header: '#111c2f',
+        body: '#0f172a',
+        footer: '#111c2f',
+        panel: '#162033',
+        panelSoft: '#111827',
+        hover: 'rgba(37, 99, 235, 0.14)',
+        border: 'rgba(148, 163, 184, 0.2)',
+        borderSoft: 'rgba(148, 163, 184, 0.12)',
+        text: '#e2e8f0',
+        heading: '#f8fafc',
+        secondary: '#94a3b8',
+        muted: '#64748b',
+        iconBg: 'rgba(37, 99, 235, 0.16)'
+      }
+    : {
+        paper: '#ffffff',
+        header: '#f8fafc',
+        body: '#ffffff',
+        footer: '#f8fafc',
+        panel: '#ffffff',
+        panelSoft: '#fafafa',
+        hover: '#f8fafc',
+        border: '#e5e7eb',
+        borderSoft: '#f0f0f0',
+        text: '#334155',
+        heading: '#0f172a',
+        secondary: '#64748b',
+        muted: '#94a3b8',
+        iconBg: '#dbeafe'
+      };
+  const exportTextFieldSx = {
+    '& .MuiOutlinedInput-root': {
+      borderRadius: '8px',
+      bgcolor: exportDialogTone.panel,
+      color: exportDialogTone.text,
+      '& fieldset': { borderColor: exportDialogTone.border },
+      '&:hover fieldset': { borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.34)' : '#bfdbfe' },
+      '&.Mui-focused fieldset': { borderColor: '#2563eb' }
+    },
+    '& .MuiInputBase-input::placeholder': {
+      color: exportDialogTone.secondary,
+      opacity: 1
     }
   };
   const orangeActionSx = {
@@ -6716,7 +6826,7 @@ const EnhancedDataEditor = () => {
         onClose={() => setFactwiseExportDialogOpen(false)}
         maxWidth="sm"
         fullWidth
-        PaperProps={{ sx: { borderRadius: '14px', overflow: 'hidden', maxWidth: 560 } }}
+        PaperProps={{ sx: { borderRadius: '14px', overflow: 'hidden', maxWidth: 560, bgcolor: exportDialogTone.paper, border: `1px solid ${exportDialogTone.border}` } }}
       >
         <DialogTitle sx={{
           display: 'flex',
@@ -6724,21 +6834,22 @@ const EnhancedDataEditor = () => {
           justifyContent: 'space-between',
           px: 3,
           py: 2,
-          borderBottom: '1px solid #e5e7eb',
-          bgcolor: '#f8fafc'
+          borderBottom: `1px solid ${exportDialogTone.border}`,
+          bgcolor: exportDialogTone.header,
+          color: exportDialogTone.heading
         }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
             <FolderOpenIcon sx={{ color: '#2563eb' }} />
-            <Typography variant="h6" sx={{ fontSize: 18, fontWeight: 650 }}>
+            <Typography variant="h6" sx={{ fontSize: 18, fontWeight: 620, color: exportDialogTone.heading }}>
               Export to FactWise
             </Typography>
           </Box>
-          <IconButton onClick={() => setFactwiseExportDialogOpen(false)} size="small">
+          <IconButton onClick={() => setFactwiseExportDialogOpen(false)} size="small" sx={{ color: exportDialogTone.secondary }}>
             <CloseIcon />
           </IconButton>
         </DialogTitle>
-        <DialogContent sx={{ px: 3, py: 2.5 }}>
-          <Typography variant="body2" sx={{ color: '#64748b', mb: 2 }}>
+        <DialogContent sx={{ px: 3, py: 2.5, bgcolor: exportDialogTone.body }}>
+          <Typography variant="body2" sx={{ color: exportDialogTone.secondary, mb: 2 }}>
             Choose where this prepared sheet should go.
           </Typography>
           <Box sx={{ display: 'grid', gap: 1.25 }}>
@@ -6747,7 +6858,7 @@ const EnhancedDataEditor = () => {
                 key: 'project',
                 title: 'Export to Project',
                 helper: 'Send selected columns into a new or existing project.',
-                icon: <FolderOpenIcon sx={{ color: '#ea580c' }} />
+                icon: <FolderOpenIcon sx={{ color: '#2563eb' }} />
               },
               {
                 key: 'item',
@@ -6766,20 +6877,20 @@ const EnhancedDataEditor = () => {
                 key={option.key}
                 onClick={() => handleChooseFactwiseDestination(option.key)}
                 sx={{
-                  border: '1px solid #e2e8f0',
+                  border: `1px solid ${exportDialogTone.border}`,
                   borderRadius: '12px',
                   px: 2,
                   py: 1.4,
-                  bgcolor: '#fff',
-                  '&:hover': { bgcolor: '#f8fafc', borderColor: '#bfdbfe' }
+                  bgcolor: exportDialogTone.panel,
+                  '&:hover': { bgcolor: exportDialogTone.hover, borderColor: '#60a5fa' }
                 }}
               >
                 <ListItemIcon sx={{ minWidth: 38 }}>{option.icon}</ListItemIcon>
                 <ListItemText
                   primary={option.title}
                   secondary={option.helper}
-                  primaryTypographyProps={{ fontWeight: 650, fontSize: 14, color: '#0f172a' }}
-                  secondaryTypographyProps={{ fontSize: 12.5, color: '#64748b', mt: 0.25 }}
+                  primaryTypographyProps={{ fontWeight: 620, fontSize: 14, color: exportDialogTone.heading }}
+                  secondaryTypographyProps={{ fontSize: 12.5, color: exportDialogTone.secondary, mt: 0.25 }}
                 />
               </ListItemButton>
             ))}
@@ -6795,7 +6906,7 @@ const EnhancedDataEditor = () => {
         }}
         maxWidth="lg"
         fullWidth
-        PaperProps={{ sx: { borderRadius: '12px', overflow: 'hidden', maxWidth: factwisePreviewType === 'bom' ? 1068 : 980 } }}
+        PaperProps={{ sx: { borderRadius: '12px', overflow: 'hidden', maxWidth: factwisePreviewType === 'bom' ? 1068 : 980, bgcolor: exportDialogTone.paper, border: `1px solid ${exportDialogTone.border}` } }}
       >
         <DialogTitle sx={{
           display: 'flex',
@@ -6803,14 +6914,15 @@ const EnhancedDataEditor = () => {
           justifyContent: 'space-between',
           px: 3,
           py: 2,
-          borderBottom: '1px solid #e5e7eb',
-          bgcolor: '#fff'
+          borderBottom: `1px solid ${exportDialogTone.border}`,
+          bgcolor: exportDialogTone.header,
+          color: exportDialogTone.heading
         }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
             {factwisePreviewType === 'bom'
               ? <AccountTreeIcon sx={{ color: '#16a34a' }} />
               : <BadgeIcon sx={{ color: '#2563eb' }} />}
-            <Typography variant="h6" sx={{ fontSize: 18, fontWeight: 650 }}>
+            <Typography variant="h6" sx={{ fontSize: 18, fontWeight: 620, color: exportDialogTone.heading }}>
               {factwisePreviewType === 'bom' ? 'Export BOM' : 'Export Item Directory'}
             </Typography>
           </Box>
@@ -6822,19 +6934,19 @@ const EnhancedDataEditor = () => {
             <Button
               onClick={() => setFactwisePreviewOpen(false)}
               disabled={Boolean(factwisePreviewDownloading)}
-              sx={{ minWidth: 0, color: '#64748b' }}
+              sx={{ minWidth: 0, color: exportDialogTone.secondary }}
             >
               <CloseIcon fontSize="small" />
             </Button>
           )}
         </DialogTitle>
-        <DialogContent sx={{ px: 3, py: 2.5 }}>
+        <DialogContent sx={{ px: 3, py: 2.5, bgcolor: exportDialogTone.body }}>
           {factwisePreviewType === 'bom' ? (
             <>
-              <Typography variant="body2" sx={{ color: '#64748b', mb: 2 }}>
+              <Typography variant="body2" sx={{ color: exportDialogTone.secondary, mb: 2 }}>
                 Review the BOM below, then export it as an Excel sheet, or to FactWise.
               </Typography>
-              <Typography variant="caption" sx={{ color: '#64748b', display: 'block', mb: 1.5 }}>
+              <Typography variant="caption" sx={{ color: exportDialogTone.secondary, display: 'block', mb: 1.5 }}>
                 High-level view - open full screen to drill into every raw material.
               </Typography>
               <Box
@@ -6842,10 +6954,10 @@ const EnhancedDataEditor = () => {
                   position: 'relative',
                   height: 374,
                   overflow: 'hidden',
-                  border: '1px solid #e5e7eb',
+                  border: `1px solid ${exportDialogTone.border}`,
                   borderRadius: '8px',
-                  bgcolor: '#fff',
-                  backgroundImage: 'radial-gradient(#e5e7eb 0.8px, transparent 0.8px)',
+                  bgcolor: isDarkMode ? '#0b1220' : '#fff',
+                  backgroundImage: `radial-gradient(${isDarkMode ? 'rgba(148, 163, 184, 0.22)' : '#e5e7eb'} 0.8px, transparent 0.8px)`,
                   backgroundSize: '22px 22px'
                 }}
               >
@@ -6876,13 +6988,13 @@ const EnhancedDataEditor = () => {
                     px: 2,
                     border: '1px solid #aeb7c2',
                     borderRadius: '8px',
-                    bgcolor: '#fff',
+                    bgcolor: exportDialogTone.panel,
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
                     fontSize: 13,
                     fontWeight: 800,
-                    color: '#0f172a',
+                    color: exportDialogTone.heading,
                     boxShadow: '0 1px 2px rgba(15,23,42,0.06)'
                   }}
                 >
@@ -6936,9 +7048,9 @@ const EnhancedDataEditor = () => {
                       px: 1.5,
                       py: 0.8,
                       borderRadius: '8px',
-                      border: '1px dashed #cbd5e1',
-                      bgcolor: '#f8fafc',
-                      color: '#64748b',
+                      border: `1px dashed ${exportDialogTone.border}`,
+                      bgcolor: exportDialogTone.panel,
+                      color: exportDialogTone.secondary,
                       fontSize: 11,
                       fontWeight: 800,
                       textAlign: 'center'
@@ -6948,9 +7060,9 @@ const EnhancedDataEditor = () => {
                   </Box>
                 )}
                 <Box sx={{ position: 'absolute', left: 14, bottom: 14, display: 'grid', gap: 3 }}>
-                  <Button size="small" sx={{ minWidth: 28, width: 28, height: 28, p: 0, bgcolor: '#fff', color: '#111827', border: '1px solid #e5e7eb' }}>+</Button>
-                  <Button size="small" sx={{ minWidth: 28, width: 28, height: 28, p: 0, bgcolor: '#fff', color: '#111827', border: '1px solid #e5e7eb' }}>-</Button>
-                  <Button size="small" sx={{ minWidth: 28, width: 28, height: 28, p: 0, bgcolor: '#fff', color: '#111827', border: '1px solid #e5e7eb' }}>⛶</Button>
+                  <Button size="small" sx={{ minWidth: 28, width: 28, height: 28, p: 0, bgcolor: exportDialogTone.panel, color: exportDialogTone.heading, border: `1px solid ${exportDialogTone.border}` }}>+</Button>
+                  <Button size="small" sx={{ minWidth: 28, width: 28, height: 28, p: 0, bgcolor: exportDialogTone.panel, color: exportDialogTone.heading, border: `1px solid ${exportDialogTone.border}` }}>-</Button>
+                  <Button size="small" sx={{ minWidth: 28, width: 28, height: 28, p: 0, bgcolor: exportDialogTone.panel, color: exportDialogTone.heading, border: `1px solid ${exportDialogTone.border}` }}>⛶</Button>
                 </Box>
               </Box>
               <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2, mt: 1.2 }}>
@@ -6961,7 +7073,7 @@ const EnhancedDataEditor = () => {
                   ['#fde047', 'Raw material'],
                   ['#d1d5db', 'Alternate']
                 ].map(([color, label]) => (
-                  <Box key={label} sx={{ display: 'flex', alignItems: 'center', gap: 0.5, fontSize: 12, color: '#64748b' }}>
+                  <Box key={label} sx={{ display: 'flex', alignItems: 'center', gap: 0.5, fontSize: 12, color: exportDialogTone.secondary }}>
                     <Box sx={{ width: 10, height: 10, borderRadius: 0.5, bgcolor: color, border: '1px solid #cbd5e1' }} />
                     {label}
                   </Box>
@@ -6970,13 +7082,13 @@ const EnhancedDataEditor = () => {
             </>
           ) : (
             <>
-              <Typography variant="body2" sx={{ color: '#64748b', mb: 1 }}>
+              <Typography variant="body2" sx={{ color: exportDialogTone.secondary, mb: 1 }}>
                 Review the item directory below, then download it for FactWise.
               </Typography>
-              <Typography variant="caption" sx={{ color: '#64748b', display: 'block', mb: 1.5 }}>
+              <Typography variant="caption" sx={{ color: exportDialogTone.secondary, display: 'block', mb: 1.5 }}>
                 Preview shows the current page. The downloaded file includes the full processed sheet.
               </Typography>
-              <TableContainer component={Paper} variant="outlined" sx={{ maxHeight: 360, borderRadius: '10px' }}>
+              <TableContainer component={Paper} variant="outlined" sx={{ maxHeight: 360, borderRadius: '10px', bgcolor: exportDialogTone.panel, borderColor: exportDialogTone.border }}>
                 <Table stickyHeader size="small">
                   <TableHead>
                     <TableRow>
@@ -6984,7 +7096,7 @@ const EnhancedDataEditor = () => {
                         .filter(col => col.field && col.field !== '__row_number__')
                         .slice(0, 10)
                         .map(col => (
-                          <TableCell key={col.field} sx={{ fontWeight: 700, bgcolor: '#f8fafc', whiteSpace: 'nowrap' }}>
+                          <TableCell key={col.field} sx={{ fontWeight: 650, bgcolor: exportDialogTone.header, color: exportDialogTone.heading, borderColor: exportDialogTone.border, whiteSpace: 'nowrap' }}>
                             {col.headerName || col.field}
                           </TableCell>
                         ))}
@@ -6992,7 +7104,7 @@ const EnhancedDataEditor = () => {
                   </TableHead>
                   <TableBody>
                     {(rowData || []).slice(0, 8).map((row, rowIndex) => (
-                      <TableRow key={row.id || rowIndex} hover>
+                        <TableRow key={row.id || rowIndex} hover sx={{ '&:hover td': { bgcolor: exportDialogTone.hover } }}>
                         {columnDefs
                           .filter(col => col.field && col.field !== '__row_number__')
                           .slice(0, 10)
@@ -7004,7 +7116,8 @@ const EnhancedDataEditor = () => {
                                 overflow: 'hidden',
                                 textOverflow: 'ellipsis',
                                 whiteSpace: 'nowrap',
-                                color: '#334155'
+                                color: exportDialogTone.text,
+                                borderColor: exportDialogTone.borderSoft
                               }}
                             >
                               {row[col.field] ?? ''}
@@ -7016,7 +7129,7 @@ const EnhancedDataEditor = () => {
                 </Table>
               </TableContainer>
               <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mt: 1.25 }}>
-                <Typography variant="caption" sx={{ color: '#64748b' }}>
+                <Typography variant="caption" sx={{ color: exportDialogTone.secondary }}>
                   Showing {Math.min((rowData || []).length, 8)} rows and {Math.min(getCurrentExportColumnOrder().length, 10)} columns in preview
                 </Typography>
                 {getCurrentExportColumnOrder().length > 10 && (
@@ -7030,8 +7143,8 @@ const EnhancedDataEditor = () => {
           px: 3,
           py: 2,
           gap: 1,
-          borderTop: '1px solid #e5e7eb',
-          bgcolor: '#f8fafc'
+          borderTop: `1px solid ${exportDialogTone.border}`,
+          bgcolor: exportDialogTone.footer
         }}>
           <Button
             onClick={() => setFactwisePreviewOpen(false)}
@@ -7039,69 +7152,101 @@ const EnhancedDataEditor = () => {
             sx={{
               textTransform: 'none',
               borderRadius: '8px',
-              color: factwisePreviewType === 'bom' ? '#1976d2' : '#475569',
-              mr: factwisePreviewType === 'bom' ? 'auto' : 0,
+              color: factwisePreviewType === 'bom' ? '#60a5fa' : exportDialogTone.secondary,
+              mr: 'auto',
               fontWeight: factwisePreviewType === 'bom' ? 700 : 500
             }}
           >
             Cancel
           </Button>
-          {factwisePreviewType === 'bom' ? (
-            <>
-              <Button
-                variant="contained"
-                onClick={() => downloadFactwisePreview('excel')}
-                disabled={Boolean(factwisePreviewDownloading)}
-                startIcon={factwisePreviewDownloading === 'excel' ? <CircularProgress size={16} sx={{ color: '#fff' }} /> : <FolderOpenIcon />}
-                sx={{
-                  textTransform: 'none',
-                  borderRadius: '4px',
-                  fontWeight: 700,
-                  bgcolor: '#ea580c',
-                  '&:hover': { bgcolor: '#c2410c' }
-                }}
-              >
-                Export to FactWise
-              </Button>
-              <Button
-                variant="contained"
-                onClick={() => downloadFactwisePreview('excel')}
-                disabled={Boolean(factwisePreviewDownloading)}
-                startIcon={factwisePreviewDownloading === 'excel' ? <CircularProgress size={16} sx={{ color: '#fff' }} /> : <DownloadIcon />}
-                sx={{
-                  textTransform: 'none',
-                  borderRadius: '4px',
-                  fontWeight: 700,
-                  bgcolor: '#ea580c',
-                  '&:hover': { bgcolor: '#c2410c' }
-                }}
-              >
-                Export Sheet
-              </Button>
-            </>
-          ) : (
-            <>
-              <Button
-                variant="outlined"
-                onClick={() => downloadFactwisePreview('csv')}
-                disabled={Boolean(factwisePreviewDownloading)}
-                startIcon={factwisePreviewDownloading === 'csv' ? <CircularProgress size={16} /> : <DownloadIcon />}
-                sx={{ textTransform: 'none', borderRadius: '8px' }}
-              >
-                Download CSV
-              </Button>
-              <Button
-                variant="contained"
-                onClick={() => downloadFactwisePreview('excel')}
-                disabled={Boolean(factwisePreviewDownloading)}
-                startIcon={factwisePreviewDownloading === 'excel' ? <CircularProgress size={16} sx={{ color: '#fff' }} /> : <DownloadIcon />}
-                sx={{ textTransform: 'none', borderRadius: '8px', fontWeight: 650 }}
-              >
-                Download XLSX
-              </Button>
-            </>
-          )}
+          <Button
+            variant="contained"
+            onClick={() => handleDirectoryExport(factwisePreviewType)}
+            disabled={Boolean(factwisePreviewDownloading)}
+            startIcon={<FolderOpenIcon />}
+            sx={{
+              textTransform: 'none',
+              borderRadius: '999px',
+              fontWeight: 700,
+              px: 3,
+              minHeight: 38,
+              bgcolor: '#2563eb',
+              boxShadow: '0 14px 28px -18px rgba(37, 99, 235, 0.9)',
+              '&:hover': {
+                bgcolor: '#2563eb',
+                boxShadow: '0 14px 28px -18px rgba(37, 99, 235, 0.9)'
+              }
+            }}
+          >
+            Export
+          </Button>
         </DialogActions>
+      </Dialog>
+
+      {/* Directory export loading/success */}
+      <Dialog
+        open={directoryExportStatus.open}
+        onClose={() => {
+          if (directoryExportStatus.phase === 'success') {
+            setDirectoryExportStatus(prev => ({ ...prev, open: false, phase: 'idle' }));
+          }
+        }}
+        maxWidth="xs"
+        fullWidth
+        PaperProps={{ sx: { borderRadius: '16px', overflow: 'hidden', bgcolor: exportDialogTone.paper, border: `1px solid ${exportDialogTone.border}` } }}
+      >
+        {directoryExportStatus.phase === 'loading' ? (
+          <DialogContent sx={{ p: 0 }}>
+            <ExportLoadingContent
+              isDarkMode={isDarkMode}
+              title={`Exporting to ${directoryExportStatus.type === 'bom' ? 'BOM Directory' : 'Item Directory'}...`}
+              message="Preparing your FactWise export."
+            />
+          </DialogContent>
+        ) : (
+          <>
+            <DialogContent sx={{ px: 4, py: 5, textAlign: 'center', bgcolor: exportDialogTone.body }}>
+              <Box sx={{
+                width: 74,
+                height: 74,
+                borderRadius: '50%',
+                bgcolor: exportDialogTone.iconBg,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                mx: 'auto',
+                mb: 2.5
+              }}>
+                <CheckCircleIcon sx={{ fontSize: 46, color: '#2563eb' }} />
+              </Box>
+              <Typography sx={{ fontSize: 24, lineHeight: 1.18, fontWeight: 680, color: isDarkMode ? '#bfdbfe' : '#1d4ed8', mb: 1, letterSpacing: 0 }}>
+                Exported Successfully
+              </Typography>
+              <Typography sx={{ fontSize: 15, lineHeight: 1.5, fontWeight: 500, color: exportDialogTone.text, mb: 0.5, letterSpacing: 0 }}>
+                Exported to {directoryExportStatus.type === 'bom' ? 'BOM Directory' : 'Item Directory'}.
+              </Typography>
+              <Typography sx={{ fontSize: 13.5, lineHeight: 1.5, fontWeight: 400, color: exportDialogTone.secondary, letterSpacing: 0 }}>
+                Your FactWise export is ready.
+              </Typography>
+            </DialogContent>
+            <DialogActions sx={{ px: 3, py: 2, justifyContent: 'center', bgcolor: exportDialogTone.footer, borderTop: `1px solid ${exportDialogTone.border}` }}>
+              <Button
+                variant="contained"
+                onClick={() => setDirectoryExportStatus(prev => ({ ...prev, open: false, phase: 'idle' }))}
+                sx={{
+                  textTransform: 'none',
+                  borderRadius: '999px',
+                  fontWeight: 700,
+                  px: 4,
+                  bgcolor: '#2563eb',
+                  '&:hover': { bgcolor: '#2563eb' }
+                }}
+              >
+                Done
+              </Button>
+            </DialogActions>
+          </>
+        )}
       </Dialog>
 
       {/* Data Correction Upload Dialog */}
@@ -7206,80 +7351,79 @@ const EnhancedDataEditor = () => {
         maxWidth="sm"
         fullWidth
         PaperProps={{
-          sx: { borderRadius: '12px', overflow: 'hidden' }
+          sx: { borderRadius: '12px', overflow: 'hidden', bgcolor: exportDialogTone.paper, border: `1px solid ${exportDialogTone.border}` }
         }}
       >
         <DialogTitle sx={{
           display: 'flex',
           justifyContent: 'space-between',
           alignItems: 'center',
-          backgroundColor: '#f8f9fa',
-          borderBottom: '1px solid #e0e0e0',
+          backgroundColor: exportDialogTone.header,
+          borderBottom: `1px solid ${exportDialogTone.border}`,
+          color: exportDialogTone.heading,
           py: 2
         }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-            <FolderOpenIcon sx={{ color: '#e65100' }} />
-            <Typography variant="h6" sx={{ fontWeight: 600, fontSize: '18px' }}>
+            <FolderOpenIcon sx={{ color: '#2563eb' }} />
+            <Typography variant="h6" sx={{ fontWeight: 620, fontSize: '18px', color: exportDialogTone.heading }}>
               Export to Project
             </Typography>
           </Box>
           {!exportProjectLoading && (
-            <IconButton onClick={() => setExportProjectDialogOpen(false)} size="small">
+            <IconButton onClick={() => setExportProjectDialogOpen(false)} size="small" sx={{ color: exportDialogTone.secondary }}>
               <CloseIcon />
             </IconButton>
           )}
         </DialogTitle>
 
         {exportProjectLoading ? (
-          <DialogContent sx={{ px: 4, py: 8, textAlign: 'center' }}>
-            <CircularProgress size={56} sx={{ color: '#e65100', mb: 3 }} />
-            <Typography variant="h6" sx={{ fontWeight: 600, color: '#333' }}>
-              Exporting to Project...
-            </Typography>
-            <Typography variant="body2" sx={{ color: 'text.secondary', mt: 1 }}>
-              Please wait
-            </Typography>
+          <DialogContent sx={{ p: 0 }}>
+            <ExportLoadingContent
+              isDarkMode={isDarkMode}
+              title="Exporting to Project..."
+              message="Preparing your selected fields."
+            />
           </DialogContent>
         ) : exportProjectSuccess ? (
           <>
-            <DialogContent sx={{ px: 4, py: 5, textAlign: 'center' }}>
+            <DialogContent sx={{ px: 4, py: 5, textAlign: 'center', bgcolor: exportDialogTone.body }}>
               <Box sx={{
                 width: 80,
                 height: 80,
                 borderRadius: '50%',
-                backgroundColor: '#e8f5e9',
+                backgroundColor: exportDialogTone.iconBg,
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 margin: '0 auto 24px'
               }}>
-                <CheckCircleIcon sx={{ fontSize: 48, color: '#2e7d32' }} />
+                <CheckCircleIcon sx={{ fontSize: 48, color: '#2563eb' }} />
               </Box>
-              <Typography variant="h5" sx={{ fontWeight: 700, color: '#2e7d32', mb: 1.5 }}>
+              <Typography sx={{ fontSize: 24, lineHeight: 1.18, fontWeight: 680, color: isDarkMode ? '#bfdbfe' : '#1d4ed8', mb: 1.25, letterSpacing: 0 }}>
                 Exported Successfully
               </Typography>
-              <Typography variant="body1" sx={{ color: 'text.secondary', mb: 1 }}>
+              <Typography sx={{ fontSize: 15, lineHeight: 1.5, fontWeight: 500, color: exportDialogTone.text, mb: 1, letterSpacing: 0 }}>
                 Data has been exported to project
               </Typography>
-              <Typography variant="h6" sx={{ fontWeight: 600, color: '#333' }}>
+              <Typography sx={{ fontSize: 18, lineHeight: 1.35, fontWeight: 650, color: exportDialogTone.heading, letterSpacing: 0 }}>
                 {exportProjectMode === 'NEW'
                   ? exportProjectName
                   : `${selectedExistingProject?.project_code} — ${selectedExistingProject?.project_name}`}
               </Typography>
-              <Typography variant="body2" sx={{ color: 'text.secondary', mt: 2 }}>
+              <Typography sx={{ fontSize: 13.5, lineHeight: 1.5, fontWeight: 400, color: exportDialogTone.secondary, mt: 2, letterSpacing: 0 }}>
                 {Object.values(exportProjectSelectedColumns).filter(v => v).length} columns exported
               </Typography>
             </DialogContent>
-            <DialogActions sx={{ px: 3, py: 2, justifyContent: 'center', backgroundColor: '#f8f9fa', borderTop: '1px solid #e0e0e0' }}>
+            <DialogActions sx={{ px: 3, py: 2, justifyContent: 'center', backgroundColor: exportDialogTone.footer, borderTop: `1px solid ${exportDialogTone.border}` }}>
               <Button
                 variant="contained"
                 onClick={() => setExportProjectDialogOpen(false)}
                 sx={{
-                  backgroundColor: '#2e7d32',
-                  '&:hover': { backgroundColor: '#1b5e20' },
+                  backgroundColor: '#2563eb',
+                  '&:hover': { backgroundColor: '#2563eb' },
                   textTransform: 'none',
-                  borderRadius: '8px',
-                  fontWeight: 600,
+                  borderRadius: '999px',
+                  fontWeight: 700,
                   px: 4
                 }}
               >
@@ -7289,10 +7433,10 @@ const EnhancedDataEditor = () => {
           </>
         ) : (
           <>
-            <DialogContent sx={{ px: 3, py: 3 }}>
+            <DialogContent sx={{ px: 3, py: 3, bgcolor: exportDialogTone.body, color: exportDialogTone.text }}>
               {/* Export Mode Selection */}
               <FormControl component="fieldset" sx={{ mb: 2, width: '100%' }}>
-                <FormLabel component="legend" sx={{ fontSize: '14px', fontWeight: 500, mb: 0.5 }}>
+                <FormLabel component="legend" sx={{ fontSize: '14px', fontWeight: 500, mb: 0.5, color: `${exportDialogTone.secondary} !important` }}>
                   Export to
                 </FormLabel>
                 <RadioGroup
@@ -7302,23 +7446,25 @@ const EnhancedDataEditor = () => {
                 >
                   <FormControlLabel
                     value="NEW"
-                    control={<Radio sx={{ py: 0.5 }} />}
+                    control={<Radio sx={{ py: 0.5, color: exportDialogTone.secondary, '&.Mui-checked': { color: '#2563eb' } }} />}
                     label="New Project"
+                    sx={{ color: exportDialogTone.text, '& .MuiFormControlLabel-label': { fontSize: 14, fontWeight: 400 } }}
                   />
                   <FormControlLabel
                     value="EXISTING"
-                    control={<Radio sx={{ py: 0.5 }} />}
+                    control={<Radio sx={{ py: 0.5, color: exportDialogTone.secondary, '&.Mui-checked': { color: '#2563eb' } }} />}
                     label="Existing Project"
+                    sx={{ color: exportDialogTone.text, '& .MuiFormControlLabel-label': { fontSize: 14, fontWeight: 400 } }}
                   />
                 </RadioGroup>
               </FormControl>
 
-              <Divider sx={{ mb: 2 }} />
+              <Divider sx={{ mb: 2, borderColor: exportDialogTone.border }} />
 
               {/* Project Name */}
               {exportProjectMode === 'NEW' && (
                 <Box sx={{ mb: 2 }}>
-                  <Typography variant="body2" sx={{ color: 'text.secondary', mb: 0.5, fontWeight: 500 }}>
+                  <Typography variant="body2" sx={{ color: exportDialogTone.secondary, mb: 0.5, fontWeight: 500 }}>
                     Project Name
                   </Typography>
                   <TextField
@@ -7327,14 +7473,14 @@ const EnhancedDataEditor = () => {
                     value={exportProjectName}
                     onChange={(e) => setExportProjectName(e.target.value)}
                     placeholder="Enter project name..."
-                    sx={{ '& .MuiOutlinedInput-root': { borderRadius: '8px' } }}
+                    sx={exportTextFieldSx}
                   />
                 </Box>
               )}
 
               {exportProjectMode === 'EXISTING' && (
                 <Box sx={{ mb: 2 }}>
-                  <Typography variant="body2" sx={{ color: 'text.secondary', mb: 0.5, fontWeight: 500 }}>
+                  <Typography variant="body2" sx={{ color: exportDialogTone.secondary, mb: 0.5, fontWeight: 500 }}>
                     Select Project
                   </Typography>
                   <Autocomplete
@@ -7350,13 +7496,29 @@ const EnhancedDataEditor = () => {
                     onChange={(_, newValue) => {
                       setSelectedExistingProject(newValue);
                     }}
+                    PaperComponent={(props) => (
+                      <Paper
+                        {...props}
+                        sx={{
+                          bgcolor: exportDialogTone.panel,
+                          color: exportDialogTone.text,
+                          border: `1px solid ${exportDialogTone.border}`,
+                          boxShadow: isDarkMode ? '0 18px 42px rgba(0,0,0,0.48)' : '0 18px 42px rgba(15,23,42,0.16)',
+                          '& .MuiAutocomplete-option': {
+                            color: exportDialogTone.text,
+                            '&[aria-selected="true"]': { bgcolor: exportDialogTone.hover },
+                            '&.Mui-focused': { bgcolor: exportDialogTone.hover }
+                          }
+                        }}
+                      />
+                    )}
                     renderOption={(props, option) => (
                       <li {...props} key={option.project_id}>
                         <Box sx={{ display: 'flex', alignItems: 'center', width: '100%', py: 0.5 }}>
-                          <Typography variant="body2" sx={{ fontWeight: 600, fontSize: '14px', color: '#1565c0', minWidth: 90 }}>
+                          <Typography variant="body2" sx={{ fontWeight: 600, fontSize: '14px', color: '#60a5fa', minWidth: 90 }}>
                             {option.project_code}
                           </Typography>
-                          <Typography variant="body2" sx={{ fontSize: '14px', ml: 3, flex: 1 }}>
+                          <Typography variant="body2" sx={{ fontSize: '14px', ml: 3, flex: 1, color: exportDialogTone.text }}>
                             {option.project_name}
                           </Typography>
                         </Box>
@@ -7367,12 +7529,12 @@ const EnhancedDataEditor = () => {
                         {...params}
                         size="small"
                         placeholder="Search by project name or code..."
-                        sx={{ '& .MuiOutlinedInput-root': { borderRadius: '8px' } }}
+                        sx={exportTextFieldSx}
                         InputProps={{
                           ...params.InputProps,
                           startAdornment: (
                             <>
-                              <SearchIcon sx={{ color: 'text.secondary', fontSize: 20, mr: 0.5 }} />
+                              <SearchIcon sx={{ color: exportDialogTone.secondary, fontSize: 20, mr: 0.5 }} />
                               {params.InputProps.startAdornment}
                             </>
                           ),
@@ -7380,17 +7542,17 @@ const EnhancedDataEditor = () => {
                       />
                     )}
                     noOptionsText="No projects found"
-                    ListboxProps={{ style: { maxHeight: '300px' } }}
+                    ListboxProps={{ style: { maxHeight: '300px', backgroundColor: exportDialogTone.panel, color: exportDialogTone.text } }}
                   />
                 </Box>
               )}
 
-              <Divider sx={{ mb: 2 }} />
+              <Divider sx={{ mb: 2, borderColor: exportDialogTone.border }} />
 
               {/* Fields to Export Section */}
               <Box sx={{ mb: 1 }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
-                  <Typography variant="body2" sx={{ color: 'text.secondary', fontWeight: 500 }}>
+                  <Typography variant="body2" sx={{ color: exportDialogTone.secondary, fontWeight: 500 }}>
                     Fields to be exported
                   </Typography>
                   <Box sx={{ display: 'flex', alignItems: 'center' }}>
@@ -7402,9 +7564,9 @@ const EnhancedDataEditor = () => {
                       }
                       onChange={handleExportProjectToggleSelectAll}
                       size="small"
-                      sx={{ color: '#2e7d32', '&.Mui-checked': { color: '#2e7d32' } }}
+                      sx={{ color: '#2563eb', '&.Mui-checked': { color: '#2563eb' } }}
                     />
-                    <Typography variant="body2" sx={{ fontWeight: 500, fontSize: '13px' }}>
+                    <Typography variant="body2" sx={{ fontWeight: 500, fontSize: '13px', color: exportDialogTone.text }}>
                       SELECT ALL
                     </Typography>
                   </Box>
@@ -7413,9 +7575,9 @@ const EnhancedDataEditor = () => {
                 <Box sx={{
                   maxHeight: '280px',
                   overflowY: 'auto',
-                  border: '1px solid #e0e0e0',
+                  border: `1px solid ${exportDialogTone.border}`,
                   borderRadius: '8px',
-                  backgroundColor: '#fafafa'
+                  backgroundColor: exportDialogTone.panelSoft
                 }}>
                   <Grid container>
                     {Object.entries(exportProjectSelectedColumns).map(([field, checked]) => {
@@ -7428,13 +7590,13 @@ const EnhancedDataEditor = () => {
                             alignItems: 'center',
                             px: 1.5,
                             py: 0.25,
-                            borderBottom: '1px solid #f0f0f0',
-                            '&:hover': { backgroundColor: '#f5f5f5' }
+                            borderBottom: `1px solid ${exportDialogTone.borderSoft}`,
+                            '&:hover': { backgroundColor: exportDialogTone.hover }
                           }}>
                             <Checkbox
                               checked={checked}
                               size="small"
-                              sx={{ color: '#2e7d32', '&.Mui-checked': { color: '#2e7d32' } }}
+                              sx={{ color: '#2563eb', '&.Mui-checked': { color: '#2563eb' } }}
                               onChange={(e) => {
                                 const newChecked = e.target.checked;
                                 setExportProjectSelectedColumns(prev => ({
@@ -7449,7 +7611,8 @@ const EnhancedDataEditor = () => {
                               fontSize: '13px',
                               overflow: 'hidden',
                               textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap'
+                              whiteSpace: 'nowrap',
+                              color: exportDialogTone.text
                             }}>
                               {label}
                             </Typography>
@@ -7460,7 +7623,7 @@ const EnhancedDataEditor = () => {
                   </Grid>
                 </Box>
 
-                <Typography variant="caption" sx={{ color: 'text.secondary', mt: 0.5, display: 'block' }}>
+                <Typography variant="caption" sx={{ color: exportDialogTone.secondary, mt: 0.5, display: 'block' }}>
                   {Object.values(exportProjectSelectedColumns).filter(v => v).length} of{' '}
                   {Object.keys(exportProjectSelectedColumns).length} columns selected
                 </Typography>
@@ -7470,15 +7633,24 @@ const EnhancedDataEditor = () => {
             <DialogActions sx={{
               px: 3,
               py: 2,
-              backgroundColor: '#f8f9fa',
-              borderTop: '1px solid #e0e0e0',
+              backgroundColor: exportDialogTone.footer,
+              borderTop: `1px solid ${exportDialogTone.border}`,
               gap: 1
             }}>
               <Button
                 variant="outlined"
                 color="error"
                 onClick={() => setExportProjectDialogOpen(false)}
-                sx={{ textTransform: 'none', borderRadius: '8px' }}
+                sx={{
+                  textTransform: 'none',
+                  borderRadius: '8px',
+                  color: isDarkMode ? '#fca5a5' : '#dc2626',
+                  borderColor: isDarkMode ? 'rgba(248, 113, 113, 0.42)' : 'rgba(220, 38, 38, 0.5)',
+                  '&:hover': {
+                    borderColor: isDarkMode ? '#fca5a5' : '#dc2626',
+                    bgcolor: isDarkMode ? 'rgba(248, 113, 113, 0.08)' : 'rgba(220, 38, 38, 0.05)'
+                  }
+                }}
               >
                 Cancel
               </Button>
@@ -7492,11 +7664,12 @@ const EnhancedDataEditor = () => {
                 }
                 startIcon={<FolderOpenIcon />}
                 sx={{
-                  backgroundColor: '#e65100',
-                  '&:hover': { backgroundColor: '#bf360c' },
+                  backgroundColor: '#2563eb',
+                  '&:hover': { backgroundColor: '#2563eb' },
                   textTransform: 'none',
-                  borderRadius: '8px',
-                  fontWeight: 600
+                  borderRadius: '999px',
+                  fontWeight: 700,
+                  px: 3
                 }}
               >
                 Export
