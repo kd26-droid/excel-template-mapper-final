@@ -37,7 +37,25 @@ import {
 const API_BASE = process.env.REACT_APP_API_BASE_URL || '/api';
 const STEPS = ['Split points', 'Outputs', 'Preview'];
 const CUSTOM_GROUP_SEPARATOR = '__custom__';
+const CUSTOM_SIMPLE_DELIMITER = '__custom__';
 const GROUP_SEPARATOR_PRESETS = ['', '),', ',', '/', '|', ';', ' '];
+const SIMPLE_DELIMITER_PRESETS = [
+  { value: ',', label: 'Comma ,' },
+  { value: ';', label: 'Semicolon ;' },
+  { value: '|', label: 'Pipe |' },
+  { value: '/', label: 'Slash /' },
+  { value: ' ', label: 'Space' },
+  { value: '\t', label: 'Tab' },
+  { value: '\n', label: 'New line' },
+];
+
+const numberedColumnIndex = (value, pattern, genericName) => {
+  const match = String(value || '').match(pattern);
+  if (match) return Number(match[1]);
+  return String(value || '').toLowerCase() === genericName.toLowerCase() ? 1 : 0;
+};
+
+const escapeRegExp = value => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const buildParts = (text, boundaries, trimValues, dropEmptyValues) => {
   if (!text || boundaries.length === 0) return [];
@@ -92,9 +110,16 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
   const [commonDelimiters, setCommonDelimiters] = useState([]);
   const [splitMode, setSplitMode] = useState('pattern');
   const [simpleDelimiter, setSimpleDelimiter] = useState('');
+  const [simpleDelimiterMode, setSimpleDelimiterMode] = useState('');
+  const [customSimpleDelimiter, setCustomSimpleDelimiter] = useState('');
   const [chunkSize, setChunkSize] = useState(3);
   const [trimValues, setTrimValues] = useState(true);
   const [dropEmptyValues, setDropEmptyValues] = useState(true);
+  const [keepSourceColumn, setKeepSourceColumn] = useState(true);
+  const [simpleOutputType, setSimpleOutputType] = useState('tag');
+  const [simpleSpecTarget, setSimpleSpecTarget] = useState('new');
+  const [simpleSpecName, setSimpleSpecName] = useState('');
+  const [simpleCustomName, setSimpleCustomName] = useState('');
   const [boundaries, setBoundaries] = useState([]);
   const [parts, setParts] = useState([]);
   const [previewData, setPreviewData] = useState(null);
@@ -132,6 +157,35 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
   }, [availableColumns, sessionId, initialColumn]);
 
   const currentSample = sampleValues[currentSampleIndex] || '';
+  const existingTagMax = useMemo(() => columns.reduce((maximum, column) => Math.max(
+    maximum,
+    numberedColumnIndex(column.value, /^Tag_(\d+)$/, 'Tag')
+  ), 0), [columns]);
+  const existingSpecPairs = useMemo(() => {
+    const pairIndexes = new Set();
+    columns.forEach(column => {
+      const nameIndex = numberedColumnIndex(column.value, /^Specification_Name_(\d+)$/, 'Specification name');
+      const valueIndex = numberedColumnIndex(column.value, /^Specification_Value_(\d+)(?:_\d+)?$/, 'Specification value');
+      if (nameIndex) pairIndexes.add(nameIndex);
+      if (valueIndex) pairIndexes.add(valueIndex);
+    });
+    return [...pairIndexes].sort((a, b) => a - b);
+  }, [columns]);
+  const nextSpecPairIndex = existingSpecPairs.length ? Math.max(...existingSpecPairs) + 1 : 1;
+  const selectedSpecPairIndex = simpleSpecTarget === 'new'
+    ? nextSpecPairIndex
+    : Number(simpleSpecTarget);
+  const existingCustomMax = useMemo(() => {
+    const name = simpleCustomName.trim();
+    if (!name) return 0;
+    const numberedPattern = new RegExp(`^${escapeRegExp(name)}_(\\d+)$`, 'i');
+    return columns.reduce((maximum, column) => {
+      const value = String(column.value || '');
+      const match = value.match(numberedPattern);
+      if (match) return Math.max(maximum, Number(match[1]));
+      return value.toLowerCase() === name.toLowerCase() ? Math.max(maximum, 1) : maximum;
+    }, 0);
+  }, [columns, simpleCustomName]);
   const firstGroup = useMemo(() => {
     if (!currentSample || !groupSeparator) return currentSample;
     let groups = currentSample.split(groupSeparator);
@@ -234,8 +288,26 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
     setParts(current => current.map(part => part.id === id ? { ...part, [field]: value } : part));
   };
 
-  const parserConfig = useMemo(() => ({
-    patterns: [{
+  const parserConfig = useMemo(() => {
+    const extractions = parts.map((part, index) => {
+      const simpleSpecOutput = splitMode === 'delimiter' && simpleOutputType === 'spec';
+      return {
+        type: part.type,
+        part_index: part.partIndex ?? index,
+        char1: part.type === 'before' ? part.delimiter : part.startDelimiter,
+        char2: part.type === 'between' ? part.endDelimiter : '',
+        output_type: splitMode === 'delimiter' ? simpleOutputType : part.outputType,
+        spec_name: simpleSpecOutput
+          ? (simpleSpecTarget === 'new' ? simpleSpecName.trim() : `Specification pair ${selectedSpecPairIndex}`)
+          : (part.specName || ''),
+        spec_pair_index: simpleSpecOutput ? selectedSpecPairIndex : null,
+        include_spec_name: simpleSpecOutput ? simpleSpecTarget === 'new' : true,
+        custom_name: splitMode === 'delimiter' && simpleOutputType === 'custom'
+          ? simpleCustomName.trim()
+          : '',
+      };
+    });
+    return { patterns: [{
       name: 'User Pattern',
       group_separator: groupSeparator,
       split_mode: splitMode,
@@ -243,19 +315,21 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
       chunk_size: Math.max(1, Number(chunkSize) || 1),
       trim_values: trimValues,
       drop_empty: dropEmptyValues,
-      extractions: parts.map((part, index) => ({
-        type: part.type,
-        part_index: part.partIndex ?? index,
-        char1: part.type === 'before' ? part.delimiter : part.startDelimiter,
-        char2: part.type === 'between' ? part.endDelimiter : '',
-        output_type: part.outputType,
-        spec_name: part.specName || '',
-      })),
-    }],
-  }), [chunkSize, dropEmptyValues, groupSeparator, parts, simpleDelimiter, splitMode, trimValues]);
+      keep_source_column: keepSourceColumn,
+      extractions,
+    }] };
+  }, [chunkSize, dropEmptyValues, groupSeparator, keepSourceColumn, parts, selectedSpecPairIndex, simpleCustomName, simpleDelimiter, simpleOutputType, simpleSpecName, simpleSpecTarget, splitMode, trimValues]);
 
   const loadPreview = async () => {
-    if (parts.some(part => part.outputType === 'spec' && !part.specName.trim())) {
+    if (splitMode === 'delimiter' && simpleOutputType === 'spec' && simpleSpecTarget === 'new' && !simpleSpecName.trim()) {
+      setError('Enter a name for the new Specification pair.');
+      return;
+    }
+    if (splitMode === 'delimiter' && simpleOutputType === 'custom' && !simpleCustomName.trim()) {
+      setError('Enter a name for the custom columns.');
+      return;
+    }
+    if (splitMode !== 'delimiter' && parts.some(part => part.outputType === 'spec' && !part.specName.trim())) {
       setError('Enter a name for every Specification output.');
       return;
     }
@@ -379,6 +453,7 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
                           setSplitMode(nextMode);
                           setBoundaries([]);
                           setSimpleDelimiter('');
+                          setSimpleDelimiterMode('');
                           setPreviewData(null);
                           if (nextMode !== 'pattern') {
                             setGroupSeparator('');
@@ -391,6 +466,40 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
                         <MenuItem value="characters">Every N characters</MenuItem>
                       </Select>
                     </FormControl>
+                    {splitMode === 'delimiter' && (
+                      <FormControl size="small" sx={{ width: { xs: '100%', sm: 190 }, maxWidth: '100%' }}>
+                        <InputLabel>Delimiter</InputLabel>
+                        <Select
+                          label="Delimiter"
+                          value={simpleDelimiterMode}
+                          onChange={event => {
+                            const mode = event.target.value;
+                            setSimpleDelimiterMode(mode);
+                            setSimpleDelimiter(mode === CUSTOM_SIMPLE_DELIMITER ? customSimpleDelimiter : mode);
+                            setPreviewData(null);
+                          }}
+                        >
+                          <MenuItem value="" disabled>Select delimiter</MenuItem>
+                          {SIMPLE_DELIMITER_PRESETS.map(option => (
+                            <MenuItem key={option.label} value={option.value}>{option.label}</MenuItem>
+                          ))}
+                          <MenuItem value={CUSTOM_SIMPLE_DELIMITER}>Custom text...</MenuItem>
+                        </Select>
+                      </FormControl>
+                    )}
+                    {splitMode === 'delimiter' && simpleDelimiterMode === CUSTOM_SIMPLE_DELIMITER && (
+                      <TextField
+                        size="small"
+                        label="Custom delimiter"
+                        value={customSimpleDelimiter}
+                        onChange={event => {
+                          setCustomSimpleDelimiter(event.target.value);
+                          setSimpleDelimiter(event.target.value);
+                          setPreviewData(null);
+                        }}
+                        sx={{ width: { xs: '100%', sm: 190 }, maxWidth: '100%' }}
+                      />
+                    )}
                     {splitMode === 'characters' && (
                       <TextField
                         size="small"
@@ -455,6 +564,9 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
                           onClick={() => {
                             if (splitMode === 'delimiter') {
                               setSimpleDelimiter(char);
+                              const preset = SIMPLE_DELIMITER_PRESETS.find(option => option.value === char);
+                              setSimpleDelimiterMode(preset ? preset.value : CUSTOM_SIMPLE_DELIMITER);
+                              if (!preset) setCustomSimpleDelimiter(char);
                               return;
                             }
                             if (splitMode === 'pattern') toggleBoundary(char, index);
@@ -487,6 +599,11 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
                     control={<Checkbox checked={dropEmptyValues} onChange={event => setDropEmptyValues(event.target.checked)} />}
                     label="Drop empty values"
                   />
+                  <FormControlLabel
+                    sx={{ m: 0 }}
+                    control={<Checkbox checked={keepSourceColumn} onChange={event => setKeepSourceColumn(event.target.checked)} />}
+                    label="Keep original column"
+                  />
                 </Box>
               </Box>
 
@@ -510,6 +627,87 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
 
       {step === 1 && (
         <Box>
+          {splitMode === 'delimiter' ? (
+            <Box sx={{ display: 'grid', gap: 2.25, mb: 2.5 }}>
+              <FormControl size="small" fullWidth>
+                <InputLabel>Output</InputLabel>
+                <Select
+                  label="Output"
+                  value={simpleOutputType}
+                  onChange={event => {
+                    setSimpleOutputType(event.target.value);
+                    setError('');
+                    setPreviewData(null);
+                  }}
+                >
+                  <MenuItem value="tag">Add Tags</MenuItem>
+                  <MenuItem value="spec">Add Specification Values</MenuItem>
+                  <MenuItem value="custom">Custom columns</MenuItem>
+                </Select>
+              </FormControl>
+
+              {simpleOutputType === 'spec' && (
+                <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'minmax(220px, 1fr) minmax(220px, 1fr)' }, gap: 1.5 }}>
+                  <FormControl size="small" fullWidth>
+                    <InputLabel>Specification pair</InputLabel>
+                    <Select
+                      label="Specification pair"
+                      value={simpleSpecTarget}
+                      onChange={event => {
+                        setSimpleSpecTarget(event.target.value);
+                        setError('');
+                        setPreviewData(null);
+                      }}
+                    >
+                      {existingSpecPairs.map(pairIndex => (
+                        <MenuItem key={pairIndex} value={String(pairIndex)}>Specification pair ({pairIndex})</MenuItem>
+                      ))}
+                      <MenuItem value="new">Add specification pair ({nextSpecPairIndex})</MenuItem>
+                    </Select>
+                  </FormControl>
+                  {simpleSpecTarget === 'new' && (
+                    <TextField
+                      size="small"
+                      label="Specification name"
+                      value={simpleSpecName}
+                      onChange={event => setSimpleSpecName(event.target.value)}
+                    />
+                  )}
+                </Box>
+              )}
+
+              {simpleOutputType === 'custom' && (
+                <TextField
+                  size="small"
+                  fullWidth
+                  label="Column name"
+                  placeholder="e.g. Reference Designator"
+                  value={simpleCustomName}
+                  onChange={event => {
+                    setSimpleCustomName(event.target.value);
+                    setError('');
+                    setPreviewData(null);
+                  }}
+                />
+              )}
+
+              <Box sx={{ display: 'grid', gap: 1 }}>
+                <Typography variant="subtitle2">Columns to add</Typography>
+                <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
+                  {simpleOutputType === 'tag' ? parts.map((part, index) => (
+                      <Chip key={part.id} label={`Tag (${existingTagMax + index + 1}): ${part.preview || '(empty)'}`} />
+                    )) : simpleOutputType === 'spec' ? parts.map((part, index) => (
+                      <Chip key={part.id} label={`Specification value (${selectedSpecPairIndex}.${index + 1}): ${part.preview || '(empty)'}`} />
+                    )) : parts.map((part, index) => (
+                      <Chip
+                        key={part.id}
+                        label={`${simpleCustomName.trim() || 'Custom column'} (${existingCustomMax + index + 1}): ${part.preview || '(empty)'}`}
+                      />
+                    ))}
+                </Box>
+              </Box>
+            </Box>
+          ) : (
           <Box sx={{ borderTop: '1px solid #e5e7eb', mb: 2 }}>
             {parts.map((part, index) => (
               <Box
@@ -537,6 +735,7 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
               </Box>
             ))}
           </Box>
+          )}
           <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
             <Button startIcon={<ArrowBackIcon />} onClick={() => setStep(0)}>Back</Button>
             <Button variant="contained" startIcon={<ContentCutIcon />} onClick={loadPreview} disabled={loading}>

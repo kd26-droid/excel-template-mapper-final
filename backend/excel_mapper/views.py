@@ -9469,6 +9469,10 @@ def apply_column_value_rule(headers, rows, raw_rule):
             row.append('')
 
     value_mode = str(rule.get('value_mode') or 'fixed')
+    # The editor historically called this mode "concat" while reusable rules
+    # use "join". Accept both so current requests and older templates compose.
+    if value_mode == 'concat':
+        value_mode = 'join'
     source_columns = [str(value or '').strip() for value in (rule.get('source_columns') or []) if str(value or '').strip()]
     source_indexes = [_grid_column_index(output_headers, source) for source in source_columns]
     if value_mode in {'copy', 'join'} and (not source_indexes or any(index < 0 for index in source_indexes)):
@@ -9610,6 +9614,8 @@ def fill_or_create_column(request):
 
         clean_rule = dict(rule)
         clean_rule['type'] = 'column_value'
+        if clean_rule.get('value_mode') == 'concat':
+            clean_rule['value_mode'] = 'join'
         clean_rule['target_column'] = str(clean_rule.get('target_column') or '').strip()
         if clean_rule.get('target_mode') == 'new' and _grid_column_index(headers, clean_rule['target_column']) >= 0:
             return Response({

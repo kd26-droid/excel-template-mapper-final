@@ -421,6 +421,8 @@ const EnhancedDataEditor = () => {
   const [createColumnFirst, setCreateColumnFirst] = useState('');
   const [createColumnSecond, setCreateColumnSecond] = useState('');
   const [createColumnSeparator, setCreateColumnSeparator] = useState(' ');
+  const [createColumnSeparatorMode, setCreateColumnSeparatorMode] = useState('space');
+  const [createColumnCustomSeparator, setCreateColumnCustomSeparator] = useState('');
   const [createColumnMode, setCreateColumnMode] = useState('fill_empty');
   const [createColumnSaving, setCreateColumnSaving] = useState(false);
   const [hasFormulas, setHasFormulas] = useState(false);
@@ -4535,7 +4537,7 @@ const EnhancedDataEditor = () => {
 
             {createColumnContentType === 'concat' && (
               <>
-                <Grid item xs={12} sm={5}>
+                <Grid item xs={12} sm={4}>
                   <FormControl fullWidth size="small">
                     <InputLabel>First column</InputLabel>
                     <Select label="First column" value={createColumnFirst} onChange={(e) => setCreateColumnFirst(e.target.value)}>
@@ -4543,7 +4545,7 @@ const EnhancedDataEditor = () => {
                     </Select>
                   </FormControl>
                 </Grid>
-                <Grid item xs={12} sm={5}>
+                <Grid item xs={12} sm={4}>
                   <FormControl fullWidth size="small">
                     <InputLabel>Second column</InputLabel>
                     <Select label="Second column" value={createColumnSecond} onChange={(e) => setCreateColumnSecond(e.target.value)}>
@@ -4551,9 +4553,55 @@ const EnhancedDataEditor = () => {
                     </Select>
                   </FormControl>
                 </Grid>
-                <Grid item xs={12} sm={2}>
-                  <TextField fullWidth size="small" label="Separator" value={createColumnSeparator} onChange={(e) => setCreateColumnSeparator(e.target.value)} />
+                <Grid item xs={12} sm={4}>
+                  <FormControl fullWidth size="small">
+                    <InputLabel>Separator</InputLabel>
+                    <Select
+                      label="Separator"
+                      value={createColumnSeparatorMode}
+                      onChange={(e) => {
+                        const mode = e.target.value;
+                        const presets = {
+                          none: '',
+                          space: ' ',
+                          hyphen: '-',
+                          spaced_hyphen: ' - ',
+                          underscore: '_',
+                          slash: '/',
+                          pipe: '|',
+                          comma: ',',
+                        };
+                        setCreateColumnSeparatorMode(mode);
+                        setCreateColumnSeparator(mode === 'custom' ? createColumnCustomSeparator : presets[mode]);
+                      }}
+                    >
+                      <MenuItem value="none">No separator</MenuItem>
+                      <MenuItem value="space">Space</MenuItem>
+                      <MenuItem value="hyphen">Hyphen -</MenuItem>
+                      <MenuItem value="spaced_hyphen">Spaced hyphen&nbsp; - </MenuItem>
+                      <MenuItem value="underscore">Underscore _</MenuItem>
+                      <MenuItem value="slash">Slash /</MenuItem>
+                      <MenuItem value="pipe">Pipe |</MenuItem>
+                      <MenuItem value="comma">Comma ,</MenuItem>
+                      <MenuItem value="custom">Custom...</MenuItem>
+                    </Select>
+                  </FormControl>
                 </Grid>
+                {createColumnSeparatorMode === 'custom' && (
+                  <Grid item xs={12}>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      label="Custom separator"
+                      value={createColumnCustomSeparator}
+                      onChange={(e) => {
+                        setCreateColumnCustomSeparator(e.target.value);
+                        setCreateColumnSeparator(e.target.value);
+                      }}
+                      helperText="Enter any character or text, including spaces."
+                    />
+                  </Grid>
+                )}
               </>
             )}
 

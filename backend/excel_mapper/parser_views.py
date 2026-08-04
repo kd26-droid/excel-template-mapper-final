@@ -22,6 +22,7 @@ from .views import (
     hybrid_file_manager,
     make_unique_field_headers,
     read_session_grid,
+    write_session_grid,
 )
 from .models import PDFSession, PDFExtractionResult
 
@@ -128,7 +129,7 @@ def parse_cell_single_pattern(cell_value, pattern_config):
     global _parse_log_count
 
     if not cell_value:
-        return {'spec': {}, 'tag': []}
+        return {'spec': {}, 'tag': [], 'custom': {}}
 
     trim_values = bool(pattern_config.get('trim_values', True))
     drop_empty = bool(pattern_config.get('drop_empty', True))
@@ -144,7 +145,7 @@ def parse_cell_single_pattern(cell_value, pattern_config):
         groups = [cell_value]
 
     # Initialize result
-    result = {'spec': {}, 'tag': []}
+    result = {'spec': {}, 'tag': [], 'custom': {}}
 
     extractions = pattern_config.get('extractions', [])
     split_mode = str(pattern_config.get('split_mode') or 'pattern')
@@ -198,6 +199,7 @@ def parse_cell_single_pattern(cell_value, pattern_config):
                 char2 = str(end)
         output_type = extraction.get('output_type', 'spec')
         spec_name = extraction.get('spec_name', '')
+        custom_name = str(extraction.get('custom_name') or '').strip()
         try:
             part_index = max(0, int(extraction.get('part_index') or 0))
         except (TypeError, ValueError):
@@ -232,9 +234,11 @@ def parse_cell_single_pattern(cell_value, pattern_config):
                 result['spec'][spec_name].append(value)
             elif output_type == 'tag':
                 result['tag'].append(value)
+            elif output_type == 'custom' and custom_name:
+                result['custom'].setdefault(custom_name, []).append(value)
 
     if _parse_log_count <= 3:
-        logger.info(f"   Result: specs={list(result['spec'].keys())}, tags={len(result['tag'])}")
+        logger.info(f"   Result: specs={list(result['spec'].keys())}, tags={len(result['tag'])}, custom={list(result['custom'].keys())}")
 
     return result
 
@@ -310,7 +314,7 @@ def parse_cell(cell_value, parser_config):
         }
     """
     if not cell_value:
-        return {'spec': {}, 'tag': [], 'matched_pattern': None}
+        return {'spec': {}, 'tag': [], 'custom': {}, 'matched_pattern': None}
 
     cell_value = str(cell_value).strip()
 
@@ -518,6 +522,7 @@ def apply_parser_to_data(data, headers, source_column, parser_config):
     parsed_rows = []
     max_spec_counts = {}  # {spec_name: max_count}
     max_tag_count = 0
+    max_custom_counts = {}
 
     for row in data:
         cell_value = row[source_idx] if source_idx < len(row) else ''
@@ -530,30 +535,103 @@ def apply_parser_to_data(data, headers, source_column, parser_config):
             max_spec_counts[spec_name] = max(current_max, len(values))
 
         max_tag_count = max(max_tag_count, len(parsed['tag']))
+        for custom_name, values in parsed.get('custom', {}).items():
+            max_custom_counts[custom_name] = max(max_custom_counts.get(custom_name, 0), len(values))
 
     logger.info(f"   Parsed {len(parsed_rows)} rows")
     logger.info(f"   max_spec_counts: {max_spec_counts}")
     logger.info(f"   max_tag_count: {max_tag_count}")
+    logger.info(f"   max_custom_counts: {max_custom_counts}")
 
-    # Build new headers based on max counts
-    # IMPORTANT: Headers must be UNIQUE for dict-based merge to work!
-    new_headers = []
-    spec_index = 0
-
-    # For each spec type: Spec Name, Spec Value 1, Spec Value 2, ...
+    # Build output definitions once. Multiple delimiter parts aimed at one
+    # specification belong to one pair, not one duplicated pair per part.
+    spec_outputs = []
+    seen_spec_outputs = set()
     for extraction in extractions:
-        if extraction.get('output_type') == 'spec':
-            name = extraction.get('spec_name', '')
-            if name and name in max_spec_counts:
-                spec_index += 1
-                # Use unique header names with the spec name and index
-                new_headers.append(f'Specification_Name_{spec_index}')  # e.g., Specification_Name_1
-                for i in range(max_spec_counts[name]):
-                    new_headers.append(f'Specification_Value_{spec_index}_{i+1}')  # e.g., Specification_Value_1_1
+        if extraction.get('output_type') != 'spec':
+            continue
+        name = str(extraction.get('spec_name') or '').strip()
+        if not name or name not in max_spec_counts:
+            continue
+        try:
+            requested_pair = int(extraction.get('spec_pair_index') or 0)
+        except (TypeError, ValueError):
+            requested_pair = 0
+        include_name = extraction.get('include_spec_name', True) is not False
+        key = (name, requested_pair, include_name)
+        if key not in seen_spec_outputs:
+            seen_spec_outputs.add(key)
+            spec_outputs.append({
+                'name': name,
+                'pair_index': requested_pair,
+                'include_name': include_name,
+            })
 
-    # Tags - also make unique
+    existing_tag_indexes = [
+        int(match.group(1)) for header in headers
+        for match in [re.match(r'^Tag_(\d+)$', str(header or ''))] if match
+    ]
+    if 'Tag' in headers:
+        existing_tag_indexes.append(1)
+    tag_start_index = max(existing_tag_indexes, default=0) + 1
+
+    existing_spec_indexes = [
+        int(match.group(1)) for header in headers
+        for match in [re.match(r'^Specification_(?:Name|Value)_(\d+)(?:_|$)', str(header or ''))] if match
+    ]
+    if 'Specification name' in headers or 'Specification value' in headers:
+        existing_spec_indexes.append(1)
+    next_spec_index = max(existing_spec_indexes, default=0) + 1
+    assigned_spec_indexes = set(existing_spec_indexes)
+    for output in spec_outputs:
+        if output['pair_index'] > 0:
+            assigned_spec_indexes.add(output['pair_index'])
+            continue
+        while next_spec_index in assigned_spec_indexes:
+            next_spec_index += 1
+        output['pair_index'] = next_spec_index
+        assigned_spec_indexes.add(next_spec_index)
+        next_spec_index += 1
+
+    # IMPORTANT: Headers must be unique for dict-based merge to work.
+    new_headers = []
+    for output in spec_outputs:
+        name = output['name']
+        pair_index = output['pair_index']
+        value_count = max_spec_counts[name]
+        if output['include_name']:
+            new_headers.append(f'Specification_Name_{pair_index}')
+        for i in range(value_count):
+            value_suffix = f'_{i + 1}' if value_count > 1 or not output['include_name'] else ''
+            new_headers.append(f'Specification_Value_{pair_index}{value_suffix}')
+
+    custom_outputs = []
+    seen_custom_outputs = set()
+    for extraction in extractions:
+        if extraction.get('output_type') != 'custom':
+            continue
+        name = str(extraction.get('custom_name') or '').strip()
+        if name and name in max_custom_counts and name not in seen_custom_outputs:
+            seen_custom_outputs.add(name)
+            existing_indexes = []
+            numbered_pattern = re.compile(rf'^{re.escape(name)}_(\d+)$', re.IGNORECASE)
+            for header in headers:
+                match = numbered_pattern.match(str(header or ''))
+                if match:
+                    existing_indexes.append(int(match.group(1)))
+                elif str(header or '').lower() == name.lower():
+                    existing_indexes.append(1)
+            custom_outputs.append({
+                'name': name,
+                'start_index': max(existing_indexes, default=0) + 1,
+            })
+
+    for output in custom_outputs:
+        for offset in range(max_custom_counts[output['name']]):
+            new_headers.append(f"{output['name']}_{output['start_index'] + offset}")
+
     for i in range(max_tag_count):
-        new_headers.append(f'Tag_{i+1}')
+        new_headers.append(f'Tag_{tag_start_index + i}')
 
     logger.info(f"   New headers count: {len(new_headers)}")
     logger.info(f"   First 10 headers: {new_headers[:10]}")
@@ -564,21 +642,18 @@ def apply_parser_to_data(data, headers, source_column, parser_config):
     for parsed in parsed_rows:
         row_values = []
 
-        # Add spec values in order (use the extractions variable we defined above)
-        for extraction in extractions:
-            if extraction.get('output_type') == 'spec':
-                name = extraction.get('spec_name', '')
-                if name and name in max_spec_counts:
-                    # Add the spec name
-                    row_values.append(name)
+        for output in spec_outputs:
+            name = output['name']
+            if output['include_name']:
+                row_values.append(name)
+            values = parsed['spec'].get(name, [])
+            for i in range(max_spec_counts[name]):
+                row_values.append(values[i] if i < len(values) else '')
 
-                    # Add values, padding with empty strings
-                    values = parsed['spec'].get(name, [])
-                    for i in range(max_spec_counts[name]):
-                        if i < len(values):
-                            row_values.append(values[i])
-                        else:
-                            row_values.append('')
+        for output in custom_outputs:
+            values = parsed.get('custom', {}).get(output['name'], [])
+            for i in range(max_custom_counts[output['name']]):
+                row_values.append(values[i] if i < len(values) else '')
 
         # Add tags
         tags = parsed['tag']
@@ -597,7 +672,8 @@ def apply_parser_to_data(data, headers, source_column, parser_config):
         'new_data': new_data,
         'max_counts': {
             'specs': max_spec_counts,
-            'tags': max_tag_count
+            'tags': max_tag_count,
+            'custom': max_custom_counts,
         }
     }
 
@@ -880,6 +956,26 @@ def parser_apply(request):
 
     new_headers = result['new_headers']
     new_data = result['new_data']
+    patterns = parser_config.get('patterns') or []
+    active_pattern = patterns[0] if patterns else parser_config
+    keep_source_column = active_pattern.get('keep_source_column', True) is not False
+    source_removed = False
+
+    if not keep_source_column:
+        try:
+            source_index = headers.index(source_column)
+        except ValueError:
+            return Response({
+                'success': False,
+                'error': f'Column "{source_column}" is not in the grid',
+            })
+        retained_headers = headers[:source_index] + headers[source_index + 1:]
+        retained_rows = []
+        for row in data:
+            padded = list(row[:len(headers)]) + [''] * max(0, len(headers) - len(row))
+            retained_rows.append(padded[:source_index] + padded[source_index + 1:])
+        write_session_grid(session_id, info, retained_headers, retained_rows)
+        source_removed = True
 
     # Store parser columns separately - data_view will merge them
     info['parser_columns'] = {
@@ -895,6 +991,7 @@ def parser_apply(request):
         'parser_config': parser_config,
         'new_headers': new_headers,
         'max_counts': result['max_counts'],
+        'keep_source_column': keep_source_column,
         'applied': True
     }
 
@@ -906,6 +1003,7 @@ def parser_apply(request):
         'success': True,
         'new_headers_count': len(new_headers),
         'max_counts': result['max_counts'],
+        'source_removed': source_removed,
         'message': f'Parser applied. Added {len(new_headers)} new columns.'
     })
 
