@@ -7467,7 +7467,7 @@ const EnhancedDataEditor = () => {
         autoHideDuration={3500}
         onClose={closeSnackbar}
         anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
-        sx={{ mt: 8, maxWidth: 420 }}
+        sx={{ mt: 7, maxWidth: 420, zIndex: 1600 }}
       >
         <Alert 
           onClose={closeSnackbar} 

@@ -4323,9 +4323,21 @@ const BomNormalizer = () => {
         open={Boolean(successMessage)}
         autoHideDuration={5000}
         onClose={() => setSuccessMessage('')}
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+        anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
+        sx={{ mt: 7, maxWidth: 420, zIndex: 1600 }}
       >
-        <Alert severity="success" variant="filled" onClose={() => setSuccessMessage('')}>
+        <Alert
+          severity="success"
+          variant="filled"
+          onClose={() => setSuccessMessage('')}
+          sx={{
+            width: 'auto',
+            maxWidth: 420,
+            borderRadius: '14px',
+            boxShadow: '0 18px 50px rgba(15,23,42,0.22)',
+            alignItems: 'center'
+          }}
+        >
           {successMessage}
         </Alert>
       </Snackbar>
