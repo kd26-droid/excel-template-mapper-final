@@ -10,8 +10,8 @@ import { useThemeContext } from '../utils/ThemeContext';
 
 // ─── nav items ──────────────────────────────────────────────────────────────
 const NAV_ITEMS = [
-  { label: 'Dashboard',      path: '/',               icon: DashboardIcon },
-  { label: 'Upload Files',   path: '/upload',         icon: CloudUploadIcon },
+  { label: 'Dashboard',      path: '/dashboard',      icon: DashboardIcon },
+  { label: 'Upload Files',   path: '/',               icon: CloudUploadIcon, activePaths: ['/', '/upload'] },
   { label: 'Settings',       path: '/settings',       icon: SettingsIcon },
 ];
 
@@ -118,6 +118,7 @@ const Header = () => {
         >
           {NAV_ITEMS.map((item) => {
             const isActive =
+              item.activePaths?.includes(currentPath) ||
               currentPath === item.path ||
               (item.path !== '/' && currentPath.startsWith(item.path));
             const Icon = item.icon;

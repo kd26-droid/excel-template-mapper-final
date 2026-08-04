@@ -1845,6 +1845,15 @@ def upload_files(request):
                 logger.error(f"Template application traceback: {traceback.format_exc()}")
                 template_applied = True
                 template_success = False
+
+        # Template application mutates SESSION_STORE after the initial session save.
+        # Persist the updated mappings/formulas before the editor opens, otherwise
+        # another worker can read the stale snapshot with mappings=None.
+        try:
+            if session_id in SESSION_STORE:
+                save_session(session_id, SESSION_STORE[session_id])
+        except Exception as persist_error:
+            logger.warning(f"Could not persist post-upload session {session_id}: {persist_error}")
         
         logger.info(f"Files uploaded successfully for session {session_id}")
         
@@ -3377,7 +3386,8 @@ def data_view(request):
         logger.info(f"📊 DATA_VIEW: enhanced_headers = {info.get('enhanced_headers')}")
         logger.info(f"📊 DATA_VIEW: current_template_headers = {info.get('current_template_headers')}")
         logger.info(f"📊 DATA_VIEW: column_counts = {info.get('column_counts')}")
-        logger.info(f"📊 DATA_VIEW: mappings count = {len(info.get('mappings', []))}")
+        raw_mappings_for_log = info.get('mappings') or []
+        logger.info(f"📊 DATA_VIEW: mappings count = {len(raw_mappings_for_log)}")
 
         def _normalize_session_rows(value):
             if isinstance(value, list):

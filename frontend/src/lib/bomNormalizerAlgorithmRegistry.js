@@ -76,6 +76,11 @@ export const QTY_OPTIONS = [
   { value: 'alternate_columns', label: 'Alternate quantity and UOM are in nearby columns' },
 ];
 
+export const MANUFACTURER_INHERIT_OPTIONS = [
+  { value: 'inherit_blank', label: 'Fill blank alternate manufacturer from primary' },
+  { value: 'never', label: 'Do not inherit manufacturer' },
+];
+
 export const GROUP_HEADER_OPTIONS = [
   {
     value: 'auto',

@@ -31,7 +31,7 @@ function App() {
       <Container maxWidth="xl" sx={{ flexGrow: 1 }}>
         <Box sx={{ mt: 4, mb: 4 }}>
           <Routes>
-            <Route path="/" element={<Dashboard />} />
+            <Route path="/" element={<UploadFiles />} />
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/upload" element={<UploadFiles />} />
             <Route path="/mapping/:sessionId" element={<ColumnMapping />} />
