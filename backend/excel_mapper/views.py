@@ -10617,6 +10617,180 @@ def set_column_default(request):
         return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+def _value_fails_validation(value, validation):
+    """Return True when a populated value breaks an optional required-field rule."""
+    text = str(value or '').strip()
+    if not text or not isinstance(validation, dict):
+        return False
+
+    kind = str(validation.get('kind') or '').strip().lower()
+    if kind == 'alpha':
+        # Allow human-readable units such as "Square metre", but no digits,
+        # punctuation, or placeholders such as "--".
+        return re.fullmatch(r'[A-Za-z]+(?:\s+[A-Za-z]+)*', text) is None
+    if kind == 'allowed':
+        allowed = {
+            str(item or '').strip().casefold()
+            for item in (validation.get('allowed_values') or [])
+            if str(item or '').strip()
+        }
+        return bool(allowed) and text.casefold() not in allowed
+    return False
+
+
+@api_view(['POST'])
+def fill_missing_values(request):
+    """Analyze a column or fill user-selected empty/specific-value cells."""
+    try:
+        session_id = request.data.get('session_id')
+        column = str(request.data.get('column') or '').strip()
+        action = str(request.data.get('action') or 'apply').strip().lower()
+        target_mode = str(request.data.get('target_mode') or 'empty').strip().lower()
+        selected_values = request.data.get('selected_values') or []
+        strategy = str(request.data.get('strategy') or '').strip().lower()
+        default_value = request.data.get('default_value', '')
+        default_value = '' if default_value is None else str(default_value).strip()
+        validation = request.data.get('validation') or {}
+
+        if not session_id:
+            return Response({'success': False, 'error': 'session_id required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not column:
+            return Response({'success': False, 'error': 'column required'}, status=status.HTTP_400_BAD_REQUEST)
+        if action not in {'analyze', 'apply'}:
+            return Response({'success': False, 'error': 'action must be analyze or apply'}, status=status.HTTP_400_BAD_REQUEST)
+        if action == 'apply':
+            if target_mode not in {'empty', 'selected_values'}:
+                return Response({'success': False, 'error': 'target_mode must be empty or selected_values'}, status=status.HTTP_400_BAD_REQUEST)
+            if target_mode == 'selected_values' and (not isinstance(selected_values, list) or not selected_values):
+                return Response({'success': False, 'error': 'Select at least one value to replace'}, status=status.HTTP_400_BAD_REQUEST)
+            if strategy not in {'above', 'below', 'default'}:
+                return Response({'success': False, 'error': 'strategy must be above, below, or default'}, status=status.HTTP_400_BAD_REQUEST)
+            if strategy == 'default' and not default_value:
+                return Response({'success': False, 'error': 'default_value required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+        headers, rows = read_session_grid(session_id, info)
+        if not headers or rows is None:
+            return Response({'success': False, 'error': 'No data found for this session'}, status=status.HTTP_400_BAD_REQUEST)
+
+        ci = _grid_column_index(headers, column)
+        if ci < 0:
+            return Response({'success': False, 'error': f'Column "{column}" is not in the grid'}, status=status.HTTP_400_BAD_REQUEST)
+
+        for row in rows:
+            while len(row) < len(headers):
+                row.append('')
+
+        if action == 'analyze':
+            from collections import Counter
+            counts = Counter()
+            empty_count = 0
+            for row in rows:
+                text = str(row[ci] or '').strip()
+                if text:
+                    counts[text] += 1
+                else:
+                    empty_count += 1
+
+            placeholders = {'-', '--', '---', 'n/a', 'na', 'null', 'none', '?'}
+            allowed = validation.get('allowed_values') or [] if isinstance(validation, dict) else []
+            value_options = []
+            for value, count in counts.items():
+                reason = ''
+                if _value_fails_validation(value, validation):
+                    kind = str((validation or {}).get('kind') or '').lower()
+                    if kind == 'alpha':
+                        reason = 'Contains numbers, punctuation, or symbols'
+                    elif kind == 'allowed':
+                        reason = f'Not an allowed value ({", ".join(str(item) for item in allowed)})'
+                    else:
+                        reason = 'Does not match this field rule'
+                elif value.casefold() in placeholders:
+                    reason = 'Looks like a placeholder'
+                value_options.append({
+                    'value': value,
+                    'count': count,
+                    'suggested': bool(reason),
+                    'reason': reason,
+                })
+
+            value_options.sort(key=lambda item: (not item['suggested'], -item['count'], item['value'].casefold()))
+            return Response({
+                'success': True,
+                'column': column,
+                'total_rows': len(rows),
+                'empty_count': empty_count,
+                'values': value_options[:500],
+                'distinct_value_count': len(value_options),
+                'suggested_values': [item['value'] for item in value_options if item['suggested']],
+            })
+
+        selected_set = {
+            str(value or '').strip()
+            for value in selected_values
+            if str(value or '').strip()
+        }
+
+        def is_problem(value):
+            text = str(value or '').strip()
+            if target_mode == 'empty':
+                return text == ''
+            return text in selected_set
+
+        problem_mask = [is_problem(row[ci]) for row in rows]
+        empty_found = sum(1 for row, problem in zip(rows, problem_mask) if problem and not str(row[ci] or '').strip())
+        selected_found = sum(1 for row, problem in zip(rows, problem_mask) if problem and str(row[ci] or '').strip())
+        changed = 0
+
+        if strategy == 'default':
+            for row, problem in zip(rows, problem_mask):
+                if problem and row[ci] != default_value:
+                    row[ci] = default_value
+                    changed += 1
+        elif strategy == 'above':
+            nearest = None
+            for row, problem in zip(rows, problem_mask):
+                if problem:
+                    if nearest is not None and row[ci] != nearest:
+                        row[ci] = nearest
+                        changed += 1
+                else:
+                    nearest = row[ci]
+        else:  # below
+            nearest = None
+            for row, problem in zip(reversed(rows), reversed(problem_mask)):
+                if problem:
+                    if nearest is not None and row[ci] != nearest:
+                        row[ci] = nearest
+                        changed += 1
+                else:
+                    nearest = row[ci]
+
+        unresolved = sum(1 for row in rows if is_problem(row[ci]))
+        write_session_grid(session_id, info, headers, rows)
+        save_session(session_id, info)
+        new_version = increment_template_version(session_id)
+        logger.info(
+            'fill_missing_values on %s: column=%s strategy=%s changed=%s unresolved=%s',
+            session_id, column, strategy, changed, unresolved,
+        )
+        return Response({
+            'success': True,
+            'changed': changed,
+            'unresolved': unresolved,
+            'empty_found': empty_found,
+            'selected_found': selected_found,
+            'target_mode': target_mode,
+            'template_version': new_version,
+            'headers': headers,
+        })
+    except Exception as e:
+        logger.error(f"fill_missing_values failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
 @api_view(['POST'])
 def expand_alternate_columns(request):
     """
@@ -11195,6 +11369,52 @@ def required_field_report(request):
                     'allowedValues': ['TRUE', 'FALSE'],
                     'values': samples,
                 })
+
+        # Additional required-field validators are sent explicitly by the UI so
+        # this endpoint remains reusable and does not guess roles from headers.
+        validators = request.data.get('validators') or {}
+        if isinstance(validators, dict):
+            already_reported = {item['field'] for item in invalids}
+            for column, validation in validators.items():
+                if column not in headers or column in already_reported or not isinstance(validation, dict):
+                    continue
+                idx = headers.index(column)
+                kind = str(validation.get('kind') or '').strip().lower()
+                values = [
+                    str((row[idx] if idx < len(row) else '') or '').strip()
+                    for row in rows
+                ]
+                populated = [value for value in values if value]
+
+                if kind == 'single_value':
+                    distinct = []
+                    for value in populated:
+                        if value not in distinct:
+                            distinct.append(value)
+                    if len(distinct) > 1:
+                        invalids.append({
+                            'field': column,
+                            'invalidCount': len(populated),
+                            'kind': kind,
+                            'values': distinct[:10],
+                        })
+                    continue
+
+                bad_values = [value for value in populated if _value_fails_validation(value, validation)]
+                if bad_values:
+                    samples = []
+                    for value in bad_values:
+                        if value not in samples:
+                            samples.append(value)
+                        if len(samples) >= 10:
+                            break
+                    invalids.append({
+                        'field': column,
+                        'invalidCount': len(bad_values),
+                        'kind': kind,
+                        'allowedValues': validation.get('allowed_values') or [],
+                        'values': samples,
+                    })
 
         return Response({
             'success': True,

@@ -16,7 +16,13 @@ from pathlib import Path
 import pandas as pd
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-from .views import get_session, save_session, hybrid_file_manager
+from .views import (
+    get_session,
+    save_session,
+    hybrid_file_manager,
+    make_unique_field_headers,
+    read_session_grid,
+)
 from .models import PDFSession, PDFExtractionResult
 
 logger = logging.getLogger(__name__)
@@ -26,29 +32,31 @@ logger = logging.getLogger(__name__)
 # CORE PARSING LOGIC
 # =============================================================================
 
-def split_by_separator(text, separator):
+def split_by_separator(text, separator, trim_values=True, drop_empty=True):
     """
     Split text by separator, handling edge cases.
 
     For separator like '),' we need to be careful:
     - "A(B,C),D(E,F)" split by '),' → ["A(B,C)", "D(E,F)"]
     """
-    if not text or not separator:
-        return [text] if text else []
+    if text is None or not separator:
+        parts = [text] if text is not None else []
+    else:
+        parts = str(text).split(separator)
 
-    # Simple split, then clean up
-    parts = text.split(separator)
-
-    # If separator was '),' the last part won't have ')' stripped
-    # But intermediate parts will be missing their closing ')'
-    if separator == '),':
+    # Intermediate parts lose the closing bracket when this separator is used.
+    if separator == '),' and len(parts) > 1:
         # Re-add ')' to all parts except the last
         parts = [p + ')' if i < len(parts) - 1 else p for i, p in enumerate(parts)]
 
-    return [p.strip() for p in parts if p.strip()]
+    if trim_values:
+        parts = [str(part).strip() for part in parts]
+    else:
+        parts = [str(part) for part in parts]
+    return [part for part in parts if not drop_empty or part != '']
 
 
-def extract_part(text, extraction_type, char1='', char2=''):
+def extract_part(text, extraction_type, char1='', char2='', trim_value=True):
     """
     Extract a part from text based on extraction type.
 
@@ -61,7 +69,7 @@ def extract_part(text, extraction_type, char1='', char2=''):
         logger.debug(f"🔍 EXTRACT: empty text")
         return ''
 
-    text = str(text).strip()
+    text = str(text)
     result = ''
 
     if extraction_type == 'before':
@@ -72,7 +80,7 @@ def extract_part(text, extraction_type, char1='', char2=''):
         if idx == -1:
             result = text  # char not found, return whole text
         else:
-            result = text[:idx].strip()
+            result = text[:idx]
         logger.debug(f"🔍 EXTRACT before '{char1}': '{text[:30]}...' → '{result}'")
 
     elif extraction_type == 'after':
@@ -83,7 +91,7 @@ def extract_part(text, extraction_type, char1='', char2=''):
         if idx == -1:
             result = ''  # char not found
         else:
-            result = text[idx + len(char1):].strip()
+            result = text[idx + len(char1):]
         logger.debug(f"🔍 EXTRACT after '{char1}': '{text[:30]}...' → '{result}'")
 
     elif extraction_type == 'between':
@@ -98,16 +106,16 @@ def extract_part(text, extraction_type, char1='', char2=''):
             idx2 = text.find(char2, idx1 + len(char1)) if char2 else -1
             if idx2 == -1:
                 # char2 not found, return everything after char1
-                result = text[idx1 + len(char1):].strip()
+                result = text[idx1 + len(char1):]
             else:
-                result = text[idx1 + len(char1):idx2].strip()
+                result = text[idx1 + len(char1):idx2]
         logger.debug(f"🔍 EXTRACT between '{char1}' and '{char2}': '{text[:30]}...' → '{result}'")
 
     else:
         logger.warning(f"🔍 EXTRACT unknown type: {extraction_type}")
         result = text
 
-    return result
+    return result.strip() if trim_value else result
 
 
 _parse_log_count = 0
@@ -122,12 +130,16 @@ def parse_cell_single_pattern(cell_value, pattern_config):
     if not cell_value:
         return {'spec': {}, 'tag': []}
 
-    cell_value = str(cell_value).strip()
+    trim_values = bool(pattern_config.get('trim_values', True))
+    drop_empty = bool(pattern_config.get('drop_empty', True))
+    cell_value = str(cell_value)
+    if trim_values:
+        cell_value = cell_value.strip()
 
     # Split into groups
     separator = pattern_config.get('group_separator', '')
     if separator:
-        groups = split_by_separator(cell_value, separator)
+        groups = split_by_separator(cell_value, separator, trim_values, drop_empty)
     else:
         groups = [cell_value]
 
@@ -135,6 +147,12 @@ def parse_cell_single_pattern(cell_value, pattern_config):
     result = {'spec': {}, 'tag': []}
 
     extractions = pattern_config.get('extractions', [])
+    split_mode = str(pattern_config.get('split_mode') or 'pattern')
+    delimiter = str(pattern_config.get('delimiter') or '')
+    try:
+        chunk_size = max(1, int(pattern_config.get('chunk_size') or 1))
+    except (TypeError, ValueError):
+        chunk_size = 1
 
     # Log first 3 cells in detail
     _parse_log_count += 1
@@ -180,9 +198,30 @@ def parse_cell_single_pattern(cell_value, pattern_config):
                 char2 = str(end)
         output_type = extraction.get('output_type', 'spec')
         spec_name = extraction.get('spec_name', '')
+        try:
+            part_index = max(0, int(extraction.get('part_index') or 0))
+        except (TypeError, ValueError):
+            part_index = 0
 
         for group in groups:
-            value = extract_part(group, ext_type, char1, char2)
+            if split_mode == 'delimiter':
+                values = str(group).split(delimiter) if delimiter else [str(group)]
+                values = [value.strip() if trim_values else value for value in values]
+                if drop_empty:
+                    values = [value for value in values if value != '']
+                value = values[part_index] if part_index < len(values) else ''
+            elif split_mode == 'characters':
+                text = str(group)
+                values = [text[index:index + chunk_size] for index in range(0, len(text), chunk_size)]
+                values = [value.strip() if trim_values else value for value in values]
+                if drop_empty:
+                    values = [value for value in values if value != '']
+                value = values[part_index] if part_index < len(values) else ''
+            else:
+                value = extract_part(group, ext_type, char1, char2, trim_values)
+
+            if drop_empty and value == '':
+                continue
 
             if _parse_log_count <= 3:
                 logger.info(f"   → Extracted: type={ext_type}, char1='{char1}', char2='{char2}' → '{value[:30] if value else 'EMPTY'}'")
@@ -679,6 +718,14 @@ def get_parser_headers_and_data(info):
 
     return headers, data
 
+
+def get_parser_destination_grid(session_id, info):
+    """Return the mapped review grid using the same destination fields as the editor."""
+    headers, rows = read_session_grid(session_id, info)
+    if not headers or rows is None:
+        return [], []
+    return make_unique_field_headers(headers), rows
+
 @api_view(['POST'])
 def parser_analyze_column(request):
     """
@@ -709,8 +756,9 @@ def parser_analyze_column(request):
     if not info:
         return Response({'success': False, 'error': 'Session not found'})
 
-    # Get data and headers from file
-    headers, data = get_parser_headers_and_data(info)
+    # Structured parsing runs on the mapped destination grid, just like the
+    # delimiter-based Split into Columns tool.
+    headers, data = get_parser_destination_grid(session_id, info)
 
     if not headers:
         return Response({'success': False, 'error': 'Could not read headers from file'})
@@ -762,8 +810,7 @@ def parser_preview(request):
         logger.error("❌ Session not found")
         return Response({'success': False, 'error': 'Session not found'})
 
-    # Get data and headers from file
-    headers, data = get_parser_headers_and_data(info)
+    headers, data = get_parser_destination_grid(session_id, info)
 
     if not headers:
         return Response({'success': False, 'error': 'Could not read data from file'})
@@ -816,8 +863,7 @@ def parser_apply(request):
     if not info:
         return Response({'success': False, 'error': 'Session not found'})
 
-    # Get data and headers from file
-    headers, data = get_parser_headers_and_data(info)
+    headers, data = get_parser_destination_grid(session_id, info)
 
     if not headers:
         return Response({'success': False, 'error': 'Could not read data from file'})
@@ -879,7 +925,7 @@ def parser_get_columns(request, session_id):
     if not info:
         return Response({'success': False, 'error': 'Session not found'})
 
-    headers, _ = get_parser_headers_and_data(info)
+    headers, _ = get_parser_destination_grid(session_id, info)
     logger.info(f"PARSER_GET_COLUMNS: Returning {len(headers)} columns")
 
     return Response({

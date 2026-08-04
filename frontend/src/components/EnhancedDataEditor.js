@@ -651,6 +651,20 @@ const EnhancedDataEditor = () => {
   const [condElseColumn, setCondElseColumn] = useState('');
   const [conditionalBranches, setConditionalBranches] = useState([createConditionalBranch()]);
   const [defaultBusy, setDefaultBusy] = useState(false);
+  // User-driven cleanup: choose a column, choose blanks or exact values, then
+  // choose how those cells should be replaced.
+  const [fillMissingOpen, setFillMissingOpen] = useState(false);
+  const [fillMissingColumn, setFillMissingColumn] = useState('');
+  const [fillMissingMode, setFillMissingMode] = useState('');
+  const [fillMissingStrategy, setFillMissingStrategy] = useState('');
+  const [fillMissingDefault, setFillMissingDefault] = useState('');
+  const [fillMissingBusy, setFillMissingBusy] = useState(false);
+  const [fillMissingAnalysis, setFillMissingAnalysis] = useState(null);
+  const [fillMissingAnalysisLoading, setFillMissingAnalysisLoading] = useState(false);
+  const [fillMissingAnalysisError, setFillMissingAnalysisError] = useState('');
+  const [fillMissingSelectedValues, setFillMissingSelectedValues] = useState([]);
+  const fillMissingAnalysisSeqRef = useRef(0);
+  const fillMissingReturnToGuardRef = useRef(false);
   // Conditional delete-rows tool
   const [deleteRowsOpen, setDeleteRowsOpen] = useState(false);
   const [delCol, setDelCol] = useState('');
@@ -2357,39 +2371,32 @@ const EnhancedDataEditor = () => {
 
   const REQUIRED_FIELD_GUIDANCE = useMemo(() => ({
     'Item code': {
-      severity: 'error',
       rule: 'Mandatory, cannot be blank, and must be unique.',
       action: 'Use Fill Column or the FactWise ID tool so every row gets a non-duplicate code.',
     },
     'Item name': {
-      severity: 'error',
       rule: 'Mandatory. Duplicate names are allowed, blanks are not.',
       action: 'Use Fill Column to populate Item name from a useful value or fixed rule.',
     },
     'Item type': {
-      severity: 'warning',
       rule: 'Mandatory. Must be Raw material or Finished good.',
       action: 'Choose whether blank rows should be Raw material or Finished good, or use Fill Column.',
       quickValues: ['Raw material', 'Finished good'],
     },
     'Measurement unit': {
-      severity: 'warning',
       rule: 'Mandatory.',
       action: 'Use Fill Column to copy from a mapped column or set a default such as Nos, EA, or Unit.',
     },
     'Procurement entity name': {
-      severity: 'warning',
       rule: 'Mandatory. Usually one enterprise/entity value for all rows.',
       action: 'Use Fill Column. If an existing value is shown, you can fill blanks with it.',
     },
     'Procurement item': {
-      severity: 'warning',
       rule: 'Mandatory boolean. Must be TRUE or FALSE.',
       action: 'Use Fill Column or choose TRUE/FALSE for blanks.',
       quickValues: ['TRUE', 'FALSE'],
     },
     'Sales item': {
-      severity: 'warning',
       rule: 'Mandatory boolean. Must be TRUE or FALSE.',
       action: 'Use Fill Column or choose TRUE/FALSE for blanks.',
       quickValues: ['TRUE', 'FALSE'],
@@ -2397,6 +2404,39 @@ const EnhancedDataEditor = () => {
   }), []);
 
   const BOOLEAN_REQUIRED_FIELDS = useMemo(() => new Set(['Procurement item', 'Sales item']), []);
+
+  const getRequiredValidationRule = useCallback((requiredName) => {
+    if (requiredName === 'Measurement unit') return { kind: 'alpha' };
+    if (requiredName === 'Item type') {
+      return { kind: 'allowed', allowed_values: ['Raw material', 'Finished good'] };
+    }
+    if (requiredName === 'Procurement item' || requiredName === 'Sales item') {
+      return { kind: 'allowed', allowed_values: ['TRUE', 'FALSE'] };
+    }
+    if (requiredName === 'Procurement entity name') return { kind: 'single_value' };
+    return {};
+  }, []);
+
+  const getRequiredNameForColumn = useCallback((field) => {
+    const norm = value => String(value || '').trim().toLowerCase();
+    const column = columnDefs.find(item => item.field === field);
+    return FACTWISE_REQUIRED.find(required => (
+      norm(required) === norm(field) || norm(required) === norm(column?.headerName)
+    )) || '';
+  }, [columnDefs, FACTWISE_REQUIRED]);
+
+  const fillMissingTargetCount = useMemo(() => {
+    if (fillMissingMode === 'empty') return fillMissingAnalysis?.empty_count || 0;
+    if (fillMissingMode === 'selected_values') {
+      return fillMissingSelectedValues.reduce((total, item) => total + (Number(item.count) || 0), 0);
+    }
+    return 0;
+  }, [fillMissingMode, fillMissingAnalysis, fillMissingSelectedValues]);
+
+  const fillMissingAllEmpty = Boolean(
+    fillMissingAnalysis?.total_rows > 0 &&
+    fillMissingAnalysis.empty_count === fillMissingAnalysis.total_rows
+  );
 
   const getFactwiseRequiredGaps = useCallback(() => {
     const dataCols = columnDefs.filter(c => c.field && c.field !== '__row_number__');
@@ -2425,6 +2465,11 @@ const EnhancedDataEditor = () => {
     }
     const itemCodeField = present.find(p => p.req === 'Item code')?.field || null;
     const booleanFields = present.filter(p => BOOLEAN_REQUIRED_FIELDS.has(p.req)).map(p => p.field);
+    const validators = present.reduce((result, item) => {
+      const validation = getRequiredValidationRule(item.req);
+      if (validation.kind) result[item.field] = validation;
+      return result;
+    }, {});
     let gaps = [];
     let icIssue = null;
     try {
@@ -2432,7 +2477,8 @@ const EnhancedDataEditor = () => {
         sessionId,
         present.map(p => p.field),
         itemCodeField ? [itemCodeField] : [],
-        booleanFields
+        booleanFields,
+        validators
       );
       const counts = (resp?.data?.gaps || []).reduce((m, g) => { m[g.field] = g.emptyCount; return m; }, {});
       const invalids = (resp?.data?.invalids || []).reduce((m, g) => {
@@ -2480,7 +2526,7 @@ const EnhancedDataEditor = () => {
     }
     pendingExportRef.current = null;
     exportFn();
-  }, [getFactwiseRequiredGaps, sessionId, rowData, BOOLEAN_REQUIRED_FIELDS]);
+  }, [getFactwiseRequiredGaps, sessionId, rowData, BOOLEAN_REQUIRED_FIELDS, getRequiredValidationRule]);
 
   useEffect(() => {
     requiredGuardRunnerRef.current = runGuardedExport;
@@ -2562,6 +2608,104 @@ const EnhancedDataEditor = () => {
       setRequiredFilling(false);
     }
   }, [sessionId, fetchDataSynchronized, showSnackbar, itemCodeIssue]);
+
+  const openFillMissingDialog = useCallback((field = '', returnToGuard = false) => {
+    setToolsMenuAnchor(null);
+    setFillMissingColumn(field || '');
+    setFillMissingMode('');
+    setFillMissingStrategy('');
+    setFillMissingDefault('');
+    setFillMissingAnalysis(null);
+    setFillMissingAnalysisError('');
+    setFillMissingSelectedValues([]);
+    fillMissingReturnToGuardRef.current = returnToGuard;
+    if (returnToGuard) setRequiredDialogOpen(false);
+    setFillMissingOpen(true);
+  }, []);
+
+  useEffect(() => {
+    if (!fillMissingOpen || !fillMissingColumn) return undefined;
+    const sequence = fillMissingAnalysisSeqRef.current + 1;
+    fillMissingAnalysisSeqRef.current = sequence;
+    const requiredName = getRequiredNameForColumn(fillMissingColumn);
+    const validation = getRequiredValidationRule(requiredName);
+    setFillMissingAnalysisLoading(true);
+    setFillMissingAnalysisError('');
+    setFillMissingAnalysis(null);
+    setFillMissingSelectedValues([]);
+
+    api.analyzeColumnValues(sessionId, fillMissingColumn, validation)
+      .then(resp => {
+        if (fillMissingAnalysisSeqRef.current !== sequence) return;
+        if (!resp.data?.success) throw new Error(resp.data?.error || 'Could not inspect this column');
+        const analysis = resp.data;
+        setFillMissingAnalysis(analysis);
+        setFillMissingSelectedValues((analysis.values || []).filter(item => item.suggested));
+        if (analysis.total_rows > 0 && analysis.empty_count === analysis.total_rows) {
+          setFillMissingMode('empty');
+          setFillMissingStrategy('default');
+        }
+      })
+      .catch(error => {
+        if (fillMissingAnalysisSeqRef.current !== sequence) return;
+        setFillMissingAnalysisError(getFriendlyErrorMessage(error, 'Could not inspect this column.'));
+      })
+      .finally(() => {
+        if (fillMissingAnalysisSeqRef.current === sequence) setFillMissingAnalysisLoading(false);
+      });
+    return undefined;
+  }, [fillMissingOpen, fillMissingColumn, sessionId, getRequiredNameForColumn, getRequiredValidationRule, getFriendlyErrorMessage]);
+
+  const closeFillMissingDialog = useCallback(() => {
+    fillMissingAnalysisSeqRef.current += 1;
+    setFillMissingOpen(false);
+    if (fillMissingReturnToGuardRef.current) {
+      fillMissingReturnToGuardRef.current = false;
+      setRequiredDialogOpen(true);
+    }
+  }, []);
+
+  const handleFillMissingValues = useCallback(async () => {
+    if (!fillMissingColumn || !fillMissingMode || fillMissingTargetCount === 0) return;
+    if (fillMissingStrategy === 'default' && !fillMissingDefault.trim()) {
+      showSnackbar('Enter the default value to apply.', 'warning');
+      return;
+    }
+    setFillMissingBusy(true);
+    try {
+      const requiredName = getRequiredNameForColumn(fillMissingColumn);
+      const validation = getRequiredValidationRule(requiredName);
+      const resp = await api.fillMissingValues(
+        sessionId,
+        fillMissingColumn,
+        fillMissingMode,
+        fillMissingSelectedValues.map(item => item.value),
+        fillMissingStrategy,
+        fillMissingDefault,
+        validation
+      );
+      if (!resp.data?.success) throw new Error(resp.data?.error || 'Fill failed');
+      await fetchDataSynchronized();
+      setFillMissingOpen(false);
+      const changed = resp.data.changed || 0;
+      const unresolved = resp.data.unresolved || 0;
+      showSnackbar(
+        unresolved > 0
+          ? `Updated ${changed} cells. ${unresolved} could not be filled because no valid nearby value was available.`
+          : `${fillMissingMode === 'empty' ? 'Filled' : 'Replaced'} ${changed} cell${changed === 1 ? '' : 's'}.`,
+        unresolved > 0 ? 'warning' : 'success'
+      );
+      if (fillMissingReturnToGuardRef.current) {
+        fillMissingReturnToGuardRef.current = false;
+        const exportFn = pendingExportRef.current;
+        if (exportFn) await runGuardedExport(exportFn);
+      }
+    } catch (error) {
+      showSnackbar(getFriendlyErrorMessage(error, 'Could not fill the missing values.'), 'error');
+    } finally {
+      setFillMissingBusy(false);
+    }
+  }, [fillMissingColumn, fillMissingMode, fillMissingTargetCount, fillMissingSelectedValues, fillMissingStrategy, fillMissingDefault, sessionId, getRequiredNameForColumn, getRequiredValidationRule, fetchDataSynchronized, showSnackbar, getFriendlyErrorMessage, runGuardedExport]);
 
   const highlightItemCodeDuplicates = useCallback(() => {
     if (!itemCodeIssue?.dupRows) return;
@@ -3625,6 +3769,14 @@ const EnhancedDataEditor = () => {
     [columnDefs]
   );
 
+  const structuredSplitColsCandidates = useMemo(
+    () => splitColsCandidates.map(column => ({
+      ...column,
+      label: columnLabel(column.field, column.label),
+    })),
+    [columnLabel, splitColsCandidates]
+  );
+
   const splitColsFactWiseType = useMemo(() => {
     const field = splitColsConfig.sourceColumn;
     if (/^Tag_\d+$/.test(field) || field === 'Tag') return 'Tag';
@@ -4550,6 +4702,183 @@ const EnhancedDataEditor = () => {
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* User-driven blank/value cleanup */}
+      <Dialog open={fillMissingOpen} onClose={closeFillMissingDialog} maxWidth="sm" fullWidth>
+        <DialogTitle>Fill or replace column values</DialogTitle>
+        <DialogContent dividers sx={{ display: 'grid', gap: 2.25 }}>
+          <Box>
+            <Typography variant="overline" sx={{ fontWeight: 800, color: 'primary.main' }}>1. Select a column</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1.25 }}>
+              The app will inspect the actual values and suggest anything that looks invalid.
+            </Typography>
+            <FormControl fullWidth size="small">
+            <InputLabel>Column</InputLabel>
+            <Select
+              label="Column"
+              value={fillMissingColumn}
+              onChange={(event) => {
+                setFillMissingColumn(event.target.value);
+                setFillMissingMode('');
+                setFillMissingStrategy('');
+                setFillMissingDefault('');
+              }}
+            >
+              {columnDefs.filter(column => column.field && column.field !== '__row_number__').map(column => (
+                <MenuItem key={column.field} value={column.field}>
+                  {columnLabel(column.field, column.headerName)}
+                </MenuItem>
+              ))}
+            </Select>
+            </FormControl>
+          </Box>
+
+          {fillMissingAnalysisLoading && (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, py: 1 }}>
+              <CircularProgress size={18} />
+              <Typography variant="body2" color="text.secondary">Inspecting values in this column...</Typography>
+            </Box>
+          )}
+          {fillMissingAnalysisError && <Alert severity="error">{fillMissingAnalysisError}</Alert>}
+
+          {fillMissingAnalysis && (
+            <>
+              {fillMissingAllEmpty ? (
+                <Alert severity="info">
+                  All {fillMissingAnalysis.total_rows} cells in this column are empty. Enter one default value to fill them.
+                </Alert>
+              ) : (
+              <Box>
+                <Typography variant="overline" sx={{ fontWeight: 800, color: 'primary.main' }}>2. Choose what to fix</Typography>
+                <RadioGroup
+                  row
+                  value={fillMissingMode}
+                  onChange={(event) => {
+                    const nextMode = event.target.value;
+                    setFillMissingMode(nextMode);
+                    setFillMissingStrategy(nextMode === 'empty' && fillMissingAllEmpty ? 'default' : '');
+                  }}
+                  sx={{ mt: 0.5, gap: 1.5 }}
+                >
+                  <FormControlLabel
+                    value="empty"
+                    control={<Radio />}
+                    label={`Fill empty cells (${fillMissingAnalysis.empty_count || 0})`}
+                  />
+                  <FormControlLabel
+                    value="selected_values"
+                    control={<Radio />}
+                    label="Replace specific values"
+                  />
+                </RadioGroup>
+              </Box>
+              )}
+
+              {fillMissingMode === 'empty' && !fillMissingAllEmpty && (
+                <Alert severity={(fillMissingAnalysis.empty_count || 0) > 0 ? 'info' : 'success'}>
+                  {(fillMissingAnalysis.empty_count || 0) > 0
+                    ? `${fillMissingAnalysis.empty_count} empty cells will be filled. Populated cells will not change.`
+                    : 'This column has no empty cells.'}
+                </Alert>
+              )}
+
+              {fillMissingMode === 'selected_values' && (
+                <Box sx={{ display: 'grid', gap: 1.25 }}>
+                  <Autocomplete
+                    multiple
+                    disableCloseOnSelect
+                    limitTags={3}
+                    options={fillMissingAnalysis.values || []}
+                    value={fillMissingSelectedValues}
+                    onChange={(_, values) => setFillMissingSelectedValues(values)}
+                    getOptionLabel={(option) => `${option.value} (${option.count})${option.suggested ? ' - Suggested' : ''}`}
+                    isOptionEqualToValue={(option, value) => option.value === value.value}
+                    renderInput={(params) => (
+                      <TextField
+                        {...params}
+                        size="small"
+                        label="Values to replace"
+                        placeholder="Select one or more values"
+                      />
+                    )}
+                  />
+                  {(fillMissingAnalysis.values || []).some(item => item.suggested) && (
+                    <Alert severity="warning">
+                      <Typography variant="body2" sx={{ fontWeight: 700, mb: 0.5 }}>Suggested values are preselected</Typography>
+                      {(fillMissingAnalysis.values || []).filter(item => item.suggested).slice(0, 5).map(item => (
+                        <Typography key={item.value} variant="caption" sx={{ display: 'block' }}>
+                          {item.value} ({item.count}): {item.reason}
+                        </Typography>
+                      ))}
+                    </Alert>
+                  )}
+                  {fillMissingSelectedValues.length > 0 && (
+                    <Typography variant="body2" color="text.secondary">
+                      {fillMissingTargetCount} cells matching {fillMissingSelectedValues.length} selected value{fillMissingSelectedValues.length === 1 ? '' : 's'} will be replaced.
+                    </Typography>
+                  )}
+                </Box>
+              )}
+
+              {fillMissingMode && fillMissingTargetCount > 0 && (
+                <FormControl component="fieldset" fullWidth>
+                  <FormLabel component="legend" sx={{ mb: 1, fontWeight: 800, color: 'primary.main' }}>
+                    {fillMissingMode === 'empty' && fillMissingAllEmpty ? '3. Enter a default value' : '3. Choose the replacement'}
+                  </FormLabel>
+                  {!(fillMissingMode === 'empty' && fillMissingAllEmpty) && (
+                    <RadioGroup value={fillMissingStrategy} onChange={(event) => setFillMissingStrategy(event.target.value)}>
+                      <FormControlLabel
+                        value="above"
+                        control={<Radio />}
+                        label={<Box><Typography variant="body2" fontWeight={700}>Use the filled cell above</Typography><Typography variant="caption" color="text.secondary">Uses the nearest non-target value above each selected cell.</Typography></Box>}
+                        sx={{ alignItems: 'flex-start', mb: 1, '& .MuiRadio-root': { mt: -0.5 } }}
+                      />
+                      <FormControlLabel
+                        value="below"
+                        control={<Radio />}
+                        label={<Box><Typography variant="body2" fontWeight={700}>Use the filled cell below</Typography><Typography variant="caption" color="text.secondary">Uses the nearest non-target value below each selected cell.</Typography></Box>}
+                        sx={{ alignItems: 'flex-start', mb: 1, '& .MuiRadio-root': { mt: -0.5 } }}
+                      />
+                      <FormControlLabel
+                        value="default"
+                        control={<Radio />}
+                        label={<Box><Typography variant="body2" fontWeight={700}>Add a default value</Typography><Typography variant="caption" color="text.secondary">Uses one value for every targeted cell.</Typography></Box>}
+                        sx={{ alignItems: 'flex-start', '& .MuiRadio-root': { mt: -0.5 } }}
+                      />
+                    </RadioGroup>
+                  )}
+                  {fillMissingStrategy === 'default' && (
+                    <TextField
+                      autoFocus
+                      fullWidth
+                      size="small"
+                      label="Default value"
+                      value={fillMissingDefault}
+                      onChange={(event) => setFillMissingDefault(event.target.value)}
+                      sx={{ mt: 1.5 }}
+                    />
+                  )}
+                </FormControl>
+              )}
+            </>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={closeFillMissingDialog} disabled={fillMissingBusy}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={handleFillMissingValues}
+            disabled={
+              fillMissingBusy || fillMissingAnalysisLoading || !fillMissingColumn || !fillMissingMode ||
+              fillMissingTargetCount === 0 || !fillMissingStrategy ||
+              (fillMissingStrategy === 'default' && !fillMissingDefault.trim())
+            }
+            startIcon={fillMissingBusy ? <CircularProgress size={16} /> : <EditNoteIcon />}
+          >
+            {fillMissingBusy ? 'Applying...' : (fillMissingMode === 'empty' ? 'Fill cells' : 'Replace values')}
+          </Button>
+        </DialogActions>
+      </Dialog>
       
       {/* Cleanup Info Banner with Deleted Rows Detail */}
       {cleanupInfo && cleanupInfo.rows_deleted > 0 && (
@@ -4838,6 +5167,10 @@ const EnhancedDataEditor = () => {
                 <MenuItem onClick={() => { setToolsMenuAnchor(null); handleOpenCreateColumnDialog(); }} disabled={syncStatus.inProgress}>
                   <ListItemIcon><AddIcon sx={{ color: '#2e7d32' }} /></ListItemIcon>
                   <ListItemText>Fill / Create Column</ListItemText>
+                </MenuItem>
+                <MenuItem onClick={() => openFillMissingDialog()} disabled={syncStatus.inProgress}>
+                  <ListItemIcon><EditNoteIcon sx={{ color: '#0284c7' }} /></ListItemIcon>
+                  <ListItemText>Fill / replace values</ListItemText>
                 </MenuItem>
                 <MenuItem onClick={handleOpenSplitColsDialog} disabled={syncStatus.inProgress || splitColsRunning}>
                   <ListItemIcon>
@@ -6325,18 +6658,32 @@ const EnhancedDataEditor = () => {
           sx: {
             width: 'min(820px, calc(100vw - 40px))',
             maxHeight: 'min(780px, calc(100vh - 48px))',
-            borderRadius: '16px',
-            overflow: 'hidden'
+            borderRadius: '18px',
+            overflow: 'hidden',
+            border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.22)' : '1px solid #e2e8f0',
+            boxShadow: isDarkMode ? '0 28px 80px rgba(0, 0, 0, 0.52)' : '0 28px 70px rgba(15, 23, 42, 0.18)',
           }
         }}
       >
-        <DialogTitle sx={{ pb: 1 }}>
-          <Typography variant="h6" fontWeight={800}>Item Directory import warning</Typography>
-          <Typography variant="body2" color="text.secondary">
+        <DialogTitle sx={{
+          px: 3,
+          py: 2.25,
+          borderBottom: isDarkMode ? '1px solid rgba(148, 163, 184, 0.16)' : '1px solid #e2e8f0',
+          bgcolor: isDarkMode ? 'linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(15, 23, 42, 0.92))' : '#ffffff',
+        }}>
+          <Typography variant="h6" sx={{ fontWeight: 850, letterSpacing: 0, color: t.text.heading }}>
+            Item Directory import warning
+          </Typography>
+          <Typography variant="body2" sx={{ color: t.text.secondary, mt: 0.25 }}>
             You can export this sheet, but FactWise may reject the import until these fields are fixed.
           </Typography>
         </DialogTitle>
-        <DialogContent dividers sx={{ bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.35)' : '#f8fafc' }}>
+        <DialogContent dividers sx={{
+          px: 3,
+          py: 2,
+          bgcolor: isDarkMode ? '#0b1220' : '#f8fafc',
+          borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.14)' : '#e2e8f0',
+        }}>
           <Box sx={{ display: 'grid', gap: 1.5 }}>
             {[
               itemCodeIssue ? {
@@ -6364,10 +6711,12 @@ const EnhancedDataEditor = () => {
                 <Box
                   key={`${g.req}-${g.field}`}
                   sx={{
-                    border: `1px solid ${t.border.default}`,
+                    border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.18)' : '1px solid #e2e8f0',
+                    borderLeft: '4px solid #f97316',
                     borderRadius: '12px',
-                    p: 1.75,
-                    bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.64)' : '#ffffff',
+                    p: 2,
+                    bgcolor: isDarkMode ? '#111827' : '#ffffff',
+                    boxShadow: isDarkMode ? '0 12px 28px rgba(0, 0, 0, 0.18)' : '0 10px 24px rgba(15, 23, 42, 0.06)',
                     display: 'grid',
                     gap: 1.25,
                   }}
@@ -6377,15 +6726,33 @@ const EnhancedDataEditor = () => {
                       <Typography variant="subtitle2" sx={{ fontWeight: 800, color: t.text.heading }}>
                         {g.headerName || g.req || g.field}
                       </Typography>
-                      <Typography variant="caption" color="error" sx={{ display: 'block', mt: 0.25 }}>
+                      <Typography
+                        variant="caption"
+                        sx={{
+                          display: 'inline-flex',
+                          mt: 0.75,
+                          px: 0.75,
+                          py: 0.25,
+                          borderRadius: '999px',
+                          color: isDarkMode ? '#fed7aa' : '#c2410c',
+                          bgcolor: isDarkMode ? 'rgba(249, 115, 22, 0.14)' : '#fff7ed',
+                          border: isDarkMode ? '1px solid rgba(251, 146, 60, 0.22)' : '1px solid #fed7aa',
+                          fontWeight: 700,
+                        }}
+                      >
                         {issueParts.join(' | ')}
                       </Typography>
                     </Box>
                     <Chip
                       size="small"
-                      color={(guidance.severity || 'warning') === 'error' ? 'error' : 'warning'}
-                      label={(guidance.severity || 'warning') === 'error' ? 'Required' : 'Required field'}
-                      sx={{ fontWeight: 700 }}
+                      label="Required"
+                      sx={{
+                        fontWeight: 800,
+                        borderRadius: '999px',
+                        color: isDarkMode ? '#fed7aa' : '#9a3412',
+                        bgcolor: isDarkMode ? 'rgba(249, 115, 22, 0.16)' : '#ffedd5',
+                        border: isDarkMode ? '1px solid rgba(251, 146, 60, 0.28)' : '1px solid #fed7aa',
+                      }}
                     />
                   </Box>
 
@@ -6404,13 +6771,25 @@ const EnhancedDataEditor = () => {
                   </Box>
 
                   {allowInlineDefault && (
-                    <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
+                    <Box sx={{
+                      display: 'flex',
+                      gap: 1,
+                      alignItems: 'center',
+                      flexWrap: 'wrap',
+                    }}>
                       <TextField
                         size="small"
                         label="Default value"
                         value={inlineDefault}
                         onChange={(event) => setRequiredInlineDefaults(prev => ({ ...prev, [g.field]: event.target.value }))}
-                        sx={{ minWidth: 220, flex: '1 1 260px' }}
+                        sx={{
+                          minWidth: 220,
+                          flex: '1 1 260px',
+                          '& .MuiOutlinedInput-root': {
+                            bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.72)' : '#ffffff',
+                            borderRadius: '9px',
+                          },
+                        }}
                       />
                       <Button
                         size="small"
@@ -6418,7 +6797,18 @@ const EnhancedDataEditor = () => {
                         startIcon={requiredQuickFillKey === `${g.field}:${inlineDefault.trim()}` ? <CircularProgress size={14} sx={{ color: 'white' }} /> : null}
                         onClick={() => applyRequiredQuickFill(g, inlineDefault)}
                         disabled={requiredFilling || !(g.emptyCount > 0) || !inlineDefault.trim()}
-                        sx={{ textTransform: 'none', fontWeight: 700 }}
+                        sx={{
+                          textTransform: 'none',
+                          fontWeight: 800,
+                          minHeight: 38,
+                          px: 2,
+                          bgcolor: '#0ea5e9',
+                          '&:hover': { bgcolor: '#0284c7' },
+                          '&.Mui-disabled': {
+                            bgcolor: isDarkMode ? 'rgba(56, 189, 248, 0.16)' : '#e0f2fe',
+                            color: isDarkMode ? 'rgba(186, 230, 253, 0.46)' : '#7dd3fc',
+                          },
+                        }}
                       >
                         {requiredQuickFillKey === `${g.field}:${inlineDefault.trim()}` ? 'Applying...' : 'Apply default'}
                       </Button>
@@ -6426,16 +6816,6 @@ const EnhancedDataEditor = () => {
                   )}
 
                   <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      startIcon={<EditNoteIcon />}
-                      onClick={() => openFillColumnForRequired(g, fillSuggestion)}
-                      disabled={requiredFilling}
-                      sx={{ textTransform: 'none', fontWeight: 700 }}
-                    >
-                      Use Fill Column
-                    </Button>
                     {quickValues.map(value => (
                       <Button
                         key={`${g.field}-${value}`}
@@ -6444,7 +6824,13 @@ const EnhancedDataEditor = () => {
                         startIcon={requiredQuickFillKey === `${g.field}:${value}` ? <CircularProgress size={14} sx={{ color: 'white' }} /> : null}
                         onClick={() => applyRequiredQuickFill(g, value)}
                         disabled={requiredFilling || !(g.emptyCount > 0)}
-                        sx={{ textTransform: 'none', fontWeight: 700 }}
+                        sx={{
+                          textTransform: 'none',
+                          fontWeight: 800,
+                          borderRadius: '999px',
+                          bgcolor: '#0ea5e9',
+                          '&:hover': { bgcolor: '#0284c7' },
+                        }}
                       >
                         {requiredQuickFillKey === `${g.field}:${value}` ? 'Applying...' : `Apply ${value}`}
                       </Button>
@@ -6456,7 +6842,13 @@ const EnhancedDataEditor = () => {
                         startIcon={requiredQuickFillKey === `${g.field}:${observedValue}` ? <CircularProgress size={14} sx={{ color: 'white' }} /> : null}
                         onClick={() => applyRequiredQuickFill(g, observedValue)}
                         disabled={requiredFilling || !(g.emptyCount > 0)}
-                        sx={{ textTransform: 'none', fontWeight: 700 }}
+                        sx={{
+                          textTransform: 'none',
+                          fontWeight: 800,
+                          borderRadius: '999px',
+                          bgcolor: '#0ea5e9',
+                          '&:hover': { bgcolor: '#0284c7' },
+                        }}
                       >
                         {requiredQuickFillKey === `${g.field}:${observedValue}` ? 'Applying...' : `Apply ${observedValue}`}
                       </Button>
@@ -6468,30 +6860,80 @@ const EnhancedDataEditor = () => {
                         variant="outlined"
                         onClick={highlightItemCodeDuplicates}
                         disabled={requiredFilling}
-                        sx={{ textTransform: 'none', fontWeight: 700 }}
+                        sx={{
+                          textTransform: 'none',
+                          fontWeight: 800,
+                          borderRadius: '999px',
+                          color: isDarkMode ? '#fed7aa' : '#9a3412',
+                          borderColor: isDarkMode ? 'rgba(251, 146, 60, 0.34)' : '#fdba74',
+                          '&:hover': { bgcolor: isDarkMode ? 'rgba(249, 115, 22, 0.12)' : '#fff7ed' },
+                        }}
                       >
                         Highlight duplicates
                       </Button>
                     )}
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      startIcon={<EditNoteIcon />}
+                      onClick={() => openFillColumnForRequired(g, fillSuggestion)}
+                      disabled={requiredFilling}
+                      sx={{
+                        textTransform: 'none',
+                        fontWeight: 800,
+                        borderRadius: '999px',
+                        color: isDarkMode ? '#cbd5e1' : '#334155',
+                        borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.3)' : '#cbd5e1',
+                        '&:hover': {
+                          borderColor: '#0ea5e9',
+                          bgcolor: isDarkMode ? 'rgba(14, 165, 233, 0.10)' : '#f0f9ff',
+                        },
+                      }}
+                    >
+                      Use Fill Column
+                    </Button>
                   </Box>
                 </Box>
               );
             })}
           </Box>
-          <Alert severity="warning" sx={{ mt: 2, borderRadius: '12px' }}>
+          <Alert
+            severity="warning"
+            sx={{
+              mt: 2,
+              borderRadius: '12px',
+              bgcolor: isDarkMode ? 'rgba(180, 83, 9, 0.16)' : '#fffbeb',
+              color: isDarkMode ? '#fde68a' : '#92400e',
+              border: isDarkMode ? '1px solid rgba(251, 191, 36, 0.24)' : '1px solid #fde68a',
+              '& .MuiAlert-icon': { color: isDarkMode ? '#fbbf24' : '#d97706' },
+            }}
+          >
             Export is allowed. This warning only means the exported sheet may need to be fixed in Excel before it can be imported into FactWise.
           </Alert>
         </DialogContent>
-        <DialogActions sx={{ px: 3, py: 2 }}>
+        <DialogActions sx={{
+          px: 3,
+          py: 2,
+          borderTop: isDarkMode ? '1px solid rgba(148, 163, 184, 0.14)' : '1px solid #e2e8f0',
+          bgcolor: isDarkMode ? '#0f172a' : '#ffffff',
+        }}>
           <Button onClick={cancelRequiredExport} disabled={requiredFilling}>
             Back to grid
           </Button>
           <Button
             onClick={continueExportWithWarnings}
             variant="contained"
-            color="warning"
             disabled={requiredFilling}
-            sx={{ fontWeight: 700, textTransform: 'none' }}
+            sx={{
+              fontWeight: 850,
+              textTransform: 'none',
+              borderRadius: '999px',
+              px: 2.5,
+              bgcolor: '#2563eb',
+              color: '#ffffff',
+              boxShadow: 'none',
+              '&:hover': { bgcolor: '#1d4ed8', boxShadow: 'none' },
+            }}
           >
             Export anyway
           </Button>
@@ -6915,6 +7357,7 @@ const EnhancedDataEditor = () => {
             <ColumnParser
               sessionId={sessionId}
               initialColumn={splitColsConfig.sourceColumn}
+              availableColumns={structuredSplitColsCandidates}
               onApply={(result) => {
                 setSplitColsDialogOpen(false);
                 showSnackbar(`Structured split applied. Added ${result.new_headers_count || 0} columns.`, 'success');

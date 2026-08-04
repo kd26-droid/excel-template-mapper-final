@@ -1631,6 +1631,28 @@ const api = {
       ...(condition ? { condition } : {}),
     }, { timeout: 120000 }),
 
+  /** Inspect the actual values in a column and suggest suspicious values. */
+  analyzeColumnValues: (sessionId, column, validation = {}) =>
+    axios.post(`${API_URL}/transforms/fill-missing-values/`, {
+      session_id: sessionId,
+      column,
+      action: 'analyze',
+      validation,
+    }, { timeout: 120000 }),
+
+  /** Fill blank cells or replace exact user-selected values. */
+  fillMissingValues: (sessionId, column, targetMode, selectedValues, strategy, defaultValue = '', validation = {}) =>
+    axios.post(`${API_URL}/transforms/fill-missing-values/`, {
+      session_id: sessionId,
+      column,
+      action: 'apply',
+      target_mode: targetMode,
+      selected_values: selectedValues,
+      strategy,
+      default_value: defaultValue,
+      validation,
+    }, { timeout: 120000 }),
+
   /**
    * Group rows under parent/header rows and reshape into item rows.
    * parentCondition: { column, test, value } where test is one of
@@ -1663,12 +1685,13 @@ const api = {
    * Used by the export required-field guard so the count reflects the whole
    * dataset, not just the current page.
    */
-  requiredFieldReport: (sessionId, columns, dupeColumns = [], booleanColumns = []) => {
+  requiredFieldReport: (sessionId, columns, dupeColumns = [], booleanColumns = [], validators = {}) => {
     return axios.post(`${API_URL}/transforms/required-field-report/`, {
       session_id: sessionId,
       columns,
       dupe_columns: dupeColumns,
       boolean_columns: booleanColumns,
+      validators,
     }, { timeout: 60000 });
   },
 
