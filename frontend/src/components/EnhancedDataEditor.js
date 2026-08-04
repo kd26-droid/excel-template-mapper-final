@@ -2298,6 +2298,10 @@ const EnhancedDataEditor = () => {
           sourceRequirements: processingTemplateContext.sourceRequirements || {},
           providerSnapshot,
           stages: [
+            ...(processingTemplateContext.normalizerWorkflow ? [{
+              type: 'bom_normalizer',
+              workflow: processingTemplateContext.normalizerWorkflow,
+            }] : []),
             {
               type: 'mapping_template',
               mapping_template_id: resp.data.template_id,
@@ -2315,6 +2319,9 @@ const EnhancedDataEditor = () => {
           metadata: {
             mapping_template_id: resp.data.template_id,
             processing_path: processingTemplateContext.processingPath || '',
+            ...(processingTemplateContext.normalizerWorkflow ? {
+              normalizer_workflow: processingTemplateContext.normalizerWorkflow,
+            } : {}),
             saved_from_session_id: sessionId,
           }
         });

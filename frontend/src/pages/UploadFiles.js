@@ -2571,6 +2571,14 @@ const UploadFiles = () => {
     return stage?.mapping_template_id || null;
   };
 
+  const getProcessingTemplateNormalizerWorkflow = (template = getSelectedProcessingTemplate()) => {
+    if (template?.metadata?.normalizer_workflow) return template.metadata.normalizer_workflow;
+    const stage = Array.isArray(template?.stages)
+      ? template.stages.find(item => item?.type === 'bom_normalizer' && item?.workflow)
+      : null;
+    return stage?.workflow || null;
+  };
+
   const applyExtractedPdfAsPrimary = (extracted, action = null, templateOptions = {}) => {
     setUserFile(extracted.file);
     setClientWorkbook(extracted.workbook);
@@ -2775,6 +2783,37 @@ const UploadFiles = () => {
           setLoading(false);
           return;
         }
+
+        const processingTemplatePath = selectedProcessingTemplate?.metadata?.processing_path || '';
+        const normalizerWorkflow = getProcessingTemplateNormalizerWorkflow(selectedProcessingTemplate);
+        if (processingTemplatePath === 'normalize' || normalizerWorkflow) {
+          if (!normalizerWorkflow) {
+            setError('This workflow template was saved from BOM Normalizer but is missing its normalizer recipe. Please recreate/save it once.');
+            setLoading(false);
+            return;
+          }
+          if (normalizerWorkflow.kind === 'merge-preview') {
+            setError('This workflow template includes a merge setup. Automatic merge-template replay needs the matching source files and is not ready in this build.');
+            setLoading(false);
+            return;
+          }
+
+          navigate('/bom-normalizer', {
+            state: {
+              initialFile: uploadClientFile,
+              initialFileMode: 'workbook',
+              autoReplayProcessingTemplate: selectedProcessingTemplate,
+              autoReplayMappingTemplateId: processingMappingTemplateId,
+              uploadSource: getProcessingTemplateState({
+                processingTemplateMode: 'use',
+                processingPath: 'normalize',
+              }),
+            }
+          });
+          setLoading(false);
+          return;
+        }
+
         if (sheetJoinSetup) {
           setError('Existing template replay with sheet merge is not ready yet. Use a single prepared source or create a new template.');
           setLoading(false);
