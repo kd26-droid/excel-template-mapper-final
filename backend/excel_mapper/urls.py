@@ -130,6 +130,12 @@ from .bom_workflow_templates import (
     bom_workflow_templates,
     bom_workflow_template_detail,
 )
+from .processing_templates import (
+    processing_templates,
+    processing_template_detail,
+    processing_template_validate,
+    processing_template_editor_session,
+)
 
 # Column Parser views
 from .parser_views import (
@@ -257,6 +263,10 @@ urlpatterns = [
     path('intermediate-artifacts/<int:artifact_id>/', delete_intermediate_artifact, name='delete-intermediate-artifact'),
     path('bom-workflow-templates/', bom_workflow_templates, name='bom-workflow-templates'),
     path('bom-workflow-templates/<int:template_id>/', bom_workflow_template_detail, name='bom-workflow-template-detail'),
+    path('processing-templates/', processing_templates, name='processing-templates'),
+    path('processing-templates/editor-session/', processing_template_editor_session, name='processing-template-editor-session'),
+    path('processing-templates/<int:template_id>/', processing_template_detail, name='processing-template-detail'),
+    path('processing-templates/<int:template_id>/validate/', processing_template_validate, name='processing-template-validate'),
 
     # MPN Validation + OAuth
     path('mpn/auth/status/', mpn_auth_status, name='mpn-auth-status'),

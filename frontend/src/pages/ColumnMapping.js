@@ -239,7 +239,7 @@ const CustomNode = ({ data, id }) => {
         )}
         
         {/* Node content */}
-        <div className="px-3 break-words text-center leading-tight" title={data.originalLabel}>
+        <div className="px-3 break-words text-center leading-tight" title={data.displayLabel && data.displayLabel !== data.originalLabel ? `Stored as: ${data.originalLabel}` : data.originalLabel}>
           {/* Source node content with editing for PDF headers */}
           {isSource ? (
             <div className="relative">
@@ -316,7 +316,7 @@ const CustomNode = ({ data, id }) => {
           ) : (
             // Target node content
             <>
-              {data.originalLabel}
+              {data.displayLabel || data.originalLabel}
               {/* Source indicator badge - Template (from Excel) vs Dynamic (added via UI) */}
               <div className="mt-1 flex flex-wrap justify-center gap-1">
                 {isDynamic ? (
@@ -556,6 +556,8 @@ export default function ColumnMapping() {
   // React Flow state
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  const nodesRef = useRef([]);
+  const edgesRef = useRef([]);
   const [mappingHistory, setMappingHistory] = useState([]);
   const [selectedEdge, setSelectedEdge] = useState(null);
   const [selectedSourceNode, setSelectedSourceNode] = useState(null);
@@ -605,6 +607,14 @@ export default function ColumnMapping() {
   const [templateMappingCount, setTemplateMappingCount] = useState(0);
   const [originalTemplateId, setOriginalTemplateId] = useState(null);
   const [templateSuccess, setTemplateSuccess] = useState(false);
+
+  useEffect(() => {
+    nodesRef.current = nodes;
+  }, [nodes]);
+
+  useEffect(() => {
+    edgesRef.current = edges;
+  }, [edges]);
 
   // Snackbar state for user feedback
   const [snackbar, setSnackbar] = useState({
@@ -689,8 +699,8 @@ export default function ColumnMapping() {
 
   // Column count state
   const [columnCounts, setColumnCounts] = useState({
-    tags_count: 3,
-    spec_pairs_count: 3,
+    tags_count: 1,
+    spec_pairs_count: 1,
     customer_id_pairs_count: 1
   });
   const [templateColumns, setTemplateColumns] = useState([]);
@@ -1511,8 +1521,8 @@ export default function ColumnMapping() {
         if (session_metadata && session_metadata.column_counts) {
           const { tags_count, spec_pairs_count, customer_id_pairs_count } = session_metadata.column_counts;
           const newCounts = {
-            tags_count: tags_count || 3,
-            spec_pairs_count: spec_pairs_count || 3,
+            tags_count: tags_count || 1,
+            spec_pairs_count: spec_pairs_count || 1,
             customer_id_pairs_count: customer_id_pairs_count || 1
           };
           
@@ -1665,6 +1675,23 @@ export default function ColumnMapping() {
     return 'gray';
   }
 
+  function normalizeTemplateHeaderLabel(fieldName) {
+    return String(fieldName || '').replace(/\.\d+$/, '').trim().toLowerCase();
+  }
+
+  function getSfoRepeatedFieldType(fieldName) {
+    const normalized = normalizeTemplateHeaderLabel(fieldName);
+    if (normalized === 'tag') return 'tag';
+    if (['specification name', 'specification value', 'specification uom'].includes(normalized)) return 'specification';
+    if (['item identifications name', 'item identifications value', 'customer identification name', 'customer identification value', 'custom identification name', 'custom identification value'].includes(normalized)) return 'customer';
+    return null;
+  }
+
+  function getSfoRepeatedDisplayLabel(fieldName, occurrence, total) {
+    if (!fieldName || total <= 1) return fieldName;
+    return `${occurrence}. ${fieldName}`;
+  }
+
   function isOptionalFieldUpdated(fieldName, templateOptionals, idx) {
     if (templateOptionals && templateOptionals.length > idx) {
       return !!templateOptionals[idx];
@@ -1679,24 +1706,40 @@ export default function ColumnMapping() {
 
     const nodeData = node.data || {};
     const fieldName = nodeData.originalLabel;
+    const sfoGroupType = nodeData.sfoGroupType;
+    const sfoGroupIndex = nodeData.sfoGroupIndex || 1;
+    const isAddedSfoRepeat = !!sfoGroupType && sfoGroupIndex > 1;
 
-    if (!isDynamicColumn(fieldName)) {
+    if (!isDynamicColumn(fieldName) && !isAddedSfoRepeat) {
       window.alert('Only added dynamic fields can be deleted. FactWise template fields are locked.');
       return;
     }
     
     // Check if any of the target nodes are mapped
-    const hasMapping = edges.some(e => e.target === nodeId);
+    const targetIdsToCheck = isAddedSfoRepeat
+      ? nodes
+          .filter(n => n.id.startsWith('t-') && n.data?.sfoGroupType === sfoGroupType && n.data?.sfoGroupIndex === sfoGroupIndex)
+          .map(n => n.id)
+      : [nodeId];
+    const hasMapping = edges.some(e => targetIdsToCheck.includes(e.target));
     if (hasMapping) {
-      window.alert('Please remove the mapping from this field before deleting it.');
+      window.alert('Please remove the mapping from this added field/group before deleting it.');
       return;
     }
 
     // Compute new counts based on field type
     const newCounts = { ...columnCounts };
-    
-    if (fieldName.includes('Tag_')) {
-      newCounts.tags_count = Math.max(0, (newCounts.tags_count || 0) - 1);
+
+    if (isAddedSfoRepeat) {
+      if (sfoGroupType === 'tag') {
+        newCounts.tags_count = Math.max(1, (newCounts.tags_count || 1) - 1);
+      } else if (sfoGroupType === 'specification') {
+        newCounts.spec_pairs_count = Math.max(1, (newCounts.spec_pairs_count || 1) - 1);
+      } else if (sfoGroupType === 'customer') {
+        newCounts.customer_id_pairs_count = Math.max(1, (newCounts.customer_id_pairs_count || 1) - 1);
+      }
+    } else if (fieldName.includes('Tag_')) {
+      newCounts.tags_count = Math.max(1, (newCounts.tags_count || 1) - 1);
     } else if (fieldName.includes('Specification')) {
       // For specifications, we delete pairs
       const fieldNum = getFieldNumber(fieldName);
@@ -1709,7 +1752,7 @@ export default function ColumnMapping() {
       
       // Only decrease if we're deleting a complete pair
       if (pairNodes.length >= 2) {
-        newCounts.spec_pairs_count = Math.max(0, (newCounts.spec_pairs_count || 0) - 1);
+        newCounts.spec_pairs_count = Math.max(1, (newCounts.spec_pairs_count || 1) - 1);
       }
     } else if (fieldName.includes('Customer_Identification')) {
       // For customer IDs, we delete pairs
@@ -1723,7 +1766,7 @@ export default function ColumnMapping() {
       
       // Only decrease if we're deleting a complete pair
       if (pairNodes.length >= 2) {
-        newCounts.customer_id_pairs_count = Math.max(0, (newCounts.customer_id_pairs_count || 0) - 1);
+        newCounts.customer_id_pairs_count = Math.max(1, (newCounts.customer_id_pairs_count || 1) - 1);
       }
     }
 
@@ -1746,7 +1789,7 @@ export default function ColumnMapping() {
     // Create stable delete handler using imported function
     const stableDeleteHandler = (nodeId) => {
       // Use the proper imported function
-      handleDeleteOptionalFieldUpdated(nodeId, nodes, edges, columnCounts, updateColumnCounts);
+      handleDeleteOptionalFieldUpdated(nodeId, nodesRef.current, edgesRef.current, columnCounts, updateColumnCounts);
     };
 
     // Create source nodes
@@ -1774,7 +1817,7 @@ export default function ColumnMapping() {
     let customerPairIndex = 1;
     
     // Use the color from the existing pairColors array
-    const pairColors = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'];
+    const pairColors = ['blue', 'red', 'green', 'yellow', 'purple', 'pink'];
     
     // Build quick-look maps from session rules for FW-/AT- badges
     const tagBadges = new Map();
@@ -1803,18 +1846,35 @@ export default function ColumnMapping() {
       // non-fatal; badges are best-effort
     }
 
+    const duplicateTotals = templateHdrs.reduce((acc, header) => {
+      acc[header] = (acc[header] || 0) + 1;
+      return acc;
+    }, {});
+    const duplicateSeen = {};
+
     // Process template headers in their original order
     const templateNodes = templateHdrs.map((header, idx) => {
+      duplicateSeen[header] = (duplicateSeen[header] || 0) + 1;
+      const headerOccurrence = duplicateSeen[header];
+      const headerTotal = duplicateTotals[header] || 1;
+      const sfoGroupType = getSfoRepeatedFieldType(header);
+      const sfoGroupIndex = sfoGroupType ? headerOccurrence : null;
+      const displayLabel = getSfoRepeatedDisplayLabel(header, headerOccurrence, headerTotal);
+
       // Use updated pair detection logic for numbered fields
       const nextHeader = templateHdrs[idx + 1];
       const prevHeader = templateHdrs[idx - 1];
       
-      const isPairStart = isPairStartUpdated(header, nextHeader);
-      const isPairEnd = isPairEndUpdated(header, prevHeader);
-      const pairType = getPairTypeUpdated(header);
-      const pairIndex = getPairIndexUpdated(header);
-      const pairColor = getPairColorUpdated(header, pairColors);
-      const isDynamicTemplateField = isDynamicColumn(header);
+      const normalizedHeader = normalizeTemplateHeaderLabel(header);
+      const isSfoPairStart = normalizedHeader === 'specification name' || normalizedHeader === 'item identifications name' || normalizedHeader === 'customer identification name' || normalizedHeader === 'custom identification name';
+      const isSfoPairEnd = normalizedHeader === 'specification uom' || normalizedHeader === 'item identifications value' || normalizedHeader === 'customer identification value' || normalizedHeader === 'custom identification value';
+      const isPairStart = sfoGroupType === 'specification' || sfoGroupType === 'customer' ? isSfoPairStart : isPairStartUpdated(header, nextHeader);
+      const isPairEnd = sfoGroupType === 'specification' || sfoGroupType === 'customer' ? isSfoPairEnd : isPairEndUpdated(header, prevHeader);
+      const pairType = sfoGroupType || getPairTypeUpdated(header);
+      const pairIndex = sfoGroupType ? sfoGroupIndex : getPairIndexUpdated(header);
+      const pairColor = sfoGroupType ? pairColors[(Math.max(pairIndex, 1) - 1) % pairColors.length] : getPairColorUpdated(header, pairColors);
+      const isDynamicTemplateField = isDynamicColumn(header) || (!!sfoGroupType && sfoGroupIndex > 1);
+      const isOptionalTemplateField = isDynamicTemplateField || (sfoGroupType && isOptionalFieldUpdated(header, templateOptionals, idx));
 
       // Check for custom formula rule from factwise
       const factwiseFormula = factwiseRules?.find(rule => rule.target_column === header)?.formula_expression || null;
@@ -1832,6 +1892,7 @@ export default function ColumnMapping() {
         data: {
           label: header,
           originalLabel: header,
+          displayLabel,
           type: 'target',
           headerType: 'template',
           index: idx,
@@ -1840,7 +1901,7 @@ export default function ColumnMapping() {
           pairType: pairType,
           pairColor: pairColor,
           pairIndex: pairIndex,
-          isOptional: isDynamicTemplateField && isOptionalFieldUpdated(header, templateOptionals, idx),
+          isOptional: !!isOptionalTemplateField,
           onDelete: stableDeleteHandler,
           factwiseFormula: factwiseFormula,
           hasDefaultValue: hasDefaultValue,
@@ -1848,6 +1909,8 @@ export default function ColumnMapping() {
           atBadge: tagBadges.get(header) || null,
           isDarkMode,
           isDynamic: isDynamicTemplateField,  // true for Tag_1, Specification_Name_1, etc.
+          sfoGroupType,
+          sfoGroupIndex,
         },
         draggable: false,
         style: { 
@@ -4716,6 +4779,7 @@ export default function ColumnMapping() {
                   </button>
                 </div>
               </section>
+
             </div>
 
             <div className={`p-5 border-t ${

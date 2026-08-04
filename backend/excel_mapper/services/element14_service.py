@@ -3,6 +3,7 @@ Element14 / Farnell / Newark API client for MPN validation.
 """
 import logging
 import os
+import re
 
 import requests
 from django.core.cache import cache
@@ -28,6 +29,7 @@ class Element14Client:
             return ""
         s = str(mpn).replace('\u00A0', ' ').strip().lower()
         s = s.replace(' ', '').replace('-', '')
+        s = re.sub(r'[^\w]+$', '', s)
         for suf in ['g4', 't1', 'tr', 'reel', 'ct']:
             if s.endswith(suf):
                 s = s[:-len(suf)]
@@ -59,6 +61,9 @@ class Element14Client:
     def _products_from_response(self, result):
         if not isinstance(result, dict):
             return []
+        nested = result.get('manufacturerPartNumberSearchReturn')
+        if isinstance(nested, dict):
+            result = nested
         products = result.get('products')
         if isinstance(products, list):
             return products

@@ -18,7 +18,6 @@ import {
   Dialog,
   DialogTitle,
   DialogContent,
-  DialogContentText,
   DialogActions,
   Chip,
   Container,
@@ -29,6 +28,7 @@ import {
   Radio,
   RadioGroup,
   Snackbar,
+  Stack,
   Tooltip,
 } from '@mui/material';
 import { useDropzone } from 'react-dropzone';
@@ -465,6 +465,18 @@ const UploadFiles = () => {
   const [tagTemplatesLoading, setTagTemplatesLoading] = useState(false);
   const [tagTemplateSearchTerm, setTagTemplateSearchTerm] = useState('');
 
+  // Global processing template flow. Mapping templates are only one part of this;
+  // this captures the user's overall intent before they enter mapping/normalizing.
+  const [processingTemplateMode, setProcessingTemplateMode] = useState('');
+  const [processingTemplateName, setProcessingTemplateName] = useState('');
+  const [processingTemplates, setProcessingTemplates] = useState([]);
+  const [selectedProcessingTemplateId, setSelectedProcessingTemplateId] = useState('');
+  const [processingTemplatesLoading, setProcessingTemplatesLoading] = useState(false);
+  const [processingPath, setProcessingPath] = useState('map');
+  const [newTemplateDialogOpen, setNewTemplateDialogOpen] = useState(false);
+  const [newTemplateDraftName, setNewTemplateDraftName] = useState('');
+  const [pendingTemplateAction, setPendingTemplateAction] = useState(null);
+
   // PDF alignment state - Use 'align' to keep exact headers AND align rows across pages
   // 'align' = align rows from different pages to same row level + keep original headers (MFR stays MFR)
   // 'preserve' = append rows sequentially (page 1 rows, then page 2 rows, etc.) + keep original headers
@@ -488,6 +500,8 @@ const UploadFiles = () => {
   const [sheetJoinDialogOpen, setSheetJoinDialogOpen] = useState(false);
   const [sheetJoinSetup, setSheetJoinSetup] = useState(null);
   const [sheetJoinConfig, setSheetJoinConfig] = useState({
+    baseSourceId: 'primary',
+    detailSourceId: 'primary',
     baseSheet: '',
     detailSheet: '',
     baseHeaderRow: 1,
@@ -514,15 +528,8 @@ const UploadFiles = () => {
   const [savedSheetJoinComparisons, setSavedSheetJoinComparisons] = useState([]);
   const [activeSheetJoinComparisonId, setActiveSheetJoinComparisonId] = useState(null);
   const [previousClientState, setPreviousClientState] = useState(null);
-  const [sheetJoinSaveDialogOpen, setSheetJoinSaveDialogOpen] = useState(false);
-  const [sheetJoinSaveName, setSheetJoinSaveName] = useState('');
-  const [sheetJoinSaveLoading, setSheetJoinSaveLoading] = useState(false);
-  const [sheetJoinDuplicateDialogOpen, setSheetJoinDuplicateDialogOpen] = useState(false);
-  const [pendingSheetJoinDuplicate, setPendingSheetJoinDuplicate] = useState(null);
-  const isSheetJoinPreviewStage = sheetJoinStage === 'preview';
-  const sheetJoinDialogWidth = isSheetJoinPreviewStage
-    ? 'min(1240px, calc(100vw - 32px))'
-    : 'min(920px, calc(100vw - 32px))';
+  const [sheetJoinSources, setSheetJoinSources] = useState([]);
+  const [sheetJoinSourceFileInputKey, setSheetJoinSourceFileInputKey] = useState(0);
 
   const navigate = useNavigate();
   const location = useLocation();
@@ -548,6 +555,7 @@ const UploadFiles = () => {
   useEffect(() => {
     loadAvailableTemplates();
     loadAvailableTagTemplates();
+    loadAvailableProcessingTemplates();
     
     // Clear any stale persisted info when visiting upload page
     sessionStorage.removeItem('lastUploadedFiles');
@@ -580,6 +588,18 @@ const UploadFiles = () => {
     }
   };
 
+  const loadAvailableProcessingTemplates = async () => {
+    setProcessingTemplatesLoading(true);
+    try {
+      const response = await api.getProcessingTemplates();
+      setProcessingTemplates(response.data.templates || []);
+    } catch (err) {
+      console.error('Error loading processing templates:', err);
+    } finally {
+      setProcessingTemplatesLoading(false);
+    }
+  };
+
   const openSheetJoinDraftDb = useCallback(() => new Promise((resolve, reject) => {
     const request = indexedDB.open(sheetJoinDraftDbName, 1);
     request.onupgradeneeded = () => {
@@ -605,24 +625,6 @@ const UploadFiles = () => {
   useEffect(() => {
     loadSavedSheetJoinComparisons();
   }, [loadSavedSheetJoinComparisons]);
-
-  const getUniqueSheetJoinComparisonName = useCallback((baseName, ignoreId = null) => {
-    const cleanBase = (baseName || 'Comparison').trim();
-    const existingNames = new Set(
-      savedSheetJoinComparisons
-        .filter(item => item.id !== ignoreId)
-        .map(item => String(item.name || '').trim().toLowerCase())
-    );
-    if (!existingNames.has(cleanBase.toLowerCase())) return cleanBase;
-
-    let index = 2;
-    let candidate = `${cleanBase} copy`;
-    while (existingNames.has(candidate.toLowerCase())) {
-      candidate = `${cleanBase} copy ${index}`;
-      index += 1;
-    }
-    return candidate;
-  }, [savedSheetJoinComparisons]);
 
   const saveSheetJoinDraft = useCallback(async (preview, comparisonName = '', options = {}) => {
     if (!preview?.headers?.length) return null;
@@ -712,6 +714,8 @@ const UploadFiles = () => {
       setSheetJoinDialogOpen(false);
       setSheetJoinStage('match');
       setSheetJoinPreview(null);
+      setSheetJoinSources([]);
+      setSheetJoinSourceFileInputKey(key => key + 1);
       setActiveSheetJoinComparisonId(activeComparisonId);
       setSuccess('Related sheet data is saved as your new BOM/client file. Add the FW template when ready and continue normally.');
     };
@@ -824,9 +828,52 @@ const UploadFiles = () => {
     }
   }, [openSheetJoinDraftDb, sheetJoinDraftStoreName, savedSheetJoinComparisons, sheetJoinComparisonListKey, activeSheetJoinComparisonId]);
 
-  const getSheetHeaders = useCallback((sheetName, headerRow = 1) => {
-    if (!clientWorkbook || !sheetName || !clientWorkbook.Sheets[sheetName]) return [];
-    const rows = XLSX.utils.sheet_to_json(clientWorkbook.Sheets[sheetName], {
+  const readWorkbookFileForSheetJoin = useCallback((file) => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    const isCSV = file.name.toLowerCase().endsWith('.csv');
+    reader.onload = (event) => {
+      try {
+        const workbook = XLSX.read(event.target.result, isCSV ? {
+          type: 'string',
+          codepage: 65001,
+          raw: false,
+          dateNF: 'YYYY-MM-DD',
+          cellDates: true,
+          cellNF: false,
+          cellText: false
+        } : { type: 'binary' });
+        resolve(workbook);
+      } catch (err) {
+        reject(err);
+      }
+    };
+    reader.onerror = () => reject(reader.error || new Error('Unable to read file'));
+    if (isCSV) {
+      reader.readAsText(file, 'UTF-8');
+    } else {
+      reader.readAsBinaryString(file);
+    }
+  }), []);
+
+  const getSheetJoinSourceWorkbook = useCallback((sourceId) => {
+    if (!sourceId || sourceId === 'primary') return clientWorkbook;
+    return sheetJoinSources.find(source => source.id === sourceId)?.workbook || null;
+  }, [clientWorkbook, sheetJoinSources]);
+
+  const getSheetJoinSourceSheets = useCallback((sourceId) => {
+    if (!sourceId || sourceId === 'primary') return clientSheetNames;
+    return sheetJoinSources.find(source => source.id === sourceId)?.sheetNames || [];
+  }, [clientSheetNames, sheetJoinSources]);
+
+  const getSheetJoinSourceLabel = useCallback((sourceId) => {
+    if (!sourceId || sourceId === 'primary') return userFile?.name || 'Uploaded file';
+    return sheetJoinSources.find(source => source.id === sourceId)?.fileName || 'Added file';
+  }, [sheetJoinSources, userFile]);
+
+  const getSheetHeaders = useCallback((sheetName, headerRow = 1, sourceId = 'primary') => {
+    const workbook = getSheetJoinSourceWorkbook(sourceId);
+    if (!workbook || !sheetName || !workbook.Sheets[sheetName]) return [];
+    const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
       header: 1,
       raw: false,
       defval: ''
@@ -835,11 +882,12 @@ const UploadFiles = () => {
     return row
       .map(value => String(value || '').trim())
       .filter(Boolean);
-  }, [clientWorkbook]);
+  }, [getSheetJoinSourceWorkbook]);
 
-  const getSheetRecords = useCallback((sheetName, headerRow = 1) => {
-    if (!clientWorkbook || !sheetName || !clientWorkbook.Sheets[sheetName]) return [];
-    const rows = XLSX.utils.sheet_to_json(clientWorkbook.Sheets[sheetName], {
+  const getSheetRecords = useCallback((sheetName, headerRow = 1, sourceId = 'primary') => {
+    const workbook = getSheetJoinSourceWorkbook(sourceId);
+    if (!workbook || !sheetName || !workbook.Sheets[sheetName]) return [];
+    const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], {
       header: 1,
       raw: false,
       defval: ''
@@ -858,7 +906,7 @@ const UploadFiles = () => {
         });
         return record;
       });
-  }, [clientWorkbook]);
+  }, [getSheetJoinSourceWorkbook]);
 
   const guessKeyColumn = useCallback((headers) => {
     const normalized = headers.map(header => ({
@@ -887,11 +935,13 @@ const UploadFiles = () => {
   }, []);
 
   const sanitizeSheetJoinConfig = useCallback((config) => {
-    const baseHeaders = getSheetHeaders(config.baseSheet, config.baseHeaderRow).length
-      ? getSheetHeaders(config.baseSheet, config.baseHeaderRow)
+    const baseSourceId = config.baseSourceId || 'primary';
+    const detailSourceId = config.detailSourceId || 'primary';
+    const baseHeaders = getSheetHeaders(config.baseSheet, config.baseHeaderRow, baseSourceId).length
+      ? getSheetHeaders(config.baseSheet, config.baseHeaderRow, baseSourceId)
       : (config.baseHeaders || []);
-    const detailHeaders = getSheetHeaders(config.detailSheet, config.detailHeaderRow).length
-      ? getSheetHeaders(config.detailSheet, config.detailHeaderRow)
+    const detailHeaders = getSheetHeaders(config.detailSheet, config.detailHeaderRow, detailSourceId).length
+      ? getSheetHeaders(config.detailSheet, config.detailHeaderRow, detailSourceId)
       : (config.detailHeaders || []);
     // Don't auto-guess the primary match column — the user must pick it deliberately.
     const baseKey = baseHeaders.includes(config.baseKey) ? config.baseKey : '';
@@ -901,6 +951,8 @@ const UploadFiles = () => {
 
     return {
       ...config,
+      baseSourceId,
+      detailSourceId,
       baseKey,
       detailKey,
       detailColumns: selectedDetailColumns,
@@ -916,10 +968,10 @@ const UploadFiles = () => {
 
   const buildSheetJoinPreview = useCallback((config) => {
     const cleanConfig = sanitizeSheetJoinConfig(config);
-    const baseHeaders = getSheetHeaders(cleanConfig.baseSheet, cleanConfig.baseHeaderRow);
-    const detailHeaders = getSheetHeaders(cleanConfig.detailSheet, cleanConfig.detailHeaderRow);
-    const baseRows = getSheetRecords(cleanConfig.baseSheet, cleanConfig.baseHeaderRow);
-    const detailRows = getSheetRecords(cleanConfig.detailSheet, cleanConfig.detailHeaderRow);
+    const baseHeaders = getSheetHeaders(cleanConfig.baseSheet, cleanConfig.baseHeaderRow, cleanConfig.baseSourceId);
+    const detailHeaders = getSheetHeaders(cleanConfig.detailSheet, cleanConfig.detailHeaderRow, cleanConfig.detailSourceId);
+    const baseRows = getSheetRecords(cleanConfig.baseSheet, cleanConfig.baseHeaderRow, cleanConfig.baseSourceId);
+    const detailRows = getSheetRecords(cleanConfig.detailSheet, cleanConfig.detailHeaderRow, cleanConfig.detailSourceId);
     const selectedDetailColumns = cleanConfig.detailColumns.filter(column => detailHeaders.includes(column) && column !== cleanConfig.detailKey);
     const singleGroupedColumnName = cleanConfig.relationshipName.trim();
 
@@ -1061,6 +1113,8 @@ const UploadFiles = () => {
       setActiveSheetJoinComparisonId(null);
       setSheetJoinLegacyHeaderWarning(false);
       setSheetJoinDialogOpen(false);
+      setSheetJoinSources([]);
+      setSheetJoinSourceFileInputKey(key => key + 1);
       
       // Read the file to extract sheet names and column headers for Excel/CSV files
       // Skip processing for PDF files as they will be handled by Azure OCR
@@ -1069,6 +1123,7 @@ const UploadFiles = () => {
       const isPDF = file.name.toLowerCase().endsWith('.pdf');
 
       if (isPDF) {
+        setProcessingPath('map');
         // For PDF files, we don't need to extract sheet names or headers
         // They will be processed by Azure OCR service
         setClientWorkbook(null);
@@ -1241,6 +1296,24 @@ const UploadFiles = () => {
       // (so files only appear when coming back from mapping).
     }
   }, []);
+
+  useEffect(() => {
+    const initialClientFile = location.state?.initialClientFile;
+    if (!initialClientFile) return;
+
+    onDropUserFile([initialClientFile]);
+    setWizardStep(1);
+    setProcessingPath(location.state?.processingPath || 'map');
+    setSuccess(location.state?.fromBomNormalizer
+      ? 'BOM Normalizer output loaded. Continue with BOM Mapping when ready.'
+      : 'File loaded.');
+
+    const nextState = { ...(location.state || {}) };
+    delete nextState.initialClientFile;
+    delete nextState.fromBomNormalizer;
+    delete nextState.processingPath;
+    navigate('/upload', { replace: true, state: nextState });
+  }, [location.state, navigate, onDropUserFile]);
 
 
   const { getRootProps: getUserRootProps, getInputProps: getUserInputProps, isDragActive: isUserDragActive } =
@@ -1442,15 +1515,44 @@ const UploadFiles = () => {
     setCompatibilityErrorData(null);
   };
 
-  const handleOpenSheetJoinSetup = () => {
-    if (!clientWorkbook || clientSheetNames.length < 2) return;
+  const handleConfirmNewProcessingTemplate = () => {
+    const name = newTemplateDraftName.trim();
+    if (!name) {
+      setError('Enter a template name to continue.');
+      return;
+    }
 
+    setProcessingTemplateMode('new');
+    setProcessingTemplateName(name);
+    setNewTemplateDialogOpen(false);
+    const action = pendingTemplateAction;
+    setPendingTemplateAction(null);
+
+    const options = {
+      processingTemplateMode: 'new',
+      processingTemplateName: name,
+    };
+
+    if (action === 'normalize') {
+      handleOpenBomNormalizer(options);
+    } else if (action === 'upload') {
+      handleUpload(options);
+    }
+  };
+
+  const handleOpenSheetJoinSetup = () => {
+    if (!clientWorkbook || !clientSheetNames.length) return;
+
+    const externalSource = sheetJoinSources[0] || null;
+    const baseSourceId = sheetJoinSetup?.baseSourceId || 'primary';
+    const detailSourceId = sheetJoinSetup?.detailSourceId || externalSource?.id || 'primary';
+    const availableDetailSheets = getSheetJoinSourceSheets(detailSourceId);
     const baseSheet = sheetJoinSetup?.baseSheet || selectedClientSheet || clientSheetNames[0];
-    const detailSheet = sheetJoinSetup?.detailSheet || clientSheetNames.find(sheet => sheet !== baseSheet) || clientSheetNames[1] || '';
+    const detailSheet = sheetJoinSetup?.detailSheet || availableDetailSheets.find(sheet => detailSourceId !== baseSourceId || sheet !== baseSheet) || availableDetailSheets[0] || '';
     const baseHeaderRow = sheetJoinSetup?.baseHeaderRow || clientHeaderRow || 1;
     const detailHeaderRow = sheetJoinSetup?.detailHeaderRow || 1;
-    const baseHeaders = getSheetHeaders(baseSheet, baseHeaderRow);
-    const detailHeaders = getSheetHeaders(detailSheet, detailHeaderRow);
+    const baseHeaders = getSheetHeaders(baseSheet, baseHeaderRow, baseSourceId);
+    const detailHeaders = getSheetHeaders(detailSheet, detailHeaderRow, detailSourceId);
     // Don't auto-guess the primary match column — the user picks it deliberately.
     const baseKey = sheetJoinSetup?.baseKey || '';
     const detailKey = sheetJoinSetup?.detailKey || guessKeyColumn(detailHeaders);
@@ -1458,6 +1560,8 @@ const UploadFiles = () => {
     const defaultCopiedColumnSelection = defaultCopiedBaseColumns(baseHeaders);
 
     setSheetJoinConfig({
+      baseSourceId,
+      detailSourceId,
       baseSheet,
       detailSheet,
       baseHeaderRow,
@@ -1477,6 +1581,58 @@ const UploadFiles = () => {
     setSheetJoinStage('match');
     setSheetJoinPreview(null);
     setSheetJoinDialogOpen(true);
+  };
+
+  const handleAddSheetJoinSourceFile = async (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const lowerName = file.name.toLowerCase();
+    if (lowerName.endsWith('.pdf')) {
+      setError('PDF merge sources need extraction first. For now, add Excel or CSV here.');
+      event.target.value = '';
+      return;
+    }
+
+    try {
+      const workbook = await readWorkbookFileForSheetJoin(file);
+      const sheetNames = workbook.SheetNames || [];
+      if (!sheetNames.length) {
+        setError('No sheets found in the file selected for merge.');
+        return;
+      }
+      const id = `source-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const nextSource = {
+        id,
+        file,
+        fileName: file.name,
+        workbook,
+        sheetNames,
+      };
+      const detailSheet = sheetNames[0];
+      const detailHeaderRow = detectHeaderRow(workbook, detailSheet);
+      const detailHeaders = readHeadersAtRow(workbook, detailSheet, detailHeaderRow);
+      const detailKey = guessKeyColumn(detailHeaders);
+      const detailColumns = defaultDetailColumns(detailHeaders, detailKey);
+
+      setSheetJoinSources(prev => [...prev, nextSource]);
+      setSheetJoinConfig(prev => ({
+        ...prev,
+        detailSourceId: id,
+        detailSheet,
+        detailHeaderRow,
+        detailKey,
+        detailColumns,
+        uniqueIdDetailColumn: detailColumns[0] || detailKey,
+      }));
+      setSheetJoinStage('match');
+      setSheetJoinPreview(null);
+      setActiveSheetJoinComparisonId(null);
+    } catch (err) {
+      setError(`Could not read merge source: ${err.message || err}`);
+    } finally {
+      event.target.value = '';
+      setSheetJoinSourceFileInputKey(key => key + 1);
+    }
   };
 
   const handleCloseSheetJoinSetup = () => {
@@ -1561,7 +1717,7 @@ const UploadFiles = () => {
     const preview = sheetJoinPreview || buildSheetJoinPreview(sheetJoinConfig);
 
     const setup = {
-      sourceType: 'same-workbook',
+      sourceType: preview.config.baseSourceId === preview.config.detailSourceId ? 'same-workbook' : 'multi-source',
       ...preview.config,
       baseHeaderRow: Math.max(1, Number(preview.config.baseHeaderRow || 1)),
       detailHeaderRow: Math.max(1, Number(preview.config.detailHeaderRow || 1)),
@@ -1605,8 +1761,8 @@ const UploadFiles = () => {
       }
       const storedConfig = draft.previewConfig || sheetJoinConfig;
       const uniqueList = (values) => [...new Set((values || []).filter(Boolean))];
-      const workbookBaseHeaders = getSheetHeaders(storedConfig.baseSheet, storedConfig.baseHeaderRow);
-      const workbookDetailHeaders = getSheetHeaders(storedConfig.detailSheet, storedConfig.detailHeaderRow);
+      const workbookBaseHeaders = getSheetHeaders(storedConfig.baseSheet, storedConfig.baseHeaderRow, storedConfig.baseSourceId);
+      const workbookDetailHeaders = getSheetHeaders(storedConfig.detailSheet, storedConfig.detailHeaderRow, storedConfig.detailSourceId);
       const fallbackDetailHeaders = uniqueList([
         storedConfig.detailKey,
         ...(storedConfig.detailColumns || [])
@@ -1664,74 +1820,6 @@ const UploadFiles = () => {
       setError('Failed to continue with saved merge book: ' + (err.message || err));
     }
   }, [applySheetJoinDraftToUpload, getSavedSheetJoinDraft]);
-
-  const saveNamedSheetJoinComparison = useCallback(async (preview, name, options = {}) => {
-    const saved = await saveSheetJoinDraft(preview, name, options);
-    if (saved?.id) {
-      setActiveSheetJoinComparisonId(saved.id);
-    }
-    handleSaveSheetJoinSetup();
-    setSheetJoinSaveDialogOpen(false);
-    setSheetJoinSaveName('');
-    setPendingSheetJoinDuplicate(null);
-    setSheetJoinDuplicateDialogOpen(false);
-    setSuccess('Merge book saved. You can reopen it from the saved merge books on Upload.');
-  }, [saveSheetJoinDraft, handleSaveSheetJoinSetup]);
-
-  const handleSaveComparisonWithName = async () => {
-    if (!sheetJoinSaveName.trim()) {
-      setError('Merge book name is required');
-      return;
-    }
-    const preview = sheetJoinPreview || buildSheetJoinPreview(sheetJoinConfig);
-    const requestedName = sheetJoinSaveName.trim();
-    const duplicate = savedSheetJoinComparisons.find(item =>
-      String(item.name || '').trim().toLowerCase() === requestedName.toLowerCase()
-    );
-    if (duplicate) {
-      setPendingSheetJoinDuplicate({ preview, name: requestedName, existing: duplicate });
-      setSheetJoinDuplicateDialogOpen(true);
-      return;
-    }
-
-    try {
-      setSheetJoinSaveLoading(true);
-      await saveNamedSheetJoinComparison(preview, requestedName);
-    } catch (err) {
-      setError('Failed to save merge book: ' + (err.message || err));
-    } finally {
-      setSheetJoinSaveLoading(false);
-    }
-  };
-
-  const handleOverrideSavedComparison = async () => {
-    if (!pendingSheetJoinDuplicate) return;
-    try {
-      setSheetJoinSaveLoading(true);
-      await saveNamedSheetJoinComparison(
-        pendingSheetJoinDuplicate.preview,
-        pendingSheetJoinDuplicate.name,
-        { overrideId: pendingSheetJoinDuplicate.existing.id }
-      );
-    } catch (err) {
-      setError('Failed to override merge book: ' + (err.message || err));
-    } finally {
-      setSheetJoinSaveLoading(false);
-    }
-  };
-
-  const handleSaveComparisonAsCopy = async () => {
-    if (!pendingSheetJoinDuplicate) return;
-    const copyName = getUniqueSheetJoinComparisonName(pendingSheetJoinDuplicate.name);
-    try {
-      setSheetJoinSaveLoading(true);
-      await saveNamedSheetJoinComparison(pendingSheetJoinDuplicate.preview, copyName);
-    } catch (err) {
-      setError('Failed to save merge book copy: ' + (err.message || err));
-    } finally {
-      setSheetJoinSaveLoading(false);
-    }
-  };
 
   const handleContinueWithBomMapping = async () => {
     const preview = sheetJoinPreview || buildSheetJoinPreview(sheetJoinConfig);
@@ -1820,7 +1908,97 @@ const UploadFiles = () => {
     }
   };
 
-  const handleUpload = async () => {
+  const getUploadFileType = (file) => {
+    const name = file?.name?.toLowerCase?.() || '';
+    if (name.endsWith('.pdf')) return 'pdf';
+    if (name.endsWith('.csv')) return 'csv';
+    if (name.endsWith('.xlsx') || name.endsWith('.xls')) return 'excel';
+    return 'unknown';
+  };
+
+  const getProcessingTemplateState = (overrides = {}) => {
+    const selectedProcessingTemplate = processingTemplates.find(
+      template => String(template.id) === String(selectedProcessingTemplateId)
+    );
+    const effectiveMode = overrides.processingTemplateMode || (selectedProcessingTemplateId ? 'use' : 'new');
+    const effectiveName = overrides.processingTemplateName !== undefined
+      ? overrides.processingTemplateName
+      : processingTemplateName.trim();
+
+    return {
+      processingTemplateMode: effectiveMode,
+      processingTemplateName: effectiveName,
+      selectedProcessingTemplate: selectedProcessingTemplate || null,
+      selectedProcessingTemplateId: selectedProcessingTemplateId || '',
+      processingPath: overrides.processingPath || processingPath,
+      sourceRequirements: {
+        source_count: templateFile ? 2 : 1,
+        source_types: [getUploadFileType(userFile), templateFile ? getUploadFileType(templateFile) : null].filter(Boolean),
+        sources: [
+          userFile ? {
+            position: 1,
+            file_name_hint: userFile.name,
+            file_type: getUploadFileType(userFile),
+            sheet_names: clientSheetNames,
+            active_sheet: selectedClientSheet,
+            header_row: clientHeaderRow,
+            headers: clientHeaderPreview,
+          } : null,
+          templateFile ? {
+            position: 2,
+            file_name_hint: templateFile.name,
+            file_type: getUploadFileType(templateFile),
+            sheet_names: templateSheetNames,
+            active_sheet: selectedTemplateSheet,
+            header_row: templateHeaderRow,
+            headers: templateHeaderPreview,
+          } : null,
+        ].filter(Boolean),
+      },
+    };
+  };
+
+  const openNewTemplateDialog = (action) => {
+    const fallbackName = `${userFile?.name ? userFile.name.replace(/\.[^.]+$/, '') : 'BOM'} template`;
+    setNewTemplateDraftName(processingTemplateName.trim() || fallbackName);
+    setPendingTemplateAction(action);
+    setNewTemplateDialogOpen(true);
+    setError(null);
+  };
+
+  const handleOpenBomNormalizer = (templateOptions = {}) => {
+    if (!userFile) {
+      setError('Please select a client file');
+      return;
+    }
+
+    if (userFile.name.toLowerCase().endsWith('.pdf')) {
+      setError('PDF files must be extracted first. Use normal upload to choose OCR or zone mapping.');
+      return;
+    }
+
+    if (!selectedProcessingTemplateId && !templateOptions.processingTemplateName) {
+      openNewTemplateDialog('normalize');
+      return;
+    }
+
+    navigate('/bom-normalizer', {
+      state: {
+        initialFile: userFile,
+        initialFileMode: 'workbook',
+        templateFile,
+        uploadSource: {
+          ...getProcessingTemplateState({
+            processingTemplateMode: selectedProcessingTemplateId ? 'use' : 'new',
+            ...templateOptions,
+          }),
+          processingPath: 'normalize',
+        },
+      }
+    });
+  };
+
+  const handleUpload = async (templateOptions = {}) => {
     if (!userFile) {
       setError('Please select a client file');
       return;
@@ -1828,12 +2006,8 @@ const UploadFiles = () => {
 
     const isPDF = userFile.name.toLowerCase().endsWith('.pdf');
 
-    // Template file is required for non-PDF files. PDF uploads can still fall back
-    // to the default template, but if a template is selected it must be complete.
-    if (!isPDF && !templateFile) {
-      setError('Please select a template file');
-      return;
-    }
+    // FactWise template upload is optional in the new flow. If it is omitted,
+    // mapping will use the default/fetched FactWise template downstream.
 
     if (!isPDF && clientSheetNames.length > 0) {
       if (combineSheetsMode) {
@@ -1849,6 +2023,11 @@ const UploadFiles = () => {
 
     if (templateFile && templateSheetNames.length > 0 && !selectedTemplateSheet) {
       setError('Please select a sheet from your template file');
+      return;
+    }
+
+    if (!selectedProcessingTemplateId && !templateOptions.processingTemplateName) {
+      openNewTemplateDialog('upload');
       return;
     }
 
@@ -1902,9 +2081,11 @@ const UploadFiles = () => {
       formData.append('clientFile', uploadClientFile);
       formData.append('sheetName', uploadSheetName);
       formData.append('headerRow', uploadHeaderRow.toString());
-      formData.append('templateFile', templateFile);
-      formData.append('templateSheetName', selectedTemplateSheet);
-      formData.append('templateHeaderRow', templateHeaderRow.toString());
+      if (templateFile) {
+        formData.append('templateFile', templateFile);
+        formData.append('templateSheetName', selectedTemplateSheet);
+        formData.append('templateHeaderRow', templateHeaderRow.toString());
+      }
 
       // Add formula rules if they exist and NO mapping template is selected
       // When a template is selected, it already contains the rules, so don't send them again
@@ -1932,7 +2113,11 @@ const UploadFiles = () => {
               autoApplyTemplate: selectedTemplate,
               appliedTemplate: selectedTemplate,
               fromUpload: true,
-              smartTagFormulaRules: formulaRules
+              smartTagFormulaRules: formulaRules,
+              uploadSource: getProcessingTemplateState({
+                processingTemplateMode: selectedProcessingTemplateId ? 'use' : 'new',
+                ...templateOptions,
+              })
             });
           }, 1500);
           
@@ -1964,8 +2149,18 @@ const UploadFiles = () => {
             autoApplyTemplate: selectedTemplate,
             appliedTemplate: selectedTemplate,
             fromUpload: true,
-            smartTagFormulaRules: formulaRules
-          } : null);
+            smartTagFormulaRules: formulaRules,
+            uploadSource: getProcessingTemplateState({
+              processingTemplateMode: selectedProcessingTemplateId ? 'use' : 'new',
+              ...templateOptions,
+            })
+          } : {
+            fromUpload: true,
+            uploadSource: getProcessingTemplateState({
+              processingTemplateMode: selectedProcessingTemplateId ? 'use' : 'new',
+              ...templateOptions,
+            })
+          });
         }, 1500);
       }
       
@@ -2059,8 +2254,20 @@ const UploadFiles = () => {
     }
   };
 
-  const currentBaseHeaders = getSheetHeaders(sheetJoinConfig.baseSheet, sheetJoinConfig.baseHeaderRow);
-  const currentDetailHeaders = getSheetHeaders(sheetJoinConfig.detailSheet, sheetJoinConfig.detailHeaderRow);
+  const sheetJoinSourceOptions = [
+    {
+      id: 'primary',
+      label: userFile?.name || 'Uploaded file',
+      sheetNames: clientSheetNames,
+    },
+    ...sheetJoinSources.map(source => ({
+      id: source.id,
+      label: source.fileName,
+      sheetNames: source.sheetNames || [],
+    })),
+  ];
+  const currentBaseHeaders = getSheetHeaders(sheetJoinConfig.baseSheet, sheetJoinConfig.baseHeaderRow, sheetJoinConfig.baseSourceId);
+  const currentDetailHeaders = getSheetHeaders(sheetJoinConfig.detailSheet, sheetJoinConfig.detailHeaderRow, sheetJoinConfig.detailSourceId);
   const sheetJoinBaseHeaders = currentBaseHeaders.length
     ? currentBaseHeaders
     : (sheetJoinConfig.baseHeaders || sheetJoinPreview?.config?.baseHeaders || []);
@@ -2172,7 +2379,9 @@ const UploadFiles = () => {
         sx={{
           position: 'relative',
           zIndex: 1,
-          width: 'min(1100px, calc(100vw - 32px))',
+          width: wizardStep === 0
+            ? 'min(920px, calc(100vw - 32px))'
+            : 'min(1100px, calc(100vw - 32px))',
           minHeight: '580px',
           borderRadius: '22px',
           border: `1px solid ${Nn.cardBorder}`,
@@ -2187,24 +2396,41 @@ const UploadFiles = () => {
         }}
       >
         {/* Top Header & Progress */}
-        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 3 }}>
+        <Box sx={{
+          display: 'flex',
+          justifyContent: wizardStep === 0 ? 'center' : 'space-between',
+          alignItems: wizardStep === 0 ? 'center' : 'flex-start',
+          mb: 3,
+          position: 'relative',
+          textAlign: wizardStep === 0 ? 'center' : 'left'
+        }}>
           <Box>
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, mb: 0.5 }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: wizardStep === 0 ? 'center' : 'flex-start', gap: 1.5, mb: 0.5 }}>
               <Typography variant="h5" fontWeight="800" sx={{ color: Nn.text, letterSpacing: '-0.02em', fontSize: '1.4rem' }}>
-                Upload Files
+                {wizardStep === 1 ? 'Select Template' : 'Upload Files'}
               </Typography>
               <Chip
                 label={wizardStep === 0 ? "Step 1 of 2 • Files" : "Step 2 of 2 • Options"}
                 size="small"
-                sx={{ height: 22, fontSize: '11px', fontWeight: 700, bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.2)' : 'rgba(37, 99, 235, 0.1)', color: isDarkMode ? '#60a5fa' : '#1d4ed8', border: isDarkMode ? '1px solid rgba(37, 99, 235, 0.4)' : '1px solid rgba(37, 99, 235, 0.25)', borderRadius: '999px' }}
+                sx={{ display: wizardStep === 1 ? 'none' : 'inline-flex', height: 22, fontSize: '11px', fontWeight: 700, bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.2)' : 'rgba(37, 99, 235, 0.1)', color: isDarkMode ? '#60a5fa' : '#1d4ed8', border: isDarkMode ? '1px solid rgba(37, 99, 235, 0.4)' : '1px solid rgba(37, 99, 235, 0.25)', borderRadius: '999px' }}
               />
             </Box>
             <Typography variant="caption" sx={{ color: Nn.muted, fontSize: '0.85rem' }}>
-              Select client data & target template to begin automated mapping.
+              {wizardStep === 1
+                ? 'Choose an existing workflow template, or continue and create a new one.'
+                : 'Upload the client source data. Destination: FactWise item default.'}
             </Typography>
           </Box>
           {/* Progress bar */}
-          <Box sx={{ display: 'flex', gap: 0.5, width: 80, mt: 1 }}>
+          <Box sx={{
+            display: 'flex',
+            gap: 0.5,
+            width: 80,
+            mt: 1,
+            position: wizardStep === 0 ? 'absolute' : 'static',
+            right: wizardStep === 0 ? 0 : 'auto',
+            top: wizardStep === 0 ? 0 : 'auto'
+          }}>
             <Box sx={{ height: 4, flex: 1, borderRadius: 2, bgcolor: '#2563eb' }} />
             <Box sx={{ height: 4, flex: 1, borderRadius: 2, bgcolor: wizardStep === 1 ? '#2563eb' : (isDarkMode ? 'rgba(255,255,255,0.15)' : 'rgba(15,23,42,0.12)') }} />
           </Box>
@@ -2225,7 +2451,7 @@ const UploadFiles = () => {
         {wizardStep === 0 && (
           <Box sx={{ display: 'flex', flexDirection: 'column', flex: 1, justifyContent: 'space-between' }}>
             {/* Saved Merge Books Section */}
-            {savedSheetJoinComparisons.length > 0 && (
+            {false && savedSheetJoinComparisons.length > 0 && (
               <Box
                 sx={{
                   mb: 2.5,
@@ -2385,10 +2611,10 @@ const UploadFiles = () => {
               </Box>
             )}
 
-            <Grid container spacing={2.5}>
+            <Grid container spacing={2.5} justifyContent="center">
               {/* Client File Dropzone Column */}
-              <Grid item xs={12} md={6}>
-                <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 700, fontSize: 14, mb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
+              <Grid item xs={12} md={10} lg={9}>
+                <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 700, fontSize: 14, mb: 1.25, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
                   Client File
                   <Chip label="Required" size="small" sx={{ height: 20, fontSize: 11, bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.2)' : 'rgba(37, 99, 235, 0.1)', color: isDarkMode ? '#60a5fa' : '#1d4ed8', fontWeight: 700 }} />
                 </Typography>
@@ -2405,11 +2631,12 @@ const UploadFiles = () => {
                       ? `1.5px dashed ${Nn.accent}`
                       : `1.5px dashed ${Nn.inputBorder}`,
                     borderRadius: '16px',
-                    py: 3.5,
-                    px: 2.5,
+                    py: { xs: 4, md: 5 },
+                    px: { xs: 2.5, md: 4 },
                     textAlign: 'center',
                     cursor: 'pointer',
-                    minHeight: 190,
+                    minHeight: { xs: 220, md: 250 },
+                    width: '100%',
                     display: 'flex',
                     flexDirection: 'column',
                     justifyContent: 'center',
@@ -2431,7 +2658,7 @@ const UploadFiles = () => {
                     isHovered={isUserDragActive || isUserHovered}
                     isDarkMode={isDarkMode}
                   />
-                  <Typography variant="body1" sx={{ color: Nn.text, fontWeight: 700, fontSize: '0.95rem', mt: 0.5, mb: 0.25 }}>
+                  <Typography variant="body1" sx={{ color: Nn.text, fontWeight: 800, fontSize: '1rem', mt: 0.5, mb: 0.25 }}>
                     {userFile ? userFile.name : 'Drag and drop or select files'}
                   </Typography>
                   <Typography variant="caption" sx={{ color: Nn.muted, fontSize: '0.8rem', mb: 2 }}>
@@ -2562,19 +2789,13 @@ const UploadFiles = () => {
                           </Box>
                         )}
 
-                        {clientSheetNames.length > 1 && (
+                        {clientSheetNames.length > 0 && (
                           <Box sx={{ mt: 1, display: 'flex', gap: 1, alignItems: 'center' }}>
                             <Button
                               variant="outlined"
                               size="small"
                               startIcon={<AddIcon />}
-                              onClick={() => {
-                                const bSheet = selectedClientSheet || clientSheetNames[0];
-                                const dSheet = clientSheetNames.find(s => s !== bSheet) || clientSheetNames[1] || '';
-                                setSheetJoinConfig(prev => ({ ...prev, baseSheet: bSheet, detailSheet: dSheet }));
-                                setSheetJoinStage('match');
-                                setSheetJoinDialogOpen(true);
-                              }}
+                              onClick={handleOpenSheetJoinSetup}
                               sx={{
                                 textTransform: 'none',
                                 borderRadius: '999px',
@@ -2600,172 +2821,12 @@ const UploadFiles = () => {
                 )}
               </Grid>
 
-              {/* Template File Dropzone Column */}
-              <Grid item xs={12} md={6}>
-                <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 700, fontSize: 14, mb: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
-                  Template File
-                  <Chip label={userFile?.name?.toLowerCase().endsWith('.pdf') ? "Optional" : "Required"} size="small" sx={{ height: 20, fontSize: 11, bgcolor: 'rgba(245, 158, 11, 0.2)', color: '#f59e0b', fontWeight: 700 }} />
-                </Typography>
-
-                <Box
-                  {...getTemplateRootProps()}
-                  onMouseEnter={() => setIsTemplateHovered(true)}
-                  onMouseLeave={() => setIsTemplateHovered(false)}
-                  className="fw-upload-dropzone"
-                  sx={{
-                    border: templateFile
-                      ? `1.5px solid ${Nn.accent}`
-                      : (isTemplateDragActive || isTemplateHovered)
-                      ? `1.5px dashed ${Nn.accent}`
-                      : `1.5px dashed ${Nn.inputBorder}`,
-                    borderRadius: '16px',
-                    py: 3.5,
-                    px: 2.5,
-                    textAlign: 'center',
-                    cursor: 'pointer',
-                    minHeight: 190,
-                    display: 'flex',
-                    flexDirection: 'column',
-                    justifyContent: 'center',
-                    alignItems: 'center',
-                    position: 'relative',
-                    background: (isTemplateDragActive || isTemplateHovered)
-                      ? Nn.dropzoneActiveBg
-                      : templateFile
-                      ? Nn.dropzoneSelectedBg
-                      : Nn.dropzoneBg,
-                    transition: 'all 0.22s cubic-bezier(0.16, 1, 0.3, 1)'
-                  }}
-                >
-                  <input {...getTemplateInputProps()} />
-                  <DropzoneFileStackIcon
-                    color="#38bdf8"
-                    glowColor="#38bdf8"
-                    selected={!!templateFile}
-                    isHovered={isTemplateDragActive || isTemplateHovered}
-                    isDarkMode={isDarkMode}
-                  />
-                  <Typography variant="body1" sx={{ color: Nn.text, fontWeight: 700, fontSize: '0.95rem', mt: 0.5, mb: 0.25 }}>
-                    {templateFile ? templateFile.name : 'Drag and drop or select template'}
-                  </Typography>
-                  <Typography variant="caption" sx={{ color: Nn.muted, fontSize: '0.8rem', mb: 2 }}>
-                    Supported files: .xlsx, .xls, .csv
-                  </Typography>
-                  <Button
-                    variant="contained"
-                    size="small"
-                    sx={{
-                      background: templateFile
-                        ? 'linear-gradient(135deg, #0891b2 0%, #0284c7 100%)'
-                        : 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
-                      color: '#ffffff !important',
-                      fontWeight: 800,
-                      borderRadius: '999px',
-                      px: 2.5,
-                      py: 0.7,
-                      fontSize: '0.85rem',
-                      textTransform: 'none',
-                      border: 'none',
-                      boxShadow: templateFile ? '0 12px 24px -16px rgba(8, 145, 178, 0.9)' : '0 12px 24px -16px rgba(37, 99, 235, 0.9)',
-                      '&:hover': {
-                        background: templateFile
-                          ? 'linear-gradient(135deg, #0e7490 0%, #0369a1 100%)'
-                          : 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
-                        boxShadow: templateFile ? '0 16px 30px -18px rgba(8, 145, 178, 0.95)' : '0 16px 30px -18px rgba(37, 99, 235, 0.95)'
-                      }
-                    }}
-                  >
-                    {templateFile ? 'Change template' : 'Select template'}
-                  </Button>
-                </Box>
-
-                {/* Template File Sheet & Columns Preview Card */}
-                {templateFile && (
-                  <Box sx={{ mt: 1.5, p: 2, borderRadius: '14px', border: `1px solid ${Nn.panelBorder}`, bgcolor: Nn.panelBg, boxShadow: '0 4px 14px rgba(0,0,0,0.2)' }}>
-                    <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1.5 }}>
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        <CheckCircleIcon sx={{ color: '#38bdf8', fontSize: 18 }} />
-                        <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 800, fontSize: 14 }}>
-                          {templateFile.name}
-                        </Typography>
-                      </Box>
-                      <IconButton size="small" onClick={() => setTemplateFile(null)} sx={{ color: Nn.muted, '&:hover': { color: Nn.text } }}>
-                        <CloseIcon fontSize="small" />
-                      </IconButton>
-                    </Box>
-
-                    {templateSheetNames.length > 0 && (
-                      <Box sx={{ pt: 1, borderTop: `1px solid ${Nn.divider}` }}>
-                        <Grid container spacing={1.5} sx={{ mb: 1.5 }}>
-                          <Grid item xs={7}>
-                            <FormControl fullWidth size="small">
-                              <InputLabel sx={{ color: Nn.muted }}>Sheet Name</InputLabel>
-                              <Select
-                                value={selectedTemplateSheet}
-                                label="Sheet Name"
-                                onChange={(e) => handleTemplateSheetChange(e.target.value)}
-                                MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
-                                sx={{ borderRadius: '8px' }}
-                              >
-                                {templateSheetNames.map(s => (
-                                  <MenuItem key={s} value={s}>{s}</MenuItem>
-                                ))}
-                              </Select>
-                            </FormControl>
-                          </Grid>
-                          <Grid item xs={5}>
-                            <TextField
-                              label="Header Row"
-                              type="number"
-                              size="small"
-                              fullWidth
-                              InputProps={{ inputProps: { min: 1 } }}
-                              value={templateHeaderRow}
-                              onChange={(e) => handleTemplateHeaderRowChange(e.target.value)}
-                              sx={{ '& input': { borderRadius: '8px' } }}
-                            />
-                          </Grid>
-                        </Grid>
-
-                        {templateHeaderPreview.length > 0 && (
-                          <Box sx={{ mb: 1.5 }}>
-                            <Typography variant="caption" sx={{ color: Nn.muted, fontSize: 12, fontWeight: 600, display: 'block', mb: 0.75 }}>
-                              {templateHeaderAutoDetected
-                                ? `Header row auto-detected at row ${templateHeaderRow} — ${templateHeaderPreview.length} destination columns found.`
-                                : `${templateHeaderPreview.length} destination columns found on row ${templateHeaderRow}.`}
-                            </Typography>
-                            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.6, maxHeight: showAllTemplateColumns ? 220 : 90, overflowY: 'auto', py: 0.5 }}>
-                              {(showAllTemplateColumns ? templateHeaderPreview : templateHeaderPreview.slice(0, 12)).map((h, i) => (
-                                <Chip
-                                  key={`${h}-${i}`}
-                                  size="small"
-                                  variant="outlined"
-                                  label={h.length > 22 ? `${h.slice(0, 22)}…` : h}
-                                  sx={{ height: 24, fontSize: 11, bgcolor: a.surface.subtle, borderColor: a.border.default, color: Nn.tableText, fontWeight: 600 }}
-                                />
-                              ))}
-                              {templateHeaderPreview.length > 12 && (
-                                <Chip
-                                  size="small"
-                                  onClick={() => setShowAllTemplateColumns(!showAllTemplateColumns)}
-                                  label={showAllTemplateColumns ? 'Show less' : `+${templateHeaderPreview.length - 12} more`}
-                                  sx={{ height: 24, fontSize: 11, bgcolor: 'rgba(56, 189, 248, 0.25)', color: '#38bdf8', fontWeight: 800, cursor: 'pointer' }}
-                                />
-                              )}
-                            </Box>
-                          </Box>
-                        )}
-                      </Box>
-                    )}
-                  </Box>
-                )}
-              </Grid>
             </Grid>
 
             {/* Step 1 Bottom Action Bar */}
             <Box sx={{ mt: 'auto', pt: 3, borderTop: `1px solid ${Nn.divider}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <Typography variant="caption" sx={{ color: userFile ? '#60a5fa' : Nn.muted, fontWeight: 600 }}>
-                {userFile ? '✓ Required files ready' : 'Select client file & template to proceed'}
+                {userFile ? 'Client file ready. Destination: FactWise item default' : 'Select client file to proceed'}
               </Typography>
               <Button
                 variant="contained"
@@ -2803,8 +2864,159 @@ const UploadFiles = () => {
         {wizardStep === 1 && (
           <Box sx={{ display: 'flex', flexDirection: 'column', flex: 1, justifyContent: 'space-between' }}>
             <Grid container spacing={2.5}>
+              <Grid item xs={12}>
+                <Box sx={{ p: 2, borderRadius: '14px', border: `1px solid ${Nn.divider}`, bgcolor: Nn.subtlePanelBg }}>
+                  <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2, flexWrap: 'wrap', mb: 1.5 }}>
+                    <Box>
+                      <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 800, mb: 0.35 }}>
+                        Use Template
+                      </Typography>
+                      <Typography variant="caption" sx={{ color: Nn.muted, display: 'block' }}>
+                        Select an existing template if this file follows a known structure. Leave it blank to create a new template.
+                      </Typography>
+                    </Box>
+                    <Button
+                      size="small"
+                      variant="text"
+                      onClick={loadAvailableProcessingTemplates}
+                      disabled={processingTemplatesLoading}
+                      sx={{ textTransform: 'none', color: Nn.accent, fontWeight: 700 }}
+                    >
+                      Refresh
+                    </Button>
+                  </Box>
+
+                  <Grid container spacing={1.5} sx={{ display: 'none' }}>
+                    {[
+                      { value: 'new', label: 'New Template', description: 'Set up this file normally and save the flow for similar BOMs.' },
+                      { value: 'use', label: 'Use Template', description: 'Apply a previously saved full processing flow.' },
+                      { value: 'modify', label: 'Modify Template', description: 'Coming later.', disabled: true },
+                    ].map(option => {
+                      const selected = processingTemplateMode === option.value;
+                      return (
+                        <Grid item xs={12} md={4} key={option.value}>
+                          <Box
+                            onClick={() => {
+                              if (option.disabled) return;
+                              setProcessingTemplateMode(option.value);
+                              setError(null);
+                            }}
+                            sx={{
+                              p: 1.5,
+                              height: '100%',
+                              borderRadius: '12px',
+                              border: selected ? `1.5px solid ${Nn.accent}` : `1px solid ${Nn.divider}`,
+                              bgcolor: selected ? 'rgba(37, 99, 235, 0.14)' : Nn.inputBg,
+                              opacity: option.disabled ? 0.55 : 1,
+                              cursor: option.disabled ? 'not-allowed' : 'pointer',
+                              transition: 'all 0.18s ease',
+                              '&:hover': option.disabled ? {} : { borderColor: Nn.accent, transform: 'translateY(-1px)' }
+                            }}
+                          >
+                            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
+                              <Typography variant="body2" sx={{ color: Nn.text, fontWeight: 800 }}>
+                                {option.label}
+                              </Typography>
+                              {selected && <CheckCircleIcon sx={{ color: '#4ade80', fontSize: 18 }} />}
+                            </Box>
+                            <Typography variant="caption" sx={{ color: Nn.muted, display: 'block', mt: 0.5 }}>
+                              {option.description}
+                            </Typography>
+                          </Box>
+                        </Grid>
+                      );
+                    })}
+                  </Grid>
+
+                  {false && processingTemplateMode === 'new' && (
+                    <TextField
+                      fullWidth
+                      size="small"
+                      label="Template name"
+                      placeholder="Example: Standard two-source BOM"
+                      value={processingTemplateName}
+                      onChange={(e) => setProcessingTemplateName(e.target.value)}
+                      sx={{ mt: 1.5, '& .MuiOutlinedInput-root': { borderRadius: '8px', fontSize: '13px' } }}
+                    />
+                  )}
+
+                  <FormControl fullWidth size="small" sx={{ mt: 1.5 }} disabled={processingTemplatesLoading}>
+                      <InputLabel sx={{ color: Nn.muted }}>Use Template</InputLabel>
+                      <Select
+                        value={selectedProcessingTemplateId}
+                        label="Use Template"
+                        onChange={(event) => {
+                          setSelectedProcessingTemplateId(event.target.value);
+                          setProcessingTemplateMode(event.target.value ? 'use' : '');
+                        }}
+                        MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
+                        sx={{ borderRadius: '8px' }}
+                      >
+                        <MenuItem value="">
+                          No existing template - create new on continue
+                        </MenuItem>
+                        {processingTemplates.map(template => (
+                          <MenuItem key={template.id} value={String(template.id)}>
+                            {template.name}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                  </FormControl>
+                </Box>
+              </Grid>
+
+              <Grid item xs={12} sx={{ display: 'none' }}>
+                <Box sx={{ p: 2, borderRadius: '14px', border: `1px solid ${Nn.divider}`, bgcolor: Nn.subtlePanelBg }}>
+                  <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 800, mb: 0.35 }}>
+                    Processing path
+                  </Typography>
+                  <Typography variant="caption" sx={{ color: Nn.muted, display: 'block', mb: 1.5 }}>
+                    Clean BOMs can go directly to mapping. Messy BOMs can be normalized first.
+                  </Typography>
+                  <Grid container spacing={1.5}>
+                    {[
+                      { value: 'map', label: 'Proceed to mapping', description: 'Use this when the BOM is already clean enough to map.' },
+                      { value: 'normalize', label: 'BOM Normalizer', description: 'Use this when MPNs, MFRs, alternates, levels, or quantities need cleanup before mapping.', disabled: userFile?.name?.toLowerCase?.().endsWith('.pdf') },
+                    ].map(option => {
+                      const selected = processingPath === option.value;
+                      return (
+                        <Grid item xs={12} md={6} key={option.value}>
+                          <Box
+                            onClick={() => {
+                              if (option.disabled) return;
+                              setProcessingPath(option.value);
+                              setError(null);
+                            }}
+                            sx={{
+                              p: 1.5,
+                              borderRadius: '12px',
+                              border: selected ? `1.5px solid ${Nn.accent}` : `1px solid ${Nn.divider}`,
+                              bgcolor: selected ? 'rgba(37, 99, 235, 0.14)' : Nn.inputBg,
+                              opacity: option.disabled ? 0.55 : 1,
+                              cursor: option.disabled ? 'not-allowed' : 'pointer',
+                              transition: 'all 0.18s ease',
+                              '&:hover': option.disabled ? {} : { borderColor: Nn.accent, transform: 'translateY(-1px)' }
+                            }}
+                          >
+                            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
+                              <Typography variant="body2" sx={{ color: Nn.text, fontWeight: 800 }}>
+                                {option.label}
+                              </Typography>
+                              {selected && <CheckCircleIcon sx={{ color: '#4ade80', fontSize: 18 }} />}
+                            </Box>
+                            <Typography variant="caption" sx={{ color: Nn.muted, display: 'block', mt: 0.5 }}>
+                              {option.description}
+                            </Typography>
+                          </Box>
+                        </Grid>
+                      );
+                    })}
+                  </Grid>
+                </Box>
+              </Grid>
+
               {/* Mapping Template Panel */}
-              <Grid item xs={12} md={6}>
+              <Grid item xs={12} md={6} sx={{ display: 'none' }}>
                 <Box sx={{ p: 2, borderRadius: '14px', border: `1px solid ${Nn.divider}`, bgcolor: Nn.subtlePanelBg, height: '100%' }}>
                   <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 700, mb: 0.5 }}>
                     Mapping Template <Typography component="span" variant="caption" sx={{ color: Nn.muted, fontWeight: 400 }}>(Optional)</Typography>
@@ -2857,7 +3069,7 @@ const UploadFiles = () => {
               </Grid>
 
               {/* Tag Template Panel */}
-              <Grid item xs={12} md={6}>
+              <Grid item xs={12} md={6} sx={{ display: 'none' }}>
                 <Box sx={{ p: 2, borderRadius: '14px', border: `1px solid ${Nn.divider}`, bgcolor: Nn.subtlePanelBg, height: '100%' }}>
                   <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 700, mb: 0.5 }}>
                     Tag Template <Typography component="span" variant="caption" sx={{ color: Nn.muted, fontWeight: 400 }}>(Optional)</Typography>
@@ -2915,30 +3127,111 @@ const UploadFiles = () => {
               <Button variant="outlined" onClick={() => setWizardStep(0)} sx={{ borderRadius: '10px', textTransform: 'none', color: Nn.text, borderColor: Nn.divider }}>
                 ← Back
               </Button>
-              <Button
-                variant="contained"
-                onClick={handleUpload}
-                disabled={loading}
-                startIcon={loading ? <CircularProgress size={16} color="inherit" /> : null}
-                sx={{ ...primaryPillSx, px: 4, py: 0.9 }}
-              >
-                {loading ? 'Processing...' : 'Process Upload →'}
-              </Button>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                <Button
+                  variant="contained"
+                  onClick={handleOpenBomNormalizer}
+                  disabled={loading}
+                  sx={{
+                    ...primaryPillSx,
+                    px: 3.5,
+                    py: 0.9,
+                    background: 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
+                    bgcolor: '#2563eb',
+                  }}
+                >
+                  BOM Normalizer
+                </Button>
+                <Button
+                  variant="contained"
+                  onClick={handleUpload}
+                  disabled={loading}
+                  startIcon={loading ? <CircularProgress size={16} color="inherit" /> : null}
+                  sx={{ ...primaryPillSx, px: 4, py: 0.9 }}
+                >
+                  {loading ? 'Processing...' : 'Process Upload ->'}
+                </Button>
+              </Box>
             </Box>
           </Box>
         )}
       </Box>
 
+      <Dialog
+        open={newTemplateDialogOpen}
+        onClose={() => {
+          setNewTemplateDialogOpen(false);
+          setPendingTemplateAction(null);
+        }}
+        maxWidth="xs"
+        fullWidth
+        PaperProps={{
+          sx: {
+            borderRadius: '18px',
+            bgcolor: isDarkMode ? '#0f172a' : '#ffffff',
+            color: Nn.text,
+            border: `1px solid ${Nn.divider}`,
+            boxShadow: Nn.modalShadow,
+          }
+        }}
+      >
+        <DialogTitle sx={{ pb: 0.75 }}>
+          <Typography sx={{ fontSize: 18, fontWeight: 800, color: Nn.text }}>
+            Create New Template
+          </Typography>
+          <Typography sx={{ mt: 0.5, fontSize: 12.5, color: Nn.muted }}>
+            Name this workflow so it can be reused for similar BOM files.
+          </Typography>
+        </DialogTitle>
+        <DialogContent sx={{ pt: 1.5 }}>
+          <TextField
+            autoFocus
+            fullWidth
+            size="small"
+            label="Template name"
+            value={newTemplateDraftName}
+            onChange={(event) => setNewTemplateDraftName(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault();
+                handleConfirmNewProcessingTemplate();
+              }
+            }}
+            sx={{ mt: 1 }}
+          />
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2.5 }}>
+          <Button
+            variant="outlined"
+            onClick={() => {
+              setNewTemplateDialogOpen(false);
+              setPendingTemplateAction(null);
+            }}
+            sx={{ borderRadius: '10px', textTransform: 'none' }}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            onClick={handleConfirmNewProcessingTemplate}
+            disabled={!newTemplateDraftName.trim()}
+            sx={{ ...primaryPillSx, px: 2.5 }}
+          >
+            Continue
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       {/* Merge Sheets Dialog */}
       <Dialog
         open={sheetJoinDialogOpen}
         onClose={handleCloseSheetJoinSetup}
-        maxWidth={isSheetJoinPreviewStage ? 'xl' : 'md'}
+        maxWidth="xl"
         fullWidth
         PaperProps={{
           sx: {
             ...dialogPaperSx,
-            width: sheetJoinDialogWidth,
+            width: 'min(1240px, calc(100vw - 32px))',
           }
         }}
       >
@@ -2960,13 +3253,94 @@ const UploadFiles = () => {
             <Grid container spacing={2.5} sx={{ py: 1 }}>
               <Grid item xs={12} md={6}>
                 <FormControl fullWidth size="small" sx={{ mt: 1 }}>
+                  <InputLabel sx={{ color: isDarkMode ? '#94a3b8' : '#475569' }}>Primary source</InputLabel>
+                  <Select
+                    label="Primary source"
+                    value={sheetJoinConfig.baseSourceId || 'primary'}
+                    onChange={(event) => {
+                      const baseSourceId = event.target.value;
+                      const sourceSheets = getSheetJoinSourceSheets(baseSourceId);
+                      const baseSheet = sourceSheets[0] || '';
+                      const baseWorkbook = getSheetJoinSourceWorkbook(baseSourceId);
+                      const baseHeaderRow = baseSourceId === 'primary'
+                        ? (clientHeaderRow || 1)
+                        : (baseWorkbook && baseSheet ? detectHeaderRow(baseWorkbook, baseSheet) : 1);
+                      const baseHeaders = getSheetHeaders(baseSheet, baseHeaderRow, baseSourceId);
+                      const baseKey = '';
+                      setSheetJoinConfig(prev => ({
+                        ...prev,
+                        baseSourceId,
+                        baseSheet,
+                        baseHeaderRow,
+                        baseKey,
+                        uniqueIdBaseColumn: baseKey,
+                        copiedBaseColumns: defaultCopiedBaseColumns(baseHeaders)
+                      }));
+                    }}
+                    sx={selectFieldSx}
+                  >
+                    {sheetJoinSourceOptions.map(source => (
+                      <MenuItem key={source.id} value={source.id}>{source.label}</MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              </Grid>
+              <Grid item xs={12} md={6}>
+                <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ xs: 'stretch', sm: 'center' }} sx={{ mt: 1 }}>
+                  <FormControl fullWidth size="small">
+                    <InputLabel sx={{ color: isDarkMode ? '#94a3b8' : '#475569' }}>Secondary source</InputLabel>
+                    <Select
+                      label="Secondary source"
+                      value={sheetJoinConfig.detailSourceId || 'primary'}
+                      onChange={(event) => {
+                        const detailSourceId = event.target.value;
+                        const sourceSheets = getSheetJoinSourceSheets(detailSourceId);
+                        const detailSheet = sourceSheets.find(sheet => detailSourceId !== (sheetJoinConfig.baseSourceId || 'primary') || sheet !== sheetJoinConfig.baseSheet) || sourceSheets[0] || '';
+                        const detailWorkbook = getSheetJoinSourceWorkbook(detailSourceId);
+                        const detailHeaderRow = detailSourceId === 'primary'
+                          ? (clientHeaderRow || 1)
+                          : (detailWorkbook && detailSheet ? detectHeaderRow(detailWorkbook, detailSheet) : 1);
+                        const detailHeaders = getSheetHeaders(detailSheet, detailHeaderRow, detailSourceId);
+                        const detailKey = guessKeyColumn(detailHeaders);
+                        const detailColumns = defaultDetailColumns(detailHeaders, detailKey);
+                        setSheetJoinConfig(prev => ({
+                          ...prev,
+                          detailSourceId,
+                          detailSheet,
+                          detailHeaderRow,
+                          detailKey,
+                          detailColumns,
+                          uniqueIdDetailColumn: detailColumns[0] || detailKey
+                        }));
+                      }}
+                      sx={selectFieldSx}
+                    >
+                      {sheetJoinSourceOptions.map(source => (
+                        <MenuItem key={source.id} value={source.id}>{source.label}</MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+                  <Button component="label" variant="outlined" startIcon={<AddIcon />} sx={{ ...pillButtonSx, minWidth: 170, color: '#2563eb' }}>
+                    Add file
+                    <input
+                      key={sheetJoinSourceFileInputKey}
+                      hidden
+                      type="file"
+                      accept=".xlsx,.xls,.csv"
+                      onChange={handleAddSheetJoinSourceFile}
+                    />
+                  </Button>
+                </Stack>
+              </Grid>
+              <Grid item xs={12} md={6}>
+                <FormControl fullWidth size="small" sx={{ mt: 1 }}>
                   <InputLabel sx={{ color: isDarkMode ? '#94a3b8' : '#475569' }}>Primary sheet</InputLabel>
                   <Select
                     label="Primary sheet"
                     value={sheetJoinConfig.baseSheet}
                     onChange={(event) => {
                       const baseSheet = event.target.value;
-                      const baseHeaders = getSheetHeaders(baseSheet, sheetJoinConfig.baseHeaderRow);
+                      const baseHeaders = getSheetHeaders(baseSheet, sheetJoinConfig.baseHeaderRow, sheetJoinConfig.baseSourceId);
                       const baseKey = '';
                       setSheetJoinConfig(prev => ({
                         ...prev,
@@ -2978,7 +3352,7 @@ const UploadFiles = () => {
                     }}
                     sx={selectFieldSx}
                   >
-                    {clientSheetNames.map(sheet => (
+                    {getSheetJoinSourceSheets(sheetJoinConfig.baseSourceId).map(sheet => (
                       <MenuItem key={sheet} value={sheet}>{sheet}</MenuItem>
                     ))}
                   </Select>
@@ -2992,7 +3366,7 @@ const UploadFiles = () => {
                     value={sheetJoinConfig.detailSheet}
                     onChange={(event) => {
                       const detailSheet = event.target.value;
-                      const detailHeaders = getSheetHeaders(detailSheet, sheetJoinConfig.detailHeaderRow);
+                      const detailHeaders = getSheetHeaders(detailSheet, sheetJoinConfig.detailHeaderRow, sheetJoinConfig.detailSourceId);
                       const detailKey = guessKeyColumn(detailHeaders);
                       const detailColumns = defaultDetailColumns(detailHeaders, detailKey);
                       setSheetJoinConfig(prev => ({
@@ -3005,7 +3379,7 @@ const UploadFiles = () => {
                     }}
                     sx={selectFieldSx}
                   >
-                    {clientSheetNames.map(sheet => (
+                    {getSheetJoinSourceSheets(sheetJoinConfig.detailSourceId).map(sheet => (
                       <MenuItem key={sheet} value={sheet}>{sheet}</MenuItem>
                     ))}
                   </Select>
@@ -3020,7 +3394,7 @@ const UploadFiles = () => {
                   value={sheetJoinConfig.baseHeaderRow}
                   onChange={(event) => {
                     const baseHeaderRow = Math.max(1, Number(event.target.value || 1));
-                    const headers = getSheetHeaders(sheetJoinConfig.baseSheet, baseHeaderRow);
+                    const headers = getSheetHeaders(sheetJoinConfig.baseSheet, baseHeaderRow, sheetJoinConfig.baseSourceId);
                     const baseKey = '';
                     setSheetJoinConfig(prev => ({
                       ...prev,
@@ -3043,7 +3417,7 @@ const UploadFiles = () => {
                   value={sheetJoinConfig.detailHeaderRow}
                   onChange={(event) => {
                     const detailHeaderRow = Math.max(1, Number(event.target.value || 1));
-                    const headers = getSheetHeaders(sheetJoinConfig.detailSheet, detailHeaderRow);
+                    const headers = getSheetHeaders(sheetJoinConfig.detailSheet, detailHeaderRow, sheetJoinConfig.detailSourceId);
                     const detailKey = guessKeyColumn(headers);
                     const detailColumns = defaultDetailColumns(headers, detailKey);
                     setSheetJoinConfig(prev => ({
@@ -3442,7 +3816,11 @@ const UploadFiles = () => {
               <Button
                 variant="contained"
                 onClick={handleProceedSheetJoinOptions}
-                disabled={!sheetJoinConfig.baseKey || !sheetJoinConfig.detailKey || sheetJoinConfig.baseSheet === sheetJoinConfig.detailSheet}
+                disabled={
+                  !sheetJoinConfig.baseKey ||
+                  !sheetJoinConfig.detailKey ||
+                  ((sheetJoinConfig.baseSourceId || 'primary') === (sheetJoinConfig.detailSourceId || 'primary') && sheetJoinConfig.baseSheet === sheetJoinConfig.detailSheet)
+                }
                 sx={{ ...primaryPillSx, height: 40, px: 3 }}
               >
                 Proceed →
@@ -3471,133 +3849,9 @@ const UploadFiles = () => {
                 >
                   Continue with BOM Mapping →
                 </Button>
-                <Tooltip
-                  title={activeSheetJoinComparisonId ? "This merge book is already saved in your library" : "Save this merged data to your library"}
-                  arrow
-                  placement="top"
-                >
-                  <span>
-                    <Button
-                      variant="contained"
-                      disabled={Boolean(activeSheetJoinComparisonId)}
-                      onClick={() => {
-                        setSheetJoinSaveName(sheetJoinConfig.relationshipName || `Merge ${new Date().toLocaleString()}`);
-                        setSheetJoinSaveDialogOpen(true);
-                      }}
-                      sx={{
-                        height: 40,
-                        px: 2.5,
-                        fontWeight: 700,
-                        textTransform: 'none',
-                        borderRadius: '999px',
-                        background: activeSheetJoinComparisonId
-                          ? (isDarkMode ? 'rgba(255,255,255,0.08)' : '#e2e8f0')
-                          : 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
-                        color: activeSheetJoinComparisonId
-                          ? (isDarkMode ? '#64748b' : '#94a3b8')
-                          : '#ffffff',
-                        boxShadow: activeSheetJoinComparisonId ? 'none' : '0 0 16px rgba(37, 99, 235, 0.4)',
-                        '&.Mui-disabled': {
-                          background: isDarkMode ? 'rgba(255,255,255,0.08)' : '#e2e8f0',
-                          color: isDarkMode ? '#64748b' : '#94a3b8'
-                        },
-                        '&:hover': {
-                          background: activeSheetJoinComparisonId
-                            ? undefined
-                            : 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)'
-                        }
-                      }}
-                    >
-                      {activeSheetJoinComparisonId ? 'Already Saved' : 'Save Merge Book'}
-                    </Button>
-                  </span>
-                </Tooltip>
               </>
             )}
           </Box>
-        </DialogActions>
-      </Dialog>
-
-      <Dialog
-        open={sheetJoinSaveDialogOpen}
-        onClose={() => !sheetJoinSaveLoading && setSheetJoinSaveDialogOpen(false)}
-        maxWidth="sm"
-        fullWidth
-        PaperProps={{ sx: dialogPaperSx }}
-      >
-        <DialogTitle sx={{ ...dialogHeaderSx, fontWeight: 700 }}>
-          Save Merge Book
-        </DialogTitle>
-        <DialogContent sx={dialogBodySx}>
-          <DialogContentText sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
-            Name this merge book so you can reopen it later and continue BOM mapping from it.
-          </DialogContentText>
-          <TextField
-            fullWidth
-            required
-            autoFocus
-            margin="normal"
-            label="Merge Book Name"
-            value={sheetJoinSaveName}
-            onChange={(event) => setSheetJoinSaveName(event.target.value)}
-            error={!sheetJoinSaveName.trim()}
-            helperText={!sheetJoinSaveName.trim() ? 'Merge book name is required' : 'This saves the generated merge book.'}
-            InputLabelProps={{ style: { color: isDarkMode ? '#94a3b8' : '#475569' } }}
-            sx={fieldSx}
-          />
-        </DialogContent>
-        <DialogActions sx={{ ...dialogFooterSx, gap: 1 }}>
-          <Button onClick={() => setSheetJoinSaveDialogOpen(false)} disabled={sheetJoinSaveLoading} sx={{ ...pillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}>
-            Cancel
-          </Button>
-          <Button
-            variant="contained"
-            onClick={handleSaveComparisonWithName}
-            disabled={sheetJoinSaveLoading || !sheetJoinSaveName.trim()}
-            sx={primaryPillSx}
-          >
-            {sheetJoinSaveLoading ? 'Saving...' : 'Save Merge Book'}
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      <Dialog
-        open={sheetJoinDuplicateDialogOpen}
-        onClose={() => !sheetJoinSaveLoading && setSheetJoinDuplicateDialogOpen(false)}
-        maxWidth="sm"
-        fullWidth
-        PaperProps={{ sx: dialogPaperSx }}
-      >
-        <DialogTitle sx={{ ...dialogHeaderSx, fontWeight: 700 }}>
-          Merge Book Name Already Exists
-        </DialogTitle>
-        <DialogContent sx={dialogBodySx}>
-          <DialogContentText sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
-            A merge book named "{pendingSheetJoinDuplicate?.name}" is already saved. Replace the old one or keep both by saving this as a copy.
-          </DialogContentText>
-        </DialogContent>
-        <DialogActions sx={{ ...dialogFooterSx, gap: 1 }}>
-          <Button
-            onClick={() => {
-              setSheetJoinDuplicateDialogOpen(false);
-              setPendingSheetJoinDuplicate(null);
-            }}
-            disabled={sheetJoinSaveLoading}
-            sx={{ ...pillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}
-          >
-            Cancel
-          </Button>
-          <Button onClick={handleSaveComparisonAsCopy} disabled={sheetJoinSaveLoading} sx={{ ...pillButtonSx, color: '#2563eb' }}>
-            Save as Copy
-          </Button>
-          <Button variant="contained" onClick={handleOverrideSavedComparison} disabled={sheetJoinSaveLoading} sx={{
-            ...pillButtonSx,
-            bgcolor: '#f59e0b',
-            color: '#111827',
-            '&:hover': { bgcolor: '#d97706' }
-          }}>
-            Override
-          </Button>
         </DialogActions>
       </Dialog>
 
@@ -3870,11 +4124,7 @@ const UploadFiles = () => {
       </Dialog>
 
       {/* Global Loader Overlay */}
-      <LoaderOverlay
-        visible={globalLoading}
-        title="Processing upload..."
-        message="Reading the file and preparing the next step."
-      />
+      <LoaderOverlay visible={globalLoading} label="Processing..." />
     </Box>
   );
 };

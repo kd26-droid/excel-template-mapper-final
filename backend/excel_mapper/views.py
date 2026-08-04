@@ -33,6 +33,7 @@ import tempfile
 import shutil
 
 from .bom_header_mapper import BOMHeaderMapper
+from .default_template import get_sfo_template_metadata, get_sfo_template_path, SFO_TEMPLATE_NAME
 from .models import MappingTemplate, TagTemplate, PDFSession, PDFExtractionResult, Project
 try:
     # Prefer relative import; fall back gracefully on any import error
@@ -308,7 +309,7 @@ def read_csv_with_encoding(file_path, header_row, **kwargs):
     raise Exception("Could not read CSV file with any supported encoding")
 
 
-def generate_template_columns(tags_count=3, spec_pairs_count=3, customer_id_pairs_count=1):
+def generate_template_columns(tags_count=1, spec_pairs_count=1, customer_id_pairs_count=1):
     """
     Generate complete template column headers including all standard template fields.
     Always includes the 6 core Factwise headers, standard template fields, and dynamic columns.
@@ -368,6 +369,84 @@ def normalize_headers_to_internal(headers: list, existing_headers: Optional[list
 
     logger.info(f"🔄 normalize_headers_to_internal: Preserved {len(normalized)} headers without conversion")
     return normalized
+
+
+def _strip_pandas_duplicate_suffix(header: str) -> str:
+    """Turn pandas duplicate names like 'Tag.1' back into the real Excel label."""
+    value = str(header or "").strip()
+    return re.sub(r"\.\d+$", "", value)
+
+
+def _template_label_key(header: str) -> str:
+    value = _strip_pandas_duplicate_suffix(header)
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def derive_sfo_column_counts(headers: list) -> dict:
+    """Derive dynamic group counts from SFO-style repeated destination headers."""
+    return {
+        "tags_count": 1,
+        "spec_pairs_count": 1,
+        "customer_id_pairs_count": 1,
+    }
+
+
+def build_sfo_clustered_headers(base_headers: list, tags_count: int, spec_pairs_count: int, customer_id_pairs_count: int) -> list:
+    """Preserve SFO template order while expanding repeated import columns as clustered duplicate labels."""
+    headers = [_strip_pandas_duplicate_suffix(h) for h in (base_headers or []) if str(h or "").strip()]
+    if not headers:
+        headers = [
+            "Item code", "SAP Item ID", "CPN Code", "MPN Code", "HSN Code", "Item name",
+            "Description", "Item type", "Measurement unit", "Alternate UoM 1", "Notes",
+            "SAP Description", "Specification name", "Specification value", "Specification UOM",
+            "Item identifications name", "Item identifications value", "Procurement item",
+            "Procurement item price currency code", "Procurement item price", "Sales item",
+            "Tag", "Procurement entity name", "Preferred vendor code",
+            "Alternate Item Name for Preferred Vendor",
+        ]
+
+    def group_kind(header: str) -> Optional[str]:
+        key = _template_label_key(header)
+        if key == "tag" or re.match(r"^tag \d+$", key):
+            return "tag"
+        if key in {"specification name", "specification value", "specification uom"}:
+            return "spec"
+        if key in {
+            "item identifications name", "item identifications value",
+            "customer identification name", "customer identification value",
+            "custom identification name", "custom identification value",
+        }:
+            return "customer"
+        if re.match(r"^(tag|specification name|specification value|customer identification name|customer identification value) \d+$", key):
+            return "dynamic"
+        if re.match(r"^(tag|specification_name|specification_value|customer_identification_name|customer_identification_value)_\d+$", str(header or "").strip().lower()):
+            return "dynamic"
+        return None
+
+    anchors = {}
+    static_headers = []
+    for header in headers:
+        kind = group_kind(header)
+        if kind in {"tag", "spec", "customer"} and kind not in anchors:
+            anchors[kind] = len(static_headers)
+        if kind:
+            continue
+        static_headers.append(header)
+
+    def insert_group(kind: str, group_headers: list):
+        index = anchors.get(kind)
+        if index is None:
+            index = len(static_headers)
+        static_headers[index:index] = group_headers
+        for other_kind, other_index in list(anchors.items()):
+            if other_kind != kind and other_index >= index:
+                anchors[other_kind] = other_index + len(group_headers)
+
+    insert_group("spec", ["Specification name", "Specification value", "Specification UOM"] * max(0, int(spec_pairs_count or 0)))
+    insert_group("customer", ["Item identifications name", "Item identifications value"] * max(0, int(customer_id_pairs_count or 0)))
+    insert_group("tag", ["Tag"] * max(0, int(tags_count or 0)))
+
+    return static_headers
 
 # In-memory store for each session
 SESSION_STORE = {}
@@ -1114,8 +1193,8 @@ def update_session_data(request):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # Build canonical template headers (full set) using session counts
-        tags_count = info.get('tags_count', 3)
-        spec_pairs_count = info.get('spec_pairs_count', 3)
+        tags_count = info.get('tags_count', 1)
+        spec_pairs_count = info.get('spec_pairs_count', 1)
         customer_id_pairs_count = info.get('customer_id_pairs_count', 1)
 
         base_headers = [
@@ -1360,8 +1439,9 @@ def upload_files(request):
         template_file = request.FILES.get('templateFile')
         sheet_name = request.data.get('sheetName')
         header_row = int(request.data.get('headerRow', 1))
-        template_sheet_name = request.data.get('templateSheetName')
-        template_header_row = int(request.data.get('templateHeaderRow', 1))
+        default_template_metadata = get_sfo_template_metadata()
+        template_sheet_name = request.data.get('templateSheetName') or default_template_metadata["template_sheet_name"]
+        template_header_row = int(request.data.get('templateHeaderRow') or default_template_metadata["template_header_row"])
         use_template_id = request.data.get('useTemplateId')
         
         # Extract formula rules if provided
@@ -1373,17 +1453,11 @@ def upload_files(request):
             except json.JSONDecodeError:
                 logger.warning(f"Invalid formula rules JSON: {formula_rules_json}")
         
-        # Validation - both client file and template file are required
+        # Validation - the destination template is fixed to SFO Default Item.xlsx.
         if not client_file:
             return Response({
                 'success': False,
                 'error': 'Client file is required'
-            }, status=status.HTTP_400_BAD_REQUEST)
-
-        if not template_file:
-            return Response({
-                'success': False,
-                'error': 'Template file is required'
             }, status=status.HTTP_400_BAD_REQUEST)
         
         # Validate file types
@@ -1396,25 +1470,49 @@ def upload_files(request):
                 'error': f'Only Excel (.xlsx, .xls) and CSV files are supported for client file'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Validate template file
-        template_ext = Path(template_file.name).suffix.lower()
-        if template_ext not in allowed_extensions:
+        if template_file:
+            template_ext = Path(template_file.name).suffix.lower()
+            if template_ext not in allowed_extensions:
+                return Response({
+                    'success': False,
+                    'error': f'Only Excel (.xlsx, .xls) and CSV files are supported for template file'
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+        if not template_file and not Path(default_template_metadata["template_path"]).exists():
             return Response({
                 'success': False,
-                'error': f'Only Excel (.xlsx, .xls) and CSV files are supported for template file'
-            }, status=status.HTTP_400_BAD_REQUEST)
+                'error': f'{SFO_TEMPLATE_NAME} destination template file not found'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         # Save uploaded files
         client_path, client_original_name = hybrid_file_manager.save_upload_file(client_file, "client")
-        template_path, template_original_name = hybrid_file_manager.save_upload_file(template_file, "template")
+        if template_file:
+            template_path, template_original_name = hybrid_file_manager.save_upload_file(template_file, "template")
+        else:
+            template_path = default_template_metadata["template_path"]
+            template_original_name = default_template_metadata["original_template_name"]
 
         # Generate session ID
         session_id = str(uuid.uuid4())
 
-        # Set default column counts
-        default_tags_count = 3
-        default_spec_pairs_count = 3
-        default_customer_id_pairs_count = 1
+        template_headers = []
+        try:
+            mapper = BOMHeaderMapper()
+            template_headers = mapper.read_excel_headers(
+                file_path=hybrid_file_manager.get_file_path(template_path),
+                sheet_name=template_sheet_name,
+                header_row=template_header_row - 1 if template_header_row > 0 else 0
+            )
+        except Exception as template_header_error:
+            logger.warning(f"Could not read SFO template headers during upload: {template_header_error}")
+
+        default_counts = derive_sfo_column_counts(template_headers)
+        clustered_template_headers = build_sfo_clustered_headers(
+            template_headers,
+            default_counts["tags_count"],
+            default_counts["spec_pairs_count"],
+            default_counts["customer_id_pairs_count"],
+        )
         
         # Store session data using universal session saving
         session_data = {
@@ -1426,15 +1524,19 @@ def upload_files(request):
             "header_row": header_row,
             "template_sheet_name": template_sheet_name,
             "template_header_row": template_header_row,
+            "template_headers": clustered_template_headers or template_headers,
+            "current_template_headers": clustered_template_headers or template_headers,
+            "enhanced_headers": clustered_template_headers or template_headers,
             "created": timezone.now().isoformat(),
             "mappings": None,
             "edited_data": None,
             "original_template_id": None,
             "template_modified": False,
             "formula_rules": formula_rules if formula_rules else [],
-            "tags_count": default_tags_count,
-            "spec_pairs_count": default_spec_pairs_count,
-            "customer_id_pairs_count": default_customer_id_pairs_count
+            "tags_count": default_counts["tags_count"],
+            "spec_pairs_count": default_counts["spec_pairs_count"],
+            "customer_id_pairs_count": default_counts["customer_id_pairs_count"],
+            "column_counts": default_counts,
         }
         
         # Save session with universal persistence (critical for multi-worker environments)
@@ -2261,8 +2363,8 @@ def get_headers(request, session_id):
         logger.info(f"🔍 Session {session_id} - template_headers from file: {template_headers}")
         
         # Get column counts from session (with defaults)
-        tags_count = info.get('tags_count', 3)
-        spec_pairs_count = info.get('spec_pairs_count', 3)
+        tags_count = info.get('tags_count', 1)
+        spec_pairs_count = info.get('spec_pairs_count', 1)
         customer_id_pairs_count = info.get('customer_id_pairs_count', 1)
         
         # Helper functions for robust special-column detection (case/trim tolerant)
@@ -2425,9 +2527,10 @@ def get_headers(request, session_id):
         # Compute template_optionals aligned to the headers being returned
         def is_special_optional(h: str) -> bool:
             h_lower = (h or '').lower()
-            return (h == 'Tag' or h.startswith('Tag_') or 
-                   'specification' in h_lower or 
-                   'customer identification' in h_lower or 
+            return (h == 'Tag' or h.startswith('Tag_') or
+                   'specification' in h_lower or
+                   'item identifications' in h_lower or
+                   'customer identification' in h_lower or
                    'customer_identification' in h_lower)
         
         template_optionals = []
@@ -2679,8 +2782,8 @@ def save_mappings(request):
         # If no existing mappings found, try to get from other session data
         if not existing_used_columns:
             # Check if we have column counts that indicate what should exist
-            tags_count = info.get('tags_count', 3)
-            spec_pairs_count = info.get('spec_pairs_count', 3)
+            tags_count = info.get('tags_count', 1)
+            spec_pairs_count = info.get('spec_pairs_count', 1)
             customer_id_pairs_count = info.get('customer_id_pairs_count', 1)
             
             # Generate expected column names based on counts
@@ -2854,8 +2957,8 @@ def get_existing_mappings(request, session_id):
         
         # IMPORTANT: Derive column counts from default values if missing from session
         # This handles cases where templates were applied before the column count saving fix
-        tags_count = session_data.get("tags_count", 3)
-        spec_pairs_count = session_data.get("spec_pairs_count", 3)
+        tags_count = session_data.get("tags_count", 1)
+        spec_pairs_count = session_data.get("spec_pairs_count", 1)
         customer_id_pairs_count = session_data.get("customer_id_pairs_count", 1)
         
         
@@ -4158,8 +4261,8 @@ def data_view(request):
 
         # Enforce full canonical template headers in the response, regardless of data sparsity
         try:
-            tags_count = int(info.get('tags_count', 3))
-            spec_pairs_count = int(info.get('spec_pairs_count', 3))
+            tags_count = int(info.get('tags_count', 1))
+            spec_pairs_count = int(info.get('spec_pairs_count', 1))
             customer_id_pairs_count = int(info.get('customer_id_pairs_count', 1))
 
             # Use template headers from uploaded file as base
@@ -4452,8 +4555,8 @@ def session_status(request, session_id):
         template_version = info.get('template_version', 0)
         
         # Get header counts for completeness
-        tags_count = info.get('tags_count', 3)
-        spec_pairs_count = info.get('spec_pairs_count', 3)
+        tags_count = info.get('tags_count', 1)
+        spec_pairs_count = info.get('spec_pairs_count', 1)
         customer_id_pairs_count = info.get('customer_id_pairs_count', 1)
         
         # Get current headers
@@ -5342,7 +5445,7 @@ def download_original_file(request, session_id=None):
 
 @api_view(['GET'])
 def download_template_file(request, session_id=None):
-    """Download FACTWISE.xlsx template file (always returns the standard FW template)."""
+    """Download the built-in SFO destination template."""
     try:
         # Support both URL path and query parameters for session_id
         if not session_id:
@@ -5354,25 +5457,19 @@ def download_template_file(request, session_id=None):
                 'error': 'Invalid session'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # CRITICAL FIX: Always return FACTWISE.xlsx regardless of what template was uploaded
-        factwise_template_path = Path(settings.BASE_DIR) / 'FACTWISE.xlsx'
+        template_path = get_sfo_template_path()
+        logger.info(f"🔍 Template download for session {session_id}: returning SFO template from {template_path}")
 
-        # Fallback to test_files directory if not found in root
-        if not factwise_template_path.exists():
-            factwise_template_path = Path(settings.BASE_DIR) / 'test_files' / 'FACTWISE.xlsx'
-
-        logger.info(f"🔍 FW Template download for session {session_id}: returning FACTWISE.xlsx from {factwise_template_path}")
-
-        if not factwise_template_path.exists():
+        if not template_path.exists():
             return Response({
                 'success': False,
-                'error': 'FACTWISE.xlsx template file not found'
+                'error': f'{SFO_TEMPLATE_NAME} template file not found'
             }, status=status.HTTP_404_NOT_FOUND)
 
         response = FileResponse(
-            open(factwise_template_path, 'rb'),
+            open(template_path, 'rb'),
             as_attachment=True,
-            filename='FACTWISE.xlsx'
+            filename=SFO_TEMPLATE_NAME
         )
         
         return response
@@ -5723,8 +5820,8 @@ def update_column_counts(request):
     """Update dynamic column counts for the current session."""
     try:
         session_id = request.data.get('session_id')
-        tags_count = request.data.get('tags_count', 3)
-        spec_pairs_count = request.data.get('spec_pairs_count', 3)
+        tags_count = request.data.get('tags_count', 1)
+        spec_pairs_count = request.data.get('spec_pairs_count', 1)
         customer_id_pairs_count = request.data.get('customer_id_pairs_count', 1)
         
         info = get_session(session_id)
@@ -5798,49 +5895,24 @@ def update_column_counts(request):
         logger.info(f"📊 UPDATE_COLUMN_COUNTS: Session {session_id}")
         logger.info(f"📊 ORIGINAL TEMPLATE HEADERS (from uploaded file): {base_headers}")
 
-        static_headers = [h for h in base_headers if not (_is_dynamic_tag(h) or _is_dynamic_spec_name(h) or _is_dynamic_spec_value(h) or _is_dynamic_cust_name(h) or _is_dynamic_cust_value(h))]
+        regenerated_headers = build_sfo_clustered_headers(
+            base_headers,
+            tags_count,
+            spec_pairs_count,
+            customer_id_pairs_count,
+        )
 
-        # Log which headers are kept vs filtered
-        filtered_out = [h for h in base_headers if h not in static_headers]
-        logger.info(f"📊 STATIC HEADERS (template cols kept): {static_headers}")
-        logger.info(f"📊 FILTERED OUT (old dynamic cols removed): {filtered_out}")
-
-        # Build regenerated headers from user's template + dynamic columns
-        regenerated_headers = list(static_headers)
-
-        # Add dynamic Tag columns
-        dynamic_tags = []
-        for i in range(1, tags_count + 1):
-            dynamic_tags.append(f"Tag_{i}")
-            regenerated_headers.append(f"Tag_{i}")
-
-        # Add dynamic Specification pairs
-        dynamic_specs = []
-        for i in range(1, spec_pairs_count + 1):
-            dynamic_specs.append(f"Specification_Name_{i}")
-            dynamic_specs.append(f"Specification_Value_{i}")
-            regenerated_headers.append(f"Specification_Name_{i}")
-            regenerated_headers.append(f"Specification_Value_{i}")
-
-        # Add dynamic Customer Identification pairs
-        dynamic_cust = []
-        for i in range(1, customer_id_pairs_count + 1):
-            dynamic_cust.append(f"Customer_Identification_Name_{i}")
-            dynamic_cust.append(f"Customer_Identification_Value_{i}")
-            regenerated_headers.append(f"Customer_Identification_Name_{i}")
-            regenerated_headers.append(f"Customer_Identification_Value_{i}")
-
-        logger.info(f"📊 DYNAMIC TAGS ADDED: {dynamic_tags}")
-        logger.info(f"📊 DYNAMIC SPECS ADDED: {dynamic_specs}")
-        logger.info(f"📊 DYNAMIC CUST ADDED: {dynamic_cust}")
-        logger.info(f"📊 FINAL COMBINED HEADERS: {regenerated_headers}")
-        logger.info(f"📊 TOTAL: {len(static_headers)} template + {len(dynamic_tags)} tags + {len(dynamic_specs)} specs + {len(dynamic_cust)} cust = {len(regenerated_headers)} total")
+        logger.info(f"SFO TAG COLUMNS: {tags_count} repeated Tag header(s)")
+        logger.info(f"SFO SPEC GROUPS: {spec_pairs_count} clustered Specification name/value/UOM group(s)")
+        logger.info(f"SFO ITEM ID GROUPS: {customer_id_pairs_count} clustered Item identifications name/value group(s)")
+        logger.info(f"FINAL COMBINED HEADERS: {regenerated_headers}")
 
         # Compute template_optionals for the canonical headers (Tags/Spec/Customer always optional)
         def is_special_optional(h: str) -> bool:
             h_lower = (h or '').lower()
             return (h == 'Tag' or h.startswith('Tag_') or
                    'specification' in h_lower or
+                   'item identifications' in h_lower or
                    'customer identification' in h_lower or
                    'customer_identification' in h_lower)
 
@@ -5882,38 +5954,13 @@ def update_column_counts(request):
 
 
 def generate_template_columns(tags_count, spec_pairs_count, customer_id_pairs_count, existing_headers=None):
-    """Generate template headers using existing headers as base, adding dynamic columns."""
-    # Helper functions to identify dynamic column types
-    def _norm(h):
-        return str(h or '').strip().lower()
-    def _is_dynamic(h):
-        h_norm = _norm(h)
-        return (h_norm == 'tag' or h_norm.startswith('tag_') or
-                h_norm.startswith('specification_') or 'specification' in h_norm or
-                h_norm.startswith('customer_identification_') or 'customer identification' in h_norm)
-
-    # Use existing headers as base, filtering out old dynamic columns
-    if existing_headers and isinstance(existing_headers, list) and len(existing_headers) > 0:
-        columns = [h for h in existing_headers if not _is_dynamic(h)]
-    else:
-        # Fallback to empty list if no existing headers
-        columns = []
-
-    # Tags
-    for i in range(1, max(int(tags_count or 0), 0) + 1):
-        columns.append(f'Tag_{i}')
-
-    # Specification pairs
-    for i in range(1, max(int(spec_pairs_count or 0), 0) + 1):
-        columns.append(f'Specification_Name_{i}')
-        columns.append(f'Specification_Value_{i}')
-
-    # Customer identification pairs
-    for i in range(1, max(int(customer_id_pairs_count or 0), 0) + 1):
-        columns.append(f'Customer_Identification_Name_{i}')
-        columns.append(f'Customer_Identification_Value_{i}')
-
-    return columns
+    """Generate SFO import headers with repeated labels clustered in template order."""
+    return build_sfo_clustered_headers(
+        existing_headers or [],
+        max(int(tags_count or 0), 0),
+        max(int(spec_pairs_count or 0), 0),
+        max(int(customer_id_pairs_count or 0), 0),
+    )
 
 
 @api_view(['POST'])
@@ -6049,8 +6096,8 @@ def save_mapping_template(request):
         # Get column counts from request, session, or use defaults (for standalone templates only)
         if not info:
             # Standalone template - use request or defaults
-            tags_count = request.data.get('tags_count', 3)
-            spec_pairs_count = request.data.get('spec_pairs_count', 3) 
+            tags_count = request.data.get('tags_count', 1)
+            spec_pairs_count = request.data.get('spec_pairs_count', 1) 
             customer_id_pairs_count = request.data.get('customer_id_pairs_count', 1)
         
         # REMOVED: Broken normalization logic that corrupted source_column values

@@ -712,6 +712,67 @@ class BomWorkflowTemplate(models.Model):
         }
 
 
+class ProcessingTemplate(models.Model):
+    """Global replayable processing template for an end-to-end upload workflow."""
+
+    STATUS_DRAFT = 'draft'
+    STATUS_ACTIVE = 'active'
+    STATUS_ARCHIVED = 'archived'
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, 'Draft'),
+        (STATUS_ACTIVE, 'Active'),
+        (STATUS_ARCHIVED, 'Archived'),
+    ]
+
+    name = models.CharField(max_length=200, unique=True)
+    description = models.TextField(blank=True, null=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+    version = models.IntegerField(default=1)
+    source_requirements = models.JSONField(default=dict, blank=True)
+    stages = models.JSONField(default=list, blank=True)
+    provider_snapshot = models.JSONField(default=dict, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    usage_count = models.IntegerField(default=0)
+
+    class Meta:
+        db_table = 'excel_mapper_processing_template'
+        ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['name']),
+            models.Index(fields=['status', '-updated_at']),
+        ]
+
+    def __str__(self):
+        return self.name
+
+    def increment_usage(self):
+        self.usage_count += 1
+        self.save(update_fields=['usage_count', 'updated_at'])
+
+    def to_dict(self, include_definition=True):
+        data = {
+            'id': self.id,
+            'name': self.name,
+            'description': self.description or '',
+            'status': self.status,
+            'version': self.version,
+            'source_requirements': self.source_requirements or {},
+            'stage_count': len(self.stages or []),
+            'usage_count': self.usage_count,
+            'metadata': self.metadata or {},
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+        if include_definition:
+            data.update({
+                'stages': self.stages or [],
+                'provider_snapshot': self.provider_snapshot or {},
+            })
+        return data
+
+
 class Project(models.Model):
     """
     Model for storing projects that data can be exported to.

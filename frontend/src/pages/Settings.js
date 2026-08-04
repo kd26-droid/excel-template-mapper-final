@@ -41,13 +41,23 @@ import { useThemeContext } from '../utils/ThemeContext';
 import api from '../services/api';
 
 const initialColumnMappings = [
-  { column: 'MPN valid', providers: ['digikey'], description: 'Part validation status' },
-  { column: 'MPN Status', providers: ['digikey'], description: 'Lifecycle status' },
-  { column: 'EOL Status', providers: ['digikey'], description: 'End of life flag' },
-  { column: 'Discontinued', providers: ['digikey'], description: 'Discontinued status' },
-  { column: 'DKPN', providers: ['digikey'], description: 'DigiKey part number' },
-  { column: 'Canonical MPN', providers: ['digikey'], description: 'Standardized manufacturer part number' },
-  { column: 'Category', providers: ['digikey'], description: 'Product category' },
+  { column: 'MPN valid (DigiKey)', providers: ['digikey'], description: 'DigiKey part validation status' },
+  { column: 'DigiKey Status', providers: ['digikey'], description: 'DigiKey lifecycle status' },
+  { column: 'DigiKey EOL Status', providers: ['digikey'], description: 'DigiKey end of life flag' },
+  { column: 'DigiKey Discontinued', providers: ['digikey'], description: 'DigiKey discontinued status' },
+  { column: 'DigiKey Part Number', providers: ['digikey'], description: 'DigiKey part number' },
+  { column: 'DigiKey Canonical MPN', providers: ['digikey'], description: 'DigiKey standardized manufacturer part number' },
+  { column: 'DigiKey Category', providers: ['digikey'], description: 'DigiKey product category' },
+  { column: 'MPN valid (Mouser)', providers: ['mouser'], description: 'Mouser part validation status' },
+  { column: 'Mouser Status', providers: ['mouser'], description: 'Mouser lifecycle status' },
+  { column: 'MPNR', providers: ['mouser'], description: 'Mouser part number' },
+  { column: 'Mouser Canonical MPN', providers: ['mouser'], description: 'Mouser standardized manufacturer part number' },
+  { column: 'Mouser Category', providers: ['mouser'], description: 'Mouser product category' },
+  { column: 'MPN valid (Element14)', providers: ['element14'], description: 'Element14 part validation status' },
+  { column: 'Element14 Status', providers: ['element14'], description: 'Element14 lifecycle status' },
+  { column: 'Element14 Part Number', providers: ['element14'], description: 'Element14 part number' },
+  { column: 'Element14 Canonical MPN', providers: ['element14'], description: 'Element14 standardized manufacturer part number' },
+  { column: 'Element14 Category', providers: ['element14'], description: 'Element14 product category' },
 ];
 
 const providerMeta = {
@@ -85,7 +95,7 @@ const normalizeProviders = (value, fallback = ['digikey']) => {
 
 const providersFromColumnMappings = (mappings) => {
   const selected = Array.from(new Set((mappings || []).flatMap(mapping => normalizeProviders(mapping.providers || mapping.provider))));
-  return selected.length ? selected : ['digikey'];
+  return selected.length ? selected : ['digikey', 'mouser', 'element14'];
 };
 
 const getInitialColumnMappings = () => {
@@ -697,30 +707,48 @@ const Settings = () => {
                           <TableRow key={mapping.column} hover sx={{ '&:hover td': { bgcolor: t.table.hover }, '& td': { borderBottom: `1px solid ${t.table.line}` } }}>
                             <TableCell sx={{ color: t.text.primary, fontWeight: 650, fontSize: 13 }}>{mapping.column}</TableCell>
                             <TableCell sx={{ color: t.text.secondary, fontSize: 13 }}>{mapping.description}</TableCell>
-                            <TableCell sx={{ width: 190 }}>
-                              <FormControl size="small" fullWidth>
+                            <TableCell sx={{ width: 330, minWidth: 330 }}>
+                              <FormControl size="small" sx={{ width: 300 }}>
                                 <Select
                                   multiple
                                   value={selectedProviders}
-                                  onChange={(e) => handleColumnProviderChange(mapping.column, e.target.value)}
-                                  renderValue={(selected) => normalizeProviders(selected).map(providerLabel).join(', ')}
+                                  onChange={(e) => {
+                                    const nextProviders = normalizeProviders(e.target.value)
+                                      .filter(provider => Boolean(providerStatus[provider]?.configured));
+                                    handleColumnProviderChange(mapping.column, nextProviders);
+                                  }}
+                                  renderValue={(selected) => normalizeProviders(selected).map(providerLabel).join(', ') || 'Select provider'}
                                   sx={{
                                     borderRadius: '12px',
-                                    bgcolor: meta.soft,
+                                    bgcolor: meta?.soft || t.surface.controlSoft,
                                     color: t.text.primary,
                                     fontWeight: 650,
                                     fontSize: 12.5,
                                     height: 34,
-                                    '& .MuiOutlinedInput-notchedOutline': { borderColor: meta.color }
+                                    width: 300,
+                                    '& .MuiSelect-select': {
+                                      overflow: 'hidden',
+                                      textOverflow: 'ellipsis',
+                                      whiteSpace: 'nowrap',
+                                      pr: 4
+                                    },
+                                    '& .MuiOutlinedInput-notchedOutline': { borderColor: meta?.color || t.border.default }
                                   }}
                                 >
-                                  {Object.entries(providerMeta).map(([key, provider]) => (
-                                    <MenuItem key={key} value={key}>
-                                      <Checkbox checked={selectedProviders.includes(key)} />
-                                      <ListItemText primary={provider.label} />
-                                      <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: provider.color, ml: 1 }} />
+                                  {Object.entries(providerMeta).map(([key, provider]) => {
+                                    const configured = Boolean(providerStatus[key]?.configured);
+                                    return (
+                                    <MenuItem key={key} value={key} disabled={!configured} sx={{ color: configured ? t.text.primary : t.text.disabled }}>
+                                      <Checkbox checked={selectedProviders.includes(key)} disabled={!configured} />
+                                      <ListItemText
+                                        primary={provider.label}
+                                        secondary={configured ? '' : 'Not configured'}
+                                        primaryTypographyProps={{ sx: { color: configured ? t.text.primary : t.text.disabled } }}
+                                        secondaryTypographyProps={{ sx: { color: t.text.disabled, fontSize: 11 } }}
+                                      />
+                                      <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: configured ? provider.color : t.text.disabled, ml: 1, opacity: configured ? 1 : 0.45 }} />
                                     </MenuItem>
-                                  ))}
+                                  );})}
                                 </Select>
                               </FormControl>
                             </TableCell>

@@ -6,14 +6,12 @@ import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import SettingsIcon from '@mui/icons-material/Settings';
 import NotificationsNoneIcon from '@mui/icons-material/NotificationsNone';
 import WbSunnyIcon from '@mui/icons-material/WbSunny';
-import TransformIcon from '@mui/icons-material/Transform';
 import { useThemeContext } from '../utils/ThemeContext';
 
 // ─── nav items ──────────────────────────────────────────────────────────────
 const NAV_ITEMS = [
   { label: 'Dashboard',      path: '/',               icon: DashboardIcon },
   { label: 'Upload Files',   path: '/upload',         icon: CloudUploadIcon },
-  { label: 'BOM Normalizer', path: '/bom-normalizer', icon: TransformIcon },
   { label: 'Settings',       path: '/settings',       icon: SettingsIcon },
 ];
 
