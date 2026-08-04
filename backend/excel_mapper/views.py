@@ -35,7 +35,13 @@ import tempfile
 import shutil
 
 from .bom_header_mapper import BOMHeaderMapper
-from .default_template import get_sfo_template_metadata, get_sfo_template_path, SFO_TEMPLATE_NAME
+from .default_template import (
+    get_sfo_template_metadata,
+    get_sfo_template_path,
+    get_sfo_reference_headers,
+    get_sfo_reference_optional_map,
+    SFO_TEMPLATE_NAME,
+)
 from .models import MappingTemplate, TagTemplate, PDFSession, PDFExtractionResult, Project
 try:
     # Prefer relative import; fall back gracefully on any import error
@@ -1557,12 +1563,6 @@ def upload_files(request):
                     'error': f'Only Excel (.xlsx, .xls) and CSV files are supported for template file'
                 }, status=status.HTTP_400_BAD_REQUEST)
 
-        if not template_file and not Path(default_template_metadata["template_path"]).exists():
-            return Response({
-                'success': False,
-                'error': f'{SFO_TEMPLATE_NAME} destination template file not found'
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
         # Save uploaded files
         client_path, client_original_name = hybrid_file_manager.save_upload_file(client_file, "client")
         if template_file:
@@ -1584,6 +1584,10 @@ def upload_files(request):
             )
         except Exception as template_header_error:
             logger.warning(f"Could not read SFO template headers during upload: {template_header_error}")
+
+        if not template_headers and not template_file:
+            template_headers = get_sfo_reference_headers()
+            logger.info(f"Using built-in {SFO_TEMPLATE_NAME} reference headers during upload")
 
         default_counts = derive_sfo_column_counts(template_headers)
         clustered_template_headers = build_sfo_clustered_headers(
@@ -1616,6 +1620,7 @@ def upload_files(request):
             "spec_pairs_count": default_counts["spec_pairs_count"],
             "customer_id_pairs_count": default_counts["customer_id_pairs_count"],
             "column_counts": default_counts,
+            "template_source": "uploaded" if template_file else "default",
         }
         
         # Save session with universal persistence (critical for multi-worker environments)
@@ -2411,6 +2416,9 @@ def get_headers(request, session_id):
             sheet_name=info.get("template_sheet_name"),
             header_row=info.get("template_header_row", 1) - 1 if info.get("template_header_row", 1) > 0 else 0
         )
+        if not template_headers and info.get('template_source') == 'default':
+            template_headers = get_sfo_reference_headers()
+            logger.info(f"get_headers: using built-in {SFO_TEMPLATE_NAME} reference headers")
 
         # CRITICAL: Always store template_headers in session after reading from file
         # This ensures updateColumnCounts has access to the base template headers
@@ -2451,6 +2459,8 @@ def get_headers(request, session_id):
                     template_optionals_map[str(header)] = is_optional
         except Exception as e:
             logger.warning(f"Optional/Mandatory annotations not read: {e}")
+        if not template_optionals_map and info.get('template_source') == 'default':
+            template_optionals_map = get_sfo_reference_optional_map()
         enhanced_headers = info.get("enhanced_headers")
         
         # Debug logging

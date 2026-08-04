@@ -25,7 +25,7 @@ from .models import PDFSession, PDFPage, PDFExtractionResult
 from .services.pdf_processor import PDFProcessor
 from .services.azure_ocr_service import AzureOCRService
 from .services.native_pdf_service import NativePDFService
-from .default_template import get_sfo_template_metadata
+from .default_template import get_sfo_reference_headers, get_sfo_template_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +93,16 @@ def build_pdf_mapping_session_data(
             )
     except Exception as e:
         logger.warning(f"Could not pre-read PDF template headers: {e}")
+
+    if not template_headers and not uses_uploaded_template:
+        from .views import build_sfo_clustered_headers
+        template_headers = get_sfo_reference_headers()
+        template_headers = build_sfo_clustered_headers(
+            template_headers,
+            column_counts['tags_count'],
+            column_counts['spec_pairs_count'],
+            column_counts['customer_id_pairs_count'],
+        )
 
     session_data = {
         'session_id': session_id,

@@ -57,7 +57,6 @@ import {
   CheckCircle as CheckCircleIcon,
   Error as ErrorIcon,
   Edit as EditIcon,
-  Description as TemplateIcon,
   Check as CheckIcon,
   ArrowBack as ArrowBackIcon,
   AutoAwesome as AutoAwesomeIcon,
@@ -65,7 +64,6 @@ import {
   EditNote as EditNoteIcon,
   Badge as BadgeIcon,
   Close as CloseIcon,
-  Map as MapIcon,
   Refresh as RefreshIcon,
   Info as InfoIcon,
   ExpandMore as ExpandMoreIcon,
@@ -686,6 +684,8 @@ const EnhancedDataEditor = () => {
   const [requiredDialogOpen, setRequiredDialogOpen] = useState(false);
   const [requiredGaps, setRequiredGaps] = useState([]);
   const [requiredFilling, setRequiredFilling] = useState(false);
+  const [requiredQuickFillKey, setRequiredQuickFillKey] = useState('');
+  const [requiredInlineDefaults, setRequiredInlineDefaults] = useState({});
   const pendingExportRef = useRef(null);
   const returnToRequiredGuardRef = useRef(false);
   const requiredGuardRunnerRef = useRef(null);
@@ -2529,6 +2529,39 @@ const EnhancedDataEditor = () => {
     });
     return values.size === 1 ? Array.from(values)[0] : '';
   }, [rowData]);
+
+  const applyRequiredQuickFill = useCallback(async (gap, value) => {
+    const cleanValue = String(value || '').trim();
+    if (!gap?.field || !cleanValue) return;
+    const fillKey = `${gap.field}:${cleanValue}`;
+    try {
+      setRequiredQuickFillKey(fillKey);
+      setRequiredFilling(true);
+      const resp = await api.setColumnDefault(sessionId, gap.field, cleanValue, true, null);
+      if (!resp.data?.success) throw new Error(resp.data?.error || 'Fill failed');
+      await fetchDataSynchronized();
+      setRequiredInlineDefaults(prev => {
+        const next = { ...prev };
+        delete next[gap.field];
+        return next;
+      });
+      setRequiredGaps(prev => {
+        const next = prev
+          .map(item => item.field === gap.field ? { ...item, emptyCount: 0 } : item)
+          .filter(item => (item.emptyCount || 0) > 0 || (item.invalidCount || 0) > 0);
+        if (next.length === 0 && !itemCodeIssue) {
+          setRequiredDialogOpen(false);
+        }
+        return next;
+      });
+      showSnackbar(`Filled ${gap.headerName || gap.req || gap.field} blanks with "${cleanValue}".`, 'success');
+    } catch (e) {
+      showSnackbar(e.response?.data?.error || e.message || 'Could not fill the required field', 'error');
+    } finally {
+      setRequiredQuickFillKey('');
+      setRequiredFilling(false);
+    }
+  }, [sessionId, fetchDataSynchronized, showSnackbar, itemCodeIssue]);
 
   const highlightItemCodeDuplicates = useCallback(() => {
     if (!itemCodeIssue?.dupRows) return;
@@ -4795,16 +4828,6 @@ const EnhancedDataEditor = () => {
               >
                 Tools
               </Button>
-              <Button
-                size="small"
-                onClick={handleOpenSaveTemplateDialog}
-                disabled={syncStatus.inProgress}
-                startIcon={<TemplateIcon />}
-                sx={outlinedActionSx}
-                variant="outlined"
-              >
-                Save Template
-              </Button>
               </Box>
               <Menu
                 anchorEl={toolsMenuAnchor}
@@ -4839,10 +4862,6 @@ const EnhancedDataEditor = () => {
                 <MenuItem onClick={() => { setToolsMenuAnchor(null); setDelCol(''); setDelOp('is_empty'); setDelCompare(''); setDeleteRowsOpen(true); }} disabled={syncStatus.inProgress}>
                   <ListItemIcon><DeleteIcon sx={{ color: '#c62828' }} /></ListItemIcon>
                   <ListItemText>Delete rows by condition</ListItemText>
-                </MenuItem>
-                <MenuItem onClick={() => { setToolsMenuAnchor(null); sessionStorage.setItem('navigatedFromDataEditor', 'true'); navigate(`/mapping/${sessionId}`); }}>
-                  <ListItemIcon><MapIcon sx={{ color: '#2196f3' }} /></ListItemIcon>
-                  <ListItemText>View Column Mapping</ListItemText>
                 </MenuItem>
               </Menu>
 
@@ -6339,6 +6358,8 @@ const EnhancedDataEditor = () => {
               const quickValues = guidance.quickValues || [];
               const observedValue = g.req === 'Procurement entity name' ? getObservedSingleValue(g.field) : '';
               const fillSuggestion = quickValues[0] || observedValue || '';
+              const allowInlineDefault = ['Item name', 'Procurement entity name', 'Measurement unit'].includes(g.req);
+              const inlineDefault = requiredInlineDefaults[g.field] || '';
               return (
                 <Box
                   key={`${g.req}-${g.field}`}
@@ -6382,6 +6403,28 @@ const EnhancedDataEditor = () => {
                     )}
                   </Box>
 
+                  {allowInlineDefault && (
+                    <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <TextField
+                        size="small"
+                        label="Default value"
+                        value={inlineDefault}
+                        onChange={(event) => setRequiredInlineDefaults(prev => ({ ...prev, [g.field]: event.target.value }))}
+                        sx={{ minWidth: 220, flex: '1 1 260px' }}
+                      />
+                      <Button
+                        size="small"
+                        variant="contained"
+                        startIcon={requiredQuickFillKey === `${g.field}:${inlineDefault.trim()}` ? <CircularProgress size={14} sx={{ color: 'white' }} /> : null}
+                        onClick={() => applyRequiredQuickFill(g, inlineDefault)}
+                        disabled={requiredFilling || !(g.emptyCount > 0) || !inlineDefault.trim()}
+                        sx={{ textTransform: 'none', fontWeight: 700 }}
+                      >
+                        {requiredQuickFillKey === `${g.field}:${inlineDefault.trim()}` ? 'Applying...' : 'Apply default'}
+                      </Button>
+                    </Box>
+                  )}
+
                   <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
                     <Button
                       size="small"
@@ -6398,22 +6441,24 @@ const EnhancedDataEditor = () => {
                         key={`${g.field}-${value}`}
                         size="small"
                         variant="contained"
-                        onClick={() => openFillColumnForRequired(g, value)}
+                        startIcon={requiredQuickFillKey === `${g.field}:${value}` ? <CircularProgress size={14} sx={{ color: 'white' }} /> : null}
+                        onClick={() => applyRequiredQuickFill(g, value)}
                         disabled={requiredFilling || !(g.emptyCount > 0)}
                         sx={{ textTransform: 'none', fontWeight: 700 }}
                       >
-                        Open with {value}
+                        {requiredQuickFillKey === `${g.field}:${value}` ? 'Applying...' : `Apply ${value}`}
                       </Button>
                     ))}
                     {observedValue && (
                       <Button
                         size="small"
                         variant="contained"
-                        onClick={() => openFillColumnForRequired(g, observedValue)}
+                        startIcon={requiredQuickFillKey === `${g.field}:${observedValue}` ? <CircularProgress size={14} sx={{ color: 'white' }} /> : null}
+                        onClick={() => applyRequiredQuickFill(g, observedValue)}
                         disabled={requiredFilling || !(g.emptyCount > 0)}
                         sx={{ textTransform: 'none', fontWeight: 700 }}
                       >
-                        Open with {observedValue}
+                        {requiredQuickFillKey === `${g.field}:${observedValue}` ? 'Applying...' : `Apply ${observedValue}`}
                       </Button>
                     )}
                     {g.req === 'Item code' && g.duplicateRows > 0 && (
