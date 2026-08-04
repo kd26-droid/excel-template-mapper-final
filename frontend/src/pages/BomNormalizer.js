@@ -2207,15 +2207,30 @@ const BomNormalizer = () => {
       }
       : buildNormalizedResultsSnapshot();
 
+    window.__bomNormalizerReturnSnapshots = window.__bomNormalizerReturnSnapshots || {};
+    window.__bomNormalizerReturnSnapshots[key] = snapshot;
+
+    // sessionStorage has a ~5MB cap. A normalized sheet plus its source rows can
+    // exceed it, and setItem then throws — previously swallowed, so the key was
+    // returned for a snapshot that had never been written and the restore came back
+    // empty. Retry without the bulky source-only fields, which the results view does
+    // not need, before giving up on disk.
+    const writeSnapshot = (payload) => {
+      window.sessionStorage.setItem(key, JSON.stringify(payload));
+    };
+
     try {
-      window.__bomNormalizerReturnSnapshots = window.__bomNormalizerReturnSnapshots || {};
-      window.__bomNormalizerReturnSnapshots[key] = snapshot;
-      window.sessionStorage.setItem(key, JSON.stringify(snapshot));
-      return key;
+      writeSnapshot(snapshot);
     } catch (err) {
-      console.warn('Could not save BOM normalizer return snapshot:', err);
-      return key;
+      try {
+        const { sheetRows: _sheetRows, preparedDataRows: _preparedDataRows, ...lean } = snapshot;
+        writeSnapshot(lean);
+      } catch (innerErr) {
+        // Disk is unavailable; the in-memory copy above still serves a same-tab return.
+        console.warn('Could not persist BOM normalizer return snapshot:', innerErr);
+      }
     }
+    return key;
   }, [
     buildNormalizedResultsSnapshot,
     combineItems,
@@ -2233,19 +2248,48 @@ const BomNormalizer = () => {
   useEffect(() => {
     if (currentStep !== 4 || !normalizedRows.length) return;
     const snapshot = buildNormalizedResultsSnapshot(normalizedRows);
+    window.__bomNormalizerLatestResultsSnapshot = snapshot;
     try {
-      window.__bomNormalizerLatestResultsSnapshot = snapshot;
       window.sessionStorage.setItem(BOM_NORMALIZER_LATEST_RESULTS_KEY, JSON.stringify(snapshot));
     } catch (err) {
-      window.__bomNormalizerLatestResultsSnapshot = snapshot;
+      // Too large for sessionStorage — drop the source-only fields and retry, so a
+      // browser-back restore still finds the normalized rows on disk.
+      try {
+        const { sheetRows: _sheetRows, preparedDataRows: _preparedDataRows, ...lean } = snapshot;
+        window.sessionStorage.setItem(BOM_NORMALIZER_LATEST_RESULTS_KEY, JSON.stringify(lean));
+      } catch (innerErr) {
+        console.warn('Could not persist latest BOM normalizer results:', innerErr);
+      }
     }
   }, [buildNormalizedResultsSnapshot, currentStep, normalizedRows]);
 
   useEffect(() => {
     const state = location.state || {};
     const snapshotKey = state.bomNormalizerReturnKey;
-    const restoreId = snapshotKey || (state.bomNormalizerReturnSnapshot ? 'route-snapshot' : '');
-    if (!state.returnFromMapping || !restoreId || restoredReturnSnapshotRef.current === restoreId) return;
+    const routeRestoreId = snapshotKey || (state.bomNormalizerReturnSnapshot ? 'route-snapshot' : '');
+
+    // The in-app Back button navigates here with returnFromMapping + a snapshot key.
+    // The BROWSER back button replays a history entry that has neither, so without
+    // this fallback the user lands on an empty page while their normalized rows are
+    // still sitting in sessionStorage. Fall back to the latest-results snapshot,
+    // which is written on every step-4 render.
+    const hasRouteRestore = Boolean(state.returnFromMapping && routeRestoreId);
+    const latestRaw = (() => {
+      try {
+        return window.sessionStorage.getItem(BOM_NORMALIZER_LATEST_RESULTS_KEY);
+      } catch (_) {
+        return null;
+      }
+    })();
+    const hasLatestSnapshot = Boolean(latestRaw || window.__bomNormalizerLatestResultsSnapshot);
+    // Only self-restore when this page has nothing loaded, so we never clobber a
+    // fresh upload the user just started.
+    const pageIsEmpty = !normalizedRows.length && !sheetRows.length && !combineItems.length;
+    const restoreId = hasRouteRestore
+      ? routeRestoreId
+      : (hasLatestSnapshot && pageIsEmpty ? 'latest-snapshot' : '');
+
+    if (!restoreId || restoredReturnSnapshotRef.current === restoreId) return;
 
     restoredReturnSnapshotRef.current = restoreId;
     try {
@@ -2276,6 +2320,14 @@ const BomNormalizer = () => {
         ? snapshotCandidates.find((candidate) => candidate.kind === 'merge-preview')
         : pickBestNormalizerSnapshot(snapshotCandidates.filter((candidate) => candidate.kind !== 'merge-preview'));
       if (!snapshot) throw new Error('Return snapshot was not found.');
+
+      // A normalized snapshot with no rows restores the parser settings and an empty
+      // grid, which reads as "everything was lost" while looking half-restored. Treat
+      // it as a failed restore instead so the user is told, and leave the step where
+      // it is rather than dropping them on an empty Results view.
+      if (snapshot.kind !== 'merge-preview' && !snapshot.normalizedRows?.length) {
+        throw new Error('Your normalized rows could not be restored — the saved copy was empty. Run normalization again.');
+      }
 
       if (snapshot.kind === 'merge-preview') {
         setWorkbook(null);
@@ -2326,16 +2378,22 @@ const BomNormalizer = () => {
         setError('');
       }
 
-      const nextState = { ...state };
-      delete nextState.returnFromMapping;
-      delete nextState.bomNormalizerReturnKey;
-      delete nextState.bomNormalizerReturnSnapshot;
-      delete nextState.bomNormalizerReturnRows;
-      navigate(location.pathname, { replace: true, state: nextState });
+      // Only rewrite history when we actually consumed route state. On browser back
+      // there is nothing to clear, and replacing the entry would strip the state the
+      // user needs if they navigate back and forth again.
+      if (hasRouteRestore) {
+        const nextState = { ...state };
+        delete nextState.returnFromMapping;
+        delete nextState.bomNormalizerReturnKey;
+        delete nextState.bomNormalizerReturnSnapshot;
+        delete nextState.bomNormalizerReturnRows;
+        navigate(location.pathname, { replace: true, state: nextState });
+      }
     } catch (err) {
       setError(err.message || 'Could not restore the BOM Normalizer page.');
     }
-  }, [location.pathname, location.state, navigate]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.pathname, location.state, navigate, normalizedRows.length, sheetRows.length, combineItems.length]);
 
   const availableStructureOptions = useMemo(
     () => getStructureOptionsForRoles(roles),
