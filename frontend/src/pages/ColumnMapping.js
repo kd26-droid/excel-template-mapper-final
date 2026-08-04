@@ -700,8 +700,8 @@ export default function ColumnMapping() {
 
   // Column count state
   const [columnCounts, setColumnCounts] = useState({
-    tags_count: 1,
-    spec_pairs_count: 1,
+    tags_count: 3,
+    spec_pairs_count: 3,
     customer_id_pairs_count: 1
   });
   const [templateColumns, setTemplateColumns] = useState([]);
@@ -1551,8 +1551,8 @@ export default function ColumnMapping() {
         if (session_metadata && session_metadata.column_counts) {
           const { tags_count, spec_pairs_count, customer_id_pairs_count } = session_metadata.column_counts;
           const newCounts = {
-            tags_count: tags_count || 1,
-            spec_pairs_count: spec_pairs_count || 1,
+            tags_count: tags_count ?? 3,
+            spec_pairs_count: spec_pairs_count ?? 3,
             customer_id_pairs_count: customer_id_pairs_count || 1
           };
           
@@ -1720,6 +1720,26 @@ export default function ColumnMapping() {
   function getSfoRepeatedDisplayLabel(fieldName, occurrence, total) {
     if (!fieldName || total <= 1) return fieldName;
     return `${occurrence}. ${fieldName}`;
+  }
+
+  function getSfoRepeatedFieldKey(fieldName, occurrence) {
+    const normalized = normalizeTemplateHeaderLabel(fieldName);
+    const index = Math.max(1, Number(occurrence) || 1);
+    if (normalized === 'tag') return `Tag_${index}`;
+    if (normalized === 'specification name') return `Specification_Name_${index}`;
+    if (normalized === 'specification value') return `Specification_Value_${index}`;
+    if (normalized === 'customer identification name' || normalized === 'custom identification name' || normalized === 'item identifications name') {
+      return `Customer_Identification_Name_${index}`;
+    }
+    if (normalized === 'customer identification value' || normalized === 'custom identification value' || normalized === 'item identifications value') {
+      return `Customer_Identification_Value_${index}`;
+    }
+    return fieldName;
+  }
+
+  function getTemplateFieldKeyFromNode(node) {
+    if (!node?.data) return '';
+    return node.data.fieldKey || node.data.originalLabel || node.data.label || '';
   }
 
   function isOptionalFieldUpdated(fieldName, templateOptionals, idx) {
@@ -1890,6 +1910,7 @@ export default function ColumnMapping() {
       const sfoGroupType = getSfoRepeatedFieldType(header);
       const sfoGroupIndex = sfoGroupType ? headerOccurrence : null;
       const displayLabel = getSfoRepeatedDisplayLabel(header, headerOccurrence, headerTotal);
+      const fieldKey = sfoGroupType ? getSfoRepeatedFieldKey(header, headerOccurrence) : header;
 
       // Use updated pair detection logic for numbered fields
       const nextHeader = templateHdrs[idx + 1];
@@ -1910,8 +1931,8 @@ export default function ColumnMapping() {
       const factwiseFormula = factwiseRules?.find(rule => rule.target_column === header)?.formula_expression || null;
       
       // Check for default value
-      const hasDefaultValue = defaultValues && Object.prototype.hasOwnProperty.call(defaultValues, header);
-      const defaultValue = hasDefaultValue ? defaultValues[header] : '';
+      const hasDefaultValue = defaultValues && Object.prototype.hasOwnProperty.call(defaultValues, fieldKey);
+      const defaultValue = hasDefaultValue ? defaultValues[fieldKey] : '';
       
       const src = 'delete';
       
@@ -1923,6 +1944,7 @@ export default function ColumnMapping() {
           label: header,
           originalLabel: header,
           displayLabel,
+          fieldKey,
           type: 'target',
           headerType: 'template',
           index: idx,
@@ -1936,7 +1958,7 @@ export default function ColumnMapping() {
           factwiseFormula: factwiseFormula,
           hasDefaultValue: hasDefaultValue,
           defaultValue: defaultValue,
-          atBadge: tagBadges.get(header) || null,
+          atBadge: tagBadges.get(fieldKey) || tagBadges.get(header) || null,
           isDarkMode,
           isDynamic: isDynamicTemplateField,  // true for Tag_1, Specification_Name_1, etc.
           sfoGroupType,
@@ -3181,7 +3203,7 @@ export default function ColumnMapping() {
       
       // Get target column name from the actual node data
       const targetNode = nodes.find(n => n.id === edge.target);
-      const targetColumn = targetNode ? targetNode.data.originalLabel : templateHeaders[targetIdx];
+      const targetColumn = targetNode ? getTemplateFieldKeyFromNode(targetNode) : templateHeaders[targetIdx];
       
       return {
         source: sourceColumn,
@@ -3210,7 +3232,7 @@ export default function ColumnMapping() {
       // Get target column name from the actual node data
       const targetNode = nodes.find(n => n.id === edge.target);
       const targetColumnFromIndex = templateHeaders[targetIdx];
-      const targetColumn = targetNode ? targetNode.data.originalLabel : targetColumnFromIndex;
+      const targetColumn = targetNode ? getTemplateFieldKeyFromNode(targetNode) : targetColumnFromIndex;
 
       // DEBUG LOGGING
       console.log(`📊 BUILD_MAPPING: edge ${edge.source} -> ${edge.target}`);
@@ -3325,7 +3347,7 @@ export default function ColumnMapping() {
   // Handle default value dialog — supports a fixed value or a conditional if/else rule.
   const handleSaveDefaultValue = async () => {
     if (!selectedTemplateField) return;
-    const field = selectedTemplateField.name;
+    const field = selectedTemplateField.fieldKey || selectedTemplateField.name;
     const conditional = dvMode === 'conditional';
     if (conditional && !dvCondCol) return;
     if (!conditional && !defaultValueText.trim()) return;
@@ -3382,7 +3404,7 @@ export default function ColumnMapping() {
     setDefaultValueLoading(true);
     
     try {
-      const field = selectedTemplateField.name;
+      const field = selectedTemplateField.fieldKey || selectedTemplateField.name;
       let nextDefaults = {};
       let nextRules = {};
       setDefaultValueMappings(prev => {
@@ -3544,12 +3566,19 @@ export default function ColumnMapping() {
         // Unmapped template field clicked - open default value dialog
         const targetHeaders = (useDynamicTemplate && templateColumns.length > 0) ? templateColumns : templateHeaders;
         const templateFieldName = targetHeaders[targetIdx];
+        const targetNode = nodes.find(n => n.id === node.id);
+        const templateFieldKey = getTemplateFieldKeyFromNode(targetNode) || templateFieldName;
 
         if (templateFieldName) {
-          setSelectedTemplateField({ id: node.id, name: templateFieldName, index: targetIdx });
-          setDefaultValueText(defaultValueMappings[templateFieldName] || '');
+          setSelectedTemplateField({
+            id: node.id,
+            name: targetNode?.data?.displayLabel || templateFieldName,
+            fieldKey: templateFieldKey,
+            index: targetIdx
+          });
+          setDefaultValueText(defaultValueMappings[templateFieldKey] || '');
           // Prefill the conditional-rule fields from any saved rule for this field.
-          const rule = (defaultValueRules || {})[templateFieldName];
+          const rule = (defaultValueRules || {})[templateFieldKey];
           if (rule && rule.column) {
             setDvMode('conditional');
             setDvCondCol(rule.column || '');
@@ -3568,7 +3597,7 @@ export default function ColumnMapping() {
         }
       }
     }
-  }, [selectedSourceNode, nodes, edges, setNodes, setEdges, templateHeaders, templateColumns, useDynamicTemplate, defaultValueMappings]);
+  }, [selectedSourceNode, nodes, edges, setNodes, setEdges, templateHeaders, templateColumns, useDynamicTemplate, defaultValueMappings, defaultValueRules]);
 
   // L) Auto-mapping with rebuild guard
   const handleAutoMap = async () => {
@@ -3959,7 +3988,7 @@ export default function ColumnMapping() {
   useEffect(() => {
     setNodes(currentNodes => currentNodes.map(node => {
       if (!node.id.startsWith('t-')) return node; // Only update template nodes
-      const fieldName = node.data?.originalLabel;
+      const fieldName = getTemplateFieldKeyFromNode(node);
       const hasVal = fieldName && Object.prototype.hasOwnProperty.call(defaultValueMappings || {}, fieldName);
       const rule = fieldName ? (defaultValueRules || {})[fieldName] : null;
       const hasRule = !!(rule && rule.column);
@@ -4273,7 +4302,7 @@ export default function ColumnMapping() {
       // eslint-disable-next-line no-console
       // eslint-disable-next-line no-console
 
-      const mappingData = buildMappingData(edges, defaultValueMappings);
+      const mappingData = buildMappingData(edges, defaultValueMappings, { apply_now: true });
 
       const response = await api.saveColumnMappings(sessionId, mappingData);
 
@@ -4293,7 +4322,7 @@ export default function ColumnMapping() {
         mappings: edges.map(edge => {
           const sourceIdx = parseInt(edge.source.replace('c-', ''));
           const targetNode = nodes.find(n => n.id === edge.target);
-          const targetColumn = targetNode ? targetNode.data.originalLabel : templateHeaders[parseInt(edge.target.replace('t-', ''))];
+          const targetColumn = targetNode ? getTemplateFieldKeyFromNode(targetNode) : templateHeaders[parseInt(edge.target.replace('t-', ''))];
           
           return {
             sourceColumn: clientHeaders[sourceIdx],
@@ -5615,8 +5644,8 @@ export default function ColumnMapping() {
                   Cancel
                 </button>
                 {selectedTemplateField?.name && (
-                  (defaultValueMappings && Object.prototype.hasOwnProperty.call(defaultValueMappings, selectedTemplateField.name)) ||
-                  (defaultValueRules && Object.prototype.hasOwnProperty.call(defaultValueRules, selectedTemplateField.name))
+                  (defaultValueMappings && Object.prototype.hasOwnProperty.call(defaultValueMappings, selectedTemplateField.fieldKey || selectedTemplateField.name)) ||
+                  (defaultValueRules && Object.prototype.hasOwnProperty.call(defaultValueRules, selectedTemplateField.fieldKey || selectedTemplateField.name))
                 ) && (
                   <button
                     onClick={handleClearDefaultValue}

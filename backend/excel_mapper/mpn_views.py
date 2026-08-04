@@ -4,6 +4,8 @@ MPN OAuth + Validation endpoints
 import json
 import logging
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional, Tuple
 
 from django.http import HttpResponseRedirect
@@ -1452,11 +1454,13 @@ def mpn_validate_warm(request):
     Validating a whole BOM in one request makes the backend fan out dozens of
     Digi-Key calls and blows past Azure App Service's hard 230s request limit.
     The client instead loops offset=0, limit, 2*limit… calling this endpoint —
-    each call validates only ~8 MPNs (in parallel, populating the persistent
+    each call validates only ~15 MPNs (in parallel, populating the persistent
     cache) and returns progress. When done, the client calls mpn_validate once,
     which is fast because every MPN is now cached. Result content is unchanged;
     this only splits the slow API fan-out into timeout-proof batches.
     """
+    request_started = time.perf_counter()
+    timings_ms = {}
     try:
         session_id = request.data.get('session_id')
         if not session_id:
@@ -1464,6 +1468,7 @@ def mpn_validate_warm(request):
         info = get_session_consistent(session_id)
         if not info:
             return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+        timings_ms['session_load'] = round((time.perf_counter() - request_started) * 1000, 1)
 
         current_data = info.get('enhanced_data')
         if current_data and current_data.get('headers') and current_data.get('data'):
@@ -1520,71 +1525,175 @@ def mpn_validate_warm(request):
             mfr = row[fi] if (fi is not None and fi < len(row)) else None
             unique.append((raw, mfr))
         total = len(unique)
+        cache_check_started = time.perf_counter()
 
         try:
             offset = max(0, int(request.data.get('offset', 0)))
         except (TypeError, ValueError):
             offset = 0
         try:
-            limit = int(request.data.get('limit', 8))
+            limit = int(request.data.get('limit', 75))
         except (TypeError, ValueError):
-            limit = 8
-        limit = max(1, min(limit, 25))
+            limit = 75
+        limit = max(1, min(limit, 100))
+        try:
+            cold_limit = int(request.data.get('cold_limit', 15))
+        except (TypeError, ValueError):
+            cold_limit = 15
+        cold_limit = max(1, min(cold_limit, 25))
 
-        chunk = unique[offset:offset + limit]
+        mouser_store = dict(info.get('mouser_results') or {})
+        element14_store = dict(info.get('element14_results') or {})
+        mouser = _mouser_client_for_request(request)
+        element14 = _element14_client_for_request(request)
+
+        from .models import GlobalMpnCache, ProviderMpnCache
+        remaining = unique[offset:]
+        digikey_cached = GlobalMpnCache.get_cached_results(
+            [client.normalize_mpn(raw) for raw, _ in remaining],
+            site=client.site,
+            lang=client.lang,
+            currency=client.currency,
+        ) if 'digikey' in selected_providers else {}
+        mouser_cache_keys = {
+            mouser.normalize_mpn(raw): f"mouser:mpn:{mouser.normalize_mpn(raw)}"
+            for raw, _ in remaining if mouser.normalize_mpn(raw)
+        }
+        element14_cache_keys = {
+            element14.normalize_mpn(raw): f"element14:mpn:{element14.store_id}:{element14.normalize_mpn(raw)}"
+            for raw, _ in remaining if element14.normalize_mpn(raw)
+        }
+        mouser_cached_keys = set(cache.get_many(mouser_cache_keys.values()))
+        element14_cached_keys = set(cache.get_many(element14_cache_keys.values()))
+        mouser_persistent = ProviderMpnCache.get_cached_results(
+            'mouser', mouser_cache_keys.keys()
+        ) if 'mouser' in selected_providers and mouser.api_key else {}
+        element14_persistent = ProviderMpnCache.get_cached_results(
+            'element14', element14_cache_keys.keys(), element14.store_id
+        ) if 'element14' in selected_providers and element14.api_key else {}
+        timings_ms['cache_inspection'] = round((time.perf_counter() - cache_check_started) * 1000, 1)
+
+        fresh_mouser_store = {
+            normalized: result for normalized, result in mouser_store.items()
+            if normalized in mouser_persistent
+            or mouser_cache_keys.get(normalized) in mouser_cached_keys
+        }
+        fresh_element14_store = {
+            normalized: result for normalized, result in element14_store.items()
+            if normalized in element14_persistent
+            or element14_cache_keys.get(normalized) in element14_cached_keys
+        }
+        stores_pruned = (
+            len(fresh_mouser_store) != len(mouser_store)
+            or len(fresh_element14_store) != len(element14_store)
+        )
+        mouser_store = fresh_mouser_store
+        element14_store = fresh_element14_store
+        info['mouser_results'] = mouser_store
+        info['element14_results'] = element14_store
+
+        def is_fully_cached(raw):
+            if 'digikey' in selected_providers and client.normalize_mpn(raw) not in digikey_cached:
+                return False
+            mouser_norm = mouser.normalize_mpn(raw)
+            if ('mouser' in selected_providers and mouser.api_key
+                    and mouser_norm not in mouser_store
+                    and mouser_norm not in mouser_persistent
+                    and mouser_cache_keys.get(mouser_norm) not in mouser_cached_keys):
+                return False
+            element14_norm = element14.normalize_mpn(raw)
+            if ('element14' in selected_providers and element14.api_key
+                    and element14_norm not in element14_store
+                    and element14_norm not in element14_persistent
+                    and element14_cache_keys.get(element14_norm) not in element14_cached_keys):
+                return False
+            return True
+
+        chunk = []
+        cold_count = 0
+        for item in remaining:
+            cached = is_fully_cached(item[0])
+            if not cached and cold_count >= cold_limit:
+                break
+            chunk.append(item)
+            if not cached:
+                cold_count += 1
+            if len(chunk) >= limit:
+                break
+
         if chunk:
-            if 'digikey' in selected_providers:
-                client.validate_mpns([m for m, _ in chunk], [f for _, f in chunk])
-            # Also warm Mouser for this batch. Mouser has no persistent cache, so we
-            # store its results on the session; mpn_validate reads them to fill the
-            # Mouser columns progressively (no live Mouser API call in the grid build).
-            try:
-                mouser = _mouser_client_for_request(request)
+            jobs = {}
+            provider_timings = {}
+
+            def warm_supplier(supplier, existing, persistent):
+                additions = {}
+                for raw, _ in chunk:
+                    normalized = supplier.normalize_mpn(raw)
+                    if normalized and normalized not in existing:
+                        result = persistent.get(normalized)
+                        if result is None:
+                            result = supplier.validate_mpn(raw)
+                        if result is not None:
+                            additions[normalized] = result
+                return additions
+
+            with ThreadPoolExecutor(max_workers=3, thread_name_prefix='mpn-provider') as executor:
+                if 'digikey' in selected_providers:
+                    future = executor.submit(
+                        client.validate_mpns,
+                        [mpn for mpn, _ in chunk],
+                        [manufacturer for _, manufacturer in chunk],
+                    )
+                    jobs[future] = ('digikey', time.perf_counter())
                 if mouser.api_key and 'mouser' in selected_providers:
-                    mouser_store = info.get('mouser_results') or {}
-                    added = 0
-                    for raw, _ in chunk:
-                        mnorm = mouser.normalize_mpn(raw)
-                        if mnorm and mnorm not in mouser_store:
-                            res = mouser.validate_mpn(raw)
-                            if res is not None:
-                                mouser_store[mnorm] = res
-                                added += 1
-                    if added:
-                        info['mouser_results'] = mouser_store
-                        save_session(session_id, info)
-                        logger.info(f"📊 MOUSER_WARM: cached {added} Mouser results this batch ({len(mouser_store)} total)")
-            except Exception as _me:
-                logger.warning(f"Mouser warm skipped (non-critical): {_me}")
-
-            try:
-                element14 = _element14_client_for_request(request)
+                    future = executor.submit(warm_supplier, mouser, mouser_store, mouser_persistent)
+                    jobs[future] = ('mouser', time.perf_counter())
                 if element14.api_key and 'element14' in selected_providers:
-                    element14_store = info.get('element14_results') or {}
-                    added = 0
-                    for raw, _ in chunk:
-                        mnorm = element14.normalize_mpn(raw)
-                        if mnorm and mnorm not in element14_store:
-                            res = element14.validate_mpn(raw)
-                            if res is not None:
-                                element14_store[mnorm] = res
-                                added += 1
-                    if added:
-                        info['element14_results'] = element14_store
-                        save_session(session_id, info)
-                        logger.info(f"ELEMENT14_WARM: cached {added} Element14 results this batch ({len(element14_store)} total)")
-            except Exception as _e14:
-                logger.warning(f"Element14 warm skipped (non-critical): {_e14}")
+                    future = executor.submit(warm_supplier, element14, element14_store, element14_persistent)
+                    jobs[future] = ('element14', time.perf_counter())
 
-        done = (offset + limit) >= total
+                session_changed = stores_pruned
+                for future in as_completed(jobs):
+                    provider, provider_started = jobs[future]
+                    provider_timings[provider] = round((time.perf_counter() - provider_started) * 1000, 1)
+                    try:
+                        additions = future.result() or {}
+                        if provider == 'digikey':
+                            timings_ms['digikey_mpns'] = getattr(client, 'last_validation_timings', [])
+                        if provider == 'mouser' and additions:
+                            mouser_store.update(additions)
+                            info['mouser_results'] = mouser_store
+                            session_changed = True
+                        elif provider == 'element14' and additions:
+                            element14_store.update(additions)
+                            info['element14_results'] = element14_store
+                            session_changed = True
+                    except Exception as provider_error:
+                        if provider == 'digikey':
+                            raise
+                        logger.warning("%s warm skipped (non-critical): %s", provider, provider_error)
+
+            if session_changed:
+                session_save_started = time.perf_counter()
+                save_session(session_id, info, persist_file=False)
+                timings_ms['session_save'] = round((time.perf_counter() - session_save_started) * 1000, 1)
+            timings_ms['providers'] = provider_timings
+
+        next_offset = offset + len(chunk)
+        done = next_offset >= total
+        timings_ms['total'] = round((time.perf_counter() - request_started) * 1000, 1)
         return Response({
             'success': True,
             'mpn_header': mpn_header,
             'offset': offset,
             'limit': limit,
+            'cold_limit': cold_limit,
+            'cold_count': cold_count,
+            'next_offset': next_offset,
             'total': total,
-            'validated': min(offset + limit, total),
+            'validated': min(next_offset, total),
             'done': done,
+            'timings_ms': timings_ms,
             'validation_providers': sorted(selected_providers),
         })
     except Exception as e:
@@ -1722,22 +1831,21 @@ def mpn_validate(request):
         api_mpns = []
         api_mfrs = []
 
+        normalized_mpns = [client.normalize_mpn(raw_mpn) for raw_mpn in mpns]
+        cached_results.update(GlobalMpnCache.get_cached_results(
+            normalized_mpns,
+            manufacturer_id=None,
+            site=client.site,
+            lang=client.lang,
+            currency=client.currency,
+        ))
+
         for i, (raw_mpn, mfr) in enumerate(zip(mpns, mfrs)):
             norm_mpn = client.normalize_mpn(raw_mpn)
             if not norm_mpn:
                 continue
 
-            # Check global cache
-            cached_result = GlobalMpnCache.get_cached_result(
-                mpn_norm=norm_mpn,
-                manufacturer_id=None,  # TODO: Support manufacturer matching
-                site=client.site,
-                lang=client.lang,
-                currency=client.currency
-            )
-
-            if cached_result:
-                cached_results[norm_mpn] = cached_result
+            if norm_mpn in cached_results:
                 logger.debug(f"Cache HIT for MPN: {norm_mpn}")
             elif not cache_only and 'digikey' in selected_providers:
                 api_mpns.append(raw_mpn)
@@ -2028,7 +2136,11 @@ def mpn_validate(request):
             'validation_columns_added': validation_columns
         })
         info['mpn_validation'] = mpn_validation
-        save_session(session_id, info)
+        save_session(
+            session_id,
+            info,
+            persist_file=not cache_only or str(request.data.get('persist_results', '')).lower() in ('1', 'true', 'yes', 'on'),
+        )
 
         logger.info(f"💾 SESSION_SAVE: Saved DigiKey results: {len(results_map)}, Mouser results: {len(mouser_results_map)}, Element14 results: {len(element14_results_map)}")
 

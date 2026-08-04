@@ -80,8 +80,15 @@ class Element14Client:
 
         mpn_norm = self.normalize_mpn(mpn)
         cache_key = f"element14:mpn:{self.store_id}:{mpn_norm}"
+        from ..models import ProviderMpnCache
+        persistent = ProviderMpnCache.get_cached_result('element14', mpn_norm, self.store_id)
+        if persistent is not None:
+            cache.set(cache_key, persistent, timeout=60 * 60 * 24)
+            return persistent
+
         cached = cache.get(cache_key)
         if cached:
+            ProviderMpnCache.store_result('element14', mpn_norm, cached, self.store_id)
             return cached
 
         result = self.search_keyword(mpn)
@@ -98,7 +105,8 @@ class Element14Client:
                 'lifecycle': None,
                 'category': None,
             }
-            cache.set(cache_key, res, timeout=60 * 60 * 12)
+            cache.set(cache_key, res, timeout=60 * 60 * 24)
+            ProviderMpnCache.store_result('element14', mpn_norm, res, self.store_id)
             return res
 
         first = products[0]
@@ -129,5 +137,6 @@ class Element14Client:
             } if valid else None,
             'category': category if valid else None,
         }
-        cache.set(cache_key, res, timeout=60 * 60 * 12)
+        cache.set(cache_key, res, timeout=60 * 60 * 24)
+        ProviderMpnCache.store_result('element14', mpn_norm, res, self.store_id)
         return res

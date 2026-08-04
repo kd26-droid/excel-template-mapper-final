@@ -66,11 +66,17 @@ class MouserClient:
             return None
 
         mpn_norm = self.normalize_mpn(mpn)
+        from ..models import ProviderMpnCache
+        persistent = ProviderMpnCache.get_cached_result('mouser', mpn_norm)
+        if persistent is not None:
+            cache.set(f"mouser:mpn:{mpn_norm}", persistent, timeout=60 * 60 * 24)
+            return persistent
 
         # Check cache first
         cache_key = f"mouser:mpn:{mpn_norm}"
         cached = cache.get(cache_key)
         if cached:
+            ProviderMpnCache.store_result('mouser', mpn_norm, cached)
             logger.debug(f"💾 MOUSER_CACHE: HIT for {mpn_norm}")
             return cached
 
@@ -92,7 +98,8 @@ class MouserClient:
                 'lifecycle': None,
                 'category': None
             }
-            cache.set(cache_key, res, timeout=60 * 60 * 12)  # 12 hours
+            cache.set(cache_key, res, timeout=60 * 60 * 24)
+            ProviderMpnCache.store_result('mouser', mpn_norm, res)
             logger.debug(f"❌ MOUSER_VALIDATE: Invalid MPN {mpn_norm}")
             return res
 
@@ -130,5 +137,6 @@ class MouserClient:
             logger.debug(f"❌ MOUSER_VALIDATE: No match for {mpn_norm}")
 
         # Cache result
-        cache.set(cache_key, res, timeout=60 * 60 * 12)  # 12 hours
+        cache.set(cache_key, res, timeout=60 * 60 * 24)
+        ProviderMpnCache.store_result('mouser', mpn_norm, res)
         return res

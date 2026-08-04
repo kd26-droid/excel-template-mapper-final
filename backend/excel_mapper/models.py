@@ -3,11 +3,15 @@
 from django.db import models
 from django.utils import timezone
 import json
+import threading
 import uuid
+from datetime import timedelta
 from rapidfuzz import fuzz
 import logging
 
 logger = logging.getLogger(__name__)
+_MPN_CACHE_WRITE_LOCK = threading.Lock()
+MPN_CACHE_TTL = timedelta(hours=24)
 
 class MappingTemplate(models.Model):
     name = models.CharField(max_length=200, unique=True)
@@ -20,8 +24,8 @@ class MappingTemplate(models.Model):
     default_values = models.JSONField(default=dict, blank=True)  # Default values for unmapped fields
     mpn_validation_metadata = models.JSONField(default=dict, blank=True)  # MPN validation metadata
     # Dynamic column counts
-    tags_count = models.IntegerField(default=1)  # Number of Tags columns
-    spec_pairs_count = models.IntegerField(default=1)  # Number of Specification Name/Value pairs
+    tags_count = models.IntegerField(default=3)  # Number of Tags columns
+    spec_pairs_count = models.IntegerField(default=3)  # Number of Specification Name/Value pairs
     customer_id_pairs_count = models.IntegerField(default=1)  # Number of Customer ID Name/Value pairs
     session_id = models.CharField(max_length=100)  # Original session ID
     created_at = models.DateTimeField(auto_now_add=True)
@@ -498,12 +502,32 @@ class GlobalMpnCache(models.Model):
                 manufacturer_id=manufacturer_id or '',
                 site=site,
                 lang=lang,
-                currency=currency
+                currency=currency,
+                updated_at__gte=timezone.now() - MPN_CACHE_TTL,
             )
             cache_entry.increment_access()
             return cache_entry.validation_data
         except cls.DoesNotExist:
             return None
+
+    @classmethod
+    def get_cached_results(cls, mpn_norms, manufacturer_id: str = None,
+                           site: str = 'IN', lang: str = 'en', currency: str = 'INR'):
+        """Return cached results with one database query and no hit-time writes."""
+        normalized = {str(value or '').strip() for value in mpn_norms}
+        normalized.discard('')
+        if not normalized:
+            return {}
+
+        entries = cls.objects.filter(
+            mpn_normalized__in=normalized,
+            manufacturer_id=manufacturer_id or '',
+            site=site,
+            lang=lang,
+            currency=currency,
+            updated_at__gte=timezone.now() - MPN_CACHE_TTL,
+        ).only('mpn_normalized', 'validation_data')
+        return {entry.mpn_normalized: entry.validation_data for entry in entries}
 
     @classmethod
     def store_result(cls, mpn_norm: str, validation_data: dict, manufacturer_id: str = None,
@@ -520,28 +544,28 @@ class GlobalMpnCache(models.Model):
         end_of_life = lifecycle.get('endOfLife', False)
         discontinued = lifecycle.get('discontinued', False)
 
-        # Create or update cache entry
-        cache_entry, created = cls.objects.update_or_create(
-            mpn_normalized=mpn_norm,
-            manufacturer_id=manufacturer_id or '',
-            site=site,
-            lang=lang,
-            currency=currency,
-            defaults={
-                'validation_data': validation_data,
-                'is_valid': is_valid,
-                'canonical_mpn': canonical_mpn,
-                'all_canonical_mpns': all_canonical_mpns,  # NEW: Store all canonical MPNs
-                'dkpn': dkpn,
-                'status': status,
-                'end_of_life': end_of_life,
-                'discontinued': discontinued,
-                'access_count': 1,
-            }
-        )
+        with _MPN_CACHE_WRITE_LOCK:
+            cache_entry, created = cls.objects.update_or_create(
+                mpn_normalized=mpn_norm,
+                manufacturer_id=manufacturer_id or '',
+                site=site,
+                lang=lang,
+                currency=currency,
+                defaults={
+                    'validation_data': validation_data,
+                    'is_valid': is_valid,
+                    'canonical_mpn': canonical_mpn,
+                    'all_canonical_mpns': all_canonical_mpns,
+                    'dkpn': dkpn,
+                    'status': status,
+                    'end_of_life': end_of_life,
+                    'discontinued': discontinued,
+                    'access_count': 1,
+                }
+            )
 
-        if not created:
-            cache_entry.increment_access()
+            if not created:
+                cache_entry.increment_access()
 
         return cache_entry
 
@@ -598,6 +622,67 @@ class GlobalMpnCache(models.Model):
         count = invalid_entries.count()
         invalid_entries.delete()
         return count
+
+
+class ProviderMpnCache(models.Model):
+    """Persistent cross-workbook cache for non-DigiKey supplier results."""
+    provider = models.CharField(max_length=20)
+    scope = models.CharField(max_length=100, blank=True, default='')
+    mpn_normalized = models.CharField(max_length=255)
+    validation_data = models.JSONField()
+    is_valid = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'excel_mapper_provider_mpn_cache'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['provider', 'scope', 'mpn_normalized'],
+                name='unique_provider_scope_mpn_cache',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['provider', 'scope', 'mpn_normalized']),
+            models.Index(fields=['updated_at']),
+        ]
+
+    @classmethod
+    def get_cached_result(cls, provider, mpn_norm, scope=''):
+        return cls.objects.filter(
+            provider=provider,
+            scope=scope or '',
+            mpn_normalized=mpn_norm,
+            updated_at__gte=timezone.now() - MPN_CACHE_TTL,
+        ).values_list('validation_data', flat=True).first()
+
+    @classmethod
+    def get_cached_results(cls, provider, mpn_norms, scope=''):
+        normalized = {str(value or '').strip() for value in mpn_norms}
+        normalized.discard('')
+        if not normalized:
+            return {}
+        entries = cls.objects.filter(
+            provider=provider,
+            scope=scope or '',
+            mpn_normalized__in=normalized,
+            updated_at__gte=timezone.now() - MPN_CACHE_TTL,
+        ).only('mpn_normalized', 'validation_data')
+        return {entry.mpn_normalized: entry.validation_data for entry in entries}
+
+    @classmethod
+    def store_result(cls, provider, mpn_norm, validation_data, scope=''):
+        with _MPN_CACHE_WRITE_LOCK:
+            entry, _ = cls.objects.update_or_create(
+                provider=provider,
+                scope=scope or '',
+                mpn_normalized=mpn_norm,
+                defaults={
+                    'validation_data': validation_data,
+                    'is_valid': bool(validation_data.get('valid')),
+                },
+            )
+        return entry
 
 
 class ProviderCredential(models.Model):

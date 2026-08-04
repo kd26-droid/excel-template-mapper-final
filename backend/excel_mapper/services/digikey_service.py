@@ -343,6 +343,15 @@ class DigiKeyClient:
         resp = self._request('GET', f"{self.PROD_BASE}/search/{dkpn}/productdetails")
         return resp.json()
 
+    def find_exact_product(self, search_json: Dict[str, Any], mpn_norm: str) -> Optional[Dict[str, Any]]:
+        """Return the search product whose manufacturer MPN exactly matches."""
+        for source in ('ExactMatches', 'Products'):
+            for product in search_json.get(source) or []:
+                candidate = product.get('ManufacturerProductNumber') or ''
+                if self.normalize_mpn(candidate) == mpn_norm:
+                    return product
+        return None
+
     def pick_dkpn(self, search_json: Dict[str, Any]) -> Optional[str]:
         try:
             variations = None
@@ -545,6 +554,7 @@ class DigiKeyClient:
         from ..models import GlobalMpnCache
 
         results: Dict[str, Dict[str, Any]] = {}
+        self.last_validation_timings = []
         uniq: Dict[str, Optional[str]] = {}
         api_calls_needed = []
 
@@ -556,21 +566,16 @@ class DigiKeyClient:
             if mpn_norm not in uniq:
                 uniq[mpn_norm] = (manufacturer_names[i] if manufacturer_names and i < len(manufacturer_names) else None)
 
-        # First pass: Check global database cache
-        cache_hits = 0
-        for mpn_norm, mfr_name in uniq.items():
-            # Try global persistent cache first
-            cached_result = GlobalMpnCache.get_cached_result(
-                mpn_norm=mpn_norm,
-                manufacturer_id=manufacturer_id,
-                site=self.site,
-                lang=self.lang,
-                currency=self.currency
-            )
+        persistent_results = GlobalMpnCache.get_cached_results(
+            uniq.keys(), manufacturer_id=manufacturer_id, site=self.site,
+            lang=self.lang, currency=self.currency
+        )
+        results.update(persistent_results)
+        cache_hits = len(persistent_results)
 
-            if cached_result:
-                results[mpn_norm] = cached_result
-                cache_hits += 1
+        # Check the short-term cache only for persistent-cache misses.
+        for mpn_norm, mfr_name in uniq.items():
+            if mpn_norm in persistent_results:
                 logger.debug(f"Global cache HIT for MPN: {mpn_norm}")
                 continue
 
@@ -604,26 +609,26 @@ class DigiKeyClient:
         # hit concurrent-SQLite-write locks. Result content is unchanged.
         def _fetch_one(item):
             mpn_norm, mfr_name = item
+            item_started = time.perf_counter()
+            search_ms = 0.0
+            lifecycle_ms = 0.0
             try:
+                search_started = time.perf_counter()
                 search_json = self.search_keyword(mpn_norm, manufacturer_id)
+                search_ms = (time.perf_counter() - search_started) * 1000
                 valid, canon_mpn, all_canonical_mpns = self.is_valid_match(search_json, mpn_norm, mfr_name)
-                dkpn = self.pick_dkpn(search_json) if valid else None
+                matched_product = self.find_exact_product(search_json, mpn_norm) if valid else None
+                matched_search = {'ExactMatches': [matched_product]} if matched_product else search_json
+                dkpn = self.pick_dkpn(matched_search) if valid else None
 
-                category_info = self.extract_category(search_json)
-                lifecycle = None
-                if dkpn:
-                    try:
-                        pd = self.product_details(dkpn)
-                        prod = (pd or {}).get('Product') or {}
-                        lifecycle = {
-                            'status': ((prod.get('ProductStatus') or {}).get('Status')),
-                            'endOfLife': prod.get('EndOfLife'),
-                            'discontinued': prod.get('Discontinued'),
-                            'normallyStocking': prod.get('NormallyStocking'),
-                            'lastBuyChance': prod.get('DateLastBuyChance'),
-                        }
-                    except Exception as e:
-                        logger.warning(f"Lifecycle fetch failed for {dkpn}: {e}")
+                category_info = self.extract_category(matched_search)
+                lifecycle = {
+                    'status': ((matched_product.get('ProductStatus') or {}).get('Status')),
+                    'endOfLife': matched_product.get('EndOfLife'),
+                    'discontinued': matched_product.get('Discontinued'),
+                    'normallyStocking': matched_product.get('NormallyStocking'),
+                    'lastBuyChance': matched_product.get('DateLastBuyChance'),
+                } if matched_product else None
 
                 if valid:
                     res = {
@@ -649,9 +654,22 @@ class DigiKeyClient:
                         'lang': self.lang,
                         'currency': self.currency,
                     }
-                return (mpn_norm, res, None)
+                return (mpn_norm, res, None, {
+                    'mpn': mpn_norm,
+                    'valid': valid,
+                    'search_ms': round(search_ms, 1),
+                    'lifecycle_ms': round(lifecycle_ms, 1),
+                    'total_ms': round((time.perf_counter() - item_started) * 1000, 1),
+                })
             except Exception as e:
-                return (mpn_norm, None, e)
+                return (mpn_norm, None, e, {
+                    'mpn': mpn_norm,
+                    'valid': False,
+                    'search_ms': round(search_ms, 1),
+                    'lifecycle_ms': round(lifecycle_ms, 1),
+                    'total_ms': round((time.perf_counter() - item_started) * 1000, 1),
+                    'error': str(e),
+                })
 
         if api_calls_needed:
             try:
@@ -666,7 +684,8 @@ class DigiKeyClient:
             # Azure's 230s request limit — we don't need thread concurrency here.
             fetched = [_fetch_one(item) for item in api_calls_needed]
 
-            for mpn_norm, res, err in fetched:
+            self.last_validation_timings = [timing for _, _, _, timing in fetched]
+            for mpn_norm, res, err, _timing in fetched:
                 if err is not None:
                     logger.error(f"API validation failed for MPN {mpn_norm}: {err}")
                     error_result = {
@@ -686,7 +705,7 @@ class DigiKeyClient:
                     continue
 
                 results[mpn_norm] = res
-                cache.set(self._cache_key(mpn_norm, manufacturer_id), res, timeout=60 * 60 * 12)
+                cache.set(self._cache_key(mpn_norm, manufacturer_id), res, timeout=60 * 60 * 24)
                 GlobalMpnCache.store_result(
                     mpn_norm=mpn_norm,
                     validation_data=res,

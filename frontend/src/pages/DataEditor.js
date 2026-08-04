@@ -261,10 +261,13 @@ const DataEditor = () => {
       }
       
       const finalHeaders = [...data.headers];
+      const displayHeaders = Array.isArray(data.display_headers) && data.display_headers.length === finalHeaders.length
+        ? data.display_headers
+        : finalHeaders;
 
       // Build column definitions from headers (including a row number column)
       const cols = [{ headerName: '#', field: '__row_number__', width: 60 }];
-      finalHeaders.forEach(h => cols.push({ headerName: h, field: h }));
+      finalHeaders.forEach((h, idx) => cols.push({ headerName: displayHeaders[idx] || h, field: h }));
       setColumnDefs(cols);
 
       // Populate row data

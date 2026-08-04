@@ -311,7 +311,7 @@ def read_csv_with_encoding(file_path, header_row, **kwargs):
     raise Exception("Could not read CSV file with any supported encoding")
 
 
-def generate_template_columns(tags_count=1, spec_pairs_count=1, customer_id_pairs_count=1):
+def generate_template_columns(tags_count=3, spec_pairs_count=3, customer_id_pairs_count=1):
     """
     Generate complete template column headers including all standard template fields.
     Always includes the 6 core Factwise headers, standard template fields, and dynamic columns.
@@ -387,10 +387,32 @@ def _template_label_key(header: str) -> str:
 def derive_sfo_column_counts(headers: list) -> dict:
     """Derive dynamic group counts from SFO-style repeated destination headers."""
     return {
-        "tags_count": 1,
-        "spec_pairs_count": 1,
+        "tags_count": 3,
+        "spec_pairs_count": 3,
         "customer_id_pairs_count": 1,
     }
+
+
+BOM_DESTINATION_HEADERS = ["Level", "Quantity", "Base BOM Qty"]
+
+
+def add_bom_destination_headers(headers: list) -> list:
+    """Add the first BOM fields we want available in the current destination list."""
+    output = list(headers or [])
+    existing = {_template_label_key(header) for header in output}
+
+    insert_at = len(output)
+    for anchor in ("Procurement entity name", "Preferred vendor code"):
+        try:
+            insert_at = min(insert_at, next(i for i, h in enumerate(output) if _template_label_key(h) == _template_label_key(anchor)))
+        except StopIteration:
+            pass
+
+    missing = [header for header in BOM_DESTINATION_HEADERS if _template_label_key(header) not in existing]
+    if missing:
+        output[insert_at:insert_at] = missing
+
+    return output
 
 
 def build_sfo_clustered_headers(base_headers: list, tags_count: int, spec_pairs_count: int, customer_id_pairs_count: int) -> list:
@@ -448,7 +470,96 @@ def build_sfo_clustered_headers(base_headers: list, tags_count: int, spec_pairs_
     insert_group("customer", ["Item identifications name", "Item identifications value"] * max(0, int(customer_id_pairs_count or 0)))
     insert_group("tag", ["Tag"] * max(0, int(tags_count or 0)))
 
-    return static_headers
+    return add_bom_destination_headers(static_headers)
+
+
+def _internal_dynamic_index(header: str, prefix: str) -> int:
+    match = re.match(rf"^{re.escape(prefix)}_(\d+)$", str(header or "").strip(), re.IGNORECASE)
+    if not match:
+        return 0
+    try:
+        return int(match.group(1))
+    except Exception:
+        return 0
+
+
+def derive_sfo_column_counts_from_headers(headers: list) -> dict:
+    """Count SFO dynamic slots without double-counting mixed repeated + internal headers."""
+    tag_repeated = 0
+    spec_repeated = 0
+    customer_repeated = 0
+    tag_internal_max = 0
+    spec_internal_max = 0
+    customer_internal_max = 0
+
+    for header in headers or []:
+        label_key = _template_label_key(header)
+        tag_repeated += 1 if label_key == "tag" else 0
+        spec_repeated += 1 if label_key == "specification name" else 0
+        customer_repeated += 1 if label_key in {"item identifications name", "customer identification name", "custom identification name"} else 0
+
+        raw = str(header or "").strip()
+        tag_internal_max = max(tag_internal_max, _internal_dynamic_index(raw, "Tag"))
+        spec_internal_max = max(spec_internal_max, _internal_dynamic_index(raw, "Specification_Name"))
+        customer_internal_max = max(customer_internal_max, _internal_dynamic_index(raw, "Customer_Identification_Name"))
+
+    return {
+        "tags_count": max(tag_repeated, tag_internal_max, 0),
+        "spec_pairs_count": max(spec_repeated, spec_internal_max, 0),
+        "customer_id_pairs_count": max(customer_repeated, customer_internal_max, 0),
+    }
+
+
+def get_sfo_slot_key(header: str, occurrence: int) -> str:
+    """Return the internal key for a repeated SFO header occurrence."""
+    index = max(1, int(occurrence or 1))
+    label_key = _template_label_key(header)
+    if label_key == "tag":
+        return f"Tag_{index}"
+    if label_key == "specification name":
+        return f"Specification_Name_{index}"
+    if label_key == "specification value":
+        return f"Specification_Value_{index}"
+    if label_key == "specification uom":
+        return f"Specification_UOM_{index}"
+    if label_key in {"item identifications name", "customer identification name", "custom identification name"}:
+        return f"Customer_Identification_Name_{index}"
+    if label_key in {"item identifications value", "customer identification value", "custom identification value"}:
+        return f"Customer_Identification_Value_{index}"
+    return str(header or "")
+
+
+def get_sfo_slot_keys(headers: list) -> list:
+    seen = defaultdict(int)
+    slot_keys = []
+    for header in headers or []:
+        label_key = _template_label_key(header)
+        if label_key in {
+            "tag",
+            "specification name", "specification value", "specification uom",
+            "item identifications name", "item identifications value",
+            "customer identification name", "customer identification value",
+            "custom identification name", "custom identification value",
+        }:
+            seen[label_key] += 1
+            slot_keys.append(get_sfo_slot_key(header, seen[label_key]))
+        else:
+            slot_keys.append(str(header or ""))
+    return slot_keys
+
+
+def make_unique_field_headers(headers: list) -> list:
+    """Create JSON-safe field keys while keeping SFO slots stable."""
+    slot_keys = get_sfo_slot_keys(headers or [])
+    seen = defaultdict(int)
+    unique = []
+    for header, slot_key in zip(headers or [], slot_keys):
+        key = slot_key or str(header or "")
+        seen[key] += 1
+        if seen[key] > 1:
+            key = f"{key}__{seen[key]}"
+        unique.append(key)
+    return unique
 
 # In-memory store for each session
 SESSION_STORE = {}
@@ -506,8 +617,8 @@ def build_snapshot(info: dict) -> dict:
         "mappings": info.get("mappings") or {"mappings": []},
         "default_values": info.get("default_values") or {},
         "counts": {
-            "tags_count": info.get("tags_count", 1),
-            "spec_pairs_count": info.get("spec_pairs_count", 1),
+            "tags_count": info.get("tags_count", 3),
+            "spec_pairs_count": info.get("spec_pairs_count", 3),
             "customer_id_pairs_count": info.get("customer_id_pairs_count", 1),
         },
         "formula_rules": _externalize_formula_rules(info.get("formula_rules") or [], info),
@@ -559,16 +670,6 @@ def get_session_consistent(session_id: str):
     if data:
         logger.info(f"🔍 Session {session_id} found in cache")
         SESSION_STORE[session_id] = data
-        # Cross-check file snapshot for newer version to avoid stale cache across workers
-        try:
-            file_snapshot = load_session_from_file(session_id)
-            if file_snapshot and file_snapshot.get('template_version', 0) > data.get('template_version', 0):
-                cache.set(f"mapper:session:{session_id}", file_snapshot, 86400)
-                SESSION_STORE[session_id] = file_snapshot
-                logger.info(f"🔄 Cache refreshed for session {session_id} from newer file snapshot")
-                return file_snapshot
-        except Exception:
-            pass
         return data
     
     # Fallback to old in-memory store
@@ -614,7 +715,7 @@ def get_session(session_id):
     logger.warning(f"❌ Session {session_id} not found in memory or file")
     return None
 
-def save_session(session_id, session_data):
+def save_session(session_id, session_data, persist_file=True):
     """
     Universal session saving that persists across multiple workers.
     Saves to cache (shared), memory, and file.
@@ -653,8 +754,10 @@ def save_session(session_id, session_data):
         # Keep compatibility with existing in-memory store
         SESSION_STORE[session_id] = session_data
         # Persist to file/blob storage
-        save_session_to_file(session_id, session_data)
-        logger.info(f"💾 Saved session {session_id} to cache, memory, and file")
+        if persist_file:
+            save_session_to_file(session_id, session_data)
+        locations = "cache, memory, and file" if persist_file else "cache and memory"
+        logger.info(f"💾 Saved session {session_id} to {locations}")
     except Exception as e:
         logger.error(f"Failed to save session {session_id}: {e}")
 
@@ -1022,14 +1125,15 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
         
         # Process each row - match the header logic
         transformed_rows = []
+        column_slot_keys = get_sfo_slot_keys(column_order)
         for _, row in df.iterrows():
             transformed_row = []
             
-            for target_column in column_order:
-                if target_column in mapping_dict:
+            for target_column, target_key in zip(column_order, column_slot_keys):
+                mappings_for_target = mapping_dict.get(target_key) or mapping_dict.get(target_column)
+                default_key = target_key if target_key in session_default_values else target_column
+                if mappings_for_target:
                     # This column has mappings - for numbered fields, take the first mapping only
-                    mappings_for_target = mapping_dict[target_column]
-                    
                     # For our numbered fields (Tag_1, Tag_2, etc.), there should be exactly one mapping per target
                     # Take the first (and usually only) mapping
                     mapping = mappings_for_target[0]
@@ -1054,16 +1158,16 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
                             value = ""
 
                         # If the mapped source yields an empty value, fall back to session default if available
-                        if (value == "" or value is None) and target_column in session_default_values:
-                            default_value = session_default_values.get(target_column, "")
+                        if (value == "" or value is None) and default_key in session_default_values:
+                            default_value = session_default_values.get(default_key, "")
                             value = str(default_value)
                             logger.info(f"🔧 Applied session default value '{default_value}' to mapped column '{target_column}' due to empty source value")
 
                         transformed_row.append(value)
                     else:
                         # Source column missing - fall back to default if available
-                        if target_column in session_default_values:
-                            default_value = session_default_values.get(target_column, "")
+                        if default_key in session_default_values:
+                            default_value = session_default_values.get(default_key, "")
                             transformed_row.append(str(default_value))
                             logger.info(f"🔧 Applied session default value '{default_value}' to unmapped/missing-source column '{target_column}'")
                         else:
@@ -1088,8 +1192,8 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
                             transformed_row.append("")
                 else:
                     # Unmapped template column - check for default value, otherwise empty
-                    if target_column in session_default_values:
-                        default_value = session_default_values[target_column]
+                    if default_key in session_default_values:
+                        default_value = session_default_values[default_key]
                         transformed_row.append(str(default_value))
                         logger.info(f"🔧 Applied session default value '{default_value}' to unmapped column '{target_column}'")
                     else:
@@ -1097,36 +1201,9 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
             
             transformed_rows.append(transformed_row)
         
-        # Build final headers list - for numbered fields, don't add duplicates
-        # Our numbered fields (Tag_1, Tag_2, etc.) are already unique
-        final_headers = []
-        seen_headers = set()
-        
-        for target_column in column_order:
-            if target_column in mapping_dict:
-                # For numbered fields, each mapping should map to exactly one header
-                mappings_for_target = mapping_dict[target_column]
-                
-                # If target_column is already numbered (e.g., Tag_1, Tag_2), use it as-is
-                if target_column not in seen_headers:
-                    final_headers.append(target_column)
-                    seen_headers.add(target_column)
-                elif len(mappings_for_target) > 1:
-                    # Only create numbered variants if we have multiple mappings to the same unnumbered target
-                    # This should rarely happen with our new numbering system
-                    base_name = target_column.split('_')[0] if '_' in target_column else target_column
-                    counter = 2
-                    new_header = f"{base_name}_{counter}"
-                    while new_header in seen_headers:
-                        counter += 1
-                        new_header = f"{base_name}_{counter}"
-                    final_headers.append(new_header)
-                    seen_headers.add(new_header)
-            else:
-                # Unmapped template column - add as-is if not already seen
-                if target_column not in seen_headers:
-                    final_headers.append(target_column)
-                    seen_headers.add(target_column)
+        # Preserve duplicate SFO headers because the FactWise import template accepts
+        # multiple "Tag" / "Specification value" columns by position.
+        final_headers = list(column_order)
         
         # Apply conditional default-value rules (if / else based on another column).
         # These run AFTER the whole grid is built so the condition can read the mapped
@@ -1195,8 +1272,8 @@ def update_session_data(request):
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # Build canonical template headers (full set) using session counts
-        tags_count = info.get('tags_count', 1)
-        spec_pairs_count = info.get('spec_pairs_count', 1)
+        tags_count = info.get('tags_count', 3)
+        spec_pairs_count = info.get('spec_pairs_count', 3)
         customer_id_pairs_count = info.get('customer_id_pairs_count', 1)
 
         base_headers = [
@@ -2381,8 +2458,8 @@ def get_headers(request, session_id):
         logger.info(f"🔍 Session {session_id} - template_headers from file: {template_headers}")
         
         # Get column counts from session (with defaults)
-        tags_count = info.get('tags_count', 1)
-        spec_pairs_count = info.get('spec_pairs_count', 1)
+        tags_count = info.get('tags_count', 3)
+        spec_pairs_count = info.get('spec_pairs_count', 3)
         customer_id_pairs_count = info.get('customer_id_pairs_count', 1)
         
         # Helper functions for robust special-column detection (case/trim tolerant)
@@ -2419,13 +2496,22 @@ def get_headers(request, session_id):
             save_session(session_id, info)
             # Derive counts from enhanced headers to keep session in sync
             try:
-                derived_tags = len([h for h in template_headers_to_use if _is_tag(h)])
-                derived_spec_pairs = len([h for h in template_headers_to_use if _is_spec_name(h)])
-                derived_customer_pairs = len([h for h in template_headers_to_use if _is_cust_name(h)])
+                derived_counts = derive_sfo_column_counts_from_headers(template_headers_to_use)
+                derived_tags = derived_counts["tags_count"]
+                derived_spec_pairs = derived_counts["spec_pairs_count"]
+                derived_customer_pairs = derived_counts["customer_id_pairs_count"]
                 if derived_tags != tags_count or derived_spec_pairs != spec_pairs_count or derived_customer_pairs != customer_id_pairs_count:
                     info['tags_count'] = derived_tags
                     info['spec_pairs_count'] = derived_spec_pairs
                     info['customer_id_pairs_count'] = derived_customer_pairs
+                    template_headers_to_use = build_sfo_clustered_headers(
+                        template_headers_to_use,
+                        derived_tags,
+                        derived_spec_pairs,
+                        derived_customer_pairs,
+                    )
+                    info["enhanced_headers"] = template_headers_to_use
+                    info["current_template_headers"] = template_headers_to_use
                     save_session(session_id, info)
                     logger.info(f"🔍 Synchronized counts from enhanced headers: tags={derived_tags}, spec={derived_spec_pairs}, customer={derived_customer_pairs}")
             except Exception:
@@ -2734,6 +2820,7 @@ def save_mappings(request):
         default_values = request.data.get('default_values', {})
         default_value_rules = request.data.get('default_value_rules', {})
         header_corrections = request.data.get('header_corrections', {})
+        apply_now = request.data.get('apply_now') in [True, 'true', 'True', '1', 1]
         
         
         if not session_id:
@@ -2800,8 +2887,8 @@ def save_mappings(request):
         # If no existing mappings found, try to get from other session data
         if not existing_used_columns:
             # Check if we have column counts that indicate what should exist
-            tags_count = info.get('tags_count', 1)
-            spec_pairs_count = info.get('spec_pairs_count', 1)
+            tags_count = info.get('tags_count', 3)
+            spec_pairs_count = info.get('spec_pairs_count', 3)
             customer_id_pairs_count = info.get('customer_id_pairs_count', 1)
             
             # Generate expected column names based on counts
@@ -2897,6 +2984,14 @@ def save_mappings(request):
         if info.get("original_template_id"):
             info["template_modified"] = True
 
+        if not apply_now:
+            save_session(session_id, info)
+            return Response({
+                'success': True,
+                'message': 'Mappings saved successfully',
+                'applied': False
+            })
+
         # CRITICAL FIX: Apply column mappings immediately after saving
         # This ensures data is transformed and ready for Review page
         logger.info(f"🔧 FIX: Applying column mappings after save_mappings")
@@ -2932,7 +3027,11 @@ def save_mappings(request):
 
         return Response({
             'success': True,
-            'message': 'Mappings saved successfully'
+            'message': 'Mappings saved successfully',
+            'applied': True,
+            'enhanced_headers': info.get('enhanced_headers') or info.get('mapped_headers') or [],
+            'mapped_headers': info.get('mapped_headers') or [],
+            'template_version': info.get('template_version') or info.get('version') or 0
         })
         
     except Exception as e:
@@ -2975,13 +3074,13 @@ def get_existing_mappings(request, session_id):
         
         # IMPORTANT: Derive column counts from default values if missing from session
         # This handles cases where templates were applied before the column count saving fix
-        tags_count = session_data.get("tags_count", 1)
-        spec_pairs_count = session_data.get("spec_pairs_count", 1)
+        tags_count = session_data.get("tags_count", 3)
+        spec_pairs_count = session_data.get("spec_pairs_count", 3)
         customer_id_pairs_count = session_data.get("customer_id_pairs_count", 1)
         
         
         # If column counts are missing but we have default values, derive them
-        if (tags_count == 1 and spec_pairs_count == 1 and customer_id_pairs_count == 1 
+        if (tags_count == 3 and spec_pairs_count == 3 and customer_id_pairs_count == 1 
             and default_values and session_data.get("original_template_id")):
             # Count Tag_ fields in default values
             tag_fields = [field for field in default_values.keys() if field.startswith("Tag_")]
@@ -3402,11 +3501,12 @@ def data_view(request):
             if mpn_data_rows and isinstance(mpn_data_rows[0], list):
                 logger.info(f"🔄 DATA_VIEW_MPN_CONVERT: Converting {len(mpn_data_rows)} rows from list-of-lists to dict using {len(mpn_headers)} headers")
                 logger.info(f"🔍 DATA_VIEW_MPN_HEADERS: {mpn_headers}")
+                mpn_field_headers = make_unique_field_headers(mpn_headers)
                 transformed_rows = []
                 for row_idx, row_list in enumerate(mpn_data_rows):
                     row_dict = {}
-                    for idx, header in enumerate(mpn_headers):
-                        row_dict[header] = row_list[idx] if idx < len(row_list) else ''
+                    for idx, field_header in enumerate(mpn_field_headers):
+                        row_dict[field_header] = row_list[idx] if idx < len(row_list) else ''
                     transformed_rows.append(row_dict)
                     if row_idx == 0:  # Log first row
                         logger.info(f"🔍 DATA_VIEW_ROW_0: MPN valid={row_dict.get('MPN valid (DigiKey)')}, DKPN={row_dict.get('DigiKey Part Number')}, MPN valid (Mouser)={row_dict.get('MPN valid (Mouser)')}, MPNR={row_dict.get('MPNR')}")
@@ -3521,10 +3621,11 @@ def data_view(request):
         # Convert list-based data to dict format BEFORE applying formulas
         if transformed_rows and len(transformed_rows) > 0 and isinstance(transformed_rows[0], list):
             dict_rows = []
+            field_headers = make_unique_field_headers(headers_to_use)
             for row_list in transformed_rows:
                 row_dict = {}
                 
-                for i, header in enumerate(headers_to_use):
+                for i, header in enumerate(field_headers):
                     if i < len(row_list):
                         row_dict[header] = row_list[i]
                     else:
@@ -3831,6 +3932,15 @@ def data_view(request):
         default_values = info.get("default_values", {})
 
         if default_values and transformed_rows:
+            slot_to_header = {}
+            try:
+                field_headers_for_defaults = make_unique_field_headers(headers_to_use or [])
+                slot_to_header = {
+                    slot_key: field_header
+                    for slot_key, field_header in zip(get_sfo_slot_keys(headers_to_use or []), field_headers_for_defaults)
+                }
+            except Exception:
+                slot_to_header = {}
             
             for field_name, default_value in default_values.items():
                 # CRITICAL FIX: Handle both internal and external field names for default values
@@ -3839,18 +3949,20 @@ def data_view(request):
                 # First, try exact match (most common case)
                 if field_name in headers_to_use:
                     matched_field = field_name
+                elif field_name in slot_to_header:
+                    matched_field = slot_to_header[field_name]
                 else:
                     # Handle internal names (e.g., "Specification_Name_1")
                     if field_name.startswith('Specification_Name_'):
-                        matched_field = field_name
+                        matched_field = slot_to_header.get(field_name)
                     elif field_name.startswith('Specification_Value_'):
-                        matched_field = field_name
+                        matched_field = slot_to_header.get(field_name)
                     elif field_name.startswith('Customer_Identification_Name_'):
-                        matched_field = field_name
+                        matched_field = slot_to_header.get(field_name)
                     elif field_name.startswith('Customer_Identification_Value_'):
-                        matched_field = field_name
+                        matched_field = slot_to_header.get(field_name)
                     elif field_name.startswith('Tag_'):
-                        matched_field = field_name
+                        matched_field = slot_to_header.get(field_name)
                     # Handle external names (e.g., "Specification name")
                     elif field_name == "Specification name":
                         # Find the first available Specification_Name_X column
@@ -3904,6 +4016,9 @@ def data_view(request):
                             rows_updated += 1
                     
                 else:
+                    if re.match(r"^(Tag|Specification_(Name|Value|UOM)|Customer_Identification_(Name|Value))_\d+$", str(field_name or "")):
+                        logger.warning(f"Default value target '{field_name}' has no matching SFO slot in current headers; skipping")
+                        continue
                     # If the default-only field is missing from headers, add it canonically and populate
                     headers_to_use.append(field_name)
                     for row in transformed_rows:
@@ -3994,8 +4109,8 @@ def data_view(request):
         # Add dynamic headers based on session counts
         if session_id and session_id in SESSION_STORE:
             session_info = SESSION_STORE[session_id]
-            tags_count = session_info.get('tags_count', 1)
-            spec_pairs_count = session_info.get('spec_pairs_count', 1)
+            tags_count = session_info.get('tags_count', 3)
+            spec_pairs_count = session_info.get('spec_pairs_count', 3)
             customer_id_pairs_count = session_info.get('customer_id_pairs_count', 1)
             
             # Add Tag columns
@@ -4106,7 +4221,7 @@ def data_view(request):
         # FINAL SAFETY: ensure dict rows do not include stray keys not present in headers_to_use
         try:
             if isinstance(paginated_rows, list) and paginated_rows and isinstance(paginated_rows[0], dict):
-                allowed = set(headers_to_use)
+                allowed = set(headers_to_use) | set(make_unique_field_headers(headers_to_use))
                 cleaned = []
                 for row in paginated_rows:
                     cleaned.append({k: v for k, v in row.items() if k in allowed})
@@ -4279,39 +4394,19 @@ def data_view(request):
 
         # Enforce full canonical template headers in the response, regardless of data sparsity
         try:
-            tags_count = int(info.get('tags_count', 1))
-            spec_pairs_count = int(info.get('spec_pairs_count', 1))
+            tags_count = int(info.get('tags_count', 3))
+            spec_pairs_count = int(info.get('spec_pairs_count', 3))
             customer_id_pairs_count = int(info.get('customer_id_pairs_count', 1))
 
-            # Use template headers from uploaded file as base
+            # Use the SFO import shape as the canonical editor/export shape.
+            # Slot keys such as Tag_1 are internal only; headers remain repeated Tag columns.
             base_headers = info.get('template_headers') or info.get('current_template_headers') or []
-            # Filter out dynamic columns from base
-            canonical_headers = [h for h in base_headers if not (
-                h.startswith('Tag_') or h.startswith('Specification_') or h.startswith('Customer_Identification_')
-            )]
-            for i in range(1, tags_count + 1):
-                canonical_headers.append(f'Tag_{i}')
-
-            # Enhanced spec pairs detection - check actual headers to find all spec columns
-            actual_spec_count = 0
-            available_headers = headers_to_use or []
-            for header in available_headers:
-                if header.startswith('Specification_Name_') or header.startswith('Specification_Value_'):
-                    try:
-                        spec_num = int(header.split('_')[-1])
-                        actual_spec_count = max(actual_spec_count, spec_num)
-                    except (ValueError, IndexError):
-                        pass
-
-            # Use the maximum of configured spec_pairs_count and detected actual_spec_count
-            final_spec_count = max(spec_pairs_count, actual_spec_count)
-
-            for i in range(1, final_spec_count + 1):
-                canonical_headers.append(f'Specification_Name_{i}')
-                canonical_headers.append(f'Specification_Value_{i}')
-            for i in range(1, customer_id_pairs_count + 1):
-                canonical_headers.append(f'Customer_Identification_Name_{i}')
-                canonical_headers.append(f'Customer_Identification_Value_{i}')
+            canonical_headers = build_sfo_clustered_headers(
+                base_headers,
+                tags_count,
+                spec_pairs_count,
+                customer_id_pairs_count,
+            )
 
             # Add MPN validation columns if they exist
             mpn_validation = info.get('mpn_validation', {})
@@ -4357,8 +4452,11 @@ def data_view(request):
             logger.info(f"🔍 DATA_VIEW_REBUILD: final_data has {len(final_data)} rows, format={'dict' if (final_data and isinstance(final_data[0], dict)) else 'list'}, final_headers has {len(final_headers)} items, canonical_headers has {len(canonical_headers)} items")
             if isinstance(final_data, list) and final_data:
                 if isinstance(final_data[0], dict):
+                    canonical_field_headers = make_unique_field_headers(canonical_headers)
                     for row in final_data:
-                        rebuilt = {h: row.get(h, '') for h in canonical_headers}
+                        rebuilt = {}
+                        for display_header, field_header in zip(canonical_headers, canonical_field_headers):
+                            rebuilt[field_header] = row.get(field_header, row.get(display_header, ''))
                         rebuilt_rows.append(rebuilt)
                 else:
                     # list-of-lists -> dict rows using current final_headers index mapping
@@ -4434,10 +4532,38 @@ def data_view(request):
         except Exception as spec_cleanup_err:
             logger.warning(f"Spec pair cleanup in data_view skipped: {spec_cleanup_err}")
 
+        display_headers = list(final_headers or [])
+        field_headers = make_unique_field_headers(display_headers)
+        response_data = []
+        response_defaults = info.get("default_values", {}) or {}
+        if isinstance(final_data, list):
+            for row in final_data:
+                if isinstance(row, dict):
+                    normalized_row = {}
+                    for field_header, display_header in zip(field_headers, display_headers):
+                        value = row.get(field_header, row.get(display_header, ""))
+                        if (value is None or str(value).strip() == "") and field_header in response_defaults:
+                            value = response_defaults.get(field_header, "")
+                        normalized_row[field_header] = value
+                    response_data.append(normalized_row)
+                elif isinstance(row, list):
+                    normalized_row = {}
+                    for idx, field_header in enumerate(field_headers):
+                        value = row[idx] if idx < len(row) else ""
+                        if (value is None or str(value).strip() == "") and field_header in response_defaults:
+                            value = response_defaults.get(field_header, "")
+                        normalized_row[field_header] = value
+                    response_data.append(normalized_row)
+                else:
+                    response_data.append(row)
+        else:
+            response_data = final_data
+
         return no_store(Response({
             'success': True,
-            'headers': final_headers,
-            'data': final_data,
+            'headers': field_headers,
+            'display_headers': display_headers,
+            'data': response_data,
             'total_rows': total_rows,
             'formula_rules': formula_rules,
             'template_version': info.get('template_version', 0),
@@ -4573,8 +4699,8 @@ def session_status(request, session_id):
         template_version = info.get('template_version', 0)
         
         # Get header counts for completeness
-        tags_count = info.get('tags_count', 1)
-        spec_pairs_count = info.get('spec_pairs_count', 1)
+        tags_count = info.get('tags_count', 3)
+        spec_pairs_count = info.get('spec_pairs_count', 3)
         customer_id_pairs_count = info.get('customer_id_pairs_count', 1)
         
         # Get current headers
@@ -5116,10 +5242,14 @@ def download_file(request, session_id=None):
                 elif transformed_rows and isinstance(transformed_rows[0], list) and all_headers:
                     # Build header index map
                     header_index = {h: idx for idx, h in enumerate(all_headers)}
+                    slot_index = {slot_key: idx for idx, slot_key in enumerate(get_sfo_slot_keys(all_headers))}
                     for field_name, default_value in session_default_values.items():
                         # Exact match first
                         target_header = None
-                        if field_name in header_index:
+                        target_idx = None
+                        if field_name in slot_index:
+                            target_idx = slot_index[field_name]
+                        elif field_name in header_index:
                             target_header = field_name
                         else:
                             # Case-insensitive normalized match
@@ -5128,13 +5258,13 @@ def download_file(request, session_id=None):
                                 if h.lower().replace(' ', '_').replace('-', '_') == norm:
                                     target_header = h
                                     break
-                        if target_header is not None:
-                            idx = header_index.get(target_header)
-                            if idx is not None:
-                                for row in transformed_rows:
-                                    if idx < len(row):
-                                        if row[idx] is None or str(row[idx]).strip() == "":
-                                            row[idx] = default_value
+                        if target_idx is None and target_header is not None:
+                            target_idx = header_index.get(target_header)
+                        if target_idx is not None:
+                            for row in transformed_rows:
+                                if target_idx < len(row):
+                                    if row[target_idx] is None or str(row[target_idx]).strip() == "":
+                                        row[target_idx] = default_value
         except Exception as _e:
             logger.warning(f"Download default application skipped due to error: {_e}")
 
@@ -5838,8 +5968,8 @@ def update_column_counts(request):
     """Update dynamic column counts for the current session."""
     try:
         session_id = request.data.get('session_id')
-        tags_count = request.data.get('tags_count', 1)
-        spec_pairs_count = request.data.get('spec_pairs_count', 1)
+        tags_count = request.data.get('tags_count', 3)
+        spec_pairs_count = request.data.get('spec_pairs_count', 3)
         customer_id_pairs_count = request.data.get('customer_id_pairs_count', 1)
         
         info = get_session(session_id)
@@ -6101,8 +6231,8 @@ def save_mapping_template(request):
             template_headers = info.get('current_template_headers') or info.get('template_headers') or []
 
             # Get column counts
-            tags_count = request.data.get('tags_count') or info.get('tags_count', 1)
-            spec_pairs_count = request.data.get('spec_pairs_count') or info.get('spec_pairs_count', 1)
+            tags_count = request.data.get('tags_count') or info.get('tags_count', 3)
+            spec_pairs_count = request.data.get('spec_pairs_count') or info.get('spec_pairs_count', 3)
             customer_id_pairs_count = request.data.get('customer_id_pairs_count') or info.get('customer_id_pairs_count', 1)
 
             logger.info(f"🔧 Using template headers from uploaded file for save_mapping_template ({len(template_headers)} headers): {template_headers}")
@@ -6114,8 +6244,8 @@ def save_mapping_template(request):
         # Get column counts from request, session, or use defaults (for standalone templates only)
         if not info:
             # Standalone template - use request or defaults
-            tags_count = request.data.get('tags_count', 1)
-            spec_pairs_count = request.data.get('spec_pairs_count', 1) 
+            tags_count = request.data.get('tags_count', 3)
+            spec_pairs_count = request.data.get('spec_pairs_count', 3) 
             customer_id_pairs_count = request.data.get('customer_id_pairs_count', 1)
         
         # REMOVED: Broken normalization logic that corrupted source_column values
@@ -6949,9 +7079,38 @@ def apply_mapping_template(request):
             factwise_rules = getattr(template, 'factwise_rules', []) or []
             if factwise_rules:
                 SESSION_STORE[session_id]["factwise_rules"] = factwise_rules
+
+                # Unified Fill/Create Column rules are applied after mappings,
+                # formulas and defaults so their source columns are ready.
+                column_rules = [rule for rule in factwise_rules if rule.get('type') == 'column_value']
+                if column_rules:
+                    current_data = (
+                        SESSION_STORE[session_id].get("formula_enhanced_data")
+                        or SESSION_STORE[session_id].get("mapped_data")
+                        or []
+                    )
+                    current_headers = list(
+                        SESSION_STORE[session_id].get("enhanced_headers")
+                        or SESSION_STORE[session_id].get("mapped_headers")
+                        or []
+                    )
+                    positional_rows = []
+                    for row in current_data:
+                        if isinstance(row, dict):
+                            positional_rows.append([row.get(header, '') for header in current_headers])
+                        else:
+                            positional_rows.append(list(row))
+                    for column_rule in column_rules:
+                        current_headers, positional_rows, _changed = apply_column_value_rule(
+                            current_headers, positional_rows, column_rule
+                        )
+                    SESSION_STORE[session_id]["formula_enhanced_data"] = positional_rows
+                    SESSION_STORE[session_id]["enhanced_headers"] = current_headers
+                    SESSION_STORE[session_id]["current_template_headers"] = current_headers
+                    save_session(session_id, SESSION_STORE[session_id])
                 
                 # Apply each factwise rule with error handling
-                for rule in factwise_rules:
+                for rule in [rule for rule in factwise_rules if rule.get('type') == 'factwise_id']:
                     try:
                         if rule.get("type") == "factwise_id":
                             # Apply the Factwise ID rule by calling the existing function logic
@@ -7690,7 +7849,7 @@ def apply_formulas(request):
                         pass
             if new_tag_indices:
                 max_tag = max(new_tag_indices)
-                prev = int(info.get('tags_count', 1))
+                prev = int(info.get('tags_count', 3))
                 if max_tag > prev:
                     info['tags_count'] = max_tag
         except Exception as _e:
@@ -8812,10 +8971,11 @@ def create_factwise_id(request):
         default_values = info.get("default_values", {}) or {}
         if default_values and headers and data_rows:
             header_index = {h: i for i, h in enumerate(headers)}
+            slot_index = {slot_key: i for i, slot_key in enumerate(get_sfo_slot_keys(headers))}
             for field_name, default_value in default_values.items():
-                if field_name not in header_index or default_value is None or str(default_value).strip() == "":
+                field_idx = slot_index.get(field_name, header_index.get(field_name))
+                if field_idx is None or default_value is None or str(default_value).strip() == "":
                     continue
-                field_idx = header_index[field_name]
                 for row in data_rows:
                     while len(row) <= field_idx:
                         row.append("")
@@ -9199,6 +9359,15 @@ def read_session_grid(session_id, info):
             hdrs = list(snapshot['headers'])
             return hdrs, _as_lists(hdrs, snapshot['data'])
 
+    # Formula/tag operations store their latest full-grid result separately.
+    # Prefer it over rebuilding the basic mapping so later column operations
+    # compose with, rather than erase, those generated values.
+    formula_data = info.get('formula_enhanced_data')
+    formula_headers = info.get('enhanced_headers')
+    if isinstance(formula_data, list) and formula_headers:
+        hdrs = list(formula_headers)
+        return hdrs, _as_lists(hdrs, formula_data)
+
     mapping = info.get('mappings')
     if not mapping:
         return None, None
@@ -9222,6 +9391,238 @@ def write_session_grid(session_id, info, headers, rows):
     info['enhanced_headers'] = list(headers)
     info['current_template_headers'] = list(headers)
     return snapshot
+
+
+def _grid_column_index(headers, field_name):
+    """Resolve either a displayed header or a unique editor field such as Tag_2."""
+    field_name = str(field_name or '').strip()
+    if not field_name:
+        return -1
+    unique_fields = make_unique_field_headers(headers or [])
+    if field_name in unique_fields:
+        return unique_fields.index(field_name)
+    if field_name in (headers or []):
+        return list(headers).index(field_name)
+    return -1
+
+
+def _legacy_factwise_id_as_column_rule(rule):
+    """Keep older saved templates working through the unified column-rule engine."""
+    if not isinstance(rule, dict) or rule.get('type') != 'factwise_id':
+        return None
+    generation_mode = rule.get('generation_mode', 'columns')
+    return {
+        'type': 'column_value',
+        'target_mode': 'new',
+        'target_column': 'Item code',
+        'value_mode': 'serial' if generation_mode == 'serial' else 'join',
+        'source_columns': [rule.get('first_column'), rule.get('second_column')],
+        'separator': rule.get('operator', '_'),
+        'write_mode': 'overwrite' if rule.get('strategy') == 'override_all' else 'fill_empty',
+        'serial_prefix': rule.get('serial_prefix', ''),
+        'serial_start': rule.get('serial_start', 1),
+        'serial_padding': rule.get('serial_padding', 0),
+        'serial_increment': rule.get('serial_increment', True),
+    }
+
+
+def apply_column_value_rule(headers, rows, raw_rule):
+    """Apply one reusable fill/create rule to a positional grid."""
+    rule = _legacy_factwise_id_as_column_rule(raw_rule) or dict(raw_rule or {})
+    if rule.get('type') != 'column_value':
+        return list(headers or []), [list(row) for row in (rows or [])], 0
+
+    output_headers = list(headers or [])
+    output_rows = [list(row) for row in (rows or [])]
+    target = str(rule.get('target_column') or '').strip()
+    if not target:
+        raise ValueError('Target column is required')
+
+    target_index = _grid_column_index(output_headers, target)
+    target_mode = str(rule.get('target_mode') or 'existing')
+    if target_index < 0:
+        if target_mode != 'new':
+            raise ValueError(f'Column "{target}" is not in the grid')
+        output_headers.append(target)
+        target_index = len(output_headers) - 1
+        for row in output_rows:
+            row.append('')
+
+    value_mode = str(rule.get('value_mode') or 'fixed')
+    source_columns = [str(value or '').strip() for value in (rule.get('source_columns') or []) if str(value or '').strip()]
+    source_indexes = [_grid_column_index(output_headers, source) for source in source_columns]
+    if value_mode in {'copy', 'join'} and (not source_indexes or any(index < 0 for index in source_indexes)):
+        missing = [source for source, index in zip(source_columns, source_indexes) if index < 0]
+        raise ValueError(f'Source column not found: {", ".join(missing) or "select a source column"}')
+
+    condition = rule.get('condition') if isinstance(rule.get('condition'), dict) else None
+    prepared_branches = []
+    else_source_index = -1
+    if value_mode == 'conditional':
+        raw_branches = (condition or {}).get('branches')
+        if not isinstance(raw_branches, list) or not raw_branches:
+            # Backward compatibility for previously saved single if/else rules.
+            raw_branches = [{
+                'column': (condition or {}).get('column'),
+                'operator': (condition or {}).get('operator'),
+                'compare': (condition or {}).get('compare'),
+                'output_value': (condition or {}).get('then'),
+                'output_source_column': (condition or {}).get('then_source_column'),
+            }]
+
+        for branch in raw_branches:
+            branch = branch if isinstance(branch, dict) else {}
+            condition_column = str(branch.get('column') or '').strip()
+            condition_index = _grid_column_index(output_headers, condition_column)
+            if condition_index < 0:
+                raise ValueError(f'Condition column "{condition_column}" is not in the grid')
+            output_source_column = str(branch.get('output_source_column') or '').strip()
+            output_source_index = -1
+            if output_source_column:
+                output_source_index = _grid_column_index(output_headers, output_source_column)
+                if output_source_index < 0:
+                    raise ValueError(f'Condition output column "{output_source_column}" is not in the grid')
+            prepared_branches.append({
+                'condition_index': condition_index,
+                'operator': str(branch.get('operator') or 'is_empty'),
+                'compare': str(branch.get('compare') or ''),
+                'output_value': '' if branch.get('output_value') is None else str(branch.get('output_value')),
+                'output_source_index': output_source_index,
+            })
+
+        else_source_column = str((condition or {}).get('else_source_column') or '').strip()
+        if else_source_column:
+            else_source_index = _grid_column_index(output_headers, else_source_column)
+            if else_source_index < 0:
+                raise ValueError(f'Otherwise-value column "{else_source_column}" is not in the grid')
+
+    try:
+        serial_start = int(rule.get('serial_start', 1))
+    except (TypeError, ValueError):
+        serial_start = 1
+    try:
+        serial_padding = max(0, int(rule.get('serial_padding', 0)))
+    except (TypeError, ValueError):
+        serial_padding = 0
+    serial_increment = str(rule.get('serial_increment', True)).lower() not in {'false', '0', 'no', 'off'}
+    write_mode = str(rule.get('write_mode') or 'fill_empty')
+    changed = 0
+
+    def condition_matches(cell, branch):
+        value = str(cell or '').strip()
+        lowered = value.lower()
+        operator = branch['operator']
+        compare = branch['compare'].strip().lower()
+        if operator == 'is_empty':
+            return value == ''
+        if operator == 'not_empty':
+            return value != ''
+        if operator == 'equals':
+            return lowered == compare
+        if operator == 'not_equals':
+            return lowered != compare
+        if operator == 'contains':
+            return compare in lowered
+        return False
+
+    for row_index, row in enumerate(output_rows):
+        while len(row) < len(output_headers):
+            row.append('')
+        if write_mode != 'overwrite' and str(row[target_index] or '').strip():
+            continue
+
+        should_write = True
+        if value_mode == 'blank':
+            generated = ''
+        elif value_mode == 'fixed':
+            generated = '' if rule.get('fixed_value') is None else str(rule.get('fixed_value'))
+        elif value_mode == 'copy':
+            generated = row[source_indexes[0]] if source_indexes else ''
+        elif value_mode == 'join':
+            values = [str(row[index] or '').strip() for index in source_indexes]
+            generated = str(rule.get('separator') or '').join(value for value in values if value)
+        elif value_mode == 'serial':
+            number = serial_start + row_index if serial_increment else serial_start
+            suffix = str(number).zfill(serial_padding) if serial_padding else str(number)
+            generated = f"{rule.get('serial_prefix', '') or ''}{suffix}"
+        elif value_mode == 'conditional':
+            matching_branch = next(
+                (branch for branch in prepared_branches if condition_matches(row[branch['condition_index']], branch)),
+                None,
+            )
+            if matching_branch:
+                source_index = matching_branch['output_source_index']
+                generated = row[source_index] if source_index >= 0 else matching_branch['output_value']
+            elif else_source_index >= 0:
+                generated = row[else_source_index]
+            elif 'else' in (condition or {}):
+                generated = '' if (condition or {}).get('else') is None else str((condition or {}).get('else'))
+            else:
+                should_write = False
+                generated = row[target_index]
+        else:
+            raise ValueError(f'Unsupported column value mode: {value_mode}')
+
+        if should_write and row[target_index] != generated:
+            row[target_index] = generated
+            changed += 1
+
+    return output_headers, output_rows, changed
+
+
+@api_view(['POST'])
+def fill_or_create_column(request):
+    """Fill an existing destination column or create a new reusable column."""
+    try:
+        session_id = request.data.get('session_id')
+        rule = request.data.get('rule')
+        if not session_id:
+            return Response({'success': False, 'error': 'session_id required'}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(rule, dict):
+            return Response({'success': False, 'error': 'rule required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+        headers, rows = read_session_grid(session_id, info)
+        if not headers or rows is None:
+            return Response({'success': False, 'error': 'No data found for this session'}, status=status.HTTP_400_BAD_REQUEST)
+
+        clean_rule = dict(rule)
+        clean_rule['type'] = 'column_value'
+        clean_rule['target_column'] = str(clean_rule.get('target_column') or '').strip()
+        if clean_rule.get('target_mode') == 'new' and _grid_column_index(headers, clean_rule['target_column']) >= 0:
+            return Response({
+                'success': False,
+                'error': f'Column "{clean_rule["target_column"]}" already exists. Use Fill existing column.',
+            }, status=status.HTTP_400_BAD_REQUEST)
+        new_headers, new_rows, changed = apply_column_value_rule(headers, rows, clean_rule)
+        write_session_grid(session_id, info, new_headers, new_rows)
+
+        target = clean_rule['target_column']
+        retained_rules = []
+        for existing in info.get('factwise_rules') or []:
+            if existing.get('type') == 'column_value' and existing.get('target_column') == target:
+                continue
+            if target == 'Item code' and existing.get('type') == 'factwise_id':
+                continue
+            retained_rules.append(existing)
+        retained_rules.append(clean_rule)
+        info['factwise_rules'] = retained_rules
+        save_session(session_id, info)
+        new_version = increment_template_version(session_id)
+        return Response({
+            'success': True,
+            'changed': changed,
+            'headers': new_headers,
+            'template_version': new_version,
+            'rule': clean_rule,
+        })
+    except ValueError as exc:
+        return Response({'success': False, 'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    except Exception as exc:
+        logger.error(f'fill_or_create_column failed: {exc}', exc_info=True)
+        return Response({'success': False, 'error': str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 def _normalize_group_config(groups, target_fields, source_headers):
@@ -9513,6 +9914,59 @@ def split_cell_values(value, mode='delimiter', delimiter=',', chunk_size=0, trim
     return parts
 
 
+def _split_tag_slot_into_group(headers, rows, source_index, split_per_row, column_count, keep_source):
+    """Replace one Tag cell with adjacent Tag cells at the same position."""
+    generated_count = column_count
+    replacement_headers = (['Tag'] if keep_source else []) + ['Tag'] * generated_count
+    output_headers = list(headers[:source_index]) + replacement_headers + list(headers[source_index + 1:])
+    output_rows = []
+
+    for row, values in zip(rows, split_per_row):
+        padded = list(row[:len(headers)]) + [''] * max(0, len(headers) - len(row))
+        values = list(values[:column_count])
+        if keep_source:
+            replacement_values = [padded[source_index]] + values
+        else:
+            replacement_values = values
+        expected = len(replacement_headers)
+        replacement_values += [''] * (expected - len(replacement_values))
+        output_rows.append(
+            padded[:source_index] + replacement_values + padded[source_index + 1:]
+        )
+
+    return output_headers, output_rows, generated_count
+
+
+def _split_spec_value_slot_into_group(headers, rows, source_index, split_per_row, column_count, keep_source):
+    """Replace one Specification value with adjacent values for the same specification."""
+    slot_keys = get_sfo_slot_keys(headers)
+    source_key = slot_keys[source_index] if source_index < len(slot_keys) else ''
+    if not re.match(r'^Specification_Value_\d+$', source_key):
+        return None
+
+    generated_count = column_count
+    replacement_headers = (
+        ['Specification value'] if keep_source else []
+    ) + ['Specification value'] * generated_count
+    output_headers = list(headers[:source_index]) + replacement_headers + list(headers[source_index + 1:])
+    output_rows = []
+
+    for row, values in zip(rows, split_per_row):
+        padded = list(row[:len(headers)]) + [''] * max(0, len(headers) - len(row))
+        values = list(values[:column_count])
+        if keep_source:
+            replacement_values = [padded[source_index]] + values
+        else:
+            replacement_values = values
+        expected = len(replacement_headers)
+        replacement_values += [''] * (expected - len(replacement_values))
+        output_rows.append(
+            padded[:source_index] + replacement_values + padded[source_index + 1:]
+        )
+
+    return output_headers, output_rows, generated_count
+
+
 @api_view(['POST'])
 def split_column_into_columns(request):
     """
@@ -9633,26 +10087,13 @@ def split_column_into_columns(request):
         new_columns = [f'{destination_prefix}_{i + 1}' for i in range(column_count)]
         overwrite_existing = bool(request.data.get('overwrite_existing', False))
 
-        # A Specification value can't be split into bare value columns: FactWise
-        # groups strictly by name/value pairs, so every split value needs its own
-        # Specification name beside it and the whole run must stay in one
-        # contiguous cluster. When the source is a spec value, keep value #1 in the
-        # original column (so the original name is never orphaned and wiped by the
-        # empty-pair guard) and add name/value pairs for the rest, in place.
-        spec_value_key = _spec_pair_key(source_column, "value")
-        spec_name_header = None
-        spec_name_index = None
-        if spec_value_key:
-            for _i, _h in enumerate(headers):
-                if _spec_pair_key(_h, "name") == spec_value_key:
-                    spec_name_header, spec_name_index = _h, _i
-                    break
-        is_spec_value_split = bool(spec_value_key and spec_name_header is not None)
+        source_slots = get_sfo_slot_keys(headers)
+        source_slot = source_slots[source_index] if source_index < len(source_slots) else source_column
+        is_tag_group_split = bool(re.match(r'^Tag_\d+$', source_slot))
+        is_spec_value_split = bool(re.match(r'^Specification_Value_\d+$', source_slot))
 
-        if is_spec_value_split:
-            new_value_cols = [f'{source_column}_{k}' for k in range(2, column_count + 1)]
-            new_columns = new_value_cols
-            clashes = [c for c in new_value_cols if c in headers]
+        if is_tag_group_split or is_spec_value_split:
+            clashes = []
         else:
             kept_headers = [h for i, h in enumerate(headers) if keep_source_column or i != source_index]
             clashes = [c for c in new_columns if c in kept_headers]
@@ -9669,18 +10110,12 @@ def split_column_into_columns(request):
         rows_empty = 0
         overflow_rows = 0
 
-        if is_spec_value_split:
-            # FactWise reads a specification's values from its Specification name
-            # column up to the NEXT name column — so ONE name carries MANY values.
-            # Keep the single name, keep value #1 in the original value column (so
-            # the name is never orphaned/wiped by the empty-pair guard), and add
-            # value-only columns for the rest, right beside it:
-            #   Specification name, value #1, value #2, value #3, …
-            insert_block = list(new_value_cols)
-            output_headers = headers[:source_index + 1] + insert_block + headers[source_index + 1:]
-
-            output_rows = []
-            for row_number, (row, values) in enumerate(zip(rows, split_per_row), start=1):
+        if is_tag_group_split:
+            output_headers, output_rows, generated_count = _split_tag_slot_into_group(
+                headers, rows, source_index, split_per_row, column_count, keep_source_column
+            )
+            new_columns = ['Tag'] * generated_count
+            for row_number, values in enumerate(split_per_row, start=1):
                 if not values:
                     rows_empty += 1
                 elif len(values) > 1:
@@ -9693,14 +10128,24 @@ def split_column_into_columns(request):
                             'reason': f'{len(values)} values but only {column_count} column(s) available',
                             'dropped': values[column_count:],
                         })
-                    values = values[:column_count]
-
-                padded_row = list(row) + [''] * (len(headers) - len(row))
-                first_val = values[0] if len(values) >= 1 else ''
-                block = [values[k - 1] if (k - 1) < len(values) else '' for k in range(2, column_count + 1)]
-                output_rows.append(
-                    padded_row[:source_index] + [first_val] + block + padded_row[source_index + 1:]
-                )
+        elif is_spec_value_split:
+            output_headers, output_rows, generated_count = _split_spec_value_slot_into_group(
+                headers, rows, source_index, split_per_row, column_count, keep_source_column
+            )
+            new_columns = ['Specification value'] * generated_count
+            for row_number, values in enumerate(split_per_row, start=1):
+                if not values:
+                    rows_empty += 1
+                elif len(values) > 1:
+                    rows_split += 1
+                if column_count and len(values) > column_count:
+                    overflow_rows += 1
+                    if on_overflow == 'review':
+                        review_rows.append({
+                            'row': row_number,
+                            'reason': f'{len(values)} values but only {column_count} column(s) available',
+                            'dropped': values[column_count:],
+                        })
         elif overwrite_existing:
             # Write the split values into columns that already carry this prefix
             # (e.g. the template's Tag_1 … Tag_N), creating only the ones missing.
@@ -9771,6 +10216,7 @@ def split_column_into_columns(request):
                     carried[:new_column_start] + padded + carried[new_column_start:]
                 )
 
+        grouped_counts = derive_sfo_column_counts_from_headers(output_headers) if (is_tag_group_split or is_spec_value_split) else None
         summary = {
             'source_rows': len(rows),
             'output_rows': len(output_rows),
@@ -9783,10 +10229,13 @@ def split_column_into_columns(request):
             'split_mode': split_mode,
             'new_columns': new_columns,
         }
+        if grouped_counts:
+            summary['column_counts'] = grouped_counts
 
         preview_payload = [
             dict(zip(output_headers, row)) for row in output_rows[:preview_rows]
         ]
+        preview_row_values = [list(row) for row in output_rows[:preview_rows]]
 
         if preview:
             return Response({
@@ -9794,10 +10243,13 @@ def split_column_into_columns(request):
                 'preview': True,
                 'headers': output_headers,
                 'data': preview_payload,
+                'rows': preview_row_values,
                 'review_rows': review_rows[:50],
                 **summary,
             })
 
+        if grouped_counts:
+            info.update(grouped_counts)
         write_session_grid(session_id, info, output_headers, output_rows)
 
         history = list(info.get('source_transforms') or [])
@@ -9835,11 +10287,167 @@ def split_column_into_columns(request):
             'template_version': new_version,
             'headers': output_headers,
             'data': preview_payload,
+            'rows': preview_row_values,
             'review_rows': review_rows[:50],
             **summary,
         })
     except Exception as e:
         logger.error(f"split_column_into_columns failed: {e}", exc_info=True)
+        return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+def _split_grid_rows(headers, rows, source_index, delimiter, copy_indices):
+    """Split one cell into rows while copying only explicitly selected columns."""
+    output_rows = []
+    rows_split = 0
+    rows_added = 0
+    rows_without_values = 0
+    width = len(headers)
+    copied = {index for index in copy_indices if 0 <= index < width and index != source_index}
+
+    for source_row in rows:
+        original = list(source_row[:width]) + [''] * max(0, width - len(source_row))
+        values = split_cell_values(
+            original[source_index] if source_index < len(original) else '',
+            mode='delimiter',
+            delimiter=delimiter,
+            trim=True,
+            drop_empty=True,
+        )
+
+        if not values:
+            rows_without_values += 1
+            output_rows.append(original)
+            continue
+
+        first_row = list(original)
+        first_row[source_index] = values[0]
+        output_rows.append(first_row)
+
+        if len(values) == 1:
+            continue
+
+        rows_split += 1
+        rows_added += len(values) - 1
+        for value in values[1:]:
+            generated = [''] * width
+            generated[source_index] = value
+            for index in copied:
+                generated[index] = original[index]
+            output_rows.append(generated)
+
+    return output_rows, {
+        'source_rows': len(rows),
+        'output_rows': len(output_rows),
+        'rows_split': rows_split,
+        'rows_added': rows_added,
+        'rows_without_values': rows_without_values,
+    }
+
+
+@api_view(['POST'])
+def split_column_into_rows(request):
+    """Split one mapped-grid column into rows using an explicit delimiter."""
+    try:
+        session_id = request.data.get('session_id')
+        if not session_id:
+            return Response({'success': False, 'error': 'session_id required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+
+        source_column = str(request.data.get('source_column') or '').strip()
+        if not source_column:
+            return Response({'success': False, 'error': 'source_column required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        raw_delimiter = request.data.get('delimiter', 'comma')
+        if raw_delimiter is None or str(raw_delimiter) == '':
+            return Response({'success': False, 'error': 'delimiter required'}, status=status.HTTP_400_BAD_REQUEST)
+        delimiter = resolve_delimiter(raw_delimiter)
+
+        headers, rows = read_session_grid(session_id, info)
+        if not headers or rows is None:
+            return Response({'success': False, 'error': 'No mapped data found for this session'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            requested_index = int(request.data.get('source_column_index'))
+        except (TypeError, ValueError):
+            requested_index = None
+
+        positions = [index for index, header in enumerate(headers) if header == source_column]
+        if requested_index is not None and 0 <= requested_index < len(headers) and headers[requested_index] == source_column:
+            source_index = requested_index
+        elif positions:
+            source_index = positions[0]
+        else:
+            return Response({
+                'success': False,
+                'error': f'Column "{source_column}" is not in the grid',
+                'headers': headers,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        raw_copy_indices = request.data.get('copy_column_indices') or []
+        if not isinstance(raw_copy_indices, list):
+            return Response({'success': False, 'error': 'copy_column_indices must be a list'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        copy_indices = []
+        for value in raw_copy_indices:
+            try:
+                index = int(value)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= index < len(headers) and index != source_index and index not in copy_indices:
+                copy_indices.append(index)
+
+        output_rows, summary = _split_grid_rows(headers, rows, source_index, delimiter, copy_indices)
+        preview = bool(request.data.get('preview', False))
+        try:
+            preview_limit = max(1, min(int(request.data.get('preview_rows') or 20), 100))
+        except (TypeError, ValueError):
+            preview_limit = 20
+
+        payload = {
+            'success': True,
+            'preview': preview,
+            'headers': headers,
+            'rows': output_rows[:preview_limit],
+            'source_column': source_column,
+            'source_column_index': source_index,
+            'copy_column_indices': copy_indices,
+            'copied_columns': [headers[index] for index in copy_indices],
+            **summary,
+        }
+        if preview:
+            return Response(payload)
+
+        write_session_grid(session_id, info, headers, output_rows)
+        history = list(info.get('source_transforms') or [])
+        history.append({
+            'type': 'split_column_into_rows',
+            'applied_at': datetime.utcnow().isoformat(),
+            'config': {
+                'source_column': source_column,
+                'source_column_index': source_index,
+                'delimiter': delimiter,
+                'copy_column_indices': copy_indices,
+                'copied_columns': [headers[index] for index in copy_indices],
+            },
+            'summary': summary,
+        })
+        info['source_transforms'] = history
+        save_session(session_id, info)
+        payload['template_version'] = increment_template_version(session_id)
+
+        logger.info(
+            f"split_column_into_rows on {session_id}: {len(rows)} rows -> {len(output_rows)} rows "
+            f"using {source_column!r}"
+        )
+        return Response(payload)
+    except Exception as e:
+        logger.error(f"split_column_into_rows failed: {e}", exc_info=True)
         return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -10454,52 +11062,21 @@ def stack_mapped_alternates(request):
 
 
 def apply_factwise_id_to_grid(headers, rows, factwise_rules):
-    """Fill the 'Item code' column from factwise_id rules on a list-of-lists grid,
-    mirroring the download/export logic. Lets blank/duplicate checks match what the
-    user sees and what actually gets exported (the rule is otherwise applied only at
-    display/export time, not written into the stored grid). Returns (headers, rows)."""
+    """Replay reusable column rules for validation/export compatibility."""
     if not factwise_rules:
         return headers, rows
-    headers = list(headers)
+    current_headers = list(headers)
+    current_rows = [list(row) for row in rows]
     for rule in factwise_rules:
-        if not isinstance(rule, dict) or rule.get('type') != 'factwise_id':
+        if not isinstance(rule, dict) or rule.get('type') not in {'factwise_id', 'column_value'}:
             continue
-        first_col = rule.get('first_column')
-        second_col = rule.get('second_column')
-        operator = rule.get('operator', '_')
-        strategy = rule.get('strategy', 'fill_only_null')
-        generation_mode = rule.get('generation_mode', 'columns')
-        if 'Item code' not in headers:
-            headers = ['Item code'] + headers
-            rows = [[''] + list(r) for r in rows]
-        ic_idx = headers.index('Item code')
-        first_idx = headers.index(first_col) if first_col in headers else -1
-        second_idx = headers.index(second_col) if second_col in headers else -1
-        for row_index, row in enumerate(rows):
-            while len(row) <= ic_idx:
-                row.append('')
-            if generation_mode == 'serial':
-                try:
-                    start_number = int(rule.get('serial_start', 1))
-                except Exception:
-                    start_number = 1
-                try:
-                    padding = max(0, int(rule.get('serial_padding', 0)))
-                except Exception:
-                    padding = 0
-                increment_each_row = str(rule.get('serial_increment', True)).lower() not in ['false', '0', 'no', 'off']
-                current_number = start_number + row_index if increment_each_row else start_number
-                suffix = str(current_number).zfill(padding) if padding > 0 else str(current_number)
-                factwise_id = f"{rule.get('serial_prefix', '') or ''}{suffix}"
-            else:
-                first_val = str((row[first_idx] if 0 <= first_idx < len(row) else '') or '').strip()
-                second_val = str((row[second_idx] if 0 <= second_idx < len(row) else '') or '').strip()
-                factwise_id = (f"{first_val}{operator}{second_val}" if first_val and second_val else (first_val or second_val or ''))
-            if strategy == 'override_all':
-                row[ic_idx] = factwise_id
-            elif not str(row[ic_idx] or '').strip():
-                row[ic_idx] = factwise_id
-    return headers, rows
+        try:
+            current_headers, current_rows, _changed = apply_column_value_rule(
+                current_headers, current_rows, rule
+            )
+        except ValueError as exc:
+            logger.warning(f'Could not replay column rule during validation/export: {exc}')
+    return current_headers, current_rows
 
 
 @api_view(['POST'])
@@ -10574,7 +11151,38 @@ def required_field_report(request):
                     'values': dup_value_list,
                 })
 
-        return Response({'success': True, 'gaps': gaps, 'duplicates': duplicates, 'total_rows': len(rows)})
+        invalids = []
+        boolean_truths = {'true', 'false'}
+        for column in (request.data.get('boolean_columns') or []):
+            if column not in headers:
+                continue
+            idx = headers.index(column)
+            invalid_count = 0
+            samples = []
+            for row in rows:
+                v = row[idx] if idx < len(row) else ''
+                text = str(v or '').strip()
+                if not text:
+                    continue
+                if text.lower() not in boolean_truths:
+                    invalid_count += 1
+                    if len(samples) < 10 and text not in samples:
+                        samples.append(text)
+            if invalid_count > 0:
+                invalids.append({
+                    'field': column,
+                    'invalidCount': invalid_count,
+                    'allowedValues': ['TRUE', 'FALSE'],
+                    'values': samples,
+                })
+
+        return Response({
+            'success': True,
+            'gaps': gaps,
+            'duplicates': duplicates,
+            'invalids': invalids,
+            'total_rows': len(rows),
+        })
     except Exception as e:
         logger.error(f"required_field_report failed: {e}", exc_info=True)
         return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -10846,6 +11454,200 @@ def _demo_no_preview_keys():
         return set()
 
 
+def _cell_text(value):
+    return str(value or '').strip()
+
+
+def _bom_header_key(value):
+    return re.sub(r'[^a-z0-9]+', ' ', _cell_text(value).lower()).strip()
+
+
+def _find_bom_header_row(table):
+    required = {'bom id', 'raw material code'}
+    for idx, row in enumerate((table or [])[:30]):
+        keys = {_bom_header_key(cell) for cell in (row or [])}
+        if required.issubset(keys) and ('finished good code' in keys or 'sub bom id' in keys):
+            return idx
+    return -1
+
+
+def _read_source_table_for_bom_preview(info):
+    """Read an uploaded BOM import workbook before it has been mapped."""
+    try:
+        import pandas as pd
+        source_path = hybrid_file_manager.get_file_path(info.get('client_path'))
+        if not source_path:
+            return [], []
+
+        if str(source_path).lower().endswith('.csv'):
+            df = pd.read_csv(source_path, header=None, dtype=object)
+        else:
+            df = pd.read_excel(
+                source_path,
+                sheet_name=info.get('sheet_name') or 0,
+                header=None,
+                dtype=object,
+            )
+
+        table = df.fillna('').values.tolist()
+        header_idx = _find_bom_header_row(table)
+        if header_idx < 0:
+            return [], []
+
+        headers = [_cell_text(h) for h in table[header_idx]]
+        rows = [list(row) for row in table[header_idx + 1:]]
+        return headers, rows
+    except Exception as e:
+        logger.warning(f"Could not read source table for BOM preview: {e}")
+        return [], []
+
+
+def _build_bom_tree_from_table(headers, rows):
+    """Build a nested preview tree from FactWise BOM import columns."""
+    headers = [_cell_text(h) for h in (headers or [])]
+    rows = [list(row) for row in (rows or [])]
+    if _find_bom_header_row([headers]) != 0:
+        return None, {'reason': 'missing_bom_headers'}
+
+    hdr = [_bom_header_key(h) for h in headers]
+
+    def ci(*names):
+        wanted = {_bom_header_key(name) for name in names}
+        for i, h in enumerate(hdr):
+            if h in wanted:
+                return i
+        return -1
+
+    c_fg = ci('finished good code')
+    c_bom = ci('bom id')
+    c_rm = ci('raw material code')
+    c_sub = ci('sub bom id')
+    c_desc = ci('description')
+    c_qty = ci('quantity')
+    c_level = ci('level')
+    alt_cols = [i for i, h in enumerate(hdr) if h.startswith('alternate raw material code')]
+
+    if c_bom < 0 or c_rm < 0:
+        return None, {'reason': 'missing_required_columns'}
+
+    from collections import defaultdict
+    children = defaultdict(list)
+    fg_order = []
+    fg_bom_map = {}
+    bom_level_map = {}
+
+    for row in rows:
+        def g(i):
+            return row[i] if 0 <= i < len(row) else ''
+
+        bom = _cell_text(g(c_bom))
+        rm = _cell_text(g(c_rm))
+        sub = _cell_text(g(c_sub)) if c_sub >= 0 else ''
+        if not bom or (not rm and not sub):
+            continue
+
+        fg = _cell_text(g(c_fg)) if c_fg >= 0 else ''
+        level = _cell_text(g(c_level)) if c_level >= 0 else ''
+        if level:
+            bom_level_map.setdefault(bom, level)
+        if fg and fg not in fg_order:
+            fg_order.append(fg)
+        if fg:
+            fg_bom_map.setdefault(fg, bom)
+
+        children[bom].append({
+            'code': rm or sub,
+            'sub': sub,
+            'qty': g(c_qty) if c_qty >= 0 else '',
+            'level': level,
+            'desc': _cell_text(g(c_desc)) if c_desc >= 0 else '',
+            'alts': [_cell_text(g(i)) for i in alt_cols if _cell_text(g(i))],
+        })
+
+    if not children:
+        return None, {'reason': 'no_bom_rows'}
+
+    if not fg_order:
+        fg_order = list(children.keys())
+        fg_bom_map = {bom_id: bom_id for bom_id in fg_order}
+
+    nid = [0]
+    count = [0]
+    MAX_NODES = 4000
+    MAX_ALTS = 5
+
+    def new_id():
+        nid[0] += 1
+        return f'n{nid[0]}'
+
+    def build(bom_id, depth, seen):
+        out = []
+        for item in children.get(bom_id, []):
+            if count[0] >= MAX_NODES:
+                break
+            count[0] += 1
+            sub = item['sub']
+            is_asm = bool(sub and sub in children and sub not in seen)
+            kind = ('sfg' if depth == 0 else 'ssfg') if is_asm else 'component'
+            node = {
+                'id': new_id(),
+                'label': item['code'],
+                'qty': item['qty'],
+                'level': bom_level_map.get(sub) if is_asm else item.get('level'),
+                'bomId': sub or None,
+                'kind': kind,
+                'children': [],
+            }
+            for alt in item['alts'][:MAX_ALTS]:
+                if count[0] >= MAX_NODES:
+                    break
+                count[0] += 1
+                node['children'].append({
+                    'id': new_id(),
+                    'label': alt,
+                    'kind': 'alternate',
+                    'qty': None,
+                    'level': item.get('level'),
+                    'children': [],
+                })
+            if is_asm:
+                node['children'].extend(build(sub, depth + 1, seen | {sub}))
+            out.append(node)
+        return out
+
+    def build_fg(fg):
+        fg_bom = fg_bom_map.get(fg) or (fg if fg in children else None)
+        return {
+            'id': new_id(),
+            'label': fg,
+            'kind': 'fg',
+            'qty': None,
+            'level': bom_level_map.get(fg_bom) if fg_bom else None,
+            'bomId': fg_bom,
+            'children': build(fg_bom, 0, {fg_bom}) if fg_bom else [],
+        }
+
+    sub_ids = {item['sub'] for items in children.values() for item in items if item['sub']}
+    roots = [fg for fg in fg_order if fg_bom_map.get(fg) not in sub_ids] or fg_order[:1]
+    if len(roots) == 1:
+        tree = build_fg(roots[0])
+    else:
+        tree = {
+            'id': 'root',
+            'label': f'{len(roots)} finished goods',
+            'kind': 'root',
+            'qty': None,
+            'bomId': None,
+            'children': [build_fg(fg) for fg in roots],
+        }
+
+    return tree, {
+        'finishedGoods': len(roots),
+        'bomCount': len(children),
+        'truncated': count[0] >= MAX_NODES,
+    }
+
+
 @api_view(['GET'])
 def demo_bom_tree(request, session_id):
     """DEMO: parse the matched golden export .xlsx into a nested BOM tree for the
@@ -10857,6 +11659,26 @@ def demo_bom_tree(request, session_id):
         info = get_session_consistent(session_id)
         if not info:
             return Response({'success': False, 'error': 'Invalid session'}, status=status.HTTP_404_NOT_FOUND)
+
+        headers, rows = read_session_grid(session_id, info)
+        tree, meta = _build_bom_tree_from_table(headers or [], rows or [])
+        source = 'grid'
+
+        if not tree:
+            source_headers, source_rows = _read_source_table_for_bom_preview(info)
+            tree, meta = _build_bom_tree_from_table(source_headers, source_rows)
+            source = 'source'
+
+        if tree:
+            return Response({
+                'success': True,
+                'tree': tree,
+                'source': source,
+                'finishedGoods': meta.get('finishedGoods', 0),
+                'bomCount': meta.get('bomCount', 0),
+                'truncated': meta.get('truncated', False),
+            })
+
         chosen, matched_key = _match_demo_export_file(info)
         base = os.path.join(os.path.dirname(__file__), 'data', 'demo_exports')
         if not chosen or not os.path.exists(os.path.join(base, chosen)):

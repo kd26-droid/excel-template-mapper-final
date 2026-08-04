@@ -521,6 +521,7 @@ const api = {
       formula_rules: mappingData.formula_rules || null,
       factwise_rules: mappingData.factwise_rules || null,
       force_persist: mappingData.force_persist === true,
+      apply_now: mappingData.apply_now === true,
     }),
 
   /**
@@ -1408,7 +1409,7 @@ const api = {
    * @param {string} mpnHeader optional detected column name
    * @param {string} manufacturerHeader optional manufacturer column name
    */
-  validateMPNs: (sessionId, mpnHeader = null, manufacturerHeader = null, cacheOnly = false) => {
+  validateMPNs: (sessionId, mpnHeader = null, manufacturerHeader = null, cacheOnly = false, persistResults = false) => {
     const payload = { session_id: sessionId };
     const providerScopeId = getProviderCredentialScopeId();
     if (providerScopeId) payload.provider_credential_scope_id = providerScopeId;
@@ -1417,6 +1418,7 @@ const api = {
     if (mpnHeader) payload.mpn_header = mpnHeader;
     if (manufacturerHeader) payload.manufacturer_header = manufacturerHeader;
     if (cacheOnly) payload.cache_only = true;
+    if (persistResults) payload.persist_results = true;
     return axios.post(`${API_URL}/mpn/validate/`, payload, { timeout: 600000 });
   },
 
@@ -1426,8 +1428,8 @@ const api = {
    * validateMPNs once (fast, fully cached). Keeps each request small so it never
    * hits Azure's 230s request limit, and lets the UI show progress.
    */
-  warmMPNs: (sessionId, mpnHeader = null, offset = 0, limit = 8, manufacturerHeader = null) => {
-    const payload = { session_id: sessionId, offset, limit };
+  warmMPNs: (sessionId, mpnHeader = null, offset = 0, limit = 75, manufacturerHeader = null, coldLimit = 15) => {
+    const payload = { session_id: sessionId, offset, limit, cold_limit: coldLimit };
     const providerScopeId = getProviderCredentialScopeId();
     if (providerScopeId) payload.provider_credential_scope_id = providerScopeId;
     payload.validation_providers = getSelectedValidationProviders();
@@ -1513,6 +1515,9 @@ const api = {
     axios.get(`${API_URL}/download/demo-bom/${sessionId}/`, { responseType: 'blob', timeout: 120000 }),
 
   /** DEMO: fetch the nested BOM tree (FG → sub-assemblies → components) for the preview. */
+  getBomTree: (sessionId) =>
+    axios.get(`${API_URL}/demo/bom-tree/${sessionId}/`, { timeout: 60000 }),
+
   getDemoBomTree: (sessionId) =>
     axios.get(`${API_URL}/demo/bom-tree/${sessionId}/`, { timeout: 60000 }),
 
@@ -1584,6 +1589,22 @@ const api = {
     }, { timeout: 120000 });
   },
 
+  /** Split one column into rows and copy only the selected columns to added rows. */
+  splitColumnIntoRows: (sessionId, {
+    sourceColumn,
+    sourceColumnIndex = null,
+    delimiter = 'comma',
+    copyColumnIndices = [],
+    preview = false
+  } = {}) => axios.post(`${API_URL}/transforms/split-into-rows/`, {
+    session_id: sessionId,
+    source_column: sourceColumn,
+    source_column_index: sourceColumnIndex,
+    delimiter,
+    copy_column_indices: copyColumnIndices,
+    preview
+  }, { timeout: 120000 }),
+
   /** Copy one column's values into another column (both must exist). */
   copyColumn: (sessionId, sourceColumn, targetColumn, onlyEmpty = false) =>
     axios.post(`${API_URL}/transforms/copy-column/`, {
@@ -1591,6 +1612,13 @@ const api = {
       source_column: sourceColumn,
       target_column: targetColumn,
       only_empty: onlyEmpty,
+    }, { timeout: 120000 }),
+
+  /** Apply a reusable rule that fills an existing column or creates a new one. */
+  fillOrCreateColumn: (sessionId, rule) =>
+    axios.post(`${API_URL}/transforms/fill-or-create-column/`, {
+      session_id: sessionId,
+      rule,
     }, { timeout: 120000 }),
 
   /** Set a fixed value for a column — all cells, or only the empty ones. */
@@ -1635,11 +1663,12 @@ const api = {
    * Used by the export required-field guard so the count reflects the whole
    * dataset, not just the current page.
    */
-  requiredFieldReport: (sessionId, columns, dupeColumns = []) => {
+  requiredFieldReport: (sessionId, columns, dupeColumns = [], booleanColumns = []) => {
     return axios.post(`${API_URL}/transforms/required-field-report/`, {
       session_id: sessionId,
       columns,
       dupe_columns: dupeColumns,
+      boolean_columns: booleanColumns,
     }, { timeout: 60000 });
   },
 

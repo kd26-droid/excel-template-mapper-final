@@ -22,34 +22,100 @@ const KIND_STYLE = {
 const NODE_W = 200;
 const H_GAP = 26;
 const V_GAP = 120;
-const COMPACT_LEAF_CAP = 4;
+const COMPACT_CHILD_CAP = 3;
+const COMPACT_ALT_CAP = 3;
 
-function countRaw(node) {
-  if (!node.children || !node.children.length) return node.kind === 'component' ? 1 : 0;
-  return node.children.reduce((s, c) => s + countRaw(c), 0);
+function isAssembly(node) {
+  return ['root', 'fg', 'sfg', 'ssfg'].includes(node?.kind);
 }
 
-// Build the trimmed 2-level tree for the compact view.
+function directChildCounts(children = []) {
+  const rawMaterials = children.filter((child) => child.kind === 'component').length;
+  const subBoms = children.filter(isAssembly).length;
+  return { rawMaterials, subBoms, total: rawMaterials + subBoms };
+}
+
 function buildCompact(root) {
-  const kids = [];
-  const level1 = root.children || [];
-  const assemblies = level1.filter((c) => (c.children || []).some((g) => g.kind !== 'alternate'));
-  const leaves = level1.filter((c) => !(c.children || []).some((g) => g.kind !== 'alternate'));
-  assemblies.forEach((a) => {
-    const n = countRaw(a);
-    kids.push({ ...a, children: [], subtitle: `${n} raw material${n === 1 ? '' : 's'}` });
-  });
-  leaves.slice(0, COMPACT_LEAF_CAP).forEach((r) => kids.push({ ...r, children: [] }));
-  if (leaves.length > COMPACT_LEAF_CAP) {
-    kids.push({ id: `${root.id}-more`, label: `+${leaves.length - COMPACT_LEAF_CAP} more raw materials`, kind: 'more', children: [] });
+  function compactNode(node) {
+    const children = node.children || [];
+    const childCounts = isAssembly(node) ? directChildCounts(children) : node.childCounts;
+
+    if (node.kind === 'component') {
+      const alternates = children.filter((child) => child.kind === 'alternate');
+      const shownAlternates = alternates.slice(0, COMPACT_ALT_CAP).map((child) => ({ ...child, children: [] }));
+      if (alternates.length > COMPACT_ALT_CAP) {
+        shownAlternates.push({
+          id: `${node.id}-more-alts`,
+          label: `+${alternates.length - COMPACT_ALT_CAP} more alternates`,
+          kind: 'more',
+          children: alternates.slice(COMPACT_ALT_CAP).map((child) => ({ ...child, children: [] }))
+        });
+      }
+      return { ...node, children: shownAlternates };
+    }
+
+    const assemblies = children.filter(isAssembly).map(compactNode);
+    const rawMaterials = children.filter((child) => child.kind === 'component');
+    const shownRawMaterials = rawMaterials.slice(0, COMPACT_CHILD_CAP).map(compactNode);
+
+    if (rawMaterials.length > COMPACT_CHILD_CAP) {
+      shownRawMaterials.push({
+        id: `${node.id}-more-raw`,
+        label: `+${rawMaterials.length - COMPACT_CHILD_CAP} more raw materials`,
+        kind: 'more',
+        children: rawMaterials.slice(COMPACT_CHILD_CAP).map(compactNode)
+      });
+    }
+
+    return { ...node, childCounts, children: [...shownRawMaterials, ...assemblies] };
   }
-  return { ...root, children: kids };
+
+  return compactNode(root);
 }
 
-function allIds(node, acc = new Set()) {
+function describeChildCounts(counts) {
+  if (!counts || !counts.total) return '';
+  const parts = [];
+  if (counts.rawMaterials) parts.push(`${counts.rawMaterials} RM`);
+  if (counts.subBoms) parts.push(`${counts.subBoms} SB`);
+  return `${parts.join(', ')} (${counts.total})`;
+}
+
+function nodeSubtitle(node) {
+  const lines = [];
+  if (node.level !== null && node.level !== undefined && node.level !== '') {
+    lines.push(`Level ${node.level}`);
+  }
+  if (isAssembly(node)) {
+    const counts = node.childCounts || directChildCounts(node.children || []);
+    const description = describeChildCounts(counts);
+    if (description) lines.push(description);
+  }
+  return lines.join('\n');
+}
+
+function visibleCompactIds(node, acc = new Set()) {
   acc.add(node.id);
-  (node.children || []).forEach((c) => allIds(c, acc));
+  (node.children || []).forEach((child) => {
+    if (child.kind !== 'more') visibleCompactIds(child, acc);
+  });
   return acc;
+}
+
+function getTreeStats(node, depth = 0) {
+  if (!node) return { totalNodes: 0, maxDepth: 0, moreGroups: 0 };
+  return (node.children || []).reduce((acc, child) => {
+    const childStats = getTreeStats(child, depth + 1);
+    return {
+      totalNodes: acc.totalNodes + childStats.totalNodes,
+      maxDepth: Math.max(acc.maxDepth, childStats.maxDepth),
+      moreGroups: acc.moreGroups + childStats.moreGroups,
+    };
+  }, {
+    totalNodes: 1,
+    maxDepth: depth,
+    moreGroups: node.kind === 'more' ? 1 : 0,
+  });
 }
 
 function layout(root, expanded) {
@@ -67,7 +133,8 @@ function layout(root, expanded) {
     const st = KIND_STYLE[node.kind] || KIND_STYLE.component;
     const qty = (node.qty !== null && node.qty !== undefined && node.qty !== '') ? ` (${node.qty})` : '';
     const bom = node.bomId ? `\nBOM ID: ${node.bomId}` : '';
-    const subtitle = node.subtitle ? `\n${node.subtitle}` : '';
+    const subtitleText = node.subtitle || nodeSubtitle(node);
+    const subtitle = subtitleText ? `\n${subtitleText}` : '';
     const cue = hasKids ? (isOpen ? '  ▾' : `  ▸ ${kids.length}`) : '';
     nodes.push({
       id: node.id,
@@ -88,7 +155,7 @@ function layout(root, expanded) {
   return { nodes, edges };
 }
 
-export default function BomTreePreview({ sessionId, height = 460, fullscreen = false }) {
+export default function BomTreePreview({ sessionId, height = 460, fullscreen = false, onRequestFullscreen }) {
   const [tree, setTree] = useState(null);
   const [meta, setMeta] = useState({});
   const [loading, setLoading] = useState(true);
@@ -100,11 +167,17 @@ export default function BomTreePreview({ sessionId, height = 460, fullscreen = f
     let alive = true;
     setLoading(true);
     setError(null);
-    api.getDemoBomTree(sessionId)
+    api.getBomTree(sessionId)
       .then((r) => {
         if (!alive) return;
         setTree(r.data?.tree || null);
-        setMeta({ file: r.data?.file, truncated: r.data?.truncated });
+        setMeta({
+          file: r.data?.file,
+          source: r.data?.source,
+          bomCount: r.data?.bomCount,
+          finishedGoods: r.data?.finishedGoods,
+          truncated: r.data?.truncated
+        });
         setLoading(false);
       })
       .catch(() => { if (alive) { setError('No BOM preview is available for this input yet.'); setLoading(false); } });
@@ -117,10 +190,18 @@ export default function BomTreePreview({ sessionId, height = 460, fullscreen = f
     return fullscreen ? tree : buildCompact(tree);
   }, [tree, fullscreen]);
 
+  const treeStats = useMemo(() => getTreeStats(displayTree), [displayTree]);
+  const shouldSuggestFullscreen = !fullscreen && (
+    treeStats.totalNodes > 28 ||
+    treeStats.maxDepth > 4 ||
+    treeStats.moreGroups > 0 ||
+    Number(meta.bomCount || 0) > 3
+  );
+
   useEffect(() => {
     if (!displayTree) return;
     // Compact: show everything (it's small). Full screen: start high-level (root open).
-    setExpanded(fullscreen ? new Set([displayTree.id]) : allIds(displayTree));
+    setExpanded(fullscreen ? new Set([displayTree.id]) : visibleCompactIds(displayTree));
   }, [displayTree, fullscreen]);
 
   const { nodes, edges } = useMemo(
@@ -136,13 +217,13 @@ export default function BomTreePreview({ sessionId, height = 460, fullscreen = f
   }, [nodes.length]);
 
   const onNodeClick = useCallback((_e, node) => {
-    if (!fullscreen || !node?.data?.hasKids) return;
+    if (!node?.data?.hasKids) return;
     setExpanded((prev) => {
       const next = new Set(prev);
       if (next.has(node.id)) next.delete(node.id); else next.add(node.id);
       return next;
     });
-  }, [fullscreen]);
+  }, []);
 
   if (loading) return <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: height }}><CircularProgress /></Box>;
   if (error || !tree) {
@@ -158,7 +239,34 @@ export default function BomTreePreview({ sessionId, height = 460, fullscreen = f
         <Typography variant="caption" color="text.secondary">
           {fullscreen ? 'Click a box to expand / collapse. Scroll to zoom, drag to pan.' : 'High-level view — open full screen to drill into every raw material.'}
         </Typography>
+        {meta.bomCount ? (
+          <Typography variant="caption" color="text.secondary">
+            {meta.bomCount} BOM{meta.bomCount === 1 ? '' : 's'} from {meta.source === 'source' ? 'uploaded sheet' : meta.source === 'grid' ? 'current grid' : 'export sheet'}
+          </Typography>
+        ) : null}
       </Box>
+      {shouldSuggestFullscreen ? (
+        <Box sx={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 1,
+          mb: 1,
+          px: 1,
+          py: 0.75,
+          border: '1px solid #bfdbfe',
+          borderRadius: 1,
+          bgcolor: '#eff6ff'
+        }}>
+          <Typography variant="caption" sx={{ color: '#1d4ed8', fontWeight: 600 }}>
+            Large BOM detected. Full screen is easier for this tree.
+          </Typography>
+          {onRequestFullscreen ? (
+            <Button size="small" onClick={onRequestFullscreen} sx={{ minWidth: 0, px: 1, py: 0.25, fontSize: 11, fontWeight: 700 }}>
+              Full screen
+            </Button>
+          ) : null}
+        </Box>
+      ) : null}
       <Box sx={{ height, border: '1px solid #e5e7eb', borderRadius: 2, bgcolor: '#fafafa' }}>
         <ReactFlow
           nodes={nodes}

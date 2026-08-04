@@ -1,600 +1,436 @@
-/**
- * ColumnParser - Simple & Powerful Pattern Builder
- *
- * Flow:
- * 1. Select column
- * 2. See sample, auto-detected separator shown
- * 3. Click on characters to mark split points
- * 4. Label each part
- * 5. Preview & Apply
- */
-
-import React, { useState, useEffect, useCallback } from 'react';
-import './ColumnParser.css';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  Alert,
+  Box,
+  Button,
+  Chip,
+  CircularProgress,
+  FormControl,
+  IconButton,
+  InputLabel,
+  MenuItem,
+  Select,
+  Step,
+  StepLabel,
+  Stepper,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  TextField,
+  Tooltip,
+  Typography,
+} from '@mui/material';
+import {
+  ArrowBack as ArrowBackIcon,
+  ArrowForward as ArrowForwardIcon,
+  Check as CheckIcon,
+  ChevronLeft as ChevronLeftIcon,
+  ChevronRight as ChevronRightIcon,
+  ContentCut as ContentCutIcon,
+} from '@mui/icons-material';
 
 const API_BASE = process.env.REACT_APP_API_BASE_URL || '/api';
+const STEPS = ['Column', 'Split points', 'Outputs', 'Preview'];
 
-const ColumnParser = ({ sessionId, onClose, onApply }) => {
-  // Steps: 1=select, 2=mark boundaries, 3=label, 4=preview
-  const [step, setStep] = useState(1);
+const buildParts = (text, boundaries) => {
+  if (!text || boundaries.length === 0) return [];
+  const ordered = [...boundaries].sort((a, b) => a.index - b.index);
+  const parts = [];
 
-  // Data
+  if (ordered[0].index > 0) {
+    parts.push({
+      id: 0,
+      type: 'before',
+      delimiter: ordered[0].char,
+      preview: text.substring(0, ordered[0].index).trim(),
+      outputType: 'spec',
+      specName: '',
+    });
+  }
+
+  for (let index = 0; index < ordered.length - 1; index += 1) {
+    const start = ordered[index].index + 1;
+    const end = ordered[index + 1].index;
+    if (end > start) {
+      parts.push({
+        id: index + 1,
+        type: 'between',
+        startDelimiter: ordered[index].char,
+        endDelimiter: ordered[index + 1].char,
+        preview: text.substring(start, end).trim(),
+        outputType: 'spec',
+        specName: '',
+      });
+    }
+  }
+
+  const last = ordered[ordered.length - 1];
+  if (last.index < text.length - 1) {
+    parts.push({
+      id: ordered.length,
+      type: 'after',
+      delimiter: last.char,
+      preview: text.substring(last.index + 1).trim(),
+      outputType: 'spec',
+      specName: '',
+    });
+  }
+
+  return parts;
+};
+
+const ColumnParser = ({ sessionId, onApply, initialColumn = '' }) => {
+  const [step, setStep] = useState(0);
   const [columns, setColumns] = useState([]);
-  const [selectedColumn, setSelectedColumn] = useState('');
+  const [selectedColumn, setSelectedColumn] = useState(initialColumn);
   const [sampleValues, setSampleValues] = useState([]);
-  const [currentSampleIdx, setCurrentSampleIdx] = useState(0);
+  const [currentSampleIndex, setCurrentSampleIndex] = useState(0);
   const [totalValues, setTotalValues] = useState(0);
-
-  // Auto-detected
-  const [suggestedSeparator, setSuggestedSeparator] = useState('');
-  const [groupCount, setGroupCount] = useState(1);
-  const [commonDelimiters, setCommonDelimiters] = useState(['(', ')', ',', '|', ';']);
-
-  // User input
   const [groupSeparator, setGroupSeparator] = useState('');
+  const [commonDelimiters, setCommonDelimiters] = useState([]);
   const [boundaries, setBoundaries] = useState([]);
   const [parts, setParts] = useState([]);
-
-  // Preview
   const [previewData, setPreviewData] = useState(null);
-
-  // State
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  const currentSample = sampleValues[currentSampleIdx] || '';
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Load columns
-  // ═══════════════════════════════════════════════════════════════════════════
   useEffect(() => {
-    const load = async () => {
+    const loadColumns = async () => {
       try {
         setLoading(true);
-        const res = await fetch(`${API_BASE}/parser/columns/${sessionId}/`);
-        const data = await res.json();
-        if (data.success) setColumns(data.columns || []);
-      } catch (err) {
-        setError('Failed to load columns');
+        const response = await fetch(`${API_BASE}/parser/columns/${sessionId}/`);
+        const data = await response.json();
+        if (!data.success) throw new Error(data.error || 'Could not load columns');
+        const nextColumns = data.columns || [];
+        setColumns(nextColumns);
+        if (initialColumn && nextColumns.includes(initialColumn)) setSelectedColumn(initialColumn);
+      } catch (loadError) {
+        setError(loadError.message || 'Could not load columns');
       } finally {
         setLoading(false);
       }
     };
-    load();
-  }, [sessionId]);
+    loadColumns();
+  }, [sessionId, initialColumn]);
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Analyze column
-  // ═══════════════════════════════════════════════════════════════════════════
+  const currentSample = sampleValues[currentSampleIndex] || '';
+  const firstGroup = useMemo(() => {
+    if (!currentSample || !groupSeparator) return currentSample;
+    let groups = currentSample.split(groupSeparator);
+    if (groupSeparator === '),') {
+      groups = groups.map((group, index) => index < groups.length - 1 ? `${group})` : group);
+    }
+    return groups[0]?.trim() || currentSample;
+  }, [currentSample, groupSeparator]);
+
+  useEffect(() => {
+    const nextParts = buildParts(firstGroup, boundaries);
+    setParts(previous => nextParts.map((part, index) => ({
+      ...part,
+      outputType: previous[index]?.outputType || part.outputType,
+      specName: previous[index]?.specName || '',
+    })));
+  }, [firstGroup, boundaries]);
+
   const analyzeColumn = async () => {
     if (!selectedColumn) return;
     try {
       setLoading(true);
       setError('');
-      const res = await fetch(`${API_BASE}/parser/analyze/`, {
+      const response = await fetch(`${API_BASE}/parser/analyze/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: sessionId, column_name: selectedColumn })
+        body: JSON.stringify({ session_id: sessionId, column_name: selectedColumn }),
       });
-      const data = await res.json();
-
-      if (data.success && data.sample_values?.length > 0) {
-        setSampleValues(data.sample_values);
-        setCurrentSampleIdx(0);
-        setTotalValues(data.total_values || data.sample_values.length);
-        setSuggestedSeparator(data.suggested_separator || '');
-        setGroupSeparator(data.suggested_separator || '');
-        setGroupCount(data.detected_groups_count || 1);
-        // Use common delimiters from backend - only these appear in ALL cells
-        if (data.common_delimiters && data.common_delimiters.length > 0) {
-          setCommonDelimiters(data.common_delimiters);
-        }
-        setBoundaries([]);
-        setParts([]);
-        setStep(2);
-      } else {
-        setError(data.error || 'No data found in this column');
+      const data = await response.json();
+      if (!data.success || !data.sample_values?.length) {
+        throw new Error(data.error || 'No values found in this column');
       }
-    } catch (err) {
-      setError('Failed to analyze column');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Get first group for boundary marking
-  // ═══════════════════════════════════════════════════════════════════════════
-  const getFirstGroup = useCallback(() => {
-    if (!currentSample) return '';
-    if (groupSeparator) {
-      let parts = currentSample.split(groupSeparator);
-      // For '),', add back the ')' to first parts
-      if (groupSeparator === '),') {
-        parts = parts.map((p, i) => i < parts.length - 1 ? p + ')' : p);
-      }
-      return parts[0]?.trim() || currentSample;
-    }
-    return currentSample;
-  }, [currentSample, groupSeparator]);
-
-  const firstGroup = getFirstGroup();
-
-  // Calculate actual group count from current sample
-  const actualGroupCount = groupSeparator
-    ? currentSample.split(groupSeparator).length
-    : 1;
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Handle character clicks
-  // ═══════════════════════════════════════════════════════════════════════════
-  const handleCharClick = (char, index) => {
-    const exists = boundaries.findIndex(b => b.index === index);
-    if (exists !== -1) {
-      setBoundaries(boundaries.filter((_, i) => i !== exists));
-    } else {
-      setBoundaries([...boundaries, { index, char }].sort((a, b) => a.index - b.index));
-    }
-  };
-
-  // Generate parts from boundaries
-  useEffect(() => {
-    if (boundaries.length === 0) {
+      setSampleValues(data.sample_values);
+      setCurrentSampleIndex(0);
+      setTotalValues(data.total_values || data.sample_values.length);
+      setGroupSeparator(data.suggested_separator || '');
+      setCommonDelimiters(data.common_delimiters || []);
+      setBoundaries([]);
       setParts([]);
-      return;
+      setPreviewData(null);
+      setStep(1);
+    } catch (analyzeError) {
+      setError(analyzeError.message || 'Could not analyze the column');
+    } finally {
+      setLoading(false);
     }
+  };
 
-    const text = firstGroup;
-    const newParts = [];
+  const toggleBoundary = useCallback((char, index) => {
+    setBoundaries(current => {
+      const exists = current.some(boundary => boundary.index === index);
+      if (exists) return current.filter(boundary => boundary.index !== index);
+      return [...current, { index, char }].sort((a, b) => a.index - b.index);
+    });
+  }, []);
 
-    // Before first boundary
-    if (boundaries[0].index > 0) {
-      newParts.push({
-        id: 0,
-        type: 'before',
-        delimiter: boundaries[0].char,
-        preview: text.substring(0, boundaries[0].index).trim(),
-        outputType: 'spec',
-        specName: ''
-      });
-    }
-
-    // Between boundaries
-    for (let i = 0; i < boundaries.length - 1; i++) {
-      const start = boundaries[i].index + 1;
-      const end = boundaries[i + 1].index;
-      if (end > start) {
-        newParts.push({
-          id: i + 1,
-          type: 'between',
-          startDelimiter: boundaries[i].char,
-          endDelimiter: boundaries[i + 1].char,
-          preview: text.substring(start, end).trim(),
-          outputType: 'spec',
-          specName: ''
-        });
-      }
-    }
-
-    // After last boundary
-    const last = boundaries[boundaries.length - 1];
-    if (last && last.index < text.length - 1) {
-      newParts.push({
-        id: boundaries.length,
-        type: 'after',
-        delimiter: last.char,
-        preview: text.substring(last.index + 1).trim(),
-        outputType: 'spec',
-        specName: ''
-      });
-    }
-
-    setParts(newParts);
-  }, [boundaries, firstGroup]);
-
-  // Update part
   const updatePart = (id, field, value) => {
-    setParts(parts.map(p => p.id === id ? { ...p, [field]: value } : p));
+    setParts(current => current.map(part => part.id === id ? { ...part, [field]: value } : part));
   };
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Preview
-  // ═══════════════════════════════════════════════════════════════════════════
+  const parserConfig = useMemo(() => ({
+    patterns: [{
+      name: 'User Pattern',
+      group_separator: groupSeparator,
+      extractions: parts.map(part => ({
+        type: part.type,
+        char1: part.type === 'before' ? part.delimiter : part.startDelimiter,
+        char2: part.type === 'between' ? part.endDelimiter : '',
+        output_type: part.outputType,
+        spec_name: part.specName || '',
+      })),
+    }],
+  }), [groupSeparator, parts]);
+
   const loadPreview = async () => {
-    // Validate
-    const specParts = parts.filter(p => p.outputType === 'spec');
-    if (specParts.some(p => !p.specName.trim())) {
-      setError('Please enter a name for all Spec Pair fields');
+    if (parts.some(part => part.outputType === 'spec' && !part.specName.trim())) {
+      setError('Enter a name for every Specification output.');
       return;
     }
-
-    // Build config
-    const config = {
-      patterns: [{
-        name: 'User Pattern',
-        group_separator: groupSeparator,
-        extractions: parts.map(part => ({
-          type: part.type,
-          char1: part.type === 'before' ? part.delimiter : part.startDelimiter,
-          char2: part.type === 'between' ? part.endDelimiter : '',
-          output_type: part.outputType,
-          spec_name: part.specName || ''
-        }))
-      }]
-    };
-
     try {
       setLoading(true);
       setError('');
-      const res = await fetch(`${API_BASE}/parser/preview/`, {
+      const response = await fetch(`${API_BASE}/parser/preview/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: sessionId,
           source_column: selectedColumn,
-          parser_config: config,
-          preview_rows: 5
-        })
+          parser_config: parserConfig,
+          preview_rows: 5,
+        }),
       });
-      const data = await res.json();
-      if (data.success) {
-        setPreviewData(data);
-        setStep(4);
-      } else {
-        setError(data.error || 'Preview failed');
-      }
-    } catch (err) {
-      setError('Failed to generate preview');
+      const data = await response.json();
+      if (!data.success) throw new Error(data.error || 'Preview failed');
+      setPreviewData(data);
+      setStep(3);
+    } catch (previewError) {
+      setError(previewError.message || 'Preview failed');
     } finally {
       setLoading(false);
     }
   };
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Apply
-  // ═══════════════════════════════════════════════════════════════════════════
   const applyParser = async () => {
-    const config = {
-      patterns: [{
-        name: 'User Pattern',
-        group_separator: groupSeparator,
-        extractions: parts.map(part => ({
-          type: part.type,
-          char1: part.type === 'before' ? part.delimiter : part.startDelimiter,
-          char2: part.type === 'between' ? part.endDelimiter : '',
-          output_type: part.outputType,
-          spec_name: part.specName || ''
-        }))
-      }]
-    };
-
     try {
       setLoading(true);
       setError('');
-      const res = await fetch(`${API_BASE}/parser/apply/`, {
+      const response = await fetch(`${API_BASE}/parser/apply/`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: sessionId,
           source_column: selectedColumn,
-          parser_config: config
-        })
+          parser_config: parserConfig,
+        }),
       });
-      const data = await res.json();
-      if (data.success) {
-        onApply?.(data);
-        onClose?.();
-      } else {
-        setError(data.error || 'Failed to apply');
-      }
-    } catch (err) {
-      setError('Failed to apply parser');
+      const data = await response.json();
+      if (!data.success) throw new Error(data.error || 'Could not apply parser');
+      onApply?.(data);
+    } catch (applyError) {
+      setError(applyError.message || 'Could not apply parser');
     } finally {
       setLoading(false);
     }
   };
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Check if character is a SAFE delimiter (appears in ALL cells)
-  // ═══════════════════════════════════════════════════════════════════════════
-  const isDelimiterChar = (char) => {
-    // Only highlight delimiters that appear in ALL cells
-    // This prevents users from clicking on characters like '_' that only appear in some values
-    return commonDelimiters.includes(char);
-  };
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // RENDER
-  // ═══════════════════════════════════════════════════════════════════════════
   return (
-    <div className="parser-overlay">
-      <div className="parser-modal">
-        {/* Header */}
-        <div className="parser-header">
-          <div className="parser-header-content">
-            <h2>🔧 Column Parser</h2>
-            <p className="parser-subtitle">Split complex data into separate columns</p>
-          </div>
-          <button className="parser-close" onClick={onClose}>&times;</button>
-        </div>
+    <Box sx={{ pt: 1 }}>
+      <Stepper activeStep={step} alternativeLabel sx={{ mb: 3 }}>
+        {STEPS.map(label => (
+          <Step key={label}><StepLabel>{label}</StepLabel></Step>
+        ))}
+      </Stepper>
 
-        {/* Progress */}
-        <div className="parser-progress-dots">
-          {[1, 2, 3, 4].map(s => (
-            <div key={s} className={`parser-dot ${step >= s ? 'active' : ''} ${step === s ? 'current' : ''}`} />
-          ))}
-        </div>
+      {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
 
-        {error && <div className="parser-error">{error}</div>}
+      {step === 0 && (
+        <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1.5, flexWrap: 'wrap' }}>
+          <FormControl size="small" sx={{ minWidth: 260, flex: 1 }}>
+            <InputLabel>Column to parse</InputLabel>
+            <Select
+              label="Column to parse"
+              value={selectedColumn}
+              onChange={event => setSelectedColumn(event.target.value)}
+            >
+              {columns.map(column => <MenuItem key={column} value={column}>{column}</MenuItem>)}
+            </Select>
+          </FormControl>
+          <Button
+            variant="contained"
+            endIcon={loading ? <CircularProgress size={16} /> : <ArrowForwardIcon />}
+            onClick={analyzeColumn}
+            disabled={!selectedColumn || loading}
+          >
+            Analyze
+          </Button>
+        </Box>
+      )}
 
-        <div className="parser-content">
+      {step === 1 && (
+        <Box>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2, mb: 2 }}>
+            <Box>
+              <Typography variant="subtitle2">Sample {currentSampleIndex + 1} of {sampleValues.length}</Typography>
+              <Typography variant="caption" color="text.secondary">{totalValues} populated rows</Typography>
+            </Box>
+            <Box sx={{ display: 'flex', gap: 0.5 }}>
+              <IconButton size="small" onClick={() => setCurrentSampleIndex(index => index - 1)} disabled={currentSampleIndex === 0}>
+                <ChevronLeftIcon />
+              </IconButton>
+              <IconButton size="small" onClick={() => setCurrentSampleIndex(index => index + 1)} disabled={currentSampleIndex >= sampleValues.length - 1}>
+                <ChevronRightIcon />
+              </IconButton>
+            </Box>
+          </Box>
 
-          {/* ═══════════════════════════════════════════════════════════════════ */}
-          {/* STEP 1: Select Column */}
-          {/* ═══════════════════════════════════════════════════════════════════ */}
-          {step === 1 && (
-            <div className="parser-step-content">
-              <div className="parser-question">
-                <span className="parser-question-icon">📊</span>
-                <span>Which column has data to split?</span>
-              </div>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap', mb: 2 }}>
+            <TextField
+              size="small"
+              label="Group separator"
+              value={groupSeparator}
+              onChange={event => setGroupSeparator(event.target.value)}
+              sx={{ width: 180 }}
+            />
+            {['),', ',', '|', ';'].map(separator => (
+              <Chip
+                key={separator}
+                label={separator}
+                variant={groupSeparator === separator ? 'filled' : 'outlined'}
+                color={groupSeparator === separator ? 'primary' : 'default'}
+                onClick={() => setGroupSeparator(separator)}
+              />
+            ))}
+          </Box>
 
-              <select
-                className="parser-select"
-                value={selectedColumn}
-                onChange={e => setSelectedColumn(e.target.value)}
-              >
-                <option value="">Choose a column...</option>
-                {columns.map((col, i) => <option key={i} value={col}>{col}</option>)}
-              </select>
+          <Box sx={{ borderTop: '1px solid #e5e7eb', borderBottom: '1px solid #e5e7eb', py: 2, mb: 2 }}>
+            <Typography variant="subtitle2" sx={{ mb: 1 }}>Select split points</Typography>
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+              {firstGroup.split('').map((char, index) => {
+                const selected = boundaries.some(boundary => boundary.index === index);
+                const common = commonDelimiters.includes(char);
+                return (
+                  <Tooltip key={`${char}-${index}`} title={common ? `Common delimiter: ${char === ' ' ? 'space' : char}` : ''}>
+                    <Box
+                      component="button"
+                      type="button"
+                      onClick={() => toggleBoundary(char, index)}
+                      sx={{
+                        width: 32,
+                        height: 36,
+                        border: selected ? '2px solid #15803d' : `1px solid ${common ? '#0284c7' : '#d1d5db'}`,
+                        bgcolor: selected ? '#dcfce7' : '#fff',
+                        color: '#111827',
+                        fontFamily: 'monospace',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {char === ' ' ? 'SP' : char}
+                    </Box>
+                  </Tooltip>
+                );
+              })}
+            </Box>
+          </Box>
 
-              <button
-                className="parser-btn-primary parser-btn-full"
-                onClick={analyzeColumn}
-                disabled={!selectedColumn || loading}
-              >
-                {loading ? 'Analyzing...' : 'Continue →'}
-              </button>
-            </div>
+          {parts.length > 0 && (
+            <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 2 }}>
+              {parts.map((part, index) => (
+                <Chip key={part.id} label={`${index + 1}: ${part.preview || '(empty)'}`} />
+              ))}
+            </Box>
           )}
 
-          {/* ═══════════════════════════════════════════════════════════════════ */}
-          {/* STEP 2: Mark Boundaries */}
-          {/* ═══════════════════════════════════════════════════════════════════ */}
-          {step === 2 && (
-            <div className="parser-step-content">
-              {/* Info bar */}
-              <div className="parser-info-bar">
-                <span>📋 <strong>{totalValues} rows</strong> will be parsed with this pattern</span>
-                {actualGroupCount > 1 && (
-                  <span className="parser-info-groups">
-                    🔄 {actualGroupCount} groups per row
-                  </span>
-                )}
-              </div>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+            <Button startIcon={<ArrowBackIcon />} onClick={() => setStep(0)}>Back</Button>
+            <Button variant="contained" endIcon={<ArrowForwardIcon />} onClick={() => setStep(2)} disabled={!parts.length}>
+              Configure outputs
+            </Button>
+          </Box>
+        </Box>
+      )}
 
-              {/* Sample navigation */}
-              <div className="parser-sample-nav">
-                <span>Viewing example {currentSampleIdx + 1} (browse to see more)</span>
-                <div>
-                  <button disabled={currentSampleIdx === 0} onClick={() => setCurrentSampleIdx(i => i - 1)}>←</button>
-                  <button disabled={currentSampleIdx >= sampleValues.length - 1} onClick={() => setCurrentSampleIdx(i => i + 1)}>→</button>
-                </div>
-              </div>
+      {step === 2 && (
+        <Box>
+          <Box sx={{ borderTop: '1px solid #e5e7eb', mb: 2 }}>
+            {parts.map((part, index) => (
+              <Box
+                key={part.id}
+                sx={{ display: 'grid', gridTemplateColumns: 'minmax(140px, 1fr) 160px minmax(180px, 1fr)', gap: 1.5, alignItems: 'center', py: 1.25, borderBottom: '1px solid #e5e7eb' }}
+              >
+                <Typography variant="body2" sx={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {index + 1}. {part.preview || '(empty)'}
+                </Typography>
+                <FormControl size="small">
+                  <InputLabel>Output</InputLabel>
+                  <Select label="Output" value={part.outputType} onChange={event => updatePart(part.id, 'outputType', event.target.value)}>
+                    <MenuItem value="spec">Specification</MenuItem>
+                    <MenuItem value="tag">Tag</MenuItem>
+                  </Select>
+                </FormControl>
+                {part.outputType === 'spec' ? (
+                  <TextField
+                    size="small"
+                    label="Specification name"
+                    value={part.specName}
+                    onChange={event => updatePart(part.id, 'specName', event.target.value)}
+                  />
+                ) : <Box />}
+              </Box>
+            ))}
+          </Box>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+            <Button startIcon={<ArrowBackIcon />} onClick={() => setStep(1)}>Back</Button>
+            <Button variant="contained" startIcon={<ContentCutIcon />} onClick={loadPreview} disabled={loading}>
+              {loading ? 'Preparing...' : 'Preview'}
+            </Button>
+          </Box>
+        </Box>
+      )}
 
-              {/* Separator config (collapsible) */}
-              {actualGroupCount > 1 && (
-                <div className="parser-separator-config">
-                  <label>Group separator:</label>
-                  <div className="parser-separator-chips">
-                    {['),', ',', '|', ';'].map(sep => (
-                      <button
-                        key={sep}
-                        className={`parser-chip ${groupSeparator === sep ? 'active' : ''}`}
-                        onClick={() => setGroupSeparator(sep)}
-                      >
-                        <code>{sep}</code>
-                      </button>
+      {step === 3 && previewData && (
+        <Box>
+          <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 1.5 }}>
+            <Chip label={`${previewData.total_rows || 0} rows`} />
+            <Chip label={`${previewData.preview_headers?.length || 0} output columns`} />
+            {previewData.max_counts?.tags > 0 && <Chip label={`${previewData.max_counts.tags} Tags`} />}
+          </Box>
+          <TableContainer sx={{ maxHeight: 280, border: '1px solid #e5e7eb', mb: 2 }}>
+            <Table size="small" stickyHeader>
+              <TableHead>
+                <TableRow>
+                  {previewData.preview_headers?.map(header => <TableCell key={header}>{header}</TableCell>)}
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {previewData.preview_data?.map((row, rowIndex) => (
+                  <TableRow key={rowIndex}>
+                    {previewData.preview_headers?.map((header, columnIndex) => (
+                      <TableCell key={`${header}-${columnIndex}`}>{row[columnIndex]}</TableCell>
                     ))}
-                    <input
-                      type="text"
-                      className="parser-chip-input"
-                      placeholder="Other"
-                      value={groupSeparator}
-                      onChange={e => setGroupSeparator(e.target.value)}
-                    />
-                  </div>
-                </div>
-              )}
-
-              {/* Main instruction */}
-              <div className="parser-card">
-                <div className="parser-question">
-                  <span className="parser-question-icon">👆</span>
-                  <span>Click on characters to mark where to split</span>
-                </div>
-                <p className="parser-hint">
-                  Only <strong>highlighted characters</strong> appear in ALL rows. Click on them to mark split points.
-                </p>
-
-                {/* Character grid - show first group only */}
-                <div className="parser-char-grid">
-                  {firstGroup.split('').map((char, idx) => {
-                    const isBoundary = boundaries.some(b => b.index === idx);
-                    const isDelimiter = isDelimiterChar(char);
-                    return (
-                      <span
-                        key={idx}
-                        className={`parser-char ${isBoundary ? 'boundary' : ''} ${isDelimiter ? 'delimiter' : ''}`}
-                        onClick={() => handleCharClick(char, idx)}
-                        title={isDelimiter ? `Click to mark "${char}" as split point` : ''}
-                      >
-                        {char === ' ' ? '␣' : char}
-                      </span>
-                    );
-                  })}
-                </div>
-
-                {/* Show marked boundaries */}
-                {boundaries.length > 0 && (
-                  <div className="parser-boundaries-summary">
-                    <span>Split points:</span>
-                    {boundaries.map((b, i) => (
-                      <span key={i} className="parser-boundary-tag">
-                        "{b.char === ' ' ? 'space' : b.char}"
-                        <button onClick={() => handleCharClick(b.char, b.index)}>×</button>
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* Real-time preview of parts */}
-              {parts.length > 0 && (
-                <div className="parser-card parser-parts-preview">
-                  <div className="parser-question">
-                    <span className="parser-question-icon">✂️</span>
-                    <span>This will extract {parts.length} parts:</span>
-                  </div>
-                  <div className="parser-extracted-parts">
-                    {parts.map((part, idx) => (
-                      <div key={part.id} className="parser-extracted-part">
-                        <span className="parser-part-num">{idx + 1}</span>
-                        <span className="parser-part-value">{part.preview || '(empty)'}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              <div className="parser-actions">
-                <button className="parser-btn-secondary" onClick={() => setStep(1)}>← Back</button>
-                <button
-                  className="parser-btn-primary"
-                  onClick={() => setStep(3)}
-                  disabled={parts.length === 0}
-                >
-                  Continue → Label Parts
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* ═══════════════════════════════════════════════════════════════════ */}
-          {/* STEP 3: Label Parts */}
-          {/* ═══════════════════════════════════════════════════════════════════ */}
-          {step === 3 && (
-            <div className="parser-step-content">
-              <div className="parser-question">
-                <span className="parser-question-icon">🏷️</span>
-                <span>Label each extracted part</span>
-              </div>
-              <p className="parser-hint">
-                Choose "Spec Pair" for named data (MPN, Manufacturer) or "Tag" for values only
-              </p>
-
-              <div className="parser-parts-list">
-                {parts.map((part, idx) => (
-                  <div key={part.id} className="parser-part-row">
-                    <div className="parser-part-preview">
-                      <span className="parser-part-num">{idx + 1}</span>
-                      <span className="parser-part-value">{part.preview || '(empty)'}</span>
-                    </div>
-                    <div className="parser-part-config">
-                      <select
-                        value={part.outputType}
-                        onChange={e => updatePart(part.id, 'outputType', e.target.value)}
-                        className="parser-part-select"
-                      >
-                        <option value="spec">Spec Pair</option>
-                        <option value="tag">Tag</option>
-                      </select>
-                      {part.outputType === 'spec' && (
-                        <input
-                          type="text"
-                          placeholder="Name (e.g., MPN)"
-                          value={part.specName}
-                          onChange={e => updatePart(part.id, 'specName', e.target.value)}
-                          className="parser-part-input"
-                        />
-                      )}
-                    </div>
-                  </div>
+                  </TableRow>
                 ))}
-              </div>
-
-              <div className="parser-actions">
-                <button className="parser-btn-secondary" onClick={() => setStep(2)}>← Back</button>
-                <button className="parser-btn-primary" onClick={loadPreview} disabled={loading}>
-                  {loading ? 'Loading...' : 'Preview →'}
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* ═══════════════════════════════════════════════════════════════════ */}
-          {/* STEP 4: Preview & Apply */}
-          {/* ═══════════════════════════════════════════════════════════════════ */}
-          {step === 4 && previewData && (
-            <div className="parser-step-content">
-              <div className="parser-stats-row">
-                <div className="parser-stat-card">
-                  <span className="parser-stat-value">{previewData.total_rows}</span>
-                  <span className="parser-stat-label">Rows</span>
-                </div>
-                <div className="parser-stat-card">
-                  <span className="parser-stat-value">{previewData.preview_headers?.length || 0}</span>
-                  <span className="parser-stat-label">New Columns</span>
-                </div>
-                {previewData.max_counts?.tags > 0 && (
-                  <div className="parser-stat-card">
-                    <span className="parser-stat-value">{previewData.max_counts.tags}</span>
-                    <span className="parser-stat-label">Max Tags</span>
-                  </div>
-                )}
-              </div>
-
-              <div className="parser-preview-table-wrap">
-                <table className="parser-preview-table">
-                  <thead>
-                    <tr>
-                      {previewData.preview_headers?.slice(0, 8).map((h, i) => (
-                        <th key={i}>{h}</th>
-                      ))}
-                      {(previewData.preview_headers?.length || 0) > 8 && (
-                        <th>+{previewData.preview_headers.length - 8} more</th>
-                      )}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {previewData.preview_data?.slice(0, 5).map((row, ri) => (
-                      <tr key={ri}>
-                        {row.slice(0, 8).map((cell, ci) => (
-                          <td key={ci}>{cell?.toString()?.substring(0, 25) || ''}</td>
-                        ))}
-                        {row.length > 8 && <td>...</td>}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-
-              <div className="parser-actions">
-                <button className="parser-btn-secondary" onClick={() => setStep(3)}>← Back</button>
-                <button
-                  className="parser-btn-primary parser-btn-success"
-                  onClick={applyParser}
-                  disabled={loading}
-                >
-                  {loading ? 'Applying...' : '✓ Apply to All Rows'}
-                </button>
-              </div>
-            </div>
-          )}
-
-        </div>
-      </div>
-    </div>
+              </TableBody>
+            </Table>
+          </TableContainer>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+            <Button startIcon={<ArrowBackIcon />} onClick={() => setStep(2)}>Back</Button>
+            <Button variant="contained" color="success" startIcon={loading ? <CircularProgress size={16} /> : <CheckIcon />} onClick={applyParser} disabled={loading}>
+              {loading ? 'Applying...' : 'Apply structured split'}
+            </Button>
+          </Box>
+        </Box>
+      )}
+    </Box>
   );
 };
 
