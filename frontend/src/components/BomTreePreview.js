@@ -8,16 +8,25 @@ import ReactFlow, { Background, Controls } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { Box, Typography, CircularProgress, Button } from '@mui/material';
 import api from '../services/api';
+import { useThemeContext } from '../utils/ThemeContext';
 
 const KIND_STYLE = {
-  root:      { background: '#1e293b', border: '1px solid #0f172a', color: '#ffffff' },
-  fg:        { background: '#ffffff', border: '1px solid #9ca3af', color: '#111827' },
-  sfg:       { background: '#93c5fd', border: '1px solid #3b82f6', color: '#0b3b6f' },
-  ssfg:      { background: '#bbf7d0', border: '1px solid #22c55e', color: '#14532d' },
-  component: { background: '#fde047', border: '1px solid #eab308', color: '#713f12' },
-  alternate: { background: '#d1d5db', border: '1px solid #9ca3af', color: '#374151' },
-  more:      { background: '#f1f5f9', border: '1px dashed #94a3b8', color: '#475569' },
+  root:      { background: '#172554', border: '1px solid #60a5fa', color: '#dbeafe' },
+  fg:        { background: '#2563eb', border: '1px solid #93c5fd', color: '#ffffff' },
+  sfg:       { background: '#0891b2', border: '1px solid #67e8f9', color: '#ecfeff' },
+  ssfg:      { background: '#16a34a', border: '1px solid #86efac', color: '#f0fdf4' },
+  component: { background: '#f59e0b', border: '1px solid #fde68a', color: '#111827' },
+  alternate: { background: '#8b5cf6', border: '1px solid #c4b5fd', color: '#ffffff' },
+  more:      { background: '#334155', border: '1px dashed #94a3b8', color: '#e2e8f0' },
 };
+
+const LEGEND_ITEMS = [
+  ['#2563eb', 'Finished good'],
+  ['#0891b2', 'Sub-assembly'],
+  ['#16a34a', 'Sub-sub-assembly'],
+  ['#f59e0b', 'Raw material'],
+  ['#8b5cf6', 'Alternate'],
+];
 
 const NODE_W = 200;
 const H_GAP = 26;
@@ -118,7 +127,7 @@ function getTreeStats(node, depth = 0) {
   });
 }
 
-function layout(root, expanded) {
+function layout(root, expanded, isDarkMode) {
   const nodes = [];
   const edges = [];
   let nextLeaf = 0;
@@ -148,7 +157,15 @@ function layout(root, expanded) {
       sourcePosition: 'bottom',
       targetPosition: 'top',
     });
-    if (parentId) edges.push({ id: `${parentId}-${node.id}`, source: parentId, target: node.id, type: 'smoothstep' });
+    if (parentId) {
+      edges.push({
+        id: `${parentId}-${node.id}`,
+        source: parentId,
+        target: node.id,
+        type: 'smoothstep',
+        style: { stroke: isDarkMode ? '#64748b' : '#94a3b8', strokeWidth: 1.5 },
+      });
+    }
     return x;
   }
   walk(root, 0, null);
@@ -156,6 +173,7 @@ function layout(root, expanded) {
 }
 
 export default function BomTreePreview({ sessionId, height = 460, fullscreen = false, onRequestFullscreen }) {
+  const { isDarkMode, tokens: t } = useThemeContext();
   const [tree, setTree] = useState(null);
   const [meta, setMeta] = useState({});
   const [loading, setLoading] = useState(true);
@@ -191,7 +209,7 @@ export default function BomTreePreview({ sessionId, height = 460, fullscreen = f
   }, [tree, fullscreen]);
 
   const treeStats = useMemo(() => getTreeStats(displayTree), [displayTree]);
-  const shouldSuggestFullscreen = !fullscreen && (
+  const shouldSuggestFullscreen = false && !fullscreen && (
     treeStats.totalNodes > 28 ||
     treeStats.maxDepth > 4 ||
     treeStats.moreGroups > 0 ||
@@ -205,8 +223,8 @@ export default function BomTreePreview({ sessionId, height = 460, fullscreen = f
   }, [displayTree, fullscreen]);
 
   const { nodes, edges } = useMemo(
-    () => (displayTree ? layout(displayTree, expanded) : { nodes: [], edges: [] }),
-    [displayTree, expanded],
+    () => (displayTree ? layout(displayTree, expanded, isDarkMode) : { nodes: [], edges: [] }),
+    [displayTree, expanded, isDarkMode],
   );
 
   useEffect(() => {
@@ -235,7 +253,7 @@ export default function BomTreePreview({ sessionId, height = 460, fullscreen = f
   }
   return (
     <Box>
-      <Box sx={{ display: 'flex', gap: 1, mb: 1, alignItems: 'center', flexWrap: 'wrap' }}>
+      <Box sx={{ display: 'none' }}>
         <Typography variant="caption" color="text.secondary">
           {fullscreen ? 'Click a box to expand / collapse. Scroll to zoom, drag to pan.' : 'High-level view — open full screen to drill into every raw material.'}
         </Typography>
@@ -251,23 +269,55 @@ export default function BomTreePreview({ sessionId, height = 460, fullscreen = f
           alignItems: 'center',
           gap: 1,
           mb: 1,
-          px: 1,
-          py: 0.75,
-          border: '1px solid #bfdbfe',
+          px: 1.25,
+          py: 0.5,
+          border: `1px solid ${isDarkMode ? 'rgba(96, 165, 250, 0.34)' : '#bfdbfe'}`,
           borderRadius: 1,
-          bgcolor: '#eff6ff'
+          bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.14)' : '#eff6ff'
         }}>
-          <Typography variant="caption" sx={{ color: '#1d4ed8', fontWeight: 600 }}>
-            Large BOM detected. Full screen is easier for this tree.
+          <Typography variant="caption" sx={{ color: isDarkMode ? '#bfdbfe' : '#1d4ed8', fontWeight: 600 }}>
+            Large BOM
           </Typography>
           {onRequestFullscreen ? (
-            <Button size="small" onClick={onRequestFullscreen} sx={{ minWidth: 0, px: 1, py: 0.25, fontSize: 11, fontWeight: 700 }}>
+            <Button
+              size="small"
+              onClick={onRequestFullscreen}
+              sx={{
+                minWidth: 0,
+                px: 1,
+                py: 0.25,
+                fontSize: 11,
+                fontWeight: 700,
+                color: isDarkMode ? '#93c5fd' : '#1d4ed8',
+                '&:hover': { bgcolor: isDarkMode ? 'rgba(96, 165, 250, 0.16)' : '#dbeafe' }
+              }}
+            >
               Full screen
             </Button>
           ) : null}
         </Box>
       ) : null}
-      <Box sx={{ height, border: '1px solid #e5e7eb', borderRadius: 2, bgcolor: '#fafafa' }}>
+      <Box sx={{
+        height,
+        border: `1px solid ${isDarkMode ? 'rgba(148, 163, 184, 0.22)' : '#e5e7eb'}`,
+        borderRadius: 2,
+        bgcolor: isDarkMode ? '#080d18' : '#fafafa',
+        overflow: 'hidden',
+        '& .react-flow__controls': {
+          border: `1px solid ${isDarkMode ? 'rgba(148, 163, 184, 0.18)' : '#dbe4ef'}`,
+          boxShadow: isDarkMode ? '0 12px 28px rgba(0,0,0,0.35)' : '0 6px 18px rgba(15,23,42,0.12)',
+        },
+        '& .react-flow__controls-button': {
+          backgroundColor: isDarkMode ? '#111827' : '#ffffff',
+          color: isDarkMode ? '#dbeafe' : '#1e293b',
+          borderBottom: `1px solid ${isDarkMode ? 'rgba(148, 163, 184, 0.18)' : '#e5e7eb'}`,
+          '& svg, & path': {
+            fill: 'currentColor',
+            stroke: 'currentColor',
+          },
+          '&:hover': { backgroundColor: isDarkMode ? '#172033' : '#eff6ff' },
+        },
+      }}>
         <ReactFlow
           nodes={nodes}
           edges={edges}
@@ -280,15 +330,22 @@ export default function BomTreePreview({ sessionId, height = 460, fullscreen = f
           nodesConnectable={false}
           proOptions={{ hideAttribution: true }}
         >
-          <Background gap={16} color="#e5e7eb" />
+          <Background gap={18} color={isDarkMode ? '#1f2a3d' : '#e5e7eb'} />
           <Controls showInteractive={false} />
         </ReactFlow>
       </Box>
       <Box sx={{ display: 'flex', gap: 2, mt: 1, flexWrap: 'wrap', alignItems: 'center' }}>
-        {[['#ffffff', 'Finished good'], ['#93c5fd', 'Sub-assembly'], ['#bbf7d0', 'Sub-sub-assembly'], ['#fde047', 'Raw material'], ['#d1d5db', 'Alternate']].map(([c, label]) => (
+        {LEGEND_ITEMS.map(([c, label]) => (
           <Box key={label} sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-            <Box sx={{ width: 12, height: 12, bgcolor: c, border: '1px solid #9ca3af', borderRadius: 0.5 }} />
-            <Typography variant="caption" color="text.secondary">{label}</Typography>
+            <Box sx={{
+              width: 12,
+              height: 12,
+              bgcolor: c,
+              border: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.34)' : '#9ca3af'}`,
+              borderRadius: 0.5,
+              boxShadow: isDarkMode ? '0 0 0 1px rgba(0,0,0,0.2)' : 'none',
+            }} />
+            <Typography variant="caption" sx={{ color: t.text.secondary }}>{label}</Typography>
           </Box>
         ))}
       </Box>

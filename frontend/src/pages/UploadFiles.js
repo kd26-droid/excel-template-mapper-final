@@ -638,6 +638,16 @@ const UploadFiles = () => {
       boxShadow: 'none'
     }
   };
+  const secondaryPillSx = {
+    ...pillButtonSx,
+    color: Nn.text,
+    borderColor: Nn.divider,
+    bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.7)' : '#ffffff',
+    '&:hover': {
+      borderColor: Nn.accent,
+      bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff'
+    }
+  };
   const dialogChoiceCardSx = {
     borderRadius: '16px',
     border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.18)' : '1px solid #e2e8f0',
@@ -3147,8 +3157,8 @@ const UploadFiles = () => {
           zIndex: 1,
           width: wizardStep === 0
             ? 'min(920px, calc(100vw - 32px))'
-            : 'min(1100px, calc(100vw - 32px))',
-          minHeight: wizardStep === 0 ? '580px' : 'auto',
+            : 'min(900px, calc(100vw - 32px))',
+          minHeight: wizardStep === 0 ? '580px' : { xs: '390px', md: '420px' },
           borderRadius: '22px',
           border: `1px solid ${Nn.cardBorder}`,
           background: Nn.cardBg,
@@ -3158,7 +3168,7 @@ const UploadFiles = () => {
           p: { xs: 2.5, md: 3.5 },
           display: 'flex',
           flexDirection: 'column',
-          justifyContent: 'space-between'
+          justifyContent: wizardStep === 0 ? 'space-between' : 'flex-start'
         }}
       >
         {/* Top Header & Progress */}
@@ -3643,10 +3653,10 @@ const UploadFiles = () => {
 
         {/* STEP 2: Choose Options (Mapping Template + Tag Template) */}
         {wizardStep === 1 && (
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, minHeight: { xs: 270, md: 295 }, justifyContent: 'flex-start' }}>
             <Grid container spacing={2.5}>
               <Grid item xs={12}>
-                <Box sx={{ p: 2, borderRadius: '14px', border: `1px solid ${Nn.divider}`, bgcolor: Nn.subtlePanelBg }}>
+                <Box sx={{ p: { xs: 2, md: 2.25 }, borderRadius: '14px', border: `1px solid ${Nn.divider}`, bgcolor: Nn.subtlePanelBg, minHeight: { xs: 135, md: 148 } }}>
                   <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2, flexWrap: 'wrap', mb: 1.5 }}>
                     <Box>
                       <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 800, mb: 0.35 }}>
@@ -3721,7 +3731,7 @@ const UploadFiles = () => {
                     />
                   )}
 
-                  <FormControl fullWidth size="small" sx={{ mt: 1.5 }} disabled={processingTemplatesLoading}>
+                  <FormControl fullWidth sx={{ mt: 1.75 }} disabled={processingTemplatesLoading}>
                       <InputLabel sx={{ color: Nn.muted }}>Use Template</InputLabel>
                       <Select
                         value={selectedProcessingTemplateId}
@@ -3734,7 +3744,7 @@ const UploadFiles = () => {
                           }
                         }}
                         MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
-                        sx={{ borderRadius: '8px' }}
+                        sx={{ borderRadius: '8px', minHeight: 42 }}
                       >
                         {processingTemplates.map(template => (
                           <MenuItem key={template.id} value={String(template.id)}>
@@ -3904,8 +3914,8 @@ const UploadFiles = () => {
             </Grid>
 
             {/* Step 2 Bottom Action Bar */}
-            <Box sx={{ mt: 0.5, pt: 2, borderTop: `1px solid ${Nn.divider}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-              <Button variant="outlined" onClick={() => setWizardStep(0)} sx={{ borderRadius: '10px', textTransform: 'none', color: Nn.text, borderColor: Nn.divider }}>
+            <Box sx={{ mt: 'auto', pt: 2.25, borderTop: `1px solid ${Nn.divider}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <Button variant="outlined" onClick={() => setWizardStep(0)} sx={secondaryPillSx}>
                 ← Back
               </Button>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
@@ -3990,7 +4000,7 @@ const UploadFiles = () => {
               setNewTemplateDialogOpen(false);
               setPendingTemplateAction(null);
             }}
-            sx={{ borderRadius: '10px', textTransform: 'none' }}
+            sx={secondaryPillSx}
           >
             Cancel
           </Button>
