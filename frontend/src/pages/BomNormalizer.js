@@ -86,6 +86,78 @@ const fmt = (value) => {
 
 const normalizeKey = (value) => fmt(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
+const compactHeaderKey = (value) => normalizeKey(value).replace(/\s+/g, '');
+
+const headerSimilarityScore = (left, right) => {
+  const leftKey = compactHeaderKey(left);
+  const rightKey = compactHeaderKey(right);
+  if (!leftKey || !rightKey) return 0;
+  if (leftKey === rightKey) return 100;
+  if (leftKey.includes(rightKey) || rightKey.includes(leftKey)) return 88;
+
+  const leftWords = new Set(normalizeKey(left).split(/\s+/).filter(Boolean));
+  const rightWords = new Set(normalizeKey(right).split(/\s+/).filter(Boolean));
+  const overlap = [...leftWords].filter((word) => rightWords.has(word)).length;
+  if (overlap && (overlap / Math.max(leftWords.size, rightWords.size)) >= 0.65) return 84;
+
+  const maxLength = Math.max(leftKey.length, rightKey.length);
+  let samePrefix = 0;
+  while (samePrefix < maxLength && leftKey[samePrefix] === rightKey[samePrefix]) samePrefix += 1;
+  return Math.round((samePrefix / maxLength) * 70);
+};
+
+const resolveSavedHeader = (savedHeader, currentHeaders = [], threshold = 80) => {
+  if (!savedHeader) return '';
+  if (currentHeaders.includes(savedHeader)) return savedHeader;
+
+  let bestHeader = '';
+  let bestScore = 0;
+  currentHeaders.forEach((header) => {
+    const score = headerSimilarityScore(savedHeader, header);
+    if (score > bestScore) {
+      bestHeader = header;
+      bestScore = score;
+    }
+  });
+  return bestScore >= threshold ? bestHeader : '';
+};
+
+const resolveSavedRoleMap = (savedRoles = {}, currentHeaders = []) => (
+  Object.keys(emptyRoles).reduce((acc, key) => {
+    acc[key] = resolveSavedHeader(savedRoles[key], currentHeaders);
+    return acc;
+  }, {})
+);
+
+const resolveSavedAlternateGroups = (groups = [], currentHeaders = []) => (
+  (Array.isArray(groups) ? groups : [])
+    .map((group) => ({
+      ...group,
+      mpn: resolveSavedHeader(group?.mpn, currentHeaders),
+      mfr: resolveSavedHeader(group?.mfr, currentHeaders),
+      qty: resolveSavedHeader(group?.qty, currentHeaders),
+      uom: resolveSavedHeader(group?.uom, currentHeaders),
+    }))
+    .filter((group) => group.mpn || group.mfr)
+);
+
+const getProcessingTemplateMappingId = (template = {}) => {
+  const metadataId = template?.metadata?.mapping_template_id;
+  if (metadataId) return metadataId;
+  const stage = Array.isArray(template?.stages)
+    ? template.stages.find((item) => item?.type === 'mapping_template' && item?.mapping_template_id)
+    : null;
+  return stage?.mapping_template_id || null;
+};
+
+const getProcessingTemplateNormalizerWorkflow = (template = {}) => {
+  if (template?.metadata?.normalizer_workflow) return template.metadata.normalizer_workflow;
+  const stage = Array.isArray(template?.stages)
+    ? template.stages.find((item) => item?.type === 'bom_normalizer' && item?.workflow)
+    : null;
+  return stage?.workflow || null;
+};
+
 const getSnapshotRowCount = (snapshot) => (
   Array.isArray(snapshot?.normalizedRows) ? snapshot.normalizedRows.length : 0
 );
@@ -467,6 +539,47 @@ const parseColonSegments = (value) => {
   }).filter((segment) => segment.label || segment.rawValue);
 };
 
+const extractPackedMetadata = (value) => {
+  const metadata = {};
+  const text = fmt(value).replace(/\(([^()=]+)=([^()]*)\)/g, (_, key, rawValue) => {
+    const cleanKey = fmt(key);
+    if (cleanKey) metadata[cleanKey] = fmt(rawValue);
+    return ' ';
+  });
+  return {
+    text: fmt(text).replace(/\s+/g, ' '),
+    metadata,
+  };
+};
+
+const parsePackedMpnManufacturerPairs = (value, config = {}) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ');
+  if (!text || !text.includes(':')) return [];
+
+  const delimiter = selectedDelimiter(config);
+  const candidates = splitByExplicitDelimiter(text, delimiter);
+  const parts = candidates.length > 1 ? candidates : splitDelimited(text);
+  if (!parts.length) return [];
+
+  const parsed = parts.map((part) => {
+    const colonIndex = part.indexOf(':');
+    if (colonIndex <= 0) return null;
+
+    const left = fmt(part.slice(0, colonIndex));
+    const rightRaw = fmt(part.slice(colonIndex + 1));
+    const { text: manufacturer, metadata } = extractPackedMetadata(rightRaw);
+    if (!looksLikeMpnToken(left) || !manufacturer) return null;
+
+    return {
+      mpn: stripVendorPrefix(left),
+      manufacturer,
+      metadata,
+    };
+  }).filter(Boolean);
+
+  return parsed.length >= 1 && parsed.length === parts.length ? parsed : [];
+};
+
 const splitManufacturerCell = (value, expectedCount, config = {}) => {
   const text = fmt(value).replace(/\u00a0/g, ' ');
   if (!text) return [];
@@ -670,12 +783,35 @@ const normalizeSameCell = (rows, roles, config) => {
   rows.forEach((row, rowIndex) => {
     const sourceRow = row.__sourceRow || rowIndex + 1;
     const sourceText = getCell(row, roles.mpn) || getCell(row, roles.manufacturer);
+    const packedPairs = parsePackedMpnManufacturerPairs(sourceText, config);
     const segments = parseColonSegments(sourceText);
     const quantity = getCell(row, roles.quantity);
     const uom = getCell(row, roles.uom);
     const parentKey = getCell(row, roles.parent) || getCell(row, roles.description) || `Source row ${sourceRow}`;
     const level = getCell(row, roles.level) || '1';
     const cpn = getCell(row, roles.cpn);
+
+    if (packedPairs.length) {
+      packedPairs.forEach((pair, partIndex) => {
+        output.push(withSourceColumns({
+          sourceRow,
+          parentKey,
+          relation: partIndex === 0 ? 'Primary' : `Alternate ${partIndex}`,
+          level,
+          cpn,
+          description: getCell(row, roles.description),
+          mpn: pair.mpn,
+          manufacturer: pair.manufacturer,
+          quantity,
+          uom,
+          rule: 'same_cell_packed_mpn_manufacturer',
+          confidence: Math.min(confidenceForRow(pair.mpn, pair.manufacturer, 'colon') + 8, 98),
+          discardedText: '',
+          ...pair.metadata,
+        }, row, config));
+      });
+      return;
+    }
 
     if (!segments.length) {
       splitMpnCell(sourceText, config).forEach((mpn, partIndex) => {
@@ -2091,6 +2227,7 @@ const BomNormalizer = () => {
   const [error, setError] = useState('');
   const initialFileSeededRef = useRef('');
   const restoredReturnSnapshotRef = useRef('');
+  const autoReplayTemplateRef = useRef('');
 
   const headers = useMemo(
     () => preparedHeaders.length ? preparedHeaders : makeUniqueHeaders(sheetRows[headerRowIndex] || []),
@@ -2262,6 +2399,52 @@ const BomNormalizer = () => {
     selectedSheetNames,
     sheetName,
     sheetRows,
+    sheetScope,
+    tagConfig,
+  ]);
+
+  const buildNormalizerWorkflowRecipe = useCallback((kind = 'normalized-results', rowsOverride = normalizedRows) => {
+    const tagTarget = tagConfig.targetColumn || getNextTagColumn(rowsOverride);
+    const hasFactwiseValues = rowsOverride.some((row) => fmt(row['Item code'] || row.itemCode));
+    const hasTagValues = rowsOverride.some((row) => fmt(row[tagTarget]));
+
+    return {
+      version: 1,
+      kind,
+      roles,
+      config,
+      factwiseConfig,
+      tagConfig,
+      actions: {
+        factwiseId: hasFactwiseValues,
+        tagColumn: hasTagValues,
+      },
+      sourceHints: {
+        fileName,
+        sheetName,
+        sheetScope,
+        selectedSheetNames,
+        headerRowIndex,
+      },
+      outputColumns: getNormalizedExportColumns(rowsOverride),
+      ...(kind === 'merge-preview' ? {
+        mergeConfig,
+        mergeVisibleColumns,
+        mergePreviewFilter,
+      } : {}),
+    };
+  }, [
+    config,
+    factwiseConfig,
+    fileName,
+    headerRowIndex,
+    mergeConfig,
+    mergePreviewFilter,
+    mergeVisibleColumns,
+    normalizedRows,
+    roles,
+    selectedSheetNames,
+    sheetName,
     sheetScope,
     tagConfig,
   ]);
@@ -2768,6 +2951,109 @@ const BomNormalizer = () => {
     seedInitialFileAsSource();
   }, [handleWorkbookLoaded, location.pathname, location.state, navigate, parseFilesForCombine]);
 
+  useEffect(() => {
+    const state = location.state || {};
+    const processingTemplate = state.autoReplayProcessingTemplate;
+    const workflow = getProcessingTemplateNormalizerWorkflow(processingTemplate);
+    const mappingTemplateId = state.autoReplayMappingTemplateId || getProcessingTemplateMappingId(processingTemplate);
+    const replayKey = processingTemplate?.id
+      ? `${processingTemplate.id}:${fileName}:${preparedHeaders.join('|')}:${preparedDataRows.length}`
+      : '';
+
+    if (!processingTemplate || !workflow || !mappingTemplateId || autoReplayTemplateRef.current === replayKey) return;
+    if (!workbook || !preparedHeaders.length || !preparedDataRows.length || !replayKey) return;
+
+    autoReplayTemplateRef.current = replayKey;
+
+    const runTemplateReplay = async () => {
+      setBusy(true);
+      setError('');
+      setSuccessMessage(`Applying template "${processingTemplate.name || 'selected template'}"...`);
+
+      try {
+        if (workflow.kind === 'merge-preview') {
+          throw new Error('This workflow template includes a merge setup. Recreate the merge once, then save the template again after normalization.');
+        }
+
+        const resolvedRoles = resolveSavedRoleMap(workflow.roles || {}, preparedHeaders);
+        const resolvedConfig = {
+          ...config,
+          ...(workflow.config || {}),
+          alternateColumnGroups: resolveSavedAlternateGroups(workflow.config?.alternateColumnGroups || [], preparedHeaders),
+        };
+
+        if (!resolvedRoles.mpn && !resolvedRoles.manufacturer) {
+          throw new Error('This template could not match the saved MPN or manufacturer columns on the uploaded file.');
+        }
+
+        setRoles(resolvedRoles);
+        setConfig(resolvedConfig);
+        if (workflow.factwiseConfig) setFactwiseConfig((prev) => ({ ...prev, ...workflow.factwiseConfig }));
+        if (workflow.tagConfig) setTagConfig((prev) => ({ ...prev, ...workflow.tagConfig }));
+
+        let replayRows = await normalizeRowsChunked(preparedDataRows, preparedHeaders, resolvedRoles, resolvedConfig, setProgress);
+        if (workflow.actions?.factwiseId) {
+          replayRows = createFactwiseIds(replayRows, workflow.factwiseConfig || {});
+        }
+        if (workflow.actions?.tagColumn) {
+          replayRows = createTagColumn(replayRows, workflow.tagConfig || {});
+        }
+
+        if (!replayRows.length) {
+          throw new Error('The template ran, but no normalized rows were produced from this upload.');
+        }
+
+        const columns = getNormalizedExportColumns(replayRows);
+        const rows = replayRows.map((row) => {
+          const output = {};
+          columns.forEach((column) => {
+            output[column] = row[column] || '';
+          });
+          return output;
+        });
+        const file = createWorkbookFileFromRows(rows, columns, 'template-replayed-bom.xlsx', 'Normalized BOM');
+        const formData = new FormData();
+        formData.append('clientFile', file);
+        formData.append('sheetName', 'Normalized BOM');
+        formData.append('headerRow', '1');
+
+        const response = await api.uploadFilesWithTemplate(formData, mappingTemplateId);
+        if (!response.data?.template_applied || !response.data?.template_success) {
+          throw new Error(response.data?.message || 'The saved mapping could not be applied after normalization.');
+        }
+
+        navigate(`/editor/${response.data.session_id}`, {
+          state: {
+            fromUpload: true,
+            templateAlreadyApplied: true,
+            appliedProcessingTemplate: processingTemplate,
+            uploadSource: {
+              ...(state.uploadSource || {}),
+              processingTemplateMode: 'use',
+              selectedProcessingTemplate: processingTemplate,
+              selectedProcessingTemplateId: processingTemplate.id,
+              processingPath: 'normalize',
+            },
+          },
+        });
+      } catch (err) {
+        setError(err.response?.data?.error || err.message || 'Could not apply the selected workflow template.');
+      } finally {
+        setBusy(false);
+      }
+    };
+
+    runTemplateReplay();
+  }, [
+    config,
+    fileName,
+    location.state,
+    navigate,
+    preparedDataRows,
+    preparedHeaders,
+    workbook,
+  ]);
+
   const handleCombineFilesChange = useCallback(async (event) => {
     const files = Array.from(event.target.files || []);
     if (!files.length) return;
@@ -3206,7 +3492,11 @@ const BomNormalizer = () => {
             fromUpload: true,
             fromBomNormalizer: true,
             normalizerSuggestedMappings: suggestedMappings,
-            uploadSource: location.state?.uploadSource,
+            uploadSource: location.state?.uploadSource ? {
+              ...location.state.uploadSource,
+              processingPath: 'normalize',
+              normalizerWorkflow: buildNormalizerWorkflowRecipe('normalized-results', normalizedRows),
+            } : null,
             mappingBackState: {
               route: '/bom-normalizer',
               bomNormalizerReturnKey: returnSnapshotKey,
@@ -3222,6 +3512,7 @@ const BomNormalizer = () => {
       .finally(() => setBusy(false));
   }, [
     buildNormalizedResultsSnapshot,
+    buildNormalizerWorkflowRecipe,
     config,
     factwiseConfig,
     fileName,
@@ -3269,7 +3560,11 @@ const BomNormalizer = () => {
             fromUpload: true,
             fromBomNormalizer: true,
             normalizerSuggestedMappings: suggestedMappings,
-            uploadSource: location.state?.uploadSource,
+            uploadSource: location.state?.uploadSource ? {
+              ...location.state.uploadSource,
+              processingPath: 'normalize',
+              normalizerWorkflow: buildNormalizerWorkflowRecipe('merge-preview', rows),
+            } : null,
             mappingBackState: {
               route: '/bom-normalizer',
               bomNormalizerReturnKey: returnSnapshotKey,
@@ -3281,7 +3576,7 @@ const BomNormalizer = () => {
         setCombineError(err.response?.data?.error || err.message || 'Could not continue to BOM Mapping.');
       })
       .finally(() => setBusy(false));
-  }, [location.state, mergePreview, mergePreviewFilter, mergeVisibleColumns, navigate, saveReturnSnapshot]);
+  }, [buildNormalizerWorkflowRecipe, location.state, mergePreview, mergePreviewFilter, mergeVisibleColumns, navigate, saveReturnSnapshot]);
 
   const handleBackFromConfigure = useCallback(() => {
     if (skipSourceSetupForMerge && mergePreview) {

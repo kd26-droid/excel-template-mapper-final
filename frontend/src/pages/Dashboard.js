@@ -41,7 +41,6 @@ import {
   Refresh as RefreshIcon,
   Clear as ClearIcon,
   Science as ScienceIcon,
-  Code as CodeIcon,
   ExpandMore as ExpandMoreIcon,
   ExpandLess as ExpandLessIcon,
   GetApp as GetAppIcon
@@ -861,36 +860,7 @@ const Dashboard = () => {
               BOM Mapper Workbench
             </Typography>
           </Box>
-          <Box sx={{ display: 'flex', gap: 1.5, alignItems: 'center' }}>
-            <Button
-              variant="outlined"
-              size="small"
-              startIcon={<CodeIcon sx={{ fontSize: 16 }} />}
-              onClick={() => setShowFormulaModal(true)}
-              sx={{
-                height: 38,
-                px: 2.2,
-                borderRadius: '9px',
-                borderColor: Ze.border,
-                color: Ze.text,
-                bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.04)' : '#ffffff',
-                backdropFilter: 'blur(10px)',
-                fontWeight: 600,
-                fontSize: '13px',
-                textTransform: 'none',
-                boxShadow: isDarkMode ? 'inset 0 1px 0 rgba(255, 255, 255, 0.08)' : '0 8px 20px rgba(15,23,42,0.08)',
-                transition: 'all 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
-                '&:hover': {
-                  borderColor: '#06b6d4',
-                  bgcolor: 'rgba(6, 182, 212, 0.12)',
-                  color: '#38bdf8',
-                  transform: 'translateY(-1.5px)'
-                }
-              }}
-            >
-              New Formula Template
-            </Button>
-          </Box>
+          <Box />
         </Box>
 
         {/* Quick Metrics & Top 3 Leaderboard */}
