@@ -6,9 +6,11 @@ Optimized for smooth Excel to Excel mapping functionality.
 import os
 import uuid
 import logging
+import math
 from pathlib import Path
 from datetime import datetime, timedelta, timezone as datetime_timezone
 from typing import Dict, Any, Optional
+import unicodedata
 
 import pandas as pd
 from django.conf import settings
@@ -1896,7 +1898,23 @@ def apply_sheet_join(request):
             unique_id_detail_column = detail_columns[0] if detail_columns else detail_key
 
         def norm_key(value):
-            return str(value or '').replace('\u00a0', ' ').strip().lower()
+            if value is None:
+                return ''
+            try:
+                if pd.isna(value):
+                    return ''
+            except Exception:
+                pass
+            if isinstance(value, float) and math.isfinite(value) and value.is_integer():
+                value = int(value)
+            text = unicodedata.normalize('NFKC', str(value))
+            text = re.sub(r'[\u200B-\u200D\uFEFF]', '', text)
+            text = text.replace('\u00a0', ' ')
+            text = re.sub(r'[‐‑‒–—−]', '-', text)
+            text = re.sub(r"^'", '', text)
+            text = re.sub(r'\.0+$', '', text)
+            text = re.sub(r'\s+', ' ', text)
+            return text.strip().lower()
 
         def clean_value(value):
             if pd.isna(value):

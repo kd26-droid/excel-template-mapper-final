@@ -115,6 +115,101 @@ const SMART_EXPAND_STEPS = [
   'Preparing a plan…',
 ];
 
+const COLUMN_PROVIDER_MAPPINGS_KEY = 'mpn_column_provider_mappings';
+const PROVIDER_LABELS = {
+  digikey: 'DigiKey',
+  mouser: 'Mouser',
+  element14: 'Element14'
+};
+const DEFAULT_VALIDATION_COLUMN_MAPPINGS = [
+  { column: 'MPN valid', providers: ['digikey'] },
+  { column: 'MPN Status', providers: ['digikey'] },
+  { column: 'EOL Status', providers: ['digikey'] },
+  { column: 'Discontinued', providers: ['digikey'] },
+  { column: 'DKPN', providers: ['digikey'] },
+  { column: 'Canonical MPN', providers: ['digikey'] },
+  { column: 'Category', providers: ['digikey'] },
+];
+const VALIDATION_PROVIDER_COLUMN_MAP = {
+  'MPN valid': {
+    digikey: 'MPN valid (DigiKey)',
+    mouser: 'MPN valid (Mouser)',
+    element14: 'MPN valid (Element14)',
+  },
+  'MPN Status': {
+    digikey: 'DigiKey Status',
+    mouser: 'Mouser Status',
+    element14: 'Element14 Status',
+  },
+  'EOL Status': {
+    digikey: 'DigiKey EOL Status',
+    mouser: 'Mouser Status',
+    element14: 'Element14 Status',
+  },
+  'Discontinued': {
+    digikey: 'DigiKey Discontinued',
+    mouser: 'Mouser Status',
+    element14: 'Element14 Status',
+  },
+  'DKPN': {
+    digikey: 'DigiKey Part Number',
+    mouser: 'MPNR',
+    element14: 'Element14 Part Number',
+  },
+  'Canonical MPN': {
+    digikey: 'DigiKey Canonical MPN',
+    mouser: 'Mouser Canonical MPN',
+    element14: 'Element14 Canonical MPN',
+  },
+  'Category': {
+    digikey: 'DigiKey Category',
+    mouser: 'Mouser Category',
+    element14: 'Element14 Category',
+  },
+};
+
+const normalizeValidationProviders = (providers, fallback = []) => {
+  const allowed = new Set(Object.keys(PROVIDER_LABELS));
+  const raw = Array.isArray(providers) ? providers : (providers ? [providers] : fallback);
+  const selected = raw.map(provider => String(provider || '').toLowerCase()).filter(provider => allowed.has(provider));
+  return selected.length ? Array.from(new Set(selected)) : fallback;
+};
+
+const getColumnProviderMappingsFromStorage = () => {
+  if (typeof window === 'undefined') return DEFAULT_VALIDATION_COLUMN_MAPPINGS;
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(COLUMN_PROVIDER_MAPPINGS_KEY) || '[]');
+    if (!Array.isArray(saved) || saved.length === 0) return DEFAULT_VALIDATION_COLUMN_MAPPINGS;
+    const savedByColumn = new Map(saved.map(mapping => [mapping.column, mapping]));
+    return DEFAULT_VALIDATION_COLUMN_MAPPINGS.map(mapping => {
+      const savedMapping = savedByColumn.get(mapping.column);
+      return {
+        column: mapping.column,
+        providers: normalizeValidationProviders(savedMapping?.providers || savedMapping?.provider, mapping.providers)
+      };
+    });
+  } catch (_) {
+    return DEFAULT_VALIDATION_COLUMN_MAPPINGS;
+  }
+};
+
+const getConfiguredMpnValidationColumns = () => {
+  const selectedColumns = [];
+  const labelsByField = {};
+  const seen = new Set();
+  getColumnProviderMappingsFromStorage().forEach(mapping => {
+    const providerColumns = VALIDATION_PROVIDER_COLUMN_MAP[mapping.column] || {};
+    normalizeValidationProviders(mapping.providers).forEach(provider => {
+      const field = providerColumns[provider];
+      if (!field || seen.has(field)) return;
+      seen.add(field);
+      selectedColumns.push(field);
+      labelsByField[field] = `${mapping.column} (By ${PROVIDER_LABELS[provider]})`;
+    });
+  });
+  return { selectedColumns, labelsByField };
+};
+
 // Turn an internal column name into the header shown in the grid.
 // Known template groups collapse to a single label (Tag_1..N -> "Tag"), and any
 // other split-generated run (e.g. "Reference Designator_1".."_33") collapses to
@@ -169,6 +264,19 @@ const EnhancedDataEditor = () => {
   const synchronizer = useRef(null);
   const scrollContainerRef = useRef(null);
   const [mousePos, setMousePos] = useState({ x: 50, y: 50 });
+  const processingTemplateContext = useMemo(() => {
+    if (location.state?.uploadSource) return location.state.uploadSource;
+    try {
+      const raw = sessionStorage.getItem(`processingTemplateContext_${sessionId}`);
+      return raw ? JSON.parse(raw) : null;
+    } catch (_) {
+      return null;
+    }
+  }, [location.state, sessionId]);
+  const processingTemplateMode = processingTemplateContext?.processingTemplateMode || '';
+  const processingTemplateName = String(processingTemplateContext?.processingTemplateName || '').trim();
+  const isExistingProcessingTemplate = processingTemplateMode === 'use' || Boolean(processingTemplateContext?.selectedProcessingTemplateId);
+  const isNewProcessingTemplate = processingTemplateMode === 'new' && Boolean(processingTemplateName);
 
   // ─── STATE MANAGEMENT ───────────────────────────────────────────────────────
   const [loading, setLoading] = useState(true);
@@ -223,6 +331,7 @@ const EnhancedDataEditor = () => {
   const [templateSaveDialogOpen, setTemplateSaveDialogOpen] = useState(false);
   const [templateName, setTemplateName] = useState('');
   const [templateSaving, setTemplateSaving] = useState(false);
+  const [templateSaved, setTemplateSaved] = useState(false);
 
   // Template selection for applying existing templates
   const [templateChooseDialogOpen, setTemplateChooseDialogOpen] = useState(false);
@@ -530,18 +639,40 @@ const EnhancedDataEditor = () => {
   const getVisibleColumnDefs = useCallback(() => {
     if (!columnDefs || !Array.isArray(columnDefs)) return [];
 
-    return columnDefs.filter(col => {
+    const { selectedColumns, labelsByField } = getConfiguredMpnValidationColumns();
+    const selectedValidationSet = new Set(selectedColumns);
+    const rowNumberColumns = [];
+    const normalColumns = [];
+    const selectedValidationColumns = [];
+
+    columnDefs.forEach(col => {
       // Always show row number column
-      if (col.field === '__row_number__') return true;
+      if (col.field === '__row_number__') {
+        rowNumberColumns.push(col);
+        return;
+      }
 
       // Filter MPN columns based on toggle - check both field and headerName
       if (isMpnValidationColumn(col.field) || isMpnValidationColumn(col.headerName)) {
-        return showMpnColumns;
+        if (showMpnColumns && selectedValidationSet.has(col.field)) {
+          selectedValidationColumns.push({
+            ...col,
+            headerName: labelsByField[col.field] || col.headerName
+          });
+        }
+        return;
       }
 
       // Show all other columns
-      return true;
+      normalColumns.push(col);
     });
+
+    const byField = new Map(selectedValidationColumns.map(col => [col.field, col]));
+    const orderedValidationColumns = selectedColumns
+      .map(field => byField.get(field))
+      .filter(Boolean);
+
+    return [...rowNumberColumns, ...normalColumns, ...orderedValidationColumns];
   }, [columnDefs, showMpnColumns, isMpnValidationColumn]);
 
   const hasMpnValidationColumns = useMemo(() => {
@@ -976,8 +1107,9 @@ const EnhancedDataEditor = () => {
       }
 
       setRowData(rows);
-      setTotalRows(pg.total_rows || rows.length);
-      setTotalPages(pg.total_pages || 1);
+      const nextTotalRows = Number(pg.total_rows ?? payload.total_rows ?? rows.length) || rows.length;
+      setTotalRows(nextTotalRows);
+      setTotalPages(Math.max(1, Math.ceil(nextTotalRows / size)));
       setPage(pg.page || targetPage);
 
       // Reset virtualization window to the full page
@@ -1950,18 +2082,25 @@ const EnhancedDataEditor = () => {
   }, [columnDefs, computeColumnWidthPx, showSnackbar]);
 
   // ─── SAVE TEMPLATE (EDITOR) ────────────────────────────────────────────────
-  const handleOpenSaveTemplateDialog = useCallback(() => {
-    setTemplateSaveDialogOpen(true);
-  }, []);
+  useEffect(() => {
+    if (isNewProcessingTemplate && !templateName) {
+      setTemplateName(processingTemplateName);
+    }
+  }, [isNewProcessingTemplate, processingTemplateName, templateName]);
 
   const handleCloseSaveTemplateDialog = useCallback(() => {
     setTemplateSaveDialogOpen(false);
     setTemplateName('');
   }, []);
 
-  const handleSaveTemplateSynchronized = useCallback(async () => {
-    if (!templateName.trim()) {
+  const handleSaveTemplateSynchronized = useCallback(async (nameOverride = '') => {
+    const saveName = String(nameOverride || templateName || '').trim();
+    if (!saveName) {
       showSnackbar('Please enter a template name', 'error');
+      return;
+    }
+    if (isExistingProcessingTemplate) {
+      showSnackbar('Existing templates cannot be saved from this run. Use Modify Template later.', 'info');
       return;
     }
     try {
@@ -2003,7 +2142,7 @@ const EnhancedDataEditor = () => {
 
       const resp = await api.saveMappingTemplate(
         sessionId,
-        templateName.trim(),
+        saveName,
         `Saved from Data Editor (${rules.length} tag rules${mpnValidationCompleted ? ', MPN validated' : ''})`,
         currentMappings,
         rules,
@@ -2012,10 +2151,51 @@ const EnhancedDataEditor = () => {
         counts,
         mpnValidationMetadata
       );
+      if (resp?.data?.success && processingTemplateContext) {
+        let providerSnapshot = {};
+        try {
+          providerSnapshot = {
+            selected_providers: JSON.parse(localStorage.getItem('mpn_validation_providers') || '[]'),
+            column_provider_mappings: JSON.parse(localStorage.getItem('mpn_column_provider_mappings') || '[]'),
+          };
+        } catch (_) {
+          providerSnapshot = {};
+        }
+
+        await api.saveProcessingTemplate({
+          name: saveName,
+          description: 'Saved workflow from mapped data editor',
+          status: 'active',
+          version: 1,
+          sourceRequirements: processingTemplateContext.sourceRequirements || {},
+          providerSnapshot,
+          stages: [
+            {
+              type: 'mapping_template',
+              mapping_template_id: resp.data.template_id,
+              mapping_template_name: saveName,
+              session_id: sessionId,
+            },
+            {
+              type: 'mapped_data_editor',
+              column_counts: counts,
+              formula_rules_count: rules.length,
+              has_factwise_rules: Array.isArray(currentFactwiseRules) && currentFactwiseRules.length > 0,
+              mpn_validation_metadata: mpnValidationMetadata || {},
+            }
+          ],
+          metadata: {
+            mapping_template_id: resp.data.template_id,
+            processing_path: processingTemplateContext.processingPath || '',
+            saved_from_session_id: sessionId,
+          }
+        });
+      }
       const elapsed = Date.now() - opStart;
       if (elapsed < 3000) await new Promise(r => setTimeout(r, 3000 - elapsed));
       if (resp?.data?.success) {
-        showSnackbar(`Template "${templateName.trim()}" saved successfully!`, 'success');
+        setTemplateSaved(true);
+        showSnackbar(`Template "${saveName}" saved successfully!`, 'success');
         handleCloseSaveTemplateDialog();
       } else {
         showSnackbar(resp?.data?.error || 'Failed to save template', 'error');
@@ -2025,7 +2205,19 @@ const EnhancedDataEditor = () => {
     } finally {
       setTemplateSaving(false);
     }
-  }, [sessionId, templateName, dynamicColumnCounts, defaultValues, appliedFormulas, factwiseIdRule, mpnValidationCompleted, originalMpnColumn, mpnColumn, mpnManufacturerColumn, showSnackbar, handleCloseSaveTemplateDialog]);
+  }, [sessionId, templateName, dynamicColumnCounts, defaultValues, appliedFormulas, factwiseIdRule, mpnValidationCompleted, originalMpnColumn, mpnColumn, mpnManufacturerColumn, isExistingProcessingTemplate, processingTemplateContext, showSnackbar, handleCloseSaveTemplateDialog]);
+
+  const handleSaveTemplateFromToolbar = useCallback(() => {
+    if (isExistingProcessingTemplate) {
+      showSnackbar('Existing templates cannot be saved from this run. Use Modify Template later.', 'info');
+      return;
+    }
+    if (isNewProcessingTemplate) {
+      handleSaveTemplateSynchronized(processingTemplateName);
+      return;
+    }
+    setTemplateSaveDialogOpen(true);
+  }, [isExistingProcessingTemplate, isNewProcessingTemplate, processingTemplateName, handleSaveTemplateSynchronized, showSnackbar]);
 
   // ─── DOWNLOAD HANDLERS ─────────────────────────────────────────────────────
   // FactWise import sheets require these fields on every row. If the sheet looks
@@ -3413,9 +3605,9 @@ const EnhancedDataEditor = () => {
     }, 800);
   }, [sessionId, showSnackbar]);
 
-  const handleCellEdit = useCallback((rowIndex, colIndex, newValue) => {
+  const handleCellEdit = useCallback((rowIndex, columnRef, newValue) => {
     const newRowData = [...rowData];
-    const colKey = columnDefs[colIndex]?.field;
+    const colKey = typeof columnRef === 'string' ? columnRef : columnDefs[columnRef]?.field;
     if (colKey && newRowData[rowIndex]) {
       const prevVal = newRowData[rowIndex][colKey];
       newRowData[rowIndex][colKey] = newValue;
@@ -4167,6 +4359,20 @@ const EnhancedDataEditor = () => {
                   </Button>
                 </span>
               </Tooltip>
+              <Tooltip title={isExistingProcessingTemplate ? 'Existing templates cannot be saved from this run' : (templateSaved ? 'Template already saved' : 'Save this workflow template')}>
+                <span>
+                  <Button
+                    size="small"
+                    onClick={handleSaveTemplateFromToolbar}
+                    disabled={templateSaving || syncStatus.inProgress || isExistingProcessingTemplate || templateSaved}
+                    startIcon={templateSaving ? <CircularProgress size={16} /> : <SaveIcon sx={{ fontSize: 18 }} />}
+                    sx={outlinedActionSx}
+                    variant="outlined"
+                  >
+                    {templateSaving ? 'Saving...' : (templateSaved ? 'Template Saved' : 'Save Template')}
+                  </Button>
+                </span>
+              </Tooltip>
 
               {/* TOOLS dropdown */}
               <Button
@@ -4226,9 +4432,9 @@ const EnhancedDataEditor = () => {
                   <ListItemText>Create FactWise ID</ListItemText>
                 </MenuItem>
                 <Divider />
-                <MenuItem onClick={() => { setToolsMenuAnchor(null); handleOpenSaveTemplateDialog(); }} disabled={syncStatus.inProgress}>
+                <MenuItem onClick={() => { setToolsMenuAnchor(null); handleSaveTemplateFromToolbar(); }} disabled={syncStatus.inProgress || isExistingProcessingTemplate || templateSaved}>
                   <ListItemIcon><TemplateIcon sx={{ color: '#6a1b9a' }} /></ListItemIcon>
-                  <ListItemText>Save Template</ListItemText>
+                  <ListItemText>{templateSaved ? 'Template Saved' : 'Save Template'}</ListItemText>
                 </MenuItem>
                 <MenuItem onClick={() => { setToolsMenuAnchor(null); sessionStorage.setItem('navigatedFromDataEditor', 'true'); navigate(`/mapping/${sessionId}`); }}>
                   <ListItemIcon><MapIcon sx={{ color: '#2196f3' }} /></ListItemIcon>
@@ -4253,7 +4459,7 @@ const EnhancedDataEditor = () => {
                 }}
               >
                 {mpnValidating
-                  ? (mpnProgress && mpnProgress.total ? `MPN ${mpnProgress.done}/${mpnProgress.total}` : 'MPN...')
+                  ? (mpnProgress && mpnProgress.total ? `MPN unique ${mpnProgress.done}/${mpnProgress.total}` : 'MPN...')
                   : 'MPN'}
               </Button>
               <Button
@@ -4359,18 +4565,30 @@ const EnhancedDataEditor = () => {
                       return;
                     }
                     try {
-                      if (!mpnColumn) return;
+                      const availableFields = (columnDefs || [])
+                        .map(col => col.field)
+                        .filter(field => field && field !== '__row_number__');
+                      let effectiveMpnColumn = availableFields.includes(mpnColumn)
+                        ? mpnColumn
+                        : (detectMpnColumn(availableFields) || detectMpnColumnByData(availableFields, rowData));
+                      if (!effectiveMpnColumn) {
+                        showSnackbar('Select a valid MPN column before validation.', 'warning');
+                        return;
+                      }
+                      if (effectiveMpnColumn !== mpnColumn) {
+                        setMpnColumn(effectiveMpnColumn);
+                      }
                       const hasMpnValues = (rowData || []).some(row => {
-                        const value = row?.[mpnColumn];
+                        const value = row?.[effectiveMpnColumn];
                         return value !== null && value !== undefined && String(value).trim() !== '';
                       });
                       if (!hasMpnValues) {
-                        showSnackbar(`MPN validation skipped: "${mpnColumn}" has no values to validate.`, 'warning');
+                        showSnackbar(`MPN validation skipped: "${effectiveMpnColumn}" has no values to validate.`, 'warning');
                         return;
                       }
                       mpnValidationInFlightRef.current = true;
-                      if (!originalMpnColumn && !isMpnValidationColumn(mpnColumn)) {
-                        setOriginalMpnColumn(mpnColumn);
+                      if (!originalMpnColumn && !isMpnValidationColumn(effectiveMpnColumn)) {
+                        setOriginalMpnColumn(effectiveMpnColumn);
                       }
                       setMpnValidating(true);
                       // Chunk the slow Digi-Key fan-out into small requests (never
@@ -4385,13 +4603,13 @@ const EnhancedDataEditor = () => {
                       setMpnProgress({ done: 0, total: 0 });
                       // eslint-disable-next-line no-constant-condition
                       while (true) {
-                        const resp = await api.warmMPNs(sessionId, mpnColumn, offset, CHUNK, mpnManufacturerColumn);
+                        const resp = await api.warmMPNs(sessionId, effectiveMpnColumn, offset, CHUNK, mpnManufacturerColumn);
                         const d = resp?.data || {};
                         total = d.total || 0;
                         setMpnProgress({ done: Math.min(d.validated || 0, total), total });
                         // Build + render the grid from the cache so far (live fill-in).
                         try {
-                          await api.validateMPNs(sessionId, mpnColumn, mpnManufacturerColumn, true);
+                          await api.validateMPNs(sessionId, effectiveMpnColumn, mpnManufacturerColumn, true);
                           if (!shown) { setShowMpnColumns(true); shown = true; }
                           await fetchDataSynchronized();
                         } catch (_) { /* keep warming even if a partial render hiccups */ }
@@ -4421,7 +4639,7 @@ const EnhancedDataEditor = () => {
                   <ListItemIcon><CheckIcon sx={{ color: '#f57c00' }} /></ListItemIcon>
                   <ListItemText>{mpnValidating
                     ? (mpnProgress && mpnProgress.total
-                        ? `Validating ${mpnProgress.done}/${mpnProgress.total}...`
+                        ? `Validating unique MPNs ${mpnProgress.done}/${mpnProgress.total}...`
                         : 'Validating MPNs...')
                     : 'Validate MPNs'}</ListItemText>
                 </MenuItem>
@@ -4510,7 +4728,7 @@ const EnhancedDataEditor = () => {
             {mpnValidating && (
               <Box sx={{ mt: 2, px: 4 }}>
                 <Typography variant="body2" sx={{ color: t.text.secondary, mb: 1 }}>
-                  Validating MPNs with Digi-Key, Mouser, and Element14. This can take a few minutes...
+                  Validating unique non-empty MPNs with your selected providers. This can take a few minutes...
                 </Typography>
                 <LinearProgress
                   variant="indeterminate"
@@ -4769,7 +4987,7 @@ const EnhancedDataEditor = () => {
                       }}
                       onMouseEnter={(e) => { e.currentTarget.style.backgroundColor = tableTone.rowHover; }}
                       onMouseLeave={(e) => { e.currentTarget.style.backgroundColor = rowBackgroundColor; }}>
-                        {getVisibleColumnDefs().map((col, colIndex) => {
+                        {getVisibleColumnDefs().map((col) => {
                           const raw = row[col.field];
                           const cellValue = raw == null ? '' : String(raw);
                           const isUnknown = cellValue.toLowerCase() === 'unknown';
@@ -4800,7 +5018,7 @@ const EnhancedDataEditor = () => {
                                 <input
                                   type="text"
                                   value={cellValue}
-                                  onChange={(e) => handleCellEdit(rowIndex, colIndex, e.target.value)}
+                                  onChange={(e) => handleCellEdit(rowIndex, col.field, e.target.value)}
                                   style={{
                                     border: 'none',
                                     background: 'transparent',
@@ -6221,7 +6439,7 @@ const EnhancedDataEditor = () => {
         </DialogContent>
         <DialogActions>
           <Button onClick={handleCloseSaveTemplateDialog}>Cancel</Button>
-          <Button onClick={handleSaveTemplateSynchronized} variant="contained" disabled={templateSaving}>
+          <Button onClick={() => handleSaveTemplateSynchronized()} variant="contained" disabled={templateSaving}>
             {templateSaving ? 'Saving…' : 'Save'}
           </Button>
         </DialogActions>
@@ -7294,18 +7512,28 @@ const EnhancedDataEditor = () => {
         autoHideDuration={3500}
         onClose={closeSnackbar}
         anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
-        sx={{ mt: 8, maxWidth: 420 }}
+        sx={{
+          position: 'fixed !important',
+          top: '72px !important',
+          right: '24px !important',
+          left: 'auto !important',
+          bottom: 'auto !important',
+          transform: 'none !important',
+          maxWidth: 420,
+          zIndex: 1600,
+        }}
       >
         <Alert 
           onClose={closeSnackbar} 
           severity={snackbar.severity}
           variant="filled"
           sx={{
-            width: 'auto',
+            width: 'min(420px, calc(100vw - 48px))',
             maxWidth: 420,
             borderRadius: '14px',
             boxShadow: isDarkMode ? '0 18px 50px rgba(0,0,0,0.55)' : '0 18px 50px rgba(15,23,42,0.2)',
-            alignItems: 'center'
+            alignItems: 'center',
+            fontWeight: 700,
           }}
         >
           {snackbar.message}

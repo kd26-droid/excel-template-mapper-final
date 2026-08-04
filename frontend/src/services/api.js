@@ -2,10 +2,26 @@
 
 import axios from 'axios';
 
-// Use environment variable for API URL, fallback to relative path for production  
-const API_URL = process.env.REACT_APP_API_BASE_URL || '/api';
+// Use environment variable for API URL, but make local dev shareable on LAN.
+// Example: if the app is opened at http://192.168.1.20:3001 and the env says
+// http://localhost:8000/api, the browser should call http://192.168.1.20:8000/api.
+const resolveApiUrl = () => {
+  const configured = process.env.REACT_APP_API_BASE_URL || '/api';
+  if (typeof window === 'undefined') return configured;
+
+  const currentHost = window.location.hostname;
+  const isLanAccess = currentHost && currentHost !== 'localhost' && currentHost !== '127.0.0.1';
+  if (!isLanAccess) return configured;
+
+  return configured
+    .replace('localhost', currentHost)
+    .replace('127.0.0.1', currentHost);
+};
+
+const API_URL = resolveApiUrl();
 const CREDENTIAL_SCOPE_KEY = 'mpn_provider_credential_scope_id';
 const VALIDATION_PROVIDERS_KEY = 'mpn_validation_providers';
+const COLUMN_PROVIDER_MAPPINGS_KEY = 'mpn_column_provider_mappings';
 
 const getProviderCredentialScopeId = () => {
   if (typeof window === 'undefined') return null;
@@ -19,12 +35,34 @@ const getProviderCredentialScopeId = () => {
 const getSelectedValidationProviders = () => {
   if (typeof window === 'undefined') return ['digikey', 'mouser', 'element14'];
   try {
+    const mappings = JSON.parse(window.localStorage.getItem(COLUMN_PROVIDER_MAPPINGS_KEY) || '[]');
+    if (Array.isArray(mappings) && mappings.length) {
+      const allowed = new Set(['digikey', 'mouser', 'element14']);
+      const mappedProviders = mappings
+        .flatMap((mapping) => {
+          const providers = mapping?.providers || mapping?.provider || [];
+          return Array.isArray(providers) ? providers : [providers];
+        })
+        .map((provider) => String(provider || '').toLowerCase())
+        .filter((provider) => allowed.has(provider));
+      if (mappedProviders.length) return Array.from(new Set(mappedProviders));
+    }
     const saved = JSON.parse(window.localStorage.getItem(VALIDATION_PROVIDERS_KEY) || '[]');
     const allowed = new Set(['digikey', 'mouser', 'element14']);
     const selected = Array.isArray(saved) ? saved.filter((provider) => allowed.has(provider)) : [];
-    return selected.length > 1 ? selected : ['digikey', 'mouser', 'element14'];
+    return selected.length ? Array.from(new Set(selected)) : ['digikey', 'mouser', 'element14'];
   } catch {
     return ['digikey', 'mouser', 'element14'];
+  }
+};
+
+const getColumnProviderMappings = () => {
+  if (typeof window === 'undefined') return [];
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(COLUMN_PROVIDER_MAPPINGS_KEY) || '[]');
+    return Array.isArray(saved) ? saved : [];
+  } catch {
+    return [];
   }
 };
 
@@ -1375,6 +1413,7 @@ const api = {
     const providerScopeId = getProviderCredentialScopeId();
     if (providerScopeId) payload.provider_credential_scope_id = providerScopeId;
     payload.validation_providers = getSelectedValidationProviders();
+    payload.column_provider_mappings = getColumnProviderMappings();
     if (mpnHeader) payload.mpn_header = mpnHeader;
     if (manufacturerHeader) payload.manufacturer_header = manufacturerHeader;
     if (cacheOnly) payload.cache_only = true;
@@ -1392,6 +1431,7 @@ const api = {
     const providerScopeId = getProviderCredentialScopeId();
     if (providerScopeId) payload.provider_credential_scope_id = providerScopeId;
     payload.validation_providers = getSelectedValidationProviders();
+    payload.column_provider_mappings = getColumnProviderMappings();
     if (mpnHeader) payload.mpn_header = mpnHeader;
     if (manufacturerHeader) payload.manufacturer_header = manufacturerHeader;
     return axios.post(`${API_URL}/mpn/validate-warm/`, payload, { timeout: 120000 });

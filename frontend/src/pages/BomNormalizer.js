@@ -75,6 +75,8 @@ const emptyRoles = ROLE_FIELDS.reduce((acc, field) => {
 }, {});
 
 const LEARNED_ROLE_HEADERS_KEY = 'bomNormalizer.learnedRoleHeaders.v1';
+const BOM_NORMALIZER_RETURN_PREFIX = 'bomNormalizer.returnSnapshot.';
+const BOM_NORMALIZER_LATEST_RESULTS_KEY = 'bomNormalizer.latestResultsSnapshot';
 
 const fmt = (value) => {
   if (value === null || value === undefined) return '';
@@ -82,6 +84,16 @@ const fmt = (value) => {
 };
 
 const normalizeKey = (value) => fmt(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+const getSnapshotRowCount = (snapshot) => (
+  Array.isArray(snapshot?.normalizedRows) ? snapshot.normalizedRows.length : 0
+);
+
+const pickBestNormalizerSnapshot = (snapshots = []) => (
+  snapshots
+    .filter(Boolean)
+    .sort((a, b) => getSnapshotRowCount(b) - getSnapshotRowCount(a))[0] || null
+);
 
 const getLearnedRoleHeaders = () => {
   try {
@@ -1418,7 +1430,16 @@ const buildMergePreviewFromSources = (primarySource, secondarySource, config) =>
     throw new Error('Choose at least one column from the secondary source.');
   }
 
-  const normalizeMatch = (value) => fmt(value).replace(/\u00a0/g, ' ').toLowerCase();
+  const normalizeMatch = (value) => fmt(value)
+    .normalize('NFKC')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/[‐‑‒–—−]/g, '-')
+    .replace(/^'/, '')
+    .replace(/\.0+$/, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
   const outputMode = config.outputMode || 'grouped';
   const relationshipName = fmt(config.relationshipName);
   const headers = [...primarySource.headers];
@@ -1532,21 +1553,54 @@ const SourcePreview = ({ headers, rows }) => {
     text: themeTokens.text?.primary || (isDarkMode ? '#f8fafc' : '#0f172a'),
     border: themeTokens.table?.line || (isDarkMode ? 'rgba(255,255,255,0.08)' : '#e1e6ec'),
   };
+  const previewHeaders = headers || [];
   return (
-    <TableContainer sx={{ mt: 1, maxHeight: 320, border: `1px solid ${tableTone.border}`, bgcolor: tableTone.bg }}>
-      <Table stickyHeader size="small">
+    <TableContainer
+      sx={{
+        mt: 1,
+        maxHeight: 320,
+        overflowX: 'auto',
+        overflowY: 'auto',
+        border: `1px solid ${tableTone.border}`,
+        bgcolor: tableTone.bg,
+        '&::-webkit-scrollbar': { height: 10, width: 10 },
+        '&::-webkit-scrollbar-thumb': {
+          borderRadius: 8,
+          bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.42)' : 'rgba(100, 116, 139, 0.38)',
+        },
+        '&::-webkit-scrollbar-track': {
+          bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.42)' : 'rgba(241, 245, 249, 0.8)',
+        },
+      }}
+    >
+      <Table stickyHeader size="small" sx={{ width: 'max-content', minWidth: '100%', tableLayout: 'fixed' }}>
         <TableHead>
           <TableRow>
-            {headers.slice(0, 12).map((header) => (
-              <TableCell key={header} sx={{ fontWeight: 800, bgcolor: tableTone.header, color: tableTone.text, borderColor: tableTone.border }}>{header}</TableCell>
+            {previewHeaders.map((header) => (
+              <TableCell
+                key={header}
+                sx={{
+                  minWidth: 170,
+                  maxWidth: 260,
+                  fontWeight: 800,
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  bgcolor: tableTone.header,
+                  color: tableTone.text,
+                  borderColor: tableTone.border,
+                }}
+              >
+                {header}
+              </TableCell>
             ))}
           </TableRow>
         </TableHead>
         <TableBody>
           {rows.map((row, index) => (
             <TableRow key={`source-${index}`}>
-              {headers.slice(0, 12).map((header) => (
-                <TableCell key={header} sx={{ maxWidth: 220, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: tableTone.text, borderColor: tableTone.border }}>
+              {previewHeaders.map((header) => (
+                <TableCell key={header} sx={{ minWidth: 170, maxWidth: 260, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: tableTone.text, borderColor: tableTone.border }}>
                   {row[header]}
                 </TableCell>
               ))}
@@ -1572,6 +1626,28 @@ const NORMALIZED_TABLE_BASE_COLUMNS = [
   { key: 'rule', label: 'Rule', editable: false, width: 190 },
   { key: 'confidence', label: 'Confidence', editable: false, width: 105 },
 ];
+
+const buildNormalizerSuggestedMappings = (columns = []) => {
+  const available = new Set(columns);
+  const candidates = [
+    { source: 'cpn', targets: ['CPN Code', 'Customer part number', 'Customer Part Number'] },
+    { source: 'mpn', targets: ['MPN Code', 'Manufacturer part number', 'Manufacturer Part Number'] },
+    { source: 'description', targets: ['Item name', 'Description', 'SAP Description'] },
+    { source: 'quantity', targets: ['Quantity', 'Qty'] },
+    { source: 'uom', targets: ['Measurement unit', 'UOM', 'Unit of measure'] },
+    { source: 'level', targets: ['Level', 'BOM level'] },
+    { source: 'parentKey', targets: ['Parent / group key', 'Parent group key', 'Sub BOM ID', 'BOM ID'] },
+    { source: 'manufacturer', targets: ['Manufacturer', 'Preferred vendor code', 'Procurement entity name'] },
+  ];
+
+  return candidates
+    .filter((mapping) => available.has(mapping.source))
+    .map((mapping) => ({
+      ...mapping,
+      sourceLabel: mapping.source,
+      origin: 'bom-normalizer',
+    }));
+};
 
 const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenceOnlyChange }) => {
   const { isDarkMode, tokens: themeTokens } = useThemeContext();
@@ -1927,6 +2003,7 @@ const BomNormalizer = () => {
   const [successMessage, setSuccessMessage] = useState('');
   const [error, setError] = useState('');
   const initialFileSeededRef = useRef('');
+  const restoredReturnSnapshotRef = useRef('');
 
   const headers = useMemo(
     () => preparedHeaders.length ? preparedHeaders : makeUniqueHeaders(sheetRows[headerRowIndex] || []),
@@ -2058,6 +2135,207 @@ const BomNormalizer = () => {
       .map((range) => ({ name: fmt(range.name), pages: fmt(range.pages) }))
       .filter((range) => range.name || range.pages),
   }), [pdfRangeEnabled, pdfRanges]);
+
+  const buildNormalizedResultsSnapshot = useCallback((rowsOverride = normalizedRows) => ({
+    kind: 'normalized-results',
+    fileName,
+    sheetName,
+    sheetScope,
+    selectedSheetNames,
+    sheetRows,
+    headerRowIndex,
+    preparedHeaders: preparedHeaders.length ? preparedHeaders : getNormalizedExportColumns(rowsOverride),
+    preparedDataRows,
+    roles,
+    config,
+    normalizedRows: rowsOverride,
+    currentStep: 4,
+    progress,
+    normalizationSummary,
+    lowConfidenceOnly,
+    factwiseConfig,
+    tagConfig,
+  }), [
+    config,
+    factwiseConfig,
+    fileName,
+    headerRowIndex,
+    lowConfidenceOnly,
+    normalizationSummary,
+    normalizedRows,
+    preparedDataRows,
+    preparedHeaders,
+    progress,
+    roles,
+    selectedSheetNames,
+    sheetName,
+    sheetRows,
+    sheetScope,
+    tagConfig,
+  ]);
+
+  const saveReturnSnapshot = useCallback((kind) => {
+    const key = `${BOM_NORMALIZER_RETURN_PREFIX}${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const snapshot = kind === 'merge-preview'
+      ? {
+        kind,
+        combineItems: combineItems.map((item) => ({
+          id: item.id,
+          fileName: item.fileName,
+          type: item.type,
+          status: item.status,
+          rowCount: item.rowCount,
+          pageCount: item.pageCount,
+          extractedSourceCount: item.extractedSourceCount,
+          isMergedBase: item.isMergedBase,
+          workbook: item.workbook?.SheetNames ? { SheetNames: item.workbook.SheetNames } : null,
+        })),
+        mergeSources: mergeSources.map((source) => ({
+          id: source.id,
+          label: source.label,
+          headers: source.headers || [],
+          rows: source.rows || [],
+        })),
+        mergeStage,
+        mergeConfig,
+        mergePreview,
+        mergePreviewFilter,
+        mergePreviewPage,
+        mergeVisibleColumns,
+        mergeColumnWidths,
+        mergeChainMessage,
+      }
+      : buildNormalizedResultsSnapshot();
+
+    try {
+      window.__bomNormalizerReturnSnapshots = window.__bomNormalizerReturnSnapshots || {};
+      window.__bomNormalizerReturnSnapshots[key] = snapshot;
+      window.sessionStorage.setItem(key, JSON.stringify(snapshot));
+      return key;
+    } catch (err) {
+      console.warn('Could not save BOM normalizer return snapshot:', err);
+      return key;
+    }
+  }, [
+    buildNormalizedResultsSnapshot,
+    combineItems,
+    mergeChainMessage,
+    mergeColumnWidths,
+    mergeConfig,
+    mergePreview,
+    mergePreviewFilter,
+    mergePreviewPage,
+    mergeSources,
+    mergeStage,
+    mergeVisibleColumns,
+  ]);
+
+  useEffect(() => {
+    if (currentStep !== 4 || !normalizedRows.length) return;
+    const snapshot = buildNormalizedResultsSnapshot(normalizedRows);
+    try {
+      window.__bomNormalizerLatestResultsSnapshot = snapshot;
+      window.sessionStorage.setItem(BOM_NORMALIZER_LATEST_RESULTS_KEY, JSON.stringify(snapshot));
+    } catch (err) {
+      window.__bomNormalizerLatestResultsSnapshot = snapshot;
+    }
+  }, [buildNormalizedResultsSnapshot, currentStep, normalizedRows]);
+
+  useEffect(() => {
+    const state = location.state || {};
+    const snapshotKey = state.bomNormalizerReturnKey;
+    const restoreId = snapshotKey || (state.bomNormalizerReturnSnapshot ? 'route-snapshot' : '');
+    if (!state.returnFromMapping || !restoreId || restoredReturnSnapshotRef.current === restoreId) return;
+
+    restoredReturnSnapshotRef.current = restoreId;
+    try {
+      const parseSnapshot = (raw) => {
+        try {
+          return raw ? JSON.parse(raw) : null;
+        } catch (_) {
+          return null;
+        }
+      };
+      const latestSnapshot = parseSnapshot(window.sessionStorage.getItem(BOM_NORMALIZER_LATEST_RESULTS_KEY))
+        || window.__bomNormalizerLatestResultsSnapshot;
+      const rawSnapshot = parseSnapshot(snapshotKey ? window.sessionStorage.getItem(snapshotKey) : '');
+      const memorySnapshot = snapshotKey ? window.__bomNormalizerReturnSnapshots?.[snapshotKey] : null;
+      const routeRowsSnapshot = state.bomNormalizerReturnRows?.length
+        ? { ...(state.bomNormalizerReturnSnapshot || {}), kind: 'normalized-results', normalizedRows: state.bomNormalizerReturnRows }
+        : null;
+      const snapshotCandidates = [
+        routeRowsSnapshot,
+        state.bomNormalizerReturnSnapshot,
+        memorySnapshot,
+        rawSnapshot,
+        latestSnapshot,
+      ].filter(Boolean);
+      const requestedKind = snapshotCandidates.find((candidate) => candidate.kind === 'merge-preview')?.kind
+        || snapshotCandidates.find((candidate) => candidate.kind)?.kind;
+      const snapshot = requestedKind === 'merge-preview'
+        ? snapshotCandidates.find((candidate) => candidate.kind === 'merge-preview')
+        : pickBestNormalizerSnapshot(snapshotCandidates.filter((candidate) => candidate.kind !== 'merge-preview'));
+      if (!snapshot) throw new Error('Return snapshot was not found.');
+
+      if (snapshot.kind === 'merge-preview') {
+        setWorkbook(null);
+        setFileName('');
+        setSheetName('');
+        setSheetRows([]);
+        setPreparedHeaders([]);
+        setPreparedDataRows([]);
+        setNormalizedRows([]);
+        setCurrentStep(0);
+        setCombineItems(snapshot.combineItems || []);
+        setMergeSources(snapshot.mergeSources || []);
+        setMergeStage(snapshot.mergeStage || 'preview');
+        setMergeConfig((prev) => ({ ...prev, ...(snapshot.mergeConfig || {}) }));
+        setMergePreview(snapshot.mergePreview || null);
+        setMergePreviewFilter(snapshot.mergePreviewFilter || 'all');
+        setMergePreviewPage(snapshot.mergePreviewPage || 0);
+        setMergeVisibleColumns(snapshot.mergeVisibleColumns || snapshot.mergePreview?.headers || []);
+        setMergeColumnWidths(snapshot.mergeColumnWidths || {});
+        setMergeChainMessage(snapshot.mergeChainMessage || '');
+        setCombineError('');
+        setError('');
+      } else {
+        const restoredSheetName = snapshot.sheetName || snapshot.selectedSheetNames?.[0] || 'Restored BOM';
+        setWorkbook({ SheetNames: snapshot.selectedSheetNames?.length ? snapshot.selectedSheetNames : [restoredSheetName], Sheets: {} });
+        setFileName(snapshot.fileName || 'BOM Normalizer result');
+        setSheetName(restoredSheetName);
+        setSheetScope(snapshot.sheetScope || 'single');
+        setSelectedSheetNames(snapshot.selectedSheetNames || [restoredSheetName]);
+        setSheetRows(snapshot.sheetRows || []);
+        setHeaderRowIndex(snapshot.headerRowIndex || 0);
+        const restoredRows = snapshot.normalizedRows?.length
+          ? snapshot.normalizedRows
+          : (state.bomNormalizerReturnRows || []);
+        setPreparedHeaders(snapshot.preparedHeaders || getNormalizedExportColumns(restoredRows));
+        setPreparedDataRows(snapshot.preparedDataRows || []);
+        setRoles((prev) => ({ ...prev, ...(snapshot.roles || {}) }));
+        setConfig((prev) => ({ ...prev, ...(snapshot.config || {}) }));
+        setNormalizedRows(restoredRows);
+        setCurrentStep(snapshot.currentStep || 4);
+        setProgress(snapshot.progress || { processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
+        setNormalizationSummary(snapshot.normalizationSummary || null);
+        setLowConfidenceOnly(Boolean(snapshot.lowConfidenceOnly));
+        setFactwiseConfig((prev) => ({ ...prev, ...(snapshot.factwiseConfig || {}) }));
+        setTagConfig((prev) => ({ ...prev, ...(snapshot.tagConfig || {}) }));
+        setSkipSourceSetupForMerge(false);
+        setConfirmOpen(false);
+        setError('');
+      }
+
+      const nextState = { ...state };
+      delete nextState.returnFromMapping;
+      delete nextState.bomNormalizerReturnKey;
+      delete nextState.bomNormalizerReturnSnapshot;
+      delete nextState.bomNormalizerReturnRows;
+      navigate(location.pathname, { replace: true, state: nextState });
+    } catch (err) {
+      setError(err.message || 'Could not restore the BOM Normalizer page.');
+    }
+  }, [location.pathname, location.state, navigate]);
 
   const availableStructureOptions = useMemo(
     () => getStructureOptionsForRoles(roles),
@@ -2296,7 +2574,7 @@ const BomNormalizer = () => {
     const seedKey = initialFile
       ? `${initialFile.name || 'file'}-${initialFile.size || 0}-${initialFile.lastModified || 0}-${state.initialFileMode || 'source'}`
       : '';
-    if (!initialFile || initialFileSeededRef.current === seedKey || state.fromPdfZone) return;
+    if (!initialFile || initialFileSeededRef.current === seedKey || state.fromPdfZone || state.returnFromMapping) return;
 
     initialFileSeededRef.current = seedKey;
 
@@ -2751,6 +3029,7 @@ const BomNormalizer = () => {
       return;
     }
     const columns = getNormalizedExportColumns(normalizedRows);
+    const suggestedMappings = buildNormalizerSuggestedMappings(columns);
     const rows = normalizedRows.map((row) => {
       const output = {};
       columns.forEach((column) => {
@@ -2763,6 +3042,8 @@ const BomNormalizer = () => {
     formData.append('clientFile', file);
     formData.append('sheetName', 'Normalized BOM');
     formData.append('headerRow', '1');
+    const returnSnapshotKey = saveReturnSnapshot('normalized-results');
+    const returnSnapshot = buildNormalizedResultsSnapshot(normalizedRows);
 
     setBusy(true);
     setError('');
@@ -2774,7 +3055,14 @@ const BomNormalizer = () => {
           state: {
             fromUpload: true,
             fromBomNormalizer: true,
+            normalizerSuggestedMappings: suggestedMappings,
             uploadSource: location.state?.uploadSource,
+            mappingBackState: {
+              route: '/bom-normalizer',
+              bomNormalizerReturnKey: returnSnapshotKey,
+              bomNormalizerReturnRows: normalizedRows,
+              bomNormalizerReturnSnapshot: returnSnapshot,
+            },
           },
         });
       })
@@ -2782,7 +3070,25 @@ const BomNormalizer = () => {
         setError(err.response?.data?.error || err.message || 'Could not continue to BOM Mapping.');
       })
       .finally(() => setBusy(false));
-  }, [location.state, navigate, normalizedRows]);
+  }, [
+    buildNormalizedResultsSnapshot,
+    config,
+    factwiseConfig,
+    fileName,
+    headerRowIndex,
+    location.state,
+    lowConfidenceOnly,
+    navigate,
+    normalizationSummary,
+    normalizedRows,
+    progress,
+    roles,
+    saveReturnSnapshot,
+    selectedSheetNames,
+    sheetName,
+    sheetScope,
+    tagConfig,
+  ]);
 
   const handleContinueMergePreviewToBomMapping = useCallback(() => {
     if (!mergePreview) {
@@ -2794,11 +3100,13 @@ const BomNormalizer = () => {
       setCombineError('No merged rows are available for BOM Mapping.');
       return;
     }
+    const suggestedMappings = buildNormalizerSuggestedMappings(headers);
     const file = createWorkbookFileFromRows(rows, headers, 'merged-bom-for-mapping.xlsx', 'Merged BOM');
     const formData = new FormData();
     formData.append('clientFile', file);
     formData.append('sheetName', 'Merged BOM');
     formData.append('headerRow', '1');
+    const returnSnapshotKey = saveReturnSnapshot('merge-preview');
 
     setBusy(true);
     setCombineError('');
@@ -2810,7 +3118,12 @@ const BomNormalizer = () => {
           state: {
             fromUpload: true,
             fromBomNormalizer: true,
+            normalizerSuggestedMappings: suggestedMappings,
             uploadSource: location.state?.uploadSource,
+            mappingBackState: {
+              route: '/bom-normalizer',
+              bomNormalizerReturnKey: returnSnapshotKey,
+            },
           },
         });
       })
@@ -2818,7 +3131,7 @@ const BomNormalizer = () => {
         setCombineError(err.response?.data?.error || err.message || 'Could not continue to BOM Mapping.');
       })
       .finally(() => setBusy(false));
-  }, [location.state, mergePreview, mergePreviewFilter, mergeVisibleColumns, navigate]);
+  }, [location.state, mergePreview, mergePreviewFilter, mergeVisibleColumns, navigate, saveReturnSnapshot]);
 
   const handleBackFromConfigure = useCallback(() => {
     if (skipSourceSetupForMerge && mergePreview) {
@@ -3280,9 +3593,10 @@ const BomNormalizer = () => {
   }, [handleReset, mergePreview]);
 
   useEffect(() => {
+    if (currentStep === 4) return;
     setNormalizedRows([]);
     setLowConfidenceOnly(false);
-  }, [roles, config, headerRowIndex, sheetName, sheetScope, selectedSheetNames]);
+  }, [roles, config, headerRowIndex, sheetName, sheetScope, selectedSheetNames, currentStep]);
 
   useEffect(() => {
     if (!manufacturerMatchOpen) return;
@@ -3290,19 +3604,21 @@ const BomNormalizer = () => {
   }, [manufacturerMatchOpen, manufacturerMatchPreview]);
 
   useEffect(() => {
+    if (currentStep === 4) return;
     if (parserTouched) return;
     setConfig((prev) => {
       const nextStructure = detectBestStructure(headers, roles, dataRows.slice(0, 40));
       if (nextStructure === prev.structure) return prev;
       return nextConfigForDetectedStructure(prev, nextStructure);
     });
-  }, [dataRows, headers, parserTouched, roles]);
+  }, [currentStep, dataRows, headers, parserTouched, roles]);
 
   useEffect(() => {
+    if (currentStep === 4) return;
     if (!availableStructureOptions.length) return;
     if (availableStructureOptions.some((option) => option.value === config.structure)) return;
     setConfig((prev) => ({ ...prev, structure: availableStructureOptions[0].value }));
-  }, [availableStructureOptions, config.structure]);
+  }, [availableStructureOptions, config.structure, currentStep]);
 
   useEffect(() => {
     if (combineError.includes('two') && !canPrepareMerge) {
@@ -3311,23 +3627,26 @@ const BomNormalizer = () => {
   }, [canPrepareMerge, combineError]);
 
   useEffect(() => {
+    if (currentStep === 4) return;
     const strongMpnHeader = findStrongMpnHeader(headers);
     if (!strongMpnHeader || roles.mpn === strongMpnHeader) return;
     if (!roles.mpn || isGenericPartHeader(roles.mpn) || roles.mpn === roles.cpn) {
       setRoles((prev) => ({ ...prev, mpn: strongMpnHeader }));
       rememberRoleHeader('mpn', strongMpnHeader);
     }
-  }, [headers, roles.cpn, roles.mpn]);
+  }, [currentStep, headers, roles.cpn, roles.mpn]);
 
   useEffect(() => {
+    if (currentStep === 4) return;
     if (delimiterTouched || (!roles.mpn && !roles.manufacturer)) return;
     const guessedDelimiter = guessDelimiter(dataRows, roles);
     setConfig((prev) => (
       prev.delimiterMode === guessedDelimiter ? prev : { ...prev, delimiterMode: guessedDelimiter }
     ));
-  }, [dataRows, delimiterTouched, roles]);
+  }, [currentStep, dataRows, delimiterTouched, roles]);
 
   useEffect(() => {
+    if (currentStep === 4) return;
     if (parserTouched) return;
     if (!roles.mpn || !dataRows.length) return;
     const sampleValues = dataRows.slice(0, 80).map((row) => getCell(row, roles.mpn)).filter(Boolean);
@@ -3342,7 +3661,7 @@ const BomNormalizer = () => {
         alternateLayout: 'inside_selected_mpn_columns',
       };
     });
-  }, [config, dataRows, parserTouched, roles.mpn]);
+  }, [config, currentStep, dataRows, parserTouched, roles.mpn]);
 
   return (
     <Box

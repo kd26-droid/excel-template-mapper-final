@@ -597,6 +597,7 @@ export default function ColumnMapping() {
   const suppressedVirtualsRef = useRef(new Set());
   // Track if auto-apply has been triggered to prevent loops
   const autoApplyTriggeredRef = useRef(false);
+  const normalizerSuggestedMappingsAppliedRef = useRef(false);
   
   // Rebuild state
   const [isRebuilding, setIsRebuilding] = useState(false);
@@ -804,6 +805,35 @@ export default function ColumnMapping() {
 
     return false;
   }, [mappingHistory, edges]);
+
+  const handleBackNavigation = useCallback(() => {
+    const backState = location.state?.mappingBackState || {};
+    if (location.state?.fromBomNormalizer || backState.route === '/bom-normalizer') {
+      navigate('/bom-normalizer', {
+        state: {
+          ...(location.state?.uploadSource ? { uploadSource: location.state.uploadSource } : {}),
+          ...(backState.bomNormalizerReturnKey ? { bomNormalizerReturnKey: backState.bomNormalizerReturnKey } : {}),
+          ...(backState.bomNormalizerReturnSnapshot ? { bomNormalizerReturnSnapshot: backState.bomNormalizerReturnSnapshot } : {}),
+          ...(backState.bomNormalizerReturnRows ? { bomNormalizerReturnRows: backState.bomNormalizerReturnRows } : {}),
+          ...(backState.initialFile ? {
+            initialFile: backState.initialFile,
+            initialFileMode: backState.initialFileMode || 'workbook',
+          } : {}),
+          returnFromMapping: true,
+        }
+      });
+      return;
+    }
+
+    navigate('/upload', {
+      state: {
+        ...(backState.initialClientFile ? { initialClientFile: backState.initialClientFile } : {}),
+        wizardStep: backState.wizardStep ?? 1,
+        processingPath: backState.processingPath || 'map',
+        returnFromMapping: true,
+      }
+    });
+  }, [location.state, navigate]);
 
   // Header correction functions
   const handleHeaderEdit = useCallback((nodeId, originalHeader, correctedHeader) => {
@@ -3005,6 +3035,105 @@ export default function ColumnMapping() {
     }, 700);
   };
 
+  const normalizeHeaderKey = useCallback((value) => (
+    String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '')
+  ), []);
+
+  const findHeaderByCandidates = useCallback((headers, candidates = []) => {
+    if (!Array.isArray(headers) || !Array.isArray(candidates)) return '';
+    const keyToHeader = new Map(headers.map((header) => [normalizeHeaderKey(header), header]));
+    for (const candidate of candidates) {
+      const exact = keyToHeader.get(normalizeHeaderKey(candidate));
+      if (exact) return exact;
+    }
+    return '';
+  }, [normalizeHeaderKey]);
+
+  const applyNormalizerSuggestedMappings = useCallback((suggestedMappings = []) => {
+    if (!Array.isArray(suggestedMappings) || !suggestedMappings.length) return 0;
+    if (!Array.isArray(clientHeaders) || !clientHeaders.length || !Array.isArray(templateHeaders) || !templateHeaders.length) return 0;
+
+    const currentEdges = edgesRef.current || [];
+    const usedSourceIds = new Set(currentEdges.map((edge) => edge.source));
+    const usedTargetIds = new Set(currentEdges.map((edge) => edge.target));
+    const nextEdges = [];
+    const mappingPairs = [];
+
+    suggestedMappings.forEach((mapping) => {
+      const sourceHeader = findHeaderByCandidates(clientHeaders, [mapping.source, mapping.sourceLabel].filter(Boolean));
+      const targetHeader = findHeaderByCandidates(templateHeaders, mapping.targets || [mapping.target].filter(Boolean));
+      if (!sourceHeader || !targetHeader) return;
+
+      const sourceIdx = clientHeaders.indexOf(sourceHeader);
+      const targetIdx = templateHeaders.indexOf(targetHeader);
+      const sourceId = `c-${sourceIdx}`;
+      const targetId = `t-${targetIdx}`;
+      if (sourceIdx < 0 || targetIdx < 0 || usedSourceIds.has(sourceId) || usedTargetIds.has(targetId)) return;
+
+      const edge = createEdge(sourceIdx, targetIdx, false, 'bom_normalizer', true);
+      nextEdges.push(edge);
+      mappingPairs.push({ sourceIdx, targetIdx, sourceCol: sourceHeader, templateCol: targetHeader });
+      usedSourceIds.add(sourceId);
+      usedTargetIds.add(targetId);
+    });
+
+    if (!nextEdges.length) return 0;
+
+    setEdges((prev) => [...prev, ...nextEdges]);
+    setNodes((prev) => prev.map((node) => {
+      const related = mappingPairs.find((pair) => node.id === `c-${pair.sourceIdx}` || node.id === `t-${pair.targetIdx}`);
+      if (!related) return node;
+      if (node.id.startsWith('c-')) {
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            isConnected: true,
+            isFromTemplate: true,
+            mappedFromLabel: related.templateCol,
+          }
+        };
+      }
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          isConnected: true,
+          isFromTemplate: true,
+          mappedToLabel: related.sourceCol,
+        }
+      };
+    }));
+
+    try {
+      const normalized = mappingPairs.map((pair) => ({ source: pair.sourceCol, target: pair.templateCol }));
+      mappingsCacheRef.current = [...(mappingsCacheRef.current || []), ...normalized];
+    } catch (_) {}
+
+    setMappingStats((prev) => ({
+      ...prev,
+      total: (prev.total || 0) + nextEdges.length,
+      template: (prev.template || 0) + nextEdges.length,
+    }));
+
+    showSnackbar(`Auto-mapped ${nextEdges.length} column${nextEdges.length === 1 ? '' : 's'} from BOM Normalizer.`, 'success');
+    return nextEdges.length;
+  }, [clientHeaders, templateHeaders, findHeaderByCandidates, setEdges, setNodes, showSnackbar]);
+
+  useEffect(() => {
+    if (normalizerSuggestedMappingsAppliedRef.current) return;
+    const suggestedMappings = location.state?.normalizerSuggestedMappings;
+    if (!location.state?.fromBomNormalizer || !Array.isArray(suggestedMappings) || suggestedMappings.length === 0) return;
+    if (loading || clientHeaders.length === 0 || templateHeaders.length === 0 || nodes.length === 0) return;
+
+    const timer = setTimeout(() => {
+      applyNormalizerSuggestedMappings(suggestedMappings);
+      normalizerSuggestedMappingsAppliedRef.current = true;
+    }, 250);
+
+    return () => clearTimeout(timer);
+  }, [location.state, loading, clientHeaders.length, templateHeaders.length, nodes.length, applyNormalizerSuggestedMappings]);
+
   // initializeNodes function is hoisted above as function declaration to avoid TDZ
 
   // DUPLICATE FUNCTION REMOVED - using const declaration at line 1503 instead
@@ -4294,8 +4423,18 @@ export default function ColumnMapping() {
   const goToEditor = useCallback(() => {
     setPrimaryDialogOpen(false);
     const sid = sessionId;
-    setTimeout(() => navigate(`/editor/${sid}`), 0);
-  }, [sessionId, navigate]);
+    const uploadSource = location.state?.uploadSource || null;
+    if (uploadSource) {
+      try {
+        sessionStorage.setItem(`processingTemplateContext_${sid}`, JSON.stringify(uploadSource));
+      } catch (_) {}
+    }
+    setTimeout(() => navigate(`/editor/${sid}`, {
+      state: {
+        ...(uploadSource ? { uploadSource } : {}),
+      }
+    }), 0);
+  }, [sessionId, navigate, location.state]);
 
   const handleCleanupAndReview = useCallback(async () => {
     if (!primaryKeyColumn) { goToEditor(); return; }
@@ -4525,10 +4664,10 @@ export default function ColumnMapping() {
         <div className="flex flex-wrap justify-between items-center gap-3">
           {/* Left side - Back button, Logo and Template Status */}
           <div className="flex items-center gap-3">
-            <Tooltip title="Back to Upload Files" arrow placement="bottom">
+            <Tooltip title="Back to previous step" arrow placement="bottom">
               <button
-                onClick={() => navigate('/upload')}
-                aria-label="Back to Upload Files"
+                onClick={handleBackNavigation}
+                aria-label="Back to previous step"
                 className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full border text-sm font-semibold shadow-sm transition-all ${
                   isDarkMode
                     ? 'bg-slate-900 border-slate-700 text-slate-200 hover:bg-slate-800 hover:text-white'
@@ -5687,6 +5826,25 @@ export default function ColumnMapping() {
           </Button>
           <Button onClick={goToEditor} disabled={primaryCleaning} sx={{ ...muiPillButtonSx, color: isDarkMode ? '#93c5fd' : '#2563eb' }}>
             Skip and keep all rows
+          </Button>
+          <Button
+            onClick={handleCleanupAndReview}
+            disabled={!primaryKeyColumn || primaryCleaning || primaryEmptyLoading}
+            variant="contained"
+            sx={{
+              ...muiPrimaryPillSx,
+              minWidth: 132,
+              '&.Mui-disabled': {
+                bgcolor: isDarkMode ? 'rgba(30, 41, 59, 0.78)' : '#dbeafe',
+                color: isDarkMode ? 'rgba(226, 232, 240, 0.58)' : 'rgba(30, 64, 175, 0.46)',
+              }
+            }}
+          >
+            {primaryCleaning
+              ? 'Cleaning...'
+              : primaryEmptyInfo?.empty > 0
+                ? 'Remove & Continue'
+                : 'Continue'}
           </Button>
         </DialogActions>
       </Dialog>

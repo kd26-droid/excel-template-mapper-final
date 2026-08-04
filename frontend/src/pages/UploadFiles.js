@@ -187,6 +187,109 @@ const buildCombinedSheetFile = (workbook, sheetNames, headerRow, fileName) => {
   return { file: new File([blob], `${base} (combined).xlsx`, { type: blob.type }), rows: dataRows.length };
 };
 
+const asText = (value) => (value === null || value === undefined ? '' : String(value).trim());
+
+const makeUniqueHeaders = (headers = []) => {
+  const used = new Map();
+  return headers.map((header, index) => {
+    const base = asText(header) || `Column ${index + 1}`;
+    const count = used.get(base) || 0;
+    used.set(base, count + 1);
+    return count === 0 ? base : `${base} ${count + 1}`;
+  });
+};
+
+const createWorkbookFromObjects = (rows, headers, sheetLabel = 'PDF_Source') => {
+  const worksheet = XLSX.utils.aoa_to_sheet([
+    headers,
+    ...rows.map((row) => headers.map((header) => row[header] || '')),
+  ]);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, sheetLabel.slice(0, 31) || 'PDF_Source');
+  return workbook;
+};
+
+const createWorkbookFileFromWorkbook = (workbook, fileName) => {
+  const output = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+  const blob = new Blob([output], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+  return new File([blob], fileName, { type: blob.type });
+};
+
+const normalizePdfRowsForWorkbook = (payload, sourceFile) => {
+  const pdfHeaders = makeUniqueHeaders(payload?.headers || []);
+  const rawRows = Array.isArray(payload?.data) ? payload.data : [];
+  const decision = payload?.decision;
+  const decisionLabel = typeof decision === 'string'
+    ? decision
+    : (decision?.winner || decision?.method || 'best extraction');
+
+  if (!pdfHeaders.length || !rawRows.length) {
+    return { headers: [], rows: [] };
+  }
+
+  const rows = rawRows
+    .map((row, index) => {
+      const mapped = {
+        'Source file': sourceFile,
+        'Source sheet': `PDF ${decisionLabel}`,
+        __sourceRow: index + 1,
+      };
+      pdfHeaders.forEach((header, headerIndex) => {
+        mapped[header] = asText(Array.isArray(row) ? row[headerIndex] : row?.[header]);
+      });
+      return mapped;
+    })
+    .filter((row) => pdfHeaders.some((header) => asText(row[header])));
+
+  return {
+    headers: ['Source file', 'Source sheet', ...pdfHeaders],
+    rows,
+  };
+};
+
+const normalizePdfTablesForWorkbook = (payload, sourceFile) => {
+  const tables = Array.isArray(payload?.tables) ? payload.tables : [];
+  const sources = tables.map((table, tableIndex) => {
+    const tableHeaders = makeUniqueHeaders(table?.headers || []);
+    const rawRows = Array.isArray(table?.data) ? table.data : [];
+    const pageLabel = table?.page_number ? `page ${table.page_number}` : `table ${tableIndex + 1}`;
+    const rows = rawRows
+      .map((row, rowIndex) => {
+        const mapped = {
+          'Source file': sourceFile,
+          'Source sheet': `PDF ${pageLabel}`,
+          __sourceRow: rowIndex + 1,
+        };
+        tableHeaders.forEach((header, headerIndex) => {
+          mapped[header] = asText(Array.isArray(row) ? row[headerIndex] : row?.[header]);
+        });
+        return mapped;
+      })
+      .filter((row) => tableHeaders.some((header) => asText(row[header])));
+
+    return {
+      headers: ['Source file', 'Source sheet', ...tableHeaders],
+      rows,
+    };
+  }).filter((source) => source.headers.length > 2 && source.rows.length);
+
+  if (!sources.length) return { headers: [], rows: [] };
+
+  const headers = [];
+  sources.forEach((source) => {
+    source.headers.forEach((header) => {
+      if (!headers.includes(header)) headers.push(header);
+    });
+  });
+
+  return {
+    headers,
+    rows: sources.flatMap((source) => source.rows),
+  };
+};
+
 
 const DropzoneFileStackIcon = ({ color = "#3b82f6", glowColor = "#22c55e", selected = false, isHovered = false, isDarkMode = true }) => {
   const cardBg = isDarkMode ? "#0f172a" : "#ffffff";
@@ -486,6 +589,7 @@ const UploadFiles = () => {
   // PDF processing choice dialog state
   const [pdfChoiceDialogOpen, setPdfChoiceDialogOpen] = useState(false);
   const [pendingPdfSessionId, setPendingPdfSessionId] = useState(null);
+  const [pendingPdfContext, setPendingPdfContext] = useState(null);
 
   // Primary column cleanup dialog state
   const [primaryColumnDialogOpen, setPrimaryColumnDialogOpen] = useState(false);
@@ -855,6 +959,63 @@ const UploadFiles = () => {
     }
   }), []);
 
+  const preparePdfExtractionDialog = useCallback(async (file, context = {}) => {
+    if (!file) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      const response = await api.uploadPDF(formData);
+      const sessionId = response.data?.session_id;
+      if (!sessionId) throw new Error('PDF upload did not return a session.');
+      setPendingPdfSessionId(sessionId);
+      setPendingPdfContext({ ...context, file });
+      setPdfChoiceDialogOpen(true);
+      setSuccess('PDF uploaded. Choose how to extract it into tabular data.');
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Could not upload PDF.');
+      setPendingPdfSessionId(null);
+      setPendingPdfContext(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const extractPdfWorkbookFile = useCallback(async (sessionId, file, processingMode) => {
+    const response = processingMode === 'ocr'
+      ? await api.processPDFOCR({
+        session_id: sessionId,
+        data_alignment: pdfDataAlignment
+      })
+      : await api.processPDFCompare({
+        session_id: sessionId,
+        data_alignment: pdfDataAlignment
+      });
+
+    const normalizedTables = normalizePdfTablesForWorkbook(response.data, file.name);
+    const normalized = normalizedTables.rows.length
+      ? normalizedTables
+      : normalizePdfRowsForWorkbook(response.data, file.name);
+
+    if (!normalized.headers.length || !normalized.rows.length) {
+      throw new Error('No usable table rows were extracted from this PDF.');
+    }
+
+    const workbook = createWorkbookFromObjects(normalized.rows, normalized.headers, 'PDF_Source');
+    const safeBase = file.name.replace(/\.[^.]+$/, '') || 'pdf-source';
+    const workbookFile = createWorkbookFileFromWorkbook(workbook, `${safeBase} (extracted).xlsx`);
+
+    return {
+      workbook,
+      file: workbookFile,
+      sheetNames: workbook.SheetNames || ['PDF_Source'],
+      rowCount: normalized.rows.length,
+      columnCount: normalized.headers.length,
+      extractionData: response.data,
+    };
+  }, [pdfDataAlignment]);
+
   const getSheetJoinSourceWorkbook = useCallback((sourceId) => {
     if (!sourceId || sourceId === 'primary') return clientWorkbook;
     return sheetJoinSources.find(source => source.id === sourceId)?.workbook || null;
@@ -975,7 +1136,16 @@ const UploadFiles = () => {
     const selectedDetailColumns = cleanConfig.detailColumns.filter(column => detailHeaders.includes(column) && column !== cleanConfig.detailKey);
     const singleGroupedColumnName = cleanConfig.relationshipName.trim();
 
-    const normalize = value => String(value || '').replace(/\u00a0/g, ' ').trim().toLowerCase();
+    const normalize = value => String(value ?? '')
+      .normalize('NFKC')
+      .replace(/[\u200B-\u200D\uFEFF]/g, '')
+      .replace(/\u00a0/g, ' ')
+      .replace(/[‐‑‒–—−]/g, '-')
+      .replace(/^'/, '')
+      .replace(/\.0+$/, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
     const clean = value => String(value ?? '').trim();
     const uniqueValues = values => {
       const seen = new Set();
@@ -1108,7 +1278,16 @@ const UploadFiles = () => {
     if (acceptedFiles.length > 0) {
       let file = acceptedFiles[0];
       setError(null);
+      setSuccess(null);
       setUserFile(file);
+      setClientWorkbook(null);
+      setClientSheetNames([]);
+      setSelectedClientSheet('');
+      setClientHeaderRow(1);
+      setClientHeaderPreview([]);
+      setClientHeaderAutoDetected(false);
+      setCombineSheetsMode(false);
+      setSelectedClientSheets([]);
       setSheetJoinSetup(null);
       setActiveSheetJoinComparisonId(null);
       setSheetJoinLegacyHeaderWarning(false);
@@ -1126,10 +1305,6 @@ const UploadFiles = () => {
         setProcessingPath('map');
         // For PDF files, we don't need to extract sheet names or headers
         // They will be processed by Azure OCR service
-        setClientWorkbook(null);
-        setClientSheetNames([]);
-        setSelectedClientSheet('');
-        setClientHeaderRow(1);
         return;
       }
 
@@ -1297,12 +1472,36 @@ const UploadFiles = () => {
     }
   }, []);
 
+  const handleRemoveClientFile = useCallback(() => {
+    setUserFile(null);
+    setClientWorkbook(null);
+    setClientSheetNames([]);
+    setSelectedClientSheet('');
+    setClientHeaderRow(1);
+    setClientHeaderPreview([]);
+    setClientHeaderAutoDetected(false);
+    setCombineSheetsMode(false);
+    setSelectedClientSheets([]);
+    setSheetJoinSetup(null);
+    setSheetJoinDialogOpen(false);
+    setSheetJoinStage('match');
+    setSheetJoinPreview(null);
+    setSheetJoinSources([]);
+    setSheetJoinSourceFileInputKey(key => key + 1);
+    setActiveSheetJoinComparisonId(null);
+    setPendingPdfSessionId(null);
+    setPendingPdfContext(null);
+    setPdfChoiceDialogOpen(false);
+    setSuccess(null);
+    setError(null);
+  }, []);
+
   useEffect(() => {
     const initialClientFile = location.state?.initialClientFile;
     if (!initialClientFile) return;
 
     onDropUserFile([initialClientFile]);
-    setWizardStep(1);
+    setWizardStep(Number.isFinite(Number(location.state?.wizardStep)) ? Number(location.state.wizardStep) : 1);
     setProcessingPath(location.state?.processingPath || 'map');
     setSuccess(location.state?.fromBomNormalizer
       ? 'BOM Normalizer output loaded. Continue with BOM Mapping when ready.'
@@ -1588,8 +1787,11 @@ const UploadFiles = () => {
     if (!file) return;
     const lowerName = file.name.toLowerCase();
     if (lowerName.endsWith('.pdf')) {
-      setError('PDF merge sources need extraction first. For now, add Excel or CSV here.');
+      await preparePdfExtractionDialog(file, {
+        target: 'merge-source',
+      });
       event.target.value = '';
+      setSheetJoinSourceFileInputKey(key => key + 1);
       return;
     }
 
@@ -1647,8 +1849,16 @@ const UploadFiles = () => {
   };
 
   const handlePreviewSheetJoin = () => {
-    const baseRows = getSheetRecords(sheetJoinConfig.baseSheet, sheetJoinConfig.baseHeaderRow);
-    const detailRows = getSheetRecords(sheetJoinConfig.detailSheet, sheetJoinConfig.detailHeaderRow);
+    const baseRows = getSheetRecords(
+      sheetJoinConfig.baseSheet,
+      sheetJoinConfig.baseHeaderRow,
+      sheetJoinConfig.baseSourceId
+    );
+    const detailRows = getSheetRecords(
+      sheetJoinConfig.detailSheet,
+      sheetJoinConfig.detailHeaderRow,
+      sheetJoinConfig.detailSourceId
+    );
     if ((!baseRows.length || !detailRows.length) && sheetJoinPreview?.rows?.length) {
       setSheetJoinVisibleColumns(sheetJoinPreview.headers);
       setSheetJoinPreviewFilter('all');
@@ -1873,7 +2083,17 @@ const UploadFiles = () => {
     // runs the same for every source type (Excel, OCR, PDF zonal) and lets the
     // user pick a mapped column like "Item code" as the key. Here we just proceed
     // to mapping.
-    navigate(`/mapping/${sessionId}`, navState ? { state: navState } : undefined);
+    navigate(`/mapping/${sessionId}`, {
+      state: {
+        ...(navState || {}),
+        mappingBackState: {
+          route: '/upload',
+          wizardStep: 1,
+          processingPath: navState?.uploadSource?.processingPath || processingPath || 'map',
+          ...(userFile ? { initialClientFile: userFile } : {}),
+        }
+      }
+    });
   };
 
   const handleSkipCleanup = () => {
@@ -1958,6 +2178,87 @@ const UploadFiles = () => {
     };
   };
 
+  const getSelectedProcessingTemplate = () => (
+    processingTemplates.find(template => String(template.id) === String(selectedProcessingTemplateId)) || null
+  );
+
+  const getProcessingTemplateMappingId = (template = getSelectedProcessingTemplate()) => {
+    const metadataId = template?.metadata?.mapping_template_id;
+    if (metadataId) return metadataId;
+    const stage = Array.isArray(template?.stages)
+      ? template.stages.find(item => item?.type === 'mapping_template' && item?.mapping_template_id)
+      : null;
+    return stage?.mapping_template_id || null;
+  };
+
+  const applyExtractedPdfAsPrimary = (extracted, action = null, templateOptions = {}) => {
+    setUserFile(extracted.file);
+    setClientWorkbook(extracted.workbook);
+    setClientSheetNames(extracted.sheetNames);
+    setSelectedClientSheet(extracted.sheetNames[0] || 'PDF_Source');
+    setClientHeaderRow(1);
+    setClientHeaderAutoDetected(false);
+    setCombineSheetsMode(false);
+    setSelectedClientSheets([]);
+    setSheetJoinSetup(null);
+    setSheetJoinSources([]);
+    setSheetJoinSourceFileInputKey(key => key + 1);
+    setActiveSheetJoinComparisonId(null);
+    setSuccess(`PDF extracted into ${extracted.rowCount} rows and ${extracted.columnCount} columns.`);
+
+    if (action === 'normalize') {
+      navigate('/bom-normalizer', {
+        state: {
+          initialFile: extracted.file,
+          initialFileMode: 'workbook',
+          templateFile,
+          uploadSource: {
+            ...getProcessingTemplateState({
+              processingTemplateMode: selectedProcessingTemplateId ? 'use' : 'new',
+              ...templateOptions,
+            }),
+            processingPath: 'normalize',
+          },
+        }
+      });
+    }
+  };
+
+  const uploadExtractedPdfForMapping = async (extracted, templateOptions = {}) => {
+    const formData = new FormData();
+    formData.append('clientFile', extracted.file);
+    formData.append('sheetName', extracted.sheetNames[0] || 'PDF_Source');
+    formData.append('headerRow', '1');
+    if (templateFile) {
+      formData.append('templateFile', templateFile);
+      formData.append('templateSheetName', selectedTemplateSheet);
+      formData.append('templateHeaderRow', templateHeaderRow.toString());
+    }
+    if (!selectedTemplate && formulaRules && formulaRules.length > 0) {
+      formData.append('formulaRules', JSON.stringify(formulaRules));
+    }
+
+    const response = selectedTemplate && !sheetJoinSetup
+      ? await api.uploadFilesWithTemplate(formData, selectedTemplate.id)
+      : await api.uploadFiles(formData);
+
+    setSuccess('PDF extracted and uploaded successfully.');
+    setTimeout(() => {
+      continueAfterOptionalSheetJoin(response.data.session_id, {
+        ...(selectedTemplate ? {
+          autoApplyTemplate: selectedTemplate,
+          appliedTemplate: selectedTemplate,
+          smartTagFormulaRules: formulaRules,
+        } : {}),
+        fromUpload: true,
+        uploadSource: getProcessingTemplateState({
+          processingTemplateMode: selectedProcessingTemplateId ? 'use' : 'new',
+          ...templateOptions,
+        })
+      });
+    }, 800);
+  };
+
   const openNewTemplateDialog = (action) => {
     const fallbackName = `${userFile?.name ? userFile.name.replace(/\.[^.]+$/, '') : 'BOM'} template`;
     setNewTemplateDraftName(processingTemplateName.trim() || fallbackName);
@@ -1972,13 +2273,17 @@ const UploadFiles = () => {
       return;
     }
 
-    if (userFile.name.toLowerCase().endsWith('.pdf')) {
-      setError('PDF files must be extracted first. Use normal upload to choose OCR or zone mapping.');
+    if (!selectedProcessingTemplateId && !templateOptions.processingTemplateName) {
+      openNewTemplateDialog('normalize');
       return;
     }
 
-    if (!selectedProcessingTemplateId && !templateOptions.processingTemplateName) {
-      openNewTemplateDialog('normalize');
+    if (userFile.name.toLowerCase().endsWith('.pdf')) {
+      preparePdfExtractionDialog(userFile, {
+        target: 'primary',
+        action: 'normalize',
+        templateOptions,
+      });
       return;
     }
 
@@ -2035,25 +2340,12 @@ const UploadFiles = () => {
       setLoading(true);
       setError(null);
 
-      // Handle PDF files differently
       if (isPDF) {
-        const formData = new FormData();
-        formData.append('file', userFile);
-        if (templateFile) {
-          formData.append('templateFile', templateFile);
-          formData.append('templateSheetName', selectedTemplateSheet);
-          formData.append('templateHeaderRow', templateHeaderRow.toString());
-        }
-
-        // Upload PDF file to PDF OCR endpoint
-        const response = await api.uploadPDF(formData);
-        setSuccess('PDF uploaded successfully! Choose processing method...');
-
-        // Store session ID and show choice dialog
-        setPendingPdfSessionId(response.data.session_id);
-        setPdfChoiceDialogOpen(true);
-        setLoading(false);
-
+        await preparePdfExtractionDialog(userFile, {
+          target: 'primary',
+          action: 'upload',
+          templateOptions,
+        });
         return;
       }
 
@@ -2094,6 +2386,44 @@ const UploadFiles = () => {
       }
 
       let response;
+
+      const selectedProcessingTemplate = getSelectedProcessingTemplate();
+      const processingMappingTemplateId = getProcessingTemplateMappingId(selectedProcessingTemplate);
+      if (selectedProcessingTemplateId) {
+        if (!processingMappingTemplateId) {
+          setError('This workflow template is missing its saved mapping link. Please create/save the template again.');
+          setLoading(false);
+          return;
+        }
+        if (sheetJoinSetup) {
+          setError('Existing template replay with sheet merge is not ready yet. Use a single prepared source or create a new template.');
+          setLoading(false);
+          return;
+        }
+
+        response = await api.uploadFilesWithTemplate(formData, processingMappingTemplateId);
+        if (response.data.template_applied && response.data.template_success) {
+          setSuccess(`Template "${selectedProcessingTemplate?.name || 'selected template'}" applied. Opening mapped workbook...`);
+          setTimeout(() => {
+            navigate(`/editor/${response.data.session_id}`, {
+              state: {
+                fromUpload: true,
+                templateAlreadyApplied: true,
+                appliedProcessingTemplate: selectedProcessingTemplate,
+                uploadSource: getProcessingTemplateState({
+                  processingTemplateMode: 'use',
+                  processingPath: 'map',
+                }),
+              }
+            });
+          }, 800);
+          return;
+        }
+
+        setError(response.data.message || 'Template could not be applied to this file.');
+        setLoading(false);
+        return;
+      }
       
       // Use template-aware upload only when no sheet merge needs to run first.
       if (selectedTemplate && !sheetJoinSetup) {
@@ -2199,6 +2529,7 @@ const UploadFiles = () => {
     try {
       setLoading(true);
       setPdfChoiceDialogOpen(false);
+      const context = pendingPdfContext || {};
 
       if (processingMode === 'zonal') {
         setSuccess('Proceeding to zone selection for optimal results...');
@@ -2210,7 +2541,61 @@ const UploadFiles = () => {
             }
           });
         }, 1000);
-      } else if (processingMode === 'compare') {
+        return;
+      }
+
+      if (context.target) {
+        setSuccess(processingMode === 'ocr'
+          ? 'Extracting PDF with standard OCR...'
+          : 'Extracting PDF with native extraction and OCR comparison...');
+        const extracted = await extractPdfWorkbookFile(
+          pendingPdfSessionId,
+          context.file,
+          processingMode
+        );
+
+        if (context.target === 'merge-source') {
+          const id = `source-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+          const nextSource = {
+            id,
+            file: extracted.file,
+            fileName: extracted.file.name,
+            workbook: extracted.workbook,
+            sheetNames: extracted.sheetNames,
+          };
+          const detailSheet = extracted.sheetNames[0] || 'PDF_Source';
+          const detailHeaderRow = 1;
+          const detailHeaders = readHeadersAtRow(extracted.workbook, detailSheet, detailHeaderRow);
+          const detailKey = guessKeyColumn(detailHeaders);
+          const detailColumns = defaultDetailColumns(detailHeaders, detailKey);
+
+          setSheetJoinSources(prev => [...prev, nextSource]);
+          setSheetJoinConfig(prev => ({
+            ...prev,
+            detailSourceId: id,
+            detailSheet,
+            detailHeaderRow,
+            detailKey,
+            detailColumns,
+            uniqueIdDetailColumn: detailColumns[0] || detailKey,
+          }));
+          setSheetJoinStage('match');
+          setSheetJoinPreview(null);
+          setActiveSheetJoinComparisonId(null);
+          setSuccess(`PDF merge source extracted into ${extracted.rowCount} rows.`);
+        } else if (context.action === 'upload') {
+          applyExtractedPdfAsPrimary(extracted, null, context.templateOptions || {});
+          await uploadExtractedPdfForMapping(extracted, context.templateOptions || {});
+        } else if (context.action === 'normalize') {
+          applyExtractedPdfAsPrimary(extracted, 'normalize', context.templateOptions || {});
+        } else {
+          applyExtractedPdfAsPrimary(extracted, null, context.templateOptions || {});
+          setWizardStep(0);
+        }
+        return;
+      }
+
+      if (processingMode === 'compare') {
         setSuccess('Processing with native extraction and Azure OCR...');
 
         const compareResponse = await api.processPDFCompare({
@@ -2247,10 +2632,11 @@ const UploadFiles = () => {
       }
     } catch (err) {
       console.error('Error processing PDF:', err);
-      setError('Error processing PDF. Please try again.');
+      setError(err.response?.data?.error || err.message || 'Error processing PDF. Please try again.');
     } finally {
       setLoading(false);
       setPendingPdfSessionId(null);
+      setPendingPdfContext(null);
     }
   };
 
@@ -2382,7 +2768,7 @@ const UploadFiles = () => {
           width: wizardStep === 0
             ? 'min(920px, calc(100vw - 32px))'
             : 'min(1100px, calc(100vw - 32px))',
-          minHeight: '580px',
+          minHeight: wizardStep === 0 ? '580px' : 'auto',
           borderRadius: '22px',
           border: `1px solid ${Nn.cardBorder}`,
           background: Nn.cardBg,
@@ -2400,7 +2786,7 @@ const UploadFiles = () => {
           display: 'flex',
           justifyContent: wizardStep === 0 ? 'center' : 'space-between',
           alignItems: wizardStep === 0 ? 'center' : 'flex-start',
-          mb: 3,
+          mb: wizardStep === 0 ? 3 : 2.25,
           position: 'relative',
           textAlign: wizardStep === 0 ? 'center' : 'left'
         }}>
@@ -2702,7 +3088,7 @@ const UploadFiles = () => {
                           {userFile.name}
                         </Typography>
                       </Box>
-                      <IconButton size="small" onClick={() => setUserFile(null)} sx={{ color: Nn.muted, '&:hover': { color: Nn.text } }}>
+                      <IconButton size="small" onClick={handleRemoveClientFile} sx={{ color: Nn.muted, '&:hover': { color: Nn.text } }}>
                         <CloseIcon fontSize="small" />
                       </IconButton>
                     </Box>
@@ -2824,13 +3210,28 @@ const UploadFiles = () => {
             </Grid>
 
             {/* Step 1 Bottom Action Bar */}
-            <Box sx={{ mt: 'auto', pt: 3, borderTop: `1px solid ${Nn.divider}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <Box sx={{ mt: userFile ? 2.5 : 'auto', pt: 2.5, borderTop: `1px solid ${Nn.divider}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <Typography variant="caption" sx={{ color: userFile ? '#60a5fa' : Nn.muted, fontWeight: 600 }}>
-                {userFile ? 'Client file ready. Destination: FactWise item default' : 'Select client file to proceed'}
+                {userFile?.name?.toLowerCase?.().endsWith('.pdf') && !clientWorkbook
+                  ? 'Extract this PDF first, then merge or continue.'
+                  : userFile ? 'Client file ready. Destination: FactWise item default' : 'Select client file to proceed'}
               </Typography>
               <Button
                 variant="contained"
-                onClick={() => userFile ? setWizardStep(1) : setError('Please select a client file')}
+                onClick={() => {
+                  if (!userFile) {
+                    setError('Please select a client file');
+                    return;
+                  }
+                  if (userFile.name.toLowerCase().endsWith('.pdf') && !clientWorkbook) {
+                    preparePdfExtractionDialog(userFile, {
+                      target: 'primary',
+                      action: 'setup',
+                    });
+                    return;
+                  }
+                  setWizardStep(1);
+                }}
                 disabled={!userFile}
                 sx={{
                   borderRadius: '999px',
@@ -2854,7 +3255,7 @@ const UploadFiles = () => {
                   }
                 }}
               >
-                Next →
+                {userFile?.name?.toLowerCase?.().endsWith('.pdf') && !clientWorkbook ? 'Extract PDF →' : 'Next →'}
               </Button>
             </Box>
           </Box>
@@ -2862,7 +3263,7 @@ const UploadFiles = () => {
 
         {/* STEP 2: Choose Options (Mapping Template + Tag Template) */}
         {wizardStep === 1 && (
-          <Box sx={{ display: 'flex', flexDirection: 'column', flex: 1, justifyContent: 'space-between' }}>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
             <Grid container spacing={2.5}>
               <Grid item xs={12}>
                 <Box sx={{ p: 2, borderRadius: '14px', border: `1px solid ${Nn.divider}`, bgcolor: Nn.subtlePanelBg }}>
@@ -2872,7 +3273,7 @@ const UploadFiles = () => {
                         Use Template
                       </Typography>
                       <Typography variant="caption" sx={{ color: Nn.muted, display: 'block' }}>
-                        Select an existing template if this file follows a known structure. Leave it blank to create a new template.
+                        Select an existing template if this file follows a known structure. Otherwise continue normally to create a new one.
                       </Typography>
                     </Box>
                     <Button
@@ -2952,9 +3353,6 @@ const UploadFiles = () => {
                         MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
                         sx={{ borderRadius: '8px' }}
                       >
-                        <MenuItem value="">
-                          No existing template - create new on continue
-                        </MenuItem>
                         {processingTemplates.map(template => (
                           <MenuItem key={template.id} value={String(template.id)}>
                             {template.name}
@@ -3123,7 +3521,7 @@ const UploadFiles = () => {
             </Grid>
 
             {/* Step 2 Bottom Action Bar */}
-            <Box sx={{ mt: 'auto', pt: 2, borderTop: `1px solid ${Nn.divider}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <Box sx={{ mt: 0.5, pt: 2, borderTop: `1px solid ${Nn.divider}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <Button variant="outlined" onClick={() => setWizardStep(0)} sx={{ borderRadius: '10px', textTransform: 'none', color: Nn.text, borderColor: Nn.divider }}>
                 ← Back
               </Button>
@@ -3326,7 +3724,7 @@ const UploadFiles = () => {
                       key={sheetJoinSourceFileInputKey}
                       hidden
                       type="file"
-                      accept=".xlsx,.xls,.csv"
+                      accept=".xlsx,.xls,.csv,.pdf"
                       onChange={handleAddSheetJoinSourceFile}
                     />
                   </Button>
@@ -3985,7 +4383,11 @@ const UploadFiles = () => {
       {/* PDF Processing Choice Dialog */}
       <Dialog
         open={pdfChoiceDialogOpen}
-        onClose={() => setPdfChoiceDialogOpen(false)}
+        onClose={() => {
+          setPdfChoiceDialogOpen(false);
+          setPendingPdfSessionId(null);
+          setPendingPdfContext(null);
+        }}
         maxWidth="sm"
         fullWidth
         PaperProps={{ sx: dialogPaperSx }}
@@ -4058,7 +4460,11 @@ const UploadFiles = () => {
         </DialogContent>
         <DialogActions sx={{ ...dialogFooterSx, gap: 1 }}>
           <Button
-            onClick={() => setPdfChoiceDialogOpen(false)}
+            onClick={() => {
+              setPdfChoiceDialogOpen(false);
+              setPendingPdfSessionId(null);
+              setPendingPdfContext(null);
+            }}
             sx={{ ...pillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}
           >
             Cancel
