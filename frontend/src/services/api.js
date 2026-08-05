@@ -1521,6 +1521,10 @@ const api = {
   generateBomSheet: (sessionId) =>
     axios.get(`${API_URL}/bom/generate/${sessionId}/`, { timeout: 120000 }),
 
+  /** Per-source MPN validity + lifecycle counts across every row in the session. */
+  mpnValidationSummary: (sessionId) =>
+    axios.get(`${API_URL}/mpn/summary/${sessionId}/`, { timeout: 120000 }),
+
   /** Validate the generated BOM against BOM rules only (not item rules). */
   validateBomSheet: (sessionId) =>
     axios.get(`${API_URL}/bom/validate/${sessionId}/`, { timeout: 120000 }),

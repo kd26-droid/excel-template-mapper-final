@@ -4972,11 +4972,20 @@ def _append_authored_finished_good(info, rows, headers):
         if isinstance(row, list) and code_index < len(row):
             existing.add(str(row[code_index] or '').strip())
 
+    constants = _constant_column_values(rows, headers)
+
     output = list(rows or [])
     for good in goods:
         if good['code'] in existing:
             continue
         new_row = [''] * len(headers)
+        # Enterprise-level values (procurement entity, buyer/seller flags) are
+        # the same on every row, so the finished good inherits them. Without
+        # this it exports with a blank `Procurement entity name`, which is a
+        # required column, and the import fails on that row alone.
+        for position, value in constants.items():
+            if position < len(new_row):
+                new_row[position] = value
         new_row[code_index] = good['code']
         if name_index >= 0:
             new_row[name_index] = good['name']
@@ -4990,6 +4999,48 @@ def _append_authored_finished_good(info, rows, headers):
         existing.add(good['code'])
 
     return output, headers
+
+
+def _constant_column_values(rows, headers):
+    """Columns holding the same non-blank value on every row, as {index: value}.
+
+    Used to carry enterprise-wide settings onto a synthesised row. Anything that
+    varies between items — codes, descriptions, MPNs — is deliberately excluded,
+    so only genuinely sheet-wide values propagate.
+    """
+    if not rows or not headers:
+        return {}
+
+    # Item identity must never be inherited, even if a sheet happens to have one
+    # row and every column therefore looks constant.
+    never_inherit = {
+        _template_label_key(name) for name in
+        ('Item code', 'Item name', 'Description', 'Item type', 'Measurement unit',
+         'MPN Code', 'CPN Code', 'SAP Item ID', 'HSN Code')
+    }
+
+    constants = {}
+    for position, header in enumerate(headers):
+        if _template_label_key(header) in never_inherit:
+            continue
+        seen = None
+        consistent = True
+        for row in rows:
+            if not isinstance(row, list) or position >= len(row):
+                consistent = False
+                break
+            value = str(row[position] or '').strip()
+            if not value:
+                consistent = False
+                break
+            if seen is None:
+                seen = value
+            elif value != seen:
+                consistent = False
+                break
+        if consistent and seen:
+            constants[position] = seen
+    return constants
 
 
 @api_view(['GET', 'POST'])

@@ -106,6 +106,7 @@ from .zone_views import (
 )
 from .mpn_views import (
     mpn_auth_status,
+    mpn_validation_summary,
     mpn_auth_start,
     mpn_auth_callback,
     mpn_validate,
@@ -284,6 +285,7 @@ urlpatterns = [
 
     # MPN Validation + OAuth
     path('mpn/auth/status/', mpn_auth_status, name='mpn-auth-status'),
+    path('mpn/summary/<str:session_id>/', mpn_validation_summary, name='mpn-validation-summary'),
     path('mpn/auth/start/', mpn_auth_start, name='mpn-auth-start'),
     path('mpn/auth/callback', mpn_auth_callback, name='mpn-auth-callback'),
     path('mpn/validate/', mpn_validate, name='mpn-validate'),
