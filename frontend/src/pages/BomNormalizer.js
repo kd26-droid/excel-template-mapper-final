@@ -2228,6 +2228,7 @@ const BomNormalizer = () => {
   const initialFileSeededRef = useRef('');
   const restoredReturnSnapshotRef = useRef('');
   const autoReplayTemplateRef = useRef('');
+  const restoreInFlightRef = useRef(false);
 
   const headers = useMemo(
     () => preparedHeaders.length ? preparedHeaders : makeUniqueHeaders(sheetRows[headerRowIndex] || []),
@@ -2543,30 +2544,21 @@ const BomNormalizer = () => {
     const snapshotKey = state.bomNormalizerReturnKey;
     const routeRestoreId = snapshotKey || (state.bomNormalizerReturnSnapshot ? 'route-snapshot' : '');
 
-    // The in-app Back button navigates here with returnFromMapping + a snapshot key.
-    // The BROWSER back button replays a history entry that has neither, so without
-    // this fallback the user lands on an empty page while their normalized rows are
-    // still sitting in sessionStorage. Fall back to the latest-results snapshot,
-    // which is written on every step-4 render.
+    // Restore only when a navigation explicitly asked for it. An earlier version also
+    // fell back to the last stored snapshot whenever the page looked empty, so that
+    // browser-back would work too — but a fresh upload is also empty at mount, so it
+    // hijacked new uploads and replayed the previous session's rows. Route state is
+    // the only signal that reliably distinguishes "returning" from "starting over".
     const hasRouteRestore = Boolean(state.returnFromMapping && routeRestoreId);
-    const latestRaw = (() => {
-      try {
-        return window.sessionStorage.getItem(BOM_NORMALIZER_LATEST_RESULTS_KEY);
-      } catch (_) {
-        return null;
-      }
-    })();
-    const hasLatestSnapshot = Boolean(latestRaw || window.__bomNormalizerLatestResultsSnapshot);
-    // Only self-restore when this page has nothing loaded, so we never clobber a
-    // fresh upload the user just started.
-    const pageIsEmpty = !normalizedRows.length && !sheetRows.length && !combineItems.length;
-    const restoreId = hasRouteRestore
-      ? routeRestoreId
-      : (hasLatestSnapshot && pageIsEmpty ? 'latest-snapshot' : '');
+    const restoreId = hasRouteRestore ? routeRestoreId : '';
 
     if (!restoreId || restoredReturnSnapshotRef.current === restoreId) return;
 
     restoredReturnSnapshotRef.current = restoreId;
+    // Held for this tick so the "source/config changed, discard the run" effect below
+    // does not fire on the state this restore is about to set.
+    restoreInFlightRef.current = true;
+    setTimeout(() => { restoreInFlightRef.current = false; }, 0);
     try {
       const parseSnapshot = (raw) => {
         try {
@@ -2657,18 +2649,19 @@ const BomNormalizer = () => {
       // there is nothing to clear, and replacing the entry would strip the state the
       // user needs if they navigate back and forth again.
       if (hasRouteRestore) {
+        // Clear only the one-shot trigger. The snapshot key and rows stay in the
+        // history entry: the user can go forward to mapping and back again, and this
+        // entry has to still carry what that return needs. Stripping them here is why
+        // a second visit came back empty.
         const nextState = { ...state };
         delete nextState.returnFromMapping;
-        delete nextState.bomNormalizerReturnKey;
-        delete nextState.bomNormalizerReturnSnapshot;
-        delete nextState.bomNormalizerReturnRows;
         navigate(location.pathname, { replace: true, state: nextState });
       }
     } catch (err) {
       setError(err.message || 'Could not restore the BOM Normalizer page.');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [location.pathname, location.state, navigate, normalizedRows.length, sheetRows.length, combineItems.length]);
+  }, [location.pathname, location.state, navigate]);
 
   const availableStructureOptions = useMemo(
     () => getStructureOptionsForRoles(roles),
@@ -2907,7 +2900,15 @@ const BomNormalizer = () => {
     const seedKey = initialFile
       ? `${initialFile.name || 'file'}-${initialFile.size || 0}-${initialFile.lastModified || 0}-${state.initialFileMode || 'source'}`
       : '';
-    if (!initialFile || initialFileSeededRef.current === seedKey || state.fromPdfZone || state.returnFromMapping) return;
+    // restoredReturnSnapshotRef, not state.returnFromMapping: the restore effect clears
+    // that flag once it has consumed it, and this effect would then re-run, still see
+    // initialFile in the history entry, and reseed the source — wiping the rows that
+    // were just restored.
+    if (!initialFile
+      || initialFileSeededRef.current === seedKey
+      || state.fromPdfZone
+      || state.returnFromMapping
+      || restoredReturnSnapshotRef.current) return;
 
     initialFileSeededRef.current = seedKey;
 
@@ -4057,8 +4058,12 @@ const BomNormalizer = () => {
     setError('');
   }, [handleReset, location.state, mergePreview, navigate]);
 
+  // Changing the source or parser settings invalidates any previous run. Skipped
+  // while a restore is applying: that path sets roles/config and currentStep in the
+  // same batch, so this effect would observe the new config with currentStep still
+  // at 0 and wipe the rows it had just restored.
   useEffect(() => {
-    if (currentStep === 4) return;
+    if (currentStep === 4 || restoreInFlightRef.current) return;
     setNormalizedRows([]);
     setLowConfidenceOnly(false);
   }, [roles, config, headerRowIndex, sheetName, sheetScope, selectedSheetNames, currentStep]);
