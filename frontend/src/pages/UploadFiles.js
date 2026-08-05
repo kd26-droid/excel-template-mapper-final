@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import LoaderOverlay, { useGlobalBlock } from '../components/LoaderOverlay';
 import BomStructureDialog from '../components/BomStructureDialog';
@@ -1275,6 +1275,21 @@ const UploadFiles = () => {
   // Sheets offered to the BOM structure gate. In combine mode only the sheets
   // actually being stacked are relevant. Memoised because the dialog seeds its
   // state from this list.
+  // Clear the BOM structure answers whenever the workbook itself changes.
+  // A file can be set from several places (drop, PDF extraction, sheet-join
+  // draft, restoring previous state), and resetting at each call site meant a
+  // new upload could silently inherit the previous file's answers and skip the
+  // gate. Keying off the file identity covers every path, including ones added
+  // later.
+  const bomStructureFileKey = `${userFile?.name || ''}|${userFile?.size || 0}|${clientSheetNames.join(',')}`;
+  const previousBomStructureFileKey = useRef(bomStructureFileKey);
+  useEffect(() => {
+    if (previousBomStructureFileKey.current === bomStructureFileKey) return;
+    previousBomStructureFileKey.current = bomStructureFileKey;
+    setBomStructureAnswers(null);
+    setPendingBomStructureAction(null);
+  }, [bomStructureFileKey]);
+
   const bomStructureSheetNames = useMemo(
     () => (combineSheetsMode && selectedClientSheets.length > 0 ? selectedClientSheets : clientSheetNames),
     [combineSheetsMode, selectedClientSheets, clientSheetNames]

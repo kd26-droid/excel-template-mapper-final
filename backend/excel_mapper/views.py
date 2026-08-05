@@ -12808,38 +12808,60 @@ def _read_normalized_source_table(info):
         return [], []
 
 
-@api_view(['GET'])
-def generate_bom_sheet(request, session_id):
-    """Generate the FactWise BOM sheet for a session from its normalized rows.
+def _generate_bom_for_session(session_id):
+    """Resolve a session's BOM answers and generate its sheets.
 
-    Replaces the demo/golden-file path: everything returned here is built from
-    what the user actually uploaded and normalized.
+    Returns (result, bom_header, error_response). Exactly one of result /
+    error_response is set. Flat versus hierarchical is decided by the answers
+    captured in the BOM structure gate, so every caller routes identically.
     """
-    from .bom_generator import generate_flat_bom, bom_rows_as_lists
+    from .bom_generator import generate_flat_bom
 
     info = get_session_consistent(session_id)
     if not info:
-        return Response({'success': False, 'error': 'Invalid session'},
-                        status=status.HTTP_404_NOT_FOUND)
+        return None, None, Response({'success': False, 'error': 'Invalid session'},
+                                    status=status.HTTP_404_NOT_FOUND)
 
-    bom_structure = info.get('bom_structure') or {}
-    sheets = bom_structure.get('sheets') or {}
-
-    # The gate stores answers per sheet. A session carries one normalized table,
-    # so the first sheet still marked as a BOM is the one being generated.
-    bom_header = None
-    chosen_sheet = None
-    for sheet_name, answer in sheets.items():
-        if not answer.get('hasBom'):
+    sheets = (info.get('bom_structure') or {}).get('sheets') or {}
+    answer = None
+    for _sheet_name, sheet_answer in sheets.items():
+        if not sheet_answer.get('hasBom'):
             continue
-        if answer.get('bomGenerationAvailable') is False:
-            continue
-        chosen_sheet = sheet_name
-        bom_header = answer.get('bomHeader')
+        # The user said this sheet is not tree-shaped, so no BOM is built from
+        # it. That is the PM's step 4: refuse rather than guess a structure.
+        if sheet_answer.get('bomGenerationAvailable') is False:
+            return None, None, Response({
+                'success': False,
+                'error': ('This sheet was marked as not matching the BOM tree structure, '
+                          'so a BOM is not generated for it.'),
+                'needs': 'tree_confirmation',
+            }, status=status.HTTP_400_BAD_REQUEST)
+        answer = sheet_answer
         break
 
+    if answer is None:
+        return None, None, Response({
+            'success': False,
+            'error': 'No sheet in this upload was marked as containing a BOM.',
+            'needs': 'bom_sheet',
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    is_hierarchical = bool(answer.get('hasLevels'))
+    bom_header = answer.get('bomHeader')
+
+    # Multi-level generation is not implemented. Refusing is the honest answer:
+    # running the single-level generator over a hierarchical sheet would flatten
+    # every sub-assembly into one block and produce a confidently wrong BOM.
+    if is_hierarchical:
+        return None, None, Response({
+            'success': False,
+            'error': ('This sheet has BOM levels. Multi-level BOM generation is not '
+                      'available yet, so no BOM is generated for it.'),
+            'needs': 'multi_level_support',
+        }, status=status.HTTP_400_BAD_REQUEST)
+
     if not bom_header:
-        return Response({
+        return None, None, Response({
             'success': False,
             'error': ('No finished good has been defined for this upload, so a BOM '
                       'cannot be generated yet.'),
@@ -12867,69 +12889,6 @@ def generate_bom_sheet(request, session_id):
     result = generate_flat_bom(records, bom_header)
 
     if not result.is_valid:
-        return Response({
-            'success': False,
-            'errors': result.errors,
-            'warnings': result.warnings,
-        }, status=status.HTTP_400_BAD_REQUEST)
-
-    return Response({
-        'success': True,
-        'sheet': chosen_sheet,
-        'headers': result.bom_headers,
-        'rows': bom_rows_as_lists(result),
-        'item_headers': result.item_headers,
-        'item_rows': result.item_rows,
-        'stats': result.stats,
-        'warnings': result.warnings,
-    })
-
-
-def _generate_bom_for_session(session_id):
-    """Shared helper: resolve a session's BOM answers and generate its sheets.
-
-    Returns (result, bom_header, error_response). Exactly one of result /
-    error_response is set.
-    """
-    from .bom_generator import generate_flat_bom
-
-    info = get_session_consistent(session_id)
-    if not info:
-        return None, None, Response({'success': False, 'error': 'Invalid session'},
-                                    status=status.HTTP_404_NOT_FOUND)
-
-    sheets = (info.get('bom_structure') or {}).get('sheets') or {}
-    bom_header = None
-    for _sheet_name, answer in sheets.items():
-        if not answer.get('hasBom') or answer.get('bomGenerationAvailable') is False:
-            continue
-        bom_header = answer.get('bomHeader')
-        break
-
-    if not bom_header:
-        return None, None, Response({
-            'success': False,
-            'error': ('No finished good has been defined for this upload, so a BOM '
-                      'cannot be generated yet.'),
-            'needs': 'bom_header',
-        }, status=status.HTTP_400_BAD_REQUEST)
-
-    headers, rows = read_session_grid(session_id, info)
-    records = _normalized_records_from_grid(headers or [], rows or [])
-    if not _has_normalizer_columns(records):
-        source_headers, source_rows = _read_normalized_source_table(info)
-        source_records = _normalized_records_from_grid(source_headers, source_rows)
-        if _has_normalizer_columns(source_records):
-            # Grouping comes from the source sheet; item codes are generated
-            # later and only exist in the mapped grid, so the two are joined.
-            source_records, join_note = _merge_item_codes_from_grid(
-                source_records, headers or [], rows or []
-            )
-            logger.info(f"BOM generation: item code join -> {join_note}")
-            records = source_records
-
-    result = generate_flat_bom(records, bom_header)
-    if not result.is_valid:
         return None, None, Response({
             'success': False,
             'errors': result.errors,
@@ -12937,6 +12896,31 @@ def _generate_bom_for_session(session_id):
         }, status=status.HTTP_400_BAD_REQUEST)
 
     return result, bom_header, None
+
+
+@api_view(['GET'])
+def generate_bom_sheet(request, session_id):
+    """Generate the FactWise BOM sheet for a session from its normalized rows.
+
+    Replaces the demo/golden-file path: everything returned here is built from
+    what the user actually uploaded and normalized. Flat versus hierarchical is
+    decided by the answers captured in the BOM structure gate.
+    """
+    from .bom_generator import bom_rows_as_lists
+
+    result, _bom_header, error_response = _generate_bom_for_session(session_id)
+    if error_response is not None:
+        return error_response
+
+    return Response({
+        'success': True,
+        'headers': result.bom_headers,
+        'rows': bom_rows_as_lists(result),
+        'item_headers': result.item_headers,
+        'item_rows': result.item_rows,
+        'stats': result.stats,
+        'warnings': result.warnings,
+    })
 
 
 @api_view(['GET'])
