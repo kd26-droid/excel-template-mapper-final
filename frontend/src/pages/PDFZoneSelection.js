@@ -15,6 +15,8 @@ import {
   Chip,
   Stack,
   FormControlLabel,
+  RadioGroup,
+  Radio,
   Checkbox,
   TextField
 } from '@mui/material';
@@ -40,6 +42,10 @@ export default function PDFZoneSelection() {
   const fromBomNormalizer = Boolean(location.state?.fromBomNormalizer);
   const returnToUpload = Boolean(location.state?.returnToUpload);
 
+  // 'columns' = a box per column (precise, needs naming)
+  // 'table'   = one box around the whole table, columns read from the
+  //             PDF's own ruling lines, so nothing needs naming
+  const [zoneMode, setZoneMode] = useState('columns');
   const [session, setSession] = useState(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [pages, setPages] = useState([]);
@@ -602,7 +608,8 @@ export default function PDFZoneSelection() {
       const response = await api.processPDFColumnZones(sessionId, {
         mergeWrapped,
         columnLabels,
-        skipTopRows: Number(skipTopRows) || 0
+        skipTopRows: Number(skipTopRows) || 0,
+        zoneMode
       });
       const d = response.data || {};
       if (d.words_outside_columns > 0) {
@@ -731,8 +738,42 @@ export default function PDFZoneSelection() {
                 </Button>
               )}
 
+              {/* What the boxes mean. Explicit, because the same drawing can be
+                  read two completely different ways. */}
+              <Box sx={{ border: '1px solid #e0e0e0', borderRadius: 1, p: 1.5 }}>
+                <Typography variant="caption" sx={{ fontWeight: 700, display: 'block', mb: 1 }}>
+                  What are you marking?
+                </Typography>
+                <RadioGroup value={zoneMode} onChange={(e) => setZoneMode(e.target.value)}>
+                  <FormControlLabel
+                    value="table"
+                    control={<Radio size="small" />}
+                    label={
+                      <Box>
+                        <Typography variant="body2">The whole table</Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          One box around the table. Columns are read from the PDF — no naming needed.
+                        </Typography>
+                      </Box>
+                    }
+                  />
+                  <FormControlLabel
+                    value="columns"
+                    control={<Radio size="small" />}
+                    label={
+                      <Box>
+                        <Typography variant="body2">Each column separately</Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          One box per column. Use when the table has no borders.
+                        </Typography>
+                      </Box>
+                    }
+                  />
+                </RadioGroup>
+              </Box>
+
               {/* Name each column (optional), left to right, for this page. */}
-              {zones.filter(z => z.page_number === currentPage).length > 0 && (
+              {zoneMode === 'columns' && zones.filter(z => z.page_number === currentPage).length > 0 && (
                 <Box sx={{ border: '1px solid #e0e0e0', borderRadius: 1, p: 1.5 }}>
                   <Typography variant="caption" sx={{ fontWeight: 700, display: 'block', mb: 1 }}>
                     Name your columns (left to right) — optional
@@ -780,7 +821,7 @@ export default function PDFZoneSelection() {
                 onClick={processColumnZones}
                 disabled={processing || zones.length === 0}
               >
-                {processing ? 'Reading table...' : 'Extract table (text PDF)'}
+                {processing ? 'Reading table...' : (zoneMode === 'table' ? 'Extract table (text PDF)' : 'Extract columns (text PDF)')}
               </Button>
 
               <Button

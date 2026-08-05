@@ -13101,3 +13101,115 @@ def validate_bom_sheet(request, session_id):
         'warnings': report['warnings'] + result.warnings,
         'stats': report['stats'],
     })
+
+
+# ---------------------------------------------------------------------------
+# Import an edited sheet back into the same session
+# ---------------------------------------------------------------------------
+
+@api_view(['POST'])
+def import_edited_sheet(request, session_id):
+    """Replace a session's grid with an edited export of that same grid.
+
+    Columns are matched by header NAME, not position, so reordering columns in
+    Excel is safe. Columns the session does not know are ignored and reported
+    rather than silently dropped; session columns absent from the upload keep
+    their existing values, so a partial export cannot blank them.
+
+    This writes into the current session, which is the point: mappings, tags and
+    MPN validation stay attached instead of a re-upload creating a new session.
+    """
+    info = get_session_consistent(session_id)
+    if not info:
+        return Response({'success': False, 'error': 'Session not found'},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    uploaded = request.FILES.get('file') or request.FILES.get('clientFile')
+    if not uploaded:
+        return Response({'success': False, 'error': 'No file was uploaded.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        name = str(uploaded.name or '').lower()
+        if name.endswith('.csv'):
+            frame = pd.read_csv(uploaded, dtype=object)
+        else:
+            frame = pd.read_excel(uploaded, dtype=object)
+    except Exception as exc:
+        logger.error(f"Import: could not read uploaded file: {exc}")
+        return Response({'success': False, 'error': f'Could not read the file: {exc}'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    frame = frame.fillna('')
+    uploaded_headers = [str(column).strip() for column in frame.columns]
+    uploaded_rows = frame.values.tolist()
+
+    session_headers, session_rows = read_session_grid(session_id, info)
+    session_headers = list(session_headers or [])
+    session_rows = [list(row) for row in (session_rows or [])]
+
+    if not session_headers:
+        return Response({'success': False, 'error': 'This session has no grid to import into yet.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    # Repeated headers (Tag, Specification name...) are matched left-to-right so
+    # the Nth occurrence in the upload lands on the Nth occurrence in the grid.
+    remaining = {}
+    for position, header in enumerate(session_headers):
+        remaining.setdefault(_template_label_key(header), []).append(position)
+
+    column_map = {}
+    ignored = []
+    for upload_position, header in enumerate(uploaded_headers):
+        slots = remaining.get(_template_label_key(header))
+        if slots:
+            column_map[upload_position] = slots.pop(0)
+        else:
+            ignored.append(header)
+
+    if not column_map:
+        return Response({
+            'success': False,
+            'error': ('None of the uploaded columns match this sheet. '
+                      'Export the sheet first, edit it, then import that file.'),
+            'uploaded_columns': uploaded_headers[:20],
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    untouched = [session_headers[i] for slots in remaining.values() for i in slots]
+
+    new_rows = []
+    for upload_row in uploaded_rows:
+        row = [''] * len(session_headers)
+        for upload_position, session_position in column_map.items():
+            value = upload_row[upload_position] if upload_position < len(upload_row) else ''
+            row[session_position] = '' if value is None else str(value).strip()
+        new_rows.append(row)
+
+    # Columns missing from the upload keep their previous values where the row
+    # still exists, so importing a trimmed export cannot wipe them out.
+    if untouched:
+        untouched_positions = [session_headers.index(h) for h in dict.fromkeys(untouched)]
+        for index, row in enumerate(new_rows):
+            if index < len(session_rows):
+                for position in untouched_positions:
+                    if position < len(session_rows[index]):
+                        row[position] = session_rows[index][position]
+
+    previous_row_count = len(session_rows)
+    write_session_grid(session_id, info, session_headers, new_rows)
+    save_session(session_id, info)
+    increment_template_version(session_id)
+
+    logger.info(
+        f"Import: session {session_id} replaced {previous_row_count} rows with {len(new_rows)} "
+        f"({len(column_map)} columns matched, {len(ignored)} ignored)"
+    )
+
+    return Response({
+        'success': True,
+        'imported_rows': len(new_rows),
+        'previous_rows': previous_row_count,
+        'matched_columns': len(column_map),
+        'ignored_columns': ignored[:20],
+        'untouched_columns': list(dict.fromkeys(untouched))[:20],
+    })

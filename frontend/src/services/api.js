@@ -401,13 +401,15 @@ const api = {
    * Extract a table by treating the drawn zones as COLUMNS, using word
    * coordinates (blanks preserved, rows aligned, header/footer excluded).
    */
-  processPDFColumnZones: async (sessionId, { mergeWrapped = false, columnLabels = [], skipTopRows = 0 } = {}) => {
+  processPDFColumnZones: async (sessionId, { mergeWrapped = false, columnLabels = [], skipTopRows = 0, zoneMode = 'columns' } = {}) => {
     try {
       showGlobalLoader(true);
       const response = await axios.post(`${API_URL}/pdf/zones/${sessionId}/process-columns/`, {
         merge_wrapped: mergeWrapped,
         column_labels: columnLabels,
-        skip_top_rows: skipTopRows
+        skip_top_rows: skipTopRows,
+        // 'columns' = each box is a column; 'table' = one box is the whole table
+        zone_mode: zoneMode
       }, {
         timeout: 120000
       });
@@ -1520,6 +1522,13 @@ const api = {
   /** Generated BOM as JSON: headers, rows, item rows, stats, warnings. */
   generateBomSheet: (sessionId) =>
     axios.get(`${API_URL}/bom/generate/${sessionId}/`, { timeout: 120000 }),
+
+  /** Import an edited export back into the SAME session (keeps mappings/tags/MPN). */
+  importEditedSheet: (sessionId, file) => {
+    const form = new FormData();
+    form.append('file', file);
+    return axios.post(`${API_URL}/import/${sessionId}/`, form, { timeout: 180000 });
+  },
 
   /** Per-source MPN validity + lifecycle counts across every row in the session. */
   mpnValidationSummary: (sessionId) =>

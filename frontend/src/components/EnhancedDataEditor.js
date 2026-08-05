@@ -54,6 +54,8 @@ import { Pagination } from '@mui/material';
 import {
   Save as SaveIcon,
   Download as DownloadIcon,
+  UploadFile as UploadFileIcon,
+  ImportExport as ImportExportIcon,
   CheckCircle as CheckCircleIcon,
   Error as ErrorIcon,
   Edit as EditIcon,
@@ -568,6 +570,13 @@ const EnhancedDataEditor = () => {
   // Completion summary shown after MPN validation finishes.
   const [mpnSummary, setMpnSummary] = useState(null); // { validated, total, failed }
   const [mpnSummaryOpen, setMpnSummaryOpen] = useState(false);
+  // Import an edited export back into THIS session, so mappings, tags and MPN
+  // validation stay attached instead of a re-upload creating a new session.
+  const [importing, setImporting] = useState(false);
+  const [exportingSheet, setExportingSheet] = useState(false);
+  const [exportImportOpen, setExportImportOpen] = useState(false);
+  const [importResult, setImportResult] = useState(null);
+  const importFileInputRef = useRef(null);
   const mpnValidationInFlightRef = useRef(false);
   const [mpnValidationCompleted, setMpnValidationCompleted] = useState(false);
   const [mpnFilterInvalidOnly, setMpnFilterInvalidOnly] = useState(false);
@@ -2811,6 +2820,60 @@ const EnhancedDataEditor = () => {
     }
     runGuardedExport(() => openFactwisePreview(destination), destination);
   }, [handleExportToProject, runGuardedExport, openFactwisePreview]);
+
+  const handleExportSheetForEditing = useCallback(async () => {
+    setExportingSheet(true);
+    try {
+      // export_type 'raw' skips the item-directory curation (BOM columns are
+      // kept, no finished good appended) so the file mirrors the grid exactly
+      // and can be imported straight back.
+      const response = await api.downloadProcessedFile(
+        sessionId,
+        'excel',
+        getCurrentExportColumnOrder(),
+        'raw'
+      );
+      const blob = new Blob([response.data], {
+        type: response.headers?.['content-type']
+          || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `sheet_${sessionId}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+      showSnackbar('Sheet exported. Edit it, then use Import edited sheet.', 'success');
+    } catch (e) {
+      showSnackbar(getFriendlyErrorMessage(e, 'Could not export the sheet.'), 'error');
+    } finally {
+      setExportingSheet(false);
+    }
+  }, [sessionId, getCurrentExportColumnOrder, showSnackbar, getFriendlyErrorMessage]);
+
+  const handleImportEditedSheet = useCallback(async (event) => {
+    const file = event.target.files?.[0];
+    // Reset immediately so re-selecting the same file still fires onChange.
+    event.target.value = '';
+    if (!file) return;
+    setImporting(true);
+    try {
+      const resp = await api.importEditedSheet(sessionId, file);
+      const data = resp?.data || {};
+      if (!data.success) throw new Error(data.error || 'Import failed');
+      setImportResult(data);
+      // Close the launcher so the result summary is not stacked behind it.
+      setExportImportOpen(false);
+      await fetchDataSynchronized();
+      showSnackbar(`Imported ${data.imported_rows} rows from ${file.name}`, 'success');
+    } catch (e) {
+      showSnackbar(getFriendlyErrorMessage(e, 'Could not import that sheet.'), 'error');
+    } finally {
+      setImporting(false);
+    }
+  }, [sessionId, fetchDataSynchronized, showSnackbar, getFriendlyErrorMessage]);
 
   const downloadFactwisePreview = useCallback(async (format) => {
     const columnOrder = getCurrentExportColumnOrder();
@@ -5304,6 +5367,10 @@ const EnhancedDataEditor = () => {
                 <MenuItem onClick={() => { setToolsMenuAnchor(null); setDelCol(''); setDelOp('is_empty'); setDelCompare(''); setDeleteRowsOpen(true); }} disabled={syncStatus.inProgress}>
                   <ListItemIcon><DeleteIcon sx={{ color: '#c62828' }} /></ListItemIcon>
                   <ListItemText>Delete rows by condition</ListItemText>
+                </MenuItem>
+                <MenuItem onClick={() => { setToolsMenuAnchor(null); setExportImportOpen(true); }} disabled={syncStatus.inProgress}>
+                  <ListItemIcon><ImportExportIcon sx={{ color: '#2563eb' }} /></ListItemIcon>
+                  <ListItemText>Export / Import sheet</ListItemText>
                 </MenuItem>
               </Menu>
 
@@ -8797,6 +8864,99 @@ const EnhancedDataEditor = () => {
           {snackbar.message}
         </Alert>
       </Snackbar>
+
+      {/* Export / Import — one entry point, both halves of the same round trip.
+          Export writes the grid exactly as it is; import reads that file back
+          into this same session so mappings, tags and MPN validation survive. */}
+      <Dialog open={exportImportOpen} onClose={() => setExportImportOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <ImportExportIcon fontSize="small" />
+          Export / Import sheet
+        </DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="body2" sx={{ color: 'text.secondary', mb: 2.5 }}>
+            Export the sheet, edit it in Excel, then import it back. Changes land in
+            this session, so your mapping, tags and MPN validation stay attached.
+          </Typography>
+
+          <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+            <Box sx={{ flex: 1, minWidth: 220, p: 2, borderRadius: 1, border: `1px solid ${t.border.default}` }}>
+              <Typography variant="subtitle2" sx={{ mb: 0.5 }}>1 &nbsp;Export</Typography>
+              <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mb: 1.5 }}>
+                Downloads every column exactly as shown here — nothing added or removed.
+              </Typography>
+              <Button
+                fullWidth
+                variant="contained"
+                onClick={handleExportSheetForEditing}
+                disabled={exportingSheet}
+                startIcon={exportingSheet ? <CircularProgress size={16} /> : <DownloadIcon />}
+              >
+                {exportingSheet ? 'Exporting…' : 'Export sheet'}
+              </Button>
+            </Box>
+
+            <Box sx={{ flex: 1, minWidth: 220, p: 2, borderRadius: 1, border: `1px solid ${t.border.default}` }}>
+              <Typography variant="subtitle2" sx={{ mb: 0.5 }}>2 &nbsp;Import</Typography>
+              <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mb: 1.5 }}>
+                Columns match by name, so reordering is safe. Anything unmatched is reported.
+              </Typography>
+              <Button
+                fullWidth
+                variant="outlined"
+                onClick={() => importFileInputRef.current?.click()}
+                disabled={importing}
+                startIcon={importing ? <CircularProgress size={16} /> : <UploadFileIcon />}
+              >
+                {importing ? 'Importing…' : 'Import edited sheet'}
+              </Button>
+            </Box>
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setExportImportOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Hidden picker for "Import edited sheet" in the Tools menu. */}
+      <input
+        ref={importFileInputRef}
+        type="file"
+        accept=".xlsx,.xls,.csv"
+        style={{ display: 'none' }}
+        onChange={handleImportEditedSheet}
+      />
+
+      {/* What the import actually changed — columns it could not match are
+          listed rather than silently dropped. */}
+      <Dialog open={Boolean(importResult)} onClose={() => setImportResult(null)} maxWidth="xs" fullWidth>
+        <DialogTitle>Sheet imported</DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="h4" sx={{ fontWeight: 700 }}>
+            {importResult?.imported_rows}
+          </Typography>
+          <Typography variant="body2" sx={{ color: 'text.secondary', mb: 2 }}>
+            rows imported{importResult && importResult.previous_rows !== importResult.imported_rows
+              ? ` (was ${importResult.previous_rows})` : ''}
+          </Typography>
+          <Alert severity="success" sx={{ mb: 1 }}>
+            {importResult?.matched_columns} columns matched by name.
+          </Alert>
+          {importResult?.ignored_columns?.length > 0 && (
+            <Alert severity="warning" sx={{ mb: 1 }}>
+              Not in this sheet, so ignored: {importResult.ignored_columns.join(', ')}
+            </Alert>
+          )}
+          {importResult?.untouched_columns?.length > 0 && (
+            <Alert severity="info">
+              Absent from your file, so left unchanged: {importResult.untouched_columns.join(', ')}
+            </Alert>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button variant="contained" onClick={() => setImportResult(null)}>Done</Button>
+        </DialogActions>
+      </Dialog>
 
       {/* MPN validation summary, shown once validation finishes. */}
       <Dialog
