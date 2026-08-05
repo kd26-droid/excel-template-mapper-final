@@ -15,6 +15,7 @@ import unicodedata
 import pandas as pd
 from django.conf import settings
 from django.core.cache import cache
+from django.db import IntegrityError
 from django.http import FileResponse, Http404, JsonResponse, HttpResponse
 from django.utils import timezone
 from rest_framework import status
@@ -6149,6 +6150,13 @@ def save_mapping_template(request):
                 'success': False,
                 'error': 'Template name is required'
             }, status=status.HTTP_400_BAD_REQUEST)
+
+        if MappingTemplate.objects.filter(name=template_name).exists():
+            return Response({
+                'success': False,
+                'code': 'duplicate_template_name',
+                'error': 'Template with this name already exists. Please enter another name.'
+            }, status=status.HTTP_409_CONFLICT)
         
         # Handle two cases: session-based templates and standalone formula templates
         if session_id and session_id in SESSION_STORE:
@@ -6301,17 +6309,34 @@ def save_mapping_template(request):
                 customer_id_pairs_count=customer_id_pairs_count,
                 session_id=session_id
             )
+        except IntegrityError as e:
+            if 'unique' in str(e).lower() and 'name' in str(e).lower():
+                return Response({
+                    'success': False,
+                    'code': 'duplicate_template_name',
+                    'error': 'Template with this name already exists. Please enter another name.'
+                }, status=status.HTTP_409_CONFLICT)
+            raise e
         except Exception as e:
             # If new fields don't exist yet, create without them
             if 'formula_rules' in str(e) or 'factwise_rules' in str(e) or 'default_values' in str(e) or 'mpn_validation_metadata' in str(e):
-                template = MappingTemplate.objects.create(
-                    name=template_name,
-                    description=description,
-                    template_headers=template_headers,
-                    source_headers=client_headers,
-                    mappings=mappings,
-                    session_id=session_id
-                )
+                try:
+                    template = MappingTemplate.objects.create(
+                        name=template_name,
+                        description=description,
+                        template_headers=template_headers,
+                        source_headers=client_headers,
+                        mappings=mappings,
+                        session_id=session_id
+                    )
+                except IntegrityError as fallback_error:
+                    if 'unique' in str(fallback_error).lower() and 'name' in str(fallback_error).lower():
+                        return Response({
+                            'success': False,
+                            'code': 'duplicate_template_name',
+                            'error': 'Template with this name already exists. Please enter another name.'
+                        }, status=status.HTTP_409_CONFLICT)
+                    raise fallback_error
             else:
                 raise e
         

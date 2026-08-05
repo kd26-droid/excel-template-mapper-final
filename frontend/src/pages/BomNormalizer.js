@@ -86,6 +86,15 @@ const unsupportedSourceMessage = (fileName = 'Selected file') => (
   `${fileName} is not supported. Please upload .xlsx, .xls, .xlsm, .csv, or .pdf files.`
 );
 
+const EXCEL_OUTLINE_LEVEL_HEADER = 'Excel Outline Level';
+
+const uniqueHeaderName = (baseName, existingHeaders = []) => {
+  if (!existingHeaders.includes(baseName)) return baseName;
+  let index = 2;
+  while (existingHeaders.includes(`${baseName} ${index}`)) index += 1;
+  return `${baseName} ${index}`;
+};
+
 const LEARNED_ROLE_HEADERS_KEY = 'bomNormalizer.learnedRoleHeaders.v1';
 const BOM_NORMALIZER_RETURN_PREFIX = 'bomNormalizer.returnSnapshot.';
 const BOM_NORMALIZER_LATEST_RESULTS_KEY = 'bomNormalizer.latestResultsSnapshot';
@@ -342,6 +351,16 @@ const worksheetToCompactRows = (worksheet) => {
   const valuesByCell = new Map();
   const metaByRow = new Map();
   const usedColumns = new Set();
+  const outlineRows = Array.isArray(worksheet?.['!rows']) ? worksheet['!rows'] : [];
+
+  outlineRows.forEach((rowInfo, rowIndex) => {
+    const rawLevel = Number(rowInfo?.level);
+    if (!Number.isFinite(rawLevel) || rawLevel <= 0) return;
+    maxRow = Math.max(maxRow, rowIndex);
+    const rowMeta = metaByRow.get(rowIndex) || { redStyle: false, strikeStyle: false, deletedStyle: false };
+    rowMeta.outlineLevel = rawLevel + 1;
+    metaByRow.set(rowIndex, rowMeta);
+  });
 
   cells.forEach((cellAddress) => {
     const cell = worksheet[cellAddress];
@@ -424,7 +443,8 @@ const inferRoles = (headers) => {
     description: findLearnedHeader('description') || findHeader([/description/, /item name/, /\bname\b/]),
     quantity: findLearnedHeader('quantity') || findHeader([/quantity/, /\bqty\b/, /^count$/, /\bcount\b/]),
     uom: findLearnedHeader('uom') || findHeader([/\buom\b/, /measurement unit/, /\bunit\b/]),
-    level: findLearnedHeader('level') || findHeader([/\blevel\b/]),
+    level: headers.find((header) => normalizeKey(header).startsWith(normalizeKey(EXCEL_OUTLINE_LEVEL_HEADER)))
+      || (findLearnedHeader('level') || findHeader([/\blevel\b/])),
     parent: findLearnedHeader('parent') || findHeader([/parent/, /finished good/, /bom id/, /item code/, /assembly/]),
   };
 };
@@ -1301,6 +1321,153 @@ const normalizeRowsChunked = async (rows, headers, roles, config, onProgress) =>
   return output;
 };
 
+const getRawPairingParts = (row, roles, config) => {
+  const rawMpn = getCell(row, roles.mpn);
+  const rawManufacturer = getCell(row, roles.manufacturer);
+  const mpns = splitMpnCell(rawMpn, config);
+  const manufacturers = splitManufacturerCell(rawManufacturer, null, config).filter(Boolean);
+  return { mpns, manufacturers, rawMpn, rawManufacturer };
+};
+
+const analyzeMpnManufacturerPairing = (rows, headers, roles, config) => {
+  if (!roles.mpn || !roles.manufacturer || roles.mpn === roles.manufacturer) {
+    return { checkedRows: 0, matchedRows: 0, issueRows: [] };
+  }
+
+  const issueRows = [];
+  let checkedRows = 0;
+  let matchedRows = 0;
+  const manualAltGroups = cleanAlternateColumnGroups(config.alternateColumnGroups || [], headers);
+  const alternateGroups = manualAltGroups.length ? manualAltGroups : findAlternateColumnGroups(headers);
+
+  rows.forEach((row, rowIndex) => {
+    if (shouldSkipSourceRow(row, headers, roles, config)) return;
+    const sourceRow = row.__sourceRow || rowIndex + 1;
+    const base = getRawPairingParts(row, roles, config);
+    const primaryManufacturer = getCell(row, roles.manufacturer);
+
+    const scenarios = [];
+    if (base.mpns.length > 1 || base.manufacturers.length > 1) {
+      scenarios.push({
+        key: `source-${sourceRow}`,
+        sourceRow,
+        parentKey: getCell(row, roles.parent) || getCell(row, roles.description) || getCell(row, roles.cpn) || `Source row ${sourceRow}`,
+        mpns: base.mpns,
+        manufacturers: base.manufacturers,
+        rawMpn: base.rawMpn,
+        rawManufacturer: base.rawManufacturer,
+      });
+    }
+
+    if (config.alternateLayout === 'separate_columns' && alternateGroups.length) {
+      const mpns = [getCell(row, roles.mpn), ...alternateGroups.map((group) => getCell(row, group.mpn))]
+        .map(stripVendorPrefix)
+        .filter(Boolean);
+      const manufacturers = [primaryManufacturer, ...alternateGroups.map((group) => getCell(row, group.mfr))]
+        .filter(Boolean);
+      if (mpns.length > 1) {
+        scenarios.push({
+          key: `alternate-columns-${sourceRow}`,
+          sourceRow,
+          parentKey: getCell(row, roles.parent) || getCell(row, roles.description) || getCell(row, roles.cpn) || `Source row ${sourceRow}`,
+          mpns,
+          manufacturers,
+          rawMpn: mpns.join(' | '),
+          rawManufacturer: manufacturers.join(' | '),
+        });
+      }
+    }
+
+    scenarios.forEach((scenario) => {
+      const mpnCount = scenario.mpns.length;
+      const mfrCount = scenario.manufacturers.length;
+      if (mpnCount <= 1 && mfrCount <= 1) return;
+      checkedRows += 1;
+      if (mpnCount === mfrCount) {
+        matchedRows += 1;
+        return;
+      }
+      issueRows.push({
+        ...scenario,
+        action: 'keep',
+        mpnDecisions: scenario.mpns.map((mpn, index) => ({
+          mpn,
+          manufacturer: scenario.manufacturers[index] || scenario.manufacturers[0] || '',
+          keep: true,
+        })),
+        manualManufacturers: scenario.mpns.map((_, index) => scenario.manufacturers[index] || scenario.manufacturers[0] || '').join(' | '),
+        message: `${mpnCount} MPN${mpnCount === 1 ? '' : 's'} detected, ${mfrCount} manufacturer${mfrCount === 1 ? '' : 's'} detected.`,
+      });
+    });
+  });
+
+  return { checkedRows, matchedRows, issueRows };
+};
+
+const splitManualManufacturers = (value) => (
+  fmt(value)
+    .split(/\s*(?:\||\n|;)\s*/g)
+    .map(fmt)
+    .filter(Boolean)
+);
+
+const applyPairingReviewDecisions = (rows, reviewRows) => {
+  if (!reviewRows.length) return rows;
+  const decisions = reviewRows.filter((issue) => issue.action !== 'keep');
+  if (!decisions.length) return rows;
+
+  let nextRows = rows.map((row) => ({ ...row }));
+  decisions.forEach((issue) => {
+    const mpnKeys = issue.mpns.map((mpn) => normalizeKey(stripVendorPrefix(mpn)));
+    const decisionRows = Array.isArray(issue.mpnDecisions) && issue.mpnDecisions.length
+      ? issue.mpnDecisions
+      : issue.mpns.map((mpn, index) => ({
+          mpn,
+          manufacturer: issue.manufacturers[index] || issue.manufacturers[0] || '',
+          keep: true,
+        }));
+    const rowBelongsToIssue = (row) => (
+      String(row.sourceRow) === String(issue.sourceRow) ||
+      (issue.parentKey && normalizeKey(row.parentKey) === normalizeKey(issue.parentKey))
+    );
+    const manualValues = issue.action === 'manual'
+      ? splitManualManufacturers(issue.manualManufacturers)
+      : [];
+    const firstManufacturer = issue.manufacturers[0] || manualValues[0] || '';
+
+    if (issue.action === 'manual' || issue.action === 'remove_extra') {
+      const affectedRows = nextRows.filter((row) => rowBelongsToIssue(row) && mpnKeys.includes(normalizeKey(row.mpn)));
+      if (!affectedRows.length) return;
+      const templateRow = affectedRows[0];
+      const replacementRows = [];
+      decisionRows.forEach((decision, index) => {
+        if (issue.action === 'remove_extra' && decision.keep === false) return;
+        const relationIndex = replacementRows.length;
+        const manualValue = manualValues[index] || '';
+        const manufacturer = issue.action === 'manual'
+          ? (manualValue || decision.manufacturer || manualValues[0] || '')
+          : (issue.manufacturers[index] || firstManufacturer || decision.manufacturer || '');
+        replacementRows.push({
+          ...templateRow,
+          mpn: stripVendorPrefix(decision.mpn || issue.mpns[index] || ''),
+          manufacturer,
+          relation: relationIndex === 0 ? 'Primary' : `Alternate ${relationIndex}`,
+          rule: `${templateRow.rule || 'normalized'}_pairing_review`,
+          confidence: Math.max(templateRow.confidence || 0, manufacturer ? 88 : templateRow.confidence || 0),
+        });
+      });
+      let inserted = false;
+      nextRows = nextRows.flatMap((row) => {
+        if (!rowBelongsToIssue(row) || !mpnKeys.includes(normalizeKey(row.mpn))) return [row];
+        if (inserted) return [];
+        inserted = true;
+        return replacementRows;
+      });
+    }
+  });
+  return nextRows;
+};
+
 const downloadRowsAsCsv = (rows) => {
   if (!rows.length) return;
   const columns = getNormalizedExportColumns(rows);
@@ -1584,6 +1751,10 @@ const prepareSingleSheet = (currentWorkbook, currentSheetName, options = {}) => 
     : detectHeaderRow(rows);
   const columns = getUsableColumnDescriptors(rows, headerIndex);
   const currentHeaders = columns.map((column) => column.header);
+  const dataSheetRows = rows.slice(headerIndex + 1).filter((row) => row.some((cell) => fmt(cell)));
+  const hasOutlineLevels = dataSheetRows.some((row) => Number(row.__rowMeta?.outlineLevel || 0) > 1);
+  const outlineLevelHeader = hasOutlineLevels ? uniqueHeaderName(EXCEL_OUTLINE_LEVEL_HEADER, currentHeaders) : '';
+  const outputHeaders = outlineLevelHeader ? [...currentHeaders, outlineLevelHeader] : currentHeaders;
   const currentRows = rows
     .slice(headerIndex + 1)
     .filter((row) => row.some((cell) => fmt(cell)))
@@ -1592,14 +1763,21 @@ const prepareSingleSheet = (currentWorkbook, currentSheetName, options = {}) => 
       columns.forEach((column) => {
         mapped[column.header] = fmt(row[column.index]);
       });
+      if (outlineLevelHeader) {
+        mapped[outlineLevelHeader] = String(Number(row.__rowMeta?.outlineLevel || 1) || 1);
+      }
       mapped.__sourceRow = headerIndex + 2 + rowIndex;
+      if (row.__rowMeta?.deletedStyle) mapped.__deletedRowStyle = true;
+      if (row.__rowMeta?.redStyle) mapped.__redRowStyle = true;
+      if (row.__rowMeta?.strikeStyle) mapped.__strikeRowStyle = true;
       return mapped;
     });
   return {
     sheetRows: rows,
     headerRowIndex: headerIndex,
-    headers: currentHeaders,
+    headers: outputHeaders,
     dataRows: currentRows,
+    detectedOutlineLevels: hasOutlineLevels,
   };
 };
 
@@ -2468,6 +2646,9 @@ const BomNormalizer = () => {
   const [skipSourceSetupForMerge, setSkipSourceSetupForMerge] = useState(false);
   const [normalizationSummary, setNormalizationSummary] = useState(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [pairingReviewOpen, setPairingReviewOpen] = useState(false);
+  const [pairingReviewRows, setPairingReviewRows] = useState([]);
+  const [pendingNormalization, setPendingNormalization] = useState(null);
   const [lowConfidenceOnly, setLowConfidenceOnly] = useState(false);
   const [factwiseDialogOpen, setFactwiseDialogOpen] = useState(false);
   const [factwiseConfig, setFactwiseConfig] = useState({
@@ -4189,6 +4370,89 @@ const BomNormalizer = () => {
     tagConfig,
   ]);
 
+  const buildNormalizationSummary = useCallback((rows, pairingCheck = null) => {
+    const primaryRows = rows.filter((row) => row.relation === 'Primary').length;
+    const alternateRows = rows.filter((row) => row.relation !== 'Primary').length;
+    const uniqueRawMaterials = new Set(rows.map((row) => row.mpn || row.manufacturer || row.cpn).filter(Boolean)).size;
+    const skippedRows = dataRows.filter((row) => shouldSkipSourceRow(row, headers, roles, config)).length;
+    return {
+      totalRows: rows.length,
+      primaryRows,
+      alternateRows,
+      uniqueRawMaterials,
+      skippedRows,
+      pairingCheckedRows: pairingCheck?.checkedRows || 0,
+      pairingMatchedRows: pairingCheck?.matchedRows || 0,
+      pairingIssueRows: pairingCheck?.issueRows?.length || 0,
+    };
+  }, [config, dataRows, headers, roles]);
+
+  const commitNormalizedResult = useCallback((rows, pairingCheck = null) => {
+    setNormalizedRows(rows);
+    setNormalizationSummary(buildNormalizationSummary(rows, pairingCheck));
+    setConfirmOpen(true);
+    setError('');
+  }, [buildNormalizationSummary]);
+
+  const updatePairingReviewRow = useCallback((index, patch) => {
+    setPairingReviewRows((prev) => prev.map((row, rowIndex) => (
+      rowIndex === index ? { ...row, ...patch } : row
+    )));
+  }, []);
+
+  const updatePairingManualManufacturers = useCallback((index, value) => {
+    const values = splitManualManufacturers(value);
+    setPairingReviewRows((prev) => prev.map((row, rowIndex) => {
+      if (rowIndex !== index) return row;
+      const mpnDecisions = (row.mpnDecisions || row.mpns.map((mpn) => ({ mpn, manufacturer: '', keep: true })))
+        .map((decision, decisionIndex) => ({
+          ...decision,
+          manufacturer: values[decisionIndex] || decision.manufacturer || values[0] || '',
+        }));
+      return { ...row, manualManufacturers: value, mpnDecisions };
+    }));
+  }, []);
+
+  const updatePairingMpnDecision = useCallback((issueIndex, mpnIndex, patch) => {
+    setPairingReviewRows((prev) => prev.map((row, rowIndex) => {
+      if (rowIndex !== issueIndex) return row;
+      const baseDecisions = row.mpnDecisions || row.mpns.map((mpn, index) => ({
+        mpn,
+        manufacturer: row.manufacturers[index] || row.manufacturers[0] || '',
+        keep: true,
+      }));
+      const mpnDecisions = baseDecisions.map((decision, decisionIndex) => (
+        decisionIndex === mpnIndex ? { ...decision, ...patch } : decision
+      ));
+      return { ...row, mpnDecisions };
+    }));
+  }, []);
+
+  const handleApplyPairingReview = useCallback(() => {
+    if (!pendingNormalization) {
+      setPairingReviewOpen(false);
+      return;
+    }
+    const reviewedRows = applyPairingReviewDecisions(pendingNormalization.rows, pairingReviewRows);
+    const pairingCheck = {
+      ...(pendingNormalization.pairingCheck || {}),
+      issueRows: pairingReviewRows,
+    };
+    setPairingReviewOpen(false);
+    setPendingNormalization(null);
+    commitNormalizedResult(reviewedRows, pairingCheck);
+  }, [commitNormalizedResult, pairingReviewRows, pendingNormalization]);
+
+  const handleKeepPairingReview = useCallback(() => {
+    if (!pendingNormalization) {
+      setPairingReviewOpen(false);
+      return;
+    }
+    setPairingReviewOpen(false);
+    setPendingNormalization(null);
+    commitNormalizedResult(pendingNormalization.rows, pendingNormalization.pairingCheck);
+  }, [commitNormalizedResult, pendingNormalization]);
+
   const handleNormalize = useCallback(async () => {
     if (!dataRows.length) {
       setError('No data rows found below the selected header row.');
@@ -4203,26 +4467,21 @@ const BomNormalizer = () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     try {
       const result = await normalizeRowsChunked(dataRows, headers, roles, config, setProgress);
-      setNormalizedRows(result);
-      const primaryRows = result.filter((row) => row.relation === 'Primary').length;
-      const alternateRows = result.filter((row) => row.relation !== 'Primary').length;
-      const uniqueRawMaterials = new Set(result.map((row) => row.mpn || row.manufacturer || row.cpn).filter(Boolean)).size;
-      const skippedRows = dataRows.filter((row) => shouldSkipSourceRow(row, headers, roles, config)).length;
-      setNormalizationSummary({
-        totalRows: result.length,
-        primaryRows,
-        alternateRows,
-        uniqueRawMaterials,
-        skippedRows,
-      });
-      setConfirmOpen(true);
-      setError('');
+      const pairingCheck = analyzeMpnManufacturerPairing(dataRows, headers, roles, config);
+      if (pairingCheck.issueRows.length) {
+        setPendingNormalization({ rows: result, pairingCheck });
+        setPairingReviewRows(pairingCheck.issueRows);
+        setPairingReviewOpen(true);
+        setError('');
+      } else {
+        commitNormalizedResult(result, pairingCheck);
+      }
     } catch (err) {
       setError(err.message || 'Normalization failed.');
     } finally {
       setBusy(false);
     }
-  }, [config, dataRows, headers, roles]);
+  }, [commitNormalizedResult, config, dataRows, headers, roles]);
 
   const handleOpenFactwiseDialog = useCallback(() => {
     setFactwiseConfig((prev) => ({
@@ -4331,6 +4590,9 @@ const BomNormalizer = () => {
     setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
+    setPairingReviewOpen(false);
+    setPairingReviewRows([]);
+    setPendingNormalization(null);
     setLowConfidenceOnly(false);
     setFactwiseDialogOpen(false);
     setTagDialogOpen(false);
@@ -4426,6 +4688,9 @@ const BomNormalizer = () => {
   useEffect(() => {
     if (currentStep === 4 || restoreInFlightRef.current) return;
     setNormalizedRows([]);
+    setPairingReviewOpen(false);
+    setPairingReviewRows([]);
+    setPendingNormalization(null);
     setLowConfidenceOnly(false);
   }, [roles, config, headerRowIndex, sheetName, sheetScope, selectedSheetNames, currentStep]);
 
@@ -6228,6 +6493,169 @@ const BomNormalizer = () => {
           </Button>
         </DialogActions>
       </Dialog>
+      <Dialog open={pairingReviewOpen} onClose={() => {}} maxWidth="md" fullWidth>
+        <DialogTitle>
+          <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'flex-start', sm: 'center' }} gap={1}>
+            <Box>
+              <Typography sx={{ fontSize: 18, fontWeight: 850 }}>Review MPN-Manufacturer Pairing</Typography>
+              <Typography sx={{ mt: 0.5, fontSize: 13, color: normalizerTheme.muted }}>
+                Some rows have a different count of MPNs and manufacturers. Confirm how these should be paired before opening the normalized output.
+              </Typography>
+            </Box>
+            <Chip color="warning" label={`${pairingReviewRows.length} row${pairingReviewRows.length === 1 ? '' : 's'} need review`} />
+          </Stack>
+        </DialogTitle>
+        <DialogContent>
+          <Alert severity="info" sx={{ mb: 1.5 }}>
+            Clean rows continue automatically. These rows are shown because the pairing count did not match.
+          </Alert>
+          <TableContainer sx={{ maxHeight: '58vh', border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.table, overflowX: 'auto' }}>
+            <Table stickyHeader size="small" sx={{ minWidth: 920 }}>
+              <TableHead>
+                <TableRow>
+                  <TableCell sx={{ width: 72, fontWeight: 850, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text }}>Row</TableCell>
+                  <TableCell sx={{ width: 250, fontWeight: 850, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text }}>MPNs</TableCell>
+                  <TableCell sx={{ width: 190, fontWeight: 850, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text }}>Manufacturers</TableCell>
+                  <TableCell sx={{ width: 210, fontWeight: 850, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text }}>Action</TableCell>
+                  <TableCell sx={{ width: 250, fontWeight: 850, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text }}>Manual values</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {pairingReviewRows.map((issue, index) => (
+                  <TableRow key={`${issue.key || issue.sourceRow}-${index}`}>
+                    <TableCell sx={{ color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
+                      <Typography sx={{ fontWeight: 800 }}>{issue.sourceRow}</Typography>
+                    </TableCell>
+                    <TableCell sx={{ color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
+                      <Chip size="small" color="warning" variant="outlined" label={issue.message} sx={{ mb: 0.75, maxWidth: '100%' }} />
+                      <Stack gap={0.5}>
+                        {issue.mpns.map((mpn, mpnIndex) => (
+                          <Stack
+                            key={`${issue.sourceRow}-mpn-${mpnIndex}`}
+                            direction="row"
+                            alignItems="center"
+                            gap={0.75}
+                          sx={{ minHeight: 28 }}
+                          >
+                            {issue.action === 'remove_extra' && (
+                              <Checkbox
+                                size="small"
+                                checked={(issue.mpnDecisions?.[mpnIndex]?.keep ?? true) !== false}
+                                onChange={(event) => updatePairingMpnDecision(index, mpnIndex, { keep: event.target.checked })}
+                                sx={{ p: 0.25 }}
+                              />
+                            )}
+                            <Chip
+                              size="small"
+                              color={issue.action === 'remove_extra' && issue.mpnDecisions?.[mpnIndex]?.keep === false ? 'default' : 'primary'}
+                              variant={issue.action === 'remove_extra' && issue.mpnDecisions?.[mpnIndex]?.keep === false ? 'outlined' : 'filled'}
+                              label={`${mpnIndex + 1}. ${mpn}`}
+                              sx={{ opacity: issue.action === 'remove_extra' && issue.mpnDecisions?.[mpnIndex]?.keep === false ? 0.55 : 1 }}
+                            />
+                          </Stack>
+                        ))}
+                      </Stack>
+                      {issue.action === 'remove_extra' && (
+                        <Typography sx={{ mt: 0.75, fontSize: 12, color: normalizerTheme.muted }}>
+                          Uncheck the MPN rows that should be removed.
+                        </Typography>
+                      )}
+                    </TableCell>
+                    <TableCell sx={{ color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
+                      {issue.manufacturers.length ? (
+                        <Stack gap={0.5}>
+                          {issue.manufacturers.map((manufacturer, manufacturerIndex) => (
+                            <Chip key={`${issue.sourceRow}-mfr-${manufacturerIndex}`} size="small" label={`${manufacturerIndex + 1}. ${manufacturer}`} />
+                          ))}
+                        </Stack>
+                      ) : (
+                        <Typography sx={{ fontSize: 13, color: normalizerTheme.muted }}>No manufacturer detected</Typography>
+                      )}
+                    </TableCell>
+                    <TableCell sx={{ color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
+                      <FormControl fullWidth size="small">
+                        <Select
+                          value={issue.action || 'keep'}
+                          onChange={(event) => {
+                            const nextAction = event.target.value;
+                            const patch = { action: nextAction };
+                            if (nextAction === 'remove_extra') {
+                              patch.mpnDecisions = (issue.mpnDecisions || issue.mpns.map((mpn, mpnIndex) => ({
+                                mpn,
+                                manufacturer: issue.manufacturers[mpnIndex] || issue.manufacturers[0] || '',
+                                keep: true,
+                              }))).map((decision, decisionIndex) => ({
+                                ...decision,
+                                keep: decisionIndex < Math.max(1, issue.manufacturers.length),
+                              }));
+                            }
+                            updatePairingReviewRow(index, patch);
+                          }}
+                        >
+                          <MenuItem value="keep">Keep parsed output</MenuItem>
+                          <MenuItem value="manual">Use manual manufacturer list</MenuItem>
+                          <MenuItem value="remove_extra">Remove extra MPN rows</MenuItem>
+                        </Select>
+                      </FormControl>
+                    </TableCell>
+                    <TableCell sx={{ color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
+                      <TextField
+                        fullWidth
+                        size="small"
+                        value={issue.manualManufacturers || ''}
+                        onChange={(event) => updatePairingManualManufacturers(index, event.target.value)}
+                        disabled={issue.action !== 'manual'}
+                        placeholder="MFR 1 | MFR 2 | MFR 3"
+                        helperText="Separate manufacturers with |, semicolon, or new line."
+                      />
+                      {issue.action === 'manual' && (
+                        <Stack gap={0.5} sx={{ mt: 1 }}>
+                          {(issue.mpnDecisions || []).map((decision, decisionIndex) => (
+                            <TextField
+                              key={`${issue.sourceRow}-manual-${decisionIndex}`}
+                              size="small"
+                              label={`${decisionIndex + 1}. ${decision.mpn}`}
+                              value={decision.manufacturer || ''}
+                              onChange={(event) => {
+                                const nextDecisions = (issue.mpnDecisions || []).map((item, itemIndex) => (
+                                  itemIndex === decisionIndex ? { ...item, manufacturer: event.target.value } : item
+                                ));
+                                updatePairingReviewRow(index, {
+                                  mpnDecisions: nextDecisions,
+                                  manualManufacturers: nextDecisions.map((item) => item.manufacturer || '').join(' | '),
+                                });
+                              }}
+                            />
+                          ))}
+                        </Stack>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'space-between', gap: 1, flexWrap: 'wrap' }}>
+          <Button
+            onClick={() => {
+              setPairingReviewOpen(false);
+              setPendingNormalization(null);
+              setBusy(false);
+            }}
+          >
+            Back to configure
+          </Button>
+          <Stack direction="row" gap={1}>
+            <Button variant="outlined" onClick={handleKeepPairingReview}>
+              Keep parsed output
+            </Button>
+            <Button variant="contained" onClick={handleApplyPairingReview}>
+              Apply pairing decisions
+            </Button>
+          </Stack>
+        </DialogActions>
+      </Dialog>
       <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Review normalization summary</DialogTitle>
         <DialogContent>
@@ -6240,6 +6668,12 @@ const BomNormalizer = () => {
             <Chip label={`${normalizationSummary?.alternateRows || 0} alternates`} />
             <Chip label={`${normalizationSummary?.uniqueRawMaterials || 0} unique values`} />
             <Chip label={`${normalizationSummary?.skippedRows || 0} skipped source rows`} />
+            <Chip
+              color={(normalizationSummary?.pairingIssueRows || 0) > 0 ? 'warning' : 'success'}
+              label={(normalizationSummary?.pairingIssueRows || 0) > 0
+                ? `${normalizationSummary?.pairingIssueRows || 0} pairing review${normalizationSummary?.pairingIssueRows === 1 ? '' : 's'} handled`
+                : `${normalizationSummary?.pairingMatchedRows || 0}/${normalizationSummary?.pairingCheckedRows || 0} pairing checks passed`}
+            />
           </Stack>
           <Typography sx={{ mt: 2, fontSize: 13, color: '#66717f' }}>
             If these numbers look off, go back and adjust the columns, delimiter, or cleanup options.

@@ -513,6 +513,8 @@ const EnhancedDataEditor = () => {
   
   // Store factwise ID rule for template saving
   const [factwiseIdRule, setFactwiseIdRule] = useState(null);
+  const [postMappingActions, setPostMappingActions] = useState([]);
+  const replayedProcessingTemplateRef = useRef('');
   
   // Column counts for template integration
   const [dynamicColumnCounts, setDynamicColumnCounts] = useState({
@@ -1025,6 +1027,134 @@ const EnhancedDataEditor = () => {
     if (error?.request) return 'Could not reach the server. Please check if backend is running.';
     return fallback;
   }, []);
+
+  const normalizePostMappingAction = useCallback((action) => {
+    if (!action || typeof action !== 'object' || !action.type) return null;
+    return {
+      ...action,
+      id: action.id || `${action.type}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+      created_at: action.created_at || new Date().toISOString(),
+    };
+  }, []);
+
+  const recordPostMappingAction = useCallback((action) => {
+    const normalized = normalizePostMappingAction(action);
+    if (!normalized) return;
+    const actionKey = normalized.key || JSON.stringify({
+      type: normalized.type,
+      rule: normalized.rule || null,
+      config: normalized.config || null,
+      column: normalized.column || null,
+      source_column: normalized.source_column || null,
+      target_column: normalized.target_column || null,
+      defaults: normalized.defaults || null,
+    });
+    setPostMappingActions(prev => {
+      const filtered = prev.filter(item => (item.key || '') !== actionKey);
+      return [...filtered, { ...normalized, key: actionKey }];
+    });
+  }, [normalizePostMappingAction]);
+
+  const getPostMappingActionsFromTemplate = useCallback((template) => {
+    if (!template || typeof template !== 'object') return [];
+    const metadataActions = Array.isArray(template.metadata?.post_mapping_actions)
+      ? template.metadata.post_mapping_actions
+      : [];
+    const editorStage = Array.isArray(template.stages)
+      ? template.stages.find(stage => stage?.type === 'mapped_data_editor')
+      : null;
+    const stageActions = Array.isArray(editorStage?.post_mapping_actions)
+      ? editorStage.post_mapping_actions
+      : [];
+    const seen = new Set();
+    return [...metadataActions, ...stageActions]
+      .map(normalizePostMappingAction)
+      .filter(Boolean)
+      .filter(action => {
+        const key = action.key || JSON.stringify({
+          type: action.type,
+          rule: action.rule || null,
+          config: action.config || null,
+          column: action.column || null,
+          source_column: action.source_column || null,
+          target_column: action.target_column || null,
+          defaults: action.defaults || null,
+        });
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  }, [normalizePostMappingAction]);
+
+  const buildPostMappingActionsForSave = useCallback((currentFactwiseRules = [], defaults = {}, formulaRules = []) => {
+    const actions = [];
+    const push = (action) => {
+      const normalized = normalizePostMappingAction(action);
+      if (normalized) actions.push(normalized);
+    };
+
+    (Array.isArray(currentFactwiseRules) ? currentFactwiseRules : []).forEach(rule => {
+      if (!rule || typeof rule !== 'object') return;
+      if (rule.type === 'column_value') {
+        push({
+          type: 'fill_or_create_column',
+          label: `Fill/create ${rule.target_column || 'column'}`,
+          rule,
+        });
+      } else if (rule.type === 'factwise_id') {
+        push({
+          type: 'factwise_id',
+          label: 'Create FactWise ID',
+          config: {
+            first_column: rule.first_column,
+            second_column: rule.second_column,
+            operator: rule.operator || '_',
+            strategy: rule.strategy || 'fill_only_null',
+            generation_mode: rule.generation_mode || 'columns',
+            serial_prefix: rule.serial_prefix || '',
+            serial_start: rule.serial_start ?? 1,
+            serial_padding: rule.serial_padding ?? 0,
+            serial_increment: rule.serial_increment !== false,
+          },
+        });
+      }
+    });
+
+    if (defaults && typeof defaults === 'object' && Object.keys(defaults).length > 0) {
+      push({
+        type: 'fill_required_defaults',
+        label: 'Fill required defaults',
+        defaults,
+      });
+    }
+
+    if (Array.isArray(formulaRules) && formulaRules.length > 0) {
+      push({
+        type: 'formula_rules',
+        label: 'Apply formula/tag rules',
+        rules: formulaRules,
+      });
+    }
+
+    postMappingActions.forEach(push);
+
+    const seen = new Set();
+    return actions.filter(action => {
+      const key = action.key || JSON.stringify({
+        type: action.type,
+        rule: action.rule || null,
+        config: action.config || null,
+        column: action.column || null,
+        source_column: action.source_column || null,
+        target_column: action.target_column || null,
+        defaults: action.defaults || null,
+        rules: action.rules || null,
+      });
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [normalizePostMappingAction, postMappingActions]);
 
   const updateDataIntegrity = useCallback((consistent, issues = []) => {
     setDataIntegrity({
@@ -1572,6 +1702,149 @@ const EnhancedDataEditor = () => {
     }
   }, [showSnackbar, updateDataIntegrity, fetchPageData, pageSize]);
 
+  const replayPostMappingActions = useCallback(async (actions = []) => {
+    if (!Array.isArray(actions) || actions.length === 0 || !sessionId) return;
+    const failures = [];
+    let changed = false;
+    const currentFields = new Set(
+      (columnDefs || [])
+        .map(col => col.field)
+        .filter(field => field && field !== '__row_number__')
+    );
+
+    for (const action of actions) {
+      try {
+        if (action.type === 'formula_rules') {
+          const rules = Array.isArray(action.rules) ? action.rules : [];
+          if (!rules.length) continue;
+          await synchronizer.current.applyFormulasSynchronized(rules);
+          setAppliedFormulas(rules);
+          setHasFormulas(true);
+          changed = true;
+        } else if (action.type === 'fill_or_create_column') {
+          const rule = action.rule && typeof action.rule === 'object' ? { ...action.rule } : null;
+          if (!rule?.target_column) continue;
+          if (rule.target_mode === 'new' && currentFields.has(rule.target_column)) {
+            continue;
+          }
+          const resp = await api.fillOrCreateColumn(sessionId, rule);
+          if (!resp.data?.success) throw new Error(resp.data?.error || 'Column action failed');
+          currentFields.add(rule.target_column);
+          changed = true;
+        } else if (action.type === 'factwise_id') {
+          const config = action.config || {};
+          const firstColumn = config.first_column || config.firstColumn || '';
+          const secondColumn = config.second_column || config.secondColumn || '';
+          const generationMode = config.generation_mode || config.generationMode || 'columns';
+          if (generationMode !== 'serial' && (!firstColumn || !secondColumn)) continue;
+          await synchronizer.current.createFactWiseIdSynchronized(
+            firstColumn,
+            secondColumn,
+            config.operator || '_',
+            config.strategy || 'fill_only_null',
+            {
+              generationMode,
+              serialPrefix: config.serial_prefix || config.serialPrefix || '',
+              serialStart: config.serial_start ?? config.serialStart ?? 1,
+              serialPadding: config.serial_padding ?? config.serialPadding ?? 0,
+              serialIncrement: config.serial_increment ?? config.serialIncrement ?? true,
+            }
+          );
+          setFactwiseIdRule({
+            firstColumn,
+            secondColumn,
+            operator: config.operator || '_',
+            strategy: config.strategy || 'fill_only_null',
+            generationMode,
+            serialPrefix: config.serial_prefix || config.serialPrefix || '',
+            serialStart: config.serial_start ?? config.serialStart ?? 1,
+            serialPadding: config.serial_padding ?? config.serialPadding ?? 0,
+            serialIncrement: config.serial_increment ?? config.serialIncrement ?? true,
+          });
+          currentFields.add('Item code');
+          changed = true;
+        } else if (action.type === 'set_column_default') {
+          if (!action.column) continue;
+          const resp = await api.setColumnDefault(
+            sessionId,
+            action.column,
+            action.value ?? '',
+            action.only_empty !== false,
+            action.condition || null
+          );
+          if (!resp.data?.success) throw new Error(resp.data?.error || 'Default fill failed');
+          changed = true;
+        } else if (action.type === 'fill_required_defaults') {
+          const defaults = action.defaults && typeof action.defaults === 'object' ? action.defaults : {};
+          if (Object.keys(defaults).length === 0) continue;
+          const resp = await api.fillRequiredDefaults(sessionId, defaults);
+          if (!resp.data?.success) throw new Error(resp.data?.error || 'Required defaults failed');
+          setDefaultValues(prev => ({ ...prev, ...defaults }));
+          changed = true;
+        } else if (action.type === 'copy_column') {
+          if (!action.source_column || !action.target_column) continue;
+          const resp = await api.copyColumn(sessionId, action.source_column, action.target_column, action.only_empty === true);
+          if (!resp.data?.success) throw new Error(resp.data?.error || 'Copy column failed');
+          changed = true;
+        } else if (action.type === 'fill_missing_values') {
+          if (!action.column || !action.target_mode || !action.strategy) continue;
+          const resp = await api.fillMissingValues(
+            sessionId,
+            action.column,
+            action.target_mode,
+            Array.isArray(action.selected_values) ? action.selected_values : [],
+            action.strategy,
+            action.default_value || '',
+            action.validation || {}
+          );
+          if (!resp.data?.success) throw new Error(resp.data?.error || 'Fill missing values failed');
+          changed = true;
+        }
+      } catch (error) {
+        failures.push(action.label || action.type || 'Saved action');
+      }
+    }
+
+    if (changed) {
+      await fetchDataSynchronized();
+    }
+    if (failures.length > 0) {
+      showSnackbar(`Template opened, but ${failures.length} saved tool action${failures.length === 1 ? '' : 's'} could not be replayed.`, 'warning');
+    } else if (changed) {
+      showSnackbar('Saved template tools applied to this workbook.', 'success');
+    }
+  }, [sessionId, columnDefs, fetchDataSynchronized, showSnackbar]);
+
+  useEffect(() => {
+    if (!isExistingProcessingTemplate || loading || error || !sessionId || !synchronizer.current) return;
+    const template = processingTemplateContext?.selectedProcessingTemplate || location.state?.appliedProcessingTemplate;
+    const actions = getPostMappingActionsFromTemplate(template);
+    if (!template?.id || actions.length === 0) return;
+    const replayKey = `${sessionId}:${template.id}`;
+    if (replayedProcessingTemplateRef.current === replayKey) return;
+    if (!columnDefs || columnDefs.filter(col => col.field && col.field !== '__row_number__').length === 0) return;
+
+    replayedProcessingTemplateRef.current = replayKey;
+    setLoading(true);
+    replayPostMappingActions(actions)
+      .catch((err) => {
+        console.warn('Post-mapping template replay failed:', err);
+        showSnackbar('Template opened, but saved final-page tools could not be fully applied.', 'warning');
+      })
+      .finally(() => setLoading(false));
+  }, [
+    isExistingProcessingTemplate,
+    loading,
+    error,
+    sessionId,
+    processingTemplateContext,
+    location.state,
+    columnDefs,
+    getPostMappingActionsFromTemplate,
+    replayPostMappingActions,
+    showSnackbar,
+  ]);
+
   // Determine if the current dataset is fresh with respect to expected Tag/Factwise columns
   const isDatasetFresh = useCallback((data, meta) => {
     try {
@@ -1729,6 +2002,21 @@ const EnhancedDataEditor = () => {
           serialPadding,
           serialIncrement: factwiseSerialIncrement
         });
+        recordPostMappingAction({
+          type: 'factwise_id',
+          label: 'Create FactWise ID',
+          config: {
+            first_column: firstColumn,
+            second_column: secondColumn,
+            operator,
+            strategy,
+            generation_mode: factwiseGenerationMode,
+            serial_prefix: factwiseSerialPrefix,
+            serial_start: serialStart,
+            serial_padding: serialPadding,
+            serial_increment: factwiseSerialIncrement,
+          },
+        });
         const responseVersion = syncResult?.result?.data?.template_version;
         if (typeof responseVersion === 'number') {
           setSessionVersion(responseVersion);
@@ -1750,7 +2038,7 @@ const EnhancedDataEditor = () => {
     } finally {
       setLoading(false);
     }
-  }, [firstColumn, secondColumn, operator, factwiseGenerationMode, factwiseSerialPrefix, factwiseSerialStart, factwiseSerialPadding, factwiseSerialIncrement, showSnackbar, fetchDataSynchronized, updateDataIntegrity]);
+  }, [firstColumn, secondColumn, operator, factwiseGenerationMode, factwiseSerialPrefix, factwiseSerialStart, factwiseSerialPadding, factwiseSerialIncrement, showSnackbar, fetchDataSynchronized, updateDataIntegrity, recordPostMappingAction]);
 
   const handleCreateFactwiseIdSynchronized = useCallback(async () => {
     if (factwiseGenerationMode === 'columns' && (!firstColumn || !secondColumn)) {
@@ -2056,6 +2344,11 @@ const EnhancedDataEditor = () => {
       };
       const response = await api.fillOrCreateColumn(sessionId, rule);
       if (!response.data?.success) throw new Error(response.data?.error || 'Column update failed');
+      recordPostMappingAction({
+        type: 'fill_or_create_column',
+        label: `${target} fill/create rule`,
+        rule: response.data.rule || rule,
+      });
       setCreateColumnDialogOpen(false);
       await fetchDataSynchronized();
       showSnackbar(`${target} updated across ${response.data.changed || 0} cells. Rule saved for template reuse.`, 'success');
@@ -2091,7 +2384,8 @@ const EnhancedDataEditor = () => {
     factwiseSerialIncrement,
     sessionId,
     showSnackbar,
-    fetchDataSynchronized
+    fetchDataSynchronized,
+    recordPostMappingAction
   ]);
 
   const handleOpenFactwiseIdDialog = useCallback(() => {
@@ -2296,6 +2590,7 @@ const EnhancedDataEditor = () => {
         mpnValidationMetadata
       );
       if (resp?.data?.success && processingTemplateContext) {
+        const postActions = buildPostMappingActionsForSave(currentFactwiseRules || [], defaults, rules);
         let providerSnapshot = {};
         try {
           providerSnapshot = {
@@ -2330,6 +2625,7 @@ const EnhancedDataEditor = () => {
               formula_rules_count: rules.length,
               has_factwise_rules: Array.isArray(currentFactwiseRules) && currentFactwiseRules.length > 0,
               mpn_validation_metadata: mpnValidationMetadata || {},
+              post_mapping_actions: postActions,
             }
           ],
           metadata: {
@@ -2339,6 +2635,7 @@ const EnhancedDataEditor = () => {
               normalizer_workflow: processingTemplateContext.normalizerWorkflow,
             } : {}),
             saved_from_session_id: sessionId,
+            post_mapping_actions: postActions,
           }
         });
       }
@@ -2352,11 +2649,20 @@ const EnhancedDataEditor = () => {
         showSnackbar(resp?.data?.error || 'Failed to save template', 'error');
       }
     } catch (e) {
-      showSnackbar('Failed to save template', 'error');
+      const duplicateName = e?.response?.status === 409 ||
+        e?.response?.data?.code === 'duplicate_template_name' ||
+        String(e?.response?.data?.error || '').toLowerCase().includes('already exists');
+      if (duplicateName) {
+        setTemplateName(saveName);
+        setTemplateSaveDialogOpen(true);
+        showSnackbar('Template with this name already exists. Please enter another name.', 'warning');
+      } else {
+        showSnackbar(e?.response?.data?.error || 'Failed to save template', 'error');
+      }
     } finally {
       setTemplateSaving(false);
     }
-  }, [sessionId, templateName, dynamicColumnCounts, defaultValues, appliedFormulas, factwiseIdRule, mpnValidationCompleted, originalMpnColumn, mpnColumn, mpnManufacturerColumn, isExistingProcessingTemplate, processingTemplateContext, showSnackbar, handleCloseSaveTemplateDialog]);
+  }, [sessionId, templateName, dynamicColumnCounts, defaultValues, appliedFormulas, factwiseIdRule, mpnValidationCompleted, originalMpnColumn, mpnColumn, mpnManufacturerColumn, isExistingProcessingTemplate, processingTemplateContext, showSnackbar, handleCloseSaveTemplateDialog, buildPostMappingActionsForSave]);
 
   const handleSaveTemplateFromToolbar = useCallback(() => {
     if (isExistingProcessingTemplate) {
@@ -2594,6 +2900,15 @@ const EnhancedDataEditor = () => {
       setRequiredFilling(true);
       const resp = await api.setColumnDefault(sessionId, gap.field, cleanValue, true, null);
       if (!resp.data?.success) throw new Error(resp.data?.error || 'Fill failed');
+      setDefaultValues(prev => ({ ...prev, [gap.field]: cleanValue }));
+      recordPostMappingAction({
+        type: 'set_column_default',
+        label: `Fill ${gap.headerName || gap.req || gap.field}`,
+        column: gap.field,
+        value: cleanValue,
+        only_empty: true,
+        condition: null,
+      });
       await fetchDataSynchronized();
       setRequiredInlineDefaults(prev => {
         const next = { ...prev };
@@ -2616,7 +2931,7 @@ const EnhancedDataEditor = () => {
       setRequiredQuickFillKey('');
       setRequiredFilling(false);
     }
-  }, [sessionId, fetchDataSynchronized, showSnackbar, itemCodeIssue]);
+  }, [sessionId, fetchDataSynchronized, showSnackbar, itemCodeIssue, recordPostMappingAction]);
 
   const openFillMissingDialog = useCallback((field = '', returnToGuard = false) => {
     setToolsMenuAnchor(null);
@@ -2694,6 +3009,16 @@ const EnhancedDataEditor = () => {
         validation
       );
       if (!resp.data?.success) throw new Error(resp.data?.error || 'Fill failed');
+      recordPostMappingAction({
+        type: 'fill_missing_values',
+        label: `Fill missing ${fillMissingColumn}`,
+        column: fillMissingColumn,
+        target_mode: fillMissingMode,
+        selected_values: fillMissingSelectedValues.map(item => item.value),
+        strategy: fillMissingStrategy,
+        default_value: fillMissingDefault,
+        validation,
+      });
       await fetchDataSynchronized();
       setFillMissingOpen(false);
       const changed = resp.data.changed || 0;
@@ -2714,7 +3039,7 @@ const EnhancedDataEditor = () => {
     } finally {
       setFillMissingBusy(false);
     }
-  }, [fillMissingColumn, fillMissingMode, fillMissingTargetCount, fillMissingSelectedValues, fillMissingStrategy, fillMissingDefault, sessionId, getRequiredNameForColumn, getRequiredValidationRule, fetchDataSynchronized, showSnackbar, getFriendlyErrorMessage, runGuardedExport]);
+  }, [fillMissingColumn, fillMissingMode, fillMissingTargetCount, fillMissingSelectedValues, fillMissingStrategy, fillMissingDefault, sessionId, getRequiredNameForColumn, getRequiredValidationRule, fetchDataSynchronized, showSnackbar, getFriendlyErrorMessage, runGuardedExport, recordPostMappingAction]);
 
   const highlightItemCodeDuplicates = useCallback(() => {
     if (!itemCodeIssue?.dupRows) return;
@@ -3655,6 +3980,13 @@ const EnhancedDataEditor = () => {
     try {
       const resp = await api.copyColumn(sessionId, copySource, copyTarget, copyOnlyEmpty);
       if (!resp.data?.success) throw new Error(resp.data?.error || 'Copy failed');
+      recordPostMappingAction({
+        type: 'copy_column',
+        label: `Copy ${copySource} to ${copyTarget}`,
+        source_column: copySource,
+        target_column: copyTarget,
+        only_empty: copyOnlyEmpty,
+      });
       showSnackbar(`Copied "${copySource}" into "${copyTarget}" (${resp.data.changed} cells).`, 'success');
       setCopyColOpen(false);
       await fetchDataSynchronized();
@@ -3663,7 +3995,7 @@ const EnhancedDataEditor = () => {
     } finally {
       setCopyBusy(false);
     }
-  }, [copySource, copyTarget, copyOnlyEmpty, sessionId, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage]);
+  }, [copySource, copyTarget, copyOnlyEmpty, sessionId, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage, recordPostMappingAction]);
 
   const handleSetDefault = useCallback(async () => {
     if (!defaultCol) return;
@@ -3684,6 +4016,17 @@ const EnhancedDataEditor = () => {
         : null;
       const resp = await api.setColumnDefault(sessionId, defaultCol, defaultValue, defaultOnlyEmpty, condition);
       if (!resp.data?.success) throw new Error(resp.data?.error || 'Set default failed');
+      if (!conditional && defaultOnlyEmpty && String(defaultValue || '').trim() !== '') {
+        setDefaultValues(prev => ({ ...prev, [defaultCol]: defaultValue }));
+      }
+      recordPostMappingAction({
+        type: 'set_column_default',
+        label: `Set default ${defaultCol}`,
+        column: defaultCol,
+        value: defaultValue,
+        only_empty: defaultOnlyEmpty,
+        condition,
+      });
       showSnackbar(`Set "${defaultCol}" for ${resp.data.changed} cell${resp.data.changed !== 1 ? 's' : ''}.`, 'success');
       setDefaultColOpen(false);
       await fetchDataSynchronized();
@@ -3697,7 +4040,7 @@ const EnhancedDataEditor = () => {
     } finally {
       setDefaultBusy(false);
     }
-  }, [defaultCol, defaultValue, defaultOnlyEmpty, defaultMode, condCol, condOp, condCompare, condThen, condElse, sessionId, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage, runGuardedExport]);
+  }, [defaultCol, defaultValue, defaultOnlyEmpty, defaultMode, condCol, condOp, condCompare, condThen, condElse, sessionId, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage, runGuardedExport, recordPostMappingAction]);
 
   // Delete rows that meet a condition (e.g. "MPN Code is empty").
   const handleDeleteRows = useCallback(async () => {
