@@ -44,6 +44,10 @@ from .views import (
     cleanup_grid_rows,
     delete_rows_conditional,
     download_demo_bom_sheet,
+    generate_bom_sheet,
+    bom_tree,
+    download_bom_sheet,
+    validate_bom_sheet,
     demo_bom_tree,
     expand_alternate_columns,
 
@@ -55,6 +59,7 @@ from .views import (
     update_mapping_template,
     export_mapping_template,
     import_mapping_template,
+    import_edited_sheet,
     update_column_counts,
     apply_formulas,
     preview_formulas,
@@ -102,6 +107,7 @@ from .zone_views import (
 )
 from .mpn_views import (
     mpn_auth_status,
+    mpn_validation_summary,
     mpn_auth_start,
     mpn_auth_callback,
     mpn_validate,
@@ -208,6 +214,11 @@ urlpatterns = [
     path('download/grid-excel/', download_grid_excel, name='download-grid-excel'),
     path('download/demo-bom/<str:session_id>/', download_demo_bom_sheet, name='download-demo-bom-sheet'),
     path('demo/bom-tree/<str:session_id>/', demo_bom_tree, name='demo-bom-tree'),
+    path('import/<str:session_id>/', import_edited_sheet, name='import-edited-sheet'),
+    path('bom/generate/<str:session_id>/', generate_bom_sheet, name='generate-bom-sheet'),
+    path('bom/tree/<str:session_id>/', bom_tree, name='bom-tree'),
+    path('bom/download/<str:session_id>/', download_bom_sheet, name='download-bom-sheet'),
+    path('bom/validate/<str:session_id>/', validate_bom_sheet, name='validate-bom-sheet'),
 
     # Dashboard
     path('dashboard/', dashboard_view, name='dashboard'),
@@ -276,6 +287,7 @@ urlpatterns = [
 
     # MPN Validation + OAuth
     path('mpn/auth/status/', mpn_auth_status, name='mpn-auth-status'),
+    path('mpn/summary/<str:session_id>/', mpn_validation_summary, name='mpn-validation-summary'),
     path('mpn/auth/start/', mpn_auth_start, name='mpn-auth-start'),
     path('mpn/auth/callback', mpn_auth_callback, name='mpn-auth-callback'),
     path('mpn/validate/', mpn_validate, name='mpn-validate'),

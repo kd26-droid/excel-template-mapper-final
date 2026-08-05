@@ -54,6 +54,8 @@ import { Pagination } from '@mui/material';
 import {
   Save as SaveIcon,
   Download as DownloadIcon,
+  UploadFile as UploadFileIcon,
+  ImportExport as ImportExportIcon,
   CheckCircle as CheckCircleIcon,
   Error as ErrorIcon,
   Edit as EditIcon,
@@ -318,6 +320,24 @@ const deriveDisplayName = (col, allHeaders = []) => {
   return col;
 };
 
+// A part is checked against three sources (DigiKey, Mouser, Element14), each
+// writing 'Yes', 'No', or blank when that source was never looked up.
+//
+// One source confirming the part is enough to call it valid — the others simply
+// may not stock it, which is not evidence the part is wrong. Only when no source
+// confirms it and at least one rejects it is the row invalid. If nobody has an
+// opinion, it is unknown rather than a silent pass.
+const MPN_VALID_COLUMNS = ['MPN valid (DigiKey)', 'MPN valid', 'MPN valid (Mouser)', 'MPN valid (Element14)'];
+
+const getMpnRowStatus = (row) => {
+  const values = MPN_VALID_COLUMNS
+    .map(column => String(row?.[column] ?? '').trim().toLowerCase())
+    .filter(Boolean);
+  if (values.includes('yes')) return 'valid';
+  if (values.includes('no')) return 'invalid';
+  return 'unknown';
+};
+
 const EnhancedDataEditor = () => {
   const { sessionId } = useParams();
   const navigate = useNavigate();
@@ -483,6 +503,10 @@ const EnhancedDataEditor = () => {
   const [factwiseExportDialogOpen, setFactwiseExportDialogOpen] = useState(false);
   const [factwisePreviewOpen, setFactwisePreviewOpen] = useState(false);
   const [factwisePreviewType, setFactwisePreviewType] = useState('item');
+  // BOM-specific validation, kept separate from the item required-field guard.
+  const [bomValidationOpen, setBomValidationOpen] = useState(false);
+  const [bomValidationIssues, setBomValidationIssues] = useState([]);
+  const [bomValidationWarnings, setBomValidationWarnings] = useState([]);
   const [factwisePreviewDownloading, setFactwisePreviewDownloading] = useState('');
   const [directoryExportStatus, setDirectoryExportStatus] = useState({
     open: false,
@@ -506,7 +530,7 @@ const EnhancedDataEditor = () => {
   const [secondColumn, setSecondColumn] = useState('');
   const [operator, setOperator] = useState('_');
   const [factwiseGenerationMode, setFactwiseGenerationMode] = useState('columns');
-  const [factwiseSerialPrefix, setFactwiseSerialPrefix] = useState('SFO');
+  const [factwiseSerialPrefix, setFactwiseSerialPrefix] = useState('ITEM');
   const [factwiseSerialStart, setFactwiseSerialStart] = useState(1);
   const [factwiseSerialPadding, setFactwiseSerialPadding] = useState(2);
   const [factwiseSerialIncrement, setFactwiseSerialIncrement] = useState(true);
@@ -545,6 +569,16 @@ const EnhancedDataEditor = () => {
   const [mpnManufacturerColumn, setMpnManufacturerColumn] = useState(null);
   const [mpnValidating, setMpnValidating] = useState(false);
   const [mpnProgress, setMpnProgress] = useState(null); // { done, total } while chunk-warming
+  // Completion summary shown after MPN validation finishes.
+  const [mpnSummary, setMpnSummary] = useState(null); // { validated, total, failed }
+  const [mpnSummaryOpen, setMpnSummaryOpen] = useState(false);
+  // Import an edited export back into THIS session, so mappings, tags and MPN
+  // validation stay attached instead of a re-upload creating a new session.
+  const [importing, setImporting] = useState(false);
+  const [exportingSheet, setExportingSheet] = useState(false);
+  const [exportImportOpen, setExportImportOpen] = useState(false);
+  const [importResult, setImportResult] = useState(null);
+  const importFileInputRef = useRef(null);
   const mpnValidationInFlightRef = useRef(false);
   const [mpnValidationCompleted, setMpnValidationCompleted] = useState(false);
   const [mpnFilterInvalidOnly, setMpnFilterInvalidOnly] = useState(false);
@@ -2399,7 +2433,7 @@ const EnhancedDataEditor = () => {
     setSecondColumn('');
     setOperator('_');
     setFactwiseGenerationMode('columns');
-    setFactwiseSerialPrefix('SFO');
+    setFactwiseSerialPrefix('ITEM');
     setFactwiseSerialStart(1);
     setFactwiseSerialPadding(2);
     setFactwiseSerialIncrement(true);
@@ -2772,7 +2806,34 @@ const EnhancedDataEditor = () => {
   // open the dialog instead and hold the export until the user resolves it.
   // Blank counts come from the backend so they reflect the WHOLE dataset, not
   // just the current (server-paginated) page.
-  const runGuardedExport = useCallback(async (exportFn) => {
+  const runGuardedExport = useCallback(async (exportFn, exportType = 'item') => {
+    // The BOM sheet has its own ruleset. Item required fields (Item code, Item
+    // type, Measurement unit...) do not apply to a BOM row, so running them here
+    // would report failures that are not real and hide the ones that are.
+    if (exportType === 'bom') {
+      try {
+        const resp = await api.validateBomSheet(sessionId);
+        const issues = resp?.data?.errors || [];
+        if (issues.length > 0) {
+          setBomValidationIssues(issues);
+          setBomValidationWarnings(resp?.data?.warnings || []);
+          pendingExportRef.current = exportFn;
+          setBomValidationOpen(true);
+          return;
+        }
+      } catch (e) {
+        // A validation outage must not silently pass a broken BOM through.
+        showSnackbar(
+          getFriendlyErrorMessage(e, 'Could not validate the BOM before export.'),
+          'error'
+        );
+        return;
+      }
+      pendingExportRef.current = null;
+      exportFn();
+      return;
+    }
+
     const { isFactwiseSheet, present } = getFactwiseRequiredGaps();
     if (!isFactwiseSheet || present.length === 0) {
       exportFn();
@@ -2841,7 +2902,7 @@ const EnhancedDataEditor = () => {
     }
     pendingExportRef.current = null;
     exportFn();
-  }, [getFactwiseRequiredGaps, sessionId, rowData, BOOLEAN_REQUIRED_FIELDS, getRequiredValidationRule]);
+  }, [getFactwiseRequiredGaps, sessionId, rowData, BOOLEAN_REQUIRED_FIELDS, getRequiredValidationRule, showSnackbar, getFriendlyErrorMessage]);
 
   useEffect(() => {
     requiredGuardRunnerRef.current = runGuardedExport;
@@ -3082,8 +3143,62 @@ const EnhancedDataEditor = () => {
       handleExportToProject();
       return;
     }
-    runGuardedExport(() => openFactwisePreview(destination));
+    runGuardedExport(() => openFactwisePreview(destination), destination);
   }, [handleExportToProject, runGuardedExport, openFactwisePreview]);
+
+  const handleExportSheetForEditing = useCallback(async () => {
+    setExportingSheet(true);
+    try {
+      // export_type 'raw' skips the item-directory curation (BOM columns are
+      // kept, no finished good appended) so the file mirrors the grid exactly
+      // and can be imported straight back.
+      const response = await api.downloadProcessedFile(
+        sessionId,
+        'excel',
+        getCurrentExportColumnOrder(),
+        'raw'
+      );
+      const blob = new Blob([response.data], {
+        type: response.headers?.['content-type']
+          || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `sheet_${sessionId}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+      showSnackbar('Sheet exported. Edit it, then use Import edited sheet.', 'success');
+    } catch (e) {
+      showSnackbar(getFriendlyErrorMessage(e, 'Could not export the sheet.'), 'error');
+    } finally {
+      setExportingSheet(false);
+    }
+  }, [sessionId, getCurrentExportColumnOrder, showSnackbar, getFriendlyErrorMessage]);
+
+  const handleImportEditedSheet = useCallback(async (event) => {
+    const file = event.target.files?.[0];
+    // Reset immediately so re-selecting the same file still fires onChange.
+    event.target.value = '';
+    if (!file) return;
+    setImporting(true);
+    try {
+      const resp = await api.importEditedSheet(sessionId, file);
+      const data = resp?.data || {};
+      if (!data.success) throw new Error(data.error || 'Import failed');
+      setImportResult(data);
+      // Close the launcher so the result summary is not stacked behind it.
+      setExportImportOpen(false);
+      await fetchDataSynchronized();
+      showSnackbar(`Imported ${data.imported_rows} rows from ${file.name}`, 'success');
+    } catch (e) {
+      showSnackbar(getFriendlyErrorMessage(e, 'Could not import that sheet.'), 'error');
+    } finally {
+      setImporting(false);
+    }
+  }, [sessionId, fetchDataSynchronized, showSnackbar, getFriendlyErrorMessage]);
 
   const downloadFactwisePreview = useCallback(async (format) => {
     const columnOrder = getCurrentExportColumnOrder();
@@ -3095,7 +3210,16 @@ const EnhancedDataEditor = () => {
 
     try {
       setFactwisePreviewDownloading(format);
-      const response = await api.downloadProcessedFile(sessionId, format === 'csv' ? 'csv' : 'excel', columnOrder);
+      // A BOM is not the mapped grid — it is generated from the normalized rows
+      // into the FactWise BOM schema, so it comes from its own endpoint.
+      const response = factwisePreviewType === 'bom'
+        ? await api.downloadDemoBomSheet(sessionId)
+        : await api.downloadProcessedFile(
+            sessionId,
+            format === 'csv' ? 'csv' : 'excel',
+            columnOrder,
+            'item'
+          );
       const contentDisposition = response.headers?.['content-disposition'];
       let filename = `factwise_${label}_${sessionId}.${extension}`;
       if (contentDisposition) {
@@ -4745,19 +4869,12 @@ const EnhancedDataEditor = () => {
   const displayedRows = (rowData || [])
     .map((row, rowIndex) => ({ row, rowIndex }))
     .filter(({ row }) => {
-      if (!mpnFilterInvalidOnly && rowFilterMode !== 'invalid_mpn') return true;
-      const providerValues = [
-        row['MPN valid (DigiKey)'] ?? row['MPN valid'],
-        row['MPN valid (Mouser)'],
-        row['MPN valid (Element14)']
-      ];
-      return providerValues.some(value => String(value || '').toLowerCase() === 'no');
-    })
-    .filter(({ row }) => {
-      if (rowFilterMode !== 'unknown') return true;
-      return Object.values(row || {}).some(value =>
-        String(value ?? '').trim().toLowerCase() === 'unknown'
-      );
+      const wantsInvalid = mpnFilterInvalidOnly || rowFilterMode === 'invalid_mpn';
+      if (!wantsInvalid && rowFilterMode !== 'valid_mpn' && rowFilterMode !== 'unknown') return true;
+      const status = getMpnRowStatus(row);
+      if (wantsInvalid) return status === 'invalid';
+      if (rowFilterMode === 'valid_mpn') return status === 'valid';
+      return status === 'unknown';
     })
     .filter(({ row }) => {
       if (!rowSearchQuery) return true;
@@ -5594,6 +5711,10 @@ const EnhancedDataEditor = () => {
                   <ListItemIcon><DeleteIcon sx={{ color: '#c62828' }} /></ListItemIcon>
                   <ListItemText>Delete rows by condition</ListItemText>
                 </MenuItem>
+                <MenuItem onClick={() => { setToolsMenuAnchor(null); setExportImportOpen(true); }} disabled={syncStatus.inProgress}>
+                  <ListItemIcon><ImportExportIcon sx={{ color: '#2563eb' }} /></ListItemIcon>
+                  <ListItemText>Export / Import sheet</ListItemText>
+                </MenuItem>
               </Menu>
 
               {/* MPN VALIDATION dropdown */}
@@ -5644,9 +5765,12 @@ const EnhancedDataEditor = () => {
                   <ListItemIcon>{rowFilterMode === 'all' && !mpnFilterInvalidOnly ? <CheckIcon sx={{ color: t.color.primary }} /> : null}</ListItemIcon>
                   <ListItemText>All rows</ListItemText>
                 </MenuItem>
-                <MenuItem onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('unknown'); setMpnFilterInvalidOnly(false); }}>
-                  <ListItemIcon>{rowFilterMode === 'unknown' ? <CheckIcon sx={{ color: t.color.warningText }} /> : <ErrorIcon sx={{ color: t.color.warningText }} />}</ListItemIcon>
-                  <ListItemText>Unknown values</ListItemText>
+                <MenuItem
+                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('valid_mpn'); setMpnFilterInvalidOnly(false); }}
+                  disabled={!hasMpnValidationColumns}
+                >
+                  <ListItemIcon>{rowFilterMode === 'valid_mpn' ? <CheckIcon sx={{ color: t.color.success }} /> : <VerifiedUserIcon sx={{ color: t.color.success }} />}</ListItemIcon>
+                  <ListItemText>Valid MPN rows</ListItemText>
                 </MenuItem>
                 <MenuItem
                   onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('invalid_mpn'); setMpnFilterInvalidOnly(false); }}
@@ -5654,6 +5778,13 @@ const EnhancedDataEditor = () => {
                 >
                   <ListItemIcon>{(rowFilterMode === 'invalid_mpn' || mpnFilterInvalidOnly) ? <CheckIcon sx={{ color: t.color.danger }} /> : <VerifiedUserIcon sx={{ color: t.color.danger }} />}</ListItemIcon>
                   <ListItemText>Invalid MPN rows</ListItemText>
+                </MenuItem>
+                <MenuItem
+                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('unknown'); setMpnFilterInvalidOnly(false); }}
+                  disabled={!hasMpnValidationColumns}
+                >
+                  <ListItemIcon>{rowFilterMode === 'unknown' ? <CheckIcon sx={{ color: t.color.warningText }} /> : <ErrorIcon sx={{ color: t.color.warningText }} />}</ListItemIcon>
+                  <ListItemText>Unknown MPN rows</ListItemText>
                 </MenuItem>
               </Menu>
               <TextField
@@ -5756,6 +5887,7 @@ const EnhancedDataEditor = () => {
                       let offset = 0;
                       let total = 0;
                       let shown = false;
+                      let validatedCount = 0;
                       setMpnProgress({ done: 0, total: 0 });
                       // eslint-disable-next-line no-constant-condition
                       while (true) {
@@ -5769,7 +5901,8 @@ const EnhancedDataEditor = () => {
                         );
                         const d = resp?.data || {};
                         total = d.total || 0;
-                        setMpnProgress({ done: Math.min(d.validated || 0, total), total });
+                        validatedCount = Math.min(d.validated || 0, total);
+                        setMpnProgress({ done: validatedCount, total });
                         // Build + render the grid from the cache so far (live fill-in).
                         try {
                           await api.validateMPNs(
@@ -5787,7 +5920,23 @@ const EnhancedDataEditor = () => {
                       }
                       setMpnProgress(null);
                       setMpnValidationCompleted(true);
-                      showSnackbar('MPN validation complete', 'success');
+                      // Counts are unique MPNs, not rows: the grid holds one page
+                      // at a time, so a per-row tally here would only describe
+                      // whatever page happened to be loaded.
+                      // Per-source counts span every row, so they are computed
+                      // server-side; the grid only holds one page at a time.
+                      let breakdown = null;
+                      try {
+                        const summaryResp = await api.mpnValidationSummary(sessionId);
+                        if (summaryResp?.data?.success) breakdown = summaryResp.data;
+                      } catch (_) { /* the headline counts still stand */ }
+                      setMpnSummary({
+                        validated: validatedCount,
+                        total,
+                        failed: Math.max(0, total - validatedCount),
+                        breakdown,
+                      });
+                      setMpnSummaryOpen(true);
                     } catch (e) {
                       const msg = getFriendlyErrorMessage(e, 'Unable to validate MPNs. Please try again.');
                       if (e?.response?.status === 403) {
@@ -8108,7 +8257,7 @@ const EnhancedDataEditor = () => {
                     label="Prefix"
                     value={factwiseSerialPrefix}
                     onChange={(event) => setFactwiseSerialPrefix(event.target.value)}
-                    placeholder="SFO"
+                    placeholder="ITEM"
                   />
                 </Grid>
                 <Grid item xs={6}>
@@ -8484,6 +8633,27 @@ const EnhancedDataEditor = () => {
           >
             Cancel
           </Button>
+          {/* Real download. For a BOM this is the generated FactWise BOM sheet;
+              for the item directory it is the processed sheet with BOM
+              structure columns stripped out. */}
+          <Button
+            variant="outlined"
+            onClick={() => downloadFactwisePreview('excel')}
+            disabled={Boolean(factwisePreviewDownloading)}
+            startIcon={factwisePreviewDownloading === 'excel'
+              ? <CircularProgress size={16} />
+              : <DownloadIcon />}
+            sx={{
+              textTransform: 'none',
+              borderRadius: '999px',
+              fontWeight: 700,
+              px: 3,
+              minHeight: 38,
+            }}
+          >
+            {factwisePreviewDownloading === 'excel' ? 'Preparing…' : 'Export Sheet'}
+          </Button>
+          {/* Mock, like Export to Project — no file is produced. */}
           <Button
             variant="contained"
             onClick={() => handleDirectoryExport(factwisePreviewType)}
@@ -8503,7 +8673,7 @@ const EnhancedDataEditor = () => {
               }
             }}
           >
-            Export
+            Export to FactWise
           </Button>
         </DialogActions>
       </Dialog>
@@ -9037,6 +9207,238 @@ const EnhancedDataEditor = () => {
           {snackbar.message}
         </Alert>
       </Snackbar>
+
+      {/* Export / Import — one entry point, both halves of the same round trip.
+          Export writes the grid exactly as it is; import reads that file back
+          into this same session so mappings, tags and MPN validation survive. */}
+      <Dialog open={exportImportOpen} onClose={() => setExportImportOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <ImportExportIcon fontSize="small" />
+          Export / Import sheet
+        </DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="body2" sx={{ color: 'text.secondary', mb: 2.5 }}>
+            Export the sheet, edit it in Excel, then import it back. Changes land in
+            this session, so your mapping, tags and MPN validation stay attached.
+          </Typography>
+
+          <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+            <Box sx={{ flex: 1, minWidth: 220, p: 2, borderRadius: 1, border: `1px solid ${t.border.default}` }}>
+              <Typography variant="subtitle2" sx={{ mb: 0.5 }}>1 &nbsp;Export</Typography>
+              <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mb: 1.5 }}>
+                Downloads every column exactly as shown here — nothing added or removed.
+              </Typography>
+              <Button
+                fullWidth
+                variant="contained"
+                onClick={handleExportSheetForEditing}
+                disabled={exportingSheet}
+                startIcon={exportingSheet ? <CircularProgress size={16} /> : <DownloadIcon />}
+              >
+                {exportingSheet ? 'Exporting…' : 'Export sheet'}
+              </Button>
+            </Box>
+
+            <Box sx={{ flex: 1, minWidth: 220, p: 2, borderRadius: 1, border: `1px solid ${t.border.default}` }}>
+              <Typography variant="subtitle2" sx={{ mb: 0.5 }}>2 &nbsp;Import</Typography>
+              <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mb: 1.5 }}>
+                Columns match by name, so reordering is safe. Anything unmatched is reported.
+              </Typography>
+              <Button
+                fullWidth
+                variant="outlined"
+                onClick={() => importFileInputRef.current?.click()}
+                disabled={importing}
+                startIcon={importing ? <CircularProgress size={16} /> : <UploadFileIcon />}
+              >
+                {importing ? 'Importing…' : 'Import edited sheet'}
+              </Button>
+            </Box>
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setExportImportOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Hidden picker for "Import edited sheet" in the Tools menu. */}
+      <input
+        ref={importFileInputRef}
+        type="file"
+        accept=".xlsx,.xls,.csv"
+        style={{ display: 'none' }}
+        onChange={handleImportEditedSheet}
+      />
+
+      {/* What the import actually changed — columns it could not match are
+          listed rather than silently dropped. */}
+      <Dialog open={Boolean(importResult)} onClose={() => setImportResult(null)} maxWidth="xs" fullWidth>
+        <DialogTitle>Sheet imported</DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="h4" sx={{ fontWeight: 700 }}>
+            {importResult?.imported_rows}
+          </Typography>
+          <Typography variant="body2" sx={{ color: 'text.secondary', mb: 2 }}>
+            rows imported{importResult && importResult.previous_rows !== importResult.imported_rows
+              ? ` (was ${importResult.previous_rows})` : ''}
+          </Typography>
+          <Alert severity="success" sx={{ mb: 1 }}>
+            {importResult?.matched_columns} columns matched by name.
+          </Alert>
+          {importResult?.ignored_columns?.length > 0 && (
+            <Alert severity="warning" sx={{ mb: 1 }}>
+              Not in this sheet, so ignored: {importResult.ignored_columns.join(', ')}
+            </Alert>
+          )}
+          {importResult?.untouched_columns?.length > 0 && (
+            <Alert severity="info">
+              Absent from your file, so left unchanged: {importResult.untouched_columns.join(', ')}
+            </Alert>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button variant="contained" onClick={() => setImportResult(null)}>Done</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* MPN validation summary, shown once validation finishes. */}
+      <Dialog
+        open={mpnSummaryOpen}
+        onClose={() => setMpnSummaryOpen(false)}
+        maxWidth="xs"
+        fullWidth
+      >
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          {mpnSummary && mpnSummary.failed === 0
+            ? <VerifiedUserIcon sx={{ color: t.color.success }} />
+            : <ErrorIcon sx={{ color: t.color.warningText }} />}
+          MPN validation complete
+        </DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="h4" sx={{ fontWeight: 700, mb: 1 }}>
+            {mpnSummary ? `${mpnSummary.validated} of ${mpnSummary.total}` : ''}
+          </Typography>
+          <Typography variant="body2" sx={{ color: 'text.secondary', mb: 2 }}>
+            unique MPNs matched
+          </Typography>
+          {mpnSummary && mpnSummary.failed === 0 ? (
+            <Alert severity="success">
+              All MPNs were matched successfully.
+            </Alert>
+          ) : (
+            <Alert severity="warning">
+              {mpnSummary?.failed} MPN{mpnSummary?.failed === 1 ? '' : 's'} could not be
+              matched. Use the Filter menu to review Invalid or Unknown MPN rows.
+            </Alert>
+          )}
+          <Typography variant="caption" sx={{ display: 'block', mt: 2, color: 'text.secondary' }}>
+            Counts are unique part numbers, not rows — the same MPN used on several
+            rows is validated once.
+          </Typography>
+
+          {mpnSummary?.breakdown && (
+            <>
+              <Divider sx={{ my: 2 }} />
+              <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                By source — {mpnSummary.breakdown.total_rows} rows
+              </Typography>
+              {(mpnSummary.breakdown.sources || []).map((source) => (
+                <Box key={source.name} sx={{ mb: 1.5 }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                    <Typography variant="body2" sx={{ fontWeight: 700, minWidth: 84 }}>
+                      {source.name}
+                    </Typography>
+                    <Chip size="small" label={`${source.valid} valid`} sx={{ bgcolor: t.state.successBg, color: t.color.success }} />
+                    <Chip size="small" label={`${source.invalid} invalid`} sx={{ bgcolor: t.state.dangerBg, color: t.color.danger }} />
+                    {source.unchecked > 0 && (
+                      <Chip size="small" variant="outlined" label={`${source.unchecked} not checked`} />
+                    )}
+                  </Box>
+                  {/* Lifecycle is a breakdown OF the valid parts only. An
+                      unmatched part has no status, so nothing here ever
+                      describes the invalid or unchecked counts above. */}
+                  {source.valid > 0 && ((source.statuses || []).length > 0 || source.eol > 0 || source.discontinued > 0) && (
+                    <Box sx={{ ml: 1.5, mt: 0.75, pl: 1.5, borderLeft: `2px solid ${t.border.default}` }}>
+                      <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mb: 0.5 }}>
+                        Of the {source.valid} valid:
+                      </Typography>
+                      {(source.statuses || []).length > 0 && (
+                        <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap', mb: 0.5 }}>
+                          {source.statuses.map(([label, count]) => (
+                            <Chip key={label} size="small" variant="outlined" label={`${label}: ${count}`} />
+                          ))}
+                        </Box>
+                      )}
+                      {(source.eol > 0 || source.discontinued > 0) && (
+                        <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap' }}>
+                          {source.eol > 0 && (
+                            <Chip size="small" variant="outlined" label={`${source.eol} end-of-life`}
+                                  sx={{ color: t.color.warningText, borderColor: t.color.warningText }} />
+                          )}
+                          {source.discontinued > 0 && (
+                            <Chip size="small" variant="outlined" label={`${source.discontinued} discontinued`}
+                                  sx={{ color: t.color.danger, borderColor: t.color.danger }} />
+                          )}
+                        </Box>
+                      )}
+                    </Box>
+                  )}
+                </Box>
+              ))}
+              {(mpnSummary.breakdown.sources || []).length === 0 && (
+                <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                  No provider columns found in this sheet.
+                </Typography>
+              )}
+            </>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button variant="contained" onClick={() => setMpnSummaryOpen(false)}>Done</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* BOM validation — its own ruleset, not the item required-field guard. */}
+      <Dialog
+        open={bomValidationOpen}
+        onClose={() => setBomValidationOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>BOM cannot be exported yet</DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
+            {bomValidationIssues.length} issue{bomValidationIssues.length === 1 ? '' : 's'} would
+            make this BOM fail the FactWise import.
+          </Typography>
+          {bomValidationIssues.slice(0, 25).map((issue, index) => (
+            <Alert severity="error" key={index} sx={{ mb: 1 }}>
+              {issue.message}
+            </Alert>
+          ))}
+          {bomValidationIssues.length > 25 && (
+            <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+              …and {bomValidationIssues.length - 25} more.
+            </Typography>
+          )}
+          {bomValidationWarnings.length > 0 && (
+            <>
+              <Divider sx={{ my: 2 }} />
+              <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                Warnings — these do not block export
+              </Typography>
+              {bomValidationWarnings.slice(0, 10).map((warning, index) => (
+                <Alert severity="warning" key={index} sx={{ mb: 1 }}>
+                  {warning.message}
+                </Alert>
+              ))}
+            </>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setBomValidationOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 };

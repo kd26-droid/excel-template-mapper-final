@@ -1538,7 +1538,22 @@ def upload_files(request):
                 formula_rules = json.loads(formula_rules_json)
             except json.JSONDecodeError:
                 logger.warning(f"Invalid formula rules JSON: {formula_rules_json}")
-        
+
+        # Answers from the BOM structure gate. Optional: PDFs and any caller that
+        # skips the gate simply send nothing, and BOM generation treats a missing
+        # value as "not asked yet" rather than "no BOM".
+        bom_structure_json = request.data.get('bomStructure')
+        bom_structure = None
+        if bom_structure_json:
+            if isinstance(bom_structure_json, dict):
+                bom_structure = bom_structure_json
+            else:
+                try:
+                    parsed = json.loads(bom_structure_json)
+                    bom_structure = parsed if isinstance(parsed, dict) else None
+                except (json.JSONDecodeError, TypeError):
+                    logger.warning("Invalid bomStructure JSON on upload; ignoring")
+
         # Validation - the destination template is fixed to SFO Default Item.xlsx.
         if not client_file:
             return Response({
@@ -1622,6 +1637,11 @@ def upload_files(request):
             "customer_id_pairs_count": default_counts["customer_id_pairs_count"],
             "column_counts": default_counts,
             "template_source": "uploaded" if template_file else "default",
+            # Answers from the BOM structure gate on the upload page: which
+            # sheets hold a BOM, whether they have levels, and the finished good
+            # authored for flat sheets. BOM generation reads this instead of
+            # re-asking, so it has to survive a page reload.
+            "bom_structure": bom_structure,
         }
         
         # Save session with universal persistence (critical for multi-worker environments)
@@ -4867,6 +4887,163 @@ def _cluster_factwise_columns(headers):
     return order
 
 
+def _drop_bom_columns(rows, headers):
+    """Remove BOM structure columns from an item-directory export.
+
+    The working grid deliberately holds item and BOM fields together so the user
+    can edit them in one place, but the two FactWise imports are separate files
+    and the item importer does not know these columns.
+    """
+    if not headers:
+        return rows, headers
+
+    excluded = {_template_label_key(name) for name in BOM_DESTINATION_HEADERS}
+    keep = [position for position, header in enumerate(headers)
+            if _template_label_key(header) not in excluded]
+    if len(keep) == len(headers):
+        return rows, headers
+
+    new_headers = [headers[position] for position in keep]
+    new_rows = []
+    for row in rows or []:
+        if isinstance(row, list):
+            new_rows.append([row[position] if position < len(row) else '' for position in keep])
+        elif isinstance(row, dict):
+            new_rows.append({header: row.get(header, '') for header in new_headers})
+        else:
+            new_rows.append(row)
+    return new_rows, new_headers
+
+
+def _authored_finished_goods(info):
+    """Finished goods the user authored in the BOM structure gate.
+
+    Flat sheets list components but not the thing they build, so the finished
+    good is entered in the popup and lives only on the session.
+    """
+    goods = []
+    sheets = ((info or {}).get('bom_structure') or {}).get('sheets') or {}
+    for _sheet_name, answer in sheets.items():
+        if not isinstance(answer, dict) or not answer.get('hasBom'):
+            continue
+        if answer.get('bomGenerationAvailable') is False:
+            continue
+        header = answer.get('bomHeader') or {}
+        code = str(header.get('finishedGoodCode') or '').strip()
+        if not code:
+            continue
+        goods.append({
+            'code': code,
+            'name': str(header.get('itemName') or '').strip() or code,
+            'uom': str(header.get('measurementUnit') or '').strip(),
+        })
+    return goods
+
+
+def _append_authored_finished_good(info, rows, headers):
+    """Append authored finished goods to an item-directory export.
+
+    Values are placed by header name, so this works whatever column order the
+    user chose. Anything already present (by Item code) is left alone so a
+    repeated download cannot duplicate it.
+    """
+    goods = _authored_finished_goods(info)
+    if not goods or not headers:
+        return rows, headers
+
+    def index_of(*names):
+        for name in names:
+            for position, header in enumerate(headers):
+                if _template_label_key(header) == _template_label_key(name):
+                    return position
+        return -1
+
+    code_index = index_of('Item code')
+    if code_index < 0:
+        # Nothing to key on; adding a row would produce an item with no code.
+        return rows, headers
+
+    name_index = index_of('Item name')
+    description_index = index_of('Description')
+    type_index = index_of('Item type')
+    uom_index = index_of('Measurement unit')
+
+    existing = set()
+    for row in rows or []:
+        if isinstance(row, list) and code_index < len(row):
+            existing.add(str(row[code_index] or '').strip())
+
+    constants = _constant_column_values(rows, headers)
+
+    output = list(rows or [])
+    for good in goods:
+        if good['code'] in existing:
+            continue
+        new_row = [''] * len(headers)
+        # Enterprise-level values (procurement entity, buyer/seller flags) are
+        # the same on every row, so the finished good inherits them. Without
+        # this it exports with a blank `Procurement entity name`, which is a
+        # required column, and the import fails on that row alone.
+        for position, value in constants.items():
+            if position < len(new_row):
+                new_row[position] = value
+        new_row[code_index] = good['code']
+        if name_index >= 0:
+            new_row[name_index] = good['name']
+        if description_index >= 0:
+            new_row[description_index] = good['name']
+        if type_index >= 0:
+            new_row[type_index] = 'Finished good'
+        if uom_index >= 0:
+            new_row[uom_index] = good['uom']
+        output.append(new_row)
+        existing.add(good['code'])
+
+    return output, headers
+
+
+def _constant_column_values(rows, headers):
+    """Columns holding the same non-blank value on every row, as {index: value}.
+
+    Used to carry enterprise-wide settings onto a synthesised row. Anything that
+    varies between items — codes, descriptions, MPNs — is deliberately excluded,
+    so only genuinely sheet-wide values propagate.
+    """
+    if not rows or not headers:
+        return {}
+
+    # Item identity must never be inherited, even if a sheet happens to have one
+    # row and every column therefore looks constant.
+    never_inherit = {
+        _template_label_key(name) for name in
+        ('Item code', 'Item name', 'Description', 'Item type', 'Measurement unit',
+         'MPN Code', 'CPN Code', 'SAP Item ID', 'HSN Code')
+    }
+
+    constants = {}
+    for position, header in enumerate(headers):
+        if _template_label_key(header) in never_inherit:
+            continue
+        seen = None
+        consistent = True
+        for row in rows:
+            if not isinstance(row, list) or position >= len(row):
+                consistent = False
+                break
+            value = str(row[position] or '').strip()
+            if not value:
+                consistent = False
+                break
+            if seen is None:
+                seen = value
+            elif value != seen:
+                consistent = False
+                break
+        if consistent and seen:
+            constants[position] = seen
+    return constants
+
+
 @api_view(['GET', 'POST'])
 def download_file(request, session_id=None):
     """Download processed/converted file."""
@@ -4881,9 +5058,23 @@ def download_file(request, session_id=None):
 
         # Extract column order from request if provided
         requested_column_order = None
+        export_type = 'item'
         if request.method == 'POST':
             requested_column_order = request.data.get('column_order')
-        
+            export_type = str(request.data.get('export_type') or 'item').strip().lower()
+
+        # The working grid holds item and BOM fields together so the user can
+        # edit them in one place, but the two FactWise imports are different
+        # files. BOM structure columns must not appear in an item directory
+        # export: the item importer does not know them.
+        if export_type == 'item' and requested_column_order:
+            excluded = {_template_label_key(name) for name in BOM_DESTINATION_HEADERS}
+            requested_column_order = [
+                column for column in requested_column_order
+                if _template_label_key(column) not in excluded
+            ]
+
+
         if not session_id:
             return Response({
                 'success': False,
@@ -5438,6 +5629,22 @@ def download_file(request, session_id=None):
                 converted_rows.append(row_list)
             transformed_rows = converted_rows
         
+        # Strip BOM structure columns here rather than from the requested column
+        # order: several paths above rebuild `all_headers` from a canonical set,
+        # which silently reinstates anything filtered earlier.
+        if export_type == 'item':
+            transformed_rows, all_headers = _drop_bom_columns(transformed_rows, all_headers)
+
+        # A flat sheet has no finished good of its own — the user authored it in
+        # the BOM structure gate — so it exists only in `bom_structure`, never in
+        # the mapped grid. Without this the BOM would reference a finished good
+        # the exported item directory does not contain, and the FactWise import
+        # would fail on the second file.
+        if export_type == 'item':
+            transformed_rows, all_headers = _append_authored_finished_good(
+                info, transformed_rows, all_headers
+            )
+
         # Create DataFrame with duplicate column names support
         if transformed_rows and all_headers:
             # CRITICAL FIX: Ensure data and headers are compatible
@@ -12572,3 +12779,462 @@ def project_list_create(request):
             'success': True,
             'project': project.to_dict()
         }, status=status.HTTP_201_CREATED)
+
+
+# ---------------------------------------------------------------------------
+# BOM generation
+# ---------------------------------------------------------------------------
+
+def _normalized_records_from_grid(headers, rows):
+    """Turn the session grid back into normalized-row dicts.
+
+    The grid stores rows as lists because destination headers may repeat. The
+    BOM generator wants dicts keyed by the normalizer's contract, so the first
+    occurrence of each header wins — repeats only happen on destination
+    template columns, never on the normalizer's own columns.
+    """
+    index_of = {}
+    for position, header in enumerate(headers or []):
+        name = str(header or '').strip()
+        if name and name not in index_of:
+            index_of[name] = position
+
+    records = []
+    for row in rows or []:
+        record = {}
+        for name, position in index_of.items():
+            record[name] = row[position] if position < len(row) else ''
+        records.append(record)
+    return records
+
+
+def _merge_item_codes_from_grid(records, grid_headers, grid_rows):
+    """Fill each normalized record's ``Item code`` from the mapped grid.
+
+    The two halves of a BOM live in different places: ``parentKey``/``relation``
+    only exist on the uploaded normalized sheet, while ``Item code`` is produced
+    later by the editor's Factwise ID rule and only exists in the mapped grid.
+    Neither source has both, so they are joined by row position — mapping is
+    row-preserving, so record *n* corresponds to grid row *n*.
+
+    If the row counts disagree the join is unsafe and is skipped rather than
+    guessed at, leaving the codes blank so validation reports the real problem.
+    """
+    if not records or not grid_headers or not grid_rows:
+        return records, 'no_grid'
+    if len(grid_rows) != len(records):
+        return records, 'row_count_mismatch'
+
+    code_index = -1
+    for position, header in enumerate(grid_headers):
+        if _template_label_key(header) == _template_label_key('Item code'):
+            code_index = position
+            break
+    if code_index < 0:
+        return records, 'no_item_code_column'
+
+    filled = 0
+    for record, row in zip(records, grid_rows):
+        if not isinstance(row, list) or code_index >= len(row):
+            continue
+        code = str(row[code_index] or '').strip()
+        if code and not str(record.get('Item code') or '').strip():
+            record['Item code'] = code
+            filled += 1
+    return records, ('filled:%d' % filled)
+
+
+def _has_normalizer_columns(records):
+    """True when these rows came from the BOM Normalizer.
+
+    ``parentKey`` and ``relation`` are what make alternates expressible, so a
+    table without them cannot produce a correct BOM no matter what else it has.
+    """
+    if not records:
+        return False
+    first = records[0]
+    return 'parentKey' in first and 'relation' in first
+
+
+def _read_normalized_source_table(info):
+    """Read the uploaded sheet using the session's own sheet/header settings."""
+    try:
+        source_path = hybrid_file_manager.get_file_path(info.get('client_path'))
+        if not source_path:
+            return [], []
+
+        header_row = int(info.get('header_row') or 1)
+        skiprows = max(0, header_row - 1)
+
+        if str(source_path).lower().endswith('.csv'):
+            df = pd.read_csv(source_path, skiprows=skiprows, dtype=object)
+        else:
+            df = pd.read_excel(
+                source_path,
+                sheet_name=info.get('sheet_name') or 0,
+                skiprows=skiprows,
+                dtype=object,
+            )
+
+        df = df.fillna('')
+        headers = [str(column).strip() for column in df.columns]
+        return headers, df.values.tolist()
+    except Exception as exc:
+        logger.warning(f"Could not read normalized source table: {exc}")
+        return [], []
+
+
+def _generate_bom_for_session(session_id):
+    """Resolve a session's BOM answers and generate its sheets.
+
+    Returns (result, bom_header, error_response). Exactly one of result /
+    error_response is set. Flat versus hierarchical is decided by the answers
+    captured in the BOM structure gate, so every caller routes identically.
+    """
+    from .bom_generator import generate_flat_bom
+
+    info = get_session_consistent(session_id)
+    if not info:
+        return None, None, Response({'success': False, 'error': 'Invalid session'},
+                                    status=status.HTTP_404_NOT_FOUND)
+
+    sheets = (info.get('bom_structure') or {}).get('sheets') or {}
+    answer = None
+    for _sheet_name, sheet_answer in sheets.items():
+        if not sheet_answer.get('hasBom'):
+            continue
+        # The user said this sheet is not tree-shaped, so no BOM is built from
+        # it. That is the PM's step 4: refuse rather than guess a structure.
+        if sheet_answer.get('bomGenerationAvailable') is False:
+            return None, None, Response({
+                'success': False,
+                'error': ('This sheet was marked as not matching the BOM tree structure, '
+                          'so a BOM is not generated for it.'),
+                'needs': 'tree_confirmation',
+            }, status=status.HTTP_400_BAD_REQUEST)
+        answer = sheet_answer
+        break
+
+    if answer is None:
+        return None, None, Response({
+            'success': False,
+            'error': 'No sheet in this upload was marked as containing a BOM.',
+            'needs': 'bom_sheet',
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    is_hierarchical = bool(answer.get('hasLevels'))
+    bom_header = answer.get('bomHeader')
+
+    # Multi-level generation is not implemented. Refusing is the honest answer:
+    # running the single-level generator over a hierarchical sheet would flatten
+    # every sub-assembly into one block and produce a confidently wrong BOM.
+    if is_hierarchical:
+        return None, None, Response({
+            'success': False,
+            'error': ('This sheet has BOM levels. Multi-level BOM generation is not '
+                      'available yet, so no BOM is generated for it.'),
+            'needs': 'multi_level_support',
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    if not bom_header:
+        return None, None, Response({
+            'success': False,
+            'error': ('No finished good has been defined for this upload, so a BOM '
+                      'cannot be generated yet.'),
+            'needs': 'bom_header',
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    # Prefer the mapped grid when it still carries the normalizer's columns;
+    # otherwise fall back to the uploaded sheet. Before mapping has run the grid
+    # is empty, and mapping may drop `parentKey`/`relation` because they are not
+    # destination template columns — either way the source still has them.
+    headers, rows = read_session_grid(session_id, info)
+    records = _normalized_records_from_grid(headers or [], rows or [])
+    if not _has_normalizer_columns(records):
+        source_headers, source_rows = _read_normalized_source_table(info)
+        source_records = _normalized_records_from_grid(source_headers, source_rows)
+        if _has_normalizer_columns(source_records):
+            # Grouping comes from the source sheet; item codes are generated
+            # later and only exist in the mapped grid, so the two are joined.
+            source_records, join_note = _merge_item_codes_from_grid(
+                source_records, headers or [], rows or []
+            )
+            logger.info(f"BOM generation: item code join -> {join_note}")
+            records = source_records
+
+    result = generate_flat_bom(records, bom_header)
+
+    if not result.is_valid:
+        return None, None, Response({
+            'success': False,
+            'errors': result.errors,
+            'warnings': result.warnings,
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    return result, bom_header, None
+
+
+@api_view(['GET'])
+def generate_bom_sheet(request, session_id):
+    """Generate the FactWise BOM sheet for a session from its normalized rows.
+
+    Replaces the demo/golden-file path: everything returned here is built from
+    what the user actually uploaded and normalized. Flat versus hierarchical is
+    decided by the answers captured in the BOM structure gate.
+    """
+    from .bom_generator import bom_rows_as_lists
+
+    result, _bom_header, error_response = _generate_bom_for_session(session_id)
+    if error_response is not None:
+        return error_response
+
+    return Response({
+        'success': True,
+        'headers': result.bom_headers,
+        'rows': bom_rows_as_lists(result),
+        'item_headers': result.item_headers,
+        'item_rows': result.item_rows,
+        'stats': result.stats,
+        'warnings': result.warnings,
+    })
+
+
+@api_view(['GET'])
+def bom_tree(request, session_id):
+    """Tree preview built from the generated BOM — not from a golden file.
+
+    The generated table uses the real FactWise BOM columns, so the existing tree
+    builder consumes it unchanged.
+    """
+    from .bom_generator import bom_rows_as_lists
+
+    result, _bom_header, error_response = _generate_bom_for_session(session_id)
+    if error_response is not None:
+        return error_response
+
+    tree, meta = _build_bom_tree_from_table(result.bom_headers, bom_rows_as_lists(result))
+    if not tree:
+        return Response({'success': False, 'error': 'The generated BOM produced no tree.'},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    return Response({
+        'success': True,
+        'tree': tree,
+        'source': 'generated',
+        'finishedGoods': meta.get('finishedGoods', 0),
+        'bomCount': meta.get('bomCount', 0),
+        'truncated': meta.get('truncated', False),
+        'stats': result.stats,
+        'warnings': result.warnings,
+    })
+
+
+@api_view(['GET'])
+def download_bom_sheet(request, session_id):
+    """Download the generated BOM as .xlsx, laid out like the FactWise import."""
+    import openpyxl
+    from django.http import HttpResponse
+    from .bom_generator import bom_rows_as_lists
+
+    result, _bom_header, error_response = _generate_bom_for_session(session_id)
+    if error_response is not None:
+        return error_response
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = 'BOM'
+    sheet.append(result.bom_headers)
+    for row in bom_rows_as_lists(result):
+        sheet.append(row)
+
+    response = HttpResponse(
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    )
+    response['Content-Disposition'] = 'attachment; filename="factwise_bom.xlsx"'
+    workbook.save(response)
+    return response
+
+
+
+def _exported_item_rows(session_id):
+    """The item rows the user would actually download, as [{'Item code': ...}].
+
+    Reads the same grid the item export writes, then adds the authored finished
+    good exactly as the export does, so validation and the shipped file agree.
+    Returns None when the grid cannot be read, and the caller falls back.
+    """
+    try:
+        info = get_session_consistent(session_id)
+        if not info:
+            return None
+
+        headers, rows = read_session_grid(session_id, info)
+        if not headers:
+            return None
+
+        rows, headers = _append_authored_finished_good(info, list(rows or []), list(headers))
+
+        code_index = -1
+        for position, header in enumerate(headers):
+            if _template_label_key(header) == _template_label_key('Item code'):
+                code_index = position
+                break
+        if code_index < 0:
+            return None
+
+        return [
+            {'Item code': str(row[code_index] or '').strip()}
+            for row in rows
+            if isinstance(row, list) and code_index < len(row)
+        ]
+    except Exception as exc:
+        logger.warning(f"Could not read exported item rows for validation: {exc}")
+        return None
+
+
+@api_view(['GET'])
+def validate_bom_sheet(request, session_id):
+    """Validate the generated BOM against BOM rules only.
+
+    Item-directory validation is a different ruleset and is not applied here:
+    requiring `Item code` or `Item type` on a BOM row would report failures that
+    are not real, and would hide the ones that are.
+    """
+    from .bom_generator import bom_rows_as_lists
+    from .bom_validation import validate_bom
+
+    result, _bom_header, error_response = _generate_bom_for_session(session_id)
+    if error_response is not None:
+        return error_response
+
+    # Referential integrity has to be checked against the item directory the
+    # user will actually download, not the generator's own copy of it. Checking
+    # the copy is how a BOM can validate clean and still fail the FactWise
+    # import on the second file.
+    item_rows = _exported_item_rows(session_id) or result.item_rows
+
+    report = validate_bom(
+        result.bom_headers,
+        bom_rows_as_lists(result),
+        item_rows,
+    )
+
+    return Response({
+        'success': True,
+        'valid': not report['errors'],
+        'errors': report['errors'],
+        'warnings': report['warnings'] + result.warnings,
+        'stats': report['stats'],
+    })
+
+
+# ---------------------------------------------------------------------------
+# Import an edited sheet back into the same session
+# ---------------------------------------------------------------------------
+
+@api_view(['POST'])
+def import_edited_sheet(request, session_id):
+    """Replace a session's grid with an edited export of that same grid.
+
+    Columns are matched by header NAME, not position, so reordering columns in
+    Excel is safe. Columns the session does not know are ignored and reported
+    rather than silently dropped; session columns absent from the upload keep
+    their existing values, so a partial export cannot blank them.
+
+    This writes into the current session, which is the point: mappings, tags and
+    MPN validation stay attached instead of a re-upload creating a new session.
+    """
+    info = get_session_consistent(session_id)
+    if not info:
+        return Response({'success': False, 'error': 'Session not found'},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    uploaded = request.FILES.get('file') or request.FILES.get('clientFile')
+    if not uploaded:
+        return Response({'success': False, 'error': 'No file was uploaded.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        name = str(uploaded.name or '').lower()
+        if name.endswith('.csv'):
+            frame = pd.read_csv(uploaded, dtype=object)
+        else:
+            frame = pd.read_excel(uploaded, dtype=object)
+    except Exception as exc:
+        logger.error(f"Import: could not read uploaded file: {exc}")
+        return Response({'success': False, 'error': f'Could not read the file: {exc}'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    frame = frame.fillna('')
+    uploaded_headers = [str(column).strip() for column in frame.columns]
+    uploaded_rows = frame.values.tolist()
+
+    session_headers, session_rows = read_session_grid(session_id, info)
+    session_headers = list(session_headers or [])
+    session_rows = [list(row) for row in (session_rows or [])]
+
+    if not session_headers:
+        return Response({'success': False, 'error': 'This session has no grid to import into yet.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    # Repeated headers (Tag, Specification name...) are matched left-to-right so
+    # the Nth occurrence in the upload lands on the Nth occurrence in the grid.
+    remaining = {}
+    for position, header in enumerate(session_headers):
+        remaining.setdefault(_template_label_key(header), []).append(position)
+
+    column_map = {}
+    ignored = []
+    for upload_position, header in enumerate(uploaded_headers):
+        slots = remaining.get(_template_label_key(header))
+        if slots:
+            column_map[upload_position] = slots.pop(0)
+        else:
+            ignored.append(header)
+
+    if not column_map:
+        return Response({
+            'success': False,
+            'error': ('None of the uploaded columns match this sheet. '
+                      'Export the sheet first, edit it, then import that file.'),
+            'uploaded_columns': uploaded_headers[:20],
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    untouched = [session_headers[i] for slots in remaining.values() for i in slots]
+
+    new_rows = []
+    for upload_row in uploaded_rows:
+        row = [''] * len(session_headers)
+        for upload_position, session_position in column_map.items():
+            value = upload_row[upload_position] if upload_position < len(upload_row) else ''
+            row[session_position] = '' if value is None else str(value).strip()
+        new_rows.append(row)
+
+    # Columns missing from the upload keep their previous values where the row
+    # still exists, so importing a trimmed export cannot wipe them out.
+    if untouched:
+        untouched_positions = [session_headers.index(h) for h in dict.fromkeys(untouched)]
+        for index, row in enumerate(new_rows):
+            if index < len(session_rows):
+                for position in untouched_positions:
+                    if position < len(session_rows[index]):
+                        row[position] = session_rows[index][position]
+
+    previous_row_count = len(session_rows)
+    write_session_grid(session_id, info, session_headers, new_rows)
+    save_session(session_id, info)
+    increment_template_version(session_id)
+
+    logger.info(
+        f"Import: session {session_id} replaced {previous_row_count} rows with {len(new_rows)} "
+        f"({len(column_map)} columns matched, {len(ignored)} ignored)"
+    )
+
+    return Response({
+        'success': True,
+        'imported_rows': len(new_rows),
+        'previous_rows': previous_row_count,
+        'matched_columns': len(column_map),
+        'ignored_columns': ignored[:20],
+        'untouched_columns': list(dict.fromkeys(untouched))[:20],
+    })
