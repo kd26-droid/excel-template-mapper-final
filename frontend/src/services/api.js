@@ -621,11 +621,14 @@ const api = {
    * @param {string} sessionId - Session ID
    * @param {string} format - File format ('excel' or 'csv')
    */
-  downloadProcessedFile: (sessionId, format = 'excel', columnOrder = null) =>
+  downloadProcessedFile: (sessionId, format = 'excel', columnOrder = null, exportType = 'item') =>
     axios.post(`${API_URL}/download/`, {
       session_id: sessionId,
       format: format,
-      column_order: columnOrder
+      column_order: columnOrder,
+      // 'item' strips BOM structure columns; the two FactWise imports are
+      // different files even though the working grid holds both.
+      export_type: exportType
     }, {
       responseType: 'blob'
     }),
@@ -1510,13 +1513,21 @@ const api = {
     }, { timeout: 120000 });
   },
 
-  /** DEMO: fetch the pre-made "golden" export sheet for this input (as a blob). */
+  /** Download the BOM this app generated from the user's own normalized rows. */
   downloadDemoBomSheet: (sessionId) =>
-    axios.get(`${API_URL}/download/demo-bom/${sessionId}/`, { responseType: 'blob', timeout: 120000 }),
+    axios.get(`${API_URL}/bom/download/${sessionId}/`, { responseType: 'blob', timeout: 120000 }),
 
-  /** DEMO: fetch the nested BOM tree (FG → sub-assemblies → components) for the preview. */
+  /** Generated BOM as JSON: headers, rows, item rows, stats, warnings. */
+  generateBomSheet: (sessionId) =>
+    axios.get(`${API_URL}/bom/generate/${sessionId}/`, { timeout: 120000 }),
+
+  /** Validate the generated BOM against BOM rules only (not item rules). */
+  validateBomSheet: (sessionId) =>
+    axios.get(`${API_URL}/bom/validate/${sessionId}/`, { timeout: 120000 }),
+
+  /** Nested BOM tree (FG → sub-assemblies → components) built from the generated BOM. */
   getBomTree: (sessionId) =>
-    axios.get(`${API_URL}/demo/bom-tree/${sessionId}/`, { timeout: 60000 }),
+    axios.get(`${API_URL}/bom/tree/${sessionId}/`, { timeout: 60000 }),
 
   getDemoBomTree: (sessionId) =>
     axios.get(`${API_URL}/demo/bom-tree/${sessionId}/`, { timeout: 60000 }),

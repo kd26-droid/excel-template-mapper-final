@@ -44,6 +44,10 @@ from .views import (
     cleanup_grid_rows,
     delete_rows_conditional,
     download_demo_bom_sheet,
+    generate_bom_sheet,
+    bom_tree,
+    download_bom_sheet,
+    validate_bom_sheet,
     demo_bom_tree,
     expand_alternate_columns,
 
@@ -208,6 +212,10 @@ urlpatterns = [
     path('download/grid-excel/', download_grid_excel, name='download-grid-excel'),
     path('download/demo-bom/<str:session_id>/', download_demo_bom_sheet, name='download-demo-bom-sheet'),
     path('demo/bom-tree/<str:session_id>/', demo_bom_tree, name='demo-bom-tree'),
+    path('bom/generate/<str:session_id>/', generate_bom_sheet, name='generate-bom-sheet'),
+    path('bom/tree/<str:session_id>/', bom_tree, name='bom-tree'),
+    path('bom/download/<str:session_id>/', download_bom_sheet, name='download-bom-sheet'),
+    path('bom/validate/<str:session_id>/', validate_bom_sheet, name='validate-bom-sheet'),
 
     # Dashboard
     path('dashboard/', dashboard_view, name='dashboard'),

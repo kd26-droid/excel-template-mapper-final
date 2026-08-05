@@ -483,6 +483,10 @@ const EnhancedDataEditor = () => {
   const [factwiseExportDialogOpen, setFactwiseExportDialogOpen] = useState(false);
   const [factwisePreviewOpen, setFactwisePreviewOpen] = useState(false);
   const [factwisePreviewType, setFactwisePreviewType] = useState('item');
+  // BOM-specific validation, kept separate from the item required-field guard.
+  const [bomValidationOpen, setBomValidationOpen] = useState(false);
+  const [bomValidationIssues, setBomValidationIssues] = useState([]);
+  const [bomValidationWarnings, setBomValidationWarnings] = useState([]);
   const [factwisePreviewDownloading, setFactwisePreviewDownloading] = useState('');
   const [directoryExportStatus, setDirectoryExportStatus] = useState({
     open: false,
@@ -2466,7 +2470,34 @@ const EnhancedDataEditor = () => {
   // open the dialog instead and hold the export until the user resolves it.
   // Blank counts come from the backend so they reflect the WHOLE dataset, not
   // just the current (server-paginated) page.
-  const runGuardedExport = useCallback(async (exportFn) => {
+  const runGuardedExport = useCallback(async (exportFn, exportType = 'item') => {
+    // The BOM sheet has its own ruleset. Item required fields (Item code, Item
+    // type, Measurement unit...) do not apply to a BOM row, so running them here
+    // would report failures that are not real and hide the ones that are.
+    if (exportType === 'bom') {
+      try {
+        const resp = await api.validateBomSheet(sessionId);
+        const issues = resp?.data?.errors || [];
+        if (issues.length > 0) {
+          setBomValidationIssues(issues);
+          setBomValidationWarnings(resp?.data?.warnings || []);
+          pendingExportRef.current = exportFn;
+          setBomValidationOpen(true);
+          return;
+        }
+      } catch (e) {
+        // A validation outage must not silently pass a broken BOM through.
+        showSnackbar(
+          getFriendlyErrorMessage(e, 'Could not validate the BOM before export.'),
+          'error'
+        );
+        return;
+      }
+      pendingExportRef.current = null;
+      exportFn();
+      return;
+    }
+
     const { isFactwiseSheet, present } = getFactwiseRequiredGaps();
     if (!isFactwiseSheet || present.length === 0) {
       exportFn();
@@ -2535,7 +2566,7 @@ const EnhancedDataEditor = () => {
     }
     pendingExportRef.current = null;
     exportFn();
-  }, [getFactwiseRequiredGaps, sessionId, rowData, BOOLEAN_REQUIRED_FIELDS, getRequiredValidationRule]);
+  }, [getFactwiseRequiredGaps, sessionId, rowData, BOOLEAN_REQUIRED_FIELDS, getRequiredValidationRule, showSnackbar, getFriendlyErrorMessage]);
 
   useEffect(() => {
     requiredGuardRunnerRef.current = runGuardedExport;
@@ -2757,7 +2788,7 @@ const EnhancedDataEditor = () => {
       handleExportToProject();
       return;
     }
-    runGuardedExport(() => openFactwisePreview(destination));
+    runGuardedExport(() => openFactwisePreview(destination), destination);
   }, [handleExportToProject, runGuardedExport, openFactwisePreview]);
 
   const downloadFactwisePreview = useCallback(async (format) => {
@@ -2770,7 +2801,16 @@ const EnhancedDataEditor = () => {
 
     try {
       setFactwisePreviewDownloading(format);
-      const response = await api.downloadProcessedFile(sessionId, format === 'csv' ? 'csv' : 'excel', columnOrder);
+      // A BOM is not the mapped grid — it is generated from the normalized rows
+      // into the FactWise BOM schema, so it comes from its own endpoint.
+      const response = factwisePreviewType === 'bom'
+        ? await api.downloadDemoBomSheet(sessionId)
+        : await api.downloadProcessedFile(
+            sessionId,
+            format === 'csv' ? 'csv' : 'excel',
+            columnOrder,
+            'item'
+          );
       const contentDisposition = response.headers?.['content-disposition'];
       let filename = `factwise_${label}_${sessionId}.${extension}`;
       if (contentDisposition) {
@@ -8141,6 +8181,27 @@ const EnhancedDataEditor = () => {
           >
             Cancel
           </Button>
+          {/* Real download. For a BOM this is the generated FactWise BOM sheet;
+              for the item directory it is the processed sheet with BOM
+              structure columns stripped out. */}
+          <Button
+            variant="outlined"
+            onClick={() => downloadFactwisePreview('excel')}
+            disabled={Boolean(factwisePreviewDownloading)}
+            startIcon={factwisePreviewDownloading === 'excel'
+              ? <CircularProgress size={16} />
+              : <DownloadIcon />}
+            sx={{
+              textTransform: 'none',
+              borderRadius: '999px',
+              fontWeight: 700,
+              px: 3,
+              minHeight: 38,
+            }}
+          >
+            {factwisePreviewDownloading === 'excel' ? 'Preparing…' : 'Export Sheet'}
+          </Button>
+          {/* Mock, like Export to Project — no file is produced. */}
           <Button
             variant="contained"
             onClick={() => handleDirectoryExport(factwisePreviewType)}
@@ -8160,7 +8221,7 @@ const EnhancedDataEditor = () => {
               }
             }}
           >
-            Export
+            Export to FactWise
           </Button>
         </DialogActions>
       </Dialog>
@@ -8694,6 +8755,48 @@ const EnhancedDataEditor = () => {
           {snackbar.message}
         </Alert>
       </Snackbar>
+
+      {/* BOM validation — its own ruleset, not the item required-field guard. */}
+      <Dialog
+        open={bomValidationOpen}
+        onClose={() => setBomValidationOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>BOM cannot be exported yet</DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
+            {bomValidationIssues.length} issue{bomValidationIssues.length === 1 ? '' : 's'} would
+            make this BOM fail the FactWise import.
+          </Typography>
+          {bomValidationIssues.slice(0, 25).map((issue, index) => (
+            <Alert severity="error" key={index} sx={{ mb: 1 }}>
+              {issue.message}
+            </Alert>
+          ))}
+          {bomValidationIssues.length > 25 && (
+            <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+              …and {bomValidationIssues.length - 25} more.
+            </Typography>
+          )}
+          {bomValidationWarnings.length > 0 && (
+            <>
+              <Divider sx={{ my: 2 }} />
+              <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                Warnings — these do not block export
+              </Typography>
+              {bomValidationWarnings.slice(0, 10).map((warning, index) => (
+                <Alert severity="warning" key={index} sx={{ mb: 1 }}>
+                  {warning.message}
+                </Alert>
+              ))}
+            </>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setBomValidationOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 };

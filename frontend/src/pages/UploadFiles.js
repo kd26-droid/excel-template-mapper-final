@@ -1,6 +1,7 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import LoaderOverlay, { useGlobalBlock } from '../components/LoaderOverlay';
+import BomStructureDialog from '../components/BomStructureDialog';
 import {
   Typography,
   Button,
@@ -735,6 +736,15 @@ const UploadFiles = () => {
   const [clientHeaderPreview, setClientHeaderPreview] = useState([]);
   const [clientHeaderAutoDetected, setClientHeaderAutoDetected] = useState(false);
 
+  // BOM structure gate. Asked once per file, before the workbook goes anywhere,
+  // because the BOM generator cannot work out on its own which sheets are BOMs,
+  // whether they have levels, or what a flat sheet's finished good is called.
+  // `pendingBomStructureAction` holds the exit the user clicked so it can be
+  // resumed verbatim once the questions are answered.
+  const [bomStructureOpen, setBomStructureOpen] = useState(false);
+  const [bomStructureAnswers, setBomStructureAnswers] = useState(null);
+  const [pendingBomStructureAction, setPendingBomStructureAction] = useState(null);
+
   // Template file state
   const [templateFile, setTemplateFile] = useState(null);
   const [templateSheetNames, setTemplateSheetNames] = useState([]);
@@ -1262,6 +1272,21 @@ const UploadFiles = () => {
     return getUsableColumnDescriptors(rows, headerIndex).map(column => column.header);
   }, [getSheetJoinSourceWorkbook]);
 
+  // Sheets offered to the BOM structure gate. In combine mode only the sheets
+  // actually being stacked are relevant. Memoised because the dialog seeds its
+  // state from this list.
+  const bomStructureSheetNames = useMemo(
+    () => (combineSheetsMode && selectedClientSheets.length > 0 ? selectedClientSheets : clientSheetNames),
+    [combineSheetsMode, selectedClientSheets, clientSheetNames]
+  );
+
+  // Level auto-detection has to read headers at the row the user actually
+  // chose — THALES-style sheets put their header well below row 1.
+  const bomStructureHeaderReader = useCallback(
+    sheetName => getSheetHeaders(sheetName, clientHeaderRow, 'primary'),
+    [getSheetHeaders, clientHeaderRow]
+  );
+
   const getSheetRecords = useCallback((sheetName, headerRow = 1, sourceId = 'primary') => {
     const workbook = getSheetJoinSourceWorkbook(sourceId);
     if (!workbook || !sheetName || !workbook.Sheets[sheetName]) return [];
@@ -1722,6 +1747,10 @@ const UploadFiles = () => {
       setClientHeaderAutoDetected(false);
       setCombineSheetsMode(false);
       setSelectedClientSheets([]);
+      // A different workbook means different sheets, so the BOM answers no
+      // longer apply and the gate has to be asked again.
+      setBomStructureAnswers(null);
+      setPendingBomStructureAction(null);
       setSheetJoinSetup(null);
       setActiveSheetJoinComparisonId(null);
       setSheetJoinLegacyHeaderWarning(false);
@@ -2815,7 +2844,7 @@ const UploadFiles = () => {
     setError(null);
   };
 
-  const handleOpenBomNormalizer = (templateOptions = {}) => {
+  const handleOpenBomNormalizer = (templateOptions = {}, bomAnswersOverride = null) => {
     if (!userFile) {
       setError('Please select a client file');
       return;
@@ -2835,6 +2864,14 @@ const UploadFiles = () => {
       return;
     }
 
+    // Ask the BOM structure questions before the workbook leaves this page.
+    const bomAnswers = bomAnswersOverride || bomStructureAnswers;
+    if (!bomAnswers && clientSheetNames.length > 0) {
+      setPendingBomStructureAction({ action: 'normalize', templateOptions });
+      setBomStructureOpen(true);
+      return;
+    }
+
     navigate('/bom-normalizer', {
       state: {
         initialFile: userFile,
@@ -2842,6 +2879,7 @@ const UploadFiles = () => {
         initialSheetName: selectedClientSheet,
         initialHeaderRow: clientHeaderRow,
         templateFile,
+        bomStructure: bomAnswers,
         uploadSource: {
           ...getProcessingTemplateState({
             processingTemplateMode: selectedProcessingTemplateId ? 'use' : 'new',
@@ -2853,7 +2891,7 @@ const UploadFiles = () => {
     });
   };
 
-  const handleUpload = async (templateOptions = {}) => {
+  const handleUpload = async (templateOptions = {}, bomAnswersOverride = null) => {
     if (!userFile) {
       setError('Please select a client file');
       return;
@@ -2883,6 +2921,15 @@ const UploadFiles = () => {
 
     if (!selectedProcessingTemplateId && !templateOptions.processingTemplateName) {
       openNewTemplateDialog('upload');
+      return;
+    }
+
+    // Ask the BOM structure questions before the workbook leaves this page.
+    // PDFs skip the gate: they have no sheets, so the questions do not apply.
+    const bomAnswers = bomAnswersOverride || bomStructureAnswers;
+    if (!isPDF && !bomAnswers && clientSheetNames.length > 0) {
+      setPendingBomStructureAction({ action: 'upload', templateOptions });
+      setBomStructureOpen(true);
       return;
     }
 
@@ -2935,6 +2982,12 @@ const UploadFiles = () => {
         formData.append('formulaRules', JSON.stringify(formulaRules));
       }
 
+      // Carry the BOM structure answers onto the session so BOM generation does
+      // not have to re-ask after a reload.
+      if (bomAnswers) {
+        formData.append('bomStructure', JSON.stringify(bomAnswers));
+      }
+
       let response;
 
       const selectedProcessingTemplate = getSelectedProcessingTemplate();
@@ -2966,6 +3019,7 @@ const UploadFiles = () => {
               initialFileMode: 'workbook',
               initialSheetName: uploadSheetName,
               initialHeaderRow: uploadHeaderRow,
+              bomStructure: bomAnswers,
               autoReplayProcessingTemplate: selectedProcessingTemplate,
               autoReplayMappingTemplateId: processingMappingTemplateId,
               uploadSource: getProcessingTemplateState({
@@ -3062,6 +3116,7 @@ const UploadFiles = () => {
             autoApplyTemplate: selectedTemplate,
             appliedTemplate: selectedTemplate,
             fromUpload: true,
+            bomStructure: bomAnswers,
             smartTagFormulaRules: formulaRules,
             uploadSource: getProcessingTemplateState({
               processingTemplateMode: selectedProcessingTemplateId ? 'use' : 'new',
@@ -3069,6 +3124,7 @@ const UploadFiles = () => {
             })
           } : {
             fromUpload: true,
+            bomStructure: bomAnswers,
             uploadSource: getProcessingTemplateState({
               processingTemplateMode: selectedProcessingTemplateId ? 'use' : 'new',
               ...templateOptions,
@@ -3105,6 +3161,29 @@ const UploadFiles = () => {
     } finally {
       setLoading(false);
     }
+  };
+
+  // Resume whichever exit the user clicked, now that the BOM questions are
+  // answered. The guard in that handler passes on the second run, so its
+  // original body executes untouched.
+  const handleBomStructureConfirm = (payload) => {
+    setBomStructureAnswers(payload);
+    setBomStructureOpen(false);
+    const pending = pendingBomStructureAction;
+    setPendingBomStructureAction(null);
+    if (!pending) return;
+    // The answers are handed over directly rather than read back from state,
+    // which has not committed yet at this point.
+    if (pending.action === 'normalize') {
+      handleOpenBomNormalizer(pending.templateOptions || {}, payload);
+    } else {
+      handleUpload(pending.templateOptions || {}, payload);
+    }
+  };
+
+  const handleBomStructureCancel = () => {
+    setBomStructureOpen(false);
+    setPendingBomStructureAction(null);
   };
 
   // Handle PDF processing choice
@@ -5558,6 +5637,15 @@ const UploadFiles = () => {
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* BOM structure gate — asked once per file before it leaves this page */}
+      <BomStructureDialog
+        open={bomStructureOpen}
+        onClose={handleBomStructureCancel}
+        sheetNames={bomStructureSheetNames}
+        getSheetHeaders={bomStructureHeaderReader}
+        onConfirm={handleBomStructureConfirm}
+      />
 
       {/* Global Loader Overlay */}
       <LoaderOverlay visible={globalLoading} label="Processing..." />

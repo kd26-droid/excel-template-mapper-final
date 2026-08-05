@@ -3373,6 +3373,11 @@ const BomNormalizer = () => {
         formData.append('clientFile', file);
         formData.append('sheetName', 'Normalized BOM');
         formData.append('headerRow', '1');
+        // Forward the BOM structure answers captured on the upload page so the
+        // session created here keeps them.
+        if (location.state?.bomStructure) {
+          formData.append('bomStructure', JSON.stringify(location.state.bomStructure));
+        }
 
         const response = await api.uploadFilesWithTemplate(formData, mappingTemplateId);
         if (!response.data?.template_applied || !response.data?.template_success) {
@@ -3835,6 +3840,11 @@ const BomNormalizer = () => {
     formData.append('clientFile', file);
     formData.append('sheetName', 'Normalized BOM');
     formData.append('headerRow', '1');
+    // Forward the BOM structure answers captured on the upload page so the
+    // session created here keeps them.
+    if (location.state?.bomStructure) {
+      formData.append('bomStructure', JSON.stringify(location.state.bomStructure));
+    }
     const returnSnapshotKey = saveReturnSnapshot('normalized-results');
     const returnSnapshot = buildNormalizedResultsSnapshot(normalizedRows);
 
@@ -3904,6 +3914,11 @@ const BomNormalizer = () => {
     formData.append('clientFile', file);
     formData.append('sheetName', 'Merged BOM');
     formData.append('headerRow', '1');
+    // Forward the BOM structure answers captured on the upload page so the
+    // session created here keeps them.
+    if (location.state?.bomStructure) {
+      formData.append('bomStructure', JSON.stringify(location.state.bomStructure));
+    }
     const returnSnapshotKey = saveReturnSnapshot('merge-preview');
 
     setBusy(true);
