@@ -75,6 +75,17 @@ const emptyRoles = ROLE_FIELDS.reduce((acc, field) => {
   return acc;
 }, {});
 
+const SUPPORTED_SOURCE_EXTENSIONS = ['.xlsx', '.xls', '.xlsm', '.csv', '.pdf'];
+
+const getFileExtension = (fileName = '') => {
+  const match = String(fileName || '').toLowerCase().match(/\.[^.]+$/);
+  return match ? match[0] : '';
+};
+
+const unsupportedSourceMessage = (fileName = 'Selected file') => (
+  `${fileName} is not supported. Please upload .xlsx, .xls, .xlsm, .csv, or .pdf files.`
+);
+
 const LEARNED_ROLE_HEADERS_KEY = 'bomNormalizer.learnedRoleHeaders.v1';
 const BOM_NORMALIZER_RETURN_PREFIX = 'bomNormalizer.returnSnapshot.';
 const BOM_NORMALIZER_LATEST_RESULTS_KEY = 'bomNormalizer.latestResultsSnapshot';
@@ -294,13 +305,42 @@ const rowsToObjects = (rows, currentHeaders, startRowNumber = 1) => rows
       mapped[header] = fmt(row[index]);
     });
     mapped.__sourceRow = startRowNumber + rowIndex;
+    if (row.__rowMeta?.deletedStyle) mapped.__deletedRowStyle = true;
+    if (row.__rowMeta?.redStyle) mapped.__redRowStyle = true;
+    if (row.__rowMeta?.strikeStyle) mapped.__strikeRowStyle = true;
     return mapped;
   });
+
+const filterRowsByEndRow = (rows = [], endRow = '') => {
+  const limit = Number(endRow);
+  if (!Number.isFinite(limit) || limit <= 0) return rows;
+  return rows.filter((row) => Number(row?.__sourceRow || 0) <= limit);
+};
+
+const colorLooksRed = (color = {}) => {
+  const raw = fmt(color?.rgb || color?.argb || color?.value || '').replace(/^#/, '');
+  if (!raw) return false;
+  const hex = raw.length === 8 ? raw.slice(2) : raw;
+  if (!/^[0-9a-f]{6}$/i.test(hex)) return false;
+  const red = parseInt(hex.slice(0, 2), 16);
+  const green = parseInt(hex.slice(2, 4), 16);
+  const blue = parseInt(hex.slice(4, 6), 16);
+  return red >= 180 && green <= 100 && blue <= 100;
+};
+
+const getCellStyleInfo = (cell = {}) => {
+  const style = cell?.s || {};
+  const font = style.font || {};
+  const red = colorLooksRed(font.color) || colorLooksRed(style.fgColor) || colorLooksRed(style.color);
+  const strike = Boolean(font.strike || font.strikethrough);
+  return { red, strike };
+};
 
 const worksheetToCompactRows = (worksheet) => {
   const cells = Object.keys(worksheet).filter((key) => !key.startsWith('!'));
   let maxRow = -1;
   const valuesByCell = new Map();
+  const metaByRow = new Map();
   const usedColumns = new Set();
 
   cells.forEach((cellAddress) => {
@@ -311,6 +351,14 @@ const worksheetToCompactRows = (worksheet) => {
     maxRow = Math.max(maxRow, position.r);
     usedColumns.add(position.c);
     valuesByCell.set(`${position.r}:${position.c}`, value);
+    const styleInfo = getCellStyleInfo(cell);
+    if (styleInfo.red || styleInfo.strike) {
+      const rowMeta = metaByRow.get(position.r) || { redStyle: false, strikeStyle: false, deletedStyle: false };
+      rowMeta.redStyle = rowMeta.redStyle || styleInfo.red;
+      rowMeta.strikeStyle = rowMeta.strikeStyle || styleInfo.strike;
+      rowMeta.deletedStyle = rowMeta.deletedStyle || styleInfo.red || styleInfo.strike;
+      metaByRow.set(position.r, rowMeta);
+    }
   });
 
   if (maxRow < 0 || !usedColumns.size) return [];
@@ -319,7 +367,9 @@ const worksheetToCompactRows = (worksheet) => {
 
   const rows = [];
   for (let rowIndex = 0; rowIndex <= maxRow; rowIndex += 1) {
-    rows.push(columns.map((colIndex) => valuesByCell.get(`${rowIndex}:${colIndex}`) || ''));
+    const row = columns.map((colIndex) => valuesByCell.get(`${rowIndex}:${colIndex}`) || '');
+    row.__rowMeta = metaByRow.get(rowIndex) || null;
+    rows.push(row);
   }
 
   return rows;
@@ -673,6 +723,12 @@ const rowLooksLikeDoNotPopulate = (row, headers) => {
   return /\b(do\s*not\s*populate|not\s*populate|dnp|dni|not\s*fitted|no\s*fit)\b/.test(text);
 };
 
+const rowLooksLikeDeleted = (row, headers) => {
+  if (row.__deletedRowStyle || row.__redRowStyle || row.__strikeRowStyle) return true;
+  const text = rowValues(row, headers).join(' ').toLowerCase();
+  return /\b(deleted|delete|removed|obsolete|cancelled|canceled)\b/.test(text);
+};
+
 const rowLooksLikeSectionTitle = (row, headers, roles) => {
   const values = rowValues(row, headers);
   if (!values.length) return true;
@@ -710,6 +766,7 @@ const shouldSkipSourceRow = (row, headers, roles, config) => {
   if (!rowValues(row, headers).length) return true;
   if (config.skipRepeatedHeaders && rowLooksLikeRepeatedHeader(row, headers)) return true;
   if (config.skipDoNotPopulate && rowLooksLikeDoNotPopulate(row, headers)) return true;
+  if (config.skipDeletedRows && rowLooksLikeDeleted(row, headers)) return true;
   if (config.structure === 'grouped_rows' && hasGroupedRowContext(row, roles)) return false;
   if (config.skipTitleRows && rowLooksLikeSectionTitle(row, headers, roles)) return true;
   return false;
@@ -732,7 +789,7 @@ const withSourceColumns = (normalizedRow, sourceRow, config = {}) => {
 
   const carried = { ...normalizedRow };
   sourceHeaders.forEach((header) => {
-    if (!header || header === '__sourceRow') return;
+    if (!header || header.startsWith('__')) return;
     if (consumedSourceHeaders.has(normalizeKey(header))) return;
     if (Object.prototype.hasOwnProperty.call(carried, header)) return;
     carried[header] = sourceRow?.[header] ?? '';
@@ -989,6 +1046,53 @@ const normalizeOnePerRow = (rows, roles, config = {}) => rows.map((row, rowIndex
   }, row, config);
 }).filter((row) => row.mpn || row.manufacturer || row.description);
 
+const normalizeSameGroupRows = (rows, roles, config = {}) => {
+  const seenByGroup = new Map();
+
+  const getGroupKey = (row, rowIndex) => {
+    const sourceRow = row.__sourceRow || rowIndex + 1;
+    const contextualParts = [
+      getCell(row, roles.parent),
+      getCell(row, roles.description),
+      getCell(row, roles.quantity),
+      getCell(row, roles.uom),
+      getCell(row, roles.level),
+    ].filter((value) => !isPlaceholderCell(value));
+    const fallback = getCell(row, roles.cpn) || getCell(row, roles.mpn) || getCell(row, roles.manufacturer) || `Source row ${sourceRow}`;
+    const parts = contextualParts.length ? contextualParts : [fallback];
+    return parts.map(normalizeKey).filter(Boolean).join('::') || `row-${sourceRow}`;
+  };
+
+  return rows.map((row, rowIndex) => {
+    const sourceRow = row.__sourceRow || rowIndex + 1;
+    const mpn = stripVendorPrefix(getCell(row, roles.mpn));
+    const manufacturer = getCell(row, roles.manufacturer);
+    const groupKey = getGroupKey(row, rowIndex);
+    const groupIndex = seenByGroup.get(groupKey) || 0;
+    seenByGroup.set(groupKey, groupIndex + 1);
+    const parentKey = getCell(row, roles.parent)
+      || getCell(row, roles.description)
+      || getCell(row, roles.cpn)
+      || `Source row ${sourceRow}`;
+
+    return withSourceColumns({
+      sourceRow,
+      parentKey,
+      relation: groupIndex === 0 ? 'Primary' : `Alternate ${groupIndex}`,
+      level: getCell(row, roles.level) || '1',
+      cpn: getCell(row, roles.cpn),
+      description: getCell(row, roles.description),
+      mpn,
+      manufacturer,
+      quantity: getCell(row, roles.quantity),
+      uom: getCell(row, roles.uom),
+      rule: 'same_group_rows_rebalance',
+      confidence: Math.min(confidenceForRow(mpn, manufacturer, 'same_group_rows') + (groupIndex > 0 ? 12 : 6), 98),
+      discardedText: '',
+    }, row, config);
+  }).filter((row) => row.mpn || row.manufacturer || row.description);
+};
+
 const normalizeManufacturerOnly = (rows, roles, config, splitCells) => {
   const output = [];
   rows.forEach((row, rowIndex) => {
@@ -1140,6 +1244,7 @@ const normalizeRows = (rows, headers, roles, config) => {
   if (config.structure === 'mfr_only_same_cell') return normalizeManufacturerOnly(rows, roles, configWithSourceHeaders, true);
   if (config.structure === 'mfr_only_rows') return normalizeManufacturerOnly(rows, roles, configWithSourceHeaders, false);
   if (config.alternateLayout === 'separate_columns') return normalizeAlternateColumns(rows, headers, roles, configWithSourceHeaders);
+  if (config.alternateLayout === 'same_group_rows') return normalizeSameGroupRows(rows, roles, configWithSourceHeaders);
   if (config.alternateLayout === 'already_separate_rows') return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
   if (config.structure === 'same_cell') return normalizeSameCell(rows, roles, configWithSourceHeaders);
   if (config.structure === 'one_per_row') return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
@@ -1244,6 +1349,83 @@ const createWorkbookFileFromRows = (rows, columns, fileName, sheetName = 'Sheet1
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   });
   return new File([blob], fileName, { type: blob.type });
+};
+
+const arrayBufferToBinaryString = (buffer) => {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return binary;
+};
+
+const readWorkbookSafely = (buffer, fileName = 'workbook') => {
+  if (!XLSX || !XLSX.read || !XLSX.utils) {
+    throw new Error('Spreadsheet parser is not ready. Please refresh the page and try uploading again.');
+  }
+
+  const attempts = [
+    () => XLSX.read(buffer, { type: 'array', cellDates: true, raw: false, cellStyles: true, WTF: false }),
+    () => XLSX.read(new Uint8Array(buffer), { type: 'array', cellDates: true, raw: false, cellStyles: true, WTF: false }),
+    () => XLSX.read(arrayBufferToBinaryString(buffer), { type: 'binary', cellDates: true, raw: false, cellStyles: true, WTF: false }),
+  ];
+  let lastError = null;
+
+  for (const attempt of attempts) {
+    try {
+      const workbook = attempt();
+      if (workbook?.SheetNames?.length) return workbook;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  const rawMessage = String(lastError?.message || '');
+  const knownParserCrash = rawMessage.includes("reading 'utils'") || rawMessage.includes('reading "utils"');
+  if (knownParserCrash) {
+    throw new Error(`Could not read "${fileName}". Please re-save the file as .xlsx, .xlsm, or .csv and upload it again.`);
+  }
+  throw new Error(`Could not read "${fileName}". ${rawMessage || 'The workbook appears to be unsupported or corrupted.'}`);
+};
+
+const readCsvWorkbookSafely = async (file) => {
+  if (!XLSX || !XLSX.read || !XLSX.utils) {
+    throw new Error('Spreadsheet parser is not ready. Please refresh the page and try uploading again.');
+  }
+
+  const text = await file.text();
+  const attempts = [
+    () => XLSX.read(text, { type: 'string', raw: false, codepage: 65001 }),
+    () => {
+      const rows = text
+        .split(/\r?\n/)
+        .map((line) => line.split(',').map((cell) => fmt(cell).replace(/^"|"$/g, '').replace(/""/g, '"')));
+      const worksheet = XLSX.utils.aoa_to_sheet(rows);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'CSV_Source');
+      return workbook;
+    },
+  ];
+  let lastError = null;
+
+  for (const attempt of attempts) {
+    try {
+      const workbook = attempt();
+      if (workbook?.SheetNames?.length) return workbook;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  throw new Error(`Could not read "${file.name}". ${lastError?.message || 'The CSV appears to be unsupported or empty.'}`);
+};
+
+const readUploadedWorkbookSafely = async (file) => {
+  if (String(file?.name || '').toLowerCase().endsWith('.csv')) return readCsvWorkbookSafely(file);
+  const buffer = await file.arrayBuffer();
+  return readWorkbookSafely(buffer, file.name);
 };
 
 const normalizedGroupKey = (row) => `${row.sourceRow || ''}::${row.parentKey || ''}`;
@@ -1393,10 +1575,13 @@ const findStrongMpnHeader = (headers = []) => {
 
 const isGenericPartHeader = (header) => /^part( number| no)?$/.test(normalizeKey(header));
 
-const prepareSingleSheet = (currentWorkbook, currentSheetName) => {
+const prepareSingleSheet = (currentWorkbook, currentSheetName, options = {}) => {
   const worksheet = currentWorkbook.Sheets[currentSheetName];
   const rows = worksheetToCompactRows(worksheet);
-  const headerIndex = detectHeaderRow(rows);
+  const requestedHeaderIndex = Number(options.headerRow);
+  const headerIndex = Number.isFinite(requestedHeaderIndex) && requestedHeaderIndex > 0
+    ? requestedHeaderIndex - 1
+    : detectHeaderRow(rows);
   const columns = getUsableColumnDescriptors(rows, headerIndex);
   const currentHeaders = columns.map((column) => column.header);
   const currentRows = rows
@@ -1898,6 +2083,8 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
   const [visibleColumnKeys, setVisibleColumnKeys] = useState(defaultVisibleColumns);
   const [searchQuery, setSearchQuery] = useState('');
   const [pendingPrimaryDeleteIndex, setPendingPrimaryDeleteIndex] = useState(null);
+  const [allRowsOpen, setAllRowsOpen] = useState(false);
+  const [allRowsPage, setAllRowsPage] = useState(0);
   const visibleColumns = columns.filter((column) => visibleColumnKeys.includes(column.key));
   const normalizedSearch = searchQuery.trim().toLowerCase();
   const filteredRows = rows
@@ -1907,6 +2094,16 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
       if (!normalizedSearch) return true;
       return Object.values(row).some((value) => fmt(value).toLowerCase().includes(normalizedSearch));
     });
+  const allRowsPerPage = 100;
+  const allRowsTotalPages = Math.max(1, Math.ceil(filteredRows.length / allRowsPerPage));
+  const allRowsVisibleRows = filteredRows.slice(
+    allRowsPage * allRowsPerPage,
+    allRowsPage * allRowsPerPage + allRowsPerPage
+  );
+
+  useEffect(() => {
+    setAllRowsPage(0);
+  }, [filteredRows.length, visibleColumnKeys.join('|')]);
 
   const handleCellChange = (rowIndex, key, value) => {
     if (!onRowsChange) return;
@@ -1973,6 +2170,9 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
           )}
         </Stack>
         <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap" justifyContent="flex-end">
+          <Button size="small" variant="outlined" onClick={() => setAllRowsOpen(true)} disabled={!filteredRows.length}>
+            View all rows
+          </Button>
           <TextField
             size="small"
             label="Search"
@@ -2078,6 +2278,114 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
         </Box>
       )}
     </TableContainer>
+      <Dialog open={allRowsOpen} onClose={() => setAllRowsOpen(false)} maxWidth="xl" fullWidth>
+        <DialogTitle>
+          <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'flex-start', sm: 'center' }} gap={1}>
+            <Box>
+              <Typography sx={{ fontSize: 18, fontWeight: 800 }}>All normalized rows</Typography>
+              <Typography sx={{ mt: 0.4, fontSize: 13, color: tableTone.muted }}>
+                Showing the same rows and visible columns as the current sheet view.
+              </Typography>
+            </Box>
+            <Stack direction="row" gap={0.75} flexWrap="wrap">
+              <Chip size="small" label={`${filteredRows.length} of ${rows.length} rows`} />
+              <Chip size="small" label={`${visibleColumns.length} columns`} />
+              {lowConfidenceOnly && <Chip size="small" color="warning" label="Low confidence only" />}
+              {normalizedSearch && <Chip size="small" variant="outlined" label={`Search: ${searchQuery}`} />}
+            </Stack>
+          </Stack>
+        </DialogTitle>
+        <DialogContent>
+          <TableContainer
+            sx={{
+              maxHeight: '64vh',
+              overflow: 'auto',
+              border: `1px solid ${tableTone.border}`,
+              bgcolor: tableTone.bg,
+              '&::-webkit-scrollbar': { height: 10, width: 10 },
+              '&::-webkit-scrollbar-thumb': {
+                borderRadius: 8,
+                bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.42)' : 'rgba(100, 116, 139, 0.38)',
+              },
+            }}
+          >
+            <Table stickyHeader size="small" sx={{ width: 'max-content', minWidth: '100%', tableLayout: 'fixed' }}>
+              <TableHead>
+                <TableRow>
+                  <TableCell sx={{ minWidth: 70, fontWeight: 800, bgcolor: tableTone.header, color: tableTone.text, borderColor: tableTone.border }}>
+                    #
+                  </TableCell>
+                  {visibleColumns.map((column) => (
+                    <TableCell
+                      key={column.key}
+                      sx={{
+                        minWidth: column.width,
+                        maxWidth: column.width + 80,
+                        fontWeight: 800,
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        bgcolor: tableTone.header,
+                        color: tableTone.text,
+                        borderColor: tableTone.border,
+                      }}
+                    >
+                      {column.label}
+                    </TableCell>
+                  ))}
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {allRowsVisibleRows.map(({ row, originalIndex }, pageIndex) => (
+                  <TableRow key={`all-normalized-${originalIndex}`} sx={{ bgcolor: row.confidence < 70 ? tableTone.warningBg : 'inherit' }}>
+                    <TableCell sx={{ minWidth: 70, color: tableTone.text, borderColor: tableTone.border, fontWeight: 700 }}>
+                      {allRowsPage * allRowsPerPage + pageIndex + 1}
+                    </TableCell>
+                    {visibleColumns.map((column) => (
+                      <TableCell
+                        key={column.key}
+                        sx={{
+                          minWidth: column.width,
+                          maxWidth: column.width + 80,
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          color: tableTone.text,
+                          borderColor: tableTone.border,
+                        }}
+                      >
+                        {column.key === 'confidence' ? `${row[column.key]}%` : row[column.key]}
+                      </TableCell>
+                    ))}
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'space-between', gap: 1, flexWrap: 'wrap' }}>
+          <Typography sx={{ fontSize: 13, color: tableTone.muted }}>
+            Page {allRowsPage + 1} of {allRowsTotalPages}
+          </Typography>
+          <Stack direction="row" gap={1}>
+            <Button
+              variant="outlined"
+              disabled={allRowsPage === 0}
+              onClick={() => setAllRowsPage((page) => Math.max(0, page - 1))}
+            >
+              Previous
+            </Button>
+            <Button
+              variant="outlined"
+              disabled={allRowsPage >= allRowsTotalPages - 1}
+              onClick={() => setAllRowsPage((page) => Math.min(allRowsTotalPages - 1, page + 1))}
+            >
+              Next
+            </Button>
+            <Button variant="contained" onClick={() => setAllRowsOpen(false)}>Done</Button>
+          </Stack>
+        </DialogActions>
+      </Dialog>
       <Dialog
         open={pendingPrimaryDeleteIndex !== null}
         onClose={() => setPendingPrimaryDeleteIndex(null)}
@@ -2132,6 +2440,9 @@ const BomNormalizer = () => {
   const [headerRowIndex, setHeaderRowIndex] = useState(0);
   const [preparedHeaders, setPreparedHeaders] = useState([]);
   const [preparedDataRows, setPreparedDataRows] = useState([]);
+  const [sourceEndRow, setSourceEndRow] = useState('');
+  const [sourceGridOpen, setSourceGridOpen] = useState(false);
+  const [sourceGridPage, setSourceGridPage] = useState(0);
   const [roles, setRoles] = useState(emptyRoles);
   const [config, setConfig] = useState({
     structure: 'separate_cells',
@@ -2145,6 +2456,7 @@ const BomNormalizer = () => {
     skipTitleRows: true,
     skipRepeatedHeaders: true,
     skipDoNotPopulate: false,
+    skipDeletedRows: true,
     alternateColumnGroups: [],
   });
   const [normalizedRows, setNormalizedRows] = useState([]);
@@ -2234,9 +2546,31 @@ const BomNormalizer = () => {
     [preparedHeaders, sheetRows, headerRowIndex]
   );
 
-  const dataRows = useMemo(() => (
+  const sourceDataRows = useMemo(() => (
     preparedDataRows.length ? preparedDataRows : rowsToObjects(sheetRows.slice(headerRowIndex + 1), headers, headerRowIndex + 2)
   ), [preparedDataRows, sheetRows, headerRowIndex, headers]);
+
+  const dataRows = useMemo(() => (
+    filterRowsByEndRow(sourceDataRows, sourceEndRow)
+  ), [sourceDataRows, sourceEndRow]);
+
+  const sourceRowsExcludedByLimit = Math.max(0, sourceDataRows.length - dataRows.length);
+  const sourceLimitActive = Boolean(sourceEndRow && sourceRowsExcludedByLimit > 0);
+  const sourceGridRowsPerPage = 50;
+  const sourceGridTotalPages = Math.max(1, Math.ceil(sourceDataRows.length / sourceGridRowsPerPage));
+  const sourceGridVisibleRows = useMemo(() => (
+    sourceDataRows.slice(
+      sourceGridPage * sourceGridRowsPerPage,
+      sourceGridPage * sourceGridRowsPerPage + sourceGridRowsPerPage
+    )
+  ), [sourceDataRows, sourceGridPage]);
+  const isSourceRowExcluded = useCallback((row) => (
+    Boolean(sourceEndRow) && Number(row?.__sourceRow || 0) > Number(sourceEndRow)
+  ), [sourceEndRow]);
+
+  useEffect(() => {
+    setSourceGridPage(0);
+  }, [fileName, sheetName, sheetScope, selectedSheetNames, headerRowIndex, sourceEndRow]);
 
   const quality = useMemo(() => {
     if (!normalizedRows.length) return { average: 0, lowConfidence: 0 };
@@ -2373,6 +2707,7 @@ const BomNormalizer = () => {
     selectedSheetNames,
     sheetRows,
     headerRowIndex,
+    sourceEndRow,
     preparedHeaders: preparedHeaders.length ? preparedHeaders : getNormalizedExportColumns(rowsOverride),
     preparedDataRows,
     roles,
@@ -2400,6 +2735,7 @@ const BomNormalizer = () => {
     sheetName,
     sheetRows,
     sheetScope,
+    sourceEndRow,
     tagConfig,
   ]);
 
@@ -2425,6 +2761,7 @@ const BomNormalizer = () => {
         sheetScope,
         selectedSheetNames,
         headerRowIndex,
+        sourceEndRow,
       },
       outputColumns: getNormalizedExportColumns(rowsOverride),
       ...(kind === 'merge-preview' ? {
@@ -2446,6 +2783,7 @@ const BomNormalizer = () => {
     selectedSheetNames,
     sheetName,
     sheetScope,
+    sourceEndRow,
     tagConfig,
   ]);
 
@@ -2634,6 +2972,7 @@ const BomNormalizer = () => {
         setSelectedSheetNames(snapshot.selectedSheetNames || [restoredSheetName]);
         setSheetRows(snapshot.sheetRows || []);
         setHeaderRowIndex(snapshot.headerRowIndex || 0);
+        setSourceEndRow(snapshot.sourceEndRow || '');
         const restoredRows = snapshot.normalizedRows?.length
           ? snapshot.normalizedRows
           : (state.bomNormalizerReturnRows || []);
@@ -2687,14 +3026,16 @@ const BomNormalizer = () => {
       skipTitleRows: 0,
       skipRepeatedHeaders: 0,
       skipDoNotPopulate: 0,
+      skipDeletedRows: 0,
     };
-    dataRows.forEach((row) => {
+    sourceDataRows.forEach((row) => {
       if (rowLooksLikeSectionTitle(row, headers, roles)) detections.skipTitleRows += 1;
       if (rowLooksLikeRepeatedHeader(row, headers)) detections.skipRepeatedHeaders += 1;
       if (rowLooksLikeDoNotPopulate(row, headers)) detections.skipDoNotPopulate += 1;
+      if (rowLooksLikeDeleted(row, headers)) detections.skipDeletedRows += 1;
     });
     return detections;
-  }, [dataRows, headers, roles]);
+  }, [headers, roles, sourceDataRows]);
 
   const detectedCleanupOptions = useMemo(
     () => CLEANUP_OPTIONS.filter((option) => cleanupDetections[option.key] > 0),
@@ -2778,22 +3119,25 @@ const BomNormalizer = () => {
     }));
   }, []);
 
-  const handleWorkbookLoaded = useCallback((nextWorkbook, nextFileName) => {
-    const firstSheet = nextWorkbook.SheetNames[0];
-    const prepared = prepareSingleSheet(nextWorkbook, firstSheet);
+  const handleWorkbookLoaded = useCallback((nextWorkbook, nextFileName, options = {}) => {
+    const preferredSheet = options.sheetName && nextWorkbook.SheetNames.includes(options.sheetName)
+      ? options.sheetName
+      : nextWorkbook.SheetNames[0];
+    const prepared = prepareSingleSheet(nextWorkbook, preferredSheet, { headerRow: options.headerRow });
     const nextHeaders = prepared.headers;
     const nextRoles = inferRoles(nextHeaders);
     const nextStructure = detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40));
 
     setWorkbook(nextWorkbook);
     setFileName(nextFileName);
-    setSheetName(firstSheet);
+    setSheetName(preferredSheet);
     setSheetScope('single');
-    setSelectedSheetNames([firstSheet]);
+    setSelectedSheetNames([preferredSheet]);
     setSheetRows(prepared.sheetRows);
     setHeaderRowIndex(prepared.headerRowIndex);
     setPreparedHeaders(prepared.headers);
     setPreparedDataRows(prepared.dataRows);
+    setSourceEndRow('');
     setRoles(nextRoles);
     setConfig((prev) => nextConfigForDetectedStructure(prev, nextStructure));
     setNormalizedRows([]);
@@ -2867,6 +3211,10 @@ const BomNormalizer = () => {
 
   const parseFilesForCombine = useCallback(async (files, idPrefix = 'source') => {
     return Promise.all(files.map(async (file, index) => {
+      const extension = getFileExtension(file.name);
+      if (!SUPPORTED_SOURCE_EXTENSIONS.includes(extension)) {
+        throw new Error(unsupportedSourceMessage(file.name));
+      }
       const type = getFileType(file.name);
       const baseItem = {
         id: `${idPrefix}-${Date.now()}-${index}-${file.name}`,
@@ -2884,9 +3232,8 @@ const BomNormalizer = () => {
 
       if (type === 'pdf') return baseItem;
 
-      const buffer = await file.arrayBuffer();
       await new Promise((resolve) => setTimeout(resolve, 0));
-      const nextWorkbook = XLSX.read(buffer, { type: 'array' });
+      const nextWorkbook = await readUploadedWorkbookSafely(file);
       const firstSheet = nextWorkbook.SheetNames[0];
       const prepared = prepareSingleSheet(nextWorkbook, firstSheet);
       return {
@@ -2905,7 +3252,7 @@ const BomNormalizer = () => {
     const state = location.state || {};
     const initialFile = state.initialFile;
     const seedKey = initialFile
-      ? `${initialFile.name || 'file'}-${initialFile.size || 0}-${initialFile.lastModified || 0}-${state.initialFileMode || 'source'}`
+      ? `${initialFile.name || 'file'}-${initialFile.size || 0}-${initialFile.lastModified || 0}-${state.initialFileMode || 'source'}-${state.initialSheetName || ''}-${state.initialHeaderRow || ''}`
       : '';
     if (!initialFile || initialFileSeededRef.current === seedKey || state.fromPdfZone || state.returnFromMapping) return;
 
@@ -2925,10 +3272,12 @@ const BomNormalizer = () => {
 
       try {
         if (state.initialFileMode === 'workbook') {
-          const buffer = await initialFile.arrayBuffer();
           await new Promise((resolve) => setTimeout(resolve, 0));
-          const nextWorkbook = XLSX.read(buffer, { type: 'array' });
-          handleWorkbookLoaded(nextWorkbook, initialFile.name);
+          const nextWorkbook = await readUploadedWorkbookSafely(initialFile);
+          handleWorkbookLoaded(nextWorkbook, initialFile.name, {
+            sheetName: state.initialSheetName,
+            headerRow: state.initialHeaderRow,
+          });
           setCombineItems([]);
           setMergeChainMessage('');
         } else {
@@ -2940,6 +3289,8 @@ const BomNormalizer = () => {
         const remainingState = { ...state };
         delete remainingState.initialFile;
         delete remainingState.initialFileMode;
+        delete remainingState.initialSheetName;
+        delete remainingState.initialHeaderRow;
         navigate(location.pathname, { replace: true, state: remainingState });
       } catch (err) {
         setCombineError(err.message || 'Unable to prepare the uploaded file for BOM Normalizer.');
@@ -2991,7 +3342,12 @@ const BomNormalizer = () => {
         if (workflow.factwiseConfig) setFactwiseConfig((prev) => ({ ...prev, ...workflow.factwiseConfig }));
         if (workflow.tagConfig) setTagConfig((prev) => ({ ...prev, ...workflow.tagConfig }));
 
-        let replayRows = await normalizeRowsChunked(preparedDataRows, preparedHeaders, resolvedRoles, resolvedConfig, setProgress);
+        const replaySourceRows = filterRowsByEndRow(preparedDataRows, workflow.sourceHints?.sourceEndRow || '');
+        if (workflow.sourceHints?.sourceEndRow) {
+          setSourceEndRow(workflow.sourceHints.sourceEndRow);
+        }
+
+        let replayRows = await normalizeRowsChunked(replaySourceRows, preparedHeaders, resolvedRoles, resolvedConfig, setProgress);
         if (workflow.actions?.factwiseId) {
           replayRows = createFactwiseIds(replayRows, workflow.factwiseConfig || {});
         }
@@ -3618,6 +3974,7 @@ const BomNormalizer = () => {
     setHeaderRowIndex(prepared.headerRowIndex);
     setPreparedHeaders(prepared.headers);
     setPreparedDataRows(prepared.dataRows);
+    setSourceEndRow('');
     setRoles(nextRoles);
     setConfig((prev) => nextConfigForDetectedStructure(prev, detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40))));
     setNormalizedRows([]);
@@ -3648,6 +4005,7 @@ const BomNormalizer = () => {
     setHeaderRowIndex(prepared.headerRowIndex);
     setPreparedHeaders(prepared.headers);
     setPreparedDataRows(prepared.dataRows);
+    setSourceEndRow('');
     setRoles(nextRoles);
     setConfig((prev) => nextConfigForDetectedStructure(prev, detectBestStructure(prepared.headers, nextRoles, prepared.dataRows.slice(0, 40))));
     setNormalizedRows([]);
@@ -3697,6 +4055,7 @@ const BomNormalizer = () => {
         mapped.__sourceRow = nextIndex + 2 + rowIndex;
         return mapped;
       }));
+    setSourceEndRow('');
     setRoles(nextRoles);
     setNormalizedRows([]);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
@@ -3960,6 +4319,7 @@ const BomNormalizer = () => {
       skipTitleRows: true,
       skipRepeatedHeaders: true,
       skipDoNotPopulate: false,
+      skipDeletedRows: true,
       alternateColumnGroups: [],
     });
     setNormalizedRows([]);
@@ -4039,6 +4399,7 @@ const BomNormalizer = () => {
       skipTitleRows: true,
       skipRepeatedHeaders: true,
       skipDoNotPopulate: false,
+      skipDeletedRows: true,
       alternateColumnGroups: [],
     });
     setNormalizedRows([]);
@@ -4226,7 +4587,7 @@ const BomNormalizer = () => {
                   </Box>
                   <Button component="label" variant="outlined" startIcon={<CloudUploadIcon />} disabled={busy || combineBusy}>
                     {combineItems.length ? 'Add source' : 'Choose source'}
-                    <input hidden multiple type="file" accept=".xlsx,.xls,.csv,.pdf" onChange={handleCombineFilesChange} />
+                    <input hidden multiple type="file" accept=".xlsx,.xls,.xlsm,.csv,.pdf" onChange={handleCombineFilesChange} />
                   </Button>
                 </Stack>
 
@@ -4668,14 +5029,46 @@ const BomNormalizer = () => {
                       onChange={(event) => handleHeaderRowChange(event.target.value)}
                     />
                   </Grid>
+
+                  <Grid item xs={12} md={6}>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      type="number"
+                      label="Include data until row"
+                      value={sourceEndRow}
+                      inputProps={{ min: headerRowIndex + 2, max: Math.max(sheetRows.length, headerRowIndex + 2) }}
+                      helperText="Optional. Leave blank to include all detected data rows."
+                      onChange={(event) => {
+                        setSourceEndRow(event.target.value);
+                        setNormalizedRows([]);
+                        setNormalizationSummary(null);
+                      }}
+                    />
+                  </Grid>
                 </Grid>
                 <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 1.5 }}>
                   <Chip size="small" label={`${headers.length} columns`} />
-                  <Chip size="small" label={`${dataRows.length} data rows`} />
+                  <Chip
+                    size="small"
+                    label={sourceEndRow ? `${dataRows.length} included / ${sourceDataRows.length} detected rows` : `${dataRows.length} data rows`}
+                  />
+                  {sourceEndRow && <Chip size="small" color="info" variant="outlined" label={`Using rows through ${sourceEndRow}`} />}
+                  {sourceLimitActive && <Chip size="small" color="warning" variant="outlined" label={`${sourceRowsExcludedByLimit} rows excluded`} />}
                   <Chip size="small" label={sheetScope === 'single' ? `Header row ${headerRowIndex + 1}` : `${selectedSheetNames.length} sheets merged`} />
                 </Stack>
                 <Box sx={{ mt: 2 }}>
-                  <Typography sx={{ fontWeight: 800 }}>Source preview</Typography>
+                  <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1} flexWrap="wrap">
+                    <Typography sx={{ fontWeight: 800 }}>Source preview</Typography>
+                    <Button size="small" variant="outlined" onClick={() => setSourceGridOpen(true)} disabled={!sourceDataRows.length}>
+                      View all rows
+                    </Button>
+                  </Stack>
+                  {sourceEndRow && (
+                    <Alert severity="info" sx={{ mt: 1, mb: 1.25 }}>
+                      Preview is filtered to sheet rows up to {sourceEndRow}. Rows after {sourceEndRow} will be ignored during normalization.
+                    </Alert>
+                  )}
                   <SourcePreview headers={headers} rows={dataRows.slice(0, 8)} />
                 </Box>
                 <Stack direction="row" justifyContent="space-between" sx={{ mt: 2 }}>
@@ -4693,7 +5086,12 @@ const BomNormalizer = () => {
                 </Typography>
                 <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 1.2 }}>
                   <Chip size="small" label={`${headers.length} columns`} />
-                  <Chip size="small" label={`${dataRows.length} data rows`} />
+                  <Chip
+                    size="small"
+                    label={sourceEndRow ? `${dataRows.length} included / ${sourceDataRows.length} detected rows` : `${dataRows.length} data rows`}
+                  />
+                  {sourceEndRow && <Chip size="small" color="info" variant="outlined" label={`Using rows through ${sourceEndRow}`} />}
+                  {sourceLimitActive && <Chip size="small" color="warning" variant="outlined" label={`${sourceRowsExcludedByLimit} rows excluded`} />}
                   <Chip size="small" label={sheetScope === 'single' ? `Header row ${headerRowIndex + 1}` : `${selectedSheetNames.length} sheets merged`} />
                 </Stack>
                 <Box sx={{ mt: 2 }}>
@@ -4944,10 +5342,16 @@ const BomNormalizer = () => {
                   )}
                   <Typography sx={{ mt: 1, fontSize: 13, color: '#536171', lineHeight: 1.45 }}>
                     <strong>Detected rule:</strong> {selectedStructureOption?.description || '-'}
+                    {selectedAlternateOption?.description ? ` ${selectedAlternateOption.description}` : ''}
                     {config.structure === 'grouped_rows' && selectedGroupHeaderOption ? ` ${selectedGroupHeaderOption.description}` : ''}
                     {' '}<strong>Delimiter:</strong> {delimiterLabel}.
                     {' '}Blank BOM levels will be treated as level 1.
                   </Typography>
+                  {config.alternateLayout === 'same_group_rows' && !roles.parent && (
+                    <Alert severity="info" sx={{ mt: 1 }}>
+                      Select a Parent / group key such as Ref Designator for best results. Without it, grouping falls back to description, quantity, UOM, and level.
+                    </Alert>
+                  )}
                   {detectedCleanupOptions.length > 0 && (
                     <Box sx={{ mt: 1.5 }}>
                       <Typography sx={{ fontSize: 13, fontWeight: 800 }}>Clean visual rows before parsing</Typography>
@@ -5062,7 +5466,7 @@ const BomNormalizer = () => {
                           downloadRowsAsXlsx(normalizedRows);
                         }}
                       >
-                        Microsoft Excel (.xlsx)
+                        Microsoft Excel (.xlsx, .xlsm)
                       </MenuItem>
                       <MenuItem
                         onClick={() => {
@@ -5119,6 +5523,149 @@ const BomNormalizer = () => {
           </Stack>
         )}
       </Box>
+      <Dialog
+        open={sourceGridOpen}
+        onClose={() => setSourceGridOpen(false)}
+        maxWidth="xl"
+        fullWidth
+      >
+        <DialogTitle>
+          <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'flex-start', sm: 'center' }} gap={1}>
+            <Box>
+              <Typography sx={{ fontSize: 18, fontWeight: 800 }}>All source rows</Typography>
+              <Typography sx={{ mt: 0.4, fontSize: 13, color: normalizerTheme.muted }}>
+                Showing detected source rows from the selected sheet setup.
+              </Typography>
+            </Box>
+            <Stack direction="row" gap={0.75} flexWrap="wrap">
+              <Chip size="small" label={`${sourceDataRows.length} detected rows`} />
+              {sourceEndRow && <Chip size="small" color="info" variant="outlined" label={`Cutoff row ${sourceEndRow}`} />}
+              {sourceLimitActive && <Chip size="small" color="warning" variant="outlined" label={`${sourceRowsExcludedByLimit} excluded`} />}
+            </Stack>
+          </Stack>
+        </DialogTitle>
+        <DialogContent>
+          {sourceEndRow && (
+            <Alert severity="info" sx={{ mb: 1.25 }}>
+              Rows after sheet row {sourceEndRow} are visible here for review, but they are excluded from normalization.
+            </Alert>
+          )}
+          <TableContainer
+            sx={{
+              maxHeight: '62vh',
+              overflow: 'auto',
+              border: `1px solid ${normalizerTheme.border}`,
+              bgcolor: normalizerTheme.table,
+              '&::-webkit-scrollbar': { height: 10, width: 10 },
+              '&::-webkit-scrollbar-thumb': {
+                borderRadius: 8,
+                bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.42)' : 'rgba(100, 116, 139, 0.38)',
+              },
+            }}
+          >
+            <Table stickyHeader size="small" sx={{ width: 'max-content', minWidth: '100%', tableLayout: 'fixed' }}>
+              <TableHead>
+                <TableRow>
+                  <TableCell sx={{ minWidth: 90, fontWeight: 800, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
+                    Sheet row
+                  </TableCell>
+                  {sourceEndRow && (
+                    <TableCell sx={{ minWidth: 105, fontWeight: 800, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
+                      Status
+                    </TableCell>
+                  )}
+                  {headers.map((header) => (
+                    <TableCell
+                      key={header}
+                      sx={{
+                        minWidth: 170,
+                        maxWidth: 280,
+                        fontWeight: 800,
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        bgcolor: normalizerTheme.tableHeader,
+                        color: normalizerTheme.text,
+                        borderColor: normalizerTheme.border,
+                      }}
+                    >
+                      {header}
+                    </TableCell>
+                  ))}
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {sourceGridVisibleRows.map((row, index) => {
+                  const excluded = isSourceRowExcluded(row);
+                  return (
+                    <TableRow
+                      key={`source-grid-${row.__sourceRow || index}-${index}`}
+                      sx={{
+                        bgcolor: excluded
+                          ? (isDarkMode ? 'rgba(239, 68, 68, 0.08)' : 'rgba(254, 226, 226, 0.7)')
+                          : 'transparent',
+                        opacity: excluded ? 0.72 : 1,
+                      }}
+                    >
+                      <TableCell sx={{ minWidth: 90, color: normalizerTheme.text, borderColor: normalizerTheme.border, fontWeight: 700 }}>
+                        {row.__sourceRow || ''}
+                      </TableCell>
+                      {sourceEndRow && (
+                        <TableCell sx={{ minWidth: 105, color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
+                          <Chip
+                            size="small"
+                            color={excluded ? 'warning' : 'success'}
+                            variant={excluded ? 'outlined' : 'filled'}
+                            label={excluded ? 'Excluded' : 'Included'}
+                          />
+                        </TableCell>
+                      )}
+                      {headers.map((header) => (
+                        <TableCell
+                          key={header}
+                          sx={{
+                            minWidth: 170,
+                            maxWidth: 280,
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            color: normalizerTheme.text,
+                            borderColor: normalizerTheme.border,
+                          }}
+                        >
+                          {row[header]}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'space-between', gap: 1, flexWrap: 'wrap' }}>
+          <Typography sx={{ fontSize: 13, color: normalizerTheme.muted }}>
+            Page {sourceGridPage + 1} of {sourceGridTotalPages}
+          </Typography>
+          <Stack direction="row" gap={1}>
+            <Button
+              variant="outlined"
+              disabled={sourceGridPage === 0}
+              onClick={() => setSourceGridPage((page) => Math.max(0, page - 1))}
+            >
+              Previous
+            </Button>
+            <Button
+              variant="outlined"
+              disabled={sourceGridPage >= sourceGridTotalPages - 1}
+              onClick={() => setSourceGridPage((page) => Math.min(sourceGridTotalPages - 1, page + 1))}
+            >
+              Next
+            </Button>
+            <Button variant="contained" onClick={() => setSourceGridOpen(false)}>Done</Button>
+          </Stack>
+        </DialogActions>
+      </Dialog>
       <Snackbar
         open={Boolean(successMessage)}
         autoHideDuration={5000}

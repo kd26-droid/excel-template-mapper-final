@@ -38,6 +38,7 @@ export default function PDFZoneSelection() {
   const navigate = useNavigate();
   const location = useLocation();
   const fromBomNormalizer = Boolean(location.state?.fromBomNormalizer);
+  const returnToUpload = Boolean(location.state?.returnToUpload);
 
   const [session, setSession] = useState(null);
   const [currentPage, setCurrentPage] = useState(1);
@@ -543,6 +544,17 @@ export default function PDFZoneSelection() {
           fromPdfZone: true,
           pdfSessionId: sessionId,
           pdfZonePayload: payload,
+        },
+      });
+      return;
+    }
+    if (returnToUpload) {
+      navigate('/upload', {
+        state: {
+          fromPdfZoneReview: true,
+          pdfSessionId: sessionId,
+          pdfZonePayload: payload,
+          sourceFileName: location.state?.sourceFileName || session?.filename || 'PDF source',
         },
       });
       return;

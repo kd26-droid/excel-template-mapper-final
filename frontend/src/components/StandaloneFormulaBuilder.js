@@ -105,7 +105,7 @@ const StandaloneFormulaBuilder = ({ open, onClose, onSave }) => {
           }
         } catch (e) {
           console.error("Error parsing file", e);
-          alert("Failed to parse the file. Please ensure it's a valid .xlsx, .xls, or .csv file.");
+          alert("Failed to parse the file. Please ensure it's a valid .xlsx, .xls, .xlsm, or .csv file.");
         }
       };
       reader.readAsBinaryString(file);
@@ -116,6 +116,7 @@ const StandaloneFormulaBuilder = ({ open, onClose, onSave }) => {
     onDrop,
     accept: {
       'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+      'application/vnd.ms-excel.sheet.macroEnabled.12': ['.xlsm'],
       'application/vnd.ms-excel': ['.xls'],
       'text/csv': ['.csv']
     },
@@ -252,7 +253,7 @@ const StandaloneFormulaBuilder = ({ open, onClose, onSave }) => {
                 {factwiseFile ? factwiseFile.name : 'Drop your Factwise template (Excel or CSV) here or click to browse'}
               </Typography>
               <Typography variant="body2" sx={{ mt: 1, color: t.text.secondary }}>
-                Supported: .xlsx, .xls, .csv
+                Supported: .xlsx, .xls, .xlsm, .csv
               </Typography>
             </Box>
             {factwiseFile && (

@@ -2919,7 +2919,7 @@ const EnhancedDataEditor = () => {
     const file = event.target.files?.[0];
     if (!file) return;
     const ext = (file.name.split('.').pop() || '').toLowerCase();
-    if (!['xlsx', 'xls', 'csv'].includes(ext)) {
+    if (!['xlsx', 'xls', 'xlsm', 'csv'].includes(ext)) {
       showSnackbar('Please upload an Excel or CSV manufacturer directory.', 'error');
       return;
     }
@@ -3938,8 +3938,8 @@ const EnhancedDataEditor = () => {
 
     // Only allow Excel uploads
     const ext = (file.name.split('.').pop() || '').toLowerCase();
-    if (!['xlsx', 'xls'].includes(ext)) {
-      showSnackbar('Please upload an Excel file (.xlsx or .xls)', 'error');
+    if (!['xlsx', 'xls', 'xlsm'].includes(ext)) {
+      showSnackbar('Please upload an Excel file (.xlsx, .xls, or .xlsm)', 'error');
       return;
     }
 
@@ -8243,14 +8243,14 @@ const EnhancedDataEditor = () => {
         </DialogTitle>
         <DialogContent>
           <DialogContentText sx={{ mb: 3 }}>
-            Upload an Excel file (.xlsx or .xls) with corrected data. The file should have the same headers as the exported data.
+            Upload an Excel file (.xlsx, .xls, or .xlsm) with corrected data. The file should have the same headers as the exported data.
             Only matching headers will be updated; unmatched columns are ignored.
           </DialogContentText>
 
           {/* File Upload */}
           <Box sx={{ mb: 3 }}>
             <input
-              accept=".xlsx,.xls"
+              accept=".xlsx,.xls,.xlsm"
               style={{ display: 'none' }}
               id="correction-file-upload"
               type="file"

@@ -1546,13 +1546,13 @@ def upload_files(request):
             }, status=status.HTTP_400_BAD_REQUEST)
         
         # Validate file types
-        allowed_extensions = ['.xlsx', '.xls', '.csv']
+        allowed_extensions = ['.xlsx', '.xls', '.xlsm', '.csv']
         client_ext = Path(client_file.name).suffix.lower()
         
         if client_ext not in allowed_extensions:
             return Response({
                 'success': False,
-                'error': f'Only Excel (.xlsx, .xls) and CSV files are supported for client file'
+                'error': f'Only Excel (.xlsx, .xls, .xlsm) and CSV files are supported for client file'
             }, status=status.HTTP_400_BAD_REQUEST)
         
         if template_file:
@@ -1560,7 +1560,7 @@ def upload_files(request):
             if template_ext not in allowed_extensions:
                 return Response({
                     'success': False,
-                    'error': f'Only Excel (.xlsx, .xls) and CSV files are supported for template file'
+                    'error': f'Only Excel (.xlsx, .xls, .xlsm) and CSV files are supported for template file'
                 }, status=status.HTTP_400_BAD_REQUEST)
 
         # Save uploaded files

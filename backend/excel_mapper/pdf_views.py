@@ -30,7 +30,7 @@ from .default_template import get_sfo_reference_headers, get_sfo_template_metada
 logger = logging.getLogger(__name__)
 
 
-ALLOWED_TEMPLATE_EXTENSIONS = {'.xlsx', '.xls', '.csv'}
+ALLOWED_TEMPLATE_EXTENSIONS = {'.xlsx', '.xls', '.xlsm', '.csv'}
 
 
 def _parse_positive_int(value, default=1):
@@ -449,7 +449,7 @@ def upload_pdf(request):
             template_ext = Path(template_file.name).suffix.lower()
             if template_ext not in ALLOWED_TEMPLATE_EXTENSIONS:
                 return Response({
-                    'error': 'Only Excel (.xlsx, .xls) and CSV files are supported for template file'
+                    'error': 'Only Excel (.xlsx, .xls, .xlsm) and CSV files are supported for template file'
                 }, status=status.HTTP_400_BAD_REQUEST)
 
             from .views import hybrid_file_manager

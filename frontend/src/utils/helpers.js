@@ -79,7 +79,7 @@ export const stringToColor = (str) => {
 export const isValidExcelFile = (file) => {
   if (!file) return false;
   
-  const validExtensions = ['.xlsx', '.xls', '.csv'];
+  const validExtensions = ['.xlsx', '.xls', '.xlsm', '.csv'];
   const fileName = file.name.toLowerCase();
   
   return validExtensions.some(ext => fileName.endsWith(ext));
