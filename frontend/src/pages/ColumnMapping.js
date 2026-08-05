@@ -808,6 +808,11 @@ export default function ColumnMapping() {
 
   const handleBackNavigation = useCallback(() => {
     const backState = location.state?.mappingBackState || {};
+    // This is a deliberate in-app navigation carrying its own return state, so the
+    // popstate guard below must not turn it into a window.location.reload() — a
+    // reload discards location.state and the destination loses everything it needs
+    // to restore.
+    bypassUnloadGuardRef.current = true;
     if (location.state?.fromBomNormalizer || backState.route === '/bom-normalizer') {
       navigate('/bom-normalizer', {
         state: {
@@ -834,6 +839,13 @@ export default function ColumnMapping() {
       }
     });
   }, [location.state, navigate]);
+
+  // Kept in a ref so the popstate listener can leave via the same route without
+  // re-subscribing every time the callback identity changes.
+  const handleBackNavigationRef = useRef(handleBackNavigation);
+  useEffect(() => {
+    handleBackNavigationRef.current = handleBackNavigation;
+  }, [handleBackNavigation]);
 
   // Header correction functions
   const handleHeaderEdit = useCallback((nodeId, originalHeader, correctedHeader) => {
@@ -2656,13 +2668,16 @@ export default function ColumnMapping() {
     };
 
     const handlePopState = (event) => {
-      // Check if there are unsaved mappings (skip when we triggered the reload)
+      // Check if there are unsaved mappings (skip when we triggered the navigation)
       if (edges.length > 0 && !isReviewing && !isProcessingMappings && !bypassUnloadGuardRef.current) {
         event.preventDefault();
         setShowNavigationConfirm(true);
         setPendingNavigation(() => () => {
-          // Force refresh the current page to restore mappings
-          window.location.reload();
+          // Leave via the same in-app route the back button uses. A
+          // window.location.reload() here would drop location.state, so the previous
+          // screen would come back empty with no way to recover its work.
+          bypassUnloadGuardRef.current = true;
+          handleBackNavigationRef.current?.();
         });
       }
     };
