@@ -779,6 +779,9 @@ const UploadFiles = () => {
   const [processingTemplateMode, setProcessingTemplateMode] = useState('');
   const [processingTemplateName, setProcessingTemplateName] = useState('');
   const [processingTemplates, setProcessingTemplates] = useState([]);
+  // Name clashes are caught here, beside the field, rather than surfacing
+  // as a toast after the upload has already started.
+  const [newTemplateNameError, setNewTemplateNameError] = useState('');
   const [selectedProcessingTemplateId, setSelectedProcessingTemplateId] = useState('');
   const [processingTemplatesLoading, setProcessingTemplatesLoading] = useState(false);
   const [processingPath, setProcessingPath] = useState('map');
@@ -2198,9 +2201,20 @@ const UploadFiles = () => {
   const handleConfirmNewProcessingTemplate = () => {
     const name = newTemplateDraftName.trim();
     if (!name) {
-      setError('Enter a template name to continue.');
+      setNewTemplateNameError('Enter a template name to continue.');
       return;
     }
+
+    // The backend rejects duplicates with a 409; catching it here means the
+    // user fixes the name before the upload runs rather than after it fails.
+    const clash = processingTemplates.some(
+      template => String(template?.name || '').trim().toLowerCase() === name.toLowerCase()
+    );
+    if (clash) {
+      setNewTemplateNameError('A template with this name already exists. Enter a different name.');
+      return;
+    }
+    setNewTemplateNameError('');
 
     setProcessingTemplateMode('new');
     setProcessingTemplateName(name);
@@ -2856,6 +2870,7 @@ const UploadFiles = () => {
     setNewTemplateDraftName(processingTemplateName.trim() || fallbackName);
     setPendingTemplateAction(action);
     setNewTemplateDialogOpen(true);
+    setNewTemplateNameError('');
     setError(null);
   };
 
@@ -4351,7 +4366,9 @@ const UploadFiles = () => {
             size="small"
             label="Template name"
             value={newTemplateDraftName}
-            onChange={(event) => setNewTemplateDraftName(event.target.value)}
+            error={Boolean(newTemplateNameError)}
+            helperText={newTemplateNameError}
+            onChange={(event) => { setNewTemplateDraftName(event.target.value); setNewTemplateNameError(''); }}
             onKeyDown={(event) => {
               if (event.key === 'Enter') {
                 event.preventDefault();
@@ -4367,6 +4384,7 @@ const UploadFiles = () => {
             onClick={() => {
               setNewTemplateDialogOpen(false);
               setPendingTemplateAction(null);
+              setNewTemplateNameError('');
             }}
             sx={secondaryPillSx}
           >
