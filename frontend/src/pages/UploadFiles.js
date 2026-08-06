@@ -760,14 +760,13 @@ const UploadFiles = () => {
   const [clientHeaderPreview, setClientHeaderPreview] = useState([]);
   const [clientHeaderAutoDetected, setClientHeaderAutoDetected] = useState(false);
 
-  // BOM structure gate. Asked once per file, before the workbook goes anywhere,
-  // because the BOM generator cannot work out on its own which sheets are BOMs,
-  // whether they have levels, or what a flat sheet's finished good is called.
-  // `pendingBomStructureAction` holds the exit the user clicked so it can be
-  // resumed verbatim once the questions are answered.
+  // BOM structure gate. Asked on whichever exit the user takes, so the direct
+  // Upload -> Mapping path is covered as well as the normalizer route. The
+  // answers travel with the session, and the normalizer will not ask again.
   const [bomStructureOpen, setBomStructureOpen] = useState(false);
   const [bomStructureAnswers, setBomStructureAnswers] = useState(null);
   const [pendingBomStructureAction, setPendingBomStructureAction] = useState(null);
+
 
   // Template file state
   const [templateFile, setTemplateFile] = useState(null);
@@ -1298,24 +1297,6 @@ const UploadFiles = () => {
     const headerIndex = Math.max(0, Number(headerRow || 1) - 1);
     return getUsableColumnDescriptors(rows, headerIndex).map(column => column.header);
   }, [getSheetJoinSourceWorkbook]);
-
-  // Sheets offered to the BOM structure gate. In combine mode only the sheets
-  // actually being stacked are relevant. Memoised because the dialog seeds its
-  // state from this list.
-  // Clear the BOM structure answers whenever the workbook itself changes.
-  // A file can be set from several places (drop, PDF extraction, sheet-join
-  // draft, restoring previous state), and resetting at each call site meant a
-  // new upload could silently inherit the previous file's answers and skip the
-  // gate. Keying off the file identity covers every path, including ones added
-  // later.
-  const bomStructureFileKey = `${userFile?.name || ''}|${userFile?.size || 0}|${clientSheetNames.join(',')}`;
-  const previousBomStructureFileKey = useRef(bomStructureFileKey);
-  useEffect(() => {
-    if (previousBomStructureFileKey.current === bomStructureFileKey) return;
-    previousBomStructureFileKey.current = bomStructureFileKey;
-    setBomStructureAnswers(null);
-    setPendingBomStructureAction(null);
-  }, [bomStructureFileKey]);
 
   const bomStructureSheetNames = useMemo(
     () => (combineSheetsMode && selectedClientSheets.length > 0 ? selectedClientSheets : clientSheetNames),
@@ -2898,7 +2879,7 @@ const UploadFiles = () => {
     setError(null);
   };
 
-  const handleOpenBomNormalizer = (templateOptions = {}, bomAnswersOverride = null) => {
+  const handleOpenBomNormalizer = (templateOptions = {}, passedAnswers = null) => {
     if (!userFile) {
       setError('Please select a client file');
       return;
@@ -2918,13 +2899,10 @@ const UploadFiles = () => {
       return;
     }
 
-    // Ask the BOM structure questions before the workbook leaves this page.
-    const bomAnswers = bomAnswersOverride || bomStructureAnswers;
-    if (!bomAnswers && clientSheetNames.length > 0) {
-      setPendingBomStructureAction({ action: 'normalize', templateOptions });
-      setBomStructureOpen(true);
-      return;
-    }
+    // No gate here: this route goes to the BOM Normalizer, which asks the
+    // questions itself once the normalized rows are on screen. Asking twice —
+    // or asking about a PDF before it has even been parsed — is just noise.
+    const bomAnswers = passedAnswers || bomStructureAnswers;
 
     navigate('/bom-normalizer', {
       state: {
@@ -2945,7 +2923,7 @@ const UploadFiles = () => {
     });
   };
 
-  const handleUpload = async (templateOptions = {}, bomAnswersOverride = null) => {
+  const handleUpload = async (templateOptions = {}, passedAnswers = null) => {
     if (!userFile) {
       setError('Please select a client file');
       return;
@@ -2978,9 +2956,9 @@ const UploadFiles = () => {
       return;
     }
 
-    // Ask the BOM structure questions before the workbook leaves this page.
-    // PDFs skip the gate: they have no sheets, so the questions do not apply.
-    const bomAnswers = bomAnswersOverride || bomStructureAnswers;
+    // Same questions on the direct route, so a session created without the
+    // normalizer still carries them and BOM generation stays possible.
+    const bomAnswers = passedAnswers || bomStructureAnswers;
     if (!isPDF && !bomAnswers && clientSheetNames.length > 0) {
       setPendingBomStructureAction({ action: 'upload', templateOptions });
       setBomStructureOpen(true);
@@ -3217,22 +3195,19 @@ const UploadFiles = () => {
     }
   };
 
-  // Resume whichever exit the user clicked, now that the BOM questions are
-  // answered. The guard in that handler passes on the second run, so its
-  // original body executes untouched.
+  // Resume whichever exit the user clicked, now that the questions are
+  // answered. The guard passes on the second run, so the original body executes
+  // untouched. Answers are handed over directly rather than read from state,
+  // which has not committed yet at this point.
   const handleBomStructureConfirm = (payload) => {
     setBomStructureAnswers(payload);
     setBomStructureOpen(false);
     const pending = pendingBomStructureAction;
     setPendingBomStructureAction(null);
     if (!pending) return;
-    // The answers are handed over directly rather than read back from state,
-    // which has not committed yet at this point.
-    if (pending.action === 'normalize') {
-      handleOpenBomNormalizer(pending.templateOptions || {}, payload);
-    } else {
-      handleUpload(pending.templateOptions || {}, payload);
-    }
+    // Only the direct-to-mapping exit is gated here; the normalizer route asks
+    // for itself, so there is nothing else to resume.
+    handleUpload(pending.templateOptions || {}, payload);
   };
 
   const handleBomStructureCancel = () => {
@@ -5722,7 +5697,7 @@ const UploadFiles = () => {
         </DialogActions>
       </Dialog>
 
-      {/* BOM structure gate — asked once per file before it leaves this page */}
+      {/* BOM structure gate — fires on either exit, so both routes carry answers */}
       <BomStructureDialog
         open={bomStructureOpen}
         onClose={handleBomStructureCancel}

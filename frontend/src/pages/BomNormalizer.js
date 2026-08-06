@@ -47,6 +47,7 @@ import DownloadIcon from '@mui/icons-material/Download';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import api from '../services/api';
+import BomStructureDialog from '../components/BomStructureDialog';
 import {
   createFactwiseIds,
   createTagColumn,
@@ -1334,6 +1335,12 @@ const normalizeRows = (rows, headers, roles, config) => {
     sourceHeaders: headers,
     consumedSourceHeaders: getConsumedSourceHeaders(roles, config, headers),
   };
+  // Every structure option describes how MPN/MFR pairs are laid out. With
+  // neither column present they are all meaningless, and the default would emit
+  // nothing — so pass rows through, keeping level, code, quantity, description.
+  if (!roles.mpn && !roles.manufacturer) {
+    return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
+  }
   if (config.structure === 'grouped_rows') return normalizeGroupedRows(rows, roles, configWithSourceHeaders);
   if (config.structure === 'mpn_only_same_cell') return normalizeSeparateCells(rows, roles, configWithSourceHeaders);
   if (config.structure === 'mpn_only_rows') return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
@@ -2715,6 +2722,12 @@ const BomNormalizer = () => {
     borderStrong: themeTokens.border?.strong || (isDarkMode ? 'rgba(255,255,255,0.2)' : 'rgba(203, 213, 225, 0.8)'),
     warningBg: themeTokens.state?.warningBg || (isDarkMode ? 'rgba(245, 158, 11, 0.14)' : '#fff8e5'),
   }), [isDarkMode, themeTokens]);
+  // BOM structure gate. Asked here rather than at upload so the user answers
+  // after seeing the normalized rows, when "does this have levels" is a
+  // question about real output instead of raw headers.
+  const [bomStructureOpen, setBomStructureOpen] = useState(false);
+  const [bomStructureAnswers, setBomStructureAnswers] = useState(null);
+  const [pendingBomAction, setPendingBomAction] = useState(null);
   const [workbook, setWorkbook] = useState(null);
   const [fileName, setFileName] = useState('');
   const [sheetName, setSheetName] = useState('');
@@ -3335,7 +3348,10 @@ const BomNormalizer = () => {
     if (roles.mpn && roles.manufacturer) {
       return 'Separate MPN and manufacturer columns selected. The parser will pair values by position.';
     }
-    return 'Select at least an MPN column to run normalization.';
+    if (roles.level) {
+      return 'Level column selected. Rows pass through with their level, code, quantity and description.';
+    }
+    return 'Select at least an MPN or BOM level column to run normalization.';
   }, [roles.manufacturer, roles.mpn]);
 
   const alternateColumnGroups = useMemo(
@@ -3654,10 +3670,10 @@ const BomNormalizer = () => {
         formData.append('clientFile', file);
         formData.append('sheetName', 'Normalized BOM');
         formData.append('headerRow', '1');
-        // Forward the BOM structure answers captured on the upload page so the
-        // session created here keeps them.
-        if (location.state?.bomStructure) {
-          formData.append('bomStructure', JSON.stringify(location.state.bomStructure));
+        // Template replay runs without the gate; answers only exist if they were
+        // captured earlier and travelled in on the route state.
+        if (bomStructureAnswers || location.state?.bomStructure) {
+          formData.append('bomStructure', JSON.stringify(bomStructureAnswers || location.state.bomStructure));
         }
 
         const response = await api.uploadFilesWithTemplate(formData, mappingTemplateId);
@@ -4102,7 +4118,18 @@ const BomNormalizer = () => {
     setError('');
   }, [normalizedRows]);
 
-  const handleContinueNormalizedToBomMapping = useCallback(() => {
+  const handleContinueNormalizedToBomMapping = useCallback((maybeAnswers = null) => {
+    // onClick passes a MouseEvent, so accept the argument only when it
+    // carries the gate's payload shape.
+    const passed = (maybeAnswers && maybeAnswers.sheets) ? maybeAnswers : null;
+    // Answers may already have been captured on the upload page; asking a
+    // second time for the same workbook would just be noise.
+    const answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
+    if (!answers) {
+      setPendingBomAction('normalized');
+      setBomStructureOpen(true);
+      return;
+    }
     if (!normalizedRows.length) {
       setError('Run normalization before continuing to BOM Mapping.');
       return;
@@ -4117,8 +4144,8 @@ const BomNormalizer = () => {
     formData.append('headerRow', '1');
     // Forward the BOM structure answers captured on the upload page so the
     // session created here keeps them.
-    if (location.state?.bomStructure) {
-      formData.append('bomStructure', JSON.stringify(location.state.bomStructure));
+    if (answers || location.state?.bomStructure) {
+      formData.append('bomStructure', JSON.stringify(answers || location.state.bomStructure));
     }
     const returnSnapshotKey = saveReturnSnapshot('normalized-results');
     const returnSnapshot = buildNormalizedResultsSnapshot(normalizedRows);
@@ -4173,7 +4200,18 @@ const BomNormalizer = () => {
     tagConfig,
   ]);
 
-  const handleContinueMergePreviewToBomMapping = useCallback(() => {
+  const handleContinueMergePreviewToBomMapping = useCallback((maybeAnswers = null) => {
+    // onClick passes a MouseEvent, so accept the argument only when it
+    // carries the gate's payload shape.
+    const passed = (maybeAnswers && maybeAnswers.sheets) ? maybeAnswers : null;
+    // Answers may already have been captured on the upload page; asking a
+    // second time for the same workbook would just be noise.
+    const answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
+    if (!answers) {
+      setPendingBomAction('merge');
+      setBomStructureOpen(true);
+      return;
+    }
     if (!mergePreview) {
       setCombineError('Build the merge preview first.');
       return;
@@ -4192,8 +4230,8 @@ const BomNormalizer = () => {
     formData.append('headerRow', '1');
     // Forward the BOM structure answers captured on the upload page so the
     // session created here keeps them.
-    if (location.state?.bomStructure) {
-      formData.append('bomStructure', JSON.stringify(location.state.bomStructure));
+    if (answers || location.state?.bomStructure) {
+      formData.append('bomStructure', JSON.stringify(answers || location.state.bomStructure));
     }
     const returnSnapshotKey = saveReturnSnapshot('merge-preview');
 
@@ -4225,6 +4263,33 @@ const BomNormalizer = () => {
       })
       .finally(() => setBusy(false));
   }, [buildNormalizerWorkflowRecipe, location.state, mergePreview, mergePreviewFilter, mergeVisibleColumns, navigate, saveReturnSnapshot]);
+
+  // Sheets offered to the gate: whichever the user actually normalized.
+  const bomStructureSheetNames = useMemo(
+    () => (sheetScope === 'single'
+      ? [sheetName].filter(Boolean)
+      : (selectedSheetNames || []).filter(Boolean)),
+    [sheetScope, sheetName, selectedSheetNames]
+  );
+
+  // Level auto-detection reads the SOURCE headers, not the normalized output —
+  // the normalized table always has a `level` column, so detecting on it would
+  // answer "yes" for every sheet.
+  const bomStructureHeaderReader = useCallback(
+    () => preparedHeaders || [],
+    [preparedHeaders]
+  );
+
+  const handleBomStructureConfirm = useCallback((payload) => {
+    setBomStructureAnswers(payload);
+    setBomStructureOpen(false);
+    const pending = pendingBomAction;
+    setPendingBomAction(null);
+    // Answers are handed over directly rather than read back from state, which
+    // has not committed yet at this point.
+    if (pending === 'merge') handleContinueMergePreviewToBomMapping(payload);
+    else if (pending === 'normalized') handleContinueNormalizedToBomMapping(payload);
+  }, [pendingBomAction, handleContinueMergePreviewToBomMapping, handleContinueNormalizedToBomMapping]);
 
   const handleBackFromConfigure = useCallback(() => {
     if (skipSourceSetupForMerge && mergePreview) {
@@ -4582,8 +4647,12 @@ const BomNormalizer = () => {
       setError('No data rows found below the selected header row.');
       return;
     }
-    if (!roles.mpn && !roles.manufacturer) {
-      setError('Select at least an MPN or Manufacturer column before running normalization.');
+    // A hierarchical BOM is valid input with no MPN or manufacturer column at
+    // all: SAFRAN-style sheets carry internal part codes and keep manufacturers
+    // in a separate AVL sheet. Requiring MPN/MFR here blocked every multi-level
+    // BOM from being normalized, so nothing downstream was ever reachable.
+    if (!roles.mpn && !roles.manufacturer && !roles.level) {
+      setError('Select at least an MPN, Manufacturer, or BOM level column before running normalization.');
       return;
     }
     setBusy(true);
@@ -5323,7 +5392,7 @@ const BomNormalizer = () => {
                         <Stack direction="row" justifyContent="space-between" gap={1} sx={{ mt: 1.5 }}>
                           <Button variant="outlined" onClick={() => setMergeStage('options')}>Back</Button>
                           <Stack direction="row" gap={1} flexWrap="wrap" justifyContent="flex-end">
-                            <Button variant="outlined" onClick={handleContinueMergePreviewToBomMapping}>Continue to BOM Mapping</Button>
+                            <Button variant="outlined" onClick={() => handleContinueMergePreviewToBomMapping()}>Continue to BOM Mapping</Button>
                             <Button variant="contained" onClick={handleUseMergePreview}>Continue with normalizer</Button>
                           </Stack>
                         </Stack>
@@ -5909,7 +5978,7 @@ const BomNormalizer = () => {
                   <Stack direction="row" gap={1} flexWrap="wrap" justifyContent="flex-end">
                     <Button variant="outlined" onClick={handleUseNormalizedAsBase} disabled={busy || !normalizedRows.length}>Use merged sheet as base</Button>
                     <Button variant="outlined" onClick={handleNormalize} disabled={busy}>Run again</Button>
-                    <Button variant="contained" onClick={handleContinueNormalizedToBomMapping} disabled={busy || !normalizedRows.length}>Continue to BOM Mapping</Button>
+                    <Button variant="contained" onClick={() => handleContinueNormalizedToBomMapping()} disabled={busy || !normalizedRows.length}>Continue to BOM Mapping</Button>
                   </Stack>
                 </Stack>
               </Paper>
@@ -6845,6 +6914,16 @@ const BomNormalizer = () => {
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* BOM structure gate — asked on the way to mapping, once the normalized
+          rows are on screen and the questions can be answered from real output. */}
+      <BomStructureDialog
+        open={bomStructureOpen}
+        onClose={() => { setBomStructureOpen(false); setPendingBomAction(null); }}
+        sheetNames={bomStructureSheetNames}
+        getSheetHeaders={bomStructureHeaderReader}
+        onConfirm={handleBomStructureConfirm}
+      />
     </Box>
   );
 };
