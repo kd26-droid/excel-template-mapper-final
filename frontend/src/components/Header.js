@@ -248,8 +248,8 @@ const Header = () => {
             <Box
               sx={{
                 position: 'relative',
-                width: 86,
-                height: 34,
+                width: 76,
+                height: 32,
                 borderRadius: '999px',
                 p: '3px',
                 overflow: 'hidden',
@@ -267,9 +267,9 @@ const Header = () => {
                 sx={{
                   position: 'absolute',
                   top: 3,
-                  left: isDarkMode ? 3 : 46,
-                  width: 37,
-                  height: 28,
+                  left: isDarkMode ? 3 : 40,
+                  width: 33,
+                  height: 26,
                   borderRadius: '999px',
                   bgcolor: r.action.primary,
                   boxShadow: isDarkMode
@@ -284,8 +284,8 @@ const Header = () => {
                   position: 'absolute',
                   top: 3,
                   left: 3,
-                  width: 37,
-                  height: 28,
+                  width: 33,
+                  height: 26,
                   borderRadius: '999px',
                   display: 'grid',
                   placeItems: 'center',
@@ -294,15 +294,15 @@ const Header = () => {
                   transition: 'color 180ms ease',
                 }}
               >
-                <MoonIcon sx={{ width: 20, height: 20 }} />
+                <MoonIcon sx={{ width: 18, height: 18 }} />
               </Box>
               <Box
                 sx={{
                   position: 'absolute',
                   top: 3,
                   right: 3,
-                  width: 37,
-                  height: 28,
+                  width: 33,
+                  height: 26,
                   borderRadius: '999px',
                   display: 'grid',
                   placeItems: 'center',
@@ -312,7 +312,7 @@ const Header = () => {
                   transition: 'opacity 180ms ease, color 180ms ease',
                 }}
               >
-                <WbSunnyIcon sx={{ fontSize: 20 }} />
+                <WbSunnyIcon sx={{ fontSize: 18 }} />
               </Box>
             </Box>
 
