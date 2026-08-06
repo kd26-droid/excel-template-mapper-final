@@ -1509,15 +1509,6 @@ def mpn_validate_warm(request):
         seen = set()
         for row in rows:
             raw = row[mi] if mi < len(row) else ''
-            if looks_like_combined_mpn_cell(raw):
-                return Response({
-                    'success': False,
-                    'error': (
-                        f'MPN column "{mpn_header}" appears to contain multiple MPNs in one cell based on supplier-prefix or delimiter patterns. '
-                        'Plain spaces inside one MPN are allowed. Split the column into one row per MPN before validation.'
-                    ),
-                    'code': 'combined_mpn_cell'
-                }, status=status.HTTP_400_BAD_REQUEST)
             norm = client.normalize_mpn(raw)
             if not norm or norm in seen:
                 continue
@@ -1806,15 +1797,6 @@ def mpn_validate(request):
         skipped_empty = 0
         for d in dict_rows:
             raw = d.get(mpn_header, '')
-            if looks_like_combined_mpn_cell(raw):
-                return Response({
-                    'success': False,
-                    'error': (
-                        f'MPN column "{mpn_header}" appears to contain multiple MPNs in one cell based on supplier-prefix or delimiter patterns. '
-                        'Plain spaces inside one MPN are allowed. Split the column into one row per MPN before validation.'
-                    ),
-                    'code': 'combined_mpn_cell'
-                }, status=status.HTTP_400_BAD_REQUEST)
             norm = client.normalize_mpn(raw)
             if not norm:
                 skipped_empty += 1
