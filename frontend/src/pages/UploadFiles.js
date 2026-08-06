@@ -1,7 +1,7 @@
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import LoaderOverlay, { useGlobalBlock } from '../components/LoaderOverlay';
-import BomStructureDialog from '../components/BomStructureDialog';
+import BomStructureDialog, { reconcileSavedBomStructure } from '../components/BomStructureDialog';
 import {
   Typography,
   Button,
@@ -838,6 +838,9 @@ const UploadFiles = () => {
   // answers travel with the session, and the normalizer will not ask again.
   const [bomStructureOpen, setBomStructureOpen] = useState(false);
   const [bomStructureAnswers, setBomStructureAnswers] = useState(null);
+  // Partially-reusable answers from a mapping template: the gate opens with
+  // these already filled in rather than blank.
+  const [bomStructureSeed, setBomStructureSeed] = useState(null);
   const [pendingBomStructureAction, setPendingBomStructureAction] = useState(null);
 
 
@@ -1402,6 +1405,21 @@ const UploadFiles = () => {
         return record;
       });
   }, [getSheetJoinSourceWorkbook]);
+
+  const bomStructureRecordReader = useCallback(
+    sheetName => getSheetRecords(sheetName, clientHeaderRow, 'primary'),
+    [getSheetRecords, clientHeaderRow]
+  );
+
+  // Rows above the header row. On a THALES export this block is the only place
+  // the level-0 assembly is named, so the gate reads it to prefill the finished
+  // good instead of asking the user to retype what is already on screen.
+  const bomStructurePreambleReader = useCallback((sheetName) => {
+    const workbook = getSheetJoinSourceWorkbook('primary');
+    if (!workbook || !sheetName || !workbook.Sheets[sheetName]) return [];
+    const headerIndex = Math.max(0, Number(clientHeaderRow || 1) - 1);
+    return readSheetRows(workbook, sheetName).slice(0, headerIndex);
+  }, [getSheetJoinSourceWorkbook, clientHeaderRow]);
 
   const getSheetRecordsWithMeta = useCallback((sheetName, headerRow = 1, sourceId = 'primary') => {
     const workbook = getSheetJoinSourceWorkbook(sourceId);
@@ -2888,6 +2906,22 @@ const UploadFiles = () => {
     return stage?.mapping_template_id || null;
   };
 
+  // The gate's answers ride along on the mapping template behind the selected
+  // processing template, so reusing a template on the same customer's next file
+  // does not ask the same questions again.
+  //
+  // Declared here, after getProcessingTemplateMappingId: it is a `const`, so
+  // naming it in a dependency array above its declaration is a TDZ crash that
+  // takes the whole page down at render, not a lint warning.
+  const getSavedBomStructure = () => {
+    const mappingId = getProcessingTemplateMappingId();
+    if (!mappingId) return null;
+    const template = (availableTemplates || []).find(
+      item => String(item.id) === String(mappingId)
+    );
+    return template?.bom_structure || null;
+  };
+
   const getProcessingTemplateNormalizerWorkflow = (template = getSelectedProcessingTemplate()) => {
     if (template?.metadata?.normalizer_workflow) return template.metadata.normalizer_workflow;
     const stage = Array.isArray(template?.stages)
@@ -3015,6 +3049,9 @@ const UploadFiles = () => {
         initialHeaderRow: clientHeaderRow,
         templateFile,
         bomStructure: bomAnswers,
+        // The normalizer gate reconciles this against the normalized rows, which
+        // is a better test of "same assembly" than anything available here.
+        savedBomStructure: getSavedBomStructure(),
         uploadSource: {
           ...getProcessingTemplateState({
             processingTemplateMode: selectedProcessingTemplateId ? 'use' : 'new',
@@ -3061,7 +3098,24 @@ const UploadFiles = () => {
 
     // Same questions on the direct route, so a session created without the
     // normalizer still carries them and BOM generation stays possible.
-    const bomAnswers = passedAnswers || bomStructureAnswers;
+    let bomAnswers = passedAnswers || bomStructureAnswers;
+
+    // A reused template may already answer them. Its format answers always
+    // apply; its identity answers only if they still fit this file. When they
+    // all survive, the gate is skipped entirely.
+    if (!isPDF && !bomAnswers && clientSheetNames.length > 0) {
+      const saved = getSavedBomStructure();
+      if (saved) {
+        const { answers, complete } = reconcileSavedBomStructure(saved, {
+          sheetNames: bomStructureSheetNames,
+          getSheetHeaders: bomStructureHeaderReader,
+          getSheetRecords: bomStructureRecordReader,
+        });
+        if (complete) bomAnswers = saved;
+        else setBomStructureSeed(answers);
+      }
+    }
+
     if (!isPDF && !bomAnswers && clientSheetNames.length > 0) {
       setPendingBomStructureAction({ action: 'upload', templateOptions });
       setBomStructureOpen(true);
@@ -5853,6 +5907,9 @@ const UploadFiles = () => {
         onClose={handleBomStructureCancel}
         sheetNames={bomStructureSheetNames}
         getSheetHeaders={bomStructureHeaderReader}
+        getSheetRecords={bomStructureRecordReader}
+        getSheetPreambleRows={bomStructurePreambleReader}
+        initialAnswers={bomStructureSeed}
         onConfirm={handleBomStructureConfirm}
       />
 

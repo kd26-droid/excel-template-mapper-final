@@ -47,7 +47,7 @@ import DownloadIcon from '@mui/icons-material/Download';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import api from '../services/api';
-import BomStructureDialog from '../components/BomStructureDialog';
+import BomStructureDialog, { reconcileSavedBomStructure } from '../components/BomStructureDialog';
 import {
   createFactwiseIds,
   createTagColumn,
@@ -2931,6 +2931,9 @@ const BomNormalizer = () => {
   // question about real output instead of raw headers.
   const [bomStructureOpen, setBomStructureOpen] = useState(false);
   const [bomStructureAnswers, setBomStructureAnswers] = useState(null);
+  // Answers carried over from a reused mapping template, already checked
+  // against this file. The gate opens pre-filled with whatever survived.
+  const [bomStructureSeed, setBomStructureSeed] = useState(null);
   const [pendingBomAction, setPendingBomAction] = useState(null);
   const [workbook, setWorkbook] = useState(null);
   const [fileName, setFileName] = useState('');
@@ -4343,7 +4346,24 @@ const BomNormalizer = () => {
     const passed = (maybeAnswers && maybeAnswers.sheets) ? maybeAnswers : null;
     // Answers may already have been captured on the upload page; asking a
     // second time for the same workbook would just be noise.
-    const answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
+    let answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
+
+    // A reused mapping template may already answer the gate. Its format answers
+    // always apply; its identity answers only while they still describe this
+    // file. All surviving means the gate never opens.
+    if (!answers) {
+      const saved = location.state?.savedBomStructure;
+      if (saved) {
+        const reconciled = reconcileSavedBomStructure(saved, {
+          sheetNames: bomStructureSheetNames,
+          getSheetHeaders: bomStructureHeaderReader,
+          getSheetRecords: bomStructureRecordReader,
+        });
+        if (reconciled.complete) answers = saved;
+        else setBomStructureSeed(reconciled.answers);
+      }
+    }
+
     if (!answers) {
       setPendingBomAction('normalized');
       setBomStructureOpen(true);
@@ -4425,7 +4445,24 @@ const BomNormalizer = () => {
     const passed = (maybeAnswers && maybeAnswers.sheets) ? maybeAnswers : null;
     // Answers may already have been captured on the upload page; asking a
     // second time for the same workbook would just be noise.
-    const answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
+    let answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
+
+    // A reused mapping template may already answer the gate. Its format answers
+    // always apply; its identity answers only while they still describe this
+    // file. All surviving means the gate never opens.
+    if (!answers) {
+      const saved = location.state?.savedBomStructure;
+      if (saved) {
+        const reconciled = reconcileSavedBomStructure(saved, {
+          sheetNames: bomStructureSheetNames,
+          getSheetHeaders: bomStructureHeaderReader,
+          getSheetRecords: bomStructureRecordReader,
+        });
+        if (reconciled.complete) answers = saved;
+        else setBomStructureSeed(reconciled.answers);
+      }
+    }
+
     if (!answers) {
       setPendingBomAction('merge');
       setBomStructureOpen(true);
@@ -4497,6 +4534,18 @@ const BomNormalizer = () => {
   const bomStructureHeaderReader = useCallback(
     () => preparedHeaders || [],
     [preparedHeaders]
+  );
+
+  // Both readers work off the raw sheet, like the header reader above: the gate
+  // asks about the customer's structure, not the normalized output.
+  const bomStructureRecordReader = useCallback(
+    () => rowsToObjects(sheetRows.slice(headerRowIndex + 1), headers, headerRowIndex + 2),
+    [sheetRows, headerRowIndex, headers]
+  );
+
+  const bomStructurePreambleReader = useCallback(
+    () => sheetRows.slice(0, headerRowIndex),
+    [sheetRows, headerRowIndex]
   );
 
   const handleBomStructureConfirm = useCallback((payload) => {
@@ -7233,6 +7282,9 @@ const BomNormalizer = () => {
         onClose={() => { setBomStructureOpen(false); setPendingBomAction(null); }}
         sheetNames={bomStructureSheetNames}
         getSheetHeaders={bomStructureHeaderReader}
+        getSheetRecords={bomStructureRecordReader}
+        getSheetPreambleRows={bomStructurePreambleReader}
+        initialAnswers={bomStructureSeed}
         onConfirm={handleBomStructureConfirm}
       />
     </Box>

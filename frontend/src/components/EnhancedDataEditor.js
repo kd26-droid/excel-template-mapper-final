@@ -2991,6 +2991,13 @@ const EnhancedDataEditor = () => {
     if (fn) fn();
   }, []);
 
+  const continueBomExportAnyway = useCallback(() => {
+    const fn = pendingExportRef.current;
+    setBomValidationOpen(false);
+    pendingExportRef.current = null;
+    if (fn) fn();
+  }, []);
+
   const openFillColumnForRequired = useCallback((gap, suggestedValue = '') => {
     if (!gap?.field) return;
     setCreateColumnTab(0);
@@ -5024,6 +5031,9 @@ const EnhancedDataEditor = () => {
                   <Select label="Rows to update" value={createColumnMode} onChange={(e) => setCreateColumnMode(e.target.value)}>
                     <MenuItem value="fill_empty">Only rows where this column is empty</MenuItem>
                     <MenuItem value="overwrite">All rows</MenuItem>
+                    {/* The first row holding each value keeps it; only the
+                        repeats are rewritten, so the original is not lost. */}
+                    <MenuItem value="duplicates">Only rows with a duplicate value</MenuItem>
                   </Select>
                 </FormControl>
               </Grid>
@@ -5284,6 +5294,12 @@ const EnhancedDataEditor = () => {
 
           {createColumnTab === 0 && createColumnTargetExists && createColumnTargetHasData && createColumnMode === 'overwrite' && (
             <Alert severity="warning" sx={{ mt: 2 }}>Existing values in {createColumnTarget} will be replaced.</Alert>
+          )}
+          {createColumnTab === 0 && createColumnMode === 'duplicates' && (
+            <Alert severity="info" sx={{ mt: 2 }}>
+              The first row holding each value keeps it. Only the repeats below it are
+              rewritten, so nothing loses its original value.
+            </Alert>
           )}
           {createColumnTab === 0 && createColumnContentType === 'conditional' && createColumnMode === 'fill_empty' &&
             (conditionalBranches.some(branch => branch.outputType === 'empty') || condElseSourceType === 'empty') && (
@@ -9535,11 +9551,12 @@ const EnhancedDataEditor = () => {
         maxWidth="sm"
         fullWidth
       >
-        <DialogTitle>BOM cannot be exported yet</DialogTitle>
+        <DialogTitle>BOM import errors</DialogTitle>
         <DialogContent dividers>
           <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
             {bomValidationIssues.length} issue{bomValidationIssues.length === 1 ? '' : 's'} would
-            make this BOM fail the FactWise import.
+            make this BOM fail the FactWise import. You can still export the sheet to
+            look at it.
           </Typography>
           {bomValidationIssues.slice(0, 25).map((issue, index) => (
             <Alert severity="error" key={index} sx={{ mb: 1 }}>
@@ -9566,7 +9583,34 @@ const EnhancedDataEditor = () => {
           )}
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setBomValidationOpen(false)}>Close</Button>
+          <Button
+            onClick={() => {
+              pendingExportRef.current = null;
+              setBomValidationOpen(false);
+            }}
+          >
+            Back to grid
+          </Button>
+          {/* Same escape hatch the item directory has. These are real import
+              failures rather than cosmetic gaps, so the wording says the file
+              will be rejected — but blocking the download outright also blocks
+              inspecting the sheet to work out what to fix. */}
+          <Button
+            onClick={continueBomExportAnyway}
+            variant="contained"
+            sx={{
+              fontWeight: 850,
+              textTransform: 'none',
+              borderRadius: '999px',
+              px: 2.5,
+              bgcolor: '#2563eb',
+              color: '#ffffff',
+              boxShadow: 'none',
+              '&:hover': { bgcolor: '#1d4ed8', boxShadow: 'none' },
+            }}
+          >
+            Export anyway
+          </Button>
         </DialogActions>
       </Dialog>
     </Box>

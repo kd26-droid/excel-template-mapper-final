@@ -27,6 +27,12 @@ class MappingTemplate(models.Model):
     factwise_rules = models.JSONField(default=list, blank=True)  # Factwise ID rules
     default_values = models.JSONField(default=dict, blank=True)  # Default values for unmapped fields
     mpn_validation_metadata = models.JSONField(default=dict, blank=True)  # MPN validation metadata
+    # Answers from the BOM structure gate, so reusing a template on the same
+    # customer's next file does not re-ask which sheet is a BOM, whether it has
+    # levels, or which column holds them. The identity half — finished good code,
+    # sub-BOM part numbers — describes one specific assembly, so it is stored but
+    # only replayed when it still fits the new sheet.
+    bom_structure = models.JSONField(default=dict, blank=True)
     # Dynamic column counts
     tags_count = models.IntegerField(default=3)  # Number of Tags columns
     spec_pairs_count = models.IntegerField(default=3)  # Number of Specification Name/Value pairs
@@ -247,6 +253,10 @@ class MappingTemplate(models.Model):
             'tags_count': getattr(self, 'tags_count', 1),
             'spec_pairs_count': getattr(self, 'spec_pairs_count', 1),
             'customer_id_pairs_count': getattr(self, 'customer_id_pairs_count', 1),
+            # The upload page reads this to decide whether the BOM structure gate
+            # still needs to be shown for the file in hand.
+            'bom_structure': getattr(self, 'bom_structure', {}) or {},
+            'has_bom_structure': bool(getattr(self, 'bom_structure', {}) or {}),
             'created_at': self.created_at.isoformat(),
             'usage_count': self.usage_count
         }

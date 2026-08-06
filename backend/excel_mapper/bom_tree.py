@@ -65,16 +65,57 @@ class BomTreeError(Exception):
     """Raised when the rows cannot form a tree at all."""
 
 
+_DASH_RE = re.compile(r'^[-‐-―]+$')
+
+
+def parse_quantity(value):
+    """Parse a quantity cell into a float, or None when it is not a number.
+
+    Customer sheets write "not consumed" three different ways in the same file —
+    THALES uses ``---`` for drawings, blank for section rows, and ``0`` for
+    Gerber/paste data. All three parse to None or 0 here so one rule covers them.
+    """
+    text = unwrap_cell(value).strip()
+    if not text or _DASH_RE.match(text):
+        return None
+    try:
+        return float(text.replace(',', ''))
+    except (TypeError, ValueError):
+        return None
+
+
+def is_document_row(record, quantity_column, code_column=None):
+    """True when a row describes a document rather than a consumed part.
+
+    A BOM line exists to say "this assembly consumes N of that part". A row that
+    consumes nothing is not a BOM line, whatever else it carries. THALES files
+    drawings (``Qty = ---``), electronic data (``Qty = 0``) and part rows in one
+    table; this is what separates them, using only the quantity column so no
+    customer-specific column has to be mapped.
+    """
+    if not quantity_column:
+        return False
+    quantity = parse_quantity(record.get(quantity_column))
+    if quantity is not None and quantity > 0:
+        return False
+    # A row with no code cannot become a BOM line either way, but call it a
+    # document only when it has nothing to consume.
+    return True
+
+
 class BomTree(object):
     """The derived structure. Plain data — no formatting decisions live here."""
 
-    def __init__(self, rows, nodes, blocks, errors, warnings, min_level):
+    def __init__(self, rows, nodes, blocks, errors, warnings, min_level,
+                 documents=None, root_code=None):
         self.rows = rows            # per input row, with parent/leaf/depth added
         self.nodes = nodes          # code -> node dict (deduplicated)
         self.blocks = blocks        # list of block dicts, order preserved
         self.errors = errors        # structural failures; block generation
         self.warnings = warnings    # survivable oddities
         self.min_level = min_level
+        self.documents = documents or []   # rows excluded as documents/data
+        self.root_code = root_code         # authored root, when one was supplied
 
     @property
     def is_valid(self):
@@ -96,6 +137,7 @@ class BomTree(object):
         leaf_nodes = sum(1 for node in self.nodes.values() if node['is_leaf'])
         return {
             'rows': len(self.rows),
+            'documents': len(self.documents),
             'nodes': len(self.nodes),
             'blocks': len(self.blocks),
             'roots': len(self.roots),
@@ -109,12 +151,22 @@ class BomTree(object):
 
 
 def derive_tree(records, level_column, code_column,
-                description_column=None, quantity_column=None, uom_column=None):
+                description_column=None, quantity_column=None, uom_column=None,
+                root=None, drop_documents=True):
     """Derive tree structure from ``records`` (a list of dicts).
 
     Rows whose level cell does not parse are skipped and reported as warnings —
     that is how title banners, blank separators and section markers get dropped
     without special-casing any particular customer's layout.
+
+    ``root`` is the level-0 finished good when the sheet does not contain it.
+    THALES-style exports name the assembly in a preamble block above the table
+    and start the table at level 1, so without this the level-1 rows look like
+    several unrelated BOMs. When supplied, every top-level row is adopted by it.
+
+    ``drop_documents`` removes rows that consume nothing (see ``is_document_row``).
+    They are returned on the tree rather than discarded silently, so the caller
+    can show what was excluded.
     """
     if not level_column:
         raise BomTreeError('A level column is required to derive a BOM tree.')
@@ -124,6 +176,7 @@ def derive_tree(records, level_column, code_column,
     errors = []
     warnings = []
     rows = []
+    documents = []
 
     for index, record in enumerate(records or []):
         level = parse_level(record.get(level_column))
@@ -135,6 +188,21 @@ def derive_tree(records, level_column, code_column,
                     'row': index,
                     'message': 'Row skipped: level is blank or not a whole number.',
                 })
+            continue
+        # Document rows are checked before the missing-code rule so that a
+        # drawing (which has no part number by design) is reported as what it is
+        # rather than as data loss.
+        if drop_documents and quantity_column and is_document_row(record, quantity_column, code_column):
+            documents.append({
+                'row': index,
+                'level': level,
+                'code': code,
+                'description': unwrap_cell(record.get(description_column)).strip() if description_column else '',
+                'quantity': unwrap_cell(record.get(quantity_column)).strip(),
+                # Kept so the caller can drop the same rows from the item sheet.
+                # A drawing is not an item any more than it is a BOM line.
+                'source': record,
+            })
             continue
         if not code:
             warnings.append({
@@ -197,14 +265,45 @@ def derive_tree(records, level_column, code_column,
 
     _detect_level_jumps(rows, errors)
 
+    # An authored root adopts every top-level row, turning a forest into one
+    # tree. Its own depth is one above the shallowest row, so the block levels
+    # below it stay correctly ordered.
+    root_code = unwrap_cell((root or {}).get('code')).strip() if root else ''
+    if root_code:
+        for row in rows:
+            # A sheet that already contains its own root must not adopt it into
+            # itself — that is a one-node cycle, not a tree.
+            if row['parent'] is None and row['code'] != root_code:
+                row['parent'] = root_code
+            row['depth'] += 1
+
     nodes = _collect_nodes(rows)
+    if root_code:
+        # Inserted first so the item sheet lists the finished good before its
+        # components, and re-inserted rather than patched when the code also
+        # appears in the table.
+        existing = nodes.pop(root_code, None)
+        root_node = {
+            'code': root_code,
+            'description': unwrap_cell((root or {}).get('description')).strip()
+                           or (existing or {}).get('description', ''),
+            'uom': unwrap_cell((root or {}).get('uom')).strip()
+                   or (existing or {}).get('uom', ''),
+            'is_leaf': False,
+            'occurrences': (existing or {}).get('occurrences', 0) + 1,
+            'item_type': 'Finished good',
+        }
+        nodes = OrderedDict(
+            [(root_code, root_node)] + [(k, v) for k, v in nodes.items() if k != root_code]
+        )
+
     blocks = _build_blocks(rows, nodes)
     _detect_cycles(blocks, errors)
 
     # Several top-level rows mean this is a forest, not one tree. That is not
     # automatically wrong — a workbook may hold several BOMs — so it is reported
     # rather than rejected here, and the generation gate decides. THALES and
-    # Rafael both land here; SAFRAN does not.
+    # Rafael both land here without a root; SAFRAN does not.
     root_codes = [row['code'] for row in rows if row['parent'] is None]
     if len(root_codes) > 1:
         warnings.append({
@@ -214,8 +313,17 @@ def derive_tree(records, level_column, code_column,
             'message': ('%d separate top-level rows were found, so these rows are '
                         'several BOMs rather than one tree.' % len(root_codes)),
         })
+    if documents:
+        warnings.append({
+            'type': 'document_rows',
+            'count': len(documents),
+            'codes': [d['code'] or d['description'] for d in documents[:10]],
+            'message': ('%d rows consume no quantity and were excluded as documents '
+                        'or reference data rather than parts.' % len(documents)),
+        })
 
-    return BomTree(rows, nodes, blocks, errors, warnings, min_level)
+    return BomTree(rows, nodes, blocks, errors, warnings, min_level,
+                   documents=documents, root_code=root_code or None)
 
 
 def _detect_level_jumps(rows, errors):

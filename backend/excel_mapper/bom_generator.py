@@ -337,6 +337,222 @@ def generate_flat_bom(records, bom_header):
     return result
 
 
+def split_primaries_and_alternates(records):
+    """Map each parentKey to (primary record, [alternate records]).
+
+    The tree is derived from primaries only. An alternate is the same BOM line
+    seen from a different manufacturer, so it must not become a sibling row in
+    the structure — it goes sideways into the alternate columns instead.
+    """
+    groups, _ungrouped = group_normalized_rows(records)
+    primary_of = {}
+    alternates_of = {}
+    for key, rows in groups.items():
+        primary = None
+        alternates = []
+        for row in rows:
+            rank = relation_rank(row.get(F_RELATION))
+            if rank == 0 and primary is None:
+                primary = row
+            else:
+                alternates.append(row)
+        if primary is None and rows:
+            primary = rows[0]
+            alternates = rows[1:]
+        primary_of[key] = primary
+        alternates_of[key] = alternates
+    return primary_of, alternates_of
+
+
+DEFAULT_BASE_QUANTITY = 1
+DEFAULT_MEASUREMENT_UNIT = 'EA'
+
+
+def generate_multi_level_bom(tree, bom_header, alternates_of=None, records=None,
+                             sub_boms=None):
+    """Generate a multi-level BOM: one block per assembly, in sheet order.
+
+    ``tree`` is what ``bom_tree.derive_tree`` produced, so structure is never
+    re-derived here. Each block becomes a BOM ID; a child that is itself an
+    assembly fills ``Sub BOM ID`` and a child that is not fills ``Raw material
+    code``. The two are mutually exclusive — validation enforces the XOR.
+
+    Codes are resolved through one map so ``BOM ID``, ``Sub BOM ID`` and ``Raw
+    material code`` cannot drift apart: a sub-assembly's ``Sub BOM ID`` is by
+    construction the same string as its own ``BOM ID`` one block down.
+    """
+    result = GenerationResult()
+    alternates_of = alternates_of or {}
+
+    if not tree.blocks:
+        result.errors.append({
+            'type': 'no_blocks',
+            'message': 'No assembly in this sheet has any children, so there is no BOM to build.',
+        })
+        return result
+
+    # A tree code is whatever column held the part number; the FactWise item
+    # code may be generated separately. Resolve once, use everywhere.
+    resolved = {}
+    for row in tree.rows:
+        source = row.get('source') or {}
+        resolved.setdefault(row['code'], _text(source.get(F_ITEM_CODE)) or row['code'])
+    for code in tree.nodes:
+        resolved.setdefault(code, code)
+
+    def alternates_for(row):
+        key = _text((row.get('source') or {}).get(F_PARENT_KEY))
+        return alternates_of.get(key, []) if key else []
+
+    max_alternates = 0
+    for block in tree.blocks:
+        for child in block['children']:
+            max_alternates = max(max_alternates, len(alternates_for(child)))
+    result.bom_headers = build_bom_headers(max_alternates)
+
+    root_code = tree.root_code
+    authored_base_quantity = (bom_header or {}).get('baseQuantity') or 1
+    authored_uom = _text((bom_header or {}).get('measurementUnit'))
+    authored_name = _text((bom_header or {}).get('bomName'))
+
+    sub_boms = sub_boms or {}
+
+    for block in tree.blocks:
+        parent_code = resolved.get(block['bom_id'], block['bom_id'])
+        is_root_block = block['bom_id'] == root_code
+
+        # Every BOM's header is authored, not assumed. The root's comes from the
+        # popup's finished-good form; a sub-assembly's comes from its own row in
+        # the same step, keyed by part code. Falling back to the sheet's unit and
+        # then to a default keeps an older saved answer working, but the normal
+        # path is that all three values were on screen and confirmed.
+        override = sub_boms.get(block['bom_id']) or {}
+        if is_root_block:
+            base_quantity = authored_base_quantity
+            block_uom = authored_uom or block.get('uom') or DEFAULT_MEASUREMENT_UNIT
+            bom_name = authored_name or parent_code
+        else:
+            base_quantity = override.get('baseQuantity') or DEFAULT_BASE_QUANTITY
+            block_uom = (_text(override.get('measurementUnit'))
+                         or block.get('uom') or DEFAULT_MEASUREMENT_UNIT)
+            bom_name = _text(override.get('bomName')) or parent_code
+
+        for child in block['children']:
+            child_code = resolved.get(child['code'], child['code'])
+            child_node = tree.nodes.get(child['code']) or {}
+            is_assembly = not child_node.get('is_leaf', True)
+
+            row = OrderedDict((header, '') for header in result.bom_headers)
+            row['Finished good code'] = parent_code
+            row['BOM ID'] = parent_code
+            row['BOM name'] = bom_name
+            row['Base quantity'] = base_quantity
+            row['BOM measurement unit'] = block_uom
+            row['Level'] = block['level']
+            if is_assembly:
+                row['Sub BOM ID'] = child_code
+            else:
+                row['Raw material code'] = child_code
+            row['Description'] = child.get('description', '')
+            row['Quantity'] = child.get('quantity', '')
+            row['Measurement unit'] = child.get('uom', '')
+
+            for position, alternate in enumerate(alternates_for(child)):
+                suffix = '' if position == 0 else '_%d' % (position + 1)
+                base = position * len(BOM_ALTERNATE_GROUP) + len(BOM_BASE_COLUMNS)
+                names = result.bom_headers[base:base + len(BOM_ALTERNATE_GROUP)]
+                values = [
+                    _text(alternate.get(F_ITEM_CODE)),
+                    '',
+                    _text(alternate.get(F_QUANTITY)) or child.get('quantity', ''),
+                    _text(alternate.get(F_UOM)) or child.get('uom', ''),
+                ]
+                for name, value in zip(names, values):
+                    row['%s%s' % (name, suffix)] = value
+
+            result.bom_rows.append(row)
+
+    # The item sheet holds every node AND every alternate. An alternate is a
+    # different manufacturer's part with its own code, so it is a separate item
+    # even though it shares a BOM line with its primary — leaving them out is
+    # what makes the second import file fail on referential integrity.
+    # Documents were dropped from the structure; drop them from the item sheet
+    # too, along with the alternates that hang off them. Keyed by parentKey so
+    # a drawing's whole group goes together.
+    document_keys = set()
+    for document in tree.documents:
+        key = _text((document.get('source') or {}).get(F_PARENT_KEY))
+        if key:
+            document_keys.add(key)
+    item_source = [
+        record for record in (records or [])
+        if not (document_keys and _text(record.get(F_PARENT_KEY)) in document_keys)
+    ]
+
+    item_headers, item_rows, duplicate_codes = generate_item_rows(item_source)
+
+    assembly_codes = set()
+    for code, node in tree.nodes.items():
+        if not node.get('is_leaf', True):
+            assembly_codes.add(resolved.get(code, code))
+
+    # generate_item_rows types everything as a raw material because a flat sheet
+    # has no assemblies. Here the tree knows better.
+    for row in item_rows:
+        if row['Item code'] in assembly_codes:
+            row['Item type'] = 'Finished good'
+
+    # Anything the tree knows about but the records do not — the authored root
+    # above all, which exists only in the popup answers.
+    seen_codes = {row['Item code'] for row in item_rows if row['Item code']}
+    source_of = {}
+    for row in tree.rows:
+        source_of.setdefault(row['code'], row.get('source') or {})
+    for code, node in tree.nodes.items():
+        item_code = resolved.get(code, code)
+        if item_code in seen_codes:
+            continue
+        seen_codes.add(item_code)
+        source = source_of.get(code, {})
+        description = node.get('description') or ''
+        item_rows.append({
+            'Item code': item_code,
+            'CPN Code': _text(source.get(F_CPN)),
+            'MPN Code': _text(source.get(F_MPN)),
+            'Item name': description or item_code,
+            'Description': description,
+            'Item type': node.get('item_type') or ('Raw material' if node.get('is_leaf', True) else 'Finished good'),
+            'Measurement unit': node.get('uom') or '',
+            'Manufacturer': _text(source.get(F_MANUFACTURER)),
+        })
+
+    result.item_headers = item_headers
+    result.item_rows = item_rows
+    if duplicate_codes:
+        tree.warnings.append({
+            'type': 'duplicate_item_codes',
+            'count': len(duplicate_codes),
+            'codes': duplicate_codes[:10],
+            'message': '%d rows shared an item code and were collapsed into one item.'
+                       % len(duplicate_codes),
+        })
+    result.warnings = list(tree.warnings)
+    result.errors = list(tree.errors)
+
+    assemblies = sum(1 for node in tree.nodes.values() if not node.get('is_leaf', True))
+    result.stats = {
+        'bom_rows': len(result.bom_rows),
+        'item_rows': len(result.item_rows),
+        'alternate_sets': max_alternates,
+        'bom_columns': len(result.bom_headers),
+        'blocks': len(tree.blocks),
+        'assemblies': assemblies,
+        'documents_excluded': len(tree.documents),
+        'levels': max((block['level'] for block in tree.blocks), default=0),
+    }
+    return result
+
+
 def bom_rows_as_lists(result):
     """Flatten generated BOM rows to plain lists aligned with ``bom_headers``.
 

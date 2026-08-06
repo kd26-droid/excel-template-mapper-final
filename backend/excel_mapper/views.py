@@ -28,7 +28,7 @@ from openpyxl import Workbook
 from openpyxl import load_workbook
 from openpyxl.styles import Font, PatternFill
 import numpy as np
-from collections import defaultdict
+from collections import defaultdict, Counter
 import re
 import traceback
 import json
@@ -1672,6 +1672,14 @@ def upload_files(request):
                     # Update session with applied mappings
                     SESSION_STORE[session_id]["original_template_id"] = int(use_template_id)
                     SESSION_STORE[session_id]["mappings"] = new_format_mappings
+
+                    # The gate's answers travel with the template. Answers sent
+                    # with this upload win — the user just gave them for this
+                    # file, so they describe it better than a saved default.
+                    template_bom_structure = getattr(template, 'bom_structure', None) or {}
+                    if template_bom_structure and not SESSION_STORE[session_id].get("bom_structure"):
+                        SESSION_STORE[session_id]["bom_structure"] = template_bom_structure
+                        logger.info(f"Applied BOM structure from template {use_template_id}")
                     logger.info(f"🔄 Converted {len(applied_mappings)} unique mappings from template application")
                     
                     # Apply formula rules if they exist (from template or Step 3)
@@ -4844,9 +4852,36 @@ def _cluster_factwise_columns(headers):
     if not groups:
         return list(range(len(headers)))
 
+    def spec_kind(h):
+        n = re.sub(r'\s+', ' ', str(h or '').strip().lower())
+        return 0 if 'name' in n else (2 if 'uom' in n else 1)
+
     # Within the spec group, group each specification's pairs together by family.
     if 'spec' in groups:
-        groups['spec'] = sorted(groups['spec'], key=lambda j: spec_sort_key(headers[j]))
+        spec_indices = groups['spec']
+        # A template that repeats the plain label — "Specification name" three
+        # times, as the FactWise sheet does — gives every column the same sort
+        # key, so a stable sort left all the names together, then all the values,
+        # then all the UOMs. Three specifications came out as one malformed one.
+        # With nothing in the name to tell them apart, the family is positional:
+        # a name column opens a specification and the value/UOM after it belong
+        # to that one, which is how the importer reads them anyway.
+        distinguishable = any(
+            re.search(r'(_\d+|\.\d+)$', re.sub(r'\s+', ' ', str(headers[j] or '').strip().lower()))
+            for j in spec_indices
+        )
+        if distinguishable:
+            groups['spec'] = sorted(spec_indices, key=lambda j: spec_sort_key(headers[j]))
+        else:
+            family_of = {}
+            family = 0
+            for j in spec_indices:
+                if spec_kind(headers[j]) == 0 and family_of:
+                    family += 1
+                family_of[j] = family
+            groups['spec'] = sorted(
+                spec_indices, key=lambda j: (family_of[j], spec_kind(headers[j]))
+            )
 
     consumed = set()
     order = []
@@ -4916,6 +4951,108 @@ def _authored_finished_goods(info):
             'uom': str(header.get('measurementUnit') or '').strip(),
         })
     return goods
+
+
+def _sub_assembly_item_codes(session_id):
+    """Item codes that are sub-assemblies — they have a BOM of their own.
+
+    The BOM Normalizer emits `level`, `parentKey` and `relation` but never says
+    "this row is a sub-assembly"; that is worked out later by ``derive_tree``,
+    from the fact that the next row sits one level deeper. So the mapped grid has
+    no way of knowing, and every assembly reaches the item directory typed as a
+    raw material — an item that FactWise would treat as bought-in while a BOM
+    claims to produce it.
+
+    Generation is asked rather than re-deriving here, so the item sheet cannot
+    disagree with the BOM sheet about which codes are assemblies. A failure is
+    swallowed: BOM export reports it properly, and the item export should still
+    produce a file.
+    """
+    try:
+        result, _bom_header, error_response = _generate_bom_for_session(session_id)
+        if error_response is not None or result is None:
+            return set()
+        return {
+            str(row.get('Item code') or '').strip()
+            for row in (result.item_rows or [])
+            if str(row.get('Item type') or '').strip() == 'Finished good'
+            and str(row.get('Item code') or '').strip()
+        }
+    except Exception as exc:
+        logger.warning(f"Could not determine sub-assembly item types: {exc}")
+        return set()
+
+
+def _sub_assembly_codes_from_grid(info, headers, rows):
+    """Item codes of sub-assemblies, resolved from the popup's answers.
+
+    The popup keys its sub-BOM answers by the customer's part number, because
+    that is all the sheet has; the item code is generated later and only exists
+    in the grid. Joining the two on ``CPN Code`` gives the item codes without
+    re-deriving the tree, which matters here because this runs on every fill.
+    """
+    sheets = ((info or {}).get('bom_structure') or {}).get('sheets') or {}
+    part_numbers = set()
+    for answer in sheets.values():
+        if isinstance(answer, dict):
+            part_numbers.update(str(code).strip() for code in (answer.get('subBoms') or {}))
+    part_numbers.discard('')
+    if not part_numbers or not headers:
+        return []
+
+    cpn_index = _grid_column_index(headers, 'CPN Code')
+    code_index = _grid_column_index(headers, 'Item code')
+    if cpn_index < 0 or code_index < 0:
+        return []
+
+    codes = []
+    for row in rows or []:
+        if not isinstance(row, list) or max(cpn_index, code_index) >= len(row):
+            continue
+        if str(row[cpn_index] or '').strip() in part_numbers:
+            code = str(row[code_index] or '').strip()
+            if code:
+                codes.append(code)
+    return codes
+
+
+def _apply_sub_assembly_item_types(session_id, info, rows, headers):
+    """Type every sub-assembly row in the item export as a Finished good."""
+    sheets = ((info or {}).get('bom_structure') or {}).get('sheets') or {}
+    if not any(answer.get('hasLevels') for answer in sheets.values() if isinstance(answer, dict)):
+        return rows, 0
+    codes = _sub_assembly_item_codes(session_id)
+    if not codes or not headers:
+        return rows, 0
+
+    def index_of(name):
+        for position, header in enumerate(headers):
+            if _template_label_key(header) == _template_label_key(name):
+                return position
+        return -1
+
+    code_index = index_of('Item code')
+    type_index = index_of('Item type')
+    if code_index < 0 or type_index < 0:
+        return rows, 0
+
+    changed = 0
+    for row in rows or []:
+        if isinstance(row, list):
+            if code_index >= len(row):
+                continue
+            code = str(row[code_index] or '').strip()
+            if code in codes and str(row[type_index] or '').strip() != 'Finished good':
+                while len(row) <= type_index:
+                    row.append('')
+                row[type_index] = 'Finished good'
+                changed += 1
+        elif isinstance(row, dict):
+            code = str(row.get(headers[code_index]) or '').strip()
+            if code in codes and str(row.get(headers[type_index]) or '').strip() != 'Finished good':
+                row[headers[type_index]] = 'Finished good'
+                changed += 1
+    return rows, changed
 
 
 def _append_authored_finished_good(info, rows, headers):
@@ -5090,6 +5227,38 @@ def _positional_row_keys(headers):
     return keys
 
 
+_POSITIONAL_KEY_SUFFIX_RE = re.compile(r' @@dup\d+$')
+
+
+def _display_header(key):
+    """The header a positional key stands for.
+
+    Row dicts are keyed by ``_positional_row_keys``, so their keys carry the
+    repeat marker. Anything that turns row keys back into column headings has to
+    strip it, or the marker is written into the exported file as a column name.
+    """
+    return _POSITIONAL_KEY_SUFFIX_RE.sub('', str(key))
+
+
+def _headers_with_repeats(ordered_headers, present_headers):
+    """``ordered_headers``, topped up so every repeat present in the data survives.
+
+    Comparing header names one at a time cannot distinguish "this column is
+    already covered" from "this is a second Specification name" — the FactWise
+    template repeats several columns by design. Counting is what tells them
+    apart; matching by name alone either drops real repeats or, as it did here,
+    re-appends them under their internal key.
+    """
+    output = list(ordered_headers)
+    have = Counter(output)
+    need = Counter(present_headers)
+    for header in present_headers:
+        if have[header] < need[header]:
+            output.append(header)
+            have[header] += 1
+    return output
+
+
 @api_view(['GET', 'POST'])
 def download_file(request, session_id=None):
     """Download processed/converted file."""
@@ -5154,13 +5323,21 @@ def download_file(request, session_id=None):
         enhanced_data_result = info.get("enhanced_data")
         enhanced_rows = _download_rows(enhanced_data_result)
 
+        # `edited_data` is written by write_session_grid, which always persists
+        # the whole grid, so it is the editor's live state and is authoritative.
+        # `enhanced_data` is the one that can lag behind manual edits, so only it
+        # needs the stale-snapshot guard below.
+        grid_is_authoritative = False
+
         if edited_rows:
             enhanced_data = edited_rows
             use_mpn_enhanced = False
+            grid_is_authoritative = True
             logger.info(f"DOWNLOAD: Using edited data with {len(enhanced_data)} rows")
         elif formula_rows:
             enhanced_data = formula_rows
             use_mpn_enhanced = False
+            grid_is_authoritative = True
             logger.info(f"DOWNLOAD: Using formula-enhanced data with {len(enhanced_data)} rows")
         elif enhanced_rows:
             enhanced_data = enhanced_rows
@@ -5181,7 +5358,21 @@ def download_file(request, session_id=None):
         except Exception:
             total_rows_est = 0
 
-        if enhanced_data and (total_rows_est == 0 or len(enhanced_data) >= total_rows_est):
+        # A grid smaller than the uploaded file used to be treated as a stale
+        # snapshot and thrown away, silently re-deriving the export from the raw
+        # upload. But deleting rows is a normal thing to do in the editor, and it
+        # makes the grid smaller by design — so the export came back with the
+        # deleted rows restored, no generated Item codes and no Item types, and
+        # nothing said it had happened. The live grid is now believed whatever
+        # its size; the guard applies only to the snapshot that can lag.
+        if enhanced_data and grid_is_authoritative and total_rows_est and len(enhanced_data) < total_rows_est:
+            logger.info(
+                f"DOWNLOAD: grid has {len(enhanced_data)} rows vs {total_rows_est} in the "
+                f"uploaded file — exporting the grid, rows were deleted in the editor"
+            )
+
+        if enhanced_data and (grid_is_authoritative or total_rows_est == 0
+                              or len(enhanced_data) >= total_rows_est):
             # Use formula-enhanced or MPN-enhanced data for download
             transformed_rows = enhanced_data
             # Use enhanced_headers if MPN-enhanced, otherwise use current_template_headers
@@ -5583,7 +5774,10 @@ def download_file(request, session_id=None):
         # For enhanced or dict data, use headers that actually exist in the data and normalize shape
         if isinstance(transformed_rows, list) and transformed_rows and isinstance(transformed_rows[0], dict):
             # Get headers that actually exist in the enhanced data
-            actual_headers = list(transformed_rows[0].keys()) if transformed_rows else []
+            # Row keys carry the repeat marker; column headings must not. Reading
+            # the keys straight into headers is what wrote "Specification name
+            # @@dup1" into the exported sheet as an extra column.
+            actual_headers = [_display_header(key) for key in transformed_rows[0].keys()]
             logger.info(f"🔧 DEBUG download_file: Enhanced data has headers: {actual_headers}")
             
             # Use the canonical headers from session if available, but only include those that exist in the data
@@ -5645,10 +5839,10 @@ def download_file(request, session_id=None):
                     if header in actual_headers:
                         valid_headers.append(header)
 
-                # Add any additional headers from data that aren't in the requested order
-                for header in actual_headers:
-                    if header not in valid_headers:
-                        valid_headers.append(header)
+                # Add any additional headers from data that aren't in the requested
+                # order — by count, so a genuine second "Specification name" is
+                # kept while an already-covered column is not duplicated.
+                valid_headers = _headers_with_repeats(valid_headers, actual_headers)
 
                 all_headers = valid_headers
                 logger.info(f"🔧 DEBUG download_file: Using requested column order: {all_headers}")
@@ -5659,10 +5853,9 @@ def download_file(request, session_id=None):
                     if header in actual_headers:
                         valid_headers.append(header)
 
-                # Add any additional headers from data that aren't in canonical (shouldn't happen but defensive)
-                for header in actual_headers:
-                    if header not in valid_headers:
-                        valid_headers.append(header)
+                # Add any additional headers from data that aren't in canonical
+                # (shouldn't happen but defensive) — counted, for the same reason.
+                valid_headers = _headers_with_repeats(valid_headers, actual_headers)
 
                 all_headers = valid_headers
                 logger.info(f"🔧 DEBUG download_file: Using canonical headers for enhanced data: {all_headers}")
@@ -5687,6 +5880,17 @@ def download_file(request, session_id=None):
         # which silently reinstates anything filtered earlier.
         if export_type == 'item':
             transformed_rows, all_headers = _drop_bom_columns(transformed_rows, all_headers)
+
+        # A sub-assembly is the output of its own BOM, so it is a finished good
+        # in the item directory even though the sheet listed it as just another
+        # line. Only the popup-authored root used to get this, which left every
+        # level below it typed as a raw material.
+        if export_type == 'item':
+            transformed_rows, retyped = _apply_sub_assembly_item_types(
+                session_id, info, transformed_rows, all_headers
+            )
+            if retyped:
+                logger.info(f"DOWNLOAD: typed {retyped} sub-assembly row(s) as Finished good")
 
         # A flat sheet has no finished good of its own — the user authored it in
         # the BOM structure gate — so it exists only in `bom_structure`, never in
@@ -6412,6 +6616,9 @@ def save_mapping_template(request):
         override_default_values = request.data.get('default_values')  # Optional default values override
         mpn_validation_metadata = request.data.get('mpn_validation_metadata', {})  # MPN validation metadata
         overwrite_existing = bool(request.data.get('overwrite_existing'))
+        # Taken from the session rather than the request: these are the gate's
+        # answers, and the editor that saves the template never sees them.
+        bom_structure = (get_session_consistent(session_id) or {}).get('bom_structure') or {}
         
         if not template_name:
             return Response({
@@ -6573,6 +6780,7 @@ def save_mapping_template(request):
                 template.factwise_rules = factwise_rules  # Include factwise ID rules
                 template.default_values = default_values  # Include default values
                 template.mpn_validation_metadata = mpn_validation_metadata  # Include MPN validation metadata
+                template.bom_structure = bom_structure  # BOM structure gate answers
                 template.tags_count = tags_count
                 template.spec_pairs_count = spec_pairs_count
                 template.customer_id_pairs_count = customer_id_pairs_count
@@ -6589,6 +6797,7 @@ def save_mapping_template(request):
                     factwise_rules=factwise_rules,  # Include factwise ID rules
                     default_values=default_values,  # Include default values
                     mpn_validation_metadata=mpn_validation_metadata,  # Include MPN validation metadata
+                    bom_structure=bom_structure,  # BOM structure gate answers
                     tags_count=tags_count,
                     spec_pairs_count=spec_pairs_count,
                     customer_id_pairs_count=customer_id_pairs_count,
@@ -6736,6 +6945,10 @@ def update_mapping_template(request):
         template.template_headers = template_headers
         template.mappings = mappings
         template.formula_rules = formula_rules  # Update formula rules
+        # Keep the gate's answers current too, so "Update template" from the
+        # editor captures them the same way "Save template" does.
+        if info.get('bom_structure'):
+            template.bom_structure = info['bom_structure']
 
         # Also persist dynamic counts and default values if present
         tags_count = info.get('tags_count', getattr(template, 'tags_count', 1))
@@ -6851,6 +7064,7 @@ def _serialize_template_for_export(t):
             'factwise_rules': t.factwise_rules or [],
             'default_values': t.default_values or {},
             'mpn_validation_metadata': t.mpn_validation_metadata or {},
+            'bom_structure': t.bom_structure or {},
             'tags_count': t.tags_count,
             'spec_pairs_count': t.spec_pairs_count,
             'customer_id_pairs_count': t.customer_id_pairs_count,
@@ -6932,6 +7146,7 @@ def import_mapping_template(request):
             factwise_rules=tpl.get('factwise_rules') or [],
             default_values=tpl.get('default_values') or {},
             mpn_validation_metadata=tpl.get('mpn_validation_metadata') or {},
+            bom_structure=tpl.get('bom_structure') or {},
             tags_count=_int(tpl.get('tags_count')),
             spec_pairs_count=_int(tpl.get('spec_pairs_count')),
             customer_id_pairs_count=_int(tpl.get('customer_id_pairs_count')),
@@ -7588,6 +7803,14 @@ def apply_mapping_template(request):
             info['mappings'] = new_format_mappings or info.get('mappings')
             info['enhanced_headers'] = regenerated_headers
             info['default_values'] = default_values or info.get('default_values', {})
+            # Carry the BOM gate's answers over, but never overwrite answers the
+            # user has already given for this upload — a template is a default,
+            # not an override.
+            saved_bom_structure = getattr(template, 'bom_structure', None) or {}
+            if saved_bom_structure and not info.get('bom_structure'):
+                info['bom_structure'] = saved_bom_structure
+                logger.info(f"Applied BOM structure from template to session {session_id}")
+
             # Store MPN validation metadata from template if available
             mpn_metadata = getattr(template, 'mpn_validation_metadata', {})
             if mpn_metadata:
@@ -9903,10 +10126,29 @@ def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
     locked_codes = {str(code).strip() for code in (locked_item_codes or []) if str(code).strip()}
     item_code_index = _grid_column_index(output_headers, 'Item code') if (target_is_locked and locked_codes) else -1
 
+    # "duplicates" writes only to rows repeating a value already seen above them,
+    # so the first row keeping each value is left alone and the repeats are given
+    # something new. Rewriting every copy — including the first — would discard
+    # the original value entirely, which is never what "fix the duplicates" means.
+    duplicate_rows = set()
+    if write_mode == 'duplicates':
+        seen_values = set()
+        for row_index, row in enumerate(output_rows):
+            value = str(row[target_index] or '').strip() if target_index < len(row) else ''
+            if not value:
+                continue
+            if value in seen_values:
+                duplicate_rows.add(row_index)
+            else:
+                seen_values.add(value)
+
     for row_index, row in enumerate(output_rows):
         while len(row) < len(output_headers):
             row.append('')
-        if write_mode != 'overwrite' and str(row[target_index] or '').strip():
+        if write_mode == 'duplicates':
+            if row_index not in duplicate_rows:
+                continue
+        elif write_mode != 'overwrite' and str(row[target_index] or '').strip():
             continue
         if item_code_index >= 0 and str(row[item_code_index] or '').strip() in locked_codes:
             # Authored finished good: its identity is not the sheet's to rewrite.
@@ -9980,8 +10222,13 @@ def fill_or_create_column(request):
                 'error': f'Column "{clean_rule["target_column"]}" already exists. Use Fill existing column.',
             }, status=status.HTTP_400_BAD_REQUEST)
         # Rows created by the BOM structure gate keep their own identity, so a
-        # bulk fill cannot turn the finished good into a raw material.
+        # bulk fill cannot turn the finished good into a raw material. The same
+        # protection covers sub-assemblies: each is the output of its own BOM, so
+        # typing it as a raw material would contradict the BOM sheet. Their codes
+        # are resolved from the popup's answers by part number, which is cheap —
+        # asking generation here would re-derive the whole tree on every fill.
         locked_codes = [good['code'] for good in _authored_finished_goods(info)]
+        locked_codes.extend(_sub_assembly_codes_from_grid(info, headers, rows))
         new_headers, new_rows, changed = apply_column_value_rule(
             headers, rows, clean_rule, locked_item_codes=locked_codes
         )
@@ -12987,40 +13234,186 @@ def _normalized_records_from_grid(headers, rows):
     return records
 
 
-def _merge_item_codes_from_grid(records, grid_headers, grid_rows):
-    """Fill each normalized record's ``Item code`` from the mapped grid.
+# Every field the BOM generator consumes, mapped from the normalizer's key to
+# the destination-template header the editor shows it under. The two vocabularies
+# are different — the editor speaks "Quantity", the generator speaks "quantity" —
+# and matching is done through _template_label_key so case and spacing cannot
+# break the join. Only `Item code` used to cross this bridge, which is why
+# generating an ID showed up in validation and filling a quantity did not.
+BOM_GRID_FIELDS = (
+    ('Item code', 'Item code'),
+    ('quantity', 'Quantity'),
+    ('uom', 'Measurement unit'),
+    ('description', 'Description'),
+    ('mpn', 'MPN Code'),
+    ('cpn', 'CPN Code'),
+    ('manufacturer', 'Manufacturer'),
+    ('level', 'Level'),
+)
+
+
+# Columns used to re-align the grid with the uploaded sheet after rows have been
+# deleted. They have to be columns mapping copies across unchanged, so the two
+# sides can be compared: `Item code` is no good because the editor generates it
+# and the uploaded sheet's copy is still blank.
+BOM_ALIGNMENT_FIELDS = (('cpn', 'CPN Code'), ('mpn', 'MPN Code'))
+
+
+def _greedy_subsequence(grid_keys, source_keys):
+    """Match every grid key to a source key, in order, never reusing one."""
+    matched = []
+    cursor = 0
+    for key in grid_keys:
+        position = cursor
+        while position < len(source_keys) and source_keys[position] != key:
+            position += 1
+        if position >= len(source_keys):
+            return None
+        matched.append(position)
+        cursor = position + 1
+    return matched
+
+
+def _align_grid_to_records(grid_keys, source_keys):
+    """Map each grid row to its source row when rows have been deleted.
+
+    Deleting rows in the editor is the whole point of the editor, so it must not
+    break BOM export. Row order is preserved by every editing tool, which makes
+    the grid a *subsequence* of the uploaded sheet — and a subsequence can be
+    matched even when individual keys repeat.
+
+    The match is run from both ends and accepted only if the two agree. That is
+    what makes a repeated key safe: with ``[A, B, A]`` in the sheet and ``[A]``
+    left in the grid, matching from the left picks the first A and matching from
+    the right picks the last, they disagree, and the caller is told rather than
+    silently given the wrong row's structure.
+
+    Returns source indices per grid row, or None when the alignment is
+    impossible or ambiguous.
+    """
+    left = _greedy_subsequence(grid_keys, source_keys)
+    if left is None:
+        return None
+    reversed_match = _greedy_subsequence(grid_keys[::-1], source_keys[::-1])
+    if reversed_match is None:
+        return None
+    right = [len(source_keys) - 1 - position for position in reversed_match][::-1]
+    return left if left == right else None
+
+
+def _merge_grid_values_into_records(records, grid_headers, grid_rows):
+    """Overlay the editor's grid onto the normalized records, by row position.
 
     The two halves of a BOM live in different places: ``parentKey``/``relation``
-    only exist on the uploaded normalized sheet, while ``Item code`` is produced
-    later by the editor's Factwise ID rule and only exists in the mapped grid.
-    Neither source has both, so they are joined by row position — mapping is
+    only exist on the uploaded normalized sheet, while everything the user has
+    since mapped, filled or corrected only exists in the mapped grid. Neither
+    source has both, so they are joined by row position — mapping is
     row-preserving, so record *n* corresponds to grid row *n*.
 
-    If the row counts disagree the join is unsafe and is skipped rather than
-    guessed at, leaving the codes blank so validation reports the real problem.
+    Authority is decided per *column*, not per cell. A column the grid actually
+    carries is authoritative for every one of its rows, blanks included — the
+    editor is what the user is looking at, so a quantity they cleared has to
+    come out cleared and be caught by validation rather than quietly reverting
+    to the uploaded value.
+
+    "Carries" means the column exists in the grid AND has at least one non-blank
+    value. A destination-template column that mapping never populated is empty
+    for a different reason — nobody put anything there — and letting it win
+    would wipe good data off the uploaded sheet.
+
+    Returns ``(records, note)``. ``note['status'] == 'row_count_mismatch'`` means
+    the join could not be trusted and NOTHING was applied — the caller must
+    surface that, because silently falling back now discards real edits.
     """
     if not records or not grid_headers or not grid_rows:
-        return records, 'no_grid'
-    if len(grid_rows) != len(records):
-        return records, 'row_count_mismatch'
+        return records, {'status': 'no_grid'}
 
-    code_index = -1
+    index_of = {}
     for position, header in enumerate(grid_headers):
-        if _template_label_key(header) == _template_label_key('Item code'):
-            code_index = position
-            break
-    if code_index < 0:
-        return records, 'no_item_code_column'
+        key = _template_label_key(header)
+        if key and key not in index_of:
+            index_of[key] = position
 
-    filled = 0
-    for record, row in zip(records, grid_rows):
-        if not isinstance(row, list) or code_index >= len(row):
+    # Equal counts are matched by position. That stays tolerant of edits to the
+    # alignment columns themselves — correcting an MPN in the editor must not
+    # break export. It does assume the editor never re-orders rows.
+    if len(grid_rows) == len(records):
+        alignment = list(range(len(records)))
+        deleted = []
+    elif len(grid_rows) < len(records):
+        key_columns = [(field, index_of.get(_template_label_key(header)))
+                       for field, header in BOM_ALIGNMENT_FIELDS]
+        key_columns = [(field, position) for field, position in key_columns if position is not None]
+        alignment = None
+        if key_columns:
+            grid_keys = [
+                tuple(str(row[position] or '').strip()
+                      if isinstance(row, list) and position < len(row) else ''
+                      for _field, position in key_columns)
+                for row in grid_rows
+            ]
+            source_keys = [
+                tuple(str(record.get(field) or '').strip() for field, _position in key_columns)
+                for record in records
+            ]
+            alignment = _align_grid_to_records(grid_keys, source_keys)
+        if alignment is None:
+            return records, {
+                'status': 'row_count_mismatch',
+                'grid_rows': len(grid_rows),
+                'source_rows': len(records),
+            }
+        matched = set(alignment)
+        deleted = [position for position in range(len(records)) if position not in matched]
+    else:
+        # More rows in the editor than the sheet. A new row has no place in the
+        # BOM structure — nothing says what it is a child of — so it cannot be
+        # guessed at.
+        return records, {
+            'status': 'rows_added',
+            'grid_rows': len(grid_rows),
+            'source_rows': len(records),
+        }
+
+    columns = []
+    skipped = []
+    for field, header in BOM_GRID_FIELDS:
+        position = index_of.get(_template_label_key(header))
+        if position is None:
             continue
-        code = str(row[code_index] or '').strip()
-        if code and not str(record.get('Item code') or '').strip():
-            record['Item code'] = code
-            filled += 1
-    return records, ('filled:%d' % filled)
+        populated = any(
+            isinstance(row, list) and position < len(row) and str(row[position] or '').strip()
+            for row in grid_rows
+        )
+        if populated:
+            columns.append((field, position))
+        else:
+            skipped.append(header)
+    if not columns:
+        return records, {'status': 'no_matching_columns'}
+
+    changed = {}
+    kept = []
+    for row, source_index in zip(grid_rows, alignment):
+        record = records[source_index]
+        kept.append(record)
+        if not isinstance(row, list):
+            continue
+        for field, position in columns:
+            value = str(row[position] or '').strip() if position < len(row) else ''
+            if str(record.get(field) or '').strip() == value:
+                continue
+            record[field] = value
+            changed[field] = changed.get(field, 0) + 1
+
+    # Only the rows still in the editor come back. A row the user deleted is
+    # deleted — it does not belong in the BOM either.
+    return kept, {
+        'status': 'merged',
+        'changed': changed,
+        'empty_columns': skipped,
+        'deleted_rows': len(deleted),
+    }
 
 
 def _has_normalizer_columns(records):
@@ -13061,6 +13454,91 @@ def _read_normalized_source_table(info):
     except Exception as exc:
         logger.warning(f"Could not read normalized source table: {exc}")
         return [], []
+
+
+def _hierarchy_columns(records, answer):
+    """Pick the level / code columns to derive a tree from.
+
+    After normalization the rows are keyed by the normalizer's contract, so
+    ``level`` and ``cpn`` are the usual answers. The user's own column name is
+    the fallback for a sheet that reached generation without normalization.
+
+    The tree is keyed on the *customer's* part number rather than ``Item code``,
+    because item codes are generated later by the editor's Factwise ID rule and
+    are still blank while the structure is being derived. The generator maps
+    tree codes to item codes afterwards, so the two never have to agree here.
+    """
+    first = records[0] if records else {}
+    level_column = 'level' if 'level' in first else (answer.get('levelColumn') or '')
+
+    code_column = ''
+    for candidate in ('cpn', 'Item code', 'mpn'):
+        if candidate in first and any(str(r.get(candidate) or '').strip() for r in records):
+            code_column = candidate
+            break
+    return level_column, code_column
+
+
+def _generate_hierarchical_bom(records, answer, bom_header):
+    """Derive a tree from levelled rows and generate its multi-level BOM.
+
+    Returns (result, error_response); exactly one is set.
+    """
+    from .bom_tree import derive_tree, BomTreeError
+    from .bom_generator import generate_multi_level_bom, split_primaries_and_alternates
+
+    level_column, code_column = _hierarchy_columns(records, answer)
+    if not level_column:
+        return None, Response({
+            'success': False,
+            'error': 'No level column is available, so the BOM structure cannot be derived.',
+            'needs': 'level_column',
+        }, status=status.HTTP_400_BAD_REQUEST)
+    if not code_column:
+        return None, Response({
+            'success': False,
+            'error': ('No part number column has any values, so the BOM structure '
+                      'cannot be derived.'),
+            'needs': 'code_column',
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    # Alternates are the same BOM line from another manufacturer. They must not
+    # become siblings in the tree, so the structure is derived from primaries and
+    # the alternates are re-attached sideways by the generator.
+    primary_of, alternates_of = split_primaries_and_alternates(records)
+    primaries = [record for record in primary_of.values() if record] or records
+
+    root = {
+        'code': str(bom_header.get('finishedGoodCode') or '').strip(),
+        'description': str(bom_header.get('itemName') or '').strip(),
+        'uom': str(bom_header.get('measurementUnit') or '').strip(),
+    }
+
+    try:
+        tree = derive_tree(
+            primaries, level_column, code_column,
+            description_column='description' if 'description' in (primaries[0] if primaries else {}) else None,
+            quantity_column='quantity' if 'quantity' in (primaries[0] if primaries else {}) else None,
+            uom_column='uom' if 'uom' in (primaries[0] if primaries else {}) else None,
+            root=root,
+        )
+    except BomTreeError as exc:
+        return None, Response({
+            'success': False,
+            'error': str(exc),
+            'needs': 'tree_structure',
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    if not tree.is_valid:
+        return None, Response({
+            'success': False,
+            'errors': tree.errors,
+            'warnings': tree.warnings,
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    return generate_multi_level_bom(
+        tree, bom_header, alternates_of, records, answer.get('subBoms') or {}
+    ), None
 
 
 def _generate_bom_for_session(session_id):
@@ -13104,17 +13582,10 @@ def _generate_bom_for_session(session_id):
     is_hierarchical = bool(answer.get('hasLevels'))
     bom_header = answer.get('bomHeader')
 
-    # Multi-level generation is not implemented. Refusing is the honest answer:
-    # running the single-level generator over a hierarchical sheet would flatten
-    # every sub-assembly into one block and produce a confidently wrong BOM.
-    if is_hierarchical:
-        return None, None, Response({
-            'success': False,
-            'error': ('This sheet has BOM levels. Multi-level BOM generation is not '
-                      'available yet, so no BOM is generated for it.'),
-            'needs': 'multi_level_support',
-        }, status=status.HTTP_400_BAD_REQUEST)
-
+    # A finished good is required either way. A flat sheet has no root at all; a
+    # hierarchical sheet usually starts at level 1 and names its root in a
+    # preamble above the table, which is not part of the data. Both are authored
+    # in the BOM structure gate.
     if not bom_header:
         return None, None, Response({
             'success': False,
@@ -13123,25 +13594,64 @@ def _generate_bom_for_session(session_id):
             'needs': 'bom_header',
         }, status=status.HTTP_400_BAD_REQUEST)
 
-    # Prefer the mapped grid when it still carries the normalizer's columns;
-    # otherwise fall back to the uploaded sheet. Before mapping has run the grid
-    # is empty, and mapping may drop `parentKey`/`relation` because they are not
-    # destination template columns — either way the source still has them.
+    # The grid the user is looking at is the source of truth for values. It is
+    # not the source of truth for *structure*, because mapping drops
+    # `parentKey`/`relation` — they are not destination template columns. So the
+    # uploaded sheet supplies the grouping and the grid is overlaid on top of it.
+    # Generating from the uploaded sheet alone is what made every edit after
+    # mapping invisible to BOM export.
     headers, rows = read_session_grid(session_id, info)
     records = _normalized_records_from_grid(headers or [], rows or [])
     if not _has_normalizer_columns(records):
         source_headers, source_rows = _read_normalized_source_table(info)
         source_records = _normalized_records_from_grid(source_headers, source_rows)
         if _has_normalizer_columns(source_records):
-            # Grouping comes from the source sheet; item codes are generated
-            # later and only exist in the mapped grid, so the two are joined.
-            source_records, join_note = _merge_item_codes_from_grid(
+            source_records, join_note = _merge_grid_values_into_records(
                 source_records, headers or [], rows or []
             )
-            logger.info(f"BOM generation: item code join -> {join_note}")
+            logger.info(f"BOM generation: grid join -> {join_note}")
+            # Deleted rows are normal and handled. The two cases left are rows
+            # the editor added, which have no place in the structure, and an
+            # alignment too ambiguous to trust — both are reported rather than
+            # guessed at, because guessing means giving a row another row's
+            # parent.
+            if join_note.get('status') == 'rows_added':
+                return None, None, Response({
+                    'success': False,
+                    'error': (
+                        'The editor has %d rows but the uploaded sheet has %d. Rows added '
+                        'in the editor have no place in the BOM structure — nothing says '
+                        'what they are part of. Add them in the BOM Normalizer instead, '
+                        'or remove them before exporting.'
+                        % (join_note.get('grid_rows', 0), join_note.get('source_rows', 0))
+                    ),
+                    'needs': 'rows_added',
+                    'grid_rows': join_note.get('grid_rows', 0),
+                    'source_rows': join_note.get('source_rows', 0),
+                }, status=status.HTTP_400_BAD_REQUEST)
+            if join_note.get('status') == 'row_count_mismatch':
+                return None, None, Response({
+                    'success': False,
+                    'error': (
+                        'The editor has %d rows and the uploaded sheet has %d, but the '
+                        'remaining rows could not be matched to the sheet unambiguously. '
+                        'This happens when CPN Code or MPN Code was edited on a row that '
+                        'was also part of a deletion. Re-run the BOM Normalizer on the '
+                        'current sheet, then export again.'
+                        % (join_note.get('grid_rows', 0), join_note.get('source_rows', 0))
+                    ),
+                    'needs': 'row_count_mismatch',
+                    'grid_rows': join_note.get('grid_rows', 0),
+                    'source_rows': join_note.get('source_rows', 0),
+                }, status=status.HTTP_400_BAD_REQUEST)
             records = source_records
 
-    result = generate_flat_bom(records, bom_header)
+    if is_hierarchical:
+        result, error_response = _generate_hierarchical_bom(records, answer, bom_header)
+        if error_response is not None:
+            return None, None, error_response
+    else:
+        result = generate_flat_bom(records, bom_header)
 
     if not result.is_valid:
         return None, None, Response({
