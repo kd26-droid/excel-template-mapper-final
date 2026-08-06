@@ -807,13 +807,27 @@ export default function ColumnMapping() {
   }, [mappingHistory, edges]);
 
   const handleBackNavigation = useCallback(() => {
-    const backState = location.state?.mappingBackState || {};
+    // Returning from the Data Editor arrives with no route state, so fall back to the
+    // copy parked in sessionStorage on the way out.
+    let storedBackState = null;
+    let storedFromNormalizer = false;
+    if (!location.state?.mappingBackState) {
+      try {
+        const raw = sessionStorage.getItem(`mappingBackState_${sessionId}`);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          storedFromNormalizer = Boolean(parsed?.fromBomNormalizer);
+          storedBackState = parsed;
+        }
+      } catch (_) {}
+    }
+    const backState = location.state?.mappingBackState || storedBackState || {};
     // This is a deliberate in-app navigation carrying its own return state, so the
     // popstate guard below must not turn it into a window.location.reload() — a
     // reload discards location.state and the destination loses everything it needs
     // to restore.
     bypassUnloadGuardRef.current = true;
-    if (location.state?.fromBomNormalizer || backState.route === '/bom-normalizer') {
+    if (location.state?.fromBomNormalizer || storedFromNormalizer || backState.route === '/bom-normalizer') {
       navigate('/bom-normalizer', {
         state: {
           ...(location.state?.uploadSource ? { uploadSource: location.state.uploadSource } : {}),
@@ -838,7 +852,7 @@ export default function ColumnMapping() {
         returnFromMapping: true,
       }
     });
-  }, [location.state, navigate]);
+  }, [location.state, navigate, sessionId]);
 
   // Kept in a ref so the popstate listener can leave via the same route without
   // re-subscribing every time the callback identity changes.
@@ -4473,6 +4487,19 @@ export default function ColumnMapping() {
         sessionStorage.setItem(`processingTemplateContext_${sid}`, JSON.stringify(uploadSource));
       } catch (_) {}
     }
+    // Park where "back" should go before handing off to the editor. The editor
+    // navigates back here without any route state, so without this the mapping page
+    // returns with nothing and its own back button falls through to /upload instead
+    // of the screen the user actually came from.
+    try {
+      const backState = location.state?.mappingBackState;
+      if (backState) {
+        sessionStorage.setItem(`mappingBackState_${sid}`, JSON.stringify({
+          ...backState,
+          fromBomNormalizer: Boolean(location.state?.fromBomNormalizer),
+        }));
+      }
+    } catch (_) {}
     setTimeout(() => navigate(`/editor/${sid}`, {
       state: {
         ...(uploadSource ? { uploadSource } : {}),
