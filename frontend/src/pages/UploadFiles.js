@@ -37,12 +37,13 @@ import {
   CloudUpload as CloudUploadIcon,
   LibraryBooks as LibraryBooksIcon,
   CheckCircle as CheckCircleIcon,
-  TrendingUp as TrendingUpIcon,
   Schedule as ScheduleIcon,
   PlayArrow as PlayArrowIcon,
   Warning as WarningIcon,
   UploadFile as UploadFileIcon,
   Search as SearchIcon,
+  TableChart as TableChartIcon,
+  HighlightAlt as HighlightAltIcon,
   Close as CloseIcon,
   Science as ScienceIcon,
   Add as AddIcon,
@@ -699,6 +700,29 @@ const UploadFiles = () => {
       bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff',
       transform: 'translateY(-1px)'
     }
+  };
+
+  // Tinted icon chip + muted caveat line for the two PDF method tiles. The
+  // caption carries the gotcha that actually decides the choice, so it stays
+  // visually quieter than the description above it.
+  const choiceIconWrapSx = (tint) => ({
+    flexShrink: 0,
+    width: 52,
+    height: 52,
+    borderRadius: '14px',
+    display: 'grid',
+    placeItems: 'center',
+    color: tint,
+    bgcolor: `${tint}${isDarkMode ? '26' : '1a'}`,
+    border: `1px solid ${tint}3d`
+  });
+
+  const choiceCaptionSx = {
+    mt: 1.25,
+    display: 'block',
+    fontSize: 12,
+    lineHeight: 1.5,
+    color: isDarkMode ? '#7c8ba1' : '#94a3b8'
   };
 
   const sheetJoinDraftDbName = 'excel-template-mapper-drafts';
@@ -5543,61 +5567,54 @@ const UploadFiles = () => {
           </Box>
         </DialogTitle>
         <DialogContent sx={dialogBodySx}>
-          <Typography variant="body1" sx={{ mb: 3, color: isDarkMode ? '#94a3b8' : '#64748b' }}>
-            How would you like to process your PDF? Choose the method that best fits your document:
+          <Typography variant="body1" sx={{ mb: 2.5, color: isDarkMode ? '#94a3b8' : '#64748b' }}>
+            How should we read this PDF? Pick the option that matches how the page is laid out.
           </Typography>
 
-          <Grid container spacing={3}>
-            <Grid item xs={12} sm={6}>
-              <Card
-                sx={dialogChoiceCardSx}
-                onClick={() => handlePdfProcessingChoice('ocr')}
-              >
-                <CardContent sx={{ textAlign: 'center', p: 3 }}>
-                  <PlayArrowIcon sx={{ fontSize: 48, color: 'success.main', mb: 2 }} />
-                  <Typography variant="h6" gutterBottom>
-                    Simple OCR
-                  </Typography>
-                  <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
-                    For standard documents with clear, linear layout. Faster processing with automatic table detection.
-                  </Typography>
-                </CardContent>
-              </Card>
-            </Grid>
-
-            <Grid item xs={12} sm={6}>
-              <Card
-                sx={dialogChoiceCardSx}
-                onClick={() => handlePdfProcessingChoice('compare')}
-              >
-                <CardContent sx={{ textAlign: 'center', p: 3 }}>
-                  <TrendingUpIcon sx={{ fontSize: 48, color: 'info.main', mb: 2 }} />
-                  <Typography variant="h6" gutterBottom>
-                    Compare
-                  </Typography>
-                  <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
-                    Runs native extraction and Azure OCR, then chooses the cleaner result for mapping.
-                  </Typography>
-                </CardContent>
-              </Card>
-            </Grid>
-
-            <Grid item xs={12} sm={6}>
-              <Card
-                sx={dialogChoiceCardSx}
-                onClick={() => handlePdfProcessingChoice('zonal')}
-              >
-                <CardContent sx={{ textAlign: 'center', p: 3 }}>
-                  <SearchIcon sx={{ fontSize: 48, color: 'warning.main', mb: 2 }} />
-                  <Typography variant="h6" gutterBottom>
-                    Zone Mapping
-                  </Typography>
-                  <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
-                    For complex BOMs or documents with irregular layouts. Manual zone selection for precise extraction.
-                  </Typography>
-                </CardContent>
-              </Card>
-            </Grid>
+          <Grid container spacing={2.5}>
+            {[
+              {
+                key: 'ocr',
+                tint: '#22c55e',
+                icon: <TableChartIcon sx={{ fontSize: 28 }} />,
+                title: 'Simple OCR',
+                body: 'Best when the page is already a clean table — clear rows and columns, all text readable, and nothing else around it.',
+                caption: 'Reads the whole page, so anything outside the table (logos, notes, page headers, totals) comes through as data too.'
+              },
+              {
+                key: 'zonal',
+                tint: '#f59e0b',
+                icon: <HighlightAltIcon sx={{ fontSize: 28 }} />,
+                title: 'Select Area Manually',
+                body: 'You draw a box around the exact part of each page you want, and only what is inside the box gets extracted.',
+                caption: 'Use for irregular tables, several tables on one page, or pages with extra content you need to leave out.'
+              }
+            ].map((option) => (
+              <Grid item xs={12} sm={6} key={option.key}>
+                <Card
+                  sx={{ ...dialogChoiceCardSx, height: '100%' }}
+                  onClick={() => handlePdfProcessingChoice(option.key)}
+                >
+                  <CardContent sx={{ textAlign: 'center', p: 3, '&:last-child': { pb: 3 } }}>
+                    <Box sx={{ ...choiceIconWrapSx(option.tint), mx: 'auto', mb: 2 }}>
+                      {option.icon}
+                    </Box>
+                    <Typography variant="h6" fontWeight={700} sx={{ lineHeight: 1.3 }}>
+                      {option.title}
+                    </Typography>
+                    <Typography
+                      variant="body2"
+                      sx={{ mt: 1, color: isDarkMode ? '#94a3b8' : '#64748b', lineHeight: 1.55 }}
+                    >
+                      {option.body}
+                    </Typography>
+                    <Typography variant="caption" sx={choiceCaptionSx}>
+                      {option.caption}
+                    </Typography>
+                  </CardContent>
+                </Card>
+              </Grid>
+            ))}
           </Grid>
         </DialogContent>
         <DialogActions sx={{ ...dialogFooterSx, gap: 1 }}>
