@@ -10235,13 +10235,35 @@ def fill_or_create_column(request):
         write_session_grid(session_id, info, new_headers, new_rows)
 
         target = clean_rule['target_column']
+        # Filling a column twice is a normal way to work: join MPN + manufacturer
+        # first, then copy CPN into whatever that left blank. Both rules matter,
+        # and in that order. Dropping every earlier rule for the column threw the
+        # first step away, so replaying the template produced a different sheet
+        # than the user had made — silently.
+        #
+        # An overwrite is different: it rewrites the whole column, so anything
+        # that ran before it on that column can no longer be observed and is
+        # dropped. A fill_empty only completes what came before, so it is kept.
+        replaces_column = str(clean_rule.get('write_mode') or '').strip().lower() == 'overwrite'
+
+        def _same_rule(a, b):
+            """True when a rule is being re-applied unchanged, ignoring stamps."""
+            ignore = {'applied_at'}
+            return ({k: v for k, v in (a or {}).items() if k not in ignore}
+                    == {k: v for k, v in (b or {}).items() if k not in ignore})
+
         retained_rules = []
         for existing in info.get('factwise_rules') or []:
             if existing.get('type') == 'column_value' and existing.get('target_column') == target:
-                continue
-            if target == 'Item code' and existing.get('type') == 'factwise_id':
+                if replaces_column or _same_rule(existing, clean_rule):
+                    continue
+            if target == 'Item code' and existing.get('type') == 'factwise_id' and replaces_column:
                 continue
             retained_rules.append(existing)
+
+        # Stamped so the saved template can replay these in the order they were
+        # actually run, rather than in whatever order the save path assembles.
+        clean_rule['applied_at'] = timezone.now().isoformat()
         retained_rules.append(clean_rule)
         info['factwise_rules'] = retained_rules
         save_session(session_id, info)

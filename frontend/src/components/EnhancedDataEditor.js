@@ -1238,7 +1238,22 @@ const EnhancedDataEditor = () => {
 
     postMappingActions.forEach(push);
 
-    return mergePostMappingActions(actions);
+    // Assembling by category — factwise rules, then defaults, then formulas,
+    // then clicked actions — put a rule that ran second ahead of one that ran
+    // first, so the template replayed them backwards. Two fill_empty rules on
+    // one column give completely different results in the wrong order, so the
+    // real running order is restored here from the stamps.
+    const ranAt = (action) => {
+      const stamp = action?.rule?.applied_at || action?.created_at || '';
+      const parsed = Date.parse(stamp);
+      return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
+    };
+    const ordered = actions
+      .map((action, index) => ({ action, index }))
+      .sort((a, b) => (ranAt(a.action) - ranAt(b.action)) || (a.index - b.index))
+      .map(entry => entry.action);
+
+    return mergePostMappingActions(ordered);
   }, [mergePostMappingActions, normalizePostMappingAction, postMappingActions]);
 
   const updateDataIntegrity = useCallback((consistent, issues = []) => {
@@ -1790,6 +1805,10 @@ const EnhancedDataEditor = () => {
   const replayPostMappingActions = useCallback(async (actions = []) => {
     if (!Array.isArray(actions) || actions.length === 0 || !sessionId) return;
     const failures = [];
+    // Row deletions report what they removed: the same condition can match a
+    // different number of rows on a different file, and silently dropping a
+    // different set than last time is not something to find out at export.
+    const replayNotes = [];
     let changed = false;
     const currentFields = new Set(
       (columnDefs || [])
@@ -1884,6 +1903,22 @@ const EnhancedDataEditor = () => {
           );
           if (!resp.data?.success) throw new Error(resp.data?.error || 'Fill missing values failed');
           changed = true;
+        } else if (action.type === 'delete_rows') {
+          if (!action.column || !action.operator) continue;
+          // Replaying a deletion removes rows rather than overwriting cells, so
+          // it is reported rather than applied silently: on a different file the
+          // same condition can match a different number of rows, or none.
+          const resp = await api.deleteRowsConditional(
+            sessionId,
+            action.column,
+            action.operator,
+            action.compare || ''
+          );
+          if (!resp.data?.success) throw new Error(resp.data?.error || 'Delete rows failed');
+          replayNotes.push(
+            `${action.label || 'Delete rows'}: removed ${resp.data.removed || 0}, ${resp.data.remaining} left`
+          );
+          changed = true;
         }
       } catch (error) {
         failures.push(action.label || action.type || 'Saved action');
@@ -1895,6 +1930,8 @@ const EnhancedDataEditor = () => {
     }
     if (failures.length > 0) {
       showSnackbar(`Template opened, but ${failures.length} saved tool action${failures.length === 1 ? '' : 's'} could not be replayed.`, 'warning');
+    } else if (replayNotes.length > 0) {
+      showSnackbar(`Saved template tools applied. ${replayNotes.join('; ')}.`, 'success');
     } else if (changed) {
       showSnackbar('Saved template tools applied to this workbook.', 'success');
     }
@@ -4231,6 +4268,16 @@ const EnhancedDataEditor = () => {
       if (!resp.data?.success) throw new Error(resp.data?.error || 'Delete failed');
       const n = resp.data.removed || 0;
       showSnackbar(`Deleted ${n} row${n !== 1 ? 's' : ''} — ${resp.data.remaining} remaining.`, 'success');
+      // Saved with the template like the fill tools are. Without this, removing
+      // the document rows was something the user had to redo by hand on every
+      // file, and "Save template" quietly did not include it.
+      recordPostMappingAction({
+        type: 'delete_rows',
+        label: `Delete rows where ${delCol} ${delOp.replace(/_/g, ' ')}${delCompare ? ` "${delCompare}"` : ''}`,
+        column: delCol,
+        operator: delOp,
+        compare: delCompare,
+      });
       setDeleteRowsOpen(false);
       await fetchDataSynchronized();
     } catch (e) {
@@ -4238,7 +4285,7 @@ const EnhancedDataEditor = () => {
     } finally {
       setDelBusy(false);
     }
-  }, [delCol, delOp, delCompare, sessionId, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage]);
+  }, [delCol, delOp, delCompare, sessionId, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage, recordPostMappingAction]);
 
   // DEMO: export the pre-made "golden" BOM sheet for this input.
   const handleExportBomSheet = useCallback(async () => {
