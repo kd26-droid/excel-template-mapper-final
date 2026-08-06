@@ -5,6 +5,7 @@ import os
 import json
 import tempfile
 import logging
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -520,6 +521,33 @@ def upload_pdf(request):
             # Update session status
             pdf_session.processing_status = 'completed'
             pdf_session.save()
+
+            # Warm page 1 in the background. Rendering a page at preview DPI takes
+            # ~13s, and the user always looks at page 1 first — so without this they
+            # sit on a blank canvas for that whole time. Starting it here overlaps the
+            # render with the processing-method dialog and the navigation, so by the
+            # time the zone screen asks for the image it is usually already on disk
+            # (a warm hit serves in ~60ms). Quality is unchanged: this renders exactly
+            # what get_page_image would have rendered, just earlier.
+            def _warm_first_page(pdf_path, sess_id):
+                try:
+                    warm_processor = PDFProcessor()
+                    p = warm_processor.convert_single_page(
+                        pdf_path, sess_id, 1,
+                        dpi=warm_processor.config.get('preview_image_dpi', 300),
+                        optimize=False,
+                    )
+                    PDFPage.objects.filter(
+                        pdf_session__session_id=sess_id, page_number=1
+                    ).update(image_path=p['image_path'], width=p['width'], height=p['height'])
+                    logger.info(f"Pre-rendered page 1 for session {sess_id}")
+                except Exception as warm_err:
+                    # Best effort only — get_page_image still renders on demand.
+                    logger.warning(f"Could not pre-render page 1 for {sess_id}: {warm_err}")
+
+            threading.Thread(
+                target=_warm_first_page, args=(file_path, session_id), daemon=True
+            ).start()
 
             logger.info(f"PDF upload successful (lazy render): {session_id} — {len(page_dims)} pages")
 

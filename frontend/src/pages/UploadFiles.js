@@ -3223,17 +3223,17 @@ const UploadFiles = () => {
       const context = pendingPdfContext || {};
 
       if (processingMode === 'zonal') {
+        // Navigate immediately. The zone screen shows its own progress while the page
+        // image loads, so a delay here just adds dead time on top of the render.
         setSuccess('Proceeding to zone selection for optimal results...');
-        setTimeout(() => {
-          navigate(`/pdf-zones/${pendingPdfSessionId}`, {
-            state: {
-              fromUpload: true,
-              returnToUpload: true,
-              pdfAlignment: pdfDataAlignment,
-              sourceFileName: context.file?.name || userFile?.name || 'PDF source',
-            }
-          });
-        }, 1000);
+        navigate(`/pdf-zones/${pendingPdfSessionId}`, {
+          state: {
+            fromUpload: true,
+            returnToUpload: true,
+            pdfAlignment: pdfDataAlignment,
+            sourceFileName: context.file?.name || userFile?.name || 'PDF source',
+          }
+        });
         return;
       }
 
