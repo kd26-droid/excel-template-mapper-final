@@ -58,6 +58,7 @@ import {
   ImportExport as ImportExportIcon,
   CheckCircle as CheckCircleIcon,
   Error as ErrorIcon,
+  HelpOutline as HelpOutlineIcon,
   Edit as EditIcon,
   Check as CheckIcon,
   ArrowBack as ArrowBackIcon,
@@ -336,12 +337,34 @@ const deriveDisplayName = (col, allHeaders = []) => {
 // opinion, it is unknown rather than a silent pass.
 const MPN_VALID_COLUMNS = ['MPN valid (DigiKey)', 'MPN valid', 'MPN valid (Mouser)', 'MPN valid (Element14)'];
 
-const getMpnRowStatus = (row) => {
+// 'valid'   — at least one source found the part.
+// 'invalid' — at least one source answered, and every answer was "not found".
+// 'unknown' — the row has a part number, but nothing has checked it.
+// 'missing' — the MPN cell is empty, so there is nothing to check.
+//
+// A source only ever writes 'Yes'/'No' after an actual lookup, so a blank means
+// "not checked", never "checked and inconclusive". That leaves the no-answer
+// rows, which split on whether the row has a part number waiting to be checked
+// (someone should run validation) or no part number at all (someone has to go
+// find it) — two different follow-ups, so two different buckets.
+// Filter menu selection -> the row status it keeps. 'all' is absent on purpose:
+// anything not in here skips MPN filtering entirely.
+const MPN_ROW_FILTER_STATUS = {
+  valid_mpn: 'valid',
+  invalid_mpn: 'invalid',
+  unknown: 'unknown',
+  missing_mpn: 'missing',
+};
+
+const getMpnRowStatus = (row, mpnField) => {
   const values = MPN_VALID_COLUMNS
     .map(column => String(row?.[column] ?? '').trim().toLowerCase())
     .filter(Boolean);
   if (values.includes('yes')) return 'valid';
   if (values.includes('no')) return 'invalid';
+  // Without a known MPN column we cannot tell the two apart, so keep every
+  // unchecked row in 'unknown' rather than mislabel it as missing.
+  if (mpnField && !String(row?.[mpnField] ?? '').trim()) return 'missing';
   return 'unknown';
 };
 
@@ -856,6 +879,23 @@ const EnhancedDataEditor = () => {
     }
     return null;
   }, []);
+
+  // Which column holds the part number itself. The row filters need it to tell
+  // "has an MPN nobody checked" from "has no MPN at all" — the validation
+  // columns are blank in both cases, so they cannot answer that on their own.
+  // Null while the grid is still loading, which keeps every unchecked row in
+  // Unknown until we know where to look.
+  const mpnSourceField = useMemo(() => {
+    const fields = (columnDefs || [])
+      .map(col => col.field)
+      .filter(field => field && field !== '__row_number__');
+    if (!fields.length) return null;
+    if (mpnColumn && fields.includes(mpnColumn) && !isMpnValidationColumn(mpnColumn)) {
+      return mpnColumn;
+    }
+    const detected = detectMpnColumn(fields);
+    return detected && !isMpnValidationColumn(detected) ? detected : null;
+  }, [columnDefs, mpnColumn, detectMpnColumn, isMpnValidationColumn]);
 
   const detectProducerColumn = useCallback((headers) => {
     if (!Array.isArray(headers)) return null;
@@ -4897,11 +4937,10 @@ const EnhancedDataEditor = () => {
     .map((row, rowIndex) => ({ row, rowIndex }))
     .filter(({ row }) => {
       const wantsInvalid = mpnFilterInvalidOnly || rowFilterMode === 'invalid_mpn';
-      if (!wantsInvalid && rowFilterMode !== 'valid_mpn' && rowFilterMode !== 'unknown') return true;
-      const status = getMpnRowStatus(row);
+      if (!wantsInvalid && !MPN_ROW_FILTER_STATUS[rowFilterMode]) return true;
+      const status = getMpnRowStatus(row, mpnSourceField);
       if (wantsInvalid) return status === 'invalid';
-      if (rowFilterMode === 'valid_mpn') return status === 'valid';
-      return status === 'unknown';
+      return status === MPN_ROW_FILTER_STATUS[rowFilterMode];
     })
     .filter(({ row }) => {
       if (!rowSearchQuery) return true;
@@ -5883,6 +5922,17 @@ const EnhancedDataEditor = () => {
                 >
                   <ListItemIcon>{rowFilterMode === 'unknown' ? <CheckIcon sx={{ color: t.color.warningText }} /> : <ErrorIcon sx={{ color: t.color.warningText }} />}</ListItemIcon>
                   <ListItemText>Unknown MPN rows</ListItemText>
+                </MenuItem>
+                {/* Not gated on validation: an empty MPN cell is knowable before
+                    anything is looked up, and these are exactly the rows someone
+                    has to go source a part number for. It does need to know
+                    which column holds the MPN. */}
+                <MenuItem
+                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('missing_mpn'); setMpnFilterInvalidOnly(false); }}
+                  disabled={!mpnSourceField}
+                >
+                  <ListItemIcon>{rowFilterMode === 'missing_mpn' ? <CheckIcon sx={{ color: t.text.secondary }} /> : <HelpOutlineIcon sx={{ color: t.text.secondary }} />}</ListItemIcon>
+                  <ListItemText>Missing MPN rows</ListItemText>
                 </MenuItem>
               </Menu>
               <TextField
