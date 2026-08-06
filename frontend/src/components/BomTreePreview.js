@@ -185,20 +185,43 @@ export default function BomTreePreview({ sessionId, height = 460, fullscreen = f
     let alive = true;
     setLoading(true);
     setError(null);
-    api.getBomTree(sessionId)
-      .then((r) => {
+
+    const loadGeneratedTree = () => api.getBomTree(sessionId);
+    const loadDemoTree = () => api.getDemoBomTree(sessionId);
+    const applyTreeResponse = (r) => {
+      if (!alive) return;
+      const nextTree = r.data?.tree || null;
+      if (!nextTree) {
+        setTree(null);
+        setError('No BOM preview is available for this input yet.');
+      } else {
+        setTree(nextTree);
+      }
+      setMeta({
+        file: r.data?.file,
+        source: r.data?.source,
+        bomCount: r.data?.bomCount,
+        finishedGoods: r.data?.finishedGoods,
+        truncated: r.data?.truncated
+      });
+      setLoading(false);
+    };
+
+    loadGeneratedTree()
+      .catch(loadDemoTree)
+      .then(applyTreeResponse)
+      .catch(() => {
         if (!alive) return;
-        setTree(r.data?.tree || null);
         setMeta({
-          file: r.data?.file,
-          source: r.data?.source,
-          bomCount: r.data?.bomCount,
-          finishedGoods: r.data?.finishedGoods,
-          truncated: r.data?.truncated
+          file: undefined,
+          source: undefined,
+          bomCount: undefined,
+          finishedGoods: undefined,
+          truncated: undefined
         });
+        setError('No BOM preview is available for this input yet.');
         setLoading(false);
-      })
-      .catch(() => { if (alive) { setError('No BOM preview is available for this input yet.'); setLoading(false); } });
+      });
     return () => { alive = false; };
   }, [sessionId]);
 
@@ -232,7 +255,7 @@ export default function BomTreePreview({ sessionId, height = 460, fullscreen = f
       const id = setTimeout(() => rfRef.current && rfRef.current.fitView({ duration: 300, padding: 0.2 }), 60);
       return () => clearTimeout(id);
     }
-  }, [nodes.length]);
+  }, [nodes.length, fullscreen]);
 
   const onNodeClick = useCallback((_e, node) => {
     if (!node?.data?.hasKids) return;

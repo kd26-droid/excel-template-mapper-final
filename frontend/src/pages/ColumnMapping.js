@@ -5355,6 +5355,26 @@ export default function ColumnMapping() {
               {mappingStats.total} of {templateHeaders.length} columns mapped
             </div>
           </section>
+
+          {selectedSourceNode && (
+            <section className={`${sidePanelClass} ${
+              isDarkMode
+                ? 'bg-purple-950/30 border-purple-800/45 text-purple-100'
+                : 'bg-purple-50/95 border-purple-200 text-purple-800'
+            }`}>
+              <div className="flex items-start gap-3">
+                <div className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full bg-purple-500 animate-pulse" />
+                <div className="min-w-0">
+                  <div className="text-xs font-extrabold uppercase tracking-wide opacity-75">
+                    Source selected
+                  </div>
+                  <div className="mt-1 text-sm font-semibold leading-snug">
+                    Click a FW Item Template column to create mapping.
+                  </div>
+                </div>
+              </div>
+            </section>
+          )}
         </aside>
         
         {/* Main mapping area */}
@@ -5404,34 +5424,18 @@ export default function ColumnMapping() {
             </div>
           </div>
 
-          {/* Instructions */}
-          {selectedSourceNode && (
-            <div className={`fixed left-1/2 transform -translate-x-1/2 z-30 rounded-xl border shadow-lg px-4 py-2 ${
-              isDarkMode
-                ? 'bg-purple-950/82 border-purple-500/35 text-purple-100'
-                : 'bg-purple-50/96 border-purple-200 text-purple-800'
-            }`} style={{ top: '218px' }}>
-              <div className="flex items-center gap-2">
-                <div className="w-2.5 h-2.5 bg-purple-500 rounded-full animate-pulse"></div>
-                <span className="text-sm font-semibold">
-                  Click on a Template column to create mapping
-                </span>
-              </div>
-            </div>
-          )}
-
           {selectedEdge && (
-            <div className={`fixed left-1/2 transform -translate-x-1/2 z-30 rounded-xl border shadow-lg px-4 py-2.5 ${
+            <div className={`absolute top-[88px] right-8 z-30 rounded-xl border shadow-lg px-3 py-2 ${
               isDarkMode
-                ? 'bg-red-950/90 border-red-700/70 text-red-100'
-                : 'bg-red-50/95 border-red-200 text-red-800'
-            }`} style={{ top: '214px' }}>
-              <div className="flex items-center gap-3">
-                <span className="text-sm font-bold">Connection selected</span>
-                <span className={`text-xs font-semibold ${isDarkMode ? 'text-red-300' : 'text-red-600'}`}>ESC to cancel</span>
+                ? 'bg-red-950/92 border-red-700/70 text-red-100'
+                : 'bg-red-50/98 border-red-200 text-red-800'
+            }`}>
+              <div className="flex items-center gap-2.5">
+                <span className="text-xs font-extrabold whitespace-nowrap">Connection selected</span>
+                <span className={`text-[11px] font-semibold whitespace-nowrap ${isDarkMode ? 'text-red-300' : 'text-red-600'}`}>Esc to cancel</span>
                 <button
                   onClick={deleteSelectedEdge}
-                  className="px-3 py-1 bg-red-500 hover:bg-red-600 text-white rounded-lg text-xs font-extrabold transition-colors"
+                  className="px-2.5 py-1 bg-red-500 hover:bg-red-600 text-white rounded-lg text-xs font-extrabold transition-colors"
                 >
                   Delete
                 </button>
@@ -5761,7 +5765,7 @@ export default function ColumnMapping() {
       <Dialog
         open={primaryDialogOpen}
         disableEscapeKeyDown
-        maxWidth="xs"
+        maxWidth="sm"
         fullWidth
         PaperProps={{
           sx: {
@@ -5774,17 +5778,16 @@ export default function ColumnMapping() {
             boxShadow: isDarkMode
               ? '0 28px 80px rgba(0, 0, 0, 0.72)'
               : '0 24px 70px rgba(15, 23, 42, 0.18)',
-            width: 'min(440px, calc(100vw - 40px))'
+            width: 'min(560px, calc(100vw - 40px))'
           }
         }}
       >
-        <DialogTitle sx={{ px: 2.5, pt: 2.25, pb: 1, fontWeight: 800, fontSize: '1.05rem', color: isDarkMode ? '#f8fafc' : '#0f172a' }}>
+        <DialogTitle sx={{ px: 3, pt: 2.5, pb: 1, fontWeight: 800, fontSize: '1.08rem', color: isDarkMode ? '#f8fafc' : '#0f172a' }}>
           Which column identifies each item?
         </DialogTitle>
-        <DialogContent sx={{ px: 2.5, py: 1.25, bgcolor: 'transparent' }}>
-          <Typography variant="body2" sx={{ mb: 1.75, color: isDarkMode ? '#94a3b8' : '#64748b', lineHeight: 1.45 }}>
-            Rows where this column is empty will be removed (e.g. blank part numbers or leftover header lines).
-            Pick the key column, or skip to keep every row.
+        <DialogContent sx={{ px: 3, py: 1.25, bgcolor: 'transparent' }}>
+          <Typography variant="body2" sx={{ mb: 1.75, color: isDarkMode ? '#94a3b8' : '#64748b', lineHeight: 1.45, maxWidth: 470 }}>
+            Choose a required column to remove rows where it is blank, or keep every row.
           </Typography>
           <FormControl fullWidth size="small">
             <InputLabel sx={{ color: isDarkMode ? '#94a3b8' : '#475569' }}>Key column</InputLabel>
@@ -5853,32 +5856,48 @@ export default function ColumnMapping() {
             </Box>
           )}
         </DialogContent>
-        <DialogActions sx={{ px: 2.5, py: 1.75, gap: 1, bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.42)' : 'rgba(248, 250, 252, 0.68)', borderTop: isDarkMode ? '1px solid rgba(148, 163, 184, 0.12)' : '1px solid #e2e8f0' }}>
-          <Button onClick={() => setPrimaryDialogOpen(false)} disabled={primaryCleaning} sx={{ ...muiPillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}>
+        <DialogActions sx={{ px: 3, py: 1.75, bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.42)' : 'rgba(248, 250, 252, 0.68)', borderTop: isDarkMode ? '1px solid rgba(148, 163, 184, 0.12)' : '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', gap: 2 }}>
+          <Button onClick={() => setPrimaryDialogOpen(false)} disabled={primaryCleaning} sx={{ ...muiPillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569', minWidth: 88 }}>
             Cancel
           </Button>
-          <Button onClick={goToEditor} disabled={primaryCleaning} sx={{ ...muiPillButtonSx, color: isDarkMode ? '#93c5fd' : '#2563eb' }}>
-            Skip and keep all rows
-          </Button>
-          <Button
-            onClick={handleCleanupAndReview}
-            disabled={!primaryKeyColumn || primaryCleaning || primaryEmptyLoading}
-            variant="contained"
-            sx={{
-              ...muiPrimaryPillSx,
-              minWidth: 132,
-              '&.Mui-disabled': {
-                bgcolor: isDarkMode ? 'rgba(30, 41, 59, 0.78)' : '#dbeafe',
-                color: isDarkMode ? 'rgba(226, 232, 240, 0.58)' : 'rgba(30, 64, 175, 0.46)',
-              }
-            }}
-          >
-            {primaryCleaning
-              ? 'Cleaning...'
-              : primaryEmptyInfo?.empty > 0
-                ? 'Remove & Continue'
-                : 'Continue'}
-          </Button>
+          <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1.25, minWidth: 0 }}>
+            <Button
+              onClick={goToEditor}
+              disabled={primaryCleaning}
+              variant="outlined"
+              sx={{
+                ...muiPillButtonSx,
+                px: 2.25,
+                minWidth: 132,
+                whiteSpace: 'nowrap',
+                color: isDarkMode ? '#93c5fd' : '#2563eb',
+                borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.34)' : '#bfdbfe',
+                bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.08)' : '#eff6ff',
+              }}
+            >
+              Keep all rows
+            </Button>
+            <Button
+              onClick={handleCleanupAndReview}
+              disabled={!primaryKeyColumn || primaryCleaning || primaryEmptyLoading}
+              variant="contained"
+              sx={{
+                ...muiPrimaryPillSx,
+                minWidth: 132,
+                whiteSpace: 'nowrap',
+                '&.Mui-disabled': {
+                  bgcolor: isDarkMode ? 'rgba(30, 41, 59, 0.78)' : '#dbeafe',
+                  color: isDarkMode ? 'rgba(226, 232, 240, 0.58)' : 'rgba(30, 64, 175, 0.46)',
+                }
+              }}
+            >
+              {primaryCleaning
+                ? 'Cleaning...'
+                : primaryEmptyInfo?.empty > 0
+                  ? 'Remove & Continue'
+                  : 'Continue'}
+            </Button>
+          </Box>
         </DialogActions>
       </Dialog>
 
