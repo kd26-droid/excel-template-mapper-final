@@ -8,6 +8,17 @@ import NotificationsNoneIcon from '@mui/icons-material/NotificationsNone';
 import WbSunnyIcon from '@mui/icons-material/WbSunny';
 import { useThemeContext } from '../utils/ThemeContext';
 
+const MoonIcon = ({ sx }) => (
+  <Box
+    component="svg"
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24"
+    sx={{ width: 20, height: 20, display: 'block', fill: 'currentColor', ...sx }}
+  >
+    <path d="m12.2,22c4.53,0,8.45-2.91,9.76-7.24.11-.35.01-.74-.25-1s-.64-.36-1-.25c-.78.23-1.58.35-2.38.35-4.52,0-8.2-3.68-8.2-8.2,0-.8.12-1.6.35-2.38.11-.35.01-.74-.25-1-.26-.26-.64-.36-1-.25C4.91,3.35,2,7.28,2,11.8c0,5.62,4.58,10.2,10.2,10.2Z" />
+  </Box>
+);
+
 // ─── nav items ──────────────────────────────────────────────────────────────
 const NAV_ITEMS = [
   { label: 'Dashboard',      path: '/dashboard',      icon: DashboardIcon },
@@ -206,7 +217,7 @@ const Header = () => {
               display: { xs: 'none', md: 'grid' },
               gridTemplateColumns: 'auto auto auto',
               alignItems: 'center',
-              gap: 0.85,
+              gap: 0.8,
               p: 0,
               border: 'none',
               bgcolor: 'transparent',
@@ -220,108 +231,103 @@ const Header = () => {
               },
             }}
           >
-            {/* "Light" label */}
+            {/* "Dark" label */}
             <Typography
               component="span"
               sx={{
-                fontSize: 14,
-                fontWeight: 500,
-                color: isDarkMode ? r.text.disabled : r.text.primary,
+                fontSize: '13.5px',
+                fontWeight: 600,
+                color: isDarkMode ? r.text.primary : r.text.disabled,
                 transition: 'color 180ms ease',
               }}
             >
-              Light
+              Dark
             </Typography>
 
             {/* Toggle track */}
             <Box
               sx={{
                 position: 'relative',
-                width: 78,
+                width: 86,
                 height: 34,
                 borderRadius: '999px',
                 p: '3px',
                 overflow: 'hidden',
                 background: isDarkMode
-                  ? 'linear-gradient(180deg, #111827 0%, #020617 62%, #030712 100%)'
-                  : 'linear-gradient(180deg, #111827 0%, #020617 68%, #030712 100%)',
-                border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.24)' : '1px solid rgba(15, 23, 42, 0.18)',
+                  ? 'linear-gradient(180deg, #1f2937 0%, #111827 100%)'
+                  : 'linear-gradient(180deg, #f8fafc 0%, #e5e7eb 100%)',
+                border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.24)' : '1px solid rgba(148, 163, 184, 0.45)',
                 boxShadow: isDarkMode
-                  ? 'inset 0 2px 8px rgba(0,0,0,0.72), 0 5px 14px rgba(2,6,23,0.22)'
-                  : '0 10px 24px rgba(15,23,42,0.16), inset 0 2px 8px rgba(0,0,0,0.62)',
+                  ? 'inset 0 2px 7px rgba(0,0,0,0.52), 0 5px 14px rgba(2,6,23,0.22)'
+                  : '0 10px 24px rgba(15,23,42,0.12), inset 0 1px 2px rgba(255,255,255,0.8)',
                 transition: 'background 220ms ease, box-shadow 220ms ease',
               }}
             >
-              <WbSunnyIcon
-                sx={{
-                  position: 'absolute',
-                  top: 8,
-                  left: 10,
-                  fontSize: 15,
-                  color: isDarkMode ? 'rgba(255,255,255,0.58)' : 'transparent',
-                  zIndex: 1,
-                }}
-              />
-              <Box
-                sx={{
-                  position: 'absolute',
-                  top: 8,
-                  right: 10,
-                  width: 15,
-                  height: 15,
-                  borderRadius: '50%',
-                  bgcolor: !isDarkMode ? 'rgba(255,255,255,0.62)' : 'transparent',
-                  boxShadow: !isDarkMode ? `-5px 1px 0 0 ${r.toggle.moonCutout} inset` : 'none',
-                  zIndex: 1,
-                }}
-              />
-
-              {/* Thumb */}
               <Box
                 sx={{
                   position: 'absolute',
                   top: 3,
-                  left: isDarkMode ? 41 : 3,
-                  width: 31,
+                  left: isDarkMode ? 3 : 46,
+                  width: 37,
                   height: 28,
-                  borderRadius: '50%',
-                  bgcolor: isDarkMode ? '#ffffff' : '#6366f1',
-                  boxShadow: isDarkMode ? '0 2px 8px rgba(255,255,255,0.16)' : '0 2px 8px rgba(99,102,241,0.38)',
+                  borderRadius: '999px',
+                  bgcolor: r.action.primary,
+                  boxShadow: isDarkMode
+                    ? '0 5px 14px rgba(37,99,235,0.34)'
+                    : '0 5px 14px rgba(37,99,235,0.28)',
+                  transition: 'left 240ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 220ms ease',
+                }}
+              />
+
+              <Box
+                sx={{
+                  position: 'absolute',
+                  top: 3,
+                  left: 3,
+                  width: 37,
+                  height: 28,
+                  borderRadius: '999px',
+                  display: 'grid',
+                  placeItems: 'center',
+                  color: isDarkMode ? '#ffffff' : '#9ca3af',
                   zIndex: 2,
-                  transition: 'left 240ms cubic-bezier(0.16, 1, 0.3, 1), background 220ms ease, box-shadow 220ms ease',
+                  transition: 'color 180ms ease',
                 }}
               >
-                {isDarkMode ? (
-                  <Box
-                    sx={{
-                      position: 'absolute',
-                      top: 4,
-                      left: 7,
-                      width: 20,
-                      height: 20,
-                      borderRadius: '50%',
-                      bgcolor: '#ffffff',
-                      boxShadow: `-8px 1px 0 0 ${r.toggle.moonCutout} inset`,
-                    }}
-                  />
-                ) : (
-                  <WbSunnyIcon sx={{ position: 'absolute', top: 5, left: 6, fontSize: 18, color: '#ffffff' }} />
-                )}
+                <MoonIcon sx={{ width: 20, height: 20 }} />
+              </Box>
+              <Box
+                sx={{
+                  position: 'absolute',
+                  top: 3,
+                  right: 3,
+                  width: 37,
+                  height: 28,
+                  borderRadius: '999px',
+                  display: 'grid',
+                  placeItems: 'center',
+                  color: isDarkMode ? '#ffffff' : '#ffffff',
+                  zIndex: 2,
+                  opacity: isDarkMode ? 0.82 : 1,
+                  transition: 'opacity 180ms ease, color 180ms ease',
+                }}
+              >
+                <WbSunnyIcon sx={{ fontSize: 20 }} />
               </Box>
             </Box>
 
-            {/* "Dark" label */}
+            {/* "Light" label */}
             <Typography
               component="span"
               sx={{
-                fontSize: 14,
-                fontWeight: 500,
-                color: isDarkMode ? r.text.primary : r.text.disabled,
+                fontSize: '13.5px',
+                fontWeight: 600,
+                color: isDarkMode ? r.text.disabled : r.text.primary,
                 letterSpacing: 0,
                 transition: 'color 180ms ease',
               }}
             >
-              Dark
+              Light
             </Typography>
           </Box>
 
