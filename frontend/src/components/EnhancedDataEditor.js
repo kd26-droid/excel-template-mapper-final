@@ -2626,7 +2626,8 @@ const EnhancedDataEditor = () => {
         currentFactwiseRules,
         Object.keys(defaults).length > 0 ? defaults : null,
         counts,
-        mpnValidationMetadata
+        mpnValidationMetadata,
+        { overwriteExisting: isNewProcessingTemplate }
       );
       if (resp?.data?.success && processingTemplateContext) {
         const postActions = buildPostMappingActionsForSave(currentFactwiseRules || [], defaults, rules);
@@ -2681,9 +2682,10 @@ const EnhancedDataEditor = () => {
       const elapsed = Date.now() - opStart;
       if (elapsed < 3000) await new Promise(r => setTimeout(r, 3000 - elapsed));
       if (resp?.data?.success) {
+        const wasUpdate = Boolean(resp.data.updated);
         setTemplateSaved(true);
         setTemplateNameError('');
-        showSnackbar(`Template "${saveName}" saved successfully!`, 'success');
+        showSnackbar(`Template "${saveName}" ${wasUpdate ? 'updated' : 'saved'} successfully!`, 'success');
         handleCloseSaveTemplateDialog();
       } else {
         showSnackbar(resp?.data?.error || 'Failed to save template', 'error');
@@ -2702,7 +2704,7 @@ const EnhancedDataEditor = () => {
     } finally {
       setTemplateSaving(false);
     }
-  }, [sessionId, templateName, dynamicColumnCounts, defaultValues, appliedFormulas, factwiseIdRule, mpnValidationCompleted, originalMpnColumn, mpnColumn, mpnManufacturerColumn, isExistingProcessingTemplate, processingTemplateContext, showSnackbar, handleCloseSaveTemplateDialog, buildPostMappingActionsForSave]);
+  }, [sessionId, templateName, dynamicColumnCounts, defaultValues, appliedFormulas, factwiseIdRule, mpnValidationCompleted, originalMpnColumn, mpnColumn, mpnManufacturerColumn, isExistingProcessingTemplate, isNewProcessingTemplate, processingTemplateContext, showSnackbar, handleCloseSaveTemplateDialog, buildPostMappingActionsForSave]);
 
   const handleSaveTemplateFromToolbar = useCallback(() => {
     if (isExistingProcessingTemplate) {
@@ -5681,17 +5683,17 @@ const EnhancedDataEditor = () => {
               >
                 Tools
               </Button>
-              <Tooltip title={isExistingProcessingTemplate ? 'Existing templates cannot be saved from this run' : (templateSaved ? 'Template already saved' : 'Save this workflow template')}>
+              <Tooltip title={isExistingProcessingTemplate ? 'Existing templates cannot be saved from this run' : (templateSaved ? 'Update this workflow template' : 'Save this workflow template')}>
                 <span>
                   <Button
                     size="small"
                     onClick={handleSaveTemplateFromToolbar}
-                    disabled={templateSaving || syncStatus.inProgress || isExistingProcessingTemplate || templateSaved}
+                    disabled={templateSaving || syncStatus.inProgress || isExistingProcessingTemplate}
                     startIcon={templateSaving ? <CircularProgress size={16} /> : <SaveIcon sx={{ fontSize: 18 }} />}
                     sx={outlinedActionSx}
                     variant="outlined"
                   >
-                    {templateSaving ? 'Saving...' : (templateSaved ? 'Template Saved' : 'Save Template')}
+                    {templateSaving ? 'Saving...' : (templateSaved ? 'Update Template' : 'Save Template')}
                   </Button>
                 </span>
               </Tooltip>

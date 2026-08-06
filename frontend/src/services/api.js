@@ -817,7 +817,7 @@ const api = {
    * @param {array} formulaRules - Optional formula rules
    * @param {array} factwiseRules - Optional factwise ID rules
    */
-  saveMappingTemplate: async (sessionId, templateName, description = '', mappings = null, formulaRules = null, factwiseRules = null, defaultValues = null, columnCounts = null, mpnValidationMetadata = null) => {
+  saveMappingTemplate: async (sessionId, templateName, description = '', mappings = null, formulaRules = null, factwiseRules = null, defaultValues = null, columnCounts = null, mpnValidationMetadata = null, options = {}) => {
     const effectiveSessionId = sessionId || await ensureSession();
     const payload = {
       session_id: effectiveSessionId,
@@ -833,6 +833,7 @@ const api = {
         customer_id_pairs_count: columnCounts.customer_id_pairs_count,
       } : {}),
       ...(mpnValidationMetadata !== null ? { mpn_validation_metadata: mpnValidationMetadata } : {}),
+      ...(options?.overwriteExisting ? { overwrite_existing: true } : {}),
     };
     return axios.post(`${API_URL}/templates/save/`, payload);
   },

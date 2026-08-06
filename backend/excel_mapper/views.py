@@ -6351,6 +6351,7 @@ def save_mapping_template(request):
         override_factwise_rules = request.data.get('factwise_rules')  # Optional factwise rules override
         override_default_values = request.data.get('default_values')  # Optional default values override
         mpn_validation_metadata = request.data.get('mpn_validation_metadata', {})  # MPN validation metadata
+        overwrite_existing = bool(request.data.get('overwrite_existing'))
         
         if not template_name:
             return Response({
@@ -6358,7 +6359,8 @@ def save_mapping_template(request):
                 'error': 'Template name is required'
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        if MappingTemplate.objects.filter(name=template_name).exists():
+        existing_template = MappingTemplate.objects.filter(name=template_name).first()
+        if existing_template and not overwrite_existing:
             return Response({
                 'success': False,
                 'code': 'duplicate_template_name',
@@ -6501,21 +6503,37 @@ def save_mapping_template(request):
                     'customer_id_pairs_count': customer_id_pairs_count
                 }
             })
-            template = MappingTemplate.objects.create(
-                name=template_name,
-                description=description,
-                template_headers=template_headers,
-                source_headers=client_headers,
-                mappings=mappings,
-                formula_rules=formula_rules,  # Include normalized formula rules
-                factwise_rules=factwise_rules,  # Include factwise ID rules
-                default_values=default_values,  # Include default values
-                mpn_validation_metadata=mpn_validation_metadata,  # Include MPN validation metadata
-                tags_count=tags_count,
-                spec_pairs_count=spec_pairs_count,
-                customer_id_pairs_count=customer_id_pairs_count,
-                session_id=session_id
-            )
+            if existing_template and overwrite_existing:
+                template = existing_template
+                template.description = description
+                template.template_headers = template_headers
+                template.source_headers = client_headers
+                template.mappings = mappings
+                template.formula_rules = formula_rules  # Include normalized formula rules
+                template.factwise_rules = factwise_rules  # Include factwise ID rules
+                template.default_values = default_values  # Include default values
+                template.mpn_validation_metadata = mpn_validation_metadata  # Include MPN validation metadata
+                template.tags_count = tags_count
+                template.spec_pairs_count = spec_pairs_count
+                template.customer_id_pairs_count = customer_id_pairs_count
+                template.session_id = session_id
+                template.save()
+            else:
+                template = MappingTemplate.objects.create(
+                    name=template_name,
+                    description=description,
+                    template_headers=template_headers,
+                    source_headers=client_headers,
+                    mappings=mappings,
+                    formula_rules=formula_rules,  # Include normalized formula rules
+                    factwise_rules=factwise_rules,  # Include factwise ID rules
+                    default_values=default_values,  # Include default values
+                    mpn_validation_metadata=mpn_validation_metadata,  # Include MPN validation metadata
+                    tags_count=tags_count,
+                    spec_pairs_count=spec_pairs_count,
+                    customer_id_pairs_count=customer_id_pairs_count,
+                    session_id=session_id
+                )
         except IntegrityError as e:
             if 'unique' in str(e).lower() and 'name' in str(e).lower():
                 return Response({
@@ -6528,14 +6546,23 @@ def save_mapping_template(request):
             # If new fields don't exist yet, create without them
             if 'formula_rules' in str(e) or 'factwise_rules' in str(e) or 'default_values' in str(e) or 'mpn_validation_metadata' in str(e):
                 try:
-                    template = MappingTemplate.objects.create(
-                        name=template_name,
-                        description=description,
-                        template_headers=template_headers,
-                        source_headers=client_headers,
-                        mappings=mappings,
-                        session_id=session_id
-                    )
+                    if existing_template and overwrite_existing:
+                        template = existing_template
+                        template.description = description
+                        template.template_headers = template_headers
+                        template.source_headers = client_headers
+                        template.mappings = mappings
+                        template.session_id = session_id
+                        template.save()
+                    else:
+                        template = MappingTemplate.objects.create(
+                            name=template_name,
+                            description=description,
+                            template_headers=template_headers,
+                            source_headers=client_headers,
+                            mappings=mappings,
+                            session_id=session_id
+                        )
                 except IntegrityError as fallback_error:
                     if 'unique' in str(fallback_error).lower() and 'name' in str(fallback_error).lower():
                         return Response({
@@ -6550,7 +6577,8 @@ def save_mapping_template(request):
         # CRITICAL FIX: Return comprehensive response with all template data
         response_data = {
             'success': True,
-            'message': f'Template "{template.name}" saved successfully',
+            'message': f'Template "{template.name}" {"updated" if existing_template and overwrite_existing else "saved"} successfully',
+            'updated': bool(existing_template and overwrite_existing),
             'template_id': template.id,
             'template_name': template.name,
             'description': template.description,
