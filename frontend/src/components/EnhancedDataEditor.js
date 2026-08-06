@@ -270,7 +270,12 @@ const ExportLoadingContent = ({ title, message, isDarkMode = false }) => (
 const createConditionalBranch = () => ({
   column: '',
   operator: 'contains',
+  // Several values matched as "any of these". A list rather than a
+  // comma-separated string because component text is full of commas
+  // ("CAPACITOR 0.22U, 10V", "CAP; 0,1uF") — splitting one would quietly
+  // match far more rows than intended.
   compare: '',
+  compareValues: [],
   outputType: 'default',
   outputValue: '',
   outputColumn: '',
@@ -694,6 +699,10 @@ const EnhancedDataEditor = () => {
   const [condElseSourceType, setCondElseSourceType] = useState('default');
   const [condElseColumn, setCondElseColumn] = useState('');
   const [conditionalBranches, setConditionalBranches] = useState([createConditionalBranch()]);
+  // Index of the condition whose value field has focus. The multi-value hint
+  // rides on the placeholder rather than helper text, so showing it cannot
+  // change the field's height and knock the row out of alignment.
+  const [focusedConditionIndex, setFocusedConditionIndex] = useState(null);
   const [defaultBusy, setDefaultBusy] = useState(false);
   // User-driven cleanup: choose a column, choose blanks or exact values, then
   // choose how those cells should be replaced.
@@ -750,6 +759,9 @@ const EnhancedDataEditor = () => {
   // Item code gets special export handling: it must be filled AND unique. This
   // holds the detected blanks/duplicates so export can stop before FactWise rejects it.
   const [itemCodeIssue, setItemCodeIssue] = useState(null); // { field, blanks, dupRows, dupValues }
+  // Half-filled specification / customer-identification groups. Advisory only —
+  // nothing is cleared and the export is not blocked.
+  const [groupWarnings, setGroupWarnings] = useState([]);
   // "Highlight duplicates so I can edit them" — the column + the set of repeated
   // values whose cells the grid should mark. Cleared with the banner's Clear button.
   const [dupHighlight, setDupHighlight] = useState(null); // { field, values: Set<string> }
@@ -2355,7 +2367,9 @@ const EnhancedDataEditor = () => {
             branches: conditionalBranches.map(branch => ({
               column: branch.column,
               operator: branch.operator,
-              compare: branch.compare,
+              compare: (branch.compareValues && branch.compareValues.length)
+                ? branch.compareValues
+                : branch.compare,
               output_value: branch.outputType === 'empty' ? '' : branch.outputValue,
               ...(branch.outputType === 'column' ? { output_source_column: branch.outputColumn } : {}),
             })),
@@ -2858,6 +2872,7 @@ const EnhancedDataEditor = () => {
     }, {});
     let gaps = [];
     let icIssue = null;
+    let warnings = [];
     try {
       const resp = await api.requiredFieldReport(
         sessionId,
@@ -2866,6 +2881,7 @@ const EnhancedDataEditor = () => {
         booleanFields,
         validators
       );
+      warnings = resp?.data?.warnings || [];
       const counts = (resp?.data?.gaps || []).reduce((m, g) => { m[g.field] = g.emptyCount; return m; }, {});
       const invalids = (resp?.data?.invalids || []).reduce((m, g) => {
         m[g.field] = {
@@ -2906,6 +2922,7 @@ const EnhancedDataEditor = () => {
     if (otherGaps.length > 0 || icIssue) {
       setRequiredGaps(otherGaps);
       setItemCodeIssue(icIssue);
+      setGroupWarnings(warnings);
       pendingExportRef.current = exportFn;
       setRequiredDialogOpen(true);
       return;
@@ -5117,9 +5134,62 @@ const EnhancedDataEditor = () => {
                           </Select>
                         </FormControl>
                         {['equals', 'not_equals', 'contains'].includes(branch.operator) && (
-                          <TextField size="small" label="Text" value={branch.compare} onChange={(e) => setConditionalBranches(current => current.map((item, index) => index === branchIndex ? { ...item, compare: e.target.value } : item))} sx={{ minWidth: 160, flex: 1 }} />
+                          <TextField
+                            size="small"
+                            label="Text"
+                            value={branch.compare}
+                            placeholder={
+                              focusedConditionIndex === branchIndex
+                                ? (branch.compareValues?.length
+                                    ? 'Type another value, then press Enter'
+                                    : 'Type a value — press Enter to add more than one')
+                                : ''
+                            }
+                            onFocus={() => setFocusedConditionIndex(branchIndex)}
+                            onBlur={() => setFocusedConditionIndex(current => (current === branchIndex ? null : current))}
+                            onChange={(e) => setConditionalBranches(current => current.map((item, index) => index === branchIndex ? { ...item, compare: e.target.value } : item))}
+                            onKeyDown={(e) => {
+                              if (e.key !== 'Enter') return;
+                              e.preventDefault();
+                              const entered = String(branch.compare || '').trim();
+                              if (!entered) return;
+                              setConditionalBranches(current => current.map((item, index) => (
+                                index === branchIndex
+                                  ? {
+                                      ...item,
+                                      compare: '',
+                                      // Keep the typed value as a chip so the list is
+                                      // the single source of truth once it is used.
+                                      compareValues: Array.from(new Set([...(item.compareValues || []), entered])),
+                                    }
+                                  : item
+                              )));
+                            }}
+                            sx={{ minWidth: 160, flex: 1 }}
+                          />
                         )}
                       </Box>
+                      {/* Values sit on their own row so the three controls above
+                          stay aligned regardless of how many are added. */}
+                      {branch.compareValues?.length > 0 && (
+                        <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', alignItems: 'center' }}>
+                          <Typography variant="caption" sx={{ color: t.text.secondary, mr: 0.5 }}>
+                            Any of:
+                          </Typography>
+                          {branch.compareValues.map((value) => (
+                            <Chip
+                              key={value}
+                              size="small"
+                              label={value}
+                              onDelete={() => setConditionalBranches(current => current.map((item, index) => (
+                                index === branchIndex
+                                  ? { ...item, compareValues: (item.compareValues || []).filter(v => v !== value) }
+                                  : item
+                              )))}
+                            />
+                          ))}
+                        </Box>
+                      )}
                       <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
                         <Typography variant="body2" fontWeight={600} sx={{ width: 76 }}>Then use</Typography>
                         <FormControl size="small" sx={{ minWidth: 180 }}>
@@ -7268,6 +7338,18 @@ const EnhancedDataEditor = () => {
           bgcolor: isDarkMode ? '#0b1220' : '#f8fafc',
           borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.14)' : '#e2e8f0',
         }}>
+          {/* Advisory only: a name without its value is a normal in-progress
+              state, so it is reported rather than cleared or blocked. */}
+          {groupWarnings.length > 0 && (
+            <Box sx={{ display: 'grid', gap: 1, mb: 2 }}>
+              {groupWarnings.map((warning, index) => (
+                <Alert severity="warning" key={`${warning.field}-${warning.slot}-${index}`}>
+                  {warning.message}{' '}
+                  <Box component="span" sx={{ opacity: 0.85 }}>{warning.suggestion}</Box>
+                </Alert>
+              ))}
+            </Box>
+          )}
           <Box sx={{ display: 'grid', gap: 1.5 }}>
             {[
               itemCodeIssue ? {

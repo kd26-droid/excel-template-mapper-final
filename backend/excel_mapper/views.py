@@ -212,45 +212,23 @@ def drop_non_data_rows(df: pd.DataFrame, context: str = "") -> pd.DataFrame:
 
 
 def cleanup_empty_spec_pairs(headers: list, rows: list) -> int:
-    """Clear Specification name when the paired Specification value is blank."""
-    if not headers or not rows:
-        return 0
+    """Deliberately does nothing. The grid is exported exactly as it stands.
 
-    pairs = {}
-    for index, header in enumerate(headers):
-        name_key = _spec_pair_key(header, "name")
-        value_key = _spec_pair_key(header, "value")
-        if name_key:
-            pairs.setdefault(name_key, {})["name"] = header
-            pairs[name_key]["name_index"] = index
-        if value_key:
-            pairs.setdefault(value_key, {})["value"] = header
-            pairs[value_key]["value_index"] = index
+    This used to clear `Specification name` whenever the paired
+    `Specification value` was blank, and it ran on every session save as well as
+    on export. A name typed without a value yet was therefore wiped moments
+    later, with nothing to show the user why.
 
-    cleaned = 0
-    for pair in pairs.values():
-        if "name" not in pair or "value" not in pair:
-            continue
-        for row in rows:
-            if isinstance(row, dict):
-                spec_name = str(row.get(pair["name"], "") or "").strip()
-                spec_value = row.get(pair["value"], "")
-                if spec_name and _is_blank_cell(spec_value):
-                    row[pair["name"]] = ""
-                    cleaned += 1
-            elif isinstance(row, list):
-                name_index = pair["name_index"]
-                value_index = pair["value_index"]
-                raw_name = row[name_index] if name_index < len(row) else ""
-                raw_value = row[value_index] if value_index < len(row) else ""
-                spec_name = str(raw_name or "").strip()
-                if spec_name and _is_blank_cell(raw_value):
-                    while len(row) <= name_index:
-                        row.append("")
-                    row[name_index] = ""
-                    cleaned += 1
-    return cleaned
+    Specification (name/value/UOM) and customer identification (name/value) are
+    written as whole groups even when parts are empty, so a half-filled group is
+    a normal in-progress state, not something to repair. The user may complete it
+    in the exported sheet, so the export must preserve what they entered rather
+    than second-guess it.
 
+    Kept as a no-op instead of deleting the call sites, so any future caller
+    inherits the same behaviour.
+    """
+    return 0
 
 def _headers_from_rows(rows, fallback_headers=None):
     if fallback_headers:
@@ -5069,6 +5047,28 @@ IMPORT_HEADER_ALIASES = {
 }
 
 
+
+def _positional_row_keys(headers):
+    """Unique dict keys for headers that legitimately repeat.
+
+    The FactWise template repeats `Tag`, `Specification name/value/UOM` and
+    `Preferred vendor code`. Keying rows by header name alone collapses those to
+    one entry — the last occurrence wins — so anything written into the first
+    Tag slot vanished on export and the last slot's value was copied across all
+    of them. Suffixing repeats keeps each column addressable.
+    """
+    seen = {}
+    keys = []
+    for header in headers or []:
+        name = str(header)
+        count = seen.get(name, 0)
+        seen[name] = count + 1
+        # A marker no real FactWise header contains, so a suffixed key can
+        # never collide with a genuine column name.
+        keys.append(name if count == 0 else '%s @@dup%d' % (name, count))
+    return keys
+
+
 @api_view(['GET', 'POST'])
 def download_file(request, session_id=None):
     """Download processed/converted file."""
@@ -5177,7 +5177,8 @@ def download_file(request, session_id=None):
             # every cell (designators land under Procurement/Spec columns, etc.).
             if transformed_rows and isinstance(transformed_rows[0], list) and base_headers:
                 transformed_rows = [
-                    {base_headers[i]: (row[i] if i < len(row) else '') for i in range(len(base_headers))}
+                    dict(zip(_positional_row_keys(base_headers),
+                             [(row[i] if i < len(row) else '') for i in range(len(base_headers))]))
                     for row in transformed_rows
                 ]
 
@@ -5647,10 +5648,16 @@ def download_file(request, session_id=None):
             
             # Convert dict format to list format for consistency
             converted_rows = []
+            output_keys = _positional_row_keys(all_headers)
             for row_dict in transformed_rows:
                 row_list = []
-                for header in all_headers:
-                    row_list.append(row_dict.get(header, ""))
+                for key, header in zip(output_keys, all_headers):
+                    # Fall back to the plain header for rows written by a step
+                    # that never saw a duplicate (single-slot sheets).
+                    value = row_dict.get(key)
+                    if value is None:
+                        value = row_dict.get(header, "")
+                    row_list.append(value)
                 converted_rows.append(row_list)
             transformed_rows = converted_rows
         
@@ -9828,17 +9835,30 @@ def apply_column_value_rule(headers, rows, raw_rule):
         value = str(cell or '').strip()
         lowered = value.lower()
         operator = branch['operator']
-        compare = branch['compare'].strip().lower()
+
+        # A branch may carry several values, matched as "any of these". They are
+        # kept as a list rather than split from a comma-joined string because
+        # component descriptions are full of commas ("CAPACITOR 0.22U, 10V",
+        # "CAP; 0,1uF"), so splitting one would quietly match far more than the
+        # user meant.
+        raw_compare = branch.get('compare')
+        if isinstance(raw_compare, (list, tuple)):
+            compares = [str(v).strip().lower() for v in raw_compare if str(v).strip()]
+        else:
+            single = str(raw_compare or '').strip().lower()
+            compares = [single] if single else ['']
+
         if operator == 'is_empty':
             return value == ''
         if operator == 'not_empty':
             return value != ''
         if operator == 'equals':
-            return lowered == compare
+            return any(lowered == c for c in compares)
         if operator == 'not_equals':
-            return lowered != compare
+            # "not any of them" — a row matching any listed value is excluded.
+            return all(lowered != c for c in compares)
         if operator == 'contains':
-            return compare in lowered
+            return any(c in lowered for c in compares)
         return False
 
     for row_index, row in enumerate(output_rows):
@@ -11719,11 +11739,60 @@ def required_field_report(request):
             'gaps': gaps,
             'duplicates': duplicates,
             'invalids': invalids,
+            'warnings': _incomplete_group_warnings(headers, rows),
             'total_rows': len(rows),
         })
     except Exception as e:
         logger.error(f"required_field_report failed: {e}", exc_info=True)
         return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+def _incomplete_group_warnings(headers, rows):
+    """Report half-filled specification / customer-identification groups.
+
+    These groups are written whole — name, value and (for specs) UOM — so a name
+    with no value is a normal in-progress state, not corruption. Nothing is
+    cleared or blocked; the user is told which rows are incomplete so they can
+    fill the value or drop the name before importing.
+    """
+    if not headers or not rows:
+        return []
+
+    groups = [
+        ('Specification name', 'Specification value', 'specification'),
+        ('Item identifications name', 'Item identifications value', 'customer identification'),
+    ]
+
+    warnings = []
+    for name_label, value_label, description in groups:
+        name_positions = [i for i, h in enumerate(headers)
+                          if _template_label_key(h) == _template_label_key(name_label)]
+        value_positions = [i for i, h in enumerate(headers)
+                           if _template_label_key(h) == _template_label_key(value_label)]
+
+        for slot, (name_index, value_index) in enumerate(zip(name_positions, value_positions), start=1):
+            affected = 0
+            for row in rows:
+                if not isinstance(row, list):
+                    continue
+                name = str((row[name_index] if name_index < len(row) else '') or '').strip()
+                value = str((row[value_index] if value_index < len(row) else '') or '').strip()
+                if name and not value:
+                    affected += 1
+            if affected:
+                warnings.append({
+                    'kind': 'incomplete_group',
+                    'field': name_label,
+                    'slot': slot,
+                    'count': affected,
+                    'message': (
+                        f'{affected} row(s) have a {description} name in slot {slot} '
+                        f'with no matching value.'
+                    ),
+                    'suggestion': f'Fill the {value_label.lower()}, or remove the name.',
+                })
+    return warnings
 
 
 @api_view(['POST'])
