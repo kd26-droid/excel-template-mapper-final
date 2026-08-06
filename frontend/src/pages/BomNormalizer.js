@@ -229,7 +229,7 @@ const makeUniqueHeaders = (row) => {
 const HEADER_SCAN_ROWS = 40;
 const HEADER_KEYWORDS = [
   /\boperation\b/, /\bsequence\b/, /\bcomponent\b/, /\bitem\b/, /\bpart\b/,
-  /\bdescription\b/, /\btype\b/, /\buom\b/, /\bqty\b/, /\bquantity\b/,
+  /\bdescription\b/, /\btype\b/, /\buom\b/, /\bqty\b/, /\bqnty\b/, /\bquantity\b/,
   /\bmanufacturer\b/, /\bmanufacture\b/, /\bmpn\b/, /\bmfr\b/, /\bdesignator/,
   /\brelease\b/, /\bstatus\b/, /\brevision\b/, /\bclassification\b/,
 ];
@@ -346,7 +346,48 @@ const getCellStyleInfo = (cell = {}) => {
   return { red, strike };
 };
 
-const worksheetToCompactRows = (worksheet) => {
+const applyMergedCellValues = (worksheet, valuesByCell, usedColumns, metaByRow) => {
+  const merges = Array.isArray(worksheet?.['!merges']) ? worksheet['!merges'] : [];
+  let maxMergedRow = -1;
+
+  merges.forEach((merge) => {
+    const topRow = Number(merge?.s?.r);
+    const leftCol = Number(merge?.s?.c);
+    const bottomRow = Number(merge?.e?.r);
+    const rightCol = Number(merge?.e?.c);
+    if (![topRow, leftCol, bottomRow, rightCol].every(Number.isFinite)) return;
+
+    const topLeftKey = `${topRow}:${leftCol}`;
+    const topLeftAddress = XLSX.utils.encode_cell({ r: topRow, c: leftCol });
+    const topLeftCell = worksheet?.[topLeftAddress];
+    const mergedValue = fmt(valuesByCell.get(topLeftKey) ?? topLeftCell?.w ?? topLeftCell?.v);
+    if (!mergedValue) return;
+
+    const styleInfo = getCellStyleInfo(topLeftCell);
+    for (let rowIndex = topRow; rowIndex <= bottomRow; rowIndex += 1) {
+      maxMergedRow = Math.max(maxMergedRow, rowIndex);
+      if (styleInfo.red || styleInfo.strike) {
+        const rowMeta = metaByRow.get(rowIndex) || { redStyle: false, strikeStyle: false, deletedStyle: false };
+        rowMeta.redStyle = rowMeta.redStyle || styleInfo.red;
+        rowMeta.strikeStyle = rowMeta.strikeStyle || styleInfo.strike;
+        rowMeta.deletedStyle = rowMeta.deletedStyle || styleInfo.red || styleInfo.strike;
+        metaByRow.set(rowIndex, rowMeta);
+      }
+      for (let colIndex = leftCol; colIndex <= rightCol; colIndex += 1) {
+        usedColumns.add(colIndex);
+        const key = `${rowIndex}:${colIndex}`;
+        if (!fmt(valuesByCell.get(key))) {
+          valuesByCell.set(key, mergedValue);
+        }
+      }
+    }
+  });
+
+  return maxMergedRow;
+};
+
+const worksheetToCompactRows = (worksheet, options = {}) => {
+  const { expandMergedCells = true } = options;
   const cells = Object.keys(worksheet).filter((key) => !key.startsWith('!'));
   let maxRow = -1;
   const valuesByCell = new Map();
@@ -380,6 +421,10 @@ const worksheetToCompactRows = (worksheet) => {
       metaByRow.set(position.r, rowMeta);
     }
   });
+
+  if (expandMergedCells) {
+    maxRow = Math.max(maxRow, applyMergedCellValues(worksheet, valuesByCell, usedColumns, metaByRow));
+  }
 
   if (maxRow < 0 || !usedColumns.size) return [];
 
@@ -442,7 +487,7 @@ const inferRoles = (headers) => {
     manufacturer: findLearnedHeader('manufacturer') || findHeader([/^manufacturer$/, /\bmfr\b/, /manufacturer name/, /producer/], [/equivalent/, /part/, /\bmpn\b/]) ||
       findHeader([/manufacturer/], [/equivalent/, /part/, /\bmpn\b/]),
     description: findLearnedHeader('description') || findHeader([/description/, /item name/, /\bname\b/]),
-    quantity: findLearnedHeader('quantity') || findHeader([/quantity/, /\bqty\b/, /^count$/, /\bcount\b/]),
+    quantity: findLearnedHeader('quantity') || findHeader([/quantity/, /\bqty\b/, /\bqnty\b/, /^count$/, /\bcount\b/]),
     uom: findLearnedHeader('uom') || findHeader([/\buom\b/, /measurement unit/, /\bunit\b/]),
     level: headers.find((header) => normalizeKey(header).startsWith(normalizeKey(EXCEL_OUTLINE_LEVEL_HEADER)))
       || (findLearnedHeader('level') || findHeader([/\blevel\b/])),
@@ -473,32 +518,69 @@ const normalizeMpnParts = (parts) => parts
   .map((part) => fmt(part).replace(/^(?:and|or|and\/or)\s+/i, '').replace(/\s+(?:and|or|and\/or)$/i, '').trim())
   .filter((part) => part && !isConnectorOnlyMpnPart(part));
 
-const splitDelimited = (value) => {
-  const text = fmt(value);
+const splitTopLevelDelimited = (value, delimiters = [';', '|', '\n', ',']) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ');
   if (!text) return [];
+  const delimiterSet = new Set(delimiters);
   const parts = [];
   let current = '';
+  let depth = 0;
+  let quote = '';
+
+  const pushCurrent = () => {
+    const cleaned = fmt(current).replace(/^[,;|]+|[,;|]+$/g, '');
+    if (cleaned) parts.push(cleaned);
+    current = '';
+  };
 
   for (let index = 0; index < text.length; index += 1) {
     const char = text[index];
-    if ([';', '|', '\n'].includes(char)) {
-      if (fmt(current)) parts.push(fmt(current).replace(/^[,;|]+|[,;|]+$/g, ''));
-      current = '';
+
+    if (quote) {
+      current += char;
+      if (char === quote) quote = '';
       continue;
     }
-    if (char === ',') {
-      const next = text.slice(index + 1).trim().split(/[;,|\n]/)[0];
-      if (next && !/^\d{1,4}(\s|$)/.test(next)) {
-        if (fmt(current)) parts.push(fmt(current).replace(/^[,;|]+|[,;|]+$/g, ''));
-        current = '';
-        continue;
-      }
+
+    if (char === '"' || char === "'") {
+      quote = char;
+      current += char;
+      continue;
     }
+
+    if (char === '(' || char === '[' || char === '{') {
+      depth += 1;
+      current += char;
+      continue;
+    }
+
+    if (char === ')' || char === ']' || char === '}') {
+      depth = Math.max(0, depth - 1);
+      current += char;
+      continue;
+    }
+
+    if (depth === 0 && delimiterSet.has(char)) {
+      if (char === ',') {
+        const next = text.slice(index + 1).trim().split(/[;,|\n]/)[0];
+        if (!next || /^\d{1,4}(\s|$)/.test(next)) {
+          current += char;
+          continue;
+        }
+      }
+      pushCurrent();
+      continue;
+    }
+
     current += char;
   }
 
-  if (fmt(current)) parts.push(fmt(current).replace(/^[,;|]+|[,;|]+$/g, ''));
-  return parts.filter(Boolean);
+  pushCurrent();
+  return parts;
+};
+
+const splitDelimited = (value) => {
+  return splitTopLevelDelimited(value);
 };
 
 const selectedDelimiter = (config = {}) => {
@@ -511,10 +593,7 @@ const selectedDelimiter = (config = {}) => {
 const splitByExplicitDelimiter = (value, delimiter) => {
   const text = fmt(value).replace(/\u00a0/g, ' ');
   if (!text || !delimiter || !text.includes(delimiter)) return [];
-  return text
-    .split(delimiter)
-    .map((part) => fmt(part).replace(/^[,;|]+|[,;|]+$/g, ''))
-    .filter(Boolean);
+  return splitTopLevelDelimited(text, [delimiter]);
 };
 
 const stripVendorPrefix = (value) => {
@@ -623,9 +702,54 @@ const extractPackedMetadata = (value) => {
   };
 };
 
+const parseParenthesizedMpnManufacturerPairs = (value, config = {}) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ');
+  if (!text || !/[()]/.test(text)) return [];
+
+  const delimiter = selectedDelimiter(config);
+  const explicitParts = splitByExplicitDelimiter(text, delimiter);
+  const parts = explicitParts.length > 1 ? explicitParts : splitDelimited(text);
+  const candidates = parts.length ? parts : [text];
+
+  const parsed = candidates.map((part) => {
+    const match = fmt(part).match(/^(.+?)\s*\(([^()]*)\)\s*$/);
+    if (!match) return null;
+
+    const rawMpn = fmt(match[1]);
+    const inside = fmt(match[2]);
+    if (!rawMpn || !inside || !looksLikeMpnToken(rawMpn)) return null;
+
+    const insideParts = splitTopLevelDelimited(inside, [','])
+      .map(fmt)
+      .filter(Boolean);
+    if (!insideParts.length) return null;
+
+    const codeIndex = insideParts.findIndex((partValue, index) => (
+      index > 0 && /^(?:mfr|manuf(?:acturer)?|vendor)?\s*(?:code|id)?\s*[:#-]?\s*[A-Z]?\d{4,}$/i.test(partValue)
+    ));
+    const manufacturerParts = codeIndex > 0 ? insideParts.slice(0, codeIndex) : [insideParts[0]];
+    const manufacturer = manufacturerParts.join(', ').trim();
+    const manufacturerCode = codeIndex > 0 ? insideParts.slice(codeIndex).join(', ').trim() : insideParts.slice(1).join(', ').trim();
+    if (!manufacturer || !/[A-Za-z]/.test(manufacturer)) return null;
+
+    return {
+      mpn: stripVendorPrefix(rawMpn),
+      manufacturer,
+      metadata: manufacturerCode ? { manufacturerCode } : {},
+    };
+  }).filter(Boolean);
+
+  return parsed.length >= 1 && parsed.length === candidates.length ? parsed : [];
+};
+
 const parsePackedMpnManufacturerPairs = (value, config = {}) => {
   const text = fmt(value).replace(/\u00a0/g, ' ');
-  if (!text || !text.includes(':')) return [];
+  if (!text) return [];
+
+  const parenthesizedPairs = parseParenthesizedMpnManufacturerPairs(text, config);
+  if (parenthesizedPairs.length) return parenthesizedPairs;
+
+  if (!text.includes(':')) return [];
 
   const delimiter = selectedDelimiter(config);
   const candidates = splitByExplicitDelimiter(text, delimiter);
@@ -833,6 +957,7 @@ const normalizeSeparateCells = (rows, roles, config) => {
     const sourceRow = row.__sourceRow || rowIndex + 1;
     const rawMpn = getCell(row, roles.mpn);
     const rawManufacturer = getCell(row, roles.manufacturer);
+    const packedPairs = rawManufacturer ? [] : parseParenthesizedMpnManufacturerPairs(rawMpn, config);
     const mpns = splitMpnCell(rawMpn, config);
     const explicitDelimiterUsed = Boolean(selectedDelimiter(config)) && mpns.length > 1;
     const manufacturers = splitManufacturerCell(rawManufacturer, mpns.length, config);
@@ -844,6 +969,28 @@ const normalizeSeparateCells = (rows, roles, config) => {
     const level = getCell(row, roles.level) || '1';
     const rule = explicitDelimiterUsed ? 'separate_cells_user_delimiter' : 'separate_cells_position_pairing';
     const cpn = getCell(row, roles.cpn);
+
+    if (packedPairs.length) {
+      packedPairs.forEach((pair, partIndex) => {
+        output.push(withSourceColumns({
+          sourceRow,
+          parentKey,
+          relation: partIndex === 0 ? 'Primary' : `Alternate ${partIndex}`,
+          level,
+          cpn,
+          description,
+          mpn: pair.mpn,
+          manufacturer: pair.manufacturer,
+          quantity,
+          uom,
+          rule: 'separate_cells_parenthesized_mpn_manufacturer',
+          confidence: Math.min(confidenceForRow(pair.mpn, pair.manufacturer, 'separate') + 12, 98),
+          discardedText: '',
+          ...pair.metadata,
+        }, row, config));
+      });
+      return;
+    }
 
     if (!mpns.length && hasPreservableBomIdentity(row, roles)) {
       output.push(withSourceColumns({
@@ -1046,10 +1193,11 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
   const output = [];
   const manualGroups = cleanAlternateColumnGroups(config.alternateColumnGroups || [], headers);
   const alternateGroups = manualGroups.length ? manualGroups : findAlternateColumnGroups(headers);
+  const useManufacturerColumns = Boolean(roles.manufacturer) && !String(config.structure || '').startsWith('mpn_only');
   rows.forEach((row, rowIndex) => {
     const sourceRow = row.__sourceRow || rowIndex + 1;
     const primaryMpn = getCell(row, roles.mpn);
-    const primaryManufacturer = getCell(row, roles.manufacturer);
+    const primaryManufacturer = useManufacturerColumns ? getCell(row, roles.manufacturer) : '';
     const primaryQty = getCell(row, roles.quantity);
     const primaryUom = getCell(row, roles.uom);
     const rawParentKey = getCell(row, roles.parent);
@@ -1082,7 +1230,9 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
     alternateGroups.forEach((group, groupIndex) => {
       const mpn = getCell(row, group.mpn);
       if (!mpn) return;
-      const manufacturer = getCell(row, group.mfr) || (config.manufacturerMode === 'inherit_blank' ? primaryManufacturer : '');
+      const manufacturer = useManufacturerColumns
+        ? getCell(row, group.mfr) || (config.manufacturerMode === 'inherit_blank' ? primaryManufacturer : '')
+        : '';
       output.push(withSourceColumns({
         sourceRow,
         parentKey,
@@ -1342,11 +1492,11 @@ const normalizeRows = (rows, headers, roles, config) => {
     return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
   }
   if (config.structure === 'grouped_rows') return normalizeGroupedRows(rows, roles, configWithSourceHeaders);
+  if (config.alternateLayout === 'separate_columns') return normalizeAlternateColumns(rows, headers, roles, configWithSourceHeaders);
   if (config.structure === 'mpn_only_same_cell') return normalizeSeparateCells(rows, roles, configWithSourceHeaders);
   if (config.structure === 'mpn_only_rows') return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
   if (config.structure === 'mfr_only_same_cell') return normalizeManufacturerOnly(rows, roles, configWithSourceHeaders, true);
   if (config.structure === 'mfr_only_rows') return normalizeManufacturerOnly(rows, roles, configWithSourceHeaders, false);
-  if (config.alternateLayout === 'separate_columns') return normalizeAlternateColumns(rows, headers, roles, configWithSourceHeaders);
   if (config.alternateLayout === 'same_group_rows') return normalizeSameGroupRows(rows, roles, configWithSourceHeaders);
   if (config.alternateLayout === 'already_separate_rows') return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
   if (config.structure === 'same_cell') return normalizeSameCell(rows, roles, configWithSourceHeaders);
@@ -1839,10 +1989,11 @@ const isGenericPartHeader = (header) => /^part( number| no)?$/.test(normalizeKey
 const prepareSingleSheet = (currentWorkbook, currentSheetName, options = {}) => {
   const worksheet = currentWorkbook.Sheets[currentSheetName];
   const rows = worksheetToCompactRows(worksheet);
+  const rawRowsForHeaderDetection = worksheetToCompactRows(worksheet, { expandMergedCells: false });
   const requestedHeaderIndex = Number(options.headerRow);
   const headerIndex = Number.isFinite(requestedHeaderIndex) && requestedHeaderIndex > 0
     ? requestedHeaderIndex - 1
-    : detectHeaderRow(rows);
+    : detectHeaderRow(rawRowsForHeaderDetection);
   const columns = getUsableColumnDescriptors(rows, headerIndex);
   const currentHeaders = columns.map((column) => column.header);
   const dataSheetRows = rows.slice(headerIndex + 1).filter((row) => row.some((cell) => fmt(cell)));
@@ -2063,6 +2214,40 @@ const uniqueValues = (values) => {
     });
 };
 
+const repeatedPairValues = (values) => values
+  .map(fmt)
+  .filter(Boolean);
+
+const valuesNeedPositionalMergePairing = (matches = [], column = '', selectedColumns = []) => {
+  const seen = new Map();
+  for (const match of matches) {
+    const value = fmt(match?.[column]);
+    if (!value) continue;
+    const companionSignature = selectedColumns
+      .filter((selectedColumn) => selectedColumn !== column)
+      .map((selectedColumn) => fmt(match?.[selectedColumn]))
+      .filter(Boolean)
+      .join('::');
+    if (!seen.has(value)) {
+      seen.set(value, new Set(companionSignature ? [companionSignature] : []));
+      continue;
+    }
+    if (companionSignature) seen.get(value).add(companionSignature);
+    if (seen.get(value).size > 1) return true;
+  }
+  return false;
+};
+
+const shouldPreserveRepeatedMergeValues = (column = '') => {
+  const key = normalizeKey(column);
+  if (!key) return false;
+  if (/\bmpn\b|\bmfr\b|\bmfg\b/.test(key)) return true;
+  if (/manufacturer/.test(key) && /(part|number|info|name|vendor|mfr|mfg)/.test(key)) return true;
+  if (/(manufacturer|mfg|mfr).*(part|number)/.test(key)) return true;
+  if (/(part|item).*(number|no|num|code)/.test(key)) return true;
+  return false;
+};
+
 const makeUniqueName = (name, existing) => {
   let candidate = name || 'Column';
   let suffix = 2;
@@ -2156,7 +2341,13 @@ const buildMergePreviewFromSources = (primarySource, secondarySource, config) =>
           row[header] = primaryRow[header] ?? '';
         });
         selectedDetailColumns.forEach((column) => {
-          row[detailHeaderMap[column]] = uniqueValues(matches.map((match) => match[column])).join(' | ');
+          const values = matches.map((match) => match[column]);
+          row[detailHeaderMap[column]] = (
+            shouldPreserveRepeatedMergeValues(column) ||
+            valuesNeedPositionalMergePairing(matches, column, selectedDetailColumns)
+              ? repeatedPairValues(values)
+              : uniqueValues(values)
+          ).join(' | ');
         });
         rows.push(row);
         expandedRows += 1;
@@ -2821,6 +3012,7 @@ const BomNormalizer = () => {
   });
   const [mergePreview, setMergePreview] = useState(null);
   const [mergePreviewFilter, setMergePreviewFilter] = useState('all');
+  const [mergePreviewSearch, setMergePreviewSearch] = useState('');
   const [mergePreviewPage, setMergePreviewPage] = useState(0);
   const [mergeVisibleColumns, setMergeVisibleColumns] = useState([]);
   const [mergeColumnWidths, setMergeColumnWidths] = useState({});
@@ -2898,9 +3090,13 @@ const BomNormalizer = () => {
   );
 
   const showManufacturerInheritanceOption = useMemo(() => (
-    config.structure !== 'one_per_row' ||
-    config.alternateLayout !== 'already_separate_rows'
+    !String(config.structure || '').startsWith('mpn_only') &&
+    (config.structure !== 'one_per_row' || config.alternateLayout !== 'already_separate_rows')
   ), [config.alternateLayout, config.structure]);
+
+  const showAlternateManufacturerGroups = useMemo(() => (
+    Boolean(roles.manufacturer) && !String(config.structure || '').startsWith('mpn_only')
+  ), [config.structure, roles.manufacturer]);
 
   const selectedGroupHeaderOption = useMemo(
     () => GROUP_HEADER_OPTIONS.find((option) => option.value === config.groupHeaderMode),
@@ -2955,13 +3151,18 @@ const BomNormalizer = () => {
     return 'secondary values';
   }, [mergeConfig.detailColumns, mergeConfig.relationshipName]);
 
+  const normalizedMergePreviewSearch = mergePreviewSearch.trim().toLowerCase();
   const mergeFilteredPreviewRows = useMemo(() => (
     mergePreview
       ? mergePreview.rows
         .map((row, index) => ({ row, index }))
         .filter(({ row }) => mergePreviewFilter === 'all' || row.__mergeStatus === mergePreviewFilter)
+        .filter(({ row }) => {
+          if (!normalizedMergePreviewSearch) return true;
+          return Object.values(row).some((value) => fmt(value).toLowerCase().includes(normalizedMergePreviewSearch));
+        })
       : []
-  ), [mergePreview, mergePreviewFilter]);
+  ), [mergePreview, mergePreviewFilter, normalizedMergePreviewSearch]);
 
   const mergePreviewRowsPerPage = 50;
   const mergePreviewTotalPages = Math.max(1, Math.ceil(mergeFilteredPreviewRows.length / mergePreviewRowsPerPage));
@@ -3360,6 +3561,7 @@ const BomNormalizer = () => {
   );
 
   const suggestAlternateColumnGroup = useCallback(() => {
+    const shouldSuggestManufacturer = Boolean(roles.manufacturer) && !String(config.structure || '').startsWith('mpn_only');
     const usedColumns = new Set([
       roles.cpn,
       roles.mpn,
@@ -3378,7 +3580,9 @@ const BomNormalizer = () => {
     }) || '';
     const mpn = findCandidate([/\bmpn\b/, /part/, /code/, /column/]) || candidates[0] || '';
     const afterMpn = mpn ? candidates.slice(candidates.indexOf(mpn) + 1) : candidates;
-    const mfr = afterMpn.find((header) => /mfr|manufacturer|vendor|supplier|column/i.test(header)) || afterMpn[0] || '';
+    const mfr = shouldSuggestManufacturer
+      ? afterMpn.find((header) => /mfr|manufacturer|vendor|supplier|column/i.test(header)) || afterMpn[0] || ''
+      : '';
     return {
       slot: `${(config.alternateColumnGroups || []).length + 1}`,
       mpn,
@@ -3386,7 +3590,7 @@ const BomNormalizer = () => {
       qty: '',
       uom: '',
     };
-  }, [config.alternateColumnGroups, headers, roles]);
+  }, [config.alternateColumnGroups, config.structure, headers, roles]);
 
   const addAlternateColumnGroup = useCallback(() => {
     setConfig((prev) => ({
@@ -3994,6 +4198,7 @@ const BomNormalizer = () => {
       setMergeConfig(preview.config);
       setMergeVisibleColumns(preview.headers);
       setMergePreviewFilter('all');
+      setMergePreviewSearch('');
       setMergePreviewPage(0);
       setMergeStage('preview');
       setCombineError('');
@@ -4100,6 +4305,7 @@ const BomNormalizer = () => {
     setMergeSources([]);
     setMergePreview(null);
     setMergePreviewFilter('all');
+    setMergePreviewSearch('');
     setMergePreviewPage(0);
     setMergeVisibleColumns([]);
     setMergeColumnWidths({});
@@ -4809,6 +5015,7 @@ const BomNormalizer = () => {
     });
     setMergePreview(null);
     setMergePreviewFilter('all');
+    setMergePreviewSearch('');
     setMergePreviewPage(0);
     setMergeVisibleColumns([]);
     setMergeColumnWidths({});
@@ -5088,6 +5295,7 @@ const BomNormalizer = () => {
                             setMergeChainMessage('');
                             setMergeSources([]);
                             setMergePreview(null);
+                            setMergePreviewSearch('');
                             setMergeStage('sources');
                           }} disabled={combineBusy}>
                             Clear
@@ -5324,6 +5532,16 @@ const BomNormalizer = () => {
                           <Typography sx={{ fontSize: 13, color: '#66717f' }}>
                             Showing {visibleMergePreviewRows.length ? mergePreviewStart + 1 : 0}-{Math.min(mergePreviewStart + visibleMergePreviewRows.length, mergeFilteredPreviewRows.length)} of {mergeFilteredPreviewRows.length}
                           </Typography>
+                          <TextField
+                            size="small"
+                            value={mergePreviewSearch}
+                            onChange={(event) => {
+                              setMergePreviewSearch(event.target.value);
+                              setMergePreviewPage(0);
+                            }}
+                            placeholder="Search merged rows..."
+                            sx={{ minWidth: { xs: '100%', md: 260 } }}
+                          />
                           <FormControl size="small" sx={{ minWidth: 230 }}>
                             <InputLabel>Columns to keep</InputLabel>
                             <Select
@@ -5709,7 +5927,9 @@ const BomNormalizer = () => {
                         <Box>
                           <Typography sx={{ fontSize: 13, fontWeight: 800 }}>Alternate column groups</Typography>
                           <Typography sx={{ fontSize: 12.5, color: '#66717f' }}>
-                            Add one row for each alternate MPN/MFR pair that lives in separate columns.
+                            {showAlternateManufacturerGroups
+                              ? 'Add one row for each alternate MPN/MFR pair that lives in separate columns.'
+                              : 'Add one row for each alternate MPN column. Manufacturer is not required for this setup.'}
                           </Typography>
                         </Box>
                         <Button size="small" variant="outlined" onClick={addAlternateColumnGroup}>
@@ -5720,7 +5940,7 @@ const BomNormalizer = () => {
                         <Stack spacing={1} sx={{ mt: 1 }}>
                           {(config.alternateColumnGroups || []).map((group, groupIndex) => (
                             <Grid container spacing={1} alignItems="center" key={`alt-group-${groupIndex}`}>
-                              <Grid item xs={12} sm={3}>
+                              <Grid item xs={12} sm={showAlternateManufacturerGroups ? 3 : 4}>
                                 <FormControl fullWidth size="small">
                                   <InputLabel>{`Alt ${groupIndex + 1} MPN`}</InputLabel>
                                   <Select
@@ -5735,22 +5955,24 @@ const BomNormalizer = () => {
                                   </Select>
                                 </FormControl>
                               </Grid>
-                              <Grid item xs={12} sm={3}>
-                                <FormControl fullWidth size="small">
-                                  <InputLabel>{`Alt ${groupIndex + 1} MFR`}</InputLabel>
-                                  <Select
-                                    label={`Alt ${groupIndex + 1} MFR`}
-                                    value={group.mfr || ''}
-                                    onChange={(event) => updateAlternateColumnGroup(groupIndex, 'mfr', event.target.value)}
-                                  >
-                                    <MenuItem value="">None</MenuItem>
-                                    {headers.map((header) => (
-                                      <MenuItem key={header} value={header}>{header}</MenuItem>
-                                    ))}
-                                  </Select>
-                                </FormControl>
-                              </Grid>
-                              <Grid item xs={12} sm={2}>
+                              {showAlternateManufacturerGroups && (
+                                <Grid item xs={12} sm={3}>
+                                  <FormControl fullWidth size="small">
+                                    <InputLabel>{`Alt ${groupIndex + 1} MFR`}</InputLabel>
+                                    <Select
+                                      label={`Alt ${groupIndex + 1} MFR`}
+                                      value={group.mfr || ''}
+                                      onChange={(event) => updateAlternateColumnGroup(groupIndex, 'mfr', event.target.value)}
+                                    >
+                                      <MenuItem value="">None</MenuItem>
+                                      {headers.map((header) => (
+                                        <MenuItem key={header} value={header}>{header}</MenuItem>
+                                      ))}
+                                    </Select>
+                                  </FormControl>
+                                </Grid>
+                              )}
+                              <Grid item xs={12} sm={showAlternateManufacturerGroups ? 2 : 3}>
                                 <FormControl fullWidth size="small">
                                   <InputLabel>Alt Qty</InputLabel>
                                   <Select
@@ -5765,7 +5987,7 @@ const BomNormalizer = () => {
                                   </Select>
                                 </FormControl>
                               </Grid>
-                              <Grid item xs={12} sm={2}>
+                              <Grid item xs={12} sm={showAlternateManufacturerGroups ? 2 : 3}>
                                 <FormControl fullWidth size="small">
                                   <InputLabel>Alt UOM</InputLabel>
                                   <Select
@@ -5793,7 +6015,7 @@ const BomNormalizer = () => {
                         </Stack>
                       ) : (
                         <Alert severity="info" sx={{ mt: 1 }}>
-                          No alternate columns selected yet. Add a group and choose the alternate MPN column, plus manufacturer if available.
+                          No alternate columns selected yet. Add a group and choose the alternate MPN column{showAlternateManufacturerGroups ? ', plus manufacturer if available' : ''}.
                         </Alert>
                       )}
                       {alternateColumnGroups.length > 0 && (
@@ -6815,7 +7037,7 @@ const BomNormalizer = () => {
                           }}
                         >
                           <MenuItem value="keep">Keep parsed output</MenuItem>
-                          <MenuItem value="manual">Use manual manufacturer list</MenuItem>
+                          <MenuItem value="manual">Link Manufacturer</MenuItem>
                           <MenuItem value="remove_extra">Remove extra MPN/MFR values</MenuItem>
                         </Select>
                       </FormControl>
