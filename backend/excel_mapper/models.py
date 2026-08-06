@@ -11,7 +11,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 _MPN_CACHE_WRITE_LOCK = threading.Lock()
-MPN_CACHE_TTL = timedelta(hours=24)
+# How long a cached distributor lookup stays servable. Reads filter on it, so an
+# expired row is ignored rather than deleted, and the next lookup overwrites it.
+# 24h meant a sheet revisited the next day re-hit every provider API; part data
+# does not churn nearly that fast.
+MPN_CACHE_TTL = timedelta(days=14)
 
 class MappingTemplate(models.Model):
     name = models.CharField(max_length=200, unique=True)
