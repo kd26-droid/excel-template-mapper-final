@@ -526,8 +526,6 @@ const EnhancedDataEditor = () => {
   const [exportProjectMode, setExportProjectMode] = useState('NEW'); // 'NEW' or 'EXISTING'
   const [exportProjectName, setExportProjectName] = useState('');
   const [exportProjectLoading, setExportProjectLoading] = useState(false);
-  const [exportProjectSelectedColumns, setExportProjectSelectedColumns] = useState({});
-  const [exportProjectSelectAll, setExportProjectSelectAll] = useState(true);
   const [selectedExistingProject, setSelectedExistingProject] = useState(null);
   const [exportProjectSuccess, setExportProjectSuccess] = useState(false);
   const [factwiseExportDialogOpen, setFactwiseExportDialogOpen] = useState(false);
@@ -3179,18 +3177,12 @@ const EnhancedDataEditor = () => {
     showSnackbar(`Highlighted ${itemCodeIssue.dupRows} rows with duplicate Item codes. Edit them, then export again.`, 'info');
   }, [itemCodeIssue, cancelRequiredExport, showSnackbar]);
   const handleExportToProject = useCallback(() => {
-    const cols = {};
-    columnDefs
-      .filter(col => col.field && col.field !== '__row_number__')
-      .forEach(col => { cols[col.field] = true; });
-    setExportProjectSelectedColumns(cols);
-    setExportProjectSelectAll(true);
     setExportProjectName(`Project Export - ${new Date().toLocaleDateString()}`);
     setExportProjectMode('NEW');
     setSelectedExistingProject(null);
     setExportProjectSuccess(false);
     setExportProjectDialogOpen(true);
-  }, [columnDefs]);
+  }, []);
 
   const getCurrentExportColumnOrder = useCallback(() => (
     columnDefs
@@ -3322,15 +3314,8 @@ const EnhancedDataEditor = () => {
   }, [factwisePreviewType]);
 
   const handleExportProjectConfirm = useCallback(() => {
-    const selectedCols = Object.entries(exportProjectSelectedColumns)
-      .filter(([, selected]) => selected)
-      .map(([field]) => field);
-
-    if (selectedCols.length === 0) {
-      showSnackbar('Please select at least one column to export', 'warning');
-      return;
-    }
-
+    // Every column is exported — the per-field picker was removed, so there is no
+    // selection left to validate.
     if (exportProjectMode === 'EXISTING' && !selectedExistingProject) {
       showSnackbar('Please select an existing project', 'warning');
       return;
@@ -3342,17 +3327,8 @@ const EnhancedDataEditor = () => {
       setExportProjectLoading(false);
       setExportProjectSuccess(true);
     }, 3000);
-  }, [showSnackbar, exportProjectSelectedColumns, exportProjectMode, selectedExistingProject]);
+  }, [showSnackbar, exportProjectMode, selectedExistingProject]);
 
-  const handleExportProjectToggleSelectAll = useCallback(() => {
-    const newVal = !exportProjectSelectAll;
-    setExportProjectSelectAll(newVal);
-    setExportProjectSelectedColumns(prev => {
-      const updated = {};
-      Object.keys(prev).forEach(key => { updated[key] = newVal; });
-      return updated;
-    });
-  }, [exportProjectSelectAll]);
 
   const handleExportForCorrection = useCallback(async () => {
     try {
@@ -9102,7 +9078,7 @@ const EnhancedDataEditor = () => {
                   : `${selectedExistingProject?.project_code} — ${selectedExistingProject?.project_name}`}
               </Typography>
               <Typography sx={{ fontSize: 13.5, lineHeight: 1.5, fontWeight: 400, color: exportDialogTone.secondary, mt: 2, letterSpacing: 0 }}>
-                {Object.values(exportProjectSelectedColumns).filter(v => v).length} columns exported
+                {columnDefs.filter(c => c.field && c.field !== '__row_number__').length} columns exported
               </Typography>
             </DialogContent>
             <DialogActions sx={{ px: 3, py: 2, justifyContent: 'center', backgroundColor: exportDialogTone.footer, borderTop: `1px solid ${exportDialogTone.border}` }}>
@@ -9238,87 +9214,6 @@ const EnhancedDataEditor = () => {
                 </Box>
               )}
 
-              <Divider sx={{ mb: 2, borderColor: exportDialogTone.border }} />
-
-              {/* Fields to Export Section */}
-              <Box sx={{ mb: 1 }}>
-                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
-                  <Typography variant="body2" sx={{ color: exportDialogTone.secondary, fontWeight: 500 }}>
-                    Fields to be exported
-                  </Typography>
-                  <Box sx={{ display: 'flex', alignItems: 'center' }}>
-                    <Checkbox
-                      checked={exportProjectSelectAll}
-                      indeterminate={
-                        !exportProjectSelectAll &&
-                        Object.values(exportProjectSelectedColumns).some(v => v)
-                      }
-                      onChange={handleExportProjectToggleSelectAll}
-                      size="small"
-                      sx={{ color: '#2563eb', '&.Mui-checked': { color: '#2563eb' } }}
-                    />
-                    <Typography variant="body2" sx={{ fontWeight: 500, fontSize: '13px', color: exportDialogTone.text }}>
-                      SELECT ALL
-                    </Typography>
-                  </Box>
-                </Box>
-
-                <Box sx={{
-                  maxHeight: '280px',
-                  overflowY: 'auto',
-                  border: `1px solid ${exportDialogTone.border}`,
-                  borderRadius: '8px',
-                  backgroundColor: exportDialogTone.panelSoft
-                }}>
-                  <Grid container>
-                    {Object.entries(exportProjectSelectedColumns).map(([field, checked]) => {
-                      const colDef = columnDefs.find(c => c.field === field);
-                      const label = colDef?.headerName || field;
-                      return (
-                        <Grid item xs={6} key={field}>
-                          <Box sx={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            px: 1.5,
-                            py: 0.25,
-                            borderBottom: `1px solid ${exportDialogTone.borderSoft}`,
-                            '&:hover': { backgroundColor: exportDialogTone.hover }
-                          }}>
-                            <Checkbox
-                              checked={checked}
-                              size="small"
-                              sx={{ color: '#2563eb', '&.Mui-checked': { color: '#2563eb' } }}
-                              onChange={(e) => {
-                                const newChecked = e.target.checked;
-                                setExportProjectSelectedColumns(prev => ({
-                                  ...prev,
-                                  [field]: newChecked
-                                }));
-                                const allVals = { ...exportProjectSelectedColumns, [field]: newChecked };
-                                setExportProjectSelectAll(Object.values(allVals).every(v => v));
-                              }}
-                            />
-                            <Typography variant="body2" sx={{
-                              fontSize: '13px',
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap',
-                              color: exportDialogTone.text
-                            }}>
-                              {label}
-                            </Typography>
-                          </Box>
-                        </Grid>
-                      );
-                    })}
-                  </Grid>
-                </Box>
-
-                <Typography variant="caption" sx={{ color: exportDialogTone.secondary, mt: 0.5, display: 'block' }}>
-                  {Object.values(exportProjectSelectedColumns).filter(v => v).length} of{' '}
-                  {Object.keys(exportProjectSelectedColumns).length} columns selected
-                </Typography>
-              </Box>
             </DialogContent>
 
             <DialogActions sx={{
@@ -9350,8 +9245,7 @@ const EnhancedDataEditor = () => {
                 onClick={handleExportProjectConfirm}
                 disabled={
                   (exportProjectMode === 'NEW' && !exportProjectName.trim()) ||
-                  (exportProjectMode === 'EXISTING' && !selectedExistingProject) ||
-                  Object.values(exportProjectSelectedColumns).every(v => !v)
+                  (exportProjectMode === 'EXISTING' && !selectedExistingProject)
                 }
                 startIcon={<FolderOpenIcon />}
                 sx={{
