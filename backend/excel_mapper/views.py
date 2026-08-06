@@ -212,45 +212,23 @@ def drop_non_data_rows(df: pd.DataFrame, context: str = "") -> pd.DataFrame:
 
 
 def cleanup_empty_spec_pairs(headers: list, rows: list) -> int:
-    """Clear Specification name when the paired Specification value is blank."""
-    if not headers or not rows:
-        return 0
+    """Deliberately does nothing. The grid is exported exactly as it stands.
 
-    pairs = {}
-    for index, header in enumerate(headers):
-        name_key = _spec_pair_key(header, "name")
-        value_key = _spec_pair_key(header, "value")
-        if name_key:
-            pairs.setdefault(name_key, {})["name"] = header
-            pairs[name_key]["name_index"] = index
-        if value_key:
-            pairs.setdefault(value_key, {})["value"] = header
-            pairs[value_key]["value_index"] = index
+    This used to clear `Specification name` whenever the paired
+    `Specification value` was blank, and it ran on every session save as well as
+    on export. A name typed without a value yet was therefore wiped moments
+    later, with nothing to show the user why.
 
-    cleaned = 0
-    for pair in pairs.values():
-        if "name" not in pair or "value" not in pair:
-            continue
-        for row in rows:
-            if isinstance(row, dict):
-                spec_name = str(row.get(pair["name"], "") or "").strip()
-                spec_value = row.get(pair["value"], "")
-                if spec_name and _is_blank_cell(spec_value):
-                    row[pair["name"]] = ""
-                    cleaned += 1
-            elif isinstance(row, list):
-                name_index = pair["name_index"]
-                value_index = pair["value_index"]
-                raw_name = row[name_index] if name_index < len(row) else ""
-                raw_value = row[value_index] if value_index < len(row) else ""
-                spec_name = str(raw_name or "").strip()
-                if spec_name and _is_blank_cell(raw_value):
-                    while len(row) <= name_index:
-                        row.append("")
-                    row[name_index] = ""
-                    cleaned += 1
-    return cleaned
+    Specification (name/value/UOM) and customer identification (name/value) are
+    written as whole groups even when parts are empty, so a half-filled group is
+    a normal in-progress state, not something to repair. The user may complete it
+    in the exported sheet, so the export must preserve what they entered rather
+    than second-guess it.
 
+    Kept as a no-op instead of deleting the call sites, so any future caller
+    inherits the same behaviour.
+    """
+    return 0
 
 def _headers_from_rows(rows, fallback_headers=None):
     if fallback_headers:
@@ -427,7 +405,7 @@ def build_sfo_clustered_headers(base_headers: list, tags_count: int, spec_pairs_
     headers = [_strip_pandas_duplicate_suffix(h) for h in (base_headers or []) if str(h or "").strip()]
     if not headers:
         headers = [
-            "Item code", "SAP Item ID", "CPN Code", "MPN Code", "HSN Code", "Item name",
+            "Item code", "ERP Code", "CPN Code", "MPN Code", "HSN Code", "Item name",
             "Description", "Item type", "Measurement unit", "Alternate UoM 1", "Notes",
             "SAP Description", "Specification name", "Specification value", "Specification UOM",
             "Item identifications name", "Item identifications value", "Procurement item",
@@ -4975,9 +4953,30 @@ def _append_authored_finished_good(info, rows, headers):
 
     constants = _constant_column_values(rows, headers)
 
+    def stamp_identity(target_row, good):
+        """Write the authored identity onto a row, leaving everything else alone."""
+        while len(target_row) <= max(code_index, name_index, description_index, type_index, uom_index):
+            target_row.append('')
+        target_row[code_index] = good['code']
+        if name_index >= 0:
+            target_row[name_index] = good['name']
+        if description_index >= 0:
+            target_row[description_index] = good['name']
+        if type_index >= 0:
+            target_row[type_index] = 'Finished good'
+        if uom_index >= 0:
+            target_row[uom_index] = good['uom']
+
     output = list(rows or [])
     for good in goods:
         if good['code'] in existing:
+            # Already a row — usually because the sheet was exported and imported
+            # back. Re-stamp its identity so it cannot have drifted away from what
+            # the user authored (a bulk fill before the lock existed, an edit in
+            # Excel, a stale template replay).
+            for row in output:
+                if isinstance(row, list) and code_index < len(row)                         and str(row[code_index] or '').strip() == good['code']:
+                    stamp_identity(row, good)
             continue
         new_row = [''] * len(headers)
         # Enterprise-level values (procurement entity, buyer/seller flags) are
@@ -5017,7 +5016,7 @@ def _constant_column_values(rows, headers):
     never_inherit = {
         _template_label_key(name) for name in
         ('Item code', 'Item name', 'Description', 'Item type', 'Measurement unit',
-         'MPN Code', 'CPN Code', 'SAP Item ID', 'HSN Code')
+         'MPN Code', 'CPN Code', 'ERP Code', 'SAP Item ID', 'HSN Code')
     }
 
     constants = {}
@@ -5042,6 +5041,53 @@ def _constant_column_values(rows, headers):
         if consistent and seen:
             constants[position] = seen
     return constants
+
+
+# The export header cleanup below strips digits/underscores and applies
+# str.capitalize(), which is right for dynamic slots (Specification_Name_3 ->
+# "Specification name") but destroys acronyms: "CPN Code" -> "Cpn code".
+# These restore the labels FactWise expects, keyed by the cleaned header
+# lowercased with non-alphanumerics collapsed to single spaces.
+#
+# "SAP Item ID" was renamed to "ERP Code" in the destination template, so new
+# sessions already carry the new label; the alias here keeps sessions created
+# before the rename exporting under the same name.
+EXPORT_HEADER_CANONICAL_LABELS = {
+    'cpn code': 'CPN Code',
+    'mpn code': 'MPN Code',
+    'hsn code': 'HSN Code',
+    'erp code': 'ERP Code',
+    'sap item id': 'ERP Code',
+}
+
+# Old label -> new label, as _template_label_key sees them. Lets
+# import_edited_sheet match a sheet exported under one name onto a grid built
+# under the other.
+IMPORT_HEADER_ALIASES = {
+    'sap item id': 'erp code',
+}
+
+
+
+def _positional_row_keys(headers):
+    """Unique dict keys for headers that legitimately repeat.
+
+    The FactWise template repeats `Tag`, `Specification name/value/UOM` and
+    `Preferred vendor code`. Keying rows by header name alone collapses those to
+    one entry — the last occurrence wins — so anything written into the first
+    Tag slot vanished on export and the last slot's value was copied across all
+    of them. Suffixing repeats keeps each column addressable.
+    """
+    seen = {}
+    keys = []
+    for header in headers or []:
+        name = str(header)
+        count = seen.get(name, 0)
+        seen[name] = count + 1
+        # A marker no real FactWise header contains, so a suffixed key can
+        # never collide with a genuine column name.
+        keys.append(name if count == 0 else '%s @@dup%d' % (name, count))
+    return keys
 
 
 @api_view(['GET', 'POST'])
@@ -5152,7 +5198,8 @@ def download_file(request, session_id=None):
             # every cell (designators land under Procurement/Spec columns, etc.).
             if transformed_rows and isinstance(transformed_rows[0], list) and base_headers:
                 transformed_rows = [
-                    {base_headers[i]: (row[i] if i < len(row) else '') for i in range(len(base_headers))}
+                    dict(zip(_positional_row_keys(base_headers),
+                             [(row[i] if i < len(row) else '') for i in range(len(base_headers))]))
                     for row in transformed_rows
                 ]
 
@@ -5622,10 +5669,16 @@ def download_file(request, session_id=None):
             
             # Convert dict format to list format for consistency
             converted_rows = []
+            output_keys = _positional_row_keys(all_headers)
             for row_dict in transformed_rows:
                 row_list = []
-                for header in all_headers:
-                    row_list.append(row_dict.get(header, ""))
+                for key, header in zip(output_keys, all_headers):
+                    # Fall back to the plain header for rows written by a step
+                    # that never saw a duplicate (single-slot sheets).
+                    value = row_dict.get(key)
+                    if value is None:
+                        value = row_dict.get(header, "")
+                    row_list.append(value)
                 converted_rows.append(row_list)
             transformed_rows = converted_rows
         
@@ -5713,7 +5766,14 @@ def download_file(request, session_id=None):
                 # Convert to sentence case (only capitalize first letter)
                 if cleaned_col:
                     cleaned_col = cleaned_col.capitalize()
-                
+
+                # capitalize() flattens acronyms, so restore the labels FactWise
+                # expects.
+                lookup = re.sub(r'[^a-z0-9]+', ' ', cleaned_col.lower()).strip()
+                canonical = EXPORT_HEADER_CANONICAL_LABELS.get(lookup)
+                if canonical:
+                    cleaned_col = canonical
+
                 final_columns.append(cleaned_col or col)  # Fallback to original if cleaning fails
             
             df.columns = final_columns
@@ -9706,8 +9766,24 @@ def _legacy_factwise_id_as_column_rule(rule):
     }
 
 
-def apply_column_value_rule(headers, rows, raw_rule):
-    """Apply one reusable fill/create rule to a positional grid."""
+# A finished good authored in the BOM structure gate is not an ordinary row: its
+# code, name, type and unit came from the user answering a question, not from the
+# uploaded sheet. Bulk fills must leave those alone, or "set every Item type to
+# Raw material" quietly turns the finished good into a raw material.
+#
+# Everything else — buyer/seller flags, procurement entity, tags, specs — is
+# still filled normally, so the row stays consistent with the rest of the sheet.
+AUTHORED_FINISHED_GOOD_LOCKED_COLUMNS = {
+    'item code', 'item name', 'description', 'item type', 'measurement unit',
+}
+
+
+def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
+    """Apply one reusable fill/create rule to a positional grid.
+
+    ``locked_item_codes`` names rows whose identity columns must not be touched
+    (see AUTHORED_FINISHED_GOOD_LOCKED_COLUMNS).
+    """
     rule = _legacy_factwise_id_as_column_rule(raw_rule) or dict(raw_rule or {})
     if rule.get('type') != 'column_value':
         return list(headers or []), [list(row) for row in (rows or [])], 0
@@ -9796,23 +9872,44 @@ def apply_column_value_rule(headers, rows, raw_rule):
         value = str(cell or '').strip()
         lowered = value.lower()
         operator = branch['operator']
-        compare = branch['compare'].strip().lower()
+
+        # A branch may carry several values, matched as "any of these". They are
+        # kept as a list rather than split from a comma-joined string because
+        # component descriptions are full of commas ("CAPACITOR 0.22U, 10V",
+        # "CAP; 0,1uF"), so splitting one would quietly match far more than the
+        # user meant.
+        raw_compare = branch.get('compare')
+        if isinstance(raw_compare, (list, tuple)):
+            compares = [str(v).strip().lower() for v in raw_compare if str(v).strip()]
+        else:
+            single = str(raw_compare or '').strip().lower()
+            compares = [single] if single else ['']
+
         if operator == 'is_empty':
             return value == ''
         if operator == 'not_empty':
             return value != ''
         if operator == 'equals':
-            return lowered == compare
+            return any(lowered == c for c in compares)
         if operator == 'not_equals':
-            return lowered != compare
+            # "not any of them" — a row matching any listed value is excluded.
+            return all(lowered != c for c in compares)
         if operator == 'contains':
-            return compare in lowered
+            return any(c in lowered for c in compares)
         return False
+
+    # Resolve the lock once: which rows are protected, for this target column.
+    target_is_locked = _template_label_key(target) in AUTHORED_FINISHED_GOOD_LOCKED_COLUMNS
+    locked_codes = {str(code).strip() for code in (locked_item_codes or []) if str(code).strip()}
+    item_code_index = _grid_column_index(output_headers, 'Item code') if (target_is_locked and locked_codes) else -1
 
     for row_index, row in enumerate(output_rows):
         while len(row) < len(output_headers):
             row.append('')
         if write_mode != 'overwrite' and str(row[target_index] or '').strip():
+            continue
+        if item_code_index >= 0 and str(row[item_code_index] or '').strip() in locked_codes:
+            # Authored finished good: its identity is not the sheet's to rewrite.
             continue
 
         should_write = True
@@ -9882,7 +9979,12 @@ def fill_or_create_column(request):
                 'success': False,
                 'error': f'Column "{clean_rule["target_column"]}" already exists. Use Fill existing column.',
             }, status=status.HTTP_400_BAD_REQUEST)
-        new_headers, new_rows, changed = apply_column_value_rule(headers, rows, clean_rule)
+        # Rows created by the BOM structure gate keep their own identity, so a
+        # bulk fill cannot turn the finished good into a raw material.
+        locked_codes = [good['code'] for good in _authored_finished_goods(info)]
+        new_headers, new_rows, changed = apply_column_value_rule(
+            headers, rows, clean_rule, locked_item_codes=locked_codes
+        )
         write_session_grid(session_id, info, new_headers, new_rows)
 
         target = clean_rule['target_column']
@@ -11687,11 +11789,60 @@ def required_field_report(request):
             'gaps': gaps,
             'duplicates': duplicates,
             'invalids': invalids,
+            'warnings': _incomplete_group_warnings(headers, rows),
             'total_rows': len(rows),
         })
     except Exception as e:
         logger.error(f"required_field_report failed: {e}", exc_info=True)
         return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+
+def _incomplete_group_warnings(headers, rows):
+    """Report half-filled specification / customer-identification groups.
+
+    These groups are written whole — name, value and (for specs) UOM — so a name
+    with no value is a normal in-progress state, not corruption. Nothing is
+    cleared or blocked; the user is told which rows are incomplete so they can
+    fill the value or drop the name before importing.
+    """
+    if not headers or not rows:
+        return []
+
+    groups = [
+        ('Specification name', 'Specification value', 'specification'),
+        ('Item identifications name', 'Item identifications value', 'customer identification'),
+    ]
+
+    warnings = []
+    for name_label, value_label, description in groups:
+        name_positions = [i for i, h in enumerate(headers)
+                          if _template_label_key(h) == _template_label_key(name_label)]
+        value_positions = [i for i, h in enumerate(headers)
+                           if _template_label_key(h) == _template_label_key(value_label)]
+
+        for slot, (name_index, value_index) in enumerate(zip(name_positions, value_positions), start=1):
+            affected = 0
+            for row in rows:
+                if not isinstance(row, list):
+                    continue
+                name = str((row[name_index] if name_index < len(row) else '') or '').strip()
+                value = str((row[value_index] if value_index < len(row) else '') or '').strip()
+                if name and not value:
+                    affected += 1
+            if affected:
+                warnings.append({
+                    'kind': 'incomplete_group',
+                    'field': name_label,
+                    'slot': slot,
+                    'count': affected,
+                    'message': (
+                        f'{affected} row(s) have a {description} name in slot {slot} '
+                        f'with no matching value.'
+                    ),
+                    'suggestion': f'Fill the {value_label.lower()}, or remove the name.',
+                })
+    return warnings
 
 
 @api_view(['POST'])
@@ -13207,14 +13358,20 @@ def import_edited_sheet(request, session_id):
 
     # Repeated headers (Tag, Specification name...) are matched left-to-right so
     # the Nth occurrence in the upload lands on the Nth occurrence in the grid.
+    # Renamed destination columns are folded onto one key so a grid built before
+    # the rename still matches a sheet exported after it (and vice versa).
+    def _import_match_key(header):
+        key = _template_label_key(header)
+        return IMPORT_HEADER_ALIASES.get(key, key)
+
     remaining = {}
     for position, header in enumerate(session_headers):
-        remaining.setdefault(_template_label_key(header), []).append(position)
+        remaining.setdefault(_import_match_key(header), []).append(position)
 
     column_map = {}
     ignored = []
     for upload_position, header in enumerate(uploaded_headers):
-        slots = remaining.get(_template_label_key(header))
+        slots = remaining.get(_import_match_key(header))
         if slots:
             column_map[upload_position] = slots.pop(0)
         else:

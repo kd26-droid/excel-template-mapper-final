@@ -32,29 +32,13 @@ const getProviderCredentialScopeId = () => {
   return existing;
 };
 
-const getSelectedValidationProviders = () => {
-  if (typeof window === 'undefined') return ['digikey', 'mouser', 'element14'];
-  try {
-    const mappings = JSON.parse(window.localStorage.getItem(COLUMN_PROVIDER_MAPPINGS_KEY) || '[]');
-    if (Array.isArray(mappings) && mappings.length) {
-      const allowed = new Set(['digikey', 'mouser', 'element14']);
-      const mappedProviders = mappings
-        .flatMap((mapping) => {
-          const providers = mapping?.providers || mapping?.provider || [];
-          return Array.isArray(providers) ? providers : [providers];
-        })
-        .map((provider) => String(provider || '').toLowerCase())
-        .filter((provider) => allowed.has(provider));
-      if (mappedProviders.length) return Array.from(new Set(mappedProviders));
-    }
-    const saved = JSON.parse(window.localStorage.getItem(VALIDATION_PROVIDERS_KEY) || '[]');
-    const allowed = new Set(['digikey', 'mouser', 'element14']);
-    const selected = Array.isArray(saved) ? saved.filter((provider) => allowed.has(provider)) : [];
-    return selected.length ? Array.from(new Set(selected)) : ['digikey', 'mouser', 'element14'];
-  } catch {
-    return ['digikey', 'mouser', 'element14'];
-  }
-};
+// MPN validation always runs against every provider. Narrowing it by the
+// Settings selection or by column->provider mappings meant a part that DigiKey
+// does not stock came back "invalid" when Mouser or Element14 would have
+// confirmed it — one source saying no is not evidence the part is wrong.
+const ALL_VALIDATION_PROVIDERS = ['digikey', 'mouser', 'element14'];
+
+const getSelectedValidationProviders = () => ALL_VALIDATION_PROVIDERS.slice();
 
 const getColumnProviderMappings = () => {
   if (typeof window === 'undefined') return [];

@@ -3326,17 +3326,17 @@ const UploadFiles = () => {
       const context = pendingPdfContext || {};
 
       if (processingMode === 'zonal') {
+        // Navigate immediately. The zone screen shows its own progress while the page
+        // image loads, so a delay here just adds dead time on top of the render.
         setSuccess('Proceeding to zone selection for optimal results...');
-        setTimeout(() => {
-          navigate(`/pdf-zones/${pendingPdfSessionId}`, {
-            state: {
-              fromUpload: true,
-              returnToUpload: true,
-              pdfAlignment: pdfDataAlignment,
-              sourceFileName: context.file?.name || userFile?.name || 'PDF source',
-            }
-          });
-        }, 1000);
+        navigate(`/pdf-zones/${pendingPdfSessionId}`, {
+          state: {
+            fromUpload: true,
+            returnToUpload: true,
+            pdfAlignment: pdfDataAlignment,
+            sourceFileName: context.file?.name || userFile?.name || 'PDF source',
+          }
+        });
         return;
       }
 
@@ -5784,18 +5784,27 @@ const UploadFiles = () => {
       {/* Primary Column Cleanup Dialog */}
       <Dialog
         open={primaryColumnDialogOpen}
-        maxWidth="sm"
+        maxWidth="md"
         fullWidth
-        PaperProps={{ sx: dialogPaperSx }}
+        PaperProps={{ sx: { ...dialogPaperSx, maxWidth: 680, borderRadius: '16px' } }}
       >
-        <DialogTitle sx={{ ...dialogHeaderSx, display: 'flex', alignItems: 'center', gap: 1 }}>
-          <ScienceIcon color="primary" />
-          <Typography variant="h6" fontWeight="700" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a' }}>Select Primary Column</Typography>
+        <DialogTitle sx={{ ...dialogHeaderSx, display: 'flex', alignItems: 'center', gap: 1.25, px: 3, py: 2 }}>
+          <Box sx={{ width: 36, height: 36, borderRadius: '12px', display: 'grid', placeItems: 'center', bgcolor: isDarkMode ? 'rgba(96, 165, 250, 0.16)' : '#eff6ff', color: isDarkMode ? '#93c5fd' : '#2563eb' }}>
+            <ScienceIcon sx={{ fontSize: 20 }} />
+          </Box>
+          <Box>
+            <Typography sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a', fontSize: 18, lineHeight: 1.25, fontWeight: 650 }}>
+              Select primary column
+            </Typography>
+            <Typography sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', fontSize: 12.5, lineHeight: 1.4, mt: 0.25 }}>
+              Choose the column used to remove empty rows.
+            </Typography>
+          </Box>
         </DialogTitle>
-        <DialogContent sx={dialogBodySx}>
-          <Typography variant="body2" sx={{ mb: 2, color: isDarkMode ? '#94a3b8' : '#64748b' }}>
-            Select the column that should always have data. Rows where this column is empty
-            will be removed (cleans up merged cells, notes, and junk rows).
+        <DialogContent sx={{ ...dialogBodySx, px: 3, py: 2.25 }}>
+          <Typography variant="body2" sx={{ mb: 2, color: isDarkMode ? '#cbd5e1' : '#475569', fontSize: 13.5, lineHeight: 1.5 }}>
+            Rows where this column is empty will be removed. Use this to clean merged cells,
+            notes, and extra rows before mapping.
           </Typography>
           <FormControl fullWidth sx={{ mt: 1 }}>
             <InputLabel sx={{ color: isDarkMode ? '#94a3b8' : '#475569' }}>Primary Column</InputLabel>
@@ -5822,9 +5831,9 @@ const UploadFiles = () => {
             </Alert>
           )}
         </DialogContent>
-        <DialogActions sx={{ ...dialogFooterSx, gap: 1 }}>
-          <Button onClick={handleSkipCleanup} sx={{ ...pillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}>
-            Skip
+        <DialogActions sx={{ ...dialogFooterSx, px: 3, py: 2, gap: 1.25 }}>
+          <Button onClick={handleSkipCleanup} sx={{ ...pillButtonSx, borderRadius: '999px', px: 2.5, color: isDarkMode ? '#cbd5e1' : '#475569' }}>
+            Keep all rows
           </Button>
           <Button
             onClick={handleCleanup}

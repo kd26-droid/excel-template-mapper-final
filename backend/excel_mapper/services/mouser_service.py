@@ -7,6 +7,8 @@ import logging
 import requests
 from django.core.cache import cache
 
+from .provider_errors import ProviderUnavailable, classify_http_failure
+
 logger = logging.getLogger(__name__)
 
 
@@ -50,9 +52,18 @@ class MouserClient:
         try:
             logger.debug(f"🌐 MOUSER_API: Calling search_keyword for MPN: {mpn}")
             resp = requests.post(url, params=params, json=payload, timeout=30)
+            # A failure that means we never got an answer must not look like
+            # "no match" — otherwise an exhausted key reads as a clean run.
+            unavailable = classify_http_failure(
+                'mouser', resp.status_code, resp.headers.get('Retry-After')
+            )
+            if unavailable:
+                raise unavailable
             resp.raise_for_status()
             logger.debug(f"✅ MOUSER_API: Got response for MPN: {mpn}")
             return resp.json()
+        except ProviderUnavailable:
+            raise
         except Exception as e:
             logger.error(f"❌ MOUSER_API: Error for '{mpn}': {e}")
             return None

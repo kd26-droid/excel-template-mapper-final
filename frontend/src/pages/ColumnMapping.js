@@ -807,13 +807,27 @@ export default function ColumnMapping() {
   }, [mappingHistory, edges]);
 
   const handleBackNavigation = useCallback(() => {
-    const backState = location.state?.mappingBackState || {};
+    // Returning from the Data Editor arrives with no route state, so fall back to the
+    // copy parked in sessionStorage on the way out.
+    let storedBackState = null;
+    let storedFromNormalizer = false;
+    if (!location.state?.mappingBackState) {
+      try {
+        const raw = sessionStorage.getItem(`mappingBackState_${sessionId}`);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          storedFromNormalizer = Boolean(parsed?.fromBomNormalizer);
+          storedBackState = parsed;
+        }
+      } catch (_) {}
+    }
+    const backState = location.state?.mappingBackState || storedBackState || {};
     // This is a deliberate in-app navigation carrying its own return state, so the
     // popstate guard below must not turn it into a window.location.reload() — a
     // reload discards location.state and the destination loses everything it needs
     // to restore.
     bypassUnloadGuardRef.current = true;
-    if (location.state?.fromBomNormalizer || backState.route === '/bom-normalizer') {
+    if (location.state?.fromBomNormalizer || storedFromNormalizer || backState.route === '/bom-normalizer') {
       navigate('/bom-normalizer', {
         state: {
           ...(location.state?.uploadSource ? { uploadSource: location.state.uploadSource } : {}),
@@ -838,7 +852,7 @@ export default function ColumnMapping() {
         returnFromMapping: true,
       }
     });
-  }, [location.state, navigate]);
+  }, [location.state, navigate, sessionId]);
 
   // Kept in a ref so the popstate listener can leave via the same route without
   // re-subscribing every time the callback identity changes.
@@ -4473,6 +4487,19 @@ export default function ColumnMapping() {
         sessionStorage.setItem(`processingTemplateContext_${sid}`, JSON.stringify(uploadSource));
       } catch (_) {}
     }
+    // Park where "back" should go before handing off to the editor. The editor
+    // navigates back here without any route state, so without this the mapping page
+    // returns with nothing and its own back button falls through to /upload instead
+    // of the screen the user actually came from.
+    try {
+      const backState = location.state?.mappingBackState;
+      if (backState) {
+        sessionStorage.setItem(`mappingBackState_${sid}`, JSON.stringify({
+          ...backState,
+          fromBomNormalizer: Boolean(location.state?.fromBomNormalizer),
+        }));
+      }
+    } catch (_) {}
     setTimeout(() => navigate(`/editor/${sid}`, {
       state: {
         ...(uploadSource ? { uploadSource } : {}),
@@ -4617,7 +4644,6 @@ export default function ColumnMapping() {
   const flowLayout = getFlowLayout();
   const flowRowHeight = flowLayout.nodeHeight + flowLayout.nodeSpacing;
   const appHeaderOffset = '54px';
-  const topActionBase = 'h-10 rounded-full border text-sm font-bold shadow-sm transition-colors disabled:pointer-events-none';
   const sidebarButtonBase = 'w-full h-11 px-4 rounded-full flex items-center gap-3 text-sm font-medium transition-all disabled:opacity-50';
   const sidePanelClass = `rounded-2xl border p-4 ${
     isDarkMode ? 'bg-slate-900/70 border-slate-800' : 'bg-slate-50 border-slate-200'
@@ -4728,67 +4754,8 @@ export default function ColumnMapping() {
           
           {/* Right side - Action buttons */}
           <div className="flex flex-wrap items-center justify-end gap-2">
-            <Tooltip title="Refresh headers and mappings" arrow placement="bottom">
-              <button
-                onClick={() => { try { if (loadDataRef.current) loadDataRef.current(); } catch(_) {} }}
-                className={`${topActionBase} px-4 flex items-center gap-2 ${
-                  isDarkMode
-                    ? 'bg-slate-900 border-slate-700 text-slate-200'
-                    : 'bg-white border-blue-100 text-slate-700'
-                } ${statusPolling ? 'opacity-70' : ''}`}
-              >
-                <span>{statusPolling ? 'Syncing...' : 'Refresh'}</span>
-                <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${
-                  isDarkMode ? 'bg-blue-500/20 text-blue-200' : 'bg-blue-600 text-white'
-                }`}>
-                  <RefreshCw size={15} className={statusPolling ? 'animate-spin' : ''} />
-                </span>
-              </button>
-            </Tooltip>
-
-            <Tooltip title="Automatically match the strongest column pairs" arrow placement="bottom">
-              <button
-                type="button"
-                onClick={handleAutoMap}
-                disabled={isAutoMapping || isRebuildingRef.current}
-                className={`h-10 px-4 rounded-full border text-sm font-medium flex items-center gap-2 transition-all disabled:pointer-events-none disabled:opacity-60 ${
-                  isAutoMapping
-                    ? isDarkMode
-                      ? 'bg-slate-900 border-slate-700 text-slate-400'
-                      : 'bg-slate-100 border-slate-200 text-slate-500'
-                    : isDarkMode
-                      ? 'bg-blue-600 hover:bg-blue-500 border-blue-500 text-white shadow-sm shadow-blue-950/30'
-                      : 'bg-blue-600 hover:bg-blue-700 border-blue-600 text-white shadow-sm shadow-blue-500/25'
-                }`}
-              >
-                {isAutoMapping ? (
-                  <div className="w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin" />
-                ) : (
-                  <Brain size={15} />
-                )}
-                <span>{isAutoMapping ? 'Mapping...' : 'Auto Map'}</span>
-              </button>
-            </Tooltip>
-
-            <Tooltip title="Apply a saved mapping template" arrow placement="bottom">
-              <button
-                type="button"
-                onClick={() => {
-                  setShowTemplateDialog(true);
-                  loadAvailableTemplates();
-                }}
-                disabled={applyingTemplate || templatesLoading}
-                className={`h-10 px-4 rounded-full border text-sm font-medium flex items-center gap-2 transition-all disabled:pointer-events-none disabled:opacity-60 ${
-                  isDarkMode
-                    ? 'bg-slate-900 border-slate-700 text-slate-200 hover:bg-slate-800 hover:border-slate-600'
-                    : 'bg-white border-blue-100 text-slate-700 hover:bg-blue-50 hover:border-blue-200 hover:text-blue-700'
-                }`}
-              >
-                <Library size={15} />
-                <span>{applyingTemplate || templatesLoading ? 'Loading...' : 'Apply Template'}</span>
-              </button>
-            </Tooltip>
-
+            {/* Refresh, Auto Map and Apply Template live in the Tools drawer. The
+                header keeps only Review — the action that moves you forward. */}
             <Tooltip title="Review mapped data" arrow placement="bottom">
               <button
                 onClick={handleReview}
@@ -4914,6 +4881,33 @@ export default function ColumnMapping() {
                   Mapping
                 </h3>
                 <div className="space-y-2">
+                  <button
+                    type="button"
+                    onClick={handleAutoMap}
+                    disabled={isAutoMapping || isRebuildingRef.current}
+                    className={`${sidebarButtonBase} ${
+                      isDarkMode ? 'hover:bg-slate-800 text-slate-200' : 'hover:bg-slate-100 text-slate-700'
+                    } ${isAutoMapping ? 'opacity-70' : ''}`}
+                  >
+                    <Brain size={18} />
+                    <span>{isAutoMapping ? 'Mapping...' : 'Auto Map'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowTemplateDialog(true);
+                      loadAvailableTemplates();
+                    }}
+                    disabled={applyingTemplate || templatesLoading}
+                    className={`${sidebarButtonBase} ${
+                      isDarkMode ? 'hover:bg-slate-800 text-slate-200' : 'hover:bg-slate-100 text-slate-700'
+                    }`}
+                  >
+                    <Library size={18} />
+                    <span>{applyingTemplate || templatesLoading ? 'Loading...' : 'Apply Template'}</span>
+                  </button>
+
                   <button
                     type="button"
                     onClick={() => {

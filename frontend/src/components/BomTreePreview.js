@@ -6,7 +6,7 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import ReactFlow, { Background, Controls } from 'reactflow';
 import 'reactflow/dist/style.css';
-import { Box, Typography, CircularProgress, Button } from '@mui/material';
+import { Box, Typography, CircularProgress } from '@mui/material';
 import api from '../services/api';
 import { useThemeContext } from '../utils/ThemeContext';
 
@@ -82,19 +82,40 @@ function buildCompact(root) {
   return compactNode(root);
 }
 
+// Counts are spelled out rather than abbreviated: "2 raw materials, 1 sub-BOM"
+// says what sits underneath a node, where a bare "3" leaves you guessing.
+function plural(count, singular, pluralForm) {
+  return `${count} ${count === 1 ? singular : (pluralForm || `${singular}s`)}`;
+}
+
+function describeChildren(children = []) {
+  const rawMaterials = children.filter((c) => c.kind === 'component').length;
+  const subBoms = children.filter(isAssembly).length;
+  const alternates = children.filter((c) => c.kind === 'alternate').length;
+  const parts = [];
+  if (rawMaterials) parts.push(plural(rawMaterials, 'raw material'));
+  if (subBoms) parts.push(plural(subBoms, 'sub-BOM'));
+  if (alternates) parts.push(plural(alternates, 'alternate'));
+  return parts.join(', ');
+}
+
 function describeChildCounts(counts) {
   if (!counts || !counts.total) return '';
   const parts = [];
-  if (counts.rawMaterials) parts.push(`${counts.rawMaterials} RM`);
-  if (counts.subBoms) parts.push(`${counts.subBoms} SB`);
-  return `${parts.join(', ')} (${counts.total})`;
+  if (counts.rawMaterials) parts.push(plural(counts.rawMaterials, 'raw material'));
+  if (counts.subBoms) parts.push(plural(counts.subBoms, 'sub-BOM'));
+  return parts.join(', ');
 }
 
-function nodeSubtitle(node) {
+// `depth` is the node's position in the drawn tree, so the finished good is
+// Level 0 regardless of what the BOM sheet numbered it. An alternate is not a
+// deeper level - it is another option for the part beside it - so it carries
+// its parent's level and is marked as an alternate.
+function nodeSubtitle(node, depth) {
   const lines = [];
-  if (node.level !== null && node.level !== undefined && node.level !== '') {
-    lines.push(`Level ${node.level}`);
-  }
+  const isAlternate = node.kind === 'alternate';
+  const level = isAlternate ? Math.max(0, depth - 1) : depth;
+  lines.push(`Level ${level}${isAlternate ? ' (alternate)' : ''}`);
   if (isAssembly(node)) {
     const counts = node.childCounts || directChildCounts(node.children || []);
     const description = describeChildCounts(counts);
@@ -111,43 +132,48 @@ function visibleCompactIds(node, acc = new Set()) {
   return acc;
 }
 
-function getTreeStats(node, depth = 0) {
-  if (!node) return { totalNodes: 0, maxDepth: 0, moreGroups: 0 };
-  return (node.children || []).reduce((acc, child) => {
-    const childStats = getTreeStats(child, depth + 1);
-    return {
-      totalNodes: acc.totalNodes + childStats.totalNodes,
-      maxDepth: Math.max(acc.maxDepth, childStats.maxDepth),
-      moreGroups: acc.moreGroups + childStats.moreGroups,
-    };
-  }, {
-    totalNodes: 1,
-    maxDepth: depth,
-    moreGroups: node.kind === 'more' ? 1 : 0,
-  });
-}
+// A finished good can have hundreds of direct raw materials. Laying those out
+// in a single row produced a canvas tens of thousands of pixels wide, which
+// ReactFlow then zoomed out until every node was a one-pixel sliver. Wide
+// sibling groups therefore wrap onto several rows, so the tree stays readable
+// no matter how wide a level gets.
+const MAX_SIBLINGS_PER_ROW = 12;
+const WRAP_ROW_GAP = 64;
+// Comfortable reading zoom. The tree is panned, never scaled to fit.
+const ROOT_ZOOM = 0.9;
 
 function layout(root, expanded, isDarkMode) {
   const nodes = [];
   const edges = [];
   let nextLeaf = 0;
 
-  function walk(node, depth, parentId) {
+  function walk(node, depth, parentId, yOffset = 0) {
     const kids = node.children || [];
     const hasKids = kids.length > 0;
     const isOpen = expanded.has(node.id);
-    const childXs = (hasKids && isOpen) ? kids.map((c) => walk(c, depth + 1, node.id)) : [];
+    // Extra vertical space a wrapped child block consumed, so the next branch
+    // starts below it instead of overlapping.
+    let childExtra = 0;
+    const childXs = (hasKids && isOpen)
+      ? kids.map((c, i) => {
+          const row = Math.floor(i / MAX_SIBLINGS_PER_ROW);
+          childExtra = Math.max(childExtra, row * WRAP_ROW_GAP);
+          return walk(c, depth + 1, node.id, yOffset + row * WRAP_ROW_GAP);
+        })
+      : [];
     const x = childXs.length ? (childXs[0] + childXs[childXs.length - 1]) / 2 : (nextLeaf++) * (NODE_W + H_GAP);
 
     const st = KIND_STYLE[node.kind] || KIND_STYLE.component;
     const qty = (node.qty !== null && node.qty !== undefined && node.qty !== '') ? ` (${node.qty})` : '';
     const bom = node.bomId ? `\nBOM ID: ${node.bomId}` : '';
-    const subtitleText = node.subtitle || nodeSubtitle(node);
+    const subtitleText = node.subtitle || nodeSubtitle(node, depth);
     const subtitle = subtitleText ? `\n${subtitleText}` : '';
-    const cue = hasKids ? (isOpen ? '  ▾' : `  ▸ ${kids.length}`) : '';
+    const cue = hasKids
+      ? (isOpen ? '  ▾' : `  ▸ ${describeChildren(kids) || kids.length}`)
+      : '';
     nodes.push({
       id: node.id,
-      position: { x, y: depth * V_GAP },
+      position: { x, y: depth * V_GAP + yOffset },
       data: { label: `${node.label}${qty}${bom}${subtitle}${cue}`, hasKids },
       style: {
         ...st, width: NODE_W, borderRadius: 8, fontSize: 11, padding: '8px 10px',
@@ -168,11 +194,11 @@ function layout(root, expanded, isDarkMode) {
     }
     return x;
   }
-  walk(root, 0, null);
+  walk(root, 0, null, 0);
   return { nodes, edges };
 }
 
-export default function BomTreePreview({ sessionId, height = 460, fullscreen = false, onRequestFullscreen }) {
+export default function BomTreePreview({ sessionId, height = 460, fullscreen = false }) {
   const { isDarkMode, tokens: t } = useThemeContext();
   const [tree, setTree] = useState(null);
   const [meta, setMeta] = useState({});
@@ -186,8 +212,10 @@ export default function BomTreePreview({ sessionId, height = 460, fullscreen = f
     setLoading(true);
     setError(null);
 
+    // No demo fallback. If generation fails the user must see why, not a tree
+    // built from someone else's golden file that looks plausible and is not
+    // their data.
     const loadGeneratedTree = () => api.getBomTree(sessionId);
-    const loadDemoTree = () => api.getDemoBomTree(sessionId);
     const applyTreeResponse = (r) => {
       if (!alive) return;
       const nextTree = r.data?.tree || null;
@@ -208,9 +236,8 @@ export default function BomTreePreview({ sessionId, height = 460, fullscreen = f
     };
 
     loadGeneratedTree()
-      .catch(loadDemoTree)
       .then(applyTreeResponse)
-      .catch(() => {
+      .catch((err) => {
         if (!alive) return;
         setMeta({
           file: undefined,
@@ -219,7 +246,10 @@ export default function BomTreePreview({ sessionId, height = 460, fullscreen = f
           finishedGoods: undefined,
           truncated: undefined
         });
-        setError('No BOM preview is available for this input yet.');
+        setError(
+          err?.response?.data?.error
+          || 'The BOM could not be generated, so there is nothing to preview.'
+        );
         setLoading(false);
       });
     return () => { alive = false; };
@@ -231,13 +261,6 @@ export default function BomTreePreview({ sessionId, height = 460, fullscreen = f
     return fullscreen ? tree : buildCompact(tree);
   }, [tree, fullscreen]);
 
-  const treeStats = useMemo(() => getTreeStats(displayTree), [displayTree]);
-  const shouldSuggestFullscreen = false && !fullscreen && (
-    treeStats.totalNodes > 28 ||
-    treeStats.maxDepth > 4 ||
-    treeStats.moreGroups > 0 ||
-    Number(meta.bomCount || 0) > 3
-  );
 
   useEffect(() => {
     if (!displayTree) return;
@@ -250,12 +273,37 @@ export default function BomTreePreview({ sessionId, height = 460, fullscreen = f
     [displayTree, expanded, isDarkMode],
   );
 
+  // Frame the finished good once, then leave the camera alone. Re-fitting on
+  // every expand meant each drill-down shrank the whole tree until nodes were
+  // unreadable. Now the view only moves when the preview opens or the canvas
+  // size changes; expanding never touches it, so panning somewhere and opening
+  // a node keeps you exactly where you were.
+  const framedFor = useRef(null);
   useEffect(() => {
-    if (rfRef.current) {
-      const id = setTimeout(() => rfRef.current && rfRef.current.fitView({ duration: 300, padding: 0.2 }), 60);
-      return () => clearTimeout(id);
-    }
-  }, [nodes.length, fullscreen]);
+    if (!displayTree) return undefined;
+    const key = `${sessionId}|${fullscreen}`;
+    if (framedFor.current === key) return undefined;
+
+    // ReactFlow may not have initialised yet, so retry briefly rather than
+    // marking this framed and leaving the user on blank canvas.
+    let attempts = 0;
+    const timer = setInterval(() => {
+      const instance = rfRef.current;
+      attempts += 1;
+      if (instance) {
+        const root = instance.getNode ? instance.getNode(displayTree.id) : null;
+        const x = (root?.position?.x ?? 0) + NODE_W / 2;
+        const y = root?.position?.y ?? 0;
+        // Sit slightly below the root so its first row of children is in view.
+        instance.setCenter(x, y + V_GAP * 0.6, { zoom: ROOT_ZOOM, duration: 300 });
+        framedFor.current = key;
+        clearInterval(timer);
+      } else if (attempts > 20) {
+        clearInterval(timer);
+      }
+    }, 50);
+    return () => clearInterval(timer);
+  }, [displayTree, fullscreen, sessionId]);
 
   const onNodeClick = useCallback((_e, node) => {
     if (!node?.data?.hasKids) return;
@@ -286,40 +334,21 @@ export default function BomTreePreview({ sessionId, height = 460, fullscreen = f
           </Typography>
         ) : null}
       </Box>
-      {shouldSuggestFullscreen ? (
-        <Box sx={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 1,
-          mb: 1,
-          px: 1.25,
-          py: 0.5,
-          border: `1px solid ${isDarkMode ? 'rgba(96, 165, 250, 0.34)' : '#bfdbfe'}`,
-          borderRadius: 1,
-          bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.14)' : '#eff6ff'
-        }}>
-          <Typography variant="caption" sx={{ color: isDarkMode ? '#bfdbfe' : '#1d4ed8', fontWeight: 600 }}>
-            Large BOM
-          </Typography>
-          {onRequestFullscreen ? (
-            <Button
-              size="small"
-              onClick={onRequestFullscreen}
-              sx={{
-                minWidth: 0,
-                px: 1,
-                py: 0.25,
-                fontSize: 11,
-                fontWeight: 700,
-                color: isDarkMode ? '#93c5fd' : '#1d4ed8',
-                '&:hover': { bgcolor: isDarkMode ? 'rgba(96, 165, 250, 0.16)' : '#dbeafe' }
-              }}
-            >
-              Full screen
-            </Button>
-          ) : null}
-        </Box>
-      ) : null}
+      <Box sx={{ display: 'flex', gap: 2, mb: 1, flexWrap: 'wrap', alignItems: 'center' }}>
+        {LEGEND_ITEMS.map(([c, label]) => (
+          <Box key={label} sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+            <Box sx={{
+              width: 12,
+              height: 12,
+              bgcolor: c,
+              border: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.34)' : '#9ca3af'}`,
+              borderRadius: 0.5,
+              boxShadow: isDarkMode ? '0 0 0 1px rgba(0,0,0,0.2)' : 'none',
+            }} />
+            <Typography variant="caption" sx={{ color: t.text.secondary }}>{label}</Typography>
+          </Box>
+        ))}
+      </Box>
       <Box sx={{
         height,
         border: `1px solid ${isDarkMode ? 'rgba(148, 163, 184, 0.22)' : '#e5e7eb'}`,
@@ -346,7 +375,7 @@ export default function BomTreePreview({ sessionId, height = 460, fullscreen = f
           edges={edges}
           onInit={(inst) => { rfRef.current = inst; }}
           onNodeClick={onNodeClick}
-          fitView
+          defaultViewport={{ x: 0, y: 0, zoom: ROOT_ZOOM }}
           minZoom={0.05}
           maxZoom={1.5}
           nodesDraggable={false}
@@ -356,21 +385,6 @@ export default function BomTreePreview({ sessionId, height = 460, fullscreen = f
           <Background gap={18} color={isDarkMode ? '#1f2a3d' : '#e5e7eb'} />
           <Controls showInteractive={false} />
         </ReactFlow>
-      </Box>
-      <Box sx={{ display: 'flex', gap: 2, mt: 1, flexWrap: 'wrap', alignItems: 'center' }}>
-        {LEGEND_ITEMS.map(([c, label]) => (
-          <Box key={label} sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-            <Box sx={{
-              width: 12,
-              height: 12,
-              bgcolor: c,
-              border: `1px solid ${isDarkMode ? 'rgba(255,255,255,0.34)' : '#9ca3af'}`,
-              borderRadius: 0.5,
-              boxShadow: isDarkMode ? '0 0 0 1px rgba(0,0,0,0.2)' : 'none',
-            }} />
-            <Typography variant="caption" sx={{ color: t.text.secondary }}>{label}</Typography>
-          </Box>
-        ))}
       </Box>
     </Box>
   );

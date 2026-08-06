@@ -54,6 +54,7 @@ export default function PDFZoneSelection() {
   const [canvas, setCanvas] = useState(null);
   const [loading, setLoading] = useState(true);
   const [processing, setProcessing] = useState(false);
+  const [pageImageLoading, setPageImageLoading] = useState(false);
   const [error, setError] = useState(null);
   const [successMessage, setSuccessMessage] = useState(null);
   const [mergeWrapped, setMergeWrapped] = useState(false);
@@ -277,6 +278,10 @@ export default function PDFZoneSelection() {
 
   const loadPageImage = async (canvas, canvasWidth, canvasHeight) => {
     let objectUrl = null;
+    // The first request for a page renders it server-side and can take ~13s. Without
+    // this the user stares at an empty grey canvas with no indication anything is
+    // happening. A warm page returns in well under a second, so this flashes by.
+    setPageImageLoading(true);
     try {
       const response = await api.getPDFPageImage(sessionId, currentPage);
       objectUrl = URL.createObjectURL(response.data);
@@ -315,15 +320,18 @@ export default function PDFZoneSelection() {
 
         // Load existing zones for this page
         loadExistingZones(canvas, canvasWidth, canvasHeight);
+        setPageImageLoading(false);
       }).catch((err) => {
         if (objectUrl) URL.revokeObjectURL(objectUrl);
         console.error('Error loading PDF page image into canvas:', err);
         setError('Failed to load PDF page image');
+        setPageImageLoading(false);
       });
     } catch (err) {
       if (objectUrl) URL.revokeObjectURL(objectUrl);
       console.error('Error loading page image:', err);
       setError('Failed to load PDF page image');
+      setPageImageLoading(false);
     }
   };
 
@@ -847,10 +855,38 @@ export default function PDFZoneSelection() {
               minHeight: '600px',
               display: 'flex',
               justifyContent: 'center',
-              alignItems: 'flex-start'
+              alignItems: 'flex-start',
+              position: 'relative'
             }}
           >
+            {/* Rendered after the canvas, never before it: Fabric replaces the
+                canvas node with its own wrapper, and a React sibling inserted ahead
+                of it makes React lose track of the DOM position. */}
             <canvas ref={canvasRef} />
+            {pageImageLoading && (
+              <Box
+                sx={{
+                  position: 'absolute',
+                  inset: 0,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 1.5,
+                  backgroundColor: 'rgba(224,224,224,0.85)',
+                  zIndex: 2,
+                  pointerEvents: 'none',
+                }}
+              >
+                <CircularProgress size={30} />
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                  Preparing page {currentPage}
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  Rendering at full resolution so your boxes line up accurately.
+                </Typography>
+              </Box>
+            )}
           </Paper>
 
           <Card sx={{ mt: 2 }}>
