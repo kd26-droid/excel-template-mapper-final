@@ -782,6 +782,15 @@ const hasGroupedRowContext = (row, roles) => Boolean(
   getCell(row, roles.level)
 );
 
+const hasPreservableBomIdentity = (row, roles) => Boolean(
+  getCell(row, roles.parent) ||
+  getCell(row, roles.cpn) ||
+  getCell(row, roles.description) ||
+  getCell(row, roles.quantity) ||
+  getCell(row, roles.uom) ||
+  getCell(row, roles.level)
+);
+
 const shouldSkipSourceRow = (row, headers, roles, config) => {
   if (!rowValues(row, headers).length) return true;
   if (config.skipRepeatedHeaders && rowLooksLikeRepeatedHeader(row, headers)) return true;
@@ -821,16 +830,38 @@ const normalizeSeparateCells = (rows, roles, config) => {
   const output = [];
   rows.forEach((row, rowIndex) => {
     const sourceRow = row.__sourceRow || rowIndex + 1;
-    const mpns = splitMpnCell(getCell(row, roles.mpn), config);
+    const rawMpn = getCell(row, roles.mpn);
+    const rawManufacturer = getCell(row, roles.manufacturer);
+    const mpns = splitMpnCell(rawMpn, config);
     const explicitDelimiterUsed = Boolean(selectedDelimiter(config)) && mpns.length > 1;
-    const manufacturers = splitManufacturerCell(getCell(row, roles.manufacturer), mpns.length, config);
+    const manufacturers = splitManufacturerCell(rawManufacturer, mpns.length, config);
     const primaryManufacturer = manufacturers[0] || '';
     const quantity = getCell(row, roles.quantity);
     const uom = getCell(row, roles.uom);
-    const parentKey = getCell(row, roles.parent) || getCell(row, roles.description) || `Source row ${sourceRow}`;
+    const description = getCell(row, roles.description);
+    const parentKey = getCell(row, roles.parent) || description || `Source row ${sourceRow}`;
     const level = getCell(row, roles.level) || '1';
     const rule = explicitDelimiterUsed ? 'separate_cells_user_delimiter' : 'separate_cells_position_pairing';
     const cpn = getCell(row, roles.cpn);
+
+    if (!mpns.length && hasPreservableBomIdentity(row, roles)) {
+      output.push(withSourceColumns({
+        sourceRow,
+        parentKey,
+        relation: 'Primary',
+        level,
+        cpn,
+        description,
+        mpn: '',
+        manufacturer: rawManufacturer,
+        quantity,
+        uom,
+        rule: 'separate_cells_item_without_mpn_mfr',
+        confidence: rawManufacturer ? 68 : 58,
+        discardedText: rawMpn,
+      }, row, config));
+      return;
+    }
 
     mpns.forEach((mpn, partIndex) => {
       const isPrimary = partIndex === 0;
@@ -841,7 +872,7 @@ const normalizeSeparateCells = (rows, roles, config) => {
         relation: isPrimary ? 'Primary' : `Alternate ${partIndex}`,
         level,
         cpn,
-        description: getCell(row, roles.description),
+        description,
         mpn,
         manufacturer,
         quantity: config.quantityMode === 'inherit_primary' || isPrimary ? quantity : quantity,
@@ -864,7 +895,8 @@ const normalizeSameCell = (rows, roles, config) => {
     const segments = parseColonSegments(sourceText);
     const quantity = getCell(row, roles.quantity);
     const uom = getCell(row, roles.uom);
-    const parentKey = getCell(row, roles.parent) || getCell(row, roles.description) || `Source row ${sourceRow}`;
+    const description = getCell(row, roles.description);
+    const parentKey = getCell(row, roles.parent) || description || `Source row ${sourceRow}`;
     const level = getCell(row, roles.level) || '1';
     const cpn = getCell(row, roles.cpn);
 
@@ -876,7 +908,7 @@ const normalizeSameCell = (rows, roles, config) => {
           relation: partIndex === 0 ? 'Primary' : `Alternate ${partIndex}`,
           level,
           cpn,
-          description: getCell(row, roles.description),
+          description,
           mpn: pair.mpn,
           manufacturer: pair.manufacturer,
           quantity,
@@ -891,14 +923,34 @@ const normalizeSameCell = (rows, roles, config) => {
     }
 
     if (!segments.length) {
-      splitMpnCell(sourceText, config).forEach((mpn, partIndex) => {
+      const fallbackMpns = splitMpnCell(sourceText, config);
+      if (!fallbackMpns.length && hasPreservableBomIdentity(row, roles)) {
+        output.push(withSourceColumns({
+          sourceRow,
+          parentKey,
+          relation: 'Primary',
+          level,
+          cpn,
+          description,
+          mpn: '',
+          manufacturer: '',
+          quantity,
+          uom,
+          rule: 'same_cell_item_without_mpn_mfr',
+          confidence: 58,
+          discardedText: sourceText,
+        }, row, config));
+        return;
+      }
+
+      fallbackMpns.forEach((mpn, partIndex) => {
         output.push(withSourceColumns({
           sourceRow,
           parentKey,
           relation: partIndex === 0 ? 'Primary' : `Alternate ${partIndex}`,
           level,
           cpn,
-          description: getCell(row, roles.description),
+          description,
           mpn,
           manufacturer: '',
           quantity,
@@ -921,7 +973,7 @@ const normalizeSameCell = (rows, roles, config) => {
           relation: relationIndex === 0 ? 'Primary' : `Alternate ${relationIndex}`,
           level,
           cpn,
-          description: getCell(row, roles.description),
+          description,
           mpn,
           manufacturer: segment.label,
           quantity,
@@ -999,9 +1051,13 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
     const primaryManufacturer = getCell(row, roles.manufacturer);
     const primaryQty = getCell(row, roles.quantity);
     const primaryUom = getCell(row, roles.uom);
-    const parentKey = getCell(row, roles.parent) || getCell(row, roles.description) || `Source row ${sourceRow}`;
+    const rawParentKey = getCell(row, roles.parent);
+    const description = getCell(row, roles.description);
+    const parentKey = rawParentKey || description || `Source row ${sourceRow}`;
     const level = getCell(row, roles.level) || '1';
     const cpn = getCell(row, roles.cpn);
+    const hasBomIdentity = Boolean(cpn || description || rawParentKey);
+    let emittedAnyPart = false;
 
     if (primaryMpn) {
       output.push(withSourceColumns({
@@ -1010,7 +1066,7 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
         relation: 'Primary',
         level,
         cpn,
-        description: getCell(row, roles.description),
+        description,
         mpn: stripVendorPrefix(primaryMpn),
         manufacturer: primaryManufacturer,
         quantity: primaryQty,
@@ -1019,6 +1075,7 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
         confidence: confidenceForRow(primaryMpn, primaryManufacturer, 'alternate_columns'),
         discardedText: '',
       }, row, config));
+      emittedAnyPart = true;
     }
 
     alternateGroups.forEach((group, groupIndex) => {
@@ -1028,10 +1085,10 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
       output.push(withSourceColumns({
         sourceRow,
         parentKey,
-        relation: `Alternate ${groupIndex + 1}`,
+        relation: emittedAnyPart ? `Alternate ${groupIndex + 1}` : 'Primary',
         level,
         cpn,
-        description: getCell(row, roles.description),
+        description,
         mpn: stripVendorPrefix(mpn),
         manufacturer,
         quantity: config.quantityMode === 'alternate_columns' ? getCell(row, group.qty) || primaryQty : primaryQty,
@@ -1040,7 +1097,26 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
         confidence: confidenceForRow(mpn, manufacturer, 'alternate_columns'),
         discardedText: '',
       }, row, config));
+      emittedAnyPart = true;
     });
+
+    if (!emittedAnyPart && hasBomIdentity) {
+      output.push(withSourceColumns({
+        sourceRow,
+        parentKey,
+        relation: 'Primary',
+        level,
+        cpn,
+        description,
+        mpn: '',
+        manufacturer: primaryManufacturer,
+        quantity: primaryQty,
+        uom: primaryUom,
+        rule: 'alternate_columns_item_without_mpn_mfr',
+        confidence: 68,
+        discardedText: '',
+      }, row, config));
+    }
   });
   return output;
 };
@@ -1395,6 +1471,10 @@ const analyzeMpnManufacturerPairing = (rows, headers, roles, config) => {
           manufacturer: scenario.manufacturers[index] || scenario.manufacturers[0] || '',
           keep: true,
         })),
+        mfrDecisions: scenario.manufacturers.map((manufacturer) => ({
+          manufacturer,
+          keep: true,
+        })),
         manualManufacturers: scenario.mpns.map((_, index) => scenario.manufacturers[index] || scenario.manufacturers[0] || '').join(' | '),
         message: `${mpnCount} MPN${mpnCount === 1 ? '' : 's'} detected, ${mfrCount} manufacturer${mfrCount === 1 ? '' : 's'} detected.`,
       });
@@ -1426,6 +1506,9 @@ const applyPairingReviewDecisions = (rows, reviewRows) => {
           manufacturer: issue.manufacturers[index] || issue.manufacturers[0] || '',
           keep: true,
         }));
+    const manufacturerDecisions = Array.isArray(issue.mfrDecisions) && issue.mfrDecisions.length
+      ? issue.mfrDecisions
+      : issue.manufacturers.map((manufacturer) => ({ manufacturer, keep: true }));
     const rowBelongsToIssue = (row) => (
       String(row.sourceRow) === String(issue.sourceRow) ||
       (issue.parentKey && normalizeKey(row.parentKey) === normalizeKey(issue.parentKey))
@@ -1440,13 +1523,17 @@ const applyPairingReviewDecisions = (rows, reviewRows) => {
       if (!affectedRows.length) return;
       const templateRow = affectedRows[0];
       const replacementRows = [];
+      const keptManufacturers = manufacturerDecisions
+        .filter((decision) => decision.keep !== false)
+        .map((decision) => decision.manufacturer)
+        .filter(Boolean);
       decisionRows.forEach((decision, index) => {
         if (issue.action === 'remove_extra' && decision.keep === false) return;
         const relationIndex = replacementRows.length;
         const manualValue = manualValues[index] || '';
         const manufacturer = issue.action === 'manual'
           ? (manualValue || decision.manufacturer || manualValues[0] || '')
-          : (issue.manufacturers[index] || firstManufacturer || decision.manufacturer || '');
+          : (keptManufacturers[relationIndex] || keptManufacturers[0] || firstManufacturer || decision.manufacturer || '');
         replacementRows.push({
           ...templateRow,
           mpn: stripVendorPrefix(decision.mpn || issue.mpns[index] || ''),
@@ -2212,7 +2299,24 @@ const NORMALIZED_TABLE_BASE_COLUMNS = [
   { key: 'confidence', label: 'Confidence', editable: false, width: 105 },
 ];
 
-const buildNormalizerSuggestedMappings = (columns = []) => {
+const hasManufacturerValues = (rows = []) => rows.some((row) => fmt(row?.manufacturer));
+
+const buildBomMappingRowsFromNormalizedRows = (rows = [], baseColumns = getNormalizedExportColumns(rows)) => {
+  const columns = [...baseColumns];
+
+  const outputRows = rows.map((row) => {
+    const output = {};
+    baseColumns.forEach((column) => {
+      output[column] = row[column] || '';
+    });
+
+    return output;
+  });
+
+  return { columns, rows: outputRows };
+};
+
+const buildNormalizerSuggestedMappings = (columns = [], rows = []) => {
   const available = new Set(columns);
   const candidates = [
     { source: 'cpn', targets: ['CPN Code', 'Customer part number', 'Customer Part Number'] },
@@ -2222,7 +2326,9 @@ const buildNormalizerSuggestedMappings = (columns = []) => {
     { source: 'uom', targets: ['Measurement unit', 'UOM', 'Unit of measure'] },
     { source: 'level', targets: ['Level', 'BOM level'] },
     { source: 'parentKey', targets: ['Parent / group key', 'Parent group key', 'Sub BOM ID', 'BOM ID'] },
-    { source: 'manufacturer', targets: ['Manufacturer', 'Preferred vendor code', 'Procurement entity name'] },
+    ...(hasManufacturerValues(rows)
+      ? [{ source: 'manufacturer', targets: ['Tag', 'Tag_1'] }]
+      : []),
   ];
 
   return candidates
@@ -2945,7 +3051,7 @@ const BomNormalizer = () => {
         headerRowIndex,
         sourceEndRow,
       },
-      outputColumns: getNormalizedExportColumns(rowsOverride),
+      outputColumns: buildBomMappingRowsFromNormalizedRows(rowsOverride).columns,
       ...(kind === 'merge-preview' ? {
         mergeConfig,
         mergeVisibleColumns,
@@ -3541,14 +3647,8 @@ const BomNormalizer = () => {
           throw new Error('The template ran, but no normalized rows were produced from this upload.');
         }
 
-        const columns = getNormalizedExportColumns(replayRows);
-        const rows = replayRows.map((row) => {
-          const output = {};
-          columns.forEach((column) => {
-            output[column] = row[column] || '';
-          });
-          return output;
-        });
+        const baseColumns = getNormalizedExportColumns(replayRows);
+        const { columns, rows } = buildBomMappingRowsFromNormalizedRows(replayRows, baseColumns);
         const file = createWorkbookFileFromRows(rows, columns, 'template-replayed-bom.xlsx', 'Normalized BOM');
         const formData = new FormData();
         formData.append('clientFile', file);
@@ -4007,15 +4107,9 @@ const BomNormalizer = () => {
       setError('Run normalization before continuing to BOM Mapping.');
       return;
     }
-    const columns = getNormalizedExportColumns(normalizedRows);
-    const suggestedMappings = buildNormalizerSuggestedMappings(columns);
-    const rows = normalizedRows.map((row) => {
-      const output = {};
-      columns.forEach((column) => {
-        output[column] = row[column] || '';
-      });
-      return output;
-    });
+    const baseColumns = getNormalizedExportColumns(normalizedRows);
+    const { columns, rows } = buildBomMappingRowsFromNormalizedRows(normalizedRows, baseColumns);
+    const suggestedMappings = buildNormalizerSuggestedMappings(columns, rows);
     const file = createWorkbookFileFromRows(rows, columns, 'normalized-bom-for-mapping.xlsx', 'Normalized BOM');
     const formData = new FormData();
     formData.append('clientFile', file);
@@ -4084,13 +4178,14 @@ const BomNormalizer = () => {
       setCombineError('Build the merge preview first.');
       return;
     }
-    const { headers, rows } = getMergePreviewExport(mergePreview, mergeVisibleColumns, mergePreviewFilter);
-    if (!rows.length) {
+    const { headers, rows: mergeRows } = getMergePreviewExport(mergePreview, mergeVisibleColumns, mergePreviewFilter);
+    if (!mergeRows.length) {
       setCombineError('No merged rows are available for BOM Mapping.');
       return;
     }
-    const suggestedMappings = buildNormalizerSuggestedMappings(headers);
-    const file = createWorkbookFileFromRows(rows, headers, 'merged-bom-for-mapping.xlsx', 'Merged BOM');
+    const { columns, rows } = buildBomMappingRowsFromNormalizedRows(mergeRows, headers);
+    const suggestedMappings = buildNormalizerSuggestedMappings(columns, rows);
+    const file = createWorkbookFileFromRows(rows, columns, 'merged-bom-for-mapping.xlsx', 'Merged BOM');
     const formData = new FormData();
     formData.append('clientFile', file);
     formData.append('sheetName', 'Merged BOM');
@@ -4440,6 +4535,20 @@ const BomNormalizer = () => {
         decisionIndex === mpnIndex ? { ...decision, ...patch } : decision
       ));
       return { ...row, mpnDecisions };
+    }));
+  }, []);
+
+  const updatePairingMfrDecision = useCallback((issueIndex, mfrIndex, patch) => {
+    setPairingReviewRows((prev) => prev.map((row, rowIndex) => {
+      if (rowIndex !== issueIndex) return row;
+      const baseDecisions = row.mfrDecisions || row.manufacturers.map((manufacturer) => ({
+        manufacturer,
+        keep: true,
+      }));
+      const mfrDecisions = baseDecisions.map((decision, decisionIndex) => (
+        decisionIndex === mfrIndex ? { ...decision, ...patch } : decision
+      ));
+      return { ...row, mfrDecisions };
     }));
   }, []);
 
@@ -5799,8 +5908,8 @@ const BomNormalizer = () => {
                   <Button variant="outlined" onClick={() => setCurrentStep(2)} disabled={busy}>Back to configure</Button>
                   <Stack direction="row" gap={1} flexWrap="wrap" justifyContent="flex-end">
                     <Button variant="outlined" onClick={handleUseNormalizedAsBase} disabled={busy || !normalizedRows.length}>Use merged sheet as base</Button>
-                    <Button variant="outlined" onClick={handleContinueNormalizedToBomMapping} disabled={busy || !normalizedRows.length}>Continue to BOM Mapping</Button>
-                    <Button variant="contained" onClick={handleNormalize} disabled={busy}>Run again</Button>
+                    <Button variant="outlined" onClick={handleNormalize} disabled={busy}>Run again</Button>
+                    <Button variant="contained" onClick={handleContinueNormalizedToBomMapping} disabled={busy || !normalizedRows.length}>Continue to BOM Mapping</Button>
                   </Stack>
                 </Stack>
               </Paper>
@@ -6550,7 +6659,7 @@ const BomNormalizer = () => {
                             direction="row"
                             alignItems="center"
                             gap={0.75}
-                          sx={{ minHeight: 28 }}
+                            sx={{ minHeight: 28 }}
                           >
                             {issue.action === 'remove_extra' && (
                               <Checkbox
@@ -6572,7 +6681,7 @@ const BomNormalizer = () => {
                       </Stack>
                       {issue.action === 'remove_extra' && (
                         <Typography sx={{ mt: 0.75, fontSize: 12, color: normalizerTheme.muted }}>
-                          Uncheck the MPN rows that should be removed.
+                          Uncheck the MPN values that should be removed.
                         </Typography>
                       )}
                     </TableCell>
@@ -6580,11 +6689,37 @@ const BomNormalizer = () => {
                       {issue.manufacturers.length ? (
                         <Stack gap={0.5}>
                           {issue.manufacturers.map((manufacturer, manufacturerIndex) => (
-                            <Chip key={`${issue.sourceRow}-mfr-${manufacturerIndex}`} size="small" label={`${manufacturerIndex + 1}. ${manufacturer}`} />
+                            <Stack
+                              key={`${issue.sourceRow}-mfr-${manufacturerIndex}`}
+                              direction="row"
+                              alignItems="center"
+                              gap={0.75}
+                              sx={{ minHeight: 28 }}
+                            >
+                              {issue.action === 'remove_extra' && (
+                                <Checkbox
+                                  size="small"
+                                  checked={(issue.mfrDecisions?.[manufacturerIndex]?.keep ?? true) !== false}
+                                  onChange={(event) => updatePairingMfrDecision(index, manufacturerIndex, { keep: event.target.checked })}
+                                  sx={{ p: 0.25 }}
+                                />
+                              )}
+                              <Chip
+                                size="small"
+                                variant={issue.action === 'remove_extra' && issue.mfrDecisions?.[manufacturerIndex]?.keep === false ? 'outlined' : 'filled'}
+                                label={`${manufacturerIndex + 1}. ${manufacturer}`}
+                                sx={{ opacity: issue.action === 'remove_extra' && issue.mfrDecisions?.[manufacturerIndex]?.keep === false ? 0.55 : 1 }}
+                              />
+                            </Stack>
                           ))}
                         </Stack>
                       ) : (
                         <Typography sx={{ fontSize: 13, color: normalizerTheme.muted }}>No manufacturer detected</Typography>
+                      )}
+                      {issue.action === 'remove_extra' && issue.manufacturers.length > 0 && (
+                        <Typography sx={{ mt: 0.75, fontSize: 12, color: normalizerTheme.muted }}>
+                          Uncheck the manufacturer values that should be removed.
+                        </Typography>
                       )}
                     </TableCell>
                     <TableCell sx={{ color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
@@ -6595,13 +6730,26 @@ const BomNormalizer = () => {
                             const nextAction = event.target.value;
                             const patch = { action: nextAction };
                             if (nextAction === 'remove_extra') {
+                              const keepMpnCount = issue.mpns.length > issue.manufacturers.length
+                                ? Math.max(1, issue.manufacturers.length)
+                                : issue.mpns.length;
+                              const keepMfrCount = issue.manufacturers.length > issue.mpns.length
+                                ? Math.max(1, issue.mpns.length)
+                                : issue.manufacturers.length;
                               patch.mpnDecisions = (issue.mpnDecisions || issue.mpns.map((mpn, mpnIndex) => ({
                                 mpn,
                                 manufacturer: issue.manufacturers[mpnIndex] || issue.manufacturers[0] || '',
                                 keep: true,
                               }))).map((decision, decisionIndex) => ({
                                 ...decision,
-                                keep: decisionIndex < Math.max(1, issue.manufacturers.length),
+                                keep: decisionIndex < keepMpnCount,
+                              }));
+                              patch.mfrDecisions = (issue.mfrDecisions || issue.manufacturers.map((manufacturer) => ({
+                                manufacturer,
+                                keep: true,
+                              }))).map((decision, decisionIndex) => ({
+                                ...decision,
+                                keep: decisionIndex < keepMfrCount,
                               }));
                             }
                             updatePairingReviewRow(index, patch);
@@ -6609,7 +6757,7 @@ const BomNormalizer = () => {
                         >
                           <MenuItem value="keep">Keep parsed output</MenuItem>
                           <MenuItem value="manual">Use manual manufacturer list</MenuItem>
-                          <MenuItem value="remove_extra">Remove extra MPN rows</MenuItem>
+                          <MenuItem value="remove_extra">Remove extra MPN/MFR values</MenuItem>
                         </Select>
                       </FormControl>
                     </TableCell>
