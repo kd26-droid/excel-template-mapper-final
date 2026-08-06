@@ -1901,20 +1901,44 @@ def mpn_validate(request):
                 result['canonical_mpn'] = similar_canonicals[0]
                 result['all_canonical_mpns'] = similar_canonicals[:5]
 
-        # ========== MOUSER VALIDATION ==========
-        # Mouser has no persistent cache like Digi-Key, so calling its API here (for
-        # every MPN, on every cache_only rebuild) would be slow and timeout-prone.
-        # Instead mpn_validate_warm warms Mouser one batch at a time and stores the
-        # results on the session; we just read them here so Mouser columns fill in
-        # progressively alongside Digi-Key, without any live API call in this path.
+        # ========== MOUSER / ELEMENT14 VALIDATION ==========
+        # Calling these APIs here (for every MPN, on every cache_only rebuild)
+        # would be slow and timeout-prone, so mpn_validate_warm warms them a batch
+        # at a time and we only read results back here.
+        #
+        # Read the DB-backed ProviderMpnCache as well as the session, the way
+        # Digi-Key reads GlobalMpnCache above. Reading the session alone lost most
+        # of the run: the warm step prunes those stores to the parts still ahead of
+        # its offset, so by the last batch the session held only that batch. A
+        # 600-part sheet warmed all three providers and then rendered ~15 Mouser
+        # cells, which reads as "Mouser never ran". Every answer was already in
+        # ProviderMpnCache; nothing here was asking for it.
+        from .models import ProviderMpnCache
+
+        def _read_provider_results(provider, provider_client, session_key, scope=''):
+            if provider not in selected_providers:
+                return {}
+            warmed = dict(info.get(session_key) or {})
+            wanted = {
+                normalized for normalized in
+                (provider_client.normalize_mpn(raw_mpn) for raw_mpn in mpns)
+                if normalized and normalized not in warmed
+            }
+            if wanted:
+                # Session copy wins: same data, but it is the fresher of the two.
+                warmed = {**ProviderMpnCache.get_cached_results(provider, wanted, scope), **warmed}
+            return warmed
+
         mouser_client = _mouser_client_for_request(request)
-        mouser_results_map = (info.get('mouser_results') or {}) if 'mouser' in selected_providers else {}
+        mouser_results_map = _read_provider_results('mouser', mouser_client, 'mouser_results')
         if mouser_results_map:
             logger.info(f"📊 MOUSER: using {len(mouser_results_map)} warmed Mouser results "
                         f"(valid={sum(1 for r in mouser_results_map.values() if r.get('valid'))})")
 
         element14_client = _element14_client_for_request(request)
-        element14_results_map = (info.get('element14_results') or {}) if 'element14' in selected_providers else {}
+        element14_results_map = _read_provider_results(
+            'element14', element14_client, 'element14_results', element14_client.store_id
+        )
         if element14_results_map:
             logger.info(f"ELEMENT14: using {len(element14_results_map)} warmed Element14 results "
                         f"(valid={sum(1 for r in element14_results_map.values() if r.get('valid'))})")
@@ -1932,8 +1956,12 @@ def mpn_validate(request):
             if has_valid_results:
                 validation_columns.append('DigiKey Category')
 
-        # Add Mouser columns if we have Mouser results
-        if mouser_results_map:
+        # Keyed off the provider being selected, not off it having returned
+        # something — the same rule Digi-Key uses above. Gating on results meant a
+        # provider that was asked but had nothing warmed yet (or was briefly down)
+        # disappeared from the sheet entirely, which reads as "never part of this
+        # run" instead of "checked nothing yet". Blank cells say the latter.
+        if 'mouser' in selected_providers:
             mouser_columns = ['MPN valid (Mouser)', 'Mouser Status', 'MPNR', 'Mouser Canonical MPN']
             has_valid_mouser_results = any(r.get('valid') for r in mouser_results_map.values())
             if has_valid_mouser_results:
@@ -1941,7 +1969,7 @@ def mpn_validate(request):
             validation_columns.extend(mouser_columns)
             logger.info(f"📊 MOUSER_VALIDATION_COLUMNS: Adding {len(mouser_columns)} Mouser columns: {mouser_columns}")
 
-        if element14_results_map:
+        if 'element14' in selected_providers:
             element14_columns = ['MPN valid (Element14)', 'Element14 Status', 'Element14 Part Number', 'Element14 Canonical MPN']
             has_valid_element14_results = any(r.get('valid') for r in element14_results_map.values())
             if has_valid_element14_results:
