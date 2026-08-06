@@ -4781,7 +4781,7 @@ const UploadFiles = () => {
             onClick={handleContinuePdfExtractionReview}
             sx={{ height: 40, px: 2.5, ...primaryPillSx }}
           >
-            Continue with BOM Mapping →
+            Continue
           </Button>
         </DialogActions>
       </Dialog>
