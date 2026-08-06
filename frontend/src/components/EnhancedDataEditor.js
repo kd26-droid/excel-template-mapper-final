@@ -81,7 +81,9 @@ import {
   VerifiedUser as VerifiedUserIcon,
   ContentCut as ContentCutIcon,
   Add as AddIcon,
-  DeleteOutline as DeleteIcon
+  DeleteOutline as DeleteIcon,
+  Fullscreen as FullscreenIcon,
+  FullscreenExit as FullscreenExitIcon
 } from '@mui/icons-material';
 import api from '../services/api';
 import * as XLSX from 'xlsx';
@@ -6938,9 +6940,11 @@ const EnhancedDataEditor = () => {
         maxWidth={exportBomFullscreen ? false : 'lg'} fullWidth fullScreen={exportBomFullscreen}>
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <span>Export BOM</span>
-          <Button size="small" onClick={() => setExportBomFullscreen(f => !f)}>
-            {exportBomFullscreen ? 'Exit full screen' : 'Full screen'}
-          </Button>
+          <Tooltip title={exportBomFullscreen ? 'Exit full screen' : 'Full screen'}>
+            <IconButton size="small" onClick={() => setExportBomFullscreen(f => !f)}>
+              {exportBomFullscreen ? <FullscreenExitIcon fontSize="small" /> : <FullscreenIcon fontSize="small" />}
+            </IconButton>
+          </Tooltip>
         </DialogTitle>
         <DialogContent dividers>
           <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
@@ -6951,7 +6955,7 @@ const EnhancedDataEditor = () => {
             <BomTreePreview
               sessionId={sessionId}
               fullscreen={exportBomFullscreen}
-              height={exportBomFullscreen ? 'calc(100vh - 280px)' : 420}
+              height={exportBomFullscreen ? 'calc(100vh - 160px)' : 420}
               onRequestFullscreen={() => setExportBomFullscreen(true)}
             />
           )}
@@ -8506,9 +8510,16 @@ const EnhancedDataEditor = () => {
         fullScreen={factwisePreviewType === 'bom' && factwisePreviewFullscreen}
         PaperProps={{
           sx: {
-            borderRadius: '12px',
+            borderRadius: factwisePreviewType === 'bom' && factwisePreviewFullscreen ? 0 : '12px',
             overflow: 'hidden',
-            maxWidth: factwisePreviewType === 'bom' ? 1068 : 980,
+            maxWidth: factwisePreviewType === 'bom' && factwisePreviewFullscreen
+              ? 'none'
+              : factwisePreviewType === 'bom'
+                ? 1068
+                : 980,
+            width: factwisePreviewType === 'bom' && factwisePreviewFullscreen ? '100vw' : undefined,
+            height: factwisePreviewType === 'bom' && factwisePreviewFullscreen ? '100vh' : undefined,
+            m: factwisePreviewType === 'bom' && factwisePreviewFullscreen ? 0 : undefined,
             bgcolor: exportDialogTone.paper,
             border: `1px solid ${exportDialogTone.border}`
           }
@@ -8533,12 +8544,20 @@ const EnhancedDataEditor = () => {
             </Typography>
           </Box>
           {factwisePreviewType === 'bom' ? (
-            <Button
-              onClick={() => setFactwisePreviewFullscreen(value => !value)}
-              sx={{ fontSize: 12, fontWeight: 700, color: '#1976d2' }}
-            >
-              {factwisePreviewFullscreen ? 'EXIT FULL SCREEN' : 'FULL SCREEN'}
-            </Button>
+            <Tooltip title={factwisePreviewFullscreen ? 'Exit full screen' : 'Full screen'}>
+              <IconButton
+                onClick={() => setFactwisePreviewFullscreen(value => !value)}
+                size="small"
+                sx={{
+                  color: '#60a5fa',
+                  border: `1px solid ${exportDialogTone.border}`,
+                  bgcolor: 'rgba(37, 99, 235, 0.08)',
+                  '&:hover': { bgcolor: 'rgba(37, 99, 235, 0.18)' }
+                }}
+              >
+                {factwisePreviewFullscreen ? <FullscreenExitIcon fontSize="small" /> : <FullscreenIcon fontSize="small" />}
+              </IconButton>
+            </Tooltip>
           ) : (
             <Button
               onClick={() => setFactwisePreviewOpen(false)}
@@ -8549,37 +8568,24 @@ const EnhancedDataEditor = () => {
             </Button>
           )}
         </DialogTitle>
-        <DialogContent sx={{ px: 3, py: 2.5, bgcolor: exportDialogTone.body }}>
+        <DialogContent sx={{
+          px: factwisePreviewType === 'bom' && factwisePreviewFullscreen ? 2.5 : 3,
+          py: factwisePreviewType === 'bom' ? 2 : 2.5,
+          bgcolor: exportDialogTone.body,
+          display: factwisePreviewType === 'bom' ? 'flex' : 'block',
+          flexDirection: factwisePreviewType === 'bom' ? 'column' : undefined,
+          overflow: factwisePreviewType === 'bom' && factwisePreviewFullscreen ? 'hidden' : undefined
+        }}>
           {factwisePreviewType === 'bom' ? (
             <>
-              <Typography variant="body2" sx={{ color: exportDialogTone.secondary, mb: 2 }}>
-                Review the BOM below, then export it as an Excel sheet, or to FactWise.
-              </Typography>
-              <Typography variant="caption" sx={{ color: exportDialogTone.secondary, display: 'block', mb: 1.5 }}>
-                High-level view - open full screen to drill into every raw material.
-              </Typography>
               {factwisePreviewOpen && (
                 <BomTreePreview
                   sessionId={sessionId}
                   fullscreen={factwisePreviewFullscreen}
-                  height={factwisePreviewFullscreen ? 'calc(100vh - 250px)' : 420}
+                  height={factwisePreviewFullscreen ? 'calc(100vh - 166px)' : 420}
                   onRequestFullscreen={() => setFactwisePreviewFullscreen(true)}
                 />
               )}
-              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2, mt: 1.2 }}>
-                {[
-                  ['#ffffff', 'Finished good'],
-                  ['#93c5fd', 'Sub-assembly'],
-                  ['#bbf7d0', 'Sub-sub-assembly'],
-                  ['#fde047', 'Raw material'],
-                  ['#d1d5db', 'Alternate']
-                ].map(([color, label]) => (
-                  <Box key={label} sx={{ display: 'flex', alignItems: 'center', gap: 0.5, fontSize: 12, color: exportDialogTone.secondary }}>
-                    <Box sx={{ width: 10, height: 10, borderRadius: 0.5, bgcolor: color, border: '1px solid #cbd5e1' }} />
-                    {label}
-                  </Box>
-                ))}
-              </Box>
             </>
           ) : (
             <>

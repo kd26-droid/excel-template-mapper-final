@@ -5539,7 +5539,7 @@ const UploadFiles = () => {
           </Box>
         </DialogContent>
         
-        <DialogActions sx={{ ...dialogFooterSx, gap: 1 }}>
+        <DialogActions sx={{ ...dialogFooterSx, px: 2.75, py: 1.5, gap: 1 }}>
           <Button onClick={handleCloseCompatibilityError} sx={{ ...pillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}>
             Cancel
           </Button>
@@ -5556,68 +5556,102 @@ const UploadFiles = () => {
         }}
         maxWidth="sm"
         fullWidth
-        PaperProps={{ sx: dialogPaperSx }}
+        PaperProps={{
+          sx: {
+            ...dialogPaperSx,
+            maxWidth: 640,
+            borderRadius: '16px'
+          }
+        }}
       >
-        <DialogTitle sx={dialogHeaderSx}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-            <ScienceIcon color="primary" />
-            <Typography variant="h6" fontWeight="700" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a' }}>
+        <DialogTitle sx={{ ...dialogHeaderSx, px: 3.25, pt: 2.5, pb: 1.25 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
+            <ScienceIcon color="primary" sx={{ fontSize: 20 }} />
+            <Typography variant="h6" fontWeight="700" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a', fontSize: '1.05rem', lineHeight: 1.25 }}>
               Choose PDF Processing Method
             </Typography>
           </Box>
         </DialogTitle>
-        <DialogContent sx={dialogBodySx}>
-          <Typography variant="body1" sx={{ mb: 2.5, color: isDarkMode ? '#94a3b8' : '#64748b' }}>
-            How should we read this PDF? Pick the option that matches how the page is laid out.
+        <DialogContent sx={{ ...dialogBodySx, px: 3.25, pt: 0.5, pb: 1.75 }}>
+          <Typography variant="body2" sx={{ mb: 2.25, color: isDarkMode ? '#94a3b8' : '#64748b', fontSize: '0.88rem', lineHeight: 1.45 }}>
+            Pick the option that matches how the PDF page is laid out.
           </Typography>
 
-          <Grid container spacing={2.5}>
+          <Grid container spacing={2}>
             {[
               {
                 key: 'ocr',
                 tint: '#22c55e',
-                icon: <TableChartIcon sx={{ fontSize: 28 }} />,
+                icon: <TableChartIcon sx={{ fontSize: 22 }} />,
                 title: 'Simple OCR',
                 body: 'Best when the page is already a clean table — clear rows and columns, all text readable, and nothing else around it.',
-                caption: 'Reads the whole page, so anything outside the table (logos, notes, page headers, totals) comes through as data too.'
+                caption: 'Reads the whole page, so anything outside the table (logos, notes, page headers, totals) comes through as data too.',
+                shortBody: 'For clean tables with readable rows and columns.',
+                detail: 'Reads the whole page, including notes and headers.'
               },
               {
                 key: 'zonal',
                 tint: '#f59e0b',
-                icon: <HighlightAltIcon sx={{ fontSize: 28 }} />,
+                icon: <HighlightAltIcon sx={{ fontSize: 22 }} />,
                 title: 'Select Area Manually',
-                body: 'You draw a box around the exact part of each page you want, and only what is inside the box gets extracted.',
-                caption: 'Use for irregular tables, several tables on one page, or pages with extra content you need to leave out.'
+                body: 'Draw a box when only part of the page should be read.',
+                caption: 'Use for irregular tables, several tables on one page, or pages with extra content you need to leave out.',
+                shortBody: 'Draw a box when only part of the page should be read.',
+                detail: 'Only extracts content inside your selected area.'
               }
             ].map((option) => (
               <Grid item xs={12} sm={6} key={option.key}>
                 <Card
-                  sx={{ ...dialogChoiceCardSx, height: '100%' }}
+                  sx={{
+                    ...dialogChoiceCardSx,
+                    height: '100%',
+                    minHeight: 166,
+                    borderRadius: '12px'
+                  }}
                   onClick={() => handlePdfProcessingChoice(option.key)}
                 >
-                  <CardContent sx={{ textAlign: 'center', p: 3, '&:last-child': { pb: 3 } }}>
-                    <Box sx={{ ...choiceIconWrapSx(option.tint), mx: 'auto', mb: 2 }}>
-                      {option.icon}
+                  <CardContent sx={{ p: 2.5, '&:last-child': { pb: 2.5 } }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, mb: 1.75 }}>
+                      <Box
+                        sx={{
+                          ...choiceIconWrapSx(option.tint),
+                          width: 40,
+                          height: 40,
+                          borderRadius: '12px',
+                          flexShrink: 0
+                        }}
+                      >
+                        {option.icon}
+                      </Box>
+                      <Typography variant="subtitle1" fontWeight={750} sx={{ lineHeight: 1.2, color: isDarkMode ? '#f8fafc' : '#0f172a' }}>
+                        {option.title}
+                      </Typography>
                     </Box>
-                    <Typography variant="h6" fontWeight={700} sx={{ lineHeight: 1.3 }}>
-                      {option.title}
-                    </Typography>
-                    <Typography
-                      variant="body2"
-                      sx={{ mt: 1, color: isDarkMode ? '#94a3b8' : '#64748b', lineHeight: 1.55 }}
-                    >
-                      {option.body}
-                    </Typography>
-                    <Typography variant="caption" sx={choiceCaptionSx}>
-                      {option.caption}
-                    </Typography>
+                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                      <Box>
+                        <Typography variant="caption" sx={{ display: 'block', color: isDarkMode ? '#60a5fa' : '#2563eb', fontSize: '0.68rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', mb: 0.25 }}>
+                          Use when
+                        </Typography>
+                        <Typography variant="body2" sx={{ color: isDarkMode ? '#dbe4f0' : '#334155', fontSize: '0.8rem', lineHeight: 1.35, fontWeight: 650 }}>
+                          {option.shortBody || option.body}
+                        </Typography>
+                      </Box>
+                      <Box>
+                        <Typography variant="caption" sx={{ display: 'block', color: isDarkMode ? '#60a5fa' : '#2563eb', fontSize: '0.68rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', mb: 0.25 }}>
+                          Extracts
+                        </Typography>
+                        <Typography variant="body2" sx={{ color: isDarkMode ? '#9ca8ba' : '#64748b', fontSize: '0.76rem', lineHeight: 1.35 }}>
+                          {option.detail || option.caption}
+                        </Typography>
+                      </Box>
+                    </Box>
                   </CardContent>
                 </Card>
               </Grid>
             ))}
           </Grid>
         </DialogContent>
-        <DialogActions sx={{ ...dialogFooterSx, gap: 1 }}>
+        <DialogActions sx={{ ...dialogFooterSx, px: 3.25, py: 1.75, gap: 1 }}>
           <Button
             onClick={() => {
               setPdfChoiceDialogOpen(false);
