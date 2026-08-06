@@ -522,9 +522,19 @@ const splitTopLevelDelimited = (value, delimiters = [';', '|', '\n', ',']) => {
   const text = fmt(value).replace(/\u00a0/g, ' ');
   if (!text) return [];
   const delimiterSet = new Set(delimiters);
+  const matchingClose = {
+    '(': ')',
+    '[': ']',
+    '{': '}',
+  };
+  const openingForClose = {
+    ')': '(',
+    ']': '[',
+    '}': '{',
+  };
   const parts = [];
   let current = '';
-  let depth = 0;
+  const stack = [];
   let quote = '';
 
   const pushCurrent = () => {
@@ -548,19 +558,22 @@ const splitTopLevelDelimited = (value, delimiters = [';', '|', '\n', ',']) => {
       continue;
     }
 
-    if (char === '(' || char === '[' || char === '{') {
-      depth += 1;
+    if (matchingClose[char]) {
+      const hasMatchingClose = text.indexOf(matchingClose[char], index + 1) !== -1;
+      if (hasMatchingClose) stack.push(char);
       current += char;
       continue;
     }
 
-    if (char === ')' || char === ']' || char === '}') {
-      depth = Math.max(0, depth - 1);
+    if (openingForClose[char]) {
+      if (stack[stack.length - 1] === openingForClose[char]) {
+        stack.pop();
+      }
       current += char;
       continue;
     }
 
-    if (depth === 0 && delimiterSet.has(char)) {
+    if (stack.length === 0 && delimiterSet.has(char)) {
       if (char === ',') {
         const next = text.slice(index + 1).trim().split(/[;,|\n]/)[0];
         if (!next || /^\d{1,4}(\s|$)/.test(next)) {
@@ -5158,6 +5171,82 @@ const BomNormalizer = () => {
       };
     });
   }, [config, currentStep, dataRows, parserTouched, roles.mpn]);
+
+  const autoReplayTemplate = location.state?.autoReplayProcessingTemplate || null;
+  if (autoReplayTemplate) {
+    const replayName = autoReplayTemplate.name || 'selected template';
+    const progressTotal = Number(progress.total || 0);
+    const progressValue = progressTotal
+      ? Math.min(100, Math.round((Number(progress.processed || 0) / progressTotal) * 100))
+      : 35;
+
+    return (
+      <Box
+        sx={{
+          minHeight: '100vh',
+          bgcolor: normalizerTheme.page,
+          color: normalizerTheme.text,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          px: 2,
+        }}
+      >
+        <Paper
+          elevation={0}
+          sx={{
+            width: 'min(520px, 100%)',
+            p: { xs: 3, sm: 4 },
+            border: `1px solid ${normalizerTheme.border}`,
+            borderRadius: 3,
+            bgcolor: `${normalizerTheme.paper} !important`,
+            color: `${normalizerTheme.text} !important`,
+            boxShadow: isDarkMode ? '0 24px 80px rgba(0,0,0,0.42)' : '0 24px 80px rgba(15,23,42,0.12)',
+          }}
+        >
+          <Stack spacing={2.25}>
+            <Box>
+              <Typography variant="h5" fontWeight={900} sx={{ color: normalizerTheme.text }}>
+                Applying template
+              </Typography>
+              <Typography sx={{ mt: 0.75, color: normalizerTheme.muted, lineHeight: 1.5 }}>
+                Preparing the workbook with "{replayName}" and opening the final mapped data.
+              </Typography>
+            </Box>
+
+            {error ? (
+              <Alert severity="error">
+                {error}
+              </Alert>
+            ) : (
+              <>
+                <LinearProgress
+                  variant={progressTotal ? 'determinate' : 'indeterminate'}
+                  value={progressValue}
+                  sx={{
+                    height: 8,
+                    borderRadius: 999,
+                    bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.18)' : '#e2e8f0',
+                  }}
+                />
+                <Typography variant="body2" sx={{ color: normalizerTheme.muted }}>
+                  Running saved normalization, mapping, and final-page tool rules in order.
+                </Typography>
+              </>
+            )}
+
+            {error && (
+              <Stack direction="row" justifyContent="flex-end">
+                <Button variant="contained" onClick={() => navigate('/upload')}>
+                  Back to Upload
+                </Button>
+              </Stack>
+            )}
+          </Stack>
+        </Paper>
+      </Box>
+    );
+  }
 
   return (
     <Box

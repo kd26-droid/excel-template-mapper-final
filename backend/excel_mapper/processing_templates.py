@@ -162,6 +162,72 @@ def _headers_from_rows(rows):
     return headers
 
 
+def _canonical_action_key(value):
+    """Semantic key for final-page tool actions.
+
+    Saved actions get fresh ids/timestamps on each save, so those fields cannot
+    be used for dedupe. Keep the rule/config payload intact so different actions
+    against the same column are preserved in their original order.
+    """
+    if isinstance(value, dict):
+        return {
+            key: _canonical_action_key(val)
+            for key, val in sorted(value.items())
+            if key not in {'id', 'created_at', 'key', 'label'}
+        }
+    if isinstance(value, list):
+        return [_canonical_action_key(item) for item in value]
+    return value
+
+
+def _action_key(value):
+    import json
+    try:
+        return json.dumps(_canonical_action_key(value), sort_keys=True, separators=(',', ':'))
+    except TypeError:
+        return str(_canonical_action_key(value))
+
+
+def _extract_post_mapping_actions(metadata, stages):
+    actions = []
+    if isinstance(metadata, dict) and isinstance(metadata.get('post_mapping_actions'), list):
+        actions.extend(metadata.get('post_mapping_actions') or [])
+    if isinstance(stages, list):
+        for stage in stages:
+            if not isinstance(stage, dict) or stage.get('type') != 'mapped_data_editor':
+                continue
+            if isinstance(stage.get('post_mapping_actions'), list):
+                actions.extend(stage.get('post_mapping_actions') or [])
+    return [action for action in actions if isinstance(action, dict) and action.get('type')]
+
+
+def _merge_post_mapping_actions(existing_actions, incoming_actions):
+    merged = []
+    seen = set()
+    for action in [*existing_actions, *incoming_actions]:
+        key = _action_key(action)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(action)
+    return merged
+
+
+def _attach_post_mapping_actions(stages, actions):
+    if not actions:
+        return stages
+    next_stages = [dict(stage) if isinstance(stage, dict) else stage for stage in _clean_list(stages)]
+    for stage in next_stages:
+        if isinstance(stage, dict) and stage.get('type') == 'mapped_data_editor':
+            stage['post_mapping_actions'] = actions
+            return next_stages
+    next_stages.append({
+        'type': 'mapped_data_editor',
+        'post_mapping_actions': actions,
+    })
+    return next_stages
+
+
 @api_view(['GET', 'POST'])
 def processing_templates(request):
     if request.method == 'GET':
@@ -175,6 +241,20 @@ def processing_templates(request):
     if not name:
         return Response({'success': False, 'error': 'Template name is required'}, status=status.HTTP_400_BAD_REQUEST)
 
+    incoming_metadata = _clean_dict(request.data.get('metadata'))
+    incoming_stages = _clean_list(request.data.get('stages'))
+    existing_template = ProcessingTemplate.objects.filter(name=name).first()
+    if existing_template:
+        existing_actions = _extract_post_mapping_actions(existing_template.metadata, existing_template.stages)
+        incoming_actions = _extract_post_mapping_actions(incoming_metadata, incoming_stages)
+        merged_actions = _merge_post_mapping_actions(existing_actions, incoming_actions)
+        if merged_actions:
+            incoming_metadata = {
+                **incoming_metadata,
+                'post_mapping_actions': merged_actions,
+            }
+            incoming_stages = _attach_post_mapping_actions(incoming_stages, merged_actions)
+
     template, created = ProcessingTemplate.objects.update_or_create(
         name=name,
         defaults={
@@ -182,9 +262,9 @@ def processing_templates(request):
             'status': _clean_status(request.data.get('status')),
             'version': _clean_version(request.data.get('version')),
             'source_requirements': _clean_dict(request.data.get('source_requirements')),
-            'stages': _clean_list(request.data.get('stages')),
+            'stages': incoming_stages,
             'provider_snapshot': _clean_dict(request.data.get('provider_snapshot')),
-            'metadata': _clean_dict(request.data.get('metadata')),
+            'metadata': incoming_metadata,
         },
     )
 
@@ -222,12 +302,22 @@ def processing_template_detail(request, template_id):
             template.version = _clean_version(request.data.get('version'))
         if 'source_requirements' in request.data:
             template.source_requirements = _clean_dict(request.data.get('source_requirements'))
-        if 'stages' in request.data:
-            template.stages = _clean_list(request.data.get('stages'))
         if 'provider_snapshot' in request.data:
             template.provider_snapshot = _clean_dict(request.data.get('provider_snapshot'))
-        if 'metadata' in request.data:
-            template.metadata = _clean_dict(request.data.get('metadata'))
+        if 'stages' in request.data or 'metadata' in request.data:
+            incoming_stages = _clean_list(request.data.get('stages')) if 'stages' in request.data else _clean_list(template.stages)
+            incoming_metadata = _clean_dict(request.data.get('metadata')) if 'metadata' in request.data else _clean_dict(template.metadata)
+            existing_actions = _extract_post_mapping_actions(template.metadata, template.stages)
+            incoming_actions = _extract_post_mapping_actions(incoming_metadata, incoming_stages)
+            merged_actions = _merge_post_mapping_actions(existing_actions, incoming_actions)
+            if merged_actions:
+                incoming_metadata = {
+                    **incoming_metadata,
+                    'post_mapping_actions': merged_actions,
+                }
+                incoming_stages = _attach_post_mapping_actions(incoming_stages, merged_actions)
+            template.stages = incoming_stages
+            template.metadata = incoming_metadata
         template.save()
         return Response({
             'success': True,

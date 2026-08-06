@@ -1127,23 +1127,50 @@ const EnhancedDataEditor = () => {
     };
   }, []);
 
+  const getPostMappingActionKey = useCallback((action) => {
+    const canonicalize = (value) => {
+      if (Array.isArray(value)) return value.map(canonicalize);
+      if (value && typeof value === 'object') {
+        return Object.keys(value)
+          .filter(key => !['id', 'created_at', 'key', 'label'].includes(key))
+          .sort()
+          .reduce((acc, key) => {
+            acc[key] = canonicalize(value[key]);
+            return acc;
+          }, {});
+      }
+      return value;
+    };
+    try {
+      return JSON.stringify(canonicalize(action));
+    } catch (_) {
+      return `${action?.type || 'action'}:${String(action?.key || action?.label || '')}`;
+    }
+  }, []);
+
+  const mergePostMappingActions = useCallback((...actionGroups) => {
+    const seen = new Set();
+    const merged = [];
+    actionGroups.flat().forEach((action) => {
+      const normalized = normalizePostMappingAction(action);
+      if (!normalized) return;
+      const key = getPostMappingActionKey(normalized);
+      if (seen.has(key)) return;
+      seen.add(key);
+      merged.push({ ...normalized, key });
+    });
+    return merged;
+  }, [getPostMappingActionKey, normalizePostMappingAction]);
+
   const recordPostMappingAction = useCallback((action) => {
     const normalized = normalizePostMappingAction(action);
     if (!normalized) return;
-    const actionKey = normalized.key || JSON.stringify({
-      type: normalized.type,
-      rule: normalized.rule || null,
-      config: normalized.config || null,
-      column: normalized.column || null,
-      source_column: normalized.source_column || null,
-      target_column: normalized.target_column || null,
-      defaults: normalized.defaults || null,
-    });
+    const actionKey = getPostMappingActionKey(normalized);
     setPostMappingActions(prev => {
       const filtered = prev.filter(item => (item.key || '') !== actionKey);
       return [...filtered, { ...normalized, key: actionKey }];
     });
-  }, [normalizePostMappingAction]);
+  }, [getPostMappingActionKey, normalizePostMappingAction]);
 
   const getPostMappingActionsFromTemplate = useCallback((template) => {
     if (!template || typeof template !== 'object') return [];
@@ -1156,25 +1183,8 @@ const EnhancedDataEditor = () => {
     const stageActions = Array.isArray(editorStage?.post_mapping_actions)
       ? editorStage.post_mapping_actions
       : [];
-    const seen = new Set();
-    return [...metadataActions, ...stageActions]
-      .map(normalizePostMappingAction)
-      .filter(Boolean)
-      .filter(action => {
-        const key = action.key || JSON.stringify({
-          type: action.type,
-          rule: action.rule || null,
-          config: action.config || null,
-          column: action.column || null,
-          source_column: action.source_column || null,
-          target_column: action.target_column || null,
-          defaults: action.defaults || null,
-        });
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-  }, [normalizePostMappingAction]);
+    return mergePostMappingActions(metadataActions, stageActions);
+  }, [mergePostMappingActions]);
 
   const buildPostMappingActionsForSave = useCallback((currentFactwiseRules = [], defaults = {}, formulaRules = []) => {
     const actions = [];
@@ -1228,23 +1238,8 @@ const EnhancedDataEditor = () => {
 
     postMappingActions.forEach(push);
 
-    const seen = new Set();
-    return actions.filter(action => {
-      const key = action.key || JSON.stringify({
-        type: action.type,
-        rule: action.rule || null,
-        config: action.config || null,
-        column: action.column || null,
-        source_column: action.source_column || null,
-        target_column: action.target_column || null,
-        defaults: action.defaults || null,
-        rules: action.rules || null,
-      });
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-  }, [normalizePostMappingAction, postMappingActions]);
+    return mergePostMappingActions(actions);
+  }, [mergePostMappingActions, normalizePostMappingAction, postMappingActions]);
 
   const updateDataIntegrity = useCallback((consistent, issues = []) => {
     setDataIntegrity({
@@ -2684,7 +2679,13 @@ const EnhancedDataEditor = () => {
         { overwriteExisting: isNewProcessingTemplate }
       );
       if (resp?.data?.success && processingTemplateContext) {
-        const postActions = buildPostMappingActionsForSave(currentFactwiseRules || [], defaults, rules);
+        const existingTemplateForActions =
+          processingTemplateContext?.selectedProcessingTemplate ||
+          location.state?.appliedProcessingTemplate ||
+          null;
+        const existingPostActions = getPostMappingActionsFromTemplate(existingTemplateForActions);
+        const currentPostActions = buildPostMappingActionsForSave(currentFactwiseRules || [], defaults, rules);
+        const postActions = mergePostMappingActions(existingPostActions, currentPostActions);
         let providerSnapshot = {};
         try {
           providerSnapshot = {
@@ -2732,6 +2733,7 @@ const EnhancedDataEditor = () => {
             post_mapping_actions: postActions,
           }
         });
+        setPostMappingActions(postActions);
       }
       const elapsed = Date.now() - opStart;
       if (elapsed < 3000) await new Promise(r => setTimeout(r, 3000 - elapsed));
@@ -2758,7 +2760,7 @@ const EnhancedDataEditor = () => {
     } finally {
       setTemplateSaving(false);
     }
-  }, [sessionId, templateName, dynamicColumnCounts, defaultValues, appliedFormulas, factwiseIdRule, mpnValidationCompleted, originalMpnColumn, mpnColumn, mpnManufacturerColumn, isExistingProcessingTemplate, isNewProcessingTemplate, processingTemplateContext, showSnackbar, handleCloseSaveTemplateDialog, buildPostMappingActionsForSave]);
+  }, [sessionId, templateName, dynamicColumnCounts, defaultValues, appliedFormulas, factwiseIdRule, mpnValidationCompleted, originalMpnColumn, mpnColumn, mpnManufacturerColumn, isExistingProcessingTemplate, isNewProcessingTemplate, processingTemplateContext, location.state, showSnackbar, handleCloseSaveTemplateDialog, buildPostMappingActionsForSave, getPostMappingActionsFromTemplate, mergePostMappingActions]);
 
   const handleSaveTemplateFromToolbar = useCallback(() => {
     if (isExistingProcessingTemplate) {
