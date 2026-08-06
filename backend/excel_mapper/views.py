@@ -427,7 +427,7 @@ def build_sfo_clustered_headers(base_headers: list, tags_count: int, spec_pairs_
     headers = [_strip_pandas_duplicate_suffix(h) for h in (base_headers or []) if str(h or "").strip()]
     if not headers:
         headers = [
-            "Item code", "SAP Item ID", "CPN Code", "MPN Code", "HSN Code", "Item name",
+            "Item code", "ERP Code", "CPN Code", "MPN Code", "HSN Code", "Item name",
             "Description", "Item type", "Measurement unit", "Alternate UoM 1", "Notes",
             "SAP Description", "Specification name", "Specification value", "Specification UOM",
             "Item identifications name", "Item identifications value", "Procurement item",
@@ -5017,7 +5017,7 @@ def _constant_column_values(rows, headers):
     never_inherit = {
         _template_label_key(name) for name in
         ('Item code', 'Item name', 'Description', 'Item type', 'Measurement unit',
-         'MPN Code', 'CPN Code', 'SAP Item ID', 'HSN Code')
+         'MPN Code', 'CPN Code', 'ERP Code', 'SAP Item ID', 'HSN Code')
     }
 
     constants = {}
@@ -5042,6 +5042,31 @@ def _constant_column_values(rows, headers):
         if consistent and seen:
             constants[position] = seen
     return constants
+
+
+# The export header cleanup below strips digits/underscores and applies
+# str.capitalize(), which is right for dynamic slots (Specification_Name_3 ->
+# "Specification name") but destroys acronyms: "CPN Code" -> "Cpn code".
+# These restore the labels FactWise expects, keyed by the cleaned header
+# lowercased with non-alphanumerics collapsed to single spaces.
+#
+# "SAP Item ID" was renamed to "ERP Code" in the destination template, so new
+# sessions already carry the new label; the alias here keeps sessions created
+# before the rename exporting under the same name.
+EXPORT_HEADER_CANONICAL_LABELS = {
+    'cpn code': 'CPN Code',
+    'mpn code': 'MPN Code',
+    'hsn code': 'HSN Code',
+    'erp code': 'ERP Code',
+    'sap item id': 'ERP Code',
+}
+
+# Old label -> new label, as _template_label_key sees them. Lets
+# import_edited_sheet match a sheet exported under one name onto a grid built
+# under the other.
+IMPORT_HEADER_ALIASES = {
+    'sap item id': 'erp code',
+}
 
 
 @api_view(['GET', 'POST'])
@@ -5713,7 +5738,14 @@ def download_file(request, session_id=None):
                 # Convert to sentence case (only capitalize first letter)
                 if cleaned_col:
                     cleaned_col = cleaned_col.capitalize()
-                
+
+                # capitalize() flattens acronyms, so restore the labels FactWise
+                # expects.
+                lookup = re.sub(r'[^a-z0-9]+', ' ', cleaned_col.lower()).strip()
+                canonical = EXPORT_HEADER_CANONICAL_LABELS.get(lookup)
+                if canonical:
+                    cleaned_col = canonical
+
                 final_columns.append(cleaned_col or col)  # Fallback to original if cleaning fails
             
             df.columns = final_columns
@@ -13207,14 +13239,20 @@ def import_edited_sheet(request, session_id):
 
     # Repeated headers (Tag, Specification name...) are matched left-to-right so
     # the Nth occurrence in the upload lands on the Nth occurrence in the grid.
+    # Renamed destination columns are folded onto one key so a grid built before
+    # the rename still matches a sheet exported after it (and vice versa).
+    def _import_match_key(header):
+        key = _template_label_key(header)
+        return IMPORT_HEADER_ALIASES.get(key, key)
+
     remaining = {}
     for position, header in enumerate(session_headers):
-        remaining.setdefault(_template_label_key(header), []).append(position)
+        remaining.setdefault(_import_match_key(header), []).append(position)
 
     column_map = {}
     ignored = []
     for upload_position, header in enumerate(uploaded_headers):
-        slots = remaining.get(_template_label_key(header))
+        slots = remaining.get(_import_match_key(header))
         if slots:
             column_map[upload_position] = slots.pop(0)
         else:

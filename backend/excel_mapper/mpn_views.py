@@ -18,6 +18,7 @@ from rest_framework import status
 from .services.digikey_service import DigiKeyClient
 from .services.mouser_service import MouserClient
 from .services.element14_service import Element14Client
+from .services.provider_errors import ProviderUnavailable
 from .provider_credentials import (
     get_saved_provider_credentials,
     request_allows_local_env_credentials,
@@ -38,16 +39,16 @@ def _provider_scope_id(request):
 
 
 def _selected_validation_providers(request):
-    data = getattr(request, 'data', {}) or {}
-    raw = data.get('validation_providers')
-    if raw is None:
-        return set(VALIDATION_PROVIDER_IDS)
-    if isinstance(raw, str):
-        raw = [part.strip() for part in raw.split(',')]
-    if not isinstance(raw, list):
-        return set(VALIDATION_PROVIDER_IDS)
-    selected = {str(provider).strip().lower() for provider in raw if str(provider).strip().lower() in VALIDATION_PROVIDER_IDS}
-    return selected or {'digikey'}
+    """Every configured provider, always.
+
+    Validation used to honour a caller-supplied subset and fall back to DigiKey
+    alone when that subset came through empty. A part DigiKey does not stock then
+    read as invalid even when Mouser or Element14 would have confirmed it, so the
+    answer depended on which distributor happened to be asked. Checking all three
+    costs one extra lookup per uncached part and removes that whole class of
+    false negative.
+    """
+    return set(VALIDATION_PROVIDER_IDS)
 
 
 def _provider_client_kwargs(request, provider):
@@ -1612,6 +1613,10 @@ def mpn_validate_warm(request):
             if len(chunk) >= limit:
                 break
 
+        # Providers that could not be reached this round, keyed by name.
+        # Declared outside the chunk branch: a fully cached round still has
+        # to return this key, and referencing it there would be a NameError.
+        provider_failures = {}
         if chunk:
             jobs = {}
             provider_timings = {}
@@ -1659,9 +1664,24 @@ def mpn_validate_warm(request):
                             element14_store.update(additions)
                             info['element14_results'] = element14_store
                             session_changed = True
+                    except ProviderUnavailable as provider_error:
+                        # The provider could not answer at all — a bad key or an
+                        # exhausted quota. Recorded so the run can say so rather
+                        # than reporting those parts as simply "not checked".
+                        provider_failures[provider] = {
+                            'provider': provider,
+                            'reason': provider_error.reason,
+                            'message': str(provider_error),
+                        }
+                        logger.warning("%s unavailable: %s", provider, provider_error)
                     except Exception as provider_error:
                         if provider == 'digikey':
                             raise
+                        provider_failures[provider] = {
+                            'provider': provider,
+                            'reason': 'error',
+                            'message': f'{provider.title()} lookup failed: {provider_error}',
+                        }
                         logger.warning("%s warm skipped (non-critical): %s", provider, provider_error)
 
             if session_changed:
@@ -1686,6 +1706,9 @@ def mpn_validate_warm(request):
             'done': done,
             'timings_ms': timings_ms,
             'validation_providers': sorted(selected_providers),
+            # Empty on a healthy run. A populated list means those providers were
+            # never actually asked, so their blank columns are not "no match".
+            'provider_failures': list(provider_failures.values()),
         })
     except Exception as e:
         logger.error(f"mpn_validate_warm failed: {e}", exc_info=True)

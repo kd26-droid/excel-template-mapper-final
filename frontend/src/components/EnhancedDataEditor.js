@@ -5916,6 +5916,9 @@ const EnhancedDataEditor = () => {
                       let total = 0;
                       let shown = false;
                       let validatedCount = 0;
+                      // Providers that could not be reached. Their columns come back
+                      // blank, which must not be read as "no match".
+                      const providerFailures = new Map();
                       setMpnProgress({ done: 0, total: 0 });
                       // eslint-disable-next-line no-constant-condition
                       while (true) {
@@ -5929,6 +5932,9 @@ const EnhancedDataEditor = () => {
                         );
                         const d = resp?.data || {};
                         total = d.total || 0;
+                        (d.provider_failures || []).forEach((f) => {
+                          if (f && f.provider) providerFailures.set(f.provider, f);
+                        });
                         validatedCount = Math.min(d.validated || 0, total);
                         setMpnProgress({ done: validatedCount, total });
                         // Build + render the grid from the cache so far (live fill-in).
@@ -5963,6 +5969,7 @@ const EnhancedDataEditor = () => {
                         total,
                         failed: Math.max(0, total - validatedCount),
                         breakdown,
+                        providerFailures: Array.from(providerFailures.values()),
                       });
                       setMpnSummaryOpen(true);
                     } catch (e) {
@@ -9370,6 +9377,19 @@ const EnhancedDataEditor = () => {
             Counts are unique part numbers, not rows — the same MPN used on several
             rows is validated once.
           </Typography>
+
+          {mpnSummary?.providerFailures?.length > 0 && (
+            <>
+              <Divider sx={{ my: 2 }} />
+              {mpnSummary.providerFailures.map((failure) => (
+                <Alert severity="error" key={failure.provider} sx={{ mb: 1 }}>
+                  {failure.message}
+                  {' '}Parts were not checked against {failure.provider} — blank
+                  {' '}columns for it do not mean the part is invalid.
+                </Alert>
+              ))}
+            </>
+          )}
 
           {mpnSummary?.breakdown && (
             <>
