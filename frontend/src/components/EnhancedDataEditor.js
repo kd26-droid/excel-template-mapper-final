@@ -58,6 +58,7 @@ import {
   ImportExport as ImportExportIcon,
   CheckCircle as CheckCircleIcon,
   Error as ErrorIcon,
+  HelpOutline as HelpOutlineIcon,
   Edit as EditIcon,
   Check as CheckIcon,
   ArrowBack as ArrowBackIcon,
@@ -270,7 +271,12 @@ const ExportLoadingContent = ({ title, message, isDarkMode = false }) => (
 const createConditionalBranch = () => ({
   column: '',
   operator: 'contains',
+  // Several values matched as "any of these". A list rather than a
+  // comma-separated string because component text is full of commas
+  // ("CAPACITOR 0.22U, 10V", "CAP; 0,1uF") — splitting one would quietly
+  // match far more rows than intended.
   compare: '',
+  compareValues: [],
   outputType: 'default',
   outputValue: '',
   outputColumn: '',
@@ -331,12 +337,34 @@ const deriveDisplayName = (col, allHeaders = []) => {
 // opinion, it is unknown rather than a silent pass.
 const MPN_VALID_COLUMNS = ['MPN valid (DigiKey)', 'MPN valid', 'MPN valid (Mouser)', 'MPN valid (Element14)'];
 
-const getMpnRowStatus = (row) => {
+// 'valid'   — at least one source found the part.
+// 'invalid' — at least one source answered, and every answer was "not found".
+// 'unknown' — the row has a part number, but nothing has checked it.
+// 'missing' — the MPN cell is empty, so there is nothing to check.
+//
+// A source only ever writes 'Yes'/'No' after an actual lookup, so a blank means
+// "not checked", never "checked and inconclusive". That leaves the no-answer
+// rows, which split on whether the row has a part number waiting to be checked
+// (someone should run validation) or no part number at all (someone has to go
+// find it) — two different follow-ups, so two different buckets.
+// Filter menu selection -> the row status it keeps. 'all' is absent on purpose:
+// anything not in here skips MPN filtering entirely.
+const MPN_ROW_FILTER_STATUS = {
+  valid_mpn: 'valid',
+  invalid_mpn: 'invalid',
+  unknown: 'unknown',
+  missing_mpn: 'missing',
+};
+
+const getMpnRowStatus = (row, mpnField) => {
   const values = MPN_VALID_COLUMNS
     .map(column => String(row?.[column] ?? '').trim().toLowerCase())
     .filter(Boolean);
   if (values.includes('yes')) return 'valid';
   if (values.includes('no')) return 'invalid';
+  // Without a known MPN column we cannot tell the two apart, so keep every
+  // unchecked row in 'unknown' rather than mislabel it as missing.
+  if (mpnField && !String(row?.[mpnField] ?? '').trim()) return 'missing';
   return 'unknown';
 };
 
@@ -694,6 +722,10 @@ const EnhancedDataEditor = () => {
   const [condElseSourceType, setCondElseSourceType] = useState('default');
   const [condElseColumn, setCondElseColumn] = useState('');
   const [conditionalBranches, setConditionalBranches] = useState([createConditionalBranch()]);
+  // Index of the condition whose value field has focus. The multi-value hint
+  // rides on the placeholder rather than helper text, so showing it cannot
+  // change the field's height and knock the row out of alignment.
+  const [focusedConditionIndex, setFocusedConditionIndex] = useState(null);
   const [defaultBusy, setDefaultBusy] = useState(false);
   // User-driven cleanup: choose a column, choose blanks or exact values, then
   // choose how those cells should be replaced.
@@ -750,6 +782,9 @@ const EnhancedDataEditor = () => {
   // Item code gets special export handling: it must be filled AND unique. This
   // holds the detected blanks/duplicates so export can stop before FactWise rejects it.
   const [itemCodeIssue, setItemCodeIssue] = useState(null); // { field, blanks, dupRows, dupValues }
+  // Half-filled specification / customer-identification groups. Advisory only —
+  // nothing is cleared and the export is not blocked.
+  const [groupWarnings, setGroupWarnings] = useState([]);
   // "Highlight duplicates so I can edit them" — the column + the set of repeated
   // values whose cells the grid should mark. Cleared with the banner's Clear button.
   const [dupHighlight, setDupHighlight] = useState(null); // { field, values: Set<string> }
@@ -844,6 +879,23 @@ const EnhancedDataEditor = () => {
     }
     return null;
   }, []);
+
+  // Which column holds the part number itself. The row filters need it to tell
+  // "has an MPN nobody checked" from "has no MPN at all" — the validation
+  // columns are blank in both cases, so they cannot answer that on their own.
+  // Null while the grid is still loading, which keeps every unchecked row in
+  // Unknown until we know where to look.
+  const mpnSourceField = useMemo(() => {
+    const fields = (columnDefs || [])
+      .map(col => col.field)
+      .filter(field => field && field !== '__row_number__');
+    if (!fields.length) return null;
+    if (mpnColumn && fields.includes(mpnColumn) && !isMpnValidationColumn(mpnColumn)) {
+      return mpnColumn;
+    }
+    const detected = detectMpnColumn(fields);
+    return detected && !isMpnValidationColumn(detected) ? detected : null;
+  }, [columnDefs, mpnColumn, detectMpnColumn, isMpnValidationColumn]);
 
   const detectProducerColumn = useCallback((headers) => {
     if (!Array.isArray(headers)) return null;
@@ -2355,7 +2407,9 @@ const EnhancedDataEditor = () => {
             branches: conditionalBranches.map(branch => ({
               column: branch.column,
               operator: branch.operator,
-              compare: branch.compare,
+              compare: (branch.compareValues && branch.compareValues.length)
+                ? branch.compareValues
+                : branch.compare,
               output_value: branch.outputType === 'empty' ? '' : branch.outputValue,
               ...(branch.outputType === 'column' ? { output_source_column: branch.outputColumn } : {}),
             })),
@@ -2858,6 +2912,7 @@ const EnhancedDataEditor = () => {
     }, {});
     let gaps = [];
     let icIssue = null;
+    let warnings = [];
     try {
       const resp = await api.requiredFieldReport(
         sessionId,
@@ -2866,6 +2921,7 @@ const EnhancedDataEditor = () => {
         booleanFields,
         validators
       );
+      warnings = resp?.data?.warnings || [];
       const counts = (resp?.data?.gaps || []).reduce((m, g) => { m[g.field] = g.emptyCount; return m; }, {});
       const invalids = (resp?.data?.invalids || []).reduce((m, g) => {
         m[g.field] = {
@@ -2906,6 +2962,7 @@ const EnhancedDataEditor = () => {
     if (otherGaps.length > 0 || icIssue) {
       setRequiredGaps(otherGaps);
       setItemCodeIssue(icIssue);
+      setGroupWarnings(warnings);
       pendingExportRef.current = exportFn;
       setRequiredDialogOpen(true);
       return;
@@ -4880,11 +4937,10 @@ const EnhancedDataEditor = () => {
     .map((row, rowIndex) => ({ row, rowIndex }))
     .filter(({ row }) => {
       const wantsInvalid = mpnFilterInvalidOnly || rowFilterMode === 'invalid_mpn';
-      if (!wantsInvalid && rowFilterMode !== 'valid_mpn' && rowFilterMode !== 'unknown') return true;
-      const status = getMpnRowStatus(row);
+      if (!wantsInvalid && !MPN_ROW_FILTER_STATUS[rowFilterMode]) return true;
+      const status = getMpnRowStatus(row, mpnSourceField);
       if (wantsInvalid) return status === 'invalid';
-      if (rowFilterMode === 'valid_mpn') return status === 'valid';
-      return status === 'unknown';
+      return status === MPN_ROW_FILTER_STATUS[rowFilterMode];
     })
     .filter(({ row }) => {
       if (!rowSearchQuery) return true;
@@ -5117,9 +5173,62 @@ const EnhancedDataEditor = () => {
                           </Select>
                         </FormControl>
                         {['equals', 'not_equals', 'contains'].includes(branch.operator) && (
-                          <TextField size="small" label="Text" value={branch.compare} onChange={(e) => setConditionalBranches(current => current.map((item, index) => index === branchIndex ? { ...item, compare: e.target.value } : item))} sx={{ minWidth: 160, flex: 1 }} />
+                          <TextField
+                            size="small"
+                            label="Text"
+                            value={branch.compare}
+                            placeholder={
+                              focusedConditionIndex === branchIndex
+                                ? (branch.compareValues?.length
+                                    ? 'Type another value, then press Enter'
+                                    : 'Type a value — press Enter to add more than one')
+                                : ''
+                            }
+                            onFocus={() => setFocusedConditionIndex(branchIndex)}
+                            onBlur={() => setFocusedConditionIndex(current => (current === branchIndex ? null : current))}
+                            onChange={(e) => setConditionalBranches(current => current.map((item, index) => index === branchIndex ? { ...item, compare: e.target.value } : item))}
+                            onKeyDown={(e) => {
+                              if (e.key !== 'Enter') return;
+                              e.preventDefault();
+                              const entered = String(branch.compare || '').trim();
+                              if (!entered) return;
+                              setConditionalBranches(current => current.map((item, index) => (
+                                index === branchIndex
+                                  ? {
+                                      ...item,
+                                      compare: '',
+                                      // Keep the typed value as a chip so the list is
+                                      // the single source of truth once it is used.
+                                      compareValues: Array.from(new Set([...(item.compareValues || []), entered])),
+                                    }
+                                  : item
+                              )));
+                            }}
+                            sx={{ minWidth: 160, flex: 1 }}
+                          />
                         )}
                       </Box>
+                      {/* Values sit on their own row so the three controls above
+                          stay aligned regardless of how many are added. */}
+                      {branch.compareValues?.length > 0 && (
+                        <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', alignItems: 'center' }}>
+                          <Typography variant="caption" sx={{ color: t.text.secondary, mr: 0.5 }}>
+                            Any of:
+                          </Typography>
+                          {branch.compareValues.map((value) => (
+                            <Chip
+                              key={value}
+                              size="small"
+                              label={value}
+                              onDelete={() => setConditionalBranches(current => current.map((item, index) => (
+                                index === branchIndex
+                                  ? { ...item, compareValues: (item.compareValues || []).filter(v => v !== value) }
+                                  : item
+                              )))}
+                            />
+                          ))}
+                        </Box>
+                      )}
                       <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
                         <Typography variant="body2" fontWeight={600} sx={{ width: 76 }}>Then use</Typography>
                         <FormControl size="small" sx={{ minWidth: 180 }}>
@@ -5813,6 +5922,17 @@ const EnhancedDataEditor = () => {
                 >
                   <ListItemIcon>{rowFilterMode === 'unknown' ? <CheckIcon sx={{ color: t.color.warningText }} /> : <ErrorIcon sx={{ color: t.color.warningText }} />}</ListItemIcon>
                   <ListItemText>Unknown MPN rows</ListItemText>
+                </MenuItem>
+                {/* Not gated on validation: an empty MPN cell is knowable before
+                    anything is looked up, and these are exactly the rows someone
+                    has to go source a part number for. It does need to know
+                    which column holds the MPN. */}
+                <MenuItem
+                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('missing_mpn'); setMpnFilterInvalidOnly(false); }}
+                  disabled={!mpnSourceField}
+                >
+                  <ListItemIcon>{rowFilterMode === 'missing_mpn' ? <CheckIcon sx={{ color: t.text.secondary }} /> : <HelpOutlineIcon sx={{ color: t.text.secondary }} />}</ListItemIcon>
+                  <ListItemText>Missing MPN rows</ListItemText>
                 </MenuItem>
               </Menu>
               <TextField
@@ -7276,6 +7396,18 @@ const EnhancedDataEditor = () => {
           bgcolor: isDarkMode ? '#0b1220' : '#f8fafc',
           borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.14)' : '#e2e8f0',
         }}>
+          {/* Advisory only: a name without its value is a normal in-progress
+              state, so it is reported rather than cleared or blocked. */}
+          {groupWarnings.length > 0 && (
+            <Box sx={{ display: 'grid', gap: 1, mb: 2 }}>
+              {groupWarnings.map((warning, index) => (
+                <Alert severity="warning" key={`${warning.field}-${warning.slot}-${index}`}>
+                  {warning.message}{' '}
+                  <Box component="span" sx={{ opacity: 0.85 }}>{warning.suggestion}</Box>
+                </Alert>
+              ))}
+            </Box>
+          )}
           <Box sx={{ display: 'grid', gap: 1.5 }}>
             {[
               itemCodeIssue ? {
