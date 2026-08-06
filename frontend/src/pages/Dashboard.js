@@ -857,7 +857,7 @@ const Dashboard = () => {
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3, flexWrap: 'wrap', gap: 2 }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
             <Typography variant="h5" fontWeight="700" sx={{ color: Ze.text, letterSpacing: '-0.025em' }}>
-              BOM Mapper Workbench
+              FactWise BOM Scrubber
             </Typography>
           </Box>
           <Box />
