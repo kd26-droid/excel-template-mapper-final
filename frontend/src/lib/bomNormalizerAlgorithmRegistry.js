@@ -68,6 +68,11 @@ export const ALTERNATE_LAYOUT_OPTIONS = [
     label: 'Each source row is already one BOM row',
     description: 'Use this when pipe-separated values should stay in the same row instead of becoming alternates.',
   },
+  {
+    value: 'same_group_rows',
+    label: 'Rows with the same group key are alternates',
+    description: 'Use this when each row has one MPN/MFR pair, but repeated item/group details mean the later rows are alternates of the first row.',
+  },
 ];
 
 export const QTY_OPTIONS = [
@@ -123,6 +128,11 @@ export const CLEANUP_OPTIONS = [
     key: 'skipDoNotPopulate',
     label: 'Ignore Do Not Populate rows',
     description: 'Skips rows marked as not fitted or not populated.',
+  },
+  {
+    key: 'skipDeletedRows',
+    label: 'Ignore deleted/red rows',
+    description: 'Skips rows marked Deleted, red text, or strikethrough in the source workbook.',
   },
 ];
 

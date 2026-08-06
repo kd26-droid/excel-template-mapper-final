@@ -13,7 +13,7 @@ export const API_CONFIG = {
 export const FILE_CONFIG = {
   MAX_SIZE_MB: 25,
   ALLOWED_TYPES: {
-    EXCEL: ['.xlsx', '.xls'],
+    EXCEL: ['.xlsx', '.xls', '.xlsm'],
     CSV: ['.csv']
   },
   MIME_TYPES: [
@@ -60,7 +60,7 @@ export const EXPORT_CONFIG = {
 export const ERROR_MESSAGES = {
   NETWORK_ERROR: 'Network error. Please check your connection and try again.',
   FILE_TOO_LARGE: `File size exceeds ${FILE_CONFIG.MAX_SIZE_MB}MB limit.`,
-  INVALID_FILE_TYPE: 'Invalid file type. Please upload Excel (.xlsx, .xls) or CSV files only.',
+  INVALID_FILE_TYPE: 'Invalid file type. Please upload Excel (.xlsx, .xls, .xlsm) or CSV files only.',
   UPLOAD_FAILED: 'File upload failed. Please try again.',
   SESSION_EXPIRED: 'Your session has expired. Please refresh the page.',
   MAPPING_FAILED: 'Column mapping failed. Please try again.',

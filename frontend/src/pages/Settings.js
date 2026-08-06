@@ -35,25 +35,33 @@ import {
   TableChart as TableChartIcon,
   Visibility,
   VisibilityOff,
-  VpnKey as VpnKeyIcon
+  VpnKey as VpnKeyIcon,
+  Storefront as StorefrontIcon,
+  Public as PublicIcon,
+  Hub as HubIcon
 } from '@mui/icons-material';
 import { useThemeContext } from '../utils/ThemeContext';
 import api from '../services/api';
 
+// All three providers are on by default. A part confirmed by any one of them is
+// valid, so querying all three gives the best coverage; a provider without
+// credentials simply returns nothing rather than failing the run.
+const ALL_PROVIDERS = ['digikey', 'mouser', 'element14'];
+
 const initialColumnMappings = [
-  { column: 'MPN valid', providers: ['digikey'], description: 'Part validation status' },
-  { column: 'MPN Status', providers: ['digikey'], description: 'Lifecycle status' },
-  { column: 'EOL Status', providers: ['digikey'], description: 'End of life flag' },
-  { column: 'Discontinued', providers: ['digikey'], description: 'Discontinued status' },
-  { column: 'DKPN', providers: ['digikey'], description: 'Distributor part number' },
-  { column: 'Canonical MPN', providers: ['digikey'], description: 'Standardized manufacturer part number' },
-  { column: 'Category', providers: ['digikey'], description: 'Product category' },
+  { column: 'MPN valid', providers: [...ALL_PROVIDERS], description: 'Part validation status' },
+  { column: 'MPN Status', providers: [...ALL_PROVIDERS], description: 'Lifecycle status' },
+  { column: 'EOL Status', providers: [...ALL_PROVIDERS], description: 'End of life flag' },
+  { column: 'Discontinued', providers: [...ALL_PROVIDERS], description: 'Discontinued status' },
+  { column: 'DKPN', providers: [...ALL_PROVIDERS], description: 'Distributor part number' },
+  { column: 'Canonical MPN', providers: [...ALL_PROVIDERS], description: 'Standardized manufacturer part number' },
+  { column: 'Category', providers: [...ALL_PROVIDERS], description: 'Product category' },
 ];
 
 const providerMeta = {
-  digikey: { label: 'DigiKey', color: '#3b82f6', soft: 'rgba(59, 130, 246, 0.14)' },
-  mouser: { label: 'Mouser', color: '#10b981', soft: 'rgba(16, 185, 129, 0.14)' },
-  element14: { label: 'Element14', color: '#f59e0b', soft: 'rgba(245, 158, 11, 0.16)' },
+  digikey: { label: 'DigiKey', color: '#3b82f6', soft: 'rgba(59, 130, 246, 0.14)', Icon: VpnKeyIcon },
+  mouser: { label: 'Mouser', color: '#10b981', soft: 'rgba(16, 185, 129, 0.14)', Icon: StorefrontIcon },
+  element14: { label: 'Element14', color: '#f59e0b', soft: 'rgba(245, 158, 11, 0.16)', Icon: PublicIcon },
 };
 
 const CREDENTIAL_SCOPE_KEY = 'mpn_provider_credential_scope_id';
@@ -76,7 +84,7 @@ const getCredentialScopeId = () => {
   return generated;
 };
 
-const normalizeProviders = (value, fallback = ['digikey']) => {
+const normalizeProviders = (value, fallback = ALL_PROVIDERS) => {
   const allowed = new Set(Object.keys(providerMeta));
   const raw = Array.isArray(value) ? value : (value ? [value] : fallback);
   const selected = raw.filter(provider => allowed.has(provider));
@@ -221,11 +229,7 @@ const Settings = () => {
   };
 
   const secretInputSx = {
-    ...fieldSx,
-    '& input': {
-      fontFamily: '"Roboto Mono", Consolas, "Courier New", monospace',
-      letterSpacing: 0
-    }
+    ...fieldSx
   };
 
   const providerLabel = (provider) => providerMeta[provider]?.label || provider;
@@ -427,20 +431,24 @@ const Settings = () => {
     children
   }) => {
     const meta = providerMeta[provider];
+    const ProviderIcon = meta.Icon || VpnKeyIcon;
     const message = providerMessages[provider];
+    const minCardHeight = provider === 'digikey' ? 334 : 168;
     return (
-      <Paper elevation={0} sx={{ p: 2, borderRadius: '14px', border: `1px solid ${t.border.subtle}`, bgcolor: t.surface.panel }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1.5, mb: 1.5 }}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, minWidth: 0, flexWrap: 'wrap' }}>
+      <Paper elevation={0} sx={{ p: 2.25, minHeight: minCardHeight, height: provider === 'digikey' ? '100%' : 'auto', borderRadius: '14px', border: `1px solid ${t.border.subtle}`, bgcolor: t.surface.panel, display: 'flex', flexDirection: 'column' }}>
+        <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 1.5, mb: 1.75 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, minWidth: 0 }}>
             <Box sx={{ width: 34, height: 34, borderRadius: '10px', display: 'grid', placeItems: 'center', bgcolor: meta.soft, color: meta.color }}>
-              <VpnKeyIcon fontSize="small" />
+              <ProviderIcon fontSize="small" />
             </Box>
             <Box sx={{ minWidth: 0 }}>
-              <Typography sx={{ fontSize: 15, fontWeight: 700, color: t.text.heading, lineHeight: 1.2 }}>{title}</Typography>
+              <Typography sx={{ fontSize: 15, fontWeight: 650, color: t.text.heading, lineHeight: 1.25 }}>{title}</Typography>
               {description && (
-                <Typography sx={{ fontSize: 12.5, color: t.text.secondary, mt: 0.25 }}>{description}</Typography>
+                <Typography sx={{ fontSize: 12.5, color: t.text.secondary, mt: 0.25, lineHeight: 1.35 }}>{description}</Typography>
               )}
             </Box>
+          </Box>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
             {providerChip(configured)}
             {message?.type === 'error' && (
               <Chip
@@ -453,7 +461,11 @@ const Settings = () => {
               />
             )}
           </Box>
-          <Stack direction="row" spacing={1} sx={{ flexShrink: 0 }}>
+        </Box>
+        <Box sx={{ flex: 1 }}>
+          {children}
+        </Box>
+        <Stack direction="row" spacing={1} sx={{ flexShrink: 0, justifyContent: 'flex-end', mt: provider === 'digikey' ? 'auto' : 1.75, pt: provider === 'digikey' ? 2 : 0 }}>
             <Button
               size="small"
               variant="outlined"
@@ -474,8 +486,6 @@ const Settings = () => {
               Remove
             </Button>
           </Stack>
-        </Box>
-        {children}
       </Paper>
     );
   };
@@ -522,7 +532,7 @@ const Settings = () => {
               <Box sx={sectionHeaderSx}>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
                   <Box sx={{ width: 36, height: 36, borderRadius: '12px', display: 'grid', placeItems: 'center', bgcolor: t.action.primarySoft, color: t.color.primaryLight }}>
-                    <VpnKeyIcon fontSize="small" />
+                    <HubIcon fontSize="small" />
                   </Box>
                   <Box>
                     <Typography sx={{ fontSize: 16, fontWeight: 700, color: t.text.heading }}>API Providers</Typography>
@@ -533,14 +543,14 @@ const Settings = () => {
 
               <Box sx={{ p: 2.5 }}>
                 <Grid container spacing={2}>
-                  <Grid item xs={12} lg={7}>
+                  <Grid item xs={12} lg={7} sx={{ display: 'flex' }}>
                     {renderProviderCard({
                       provider: 'digikey',
                       title: 'DigiKey API',
                       description: '',
                       configured: hasDigikey,
                       children: (
-                        <Grid container spacing={1.5}>
+                        <Grid container columnSpacing={1.75} rowSpacing={2.25} sx={{ alignContent: 'flex-start' }}>
                           <Grid item xs={12} md={6}>
                             <TextField fullWidth size="small" label="Client ID" value={digikeyClientId} onChange={(e) => setDigikeyClientId(e.target.value)} placeholder="Enter client ID" sx={fieldSx} />
                           </Grid>
@@ -569,7 +579,7 @@ const Settings = () => {
                               }}
                             />
                           </Grid>
-                          <Grid item xs={12}>
+                          <Grid item xs={12} sx={{ mt: 0.25 }}>
                             <TextField fullWidth size="small" label="Redirect URI" value={digikeyRedirectUri} onChange={(e) => setDigikeyRedirectUri(e.target.value)} placeholder="https://your-app.com/api/mpn/oauth/callback" helperText="Must match the callback URL in DigiKey app settings." sx={fieldSx} />
                           </Grid>
                         </Grid>

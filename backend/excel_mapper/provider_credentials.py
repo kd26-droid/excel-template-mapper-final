@@ -133,6 +133,25 @@ def request_allows_local_env_credentials(request):
     return host in {'localhost', '127.0.0.1', '[::1]', '::1'}
 
 
+
+# Environment variables that make a provider usable without anyone saving
+# credentials in the UI. Reported so the settings screen can offer a provider
+# that will actually work, instead of greying it out as "not configured".
+PROVIDER_ENV_KEYS = {
+    'digikey': ('DIGIKEY_CLIENT_ID', 'DIGIKEY_CLIENT_SECRET'),
+    'mouser': ('MOUSER_API_KEY',),
+    'element14': ('ELEMENT14_API_KEY',),
+}
+
+
+def provider_env_available(request, provider):
+    """True when env credentials exist for this provider and may be used here."""
+    keys = PROVIDER_ENV_KEYS.get(provider) or ()
+    if not keys or not all(os.environ.get(k) for k in keys):
+        return False
+    return request_allows_local_env_credentials(request)
+
+
 @api_view(['GET', 'POST'])
 def provider_credentials(request):
     """List or save encrypted MPN provider credentials for a scope.
@@ -160,13 +179,20 @@ def provider_credentials(request):
         providers = []
         for provider, rules in PROVIDER_FIELDS.items():
             record = records.get(provider)
+            env_ready = provider_env_available(request, provider)
             if record:
-                providers.append(serialize_provider(record))
+                payload = serialize_provider(record)
+                # Saved credentials win, but env keys still make it usable.
+                if env_ready and not payload['configured']:
+                    payload['configured'] = True
+                    payload['from_environment'] = True
+                providers.append(payload)
             else:
                 providers.append({
                     'provider': provider,
                     'label': rules['label'],
-                    'configured': False,
+                    'configured': env_ready,
+                    'from_environment': env_ready,
                     'public': {},
                     'masked': {},
                     'last_test_success': None,

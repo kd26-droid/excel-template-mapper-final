@@ -1,2 +1,8 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Shell scripts must keep LF endings. A CRLF shebang makes the kernel look
+# for an interpreter named "/bin/sh", which fails as "no such file or
+# directory" and silently breaks Docker containers on Windows checkouts.
+*.sh text eol=lf
+docker-entrypoint.sh text eol=lf

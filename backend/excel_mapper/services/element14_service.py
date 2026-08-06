@@ -8,6 +8,8 @@ import re
 import requests
 from django.core.cache import cache
 
+from .provider_errors import ProviderUnavailable, classify_http_failure
+
 logger = logging.getLogger(__name__)
 
 
@@ -52,8 +54,17 @@ class Element14Client:
         try:
             logger.debug("ELEMENT14_API: searching MPN %s", mpn)
             resp = requests.get(self.API_BASE, params=params, timeout=30)
+            # A failure that means we never got an answer must not look like
+            # "no match" — otherwise an exhausted key reads as a clean run.
+            unavailable = classify_http_failure(
+                'element14', resp.status_code, resp.headers.get('Retry-After')
+            )
+            if unavailable:
+                raise unavailable
             resp.raise_for_status()
             return resp.json()
+        except ProviderUnavailable:
+            raise
         except Exception as exc:
             logger.error("ELEMENT14_API: error for '%s': %s", mpn, exc)
             return None

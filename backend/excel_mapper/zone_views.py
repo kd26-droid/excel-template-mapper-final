@@ -3,6 +3,7 @@ Simple zone management views for PDF processing
 Handles zone selection, storage, and OCR processing
 """
 import logging
+import re
 import json
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
@@ -431,6 +432,22 @@ def process_zones(request, session_id):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+
+def _rows_look_equal(a, b):
+    """True when two extracted rows carry the same text, ignoring spacing.
+
+    Used to spot a header repeated at the top of a later page. Compared loosely
+    because a repeated header can be re-wrapped differently by the extractor.
+    """
+    def norm(row):
+        return [re.sub(r'\s+', ' ', str(cell or '')).strip().lower() for cell in (row or [])]
+    left, right = norm(a), norm(b)
+    if not any(left) or not any(right):
+        return False
+    width = min(len(left), len(right))
+    return width > 0 and left[:width] == right[:width]
+
+
 @api_view(['POST'])
 def process_column_zones(request, session_id):
     """
@@ -448,7 +465,7 @@ def process_column_zones(request, session_id):
     try:
         import pdfplumber
         from .services.coordinate_table_extractor import (
-            scale_rect_to_pdf, extract_table_from_pdf_words,
+            scale_rect_to_pdf, extract_table_from_pdf_words, extract_ruled_table,
         )
 
         pdf_session = PDFSession.objects.get(session_id=session_id)
@@ -496,7 +513,50 @@ def process_column_zones(request, session_id):
                         for w in pdf_page.extract_words()
                     ]
 
-        result = extract_table_from_pdf_words(page_words, column_zones, merge_wrapped=merge_wrapped)
+        # Two ways to read the marked area, chosen by the user rather than
+        # guessed at:
+        #   'columns' - each box is one column (precise, needs a box per column)
+        #   'table'   - one box is the whole table, and the columns come from the
+        #               PDF's own ruling lines inside it
+        zone_mode = str(request.data.get('zone_mode') or 'columns').strip().lower()
+        strategy_used = 'coordinate_column_zones'
+
+        if zone_mode == 'table':
+            rows = []
+            n_cols = 0
+            dropped = 0
+            with pdfplumber.open(pdf_session.original_pdf_path) as pdf:
+                for page in sorted(column_zones):
+                    if page < 1 or page > len(pdf.pages):
+                        continue
+                    pdf_page = pdf.pages[page - 1]
+                    # Several boxes on one page are treated as one region so a
+                    # sloppily drawn pair of boxes still reads as one table.
+                    rects = column_zones[page]
+                    region = {
+                        'x0': min(r['x0'] for r in rects),
+                        'x1': max(r['x1'] for r in rects),
+                        'top': min(r['top'] for r in rects),
+                        'bottom': max(r['bottom'] for r in rects),
+                    }
+                    page_result = extract_ruled_table(pdf_page, region)
+                    if not page_result['rows']:
+                        continue
+                    strategy_used = page_result['strategy']
+                    dropped += page_result['dropped']
+                    page_rows = page_result['rows']
+                    # Some documents repeat the header on every page and some do
+                    # not, so drop a later page's first row only when it actually
+                    # matches the header already captured. Dropping it blindly
+                    # deletes a real line item from any PDF that does not repeat.
+                    if rows and page_rows and _rows_look_equal(page_rows[0], rows[0]):
+                        page_rows = page_rows[1:]
+                    rows.extend(page_rows)
+                    n_cols = max(n_cols, page_result['n_columns'])
+            result = {'rows': rows, 'n_columns': n_cols, 'dropped': dropped}
+        else:
+            result = extract_table_from_pdf_words(page_words, column_zones, merge_wrapped=merge_wrapped)
+
         rows = result['rows']
         n_cols = result['n_columns']
 
@@ -512,17 +572,27 @@ def process_column_zones(request, session_id):
 
         # Use the name the user typed for each slot, falling back to a generic
         # name where none was given.
-        headers = [
-            (column_labels[i] if i < len(column_labels) and column_labels[i] else f'Column_{i + 1}')
-            for i in range(n_cols)
-        ]
+        if zone_mode == 'table' and rows:
+            # The marked area includes the table's own header row, so use it
+            # instead of asking the user to name every column.
+            first = rows[0]
+            headers = [
+                (str(first[i]).strip() if i < len(first) and str(first[i]).strip() else f'Column_{i + 1}')
+                for i in range(n_cols)
+            ]
+            rows = rows[1:]
+        else:
+            headers = [
+                (column_labels[i] if i < len(column_labels) and column_labels[i] else f'Column_{i + 1}')
+                for i in range(n_cols)
+            ]
 
         quality_metrics = {
             'total_rows': len(rows),
             'total_columns': n_cols,
             'words_outside_columns': result['dropped'],
             'merged_continuation_rows': result.get('merged_continuation_rows', 0),
-            'method': 'coordinate_column_zones',
+            'method': strategy_used,
         }
         extraction = PDFExtractionResult.objects.create(
             pdf_session=pdf_session,

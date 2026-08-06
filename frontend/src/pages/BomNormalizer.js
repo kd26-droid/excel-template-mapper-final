@@ -47,6 +47,7 @@ import DownloadIcon from '@mui/icons-material/Download';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import api from '../services/api';
+import BomStructureDialog from '../components/BomStructureDialog';
 import {
   createFactwiseIds,
   createTagColumn,
@@ -74,6 +75,26 @@ const emptyRoles = ROLE_FIELDS.reduce((acc, field) => {
   acc[field.key] = '';
   return acc;
 }, {});
+
+const SUPPORTED_SOURCE_EXTENSIONS = ['.xlsx', '.xls', '.xlsm', '.csv', '.pdf'];
+
+const getFileExtension = (fileName = '') => {
+  const match = String(fileName || '').toLowerCase().match(/\.[^.]+$/);
+  return match ? match[0] : '';
+};
+
+const unsupportedSourceMessage = (fileName = 'Selected file') => (
+  `${fileName} is not supported. Please upload .xlsx, .xls, .xlsm, .csv, or .pdf files.`
+);
+
+const EXCEL_OUTLINE_LEVEL_HEADER = 'Excel Outline Level';
+
+const uniqueHeaderName = (baseName, existingHeaders = []) => {
+  if (!existingHeaders.includes(baseName)) return baseName;
+  let index = 2;
+  while (existingHeaders.includes(`${baseName} ${index}`)) index += 1;
+  return `${baseName} ${index}`;
+};
 
 const LEARNED_ROLE_HEADERS_KEY = 'bomNormalizer.learnedRoleHeaders.v1';
 const BOM_NORMALIZER_RETURN_PREFIX = 'bomNormalizer.returnSnapshot.';
@@ -294,14 +315,53 @@ const rowsToObjects = (rows, currentHeaders, startRowNumber = 1) => rows
       mapped[header] = fmt(row[index]);
     });
     mapped.__sourceRow = startRowNumber + rowIndex;
+    if (row.__rowMeta?.deletedStyle) mapped.__deletedRowStyle = true;
+    if (row.__rowMeta?.redStyle) mapped.__redRowStyle = true;
+    if (row.__rowMeta?.strikeStyle) mapped.__strikeRowStyle = true;
     return mapped;
   });
+
+const filterRowsByEndRow = (rows = [], endRow = '') => {
+  const limit = Number(endRow);
+  if (!Number.isFinite(limit) || limit <= 0) return rows;
+  return rows.filter((row) => Number(row?.__sourceRow || 0) <= limit);
+};
+
+const colorLooksRed = (color = {}) => {
+  const raw = fmt(color?.rgb || color?.argb || color?.value || '').replace(/^#/, '');
+  if (!raw) return false;
+  const hex = raw.length === 8 ? raw.slice(2) : raw;
+  if (!/^[0-9a-f]{6}$/i.test(hex)) return false;
+  const red = parseInt(hex.slice(0, 2), 16);
+  const green = parseInt(hex.slice(2, 4), 16);
+  const blue = parseInt(hex.slice(4, 6), 16);
+  return red >= 180 && green <= 100 && blue <= 100;
+};
+
+const getCellStyleInfo = (cell = {}) => {
+  const style = cell?.s || {};
+  const font = style.font || {};
+  const red = colorLooksRed(font.color) || colorLooksRed(style.fgColor) || colorLooksRed(style.color);
+  const strike = Boolean(font.strike || font.strikethrough);
+  return { red, strike };
+};
 
 const worksheetToCompactRows = (worksheet) => {
   const cells = Object.keys(worksheet).filter((key) => !key.startsWith('!'));
   let maxRow = -1;
   const valuesByCell = new Map();
+  const metaByRow = new Map();
   const usedColumns = new Set();
+  const outlineRows = Array.isArray(worksheet?.['!rows']) ? worksheet['!rows'] : [];
+
+  outlineRows.forEach((rowInfo, rowIndex) => {
+    const rawLevel = Number(rowInfo?.level);
+    if (!Number.isFinite(rawLevel) || rawLevel <= 0) return;
+    maxRow = Math.max(maxRow, rowIndex);
+    const rowMeta = metaByRow.get(rowIndex) || { redStyle: false, strikeStyle: false, deletedStyle: false };
+    rowMeta.outlineLevel = rawLevel + 1;
+    metaByRow.set(rowIndex, rowMeta);
+  });
 
   cells.forEach((cellAddress) => {
     const cell = worksheet[cellAddress];
@@ -311,6 +371,14 @@ const worksheetToCompactRows = (worksheet) => {
     maxRow = Math.max(maxRow, position.r);
     usedColumns.add(position.c);
     valuesByCell.set(`${position.r}:${position.c}`, value);
+    const styleInfo = getCellStyleInfo(cell);
+    if (styleInfo.red || styleInfo.strike) {
+      const rowMeta = metaByRow.get(position.r) || { redStyle: false, strikeStyle: false, deletedStyle: false };
+      rowMeta.redStyle = rowMeta.redStyle || styleInfo.red;
+      rowMeta.strikeStyle = rowMeta.strikeStyle || styleInfo.strike;
+      rowMeta.deletedStyle = rowMeta.deletedStyle || styleInfo.red || styleInfo.strike;
+      metaByRow.set(position.r, rowMeta);
+    }
   });
 
   if (maxRow < 0 || !usedColumns.size) return [];
@@ -319,7 +387,9 @@ const worksheetToCompactRows = (worksheet) => {
 
   const rows = [];
   for (let rowIndex = 0; rowIndex <= maxRow; rowIndex += 1) {
-    rows.push(columns.map((colIndex) => valuesByCell.get(`${rowIndex}:${colIndex}`) || ''));
+    const row = columns.map((colIndex) => valuesByCell.get(`${rowIndex}:${colIndex}`) || '');
+    row.__rowMeta = metaByRow.get(rowIndex) || null;
+    rows.push(row);
   }
 
   return rows;
@@ -374,7 +444,8 @@ const inferRoles = (headers) => {
     description: findLearnedHeader('description') || findHeader([/description/, /item name/, /\bname\b/]),
     quantity: findLearnedHeader('quantity') || findHeader([/quantity/, /\bqty\b/, /^count$/, /\bcount\b/]),
     uom: findLearnedHeader('uom') || findHeader([/\buom\b/, /measurement unit/, /\bunit\b/]),
-    level: findLearnedHeader('level') || findHeader([/\blevel\b/]),
+    level: headers.find((header) => normalizeKey(header).startsWith(normalizeKey(EXCEL_OUTLINE_LEVEL_HEADER)))
+      || (findLearnedHeader('level') || findHeader([/\blevel\b/])),
     parent: findLearnedHeader('parent') || findHeader([/parent/, /finished good/, /bom id/, /item code/, /assembly/]),
   };
 };
@@ -673,6 +744,12 @@ const rowLooksLikeDoNotPopulate = (row, headers) => {
   return /\b(do\s*not\s*populate|not\s*populate|dnp|dni|not\s*fitted|no\s*fit)\b/.test(text);
 };
 
+const rowLooksLikeDeleted = (row, headers) => {
+  if (row.__deletedRowStyle || row.__redRowStyle || row.__strikeRowStyle) return true;
+  const text = rowValues(row, headers).join(' ').toLowerCase();
+  return /\b(deleted|delete|removed|obsolete|cancelled|canceled)\b/.test(text);
+};
+
 const rowLooksLikeSectionTitle = (row, headers, roles) => {
   const values = rowValues(row, headers);
   if (!values.length) return true;
@@ -706,10 +783,20 @@ const hasGroupedRowContext = (row, roles) => Boolean(
   getCell(row, roles.level)
 );
 
+const hasPreservableBomIdentity = (row, roles) => Boolean(
+  getCell(row, roles.parent) ||
+  getCell(row, roles.cpn) ||
+  getCell(row, roles.description) ||
+  getCell(row, roles.quantity) ||
+  getCell(row, roles.uom) ||
+  getCell(row, roles.level)
+);
+
 const shouldSkipSourceRow = (row, headers, roles, config) => {
   if (!rowValues(row, headers).length) return true;
   if (config.skipRepeatedHeaders && rowLooksLikeRepeatedHeader(row, headers)) return true;
   if (config.skipDoNotPopulate && rowLooksLikeDoNotPopulate(row, headers)) return true;
+  if (config.skipDeletedRows && rowLooksLikeDeleted(row, headers)) return true;
   if (config.structure === 'grouped_rows' && hasGroupedRowContext(row, roles)) return false;
   if (config.skipTitleRows && rowLooksLikeSectionTitle(row, headers, roles)) return true;
   return false;
@@ -732,7 +819,7 @@ const withSourceColumns = (normalizedRow, sourceRow, config = {}) => {
 
   const carried = { ...normalizedRow };
   sourceHeaders.forEach((header) => {
-    if (!header || header === '__sourceRow') return;
+    if (!header || header.startsWith('__')) return;
     if (consumedSourceHeaders.has(normalizeKey(header))) return;
     if (Object.prototype.hasOwnProperty.call(carried, header)) return;
     carried[header] = sourceRow?.[header] ?? '';
@@ -744,16 +831,38 @@ const normalizeSeparateCells = (rows, roles, config) => {
   const output = [];
   rows.forEach((row, rowIndex) => {
     const sourceRow = row.__sourceRow || rowIndex + 1;
-    const mpns = splitMpnCell(getCell(row, roles.mpn), config);
+    const rawMpn = getCell(row, roles.mpn);
+    const rawManufacturer = getCell(row, roles.manufacturer);
+    const mpns = splitMpnCell(rawMpn, config);
     const explicitDelimiterUsed = Boolean(selectedDelimiter(config)) && mpns.length > 1;
-    const manufacturers = splitManufacturerCell(getCell(row, roles.manufacturer), mpns.length, config);
+    const manufacturers = splitManufacturerCell(rawManufacturer, mpns.length, config);
     const primaryManufacturer = manufacturers[0] || '';
     const quantity = getCell(row, roles.quantity);
     const uom = getCell(row, roles.uom);
-    const parentKey = getCell(row, roles.parent) || getCell(row, roles.description) || `Source row ${sourceRow}`;
+    const description = getCell(row, roles.description);
+    const parentKey = getCell(row, roles.parent) || description || `Source row ${sourceRow}`;
     const level = getCell(row, roles.level) || '1';
     const rule = explicitDelimiterUsed ? 'separate_cells_user_delimiter' : 'separate_cells_position_pairing';
     const cpn = getCell(row, roles.cpn);
+
+    if (!mpns.length && hasPreservableBomIdentity(row, roles)) {
+      output.push(withSourceColumns({
+        sourceRow,
+        parentKey,
+        relation: 'Primary',
+        level,
+        cpn,
+        description,
+        mpn: '',
+        manufacturer: rawManufacturer,
+        quantity,
+        uom,
+        rule: 'separate_cells_item_without_mpn_mfr',
+        confidence: rawManufacturer ? 68 : 58,
+        discardedText: rawMpn,
+      }, row, config));
+      return;
+    }
 
     mpns.forEach((mpn, partIndex) => {
       const isPrimary = partIndex === 0;
@@ -764,7 +873,7 @@ const normalizeSeparateCells = (rows, roles, config) => {
         relation: isPrimary ? 'Primary' : `Alternate ${partIndex}`,
         level,
         cpn,
-        description: getCell(row, roles.description),
+        description,
         mpn,
         manufacturer,
         quantity: config.quantityMode === 'inherit_primary' || isPrimary ? quantity : quantity,
@@ -787,7 +896,8 @@ const normalizeSameCell = (rows, roles, config) => {
     const segments = parseColonSegments(sourceText);
     const quantity = getCell(row, roles.quantity);
     const uom = getCell(row, roles.uom);
-    const parentKey = getCell(row, roles.parent) || getCell(row, roles.description) || `Source row ${sourceRow}`;
+    const description = getCell(row, roles.description);
+    const parentKey = getCell(row, roles.parent) || description || `Source row ${sourceRow}`;
     const level = getCell(row, roles.level) || '1';
     const cpn = getCell(row, roles.cpn);
 
@@ -799,7 +909,7 @@ const normalizeSameCell = (rows, roles, config) => {
           relation: partIndex === 0 ? 'Primary' : `Alternate ${partIndex}`,
           level,
           cpn,
-          description: getCell(row, roles.description),
+          description,
           mpn: pair.mpn,
           manufacturer: pair.manufacturer,
           quantity,
@@ -814,14 +924,34 @@ const normalizeSameCell = (rows, roles, config) => {
     }
 
     if (!segments.length) {
-      splitMpnCell(sourceText, config).forEach((mpn, partIndex) => {
+      const fallbackMpns = splitMpnCell(sourceText, config);
+      if (!fallbackMpns.length && hasPreservableBomIdentity(row, roles)) {
+        output.push(withSourceColumns({
+          sourceRow,
+          parentKey,
+          relation: 'Primary',
+          level,
+          cpn,
+          description,
+          mpn: '',
+          manufacturer: '',
+          quantity,
+          uom,
+          rule: 'same_cell_item_without_mpn_mfr',
+          confidence: 58,
+          discardedText: sourceText,
+        }, row, config));
+        return;
+      }
+
+      fallbackMpns.forEach((mpn, partIndex) => {
         output.push(withSourceColumns({
           sourceRow,
           parentKey,
           relation: partIndex === 0 ? 'Primary' : `Alternate ${partIndex}`,
           level,
           cpn,
-          description: getCell(row, roles.description),
+          description,
           mpn,
           manufacturer: '',
           quantity,
@@ -844,7 +974,7 @@ const normalizeSameCell = (rows, roles, config) => {
           relation: relationIndex === 0 ? 'Primary' : `Alternate ${relationIndex}`,
           level,
           cpn,
-          description: getCell(row, roles.description),
+          description,
           mpn,
           manufacturer: segment.label,
           quantity,
@@ -922,9 +1052,13 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
     const primaryManufacturer = getCell(row, roles.manufacturer);
     const primaryQty = getCell(row, roles.quantity);
     const primaryUom = getCell(row, roles.uom);
-    const parentKey = getCell(row, roles.parent) || getCell(row, roles.description) || `Source row ${sourceRow}`;
+    const rawParentKey = getCell(row, roles.parent);
+    const description = getCell(row, roles.description);
+    const parentKey = rawParentKey || description || `Source row ${sourceRow}`;
     const level = getCell(row, roles.level) || '1';
     const cpn = getCell(row, roles.cpn);
+    const hasBomIdentity = Boolean(cpn || description || rawParentKey);
+    let emittedAnyPart = false;
 
     if (primaryMpn) {
       output.push(withSourceColumns({
@@ -933,7 +1067,7 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
         relation: 'Primary',
         level,
         cpn,
-        description: getCell(row, roles.description),
+        description,
         mpn: stripVendorPrefix(primaryMpn),
         manufacturer: primaryManufacturer,
         quantity: primaryQty,
@@ -942,6 +1076,7 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
         confidence: confidenceForRow(primaryMpn, primaryManufacturer, 'alternate_columns'),
         discardedText: '',
       }, row, config));
+      emittedAnyPart = true;
     }
 
     alternateGroups.forEach((group, groupIndex) => {
@@ -951,10 +1086,10 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
       output.push(withSourceColumns({
         sourceRow,
         parentKey,
-        relation: `Alternate ${groupIndex + 1}`,
+        relation: emittedAnyPart ? `Alternate ${groupIndex + 1}` : 'Primary',
         level,
         cpn,
-        description: getCell(row, roles.description),
+        description,
         mpn: stripVendorPrefix(mpn),
         manufacturer,
         quantity: config.quantityMode === 'alternate_columns' ? getCell(row, group.qty) || primaryQty : primaryQty,
@@ -963,7 +1098,26 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
         confidence: confidenceForRow(mpn, manufacturer, 'alternate_columns'),
         discardedText: '',
       }, row, config));
+      emittedAnyPart = true;
     });
+
+    if (!emittedAnyPart && hasBomIdentity) {
+      output.push(withSourceColumns({
+        sourceRow,
+        parentKey,
+        relation: 'Primary',
+        level,
+        cpn,
+        description,
+        mpn: '',
+        manufacturer: primaryManufacturer,
+        quantity: primaryQty,
+        uom: primaryUom,
+        rule: 'alternate_columns_item_without_mpn_mfr',
+        confidence: 68,
+        discardedText: '',
+      }, row, config));
+    }
   });
   return output;
 };
@@ -988,6 +1142,53 @@ const normalizeOnePerRow = (rows, roles, config = {}) => rows.map((row, rowIndex
     discardedText: '',
   }, row, config);
 }).filter((row) => row.mpn || row.manufacturer || row.description);
+
+const normalizeSameGroupRows = (rows, roles, config = {}) => {
+  const seenByGroup = new Map();
+
+  const getGroupKey = (row, rowIndex) => {
+    const sourceRow = row.__sourceRow || rowIndex + 1;
+    const contextualParts = [
+      getCell(row, roles.parent),
+      getCell(row, roles.description),
+      getCell(row, roles.quantity),
+      getCell(row, roles.uom),
+      getCell(row, roles.level),
+    ].filter((value) => !isPlaceholderCell(value));
+    const fallback = getCell(row, roles.cpn) || getCell(row, roles.mpn) || getCell(row, roles.manufacturer) || `Source row ${sourceRow}`;
+    const parts = contextualParts.length ? contextualParts : [fallback];
+    return parts.map(normalizeKey).filter(Boolean).join('::') || `row-${sourceRow}`;
+  };
+
+  return rows.map((row, rowIndex) => {
+    const sourceRow = row.__sourceRow || rowIndex + 1;
+    const mpn = stripVendorPrefix(getCell(row, roles.mpn));
+    const manufacturer = getCell(row, roles.manufacturer);
+    const groupKey = getGroupKey(row, rowIndex);
+    const groupIndex = seenByGroup.get(groupKey) || 0;
+    seenByGroup.set(groupKey, groupIndex + 1);
+    const parentKey = getCell(row, roles.parent)
+      || getCell(row, roles.description)
+      || getCell(row, roles.cpn)
+      || `Source row ${sourceRow}`;
+
+    return withSourceColumns({
+      sourceRow,
+      parentKey,
+      relation: groupIndex === 0 ? 'Primary' : `Alternate ${groupIndex}`,
+      level: getCell(row, roles.level) || '1',
+      cpn: getCell(row, roles.cpn),
+      description: getCell(row, roles.description),
+      mpn,
+      manufacturer,
+      quantity: getCell(row, roles.quantity),
+      uom: getCell(row, roles.uom),
+      rule: 'same_group_rows_rebalance',
+      confidence: Math.min(confidenceForRow(mpn, manufacturer, 'same_group_rows') + (groupIndex > 0 ? 12 : 6), 98),
+      discardedText: '',
+    }, row, config);
+  }).filter((row) => row.mpn || row.manufacturer || row.description);
+};
 
 const normalizeManufacturerOnly = (rows, roles, config, splitCells) => {
   const output = [];
@@ -1134,12 +1335,19 @@ const normalizeRows = (rows, headers, roles, config) => {
     sourceHeaders: headers,
     consumedSourceHeaders: getConsumedSourceHeaders(roles, config, headers),
   };
+  // Every structure option describes how MPN/MFR pairs are laid out. With
+  // neither column present they are all meaningless, and the default would emit
+  // nothing — so pass rows through, keeping level, code, quantity, description.
+  if (!roles.mpn && !roles.manufacturer) {
+    return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
+  }
   if (config.structure === 'grouped_rows') return normalizeGroupedRows(rows, roles, configWithSourceHeaders);
   if (config.structure === 'mpn_only_same_cell') return normalizeSeparateCells(rows, roles, configWithSourceHeaders);
   if (config.structure === 'mpn_only_rows') return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
   if (config.structure === 'mfr_only_same_cell') return normalizeManufacturerOnly(rows, roles, configWithSourceHeaders, true);
   if (config.structure === 'mfr_only_rows') return normalizeManufacturerOnly(rows, roles, configWithSourceHeaders, false);
   if (config.alternateLayout === 'separate_columns') return normalizeAlternateColumns(rows, headers, roles, configWithSourceHeaders);
+  if (config.alternateLayout === 'same_group_rows') return normalizeSameGroupRows(rows, roles, configWithSourceHeaders);
   if (config.alternateLayout === 'already_separate_rows') return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
   if (config.structure === 'same_cell') return normalizeSameCell(rows, roles, configWithSourceHeaders);
   if (config.structure === 'one_per_row') return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
@@ -1196,6 +1404,164 @@ const normalizeRowsChunked = async (rows, headers, roles, config, onProgress) =>
   return output;
 };
 
+const getRawPairingParts = (row, roles, config) => {
+  const rawMpn = getCell(row, roles.mpn);
+  const rawManufacturer = getCell(row, roles.manufacturer);
+  const mpns = splitMpnCell(rawMpn, config);
+  const manufacturers = splitManufacturerCell(rawManufacturer, null, config).filter(Boolean);
+  return { mpns, manufacturers, rawMpn, rawManufacturer };
+};
+
+const analyzeMpnManufacturerPairing = (rows, headers, roles, config) => {
+  if (!roles.mpn || !roles.manufacturer || roles.mpn === roles.manufacturer) {
+    return { checkedRows: 0, matchedRows: 0, issueRows: [] };
+  }
+
+  const issueRows = [];
+  let checkedRows = 0;
+  let matchedRows = 0;
+  const manualAltGroups = cleanAlternateColumnGroups(config.alternateColumnGroups || [], headers);
+  const alternateGroups = manualAltGroups.length ? manualAltGroups : findAlternateColumnGroups(headers);
+
+  rows.forEach((row, rowIndex) => {
+    if (shouldSkipSourceRow(row, headers, roles, config)) return;
+    const sourceRow = row.__sourceRow || rowIndex + 1;
+    const base = getRawPairingParts(row, roles, config);
+    const primaryManufacturer = getCell(row, roles.manufacturer);
+
+    const scenarios = [];
+    if (base.mpns.length > 1 || base.manufacturers.length > 1) {
+      scenarios.push({
+        key: `source-${sourceRow}`,
+        sourceRow,
+        parentKey: getCell(row, roles.parent) || getCell(row, roles.description) || getCell(row, roles.cpn) || `Source row ${sourceRow}`,
+        mpns: base.mpns,
+        manufacturers: base.manufacturers,
+        rawMpn: base.rawMpn,
+        rawManufacturer: base.rawManufacturer,
+      });
+    }
+
+    if (config.alternateLayout === 'separate_columns' && alternateGroups.length) {
+      const mpns = [getCell(row, roles.mpn), ...alternateGroups.map((group) => getCell(row, group.mpn))]
+        .map(stripVendorPrefix)
+        .filter(Boolean);
+      const manufacturers = [primaryManufacturer, ...alternateGroups.map((group) => getCell(row, group.mfr))]
+        .filter(Boolean);
+      if (mpns.length > 1) {
+        scenarios.push({
+          key: `alternate-columns-${sourceRow}`,
+          sourceRow,
+          parentKey: getCell(row, roles.parent) || getCell(row, roles.description) || getCell(row, roles.cpn) || `Source row ${sourceRow}`,
+          mpns,
+          manufacturers,
+          rawMpn: mpns.join(' | '),
+          rawManufacturer: manufacturers.join(' | '),
+        });
+      }
+    }
+
+    scenarios.forEach((scenario) => {
+      const mpnCount = scenario.mpns.length;
+      const mfrCount = scenario.manufacturers.length;
+      if (mpnCount <= 1 && mfrCount <= 1) return;
+      checkedRows += 1;
+      if (mpnCount === mfrCount) {
+        matchedRows += 1;
+        return;
+      }
+      issueRows.push({
+        ...scenario,
+        action: 'keep',
+        mpnDecisions: scenario.mpns.map((mpn, index) => ({
+          mpn,
+          manufacturer: scenario.manufacturers[index] || scenario.manufacturers[0] || '',
+          keep: true,
+        })),
+        mfrDecisions: scenario.manufacturers.map((manufacturer) => ({
+          manufacturer,
+          keep: true,
+        })),
+        manualManufacturers: scenario.mpns.map((_, index) => scenario.manufacturers[index] || scenario.manufacturers[0] || '').join(' | '),
+        message: `${mpnCount} MPN${mpnCount === 1 ? '' : 's'} detected, ${mfrCount} manufacturer${mfrCount === 1 ? '' : 's'} detected.`,
+      });
+    });
+  });
+
+  return { checkedRows, matchedRows, issueRows };
+};
+
+const splitManualManufacturers = (value) => (
+  fmt(value)
+    .split(/\s*(?:\||\n|;)\s*/g)
+    .map(fmt)
+    .filter(Boolean)
+);
+
+const applyPairingReviewDecisions = (rows, reviewRows) => {
+  if (!reviewRows.length) return rows;
+  const decisions = reviewRows.filter((issue) => issue.action !== 'keep');
+  if (!decisions.length) return rows;
+
+  let nextRows = rows.map((row) => ({ ...row }));
+  decisions.forEach((issue) => {
+    const mpnKeys = issue.mpns.map((mpn) => normalizeKey(stripVendorPrefix(mpn)));
+    const decisionRows = Array.isArray(issue.mpnDecisions) && issue.mpnDecisions.length
+      ? issue.mpnDecisions
+      : issue.mpns.map((mpn, index) => ({
+          mpn,
+          manufacturer: issue.manufacturers[index] || issue.manufacturers[0] || '',
+          keep: true,
+        }));
+    const manufacturerDecisions = Array.isArray(issue.mfrDecisions) && issue.mfrDecisions.length
+      ? issue.mfrDecisions
+      : issue.manufacturers.map((manufacturer) => ({ manufacturer, keep: true }));
+    const rowBelongsToIssue = (row) => (
+      String(row.sourceRow) === String(issue.sourceRow) ||
+      (issue.parentKey && normalizeKey(row.parentKey) === normalizeKey(issue.parentKey))
+    );
+    const manualValues = issue.action === 'manual'
+      ? splitManualManufacturers(issue.manualManufacturers)
+      : [];
+    const firstManufacturer = issue.manufacturers[0] || manualValues[0] || '';
+
+    if (issue.action === 'manual' || issue.action === 'remove_extra') {
+      const affectedRows = nextRows.filter((row) => rowBelongsToIssue(row) && mpnKeys.includes(normalizeKey(row.mpn)));
+      if (!affectedRows.length) return;
+      const templateRow = affectedRows[0];
+      const replacementRows = [];
+      const keptManufacturers = manufacturerDecisions
+        .filter((decision) => decision.keep !== false)
+        .map((decision) => decision.manufacturer)
+        .filter(Boolean);
+      decisionRows.forEach((decision, index) => {
+        if (issue.action === 'remove_extra' && decision.keep === false) return;
+        const relationIndex = replacementRows.length;
+        const manualValue = manualValues[index] || '';
+        const manufacturer = issue.action === 'manual'
+          ? (manualValue || decision.manufacturer || manualValues[0] || '')
+          : (keptManufacturers[relationIndex] || keptManufacturers[0] || firstManufacturer || decision.manufacturer || '');
+        replacementRows.push({
+          ...templateRow,
+          mpn: stripVendorPrefix(decision.mpn || issue.mpns[index] || ''),
+          manufacturer,
+          relation: relationIndex === 0 ? 'Primary' : `Alternate ${relationIndex}`,
+          rule: `${templateRow.rule || 'normalized'}_pairing_review`,
+          confidence: Math.max(templateRow.confidence || 0, manufacturer ? 88 : templateRow.confidence || 0),
+        });
+      });
+      let inserted = false;
+      nextRows = nextRows.flatMap((row) => {
+        if (!rowBelongsToIssue(row) || !mpnKeys.includes(normalizeKey(row.mpn))) return [row];
+        if (inserted) return [];
+        inserted = true;
+        return replacementRows;
+      });
+    }
+  });
+  return nextRows;
+};
+
 const downloadRowsAsCsv = (rows) => {
   if (!rows.length) return;
   const columns = getNormalizedExportColumns(rows);
@@ -1244,6 +1610,83 @@ const createWorkbookFileFromRows = (rows, columns, fileName, sheetName = 'Sheet1
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   });
   return new File([blob], fileName, { type: blob.type });
+};
+
+const arrayBufferToBinaryString = (buffer) => {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return binary;
+};
+
+const readWorkbookSafely = (buffer, fileName = 'workbook') => {
+  if (!XLSX || !XLSX.read || !XLSX.utils) {
+    throw new Error('Spreadsheet parser is not ready. Please refresh the page and try uploading again.');
+  }
+
+  const attempts = [
+    () => XLSX.read(buffer, { type: 'array', cellDates: true, raw: false, cellStyles: true, WTF: false }),
+    () => XLSX.read(new Uint8Array(buffer), { type: 'array', cellDates: true, raw: false, cellStyles: true, WTF: false }),
+    () => XLSX.read(arrayBufferToBinaryString(buffer), { type: 'binary', cellDates: true, raw: false, cellStyles: true, WTF: false }),
+  ];
+  let lastError = null;
+
+  for (const attempt of attempts) {
+    try {
+      const workbook = attempt();
+      if (workbook?.SheetNames?.length) return workbook;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  const rawMessage = String(lastError?.message || '');
+  const knownParserCrash = rawMessage.includes("reading 'utils'") || rawMessage.includes('reading "utils"');
+  if (knownParserCrash) {
+    throw new Error(`Could not read "${fileName}". Please re-save the file as .xlsx, .xlsm, or .csv and upload it again.`);
+  }
+  throw new Error(`Could not read "${fileName}". ${rawMessage || 'The workbook appears to be unsupported or corrupted.'}`);
+};
+
+const readCsvWorkbookSafely = async (file) => {
+  if (!XLSX || !XLSX.read || !XLSX.utils) {
+    throw new Error('Spreadsheet parser is not ready. Please refresh the page and try uploading again.');
+  }
+
+  const text = await file.text();
+  const attempts = [
+    () => XLSX.read(text, { type: 'string', raw: false, codepage: 65001 }),
+    () => {
+      const rows = text
+        .split(/\r?\n/)
+        .map((line) => line.split(',').map((cell) => fmt(cell).replace(/^"|"$/g, '').replace(/""/g, '"')));
+      const worksheet = XLSX.utils.aoa_to_sheet(rows);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'CSV_Source');
+      return workbook;
+    },
+  ];
+  let lastError = null;
+
+  for (const attempt of attempts) {
+    try {
+      const workbook = attempt();
+      if (workbook?.SheetNames?.length) return workbook;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  throw new Error(`Could not read "${file.name}". ${lastError?.message || 'The CSV appears to be unsupported or empty.'}`);
+};
+
+const readUploadedWorkbookSafely = async (file) => {
+  if (String(file?.name || '').toLowerCase().endsWith('.csv')) return readCsvWorkbookSafely(file);
+  const buffer = await file.arrayBuffer();
+  return readWorkbookSafely(buffer, file.name);
 };
 
 const normalizedGroupKey = (row) => `${row.sourceRow || ''}::${row.parentKey || ''}`;
@@ -1393,12 +1836,19 @@ const findStrongMpnHeader = (headers = []) => {
 
 const isGenericPartHeader = (header) => /^part( number| no)?$/.test(normalizeKey(header));
 
-const prepareSingleSheet = (currentWorkbook, currentSheetName) => {
+const prepareSingleSheet = (currentWorkbook, currentSheetName, options = {}) => {
   const worksheet = currentWorkbook.Sheets[currentSheetName];
   const rows = worksheetToCompactRows(worksheet);
-  const headerIndex = detectHeaderRow(rows);
+  const requestedHeaderIndex = Number(options.headerRow);
+  const headerIndex = Number.isFinite(requestedHeaderIndex) && requestedHeaderIndex > 0
+    ? requestedHeaderIndex - 1
+    : detectHeaderRow(rows);
   const columns = getUsableColumnDescriptors(rows, headerIndex);
   const currentHeaders = columns.map((column) => column.header);
+  const dataSheetRows = rows.slice(headerIndex + 1).filter((row) => row.some((cell) => fmt(cell)));
+  const hasOutlineLevels = dataSheetRows.some((row) => Number(row.__rowMeta?.outlineLevel || 0) > 1);
+  const outlineLevelHeader = hasOutlineLevels ? uniqueHeaderName(EXCEL_OUTLINE_LEVEL_HEADER, currentHeaders) : '';
+  const outputHeaders = outlineLevelHeader ? [...currentHeaders, outlineLevelHeader] : currentHeaders;
   const currentRows = rows
     .slice(headerIndex + 1)
     .filter((row) => row.some((cell) => fmt(cell)))
@@ -1407,14 +1857,21 @@ const prepareSingleSheet = (currentWorkbook, currentSheetName) => {
       columns.forEach((column) => {
         mapped[column.header] = fmt(row[column.index]);
       });
+      if (outlineLevelHeader) {
+        mapped[outlineLevelHeader] = String(Number(row.__rowMeta?.outlineLevel || 1) || 1);
+      }
       mapped.__sourceRow = headerIndex + 2 + rowIndex;
+      if (row.__rowMeta?.deletedStyle) mapped.__deletedRowStyle = true;
+      if (row.__rowMeta?.redStyle) mapped.__redRowStyle = true;
+      if (row.__rowMeta?.strikeStyle) mapped.__strikeRowStyle = true;
       return mapped;
     });
   return {
     sheetRows: rows,
     headerRowIndex: headerIndex,
-    headers: currentHeaders,
+    headers: outputHeaders,
     dataRows: currentRows,
+    detectedOutlineLevels: hasOutlineLevels,
   };
 };
 
@@ -1849,7 +2306,24 @@ const NORMALIZED_TABLE_BASE_COLUMNS = [
   { key: 'confidence', label: 'Confidence', editable: false, width: 105 },
 ];
 
-const buildNormalizerSuggestedMappings = (columns = []) => {
+const hasManufacturerValues = (rows = []) => rows.some((row) => fmt(row?.manufacturer));
+
+const buildBomMappingRowsFromNormalizedRows = (rows = [], baseColumns = getNormalizedExportColumns(rows)) => {
+  const columns = [...baseColumns];
+
+  const outputRows = rows.map((row) => {
+    const output = {};
+    baseColumns.forEach((column) => {
+      output[column] = row[column] || '';
+    });
+
+    return output;
+  });
+
+  return { columns, rows: outputRows };
+};
+
+const buildNormalizerSuggestedMappings = (columns = [], rows = []) => {
   const available = new Set(columns);
   const candidates = [
     { source: 'cpn', targets: ['CPN Code', 'Customer part number', 'Customer Part Number'] },
@@ -1859,7 +2333,9 @@ const buildNormalizerSuggestedMappings = (columns = []) => {
     { source: 'uom', targets: ['Measurement unit', 'UOM', 'Unit of measure'] },
     { source: 'level', targets: ['Level', 'BOM level'] },
     { source: 'parentKey', targets: ['Parent / group key', 'Parent group key', 'Sub BOM ID', 'BOM ID'] },
-    { source: 'manufacturer', targets: ['Manufacturer', 'Preferred vendor code', 'Procurement entity name'] },
+    ...(hasManufacturerValues(rows)
+      ? [{ source: 'manufacturer', targets: ['Tag', 'Tag_1'] }]
+      : []),
   ];
 
   return candidates
@@ -1898,6 +2374,8 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
   const [visibleColumnKeys, setVisibleColumnKeys] = useState(defaultVisibleColumns);
   const [searchQuery, setSearchQuery] = useState('');
   const [pendingPrimaryDeleteIndex, setPendingPrimaryDeleteIndex] = useState(null);
+  const [allRowsOpen, setAllRowsOpen] = useState(false);
+  const [allRowsPage, setAllRowsPage] = useState(0);
   const visibleColumns = columns.filter((column) => visibleColumnKeys.includes(column.key));
   const normalizedSearch = searchQuery.trim().toLowerCase();
   const filteredRows = rows
@@ -1907,6 +2385,16 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
       if (!normalizedSearch) return true;
       return Object.values(row).some((value) => fmt(value).toLowerCase().includes(normalizedSearch));
     });
+  const allRowsPerPage = 100;
+  const allRowsTotalPages = Math.max(1, Math.ceil(filteredRows.length / allRowsPerPage));
+  const allRowsVisibleRows = filteredRows.slice(
+    allRowsPage * allRowsPerPage,
+    allRowsPage * allRowsPerPage + allRowsPerPage
+  );
+
+  useEffect(() => {
+    setAllRowsPage(0);
+  }, [filteredRows.length, visibleColumnKeys.join('|')]);
 
   const handleCellChange = (rowIndex, key, value) => {
     if (!onRowsChange) return;
@@ -1973,6 +2461,9 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
           )}
         </Stack>
         <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap" justifyContent="flex-end">
+          <Button size="small" variant="outlined" onClick={() => setAllRowsOpen(true)} disabled={!filteredRows.length}>
+            View all rows
+          </Button>
           <TextField
             size="small"
             label="Search"
@@ -2078,6 +2569,114 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
         </Box>
       )}
     </TableContainer>
+      <Dialog open={allRowsOpen} onClose={() => setAllRowsOpen(false)} maxWidth="xl" fullWidth>
+        <DialogTitle>
+          <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'flex-start', sm: 'center' }} gap={1}>
+            <Box>
+              <Typography sx={{ fontSize: 18, fontWeight: 800 }}>All normalized rows</Typography>
+              <Typography sx={{ mt: 0.4, fontSize: 13, color: tableTone.muted }}>
+                Showing the same rows and visible columns as the current sheet view.
+              </Typography>
+            </Box>
+            <Stack direction="row" gap={0.75} flexWrap="wrap">
+              <Chip size="small" label={`${filteredRows.length} of ${rows.length} rows`} />
+              <Chip size="small" label={`${visibleColumns.length} columns`} />
+              {lowConfidenceOnly && <Chip size="small" color="warning" label="Low confidence only" />}
+              {normalizedSearch && <Chip size="small" variant="outlined" label={`Search: ${searchQuery}`} />}
+            </Stack>
+          </Stack>
+        </DialogTitle>
+        <DialogContent>
+          <TableContainer
+            sx={{
+              maxHeight: '64vh',
+              overflow: 'auto',
+              border: `1px solid ${tableTone.border}`,
+              bgcolor: tableTone.bg,
+              '&::-webkit-scrollbar': { height: 10, width: 10 },
+              '&::-webkit-scrollbar-thumb': {
+                borderRadius: 8,
+                bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.42)' : 'rgba(100, 116, 139, 0.38)',
+              },
+            }}
+          >
+            <Table stickyHeader size="small" sx={{ width: 'max-content', minWidth: '100%', tableLayout: 'fixed' }}>
+              <TableHead>
+                <TableRow>
+                  <TableCell sx={{ minWidth: 70, fontWeight: 800, bgcolor: tableTone.header, color: tableTone.text, borderColor: tableTone.border }}>
+                    #
+                  </TableCell>
+                  {visibleColumns.map((column) => (
+                    <TableCell
+                      key={column.key}
+                      sx={{
+                        minWidth: column.width,
+                        maxWidth: column.width + 80,
+                        fontWeight: 800,
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        bgcolor: tableTone.header,
+                        color: tableTone.text,
+                        borderColor: tableTone.border,
+                      }}
+                    >
+                      {column.label}
+                    </TableCell>
+                  ))}
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {allRowsVisibleRows.map(({ row, originalIndex }, pageIndex) => (
+                  <TableRow key={`all-normalized-${originalIndex}`} sx={{ bgcolor: row.confidence < 70 ? tableTone.warningBg : 'inherit' }}>
+                    <TableCell sx={{ minWidth: 70, color: tableTone.text, borderColor: tableTone.border, fontWeight: 700 }}>
+                      {allRowsPage * allRowsPerPage + pageIndex + 1}
+                    </TableCell>
+                    {visibleColumns.map((column) => (
+                      <TableCell
+                        key={column.key}
+                        sx={{
+                          minWidth: column.width,
+                          maxWidth: column.width + 80,
+                          whiteSpace: 'nowrap',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          color: tableTone.text,
+                          borderColor: tableTone.border,
+                        }}
+                      >
+                        {column.key === 'confidence' ? `${row[column.key]}%` : row[column.key]}
+                      </TableCell>
+                    ))}
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'space-between', gap: 1, flexWrap: 'wrap' }}>
+          <Typography sx={{ fontSize: 13, color: tableTone.muted }}>
+            Page {allRowsPage + 1} of {allRowsTotalPages}
+          </Typography>
+          <Stack direction="row" gap={1}>
+            <Button
+              variant="outlined"
+              disabled={allRowsPage === 0}
+              onClick={() => setAllRowsPage((page) => Math.max(0, page - 1))}
+            >
+              Previous
+            </Button>
+            <Button
+              variant="outlined"
+              disabled={allRowsPage >= allRowsTotalPages - 1}
+              onClick={() => setAllRowsPage((page) => Math.min(allRowsTotalPages - 1, page + 1))}
+            >
+              Next
+            </Button>
+            <Button variant="contained" onClick={() => setAllRowsOpen(false)}>Done</Button>
+          </Stack>
+        </DialogActions>
+      </Dialog>
       <Dialog
         open={pendingPrimaryDeleteIndex !== null}
         onClose={() => setPendingPrimaryDeleteIndex(null)}
@@ -2123,6 +2722,12 @@ const BomNormalizer = () => {
     borderStrong: themeTokens.border?.strong || (isDarkMode ? 'rgba(255,255,255,0.2)' : 'rgba(203, 213, 225, 0.8)'),
     warningBg: themeTokens.state?.warningBg || (isDarkMode ? 'rgba(245, 158, 11, 0.14)' : '#fff8e5'),
   }), [isDarkMode, themeTokens]);
+  // BOM structure gate. Asked here rather than at upload so the user answers
+  // after seeing the normalized rows, when "does this have levels" is a
+  // question about real output instead of raw headers.
+  const [bomStructureOpen, setBomStructureOpen] = useState(false);
+  const [bomStructureAnswers, setBomStructureAnswers] = useState(null);
+  const [pendingBomAction, setPendingBomAction] = useState(null);
   const [workbook, setWorkbook] = useState(null);
   const [fileName, setFileName] = useState('');
   const [sheetName, setSheetName] = useState('');
@@ -2132,6 +2737,9 @@ const BomNormalizer = () => {
   const [headerRowIndex, setHeaderRowIndex] = useState(0);
   const [preparedHeaders, setPreparedHeaders] = useState([]);
   const [preparedDataRows, setPreparedDataRows] = useState([]);
+  const [sourceEndRow, setSourceEndRow] = useState('');
+  const [sourceGridOpen, setSourceGridOpen] = useState(false);
+  const [sourceGridPage, setSourceGridPage] = useState(0);
   const [roles, setRoles] = useState(emptyRoles);
   const [config, setConfig] = useState({
     structure: 'separate_cells',
@@ -2145,6 +2753,7 @@ const BomNormalizer = () => {
     skipTitleRows: true,
     skipRepeatedHeaders: true,
     skipDoNotPopulate: false,
+    skipDeletedRows: true,
     alternateColumnGroups: [],
   });
   const [normalizedRows, setNormalizedRows] = useState([]);
@@ -2156,6 +2765,9 @@ const BomNormalizer = () => {
   const [skipSourceSetupForMerge, setSkipSourceSetupForMerge] = useState(false);
   const [normalizationSummary, setNormalizationSummary] = useState(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [pairingReviewOpen, setPairingReviewOpen] = useState(false);
+  const [pairingReviewRows, setPairingReviewRows] = useState([]);
+  const [pendingNormalization, setPendingNormalization] = useState(null);
   const [lowConfidenceOnly, setLowConfidenceOnly] = useState(false);
   const [factwiseDialogOpen, setFactwiseDialogOpen] = useState(false);
   const [factwiseConfig, setFactwiseConfig] = useState({
@@ -2235,9 +2847,31 @@ const BomNormalizer = () => {
     [preparedHeaders, sheetRows, headerRowIndex]
   );
 
-  const dataRows = useMemo(() => (
+  const sourceDataRows = useMemo(() => (
     preparedDataRows.length ? preparedDataRows : rowsToObjects(sheetRows.slice(headerRowIndex + 1), headers, headerRowIndex + 2)
   ), [preparedDataRows, sheetRows, headerRowIndex, headers]);
+
+  const dataRows = useMemo(() => (
+    filterRowsByEndRow(sourceDataRows, sourceEndRow)
+  ), [sourceDataRows, sourceEndRow]);
+
+  const sourceRowsExcludedByLimit = Math.max(0, sourceDataRows.length - dataRows.length);
+  const sourceLimitActive = Boolean(sourceEndRow && sourceRowsExcludedByLimit > 0);
+  const sourceGridRowsPerPage = 50;
+  const sourceGridTotalPages = Math.max(1, Math.ceil(sourceDataRows.length / sourceGridRowsPerPage));
+  const sourceGridVisibleRows = useMemo(() => (
+    sourceDataRows.slice(
+      sourceGridPage * sourceGridRowsPerPage,
+      sourceGridPage * sourceGridRowsPerPage + sourceGridRowsPerPage
+    )
+  ), [sourceDataRows, sourceGridPage]);
+  const isSourceRowExcluded = useCallback((row) => (
+    Boolean(sourceEndRow) && Number(row?.__sourceRow || 0) > Number(sourceEndRow)
+  ), [sourceEndRow]);
+
+  useEffect(() => {
+    setSourceGridPage(0);
+  }, [fileName, sheetName, sheetScope, selectedSheetNames, headerRowIndex, sourceEndRow]);
 
   const quality = useMemo(() => {
     if (!normalizedRows.length) return { average: 0, lowConfidence: 0 };
@@ -2374,6 +3008,7 @@ const BomNormalizer = () => {
     selectedSheetNames,
     sheetRows,
     headerRowIndex,
+    sourceEndRow,
     preparedHeaders: preparedHeaders.length ? preparedHeaders : getNormalizedExportColumns(rowsOverride),
     preparedDataRows,
     roles,
@@ -2401,6 +3036,7 @@ const BomNormalizer = () => {
     sheetName,
     sheetRows,
     sheetScope,
+    sourceEndRow,
     tagConfig,
   ]);
 
@@ -2426,8 +3062,9 @@ const BomNormalizer = () => {
         sheetScope,
         selectedSheetNames,
         headerRowIndex,
+        sourceEndRow,
       },
-      outputColumns: getNormalizedExportColumns(rowsOverride),
+      outputColumns: buildBomMappingRowsFromNormalizedRows(rowsOverride).columns,
       ...(kind === 'merge-preview' ? {
         mergeConfig,
         mergeVisibleColumns,
@@ -2447,6 +3084,7 @@ const BomNormalizer = () => {
     selectedSheetNames,
     sheetName,
     sheetScope,
+    sourceEndRow,
     tagConfig,
   ]);
 
@@ -2626,6 +3264,7 @@ const BomNormalizer = () => {
         setSelectedSheetNames(snapshot.selectedSheetNames || [restoredSheetName]);
         setSheetRows(snapshot.sheetRows || []);
         setHeaderRowIndex(snapshot.headerRowIndex || 0);
+        setSourceEndRow(snapshot.sourceEndRow || '');
         const restoredRows = snapshot.normalizedRows?.length
           ? snapshot.normalizedRows
           : (state.bomNormalizerReturnRows || []);
@@ -2680,14 +3319,16 @@ const BomNormalizer = () => {
       skipTitleRows: 0,
       skipRepeatedHeaders: 0,
       skipDoNotPopulate: 0,
+      skipDeletedRows: 0,
     };
-    dataRows.forEach((row) => {
+    sourceDataRows.forEach((row) => {
       if (rowLooksLikeSectionTitle(row, headers, roles)) detections.skipTitleRows += 1;
       if (rowLooksLikeRepeatedHeader(row, headers)) detections.skipRepeatedHeaders += 1;
       if (rowLooksLikeDoNotPopulate(row, headers)) detections.skipDoNotPopulate += 1;
+      if (rowLooksLikeDeleted(row, headers)) detections.skipDeletedRows += 1;
     });
     return detections;
-  }, [dataRows, headers, roles]);
+  }, [headers, roles, sourceDataRows]);
 
   const detectedCleanupOptions = useMemo(
     () => CLEANUP_OPTIONS.filter((option) => cleanupDetections[option.key] > 0),
@@ -2707,7 +3348,10 @@ const BomNormalizer = () => {
     if (roles.mpn && roles.manufacturer) {
       return 'Separate MPN and manufacturer columns selected. The parser will pair values by position.';
     }
-    return 'Select at least an MPN column to run normalization.';
+    if (roles.level) {
+      return 'Level column selected. Rows pass through with their level, code, quantity and description.';
+    }
+    return 'Select at least an MPN or BOM level column to run normalization.';
   }, [roles.manufacturer, roles.mpn]);
 
   const alternateColumnGroups = useMemo(
@@ -2771,22 +3415,25 @@ const BomNormalizer = () => {
     }));
   }, []);
 
-  const handleWorkbookLoaded = useCallback((nextWorkbook, nextFileName) => {
-    const firstSheet = nextWorkbook.SheetNames[0];
-    const prepared = prepareSingleSheet(nextWorkbook, firstSheet);
+  const handleWorkbookLoaded = useCallback((nextWorkbook, nextFileName, options = {}) => {
+    const preferredSheet = options.sheetName && nextWorkbook.SheetNames.includes(options.sheetName)
+      ? options.sheetName
+      : nextWorkbook.SheetNames[0];
+    const prepared = prepareSingleSheet(nextWorkbook, preferredSheet, { headerRow: options.headerRow });
     const nextHeaders = prepared.headers;
     const nextRoles = inferRoles(nextHeaders);
     const nextStructure = detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40));
 
     setWorkbook(nextWorkbook);
     setFileName(nextFileName);
-    setSheetName(firstSheet);
+    setSheetName(preferredSheet);
     setSheetScope('single');
-    setSelectedSheetNames([firstSheet]);
+    setSelectedSheetNames([preferredSheet]);
     setSheetRows(prepared.sheetRows);
     setHeaderRowIndex(prepared.headerRowIndex);
     setPreparedHeaders(prepared.headers);
     setPreparedDataRows(prepared.dataRows);
+    setSourceEndRow('');
     setRoles(nextRoles);
     setConfig((prev) => nextConfigForDetectedStructure(prev, nextStructure));
     setNormalizedRows([]);
@@ -2860,6 +3507,10 @@ const BomNormalizer = () => {
 
   const parseFilesForCombine = useCallback(async (files, idPrefix = 'source') => {
     return Promise.all(files.map(async (file, index) => {
+      const extension = getFileExtension(file.name);
+      if (!SUPPORTED_SOURCE_EXTENSIONS.includes(extension)) {
+        throw new Error(unsupportedSourceMessage(file.name));
+      }
       const type = getFileType(file.name);
       const baseItem = {
         id: `${idPrefix}-${Date.now()}-${index}-${file.name}`,
@@ -2877,9 +3528,8 @@ const BomNormalizer = () => {
 
       if (type === 'pdf') return baseItem;
 
-      const buffer = await file.arrayBuffer();
       await new Promise((resolve) => setTimeout(resolve, 0));
-      const nextWorkbook = XLSX.read(buffer, { type: 'array' });
+      const nextWorkbook = await readUploadedWorkbookSafely(file);
       const firstSheet = nextWorkbook.SheetNames[0];
       const prepared = prepareSingleSheet(nextWorkbook, firstSheet);
       return {
@@ -2898,7 +3548,7 @@ const BomNormalizer = () => {
     const state = location.state || {};
     const initialFile = state.initialFile;
     const seedKey = initialFile
-      ? `${initialFile.name || 'file'}-${initialFile.size || 0}-${initialFile.lastModified || 0}-${state.initialFileMode || 'source'}`
+      ? `${initialFile.name || 'file'}-${initialFile.size || 0}-${initialFile.lastModified || 0}-${state.initialFileMode || 'source'}-${state.initialSheetName || ''}-${state.initialHeaderRow || ''}`
       : '';
     // restoredReturnSnapshotRef, not state.returnFromMapping: the restore effect clears
     // that flag once it has consumed it, and this effect would then re-run, still see
@@ -2926,10 +3576,12 @@ const BomNormalizer = () => {
 
       try {
         if (state.initialFileMode === 'workbook') {
-          const buffer = await initialFile.arrayBuffer();
           await new Promise((resolve) => setTimeout(resolve, 0));
-          const nextWorkbook = XLSX.read(buffer, { type: 'array' });
-          handleWorkbookLoaded(nextWorkbook, initialFile.name);
+          const nextWorkbook = await readUploadedWorkbookSafely(initialFile);
+          handleWorkbookLoaded(nextWorkbook, initialFile.name, {
+            sheetName: state.initialSheetName,
+            headerRow: state.initialHeaderRow,
+          });
           setCombineItems([]);
           setMergeChainMessage('');
         } else {
@@ -2941,6 +3593,8 @@ const BomNormalizer = () => {
         const remainingState = { ...state };
         delete remainingState.initialFile;
         delete remainingState.initialFileMode;
+        delete remainingState.initialSheetName;
+        delete remainingState.initialHeaderRow;
         navigate(location.pathname, { replace: true, state: remainingState });
       } catch (err) {
         setCombineError(err.message || 'Unable to prepare the uploaded file for BOM Normalizer.');
@@ -2992,7 +3646,12 @@ const BomNormalizer = () => {
         if (workflow.factwiseConfig) setFactwiseConfig((prev) => ({ ...prev, ...workflow.factwiseConfig }));
         if (workflow.tagConfig) setTagConfig((prev) => ({ ...prev, ...workflow.tagConfig }));
 
-        let replayRows = await normalizeRowsChunked(preparedDataRows, preparedHeaders, resolvedRoles, resolvedConfig, setProgress);
+        const replaySourceRows = filterRowsByEndRow(preparedDataRows, workflow.sourceHints?.sourceEndRow || '');
+        if (workflow.sourceHints?.sourceEndRow) {
+          setSourceEndRow(workflow.sourceHints.sourceEndRow);
+        }
+
+        let replayRows = await normalizeRowsChunked(replaySourceRows, preparedHeaders, resolvedRoles, resolvedConfig, setProgress);
         if (workflow.actions?.factwiseId) {
           replayRows = createFactwiseIds(replayRows, workflow.factwiseConfig || {});
         }
@@ -3004,19 +3663,18 @@ const BomNormalizer = () => {
           throw new Error('The template ran, but no normalized rows were produced from this upload.');
         }
 
-        const columns = getNormalizedExportColumns(replayRows);
-        const rows = replayRows.map((row) => {
-          const output = {};
-          columns.forEach((column) => {
-            output[column] = row[column] || '';
-          });
-          return output;
-        });
+        const baseColumns = getNormalizedExportColumns(replayRows);
+        const { columns, rows } = buildBomMappingRowsFromNormalizedRows(replayRows, baseColumns);
         const file = createWorkbookFileFromRows(rows, columns, 'template-replayed-bom.xlsx', 'Normalized BOM');
         const formData = new FormData();
         formData.append('clientFile', file);
         formData.append('sheetName', 'Normalized BOM');
         formData.append('headerRow', '1');
+        // Template replay runs without the gate; answers only exist if they were
+        // captured earlier and travelled in on the route state.
+        if (bomStructureAnswers || location.state?.bomStructure) {
+          formData.append('bomStructure', JSON.stringify(bomStructureAnswers || location.state.bomStructure));
+        }
 
         const response = await api.uploadFilesWithTemplate(formData, mappingTemplateId);
         if (!response.data?.template_applied || !response.data?.template_success) {
@@ -3460,25 +4118,35 @@ const BomNormalizer = () => {
     setError('');
   }, [normalizedRows]);
 
-  const handleContinueNormalizedToBomMapping = useCallback(() => {
+  const handleContinueNormalizedToBomMapping = useCallback((maybeAnswers = null) => {
+    // onClick passes a MouseEvent, so accept the argument only when it
+    // carries the gate's payload shape.
+    const passed = (maybeAnswers && maybeAnswers.sheets) ? maybeAnswers : null;
+    // Answers may already have been captured on the upload page; asking a
+    // second time for the same workbook would just be noise.
+    const answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
+    if (!answers) {
+      setPendingBomAction('normalized');
+      setBomStructureOpen(true);
+      return;
+    }
     if (!normalizedRows.length) {
       setError('Run normalization before continuing to BOM Mapping.');
       return;
     }
-    const columns = getNormalizedExportColumns(normalizedRows);
-    const suggestedMappings = buildNormalizerSuggestedMappings(columns);
-    const rows = normalizedRows.map((row) => {
-      const output = {};
-      columns.forEach((column) => {
-        output[column] = row[column] || '';
-      });
-      return output;
-    });
+    const baseColumns = getNormalizedExportColumns(normalizedRows);
+    const { columns, rows } = buildBomMappingRowsFromNormalizedRows(normalizedRows, baseColumns);
+    const suggestedMappings = buildNormalizerSuggestedMappings(columns, rows);
     const file = createWorkbookFileFromRows(rows, columns, 'normalized-bom-for-mapping.xlsx', 'Normalized BOM');
     const formData = new FormData();
     formData.append('clientFile', file);
     formData.append('sheetName', 'Normalized BOM');
     formData.append('headerRow', '1');
+    // Forward the BOM structure answers captured on the upload page so the
+    // session created here keeps them.
+    if (answers || location.state?.bomStructure) {
+      formData.append('bomStructure', JSON.stringify(answers || location.state.bomStructure));
+    }
     const returnSnapshotKey = saveReturnSnapshot('normalized-results');
     const returnSnapshot = buildNormalizedResultsSnapshot(normalizedRows);
 
@@ -3532,22 +4200,39 @@ const BomNormalizer = () => {
     tagConfig,
   ]);
 
-  const handleContinueMergePreviewToBomMapping = useCallback(() => {
+  const handleContinueMergePreviewToBomMapping = useCallback((maybeAnswers = null) => {
+    // onClick passes a MouseEvent, so accept the argument only when it
+    // carries the gate's payload shape.
+    const passed = (maybeAnswers && maybeAnswers.sheets) ? maybeAnswers : null;
+    // Answers may already have been captured on the upload page; asking a
+    // second time for the same workbook would just be noise.
+    const answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
+    if (!answers) {
+      setPendingBomAction('merge');
+      setBomStructureOpen(true);
+      return;
+    }
     if (!mergePreview) {
       setCombineError('Build the merge preview first.');
       return;
     }
-    const { headers, rows } = getMergePreviewExport(mergePreview, mergeVisibleColumns, mergePreviewFilter);
-    if (!rows.length) {
+    const { headers, rows: mergeRows } = getMergePreviewExport(mergePreview, mergeVisibleColumns, mergePreviewFilter);
+    if (!mergeRows.length) {
       setCombineError('No merged rows are available for BOM Mapping.');
       return;
     }
-    const suggestedMappings = buildNormalizerSuggestedMappings(headers);
-    const file = createWorkbookFileFromRows(rows, headers, 'merged-bom-for-mapping.xlsx', 'Merged BOM');
+    const { columns, rows } = buildBomMappingRowsFromNormalizedRows(mergeRows, headers);
+    const suggestedMappings = buildNormalizerSuggestedMappings(columns, rows);
+    const file = createWorkbookFileFromRows(rows, columns, 'merged-bom-for-mapping.xlsx', 'Merged BOM');
     const formData = new FormData();
     formData.append('clientFile', file);
     formData.append('sheetName', 'Merged BOM');
     formData.append('headerRow', '1');
+    // Forward the BOM structure answers captured on the upload page so the
+    // session created here keeps them.
+    if (answers || location.state?.bomStructure) {
+      formData.append('bomStructure', JSON.stringify(answers || location.state.bomStructure));
+    }
     const returnSnapshotKey = saveReturnSnapshot('merge-preview');
 
     setBusy(true);
@@ -3578,6 +4263,33 @@ const BomNormalizer = () => {
       })
       .finally(() => setBusy(false));
   }, [buildNormalizerWorkflowRecipe, location.state, mergePreview, mergePreviewFilter, mergeVisibleColumns, navigate, saveReturnSnapshot]);
+
+  // Sheets offered to the gate: whichever the user actually normalized.
+  const bomStructureSheetNames = useMemo(
+    () => (sheetScope === 'single'
+      ? [sheetName].filter(Boolean)
+      : (selectedSheetNames || []).filter(Boolean)),
+    [sheetScope, sheetName, selectedSheetNames]
+  );
+
+  // Level auto-detection reads the SOURCE headers, not the normalized output —
+  // the normalized table always has a `level` column, so detecting on it would
+  // answer "yes" for every sheet.
+  const bomStructureHeaderReader = useCallback(
+    () => preparedHeaders || [],
+    [preparedHeaders]
+  );
+
+  const handleBomStructureConfirm = useCallback((payload) => {
+    setBomStructureAnswers(payload);
+    setBomStructureOpen(false);
+    const pending = pendingBomAction;
+    setPendingBomAction(null);
+    // Answers are handed over directly rather than read back from state, which
+    // has not committed yet at this point.
+    if (pending === 'merge') handleContinueMergePreviewToBomMapping(payload);
+    else if (pending === 'normalized') handleContinueNormalizedToBomMapping(payload);
+  }, [pendingBomAction, handleContinueMergePreviewToBomMapping, handleContinueNormalizedToBomMapping]);
 
   const handleBackFromConfigure = useCallback(() => {
     if (skipSourceSetupForMerge && mergePreview) {
@@ -3619,6 +4331,7 @@ const BomNormalizer = () => {
     setHeaderRowIndex(prepared.headerRowIndex);
     setPreparedHeaders(prepared.headers);
     setPreparedDataRows(prepared.dataRows);
+    setSourceEndRow('');
     setRoles(nextRoles);
     setConfig((prev) => nextConfigForDetectedStructure(prev, detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40))));
     setNormalizedRows([]);
@@ -3649,6 +4362,7 @@ const BomNormalizer = () => {
     setHeaderRowIndex(prepared.headerRowIndex);
     setPreparedHeaders(prepared.headers);
     setPreparedDataRows(prepared.dataRows);
+    setSourceEndRow('');
     setRoles(nextRoles);
     setConfig((prev) => nextConfigForDetectedStructure(prev, detectBestStructure(prepared.headers, nextRoles, prepared.dataRows.slice(0, 40))));
     setNormalizedRows([]);
@@ -3698,6 +4412,7 @@ const BomNormalizer = () => {
         mapped.__sourceRow = nextIndex + 2 + rowIndex;
         return mapped;
       }));
+    setSourceEndRow('');
     setRoles(nextRoles);
     setNormalizedRows([]);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
@@ -3830,13 +4545,114 @@ const BomNormalizer = () => {
     tagConfig,
   ]);
 
+  const buildNormalizationSummary = useCallback((rows, pairingCheck = null) => {
+    const primaryRows = rows.filter((row) => row.relation === 'Primary').length;
+    const alternateRows = rows.filter((row) => row.relation !== 'Primary').length;
+    const uniqueRawMaterials = new Set(rows.map((row) => row.mpn || row.manufacturer || row.cpn).filter(Boolean)).size;
+    const skippedRows = dataRows.filter((row) => shouldSkipSourceRow(row, headers, roles, config)).length;
+    return {
+      totalRows: rows.length,
+      primaryRows,
+      alternateRows,
+      uniqueRawMaterials,
+      skippedRows,
+      pairingCheckedRows: pairingCheck?.checkedRows || 0,
+      pairingMatchedRows: pairingCheck?.matchedRows || 0,
+      pairingIssueRows: pairingCheck?.issueRows?.length || 0,
+    };
+  }, [config, dataRows, headers, roles]);
+
+  const commitNormalizedResult = useCallback((rows, pairingCheck = null) => {
+    setNormalizedRows(rows);
+    setNormalizationSummary(buildNormalizationSummary(rows, pairingCheck));
+    setConfirmOpen(true);
+    setError('');
+  }, [buildNormalizationSummary]);
+
+  const updatePairingReviewRow = useCallback((index, patch) => {
+    setPairingReviewRows((prev) => prev.map((row, rowIndex) => (
+      rowIndex === index ? { ...row, ...patch } : row
+    )));
+  }, []);
+
+  const updatePairingManualManufacturers = useCallback((index, value) => {
+    const values = splitManualManufacturers(value);
+    setPairingReviewRows((prev) => prev.map((row, rowIndex) => {
+      if (rowIndex !== index) return row;
+      const mpnDecisions = (row.mpnDecisions || row.mpns.map((mpn) => ({ mpn, manufacturer: '', keep: true })))
+        .map((decision, decisionIndex) => ({
+          ...decision,
+          manufacturer: values[decisionIndex] || decision.manufacturer || values[0] || '',
+        }));
+      return { ...row, manualManufacturers: value, mpnDecisions };
+    }));
+  }, []);
+
+  const updatePairingMpnDecision = useCallback((issueIndex, mpnIndex, patch) => {
+    setPairingReviewRows((prev) => prev.map((row, rowIndex) => {
+      if (rowIndex !== issueIndex) return row;
+      const baseDecisions = row.mpnDecisions || row.mpns.map((mpn, index) => ({
+        mpn,
+        manufacturer: row.manufacturers[index] || row.manufacturers[0] || '',
+        keep: true,
+      }));
+      const mpnDecisions = baseDecisions.map((decision, decisionIndex) => (
+        decisionIndex === mpnIndex ? { ...decision, ...patch } : decision
+      ));
+      return { ...row, mpnDecisions };
+    }));
+  }, []);
+
+  const updatePairingMfrDecision = useCallback((issueIndex, mfrIndex, patch) => {
+    setPairingReviewRows((prev) => prev.map((row, rowIndex) => {
+      if (rowIndex !== issueIndex) return row;
+      const baseDecisions = row.mfrDecisions || row.manufacturers.map((manufacturer) => ({
+        manufacturer,
+        keep: true,
+      }));
+      const mfrDecisions = baseDecisions.map((decision, decisionIndex) => (
+        decisionIndex === mfrIndex ? { ...decision, ...patch } : decision
+      ));
+      return { ...row, mfrDecisions };
+    }));
+  }, []);
+
+  const handleApplyPairingReview = useCallback(() => {
+    if (!pendingNormalization) {
+      setPairingReviewOpen(false);
+      return;
+    }
+    const reviewedRows = applyPairingReviewDecisions(pendingNormalization.rows, pairingReviewRows);
+    const pairingCheck = {
+      ...(pendingNormalization.pairingCheck || {}),
+      issueRows: pairingReviewRows,
+    };
+    setPairingReviewOpen(false);
+    setPendingNormalization(null);
+    commitNormalizedResult(reviewedRows, pairingCheck);
+  }, [commitNormalizedResult, pairingReviewRows, pendingNormalization]);
+
+  const handleKeepPairingReview = useCallback(() => {
+    if (!pendingNormalization) {
+      setPairingReviewOpen(false);
+      return;
+    }
+    setPairingReviewOpen(false);
+    setPendingNormalization(null);
+    commitNormalizedResult(pendingNormalization.rows, pendingNormalization.pairingCheck);
+  }, [commitNormalizedResult, pendingNormalization]);
+
   const handleNormalize = useCallback(async () => {
     if (!dataRows.length) {
       setError('No data rows found below the selected header row.');
       return;
     }
-    if (!roles.mpn && !roles.manufacturer) {
-      setError('Select at least an MPN or Manufacturer column before running normalization.');
+    // A hierarchical BOM is valid input with no MPN or manufacturer column at
+    // all: SAFRAN-style sheets carry internal part codes and keep manufacturers
+    // in a separate AVL sheet. Requiring MPN/MFR here blocked every multi-level
+    // BOM from being normalized, so nothing downstream was ever reachable.
+    if (!roles.mpn && !roles.manufacturer && !roles.level) {
+      setError('Select at least an MPN, Manufacturer, or BOM level column before running normalization.');
       return;
     }
     setBusy(true);
@@ -3844,26 +4660,21 @@ const BomNormalizer = () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     try {
       const result = await normalizeRowsChunked(dataRows, headers, roles, config, setProgress);
-      setNormalizedRows(result);
-      const primaryRows = result.filter((row) => row.relation === 'Primary').length;
-      const alternateRows = result.filter((row) => row.relation !== 'Primary').length;
-      const uniqueRawMaterials = new Set(result.map((row) => row.mpn || row.manufacturer || row.cpn).filter(Boolean)).size;
-      const skippedRows = dataRows.filter((row) => shouldSkipSourceRow(row, headers, roles, config)).length;
-      setNormalizationSummary({
-        totalRows: result.length,
-        primaryRows,
-        alternateRows,
-        uniqueRawMaterials,
-        skippedRows,
-      });
-      setConfirmOpen(true);
-      setError('');
+      const pairingCheck = analyzeMpnManufacturerPairing(dataRows, headers, roles, config);
+      if (pairingCheck.issueRows.length) {
+        setPendingNormalization({ rows: result, pairingCheck });
+        setPairingReviewRows(pairingCheck.issueRows);
+        setPairingReviewOpen(true);
+        setError('');
+      } else {
+        commitNormalizedResult(result, pairingCheck);
+      }
     } catch (err) {
       setError(err.message || 'Normalization failed.');
     } finally {
       setBusy(false);
     }
-  }, [config, dataRows, headers, roles]);
+  }, [commitNormalizedResult, config, dataRows, headers, roles]);
 
   const handleOpenFactwiseDialog = useCallback(() => {
     setFactwiseConfig((prev) => ({
@@ -3961,6 +4772,7 @@ const BomNormalizer = () => {
       skipTitleRows: true,
       skipRepeatedHeaders: true,
       skipDoNotPopulate: false,
+      skipDeletedRows: true,
       alternateColumnGroups: [],
     });
     setNormalizedRows([]);
@@ -3971,6 +4783,9 @@ const BomNormalizer = () => {
     setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
+    setPairingReviewOpen(false);
+    setPairingReviewRows([]);
+    setPendingNormalization(null);
     setLowConfidenceOnly(false);
     setFactwiseDialogOpen(false);
     setTagDialogOpen(false);
@@ -4040,6 +4855,7 @@ const BomNormalizer = () => {
       skipTitleRows: true,
       skipRepeatedHeaders: true,
       skipDoNotPopulate: false,
+      skipDeletedRows: true,
       alternateColumnGroups: [],
     });
     setNormalizedRows([]);
@@ -4065,6 +4881,9 @@ const BomNormalizer = () => {
   useEffect(() => {
     if (currentStep === 4 || restoreInFlightRef.current) return;
     setNormalizedRows([]);
+    setPairingReviewOpen(false);
+    setPairingReviewRows([]);
+    setPendingNormalization(null);
     setLowConfidenceOnly(false);
   }, [roles, config, headerRowIndex, sheetName, sheetScope, selectedSheetNames, currentStep]);
 
@@ -4231,7 +5050,7 @@ const BomNormalizer = () => {
                   </Box>
                   <Button component="label" variant="outlined" startIcon={<CloudUploadIcon />} disabled={busy || combineBusy}>
                     {combineItems.length ? 'Add source' : 'Choose source'}
-                    <input hidden multiple type="file" accept=".xlsx,.xls,.csv,.pdf" onChange={handleCombineFilesChange} />
+                    <input hidden multiple type="file" accept=".xlsx,.xls,.xlsm,.csv,.pdf" onChange={handleCombineFilesChange} />
                   </Button>
                 </Stack>
 
@@ -4573,7 +5392,7 @@ const BomNormalizer = () => {
                         <Stack direction="row" justifyContent="space-between" gap={1} sx={{ mt: 1.5 }}>
                           <Button variant="outlined" onClick={() => setMergeStage('options')}>Back</Button>
                           <Stack direction="row" gap={1} flexWrap="wrap" justifyContent="flex-end">
-                            <Button variant="outlined" onClick={handleContinueMergePreviewToBomMapping}>Continue to BOM Mapping</Button>
+                            <Button variant="outlined" onClick={() => handleContinueMergePreviewToBomMapping()}>Continue to BOM Mapping</Button>
                             <Button variant="contained" onClick={handleUseMergePreview}>Continue with normalizer</Button>
                           </Stack>
                         </Stack>
@@ -4673,14 +5492,46 @@ const BomNormalizer = () => {
                       onChange={(event) => handleHeaderRowChange(event.target.value)}
                     />
                   </Grid>
+
+                  <Grid item xs={12} md={6}>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      type="number"
+                      label="Include data until row"
+                      value={sourceEndRow}
+                      inputProps={{ min: headerRowIndex + 2, max: Math.max(sheetRows.length, headerRowIndex + 2) }}
+                      helperText="Optional. Leave blank to include all detected data rows."
+                      onChange={(event) => {
+                        setSourceEndRow(event.target.value);
+                        setNormalizedRows([]);
+                        setNormalizationSummary(null);
+                      }}
+                    />
+                  </Grid>
                 </Grid>
                 <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 1.5 }}>
                   <Chip size="small" label={`${headers.length} columns`} />
-                  <Chip size="small" label={`${dataRows.length} data rows`} />
+                  <Chip
+                    size="small"
+                    label={sourceEndRow ? `${dataRows.length} included / ${sourceDataRows.length} detected rows` : `${dataRows.length} data rows`}
+                  />
+                  {sourceEndRow && <Chip size="small" color="info" variant="outlined" label={`Using rows through ${sourceEndRow}`} />}
+                  {sourceLimitActive && <Chip size="small" color="warning" variant="outlined" label={`${sourceRowsExcludedByLimit} rows excluded`} />}
                   <Chip size="small" label={sheetScope === 'single' ? `Header row ${headerRowIndex + 1}` : `${selectedSheetNames.length} sheets merged`} />
                 </Stack>
                 <Box sx={{ mt: 2 }}>
-                  <Typography sx={{ fontWeight: 800 }}>Source preview</Typography>
+                  <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1} flexWrap="wrap">
+                    <Typography sx={{ fontWeight: 800 }}>Source preview</Typography>
+                    <Button size="small" variant="outlined" onClick={() => setSourceGridOpen(true)} disabled={!sourceDataRows.length}>
+                      View all rows
+                    </Button>
+                  </Stack>
+                  {sourceEndRow && (
+                    <Alert severity="info" sx={{ mt: 1, mb: 1.25 }}>
+                      Preview is filtered to sheet rows up to {sourceEndRow}. Rows after {sourceEndRow} will be ignored during normalization.
+                    </Alert>
+                  )}
                   <SourcePreview headers={headers} rows={dataRows.slice(0, 8)} />
                 </Box>
                 <Stack direction="row" justifyContent="space-between" sx={{ mt: 2 }}>
@@ -4698,7 +5549,12 @@ const BomNormalizer = () => {
                 </Typography>
                 <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 1.2 }}>
                   <Chip size="small" label={`${headers.length} columns`} />
-                  <Chip size="small" label={`${dataRows.length} data rows`} />
+                  <Chip
+                    size="small"
+                    label={sourceEndRow ? `${dataRows.length} included / ${sourceDataRows.length} detected rows` : `${dataRows.length} data rows`}
+                  />
+                  {sourceEndRow && <Chip size="small" color="info" variant="outlined" label={`Using rows through ${sourceEndRow}`} />}
+                  {sourceLimitActive && <Chip size="small" color="warning" variant="outlined" label={`${sourceRowsExcludedByLimit} rows excluded`} />}
                   <Chip size="small" label={sheetScope === 'single' ? `Header row ${headerRowIndex + 1}` : `${selectedSheetNames.length} sheets merged`} />
                 </Stack>
                 <Box sx={{ mt: 2 }}>
@@ -4949,10 +5805,16 @@ const BomNormalizer = () => {
                   )}
                   <Typography sx={{ mt: 1, fontSize: 13, color: '#536171', lineHeight: 1.45 }}>
                     <strong>Detected rule:</strong> {selectedStructureOption?.description || '-'}
+                    {selectedAlternateOption?.description ? ` ${selectedAlternateOption.description}` : ''}
                     {config.structure === 'grouped_rows' && selectedGroupHeaderOption ? ` ${selectedGroupHeaderOption.description}` : ''}
                     {' '}<strong>Delimiter:</strong> {delimiterLabel}.
                     {' '}Blank BOM levels will be treated as level 1.
                   </Typography>
+                  {config.alternateLayout === 'same_group_rows' && !roles.parent && (
+                    <Alert severity="info" sx={{ mt: 1 }}>
+                      Select a Parent / group key such as Ref Designator for best results. Without it, grouping falls back to description, quantity, UOM, and level.
+                    </Alert>
+                  )}
                   {detectedCleanupOptions.length > 0 && (
                     <Box sx={{ mt: 1.5 }}>
                       <Typography sx={{ fontSize: 13, fontWeight: 800 }}>Clean visual rows before parsing</Typography>
@@ -5067,7 +5929,7 @@ const BomNormalizer = () => {
                           downloadRowsAsXlsx(normalizedRows);
                         }}
                       >
-                        Microsoft Excel (.xlsx)
+                        Microsoft Excel (.xlsx, .xlsm)
                       </MenuItem>
                       <MenuItem
                         onClick={() => {
@@ -5115,8 +5977,8 @@ const BomNormalizer = () => {
                   <Button variant="outlined" onClick={() => setCurrentStep(2)} disabled={busy}>Back to configure</Button>
                   <Stack direction="row" gap={1} flexWrap="wrap" justifyContent="flex-end">
                     <Button variant="outlined" onClick={handleUseNormalizedAsBase} disabled={busy || !normalizedRows.length}>Use merged sheet as base</Button>
-                    <Button variant="outlined" onClick={handleContinueNormalizedToBomMapping} disabled={busy || !normalizedRows.length}>Continue to BOM Mapping</Button>
-                    <Button variant="contained" onClick={handleNormalize} disabled={busy}>Run again</Button>
+                    <Button variant="outlined" onClick={handleNormalize} disabled={busy}>Run again</Button>
+                    <Button variant="contained" onClick={() => handleContinueNormalizedToBomMapping()} disabled={busy || !normalizedRows.length}>Continue to BOM Mapping</Button>
                   </Stack>
                 </Stack>
               </Paper>
@@ -5124,6 +5986,149 @@ const BomNormalizer = () => {
           </Stack>
         )}
       </Box>
+      <Dialog
+        open={sourceGridOpen}
+        onClose={() => setSourceGridOpen(false)}
+        maxWidth="xl"
+        fullWidth
+      >
+        <DialogTitle>
+          <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'flex-start', sm: 'center' }} gap={1}>
+            <Box>
+              <Typography sx={{ fontSize: 18, fontWeight: 800 }}>All source rows</Typography>
+              <Typography sx={{ mt: 0.4, fontSize: 13, color: normalizerTheme.muted }}>
+                Showing detected source rows from the selected sheet setup.
+              </Typography>
+            </Box>
+            <Stack direction="row" gap={0.75} flexWrap="wrap">
+              <Chip size="small" label={`${sourceDataRows.length} detected rows`} />
+              {sourceEndRow && <Chip size="small" color="info" variant="outlined" label={`Cutoff row ${sourceEndRow}`} />}
+              {sourceLimitActive && <Chip size="small" color="warning" variant="outlined" label={`${sourceRowsExcludedByLimit} excluded`} />}
+            </Stack>
+          </Stack>
+        </DialogTitle>
+        <DialogContent>
+          {sourceEndRow && (
+            <Alert severity="info" sx={{ mb: 1.25 }}>
+              Rows after sheet row {sourceEndRow} are visible here for review, but they are excluded from normalization.
+            </Alert>
+          )}
+          <TableContainer
+            sx={{
+              maxHeight: '62vh',
+              overflow: 'auto',
+              border: `1px solid ${normalizerTheme.border}`,
+              bgcolor: normalizerTheme.table,
+              '&::-webkit-scrollbar': { height: 10, width: 10 },
+              '&::-webkit-scrollbar-thumb': {
+                borderRadius: 8,
+                bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.42)' : 'rgba(100, 116, 139, 0.38)',
+              },
+            }}
+          >
+            <Table stickyHeader size="small" sx={{ width: 'max-content', minWidth: '100%', tableLayout: 'fixed' }}>
+              <TableHead>
+                <TableRow>
+                  <TableCell sx={{ minWidth: 90, fontWeight: 800, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
+                    Sheet row
+                  </TableCell>
+                  {sourceEndRow && (
+                    <TableCell sx={{ minWidth: 105, fontWeight: 800, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
+                      Status
+                    </TableCell>
+                  )}
+                  {headers.map((header) => (
+                    <TableCell
+                      key={header}
+                      sx={{
+                        minWidth: 170,
+                        maxWidth: 280,
+                        fontWeight: 800,
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        bgcolor: normalizerTheme.tableHeader,
+                        color: normalizerTheme.text,
+                        borderColor: normalizerTheme.border,
+                      }}
+                    >
+                      {header}
+                    </TableCell>
+                  ))}
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {sourceGridVisibleRows.map((row, index) => {
+                  const excluded = isSourceRowExcluded(row);
+                  return (
+                    <TableRow
+                      key={`source-grid-${row.__sourceRow || index}-${index}`}
+                      sx={{
+                        bgcolor: excluded
+                          ? (isDarkMode ? 'rgba(239, 68, 68, 0.08)' : 'rgba(254, 226, 226, 0.7)')
+                          : 'transparent',
+                        opacity: excluded ? 0.72 : 1,
+                      }}
+                    >
+                      <TableCell sx={{ minWidth: 90, color: normalizerTheme.text, borderColor: normalizerTheme.border, fontWeight: 700 }}>
+                        {row.__sourceRow || ''}
+                      </TableCell>
+                      {sourceEndRow && (
+                        <TableCell sx={{ minWidth: 105, color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
+                          <Chip
+                            size="small"
+                            color={excluded ? 'warning' : 'success'}
+                            variant={excluded ? 'outlined' : 'filled'}
+                            label={excluded ? 'Excluded' : 'Included'}
+                          />
+                        </TableCell>
+                      )}
+                      {headers.map((header) => (
+                        <TableCell
+                          key={header}
+                          sx={{
+                            minWidth: 170,
+                            maxWidth: 280,
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            color: normalizerTheme.text,
+                            borderColor: normalizerTheme.border,
+                          }}
+                        >
+                          {row[header]}
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'space-between', gap: 1, flexWrap: 'wrap' }}>
+          <Typography sx={{ fontSize: 13, color: normalizerTheme.muted }}>
+            Page {sourceGridPage + 1} of {sourceGridTotalPages}
+          </Typography>
+          <Stack direction="row" gap={1}>
+            <Button
+              variant="outlined"
+              disabled={sourceGridPage === 0}
+              onClick={() => setSourceGridPage((page) => Math.max(0, page - 1))}
+            >
+              Previous
+            </Button>
+            <Button
+              variant="outlined"
+              disabled={sourceGridPage >= sourceGridTotalPages - 1}
+              onClick={() => setSourceGridPage((page) => Math.min(sourceGridTotalPages - 1, page + 1))}
+            >
+              Next
+            </Button>
+            <Button variant="contained" onClick={() => setSourceGridOpen(false)}>Done</Button>
+          </Stack>
+        </DialogActions>
+      </Dialog>
       <Snackbar
         open={Boolean(successMessage)}
         autoHideDuration={5000}
@@ -5217,7 +6222,7 @@ const BomNormalizer = () => {
             )}
           </Paper>
           <Grid container spacing={2}>
-            <Grid item xs={12} md={4}>
+            <Grid item xs={12} md={6}>
               <Card
                 elevation={0}
                 onClick={() => handlePdfProcessingChoice('ocr')}
@@ -5226,35 +6231,25 @@ const BomNormalizer = () => {
                 <CardContent>
                   <Typography sx={{ fontSize: 16, fontWeight: 800 }}>Simple OCR</Typography>
                   <Typography sx={{ mt: 0.8, fontSize: 13, color: '#66717f' }}>
-                    Use Azure OCR directly for clear table PDFs.
+                    Best when the page is already a clean table — clear rows and columns, all text
+                    readable, and nothing else around it. Anything outside the table comes through
+                    as data too.
                   </Typography>
                 </CardContent>
               </Card>
             </Grid>
-            <Grid item xs={12} md={4}>
-              <Card
-                elevation={0}
-                onClick={() => handlePdfProcessingChoice('compare')}
-                sx={{ height: '100%', cursor: 'pointer', border: '1px solid #dce2e8', '&:hover': { borderColor: '#1976d2', bgcolor: '#f8fafc' } }}
-              >
-                <CardContent>
-                  <Typography sx={{ fontSize: 16, fontWeight: 800 }}>Compare</Typography>
-                  <Typography sx={{ mt: 0.8, fontSize: 13, color: '#66717f' }}>
-                    Run native extraction and OCR, then use the cleaner result.
-                  </Typography>
-                </CardContent>
-              </Card>
-            </Grid>
-            <Grid item xs={12} md={4}>
+            <Grid item xs={12} md={6}>
               <Card
                 elevation={0}
                 onClick={() => handlePdfProcessingChoice('zonal')}
                 sx={{ height: '100%', cursor: 'pointer', border: '1px solid #dce2e8', '&:hover': { borderColor: '#1976d2', bgcolor: '#f8fafc' } }}
               >
                 <CardContent>
-                  <Typography sx={{ fontSize: 16, fontWeight: 800 }}>Zone Mapping</Typography>
+                  <Typography sx={{ fontSize: 16, fontWeight: 800 }}>Select Area Manually</Typography>
                   <Typography sx={{ mt: 0.8, fontSize: 13, color: '#66717f' }}>
-                    Use manual zones for PDFs with irregular tables or mixed layouts.
+                    You draw a box around the exact part of each page you want, and only what is
+                    inside the box gets extracted. Use for irregular tables or pages with extra
+                    content to leave out.
                   </Typography>
                 </CardContent>
               </Card>
@@ -5681,6 +6676,208 @@ const BomNormalizer = () => {
           </Button>
         </DialogActions>
       </Dialog>
+      <Dialog open={pairingReviewOpen} onClose={() => {}} maxWidth="md" fullWidth>
+        <DialogTitle>
+          <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'flex-start', sm: 'center' }} gap={1}>
+            <Box>
+              <Typography sx={{ fontSize: 18, fontWeight: 850 }}>Review MPN-Manufacturer Pairing</Typography>
+              <Typography sx={{ mt: 0.5, fontSize: 13, color: normalizerTheme.muted }}>
+                Some rows have a different count of MPNs and manufacturers. Confirm how these should be paired before opening the normalized output.
+              </Typography>
+            </Box>
+            <Chip color="warning" label={`${pairingReviewRows.length} row${pairingReviewRows.length === 1 ? '' : 's'} need review`} />
+          </Stack>
+        </DialogTitle>
+        <DialogContent>
+          <Alert severity="info" sx={{ mb: 1.5 }}>
+            Clean rows continue automatically. These rows are shown because the pairing count did not match.
+          </Alert>
+          <TableContainer sx={{ maxHeight: '58vh', border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.table, overflowX: 'auto' }}>
+            <Table stickyHeader size="small" sx={{ minWidth: 920 }}>
+              <TableHead>
+                <TableRow>
+                  <TableCell sx={{ width: 72, fontWeight: 850, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text }}>Row</TableCell>
+                  <TableCell sx={{ width: 250, fontWeight: 850, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text }}>MPNs</TableCell>
+                  <TableCell sx={{ width: 190, fontWeight: 850, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text }}>Manufacturers</TableCell>
+                  <TableCell sx={{ width: 210, fontWeight: 850, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text }}>Action</TableCell>
+                  <TableCell sx={{ width: 250, fontWeight: 850, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text }}>Manual values</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {pairingReviewRows.map((issue, index) => (
+                  <TableRow key={`${issue.key || issue.sourceRow}-${index}`}>
+                    <TableCell sx={{ color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
+                      <Typography sx={{ fontWeight: 800 }}>{issue.sourceRow}</Typography>
+                    </TableCell>
+                    <TableCell sx={{ color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
+                      <Chip size="small" color="warning" variant="outlined" label={issue.message} sx={{ mb: 0.75, maxWidth: '100%' }} />
+                      <Stack gap={0.5}>
+                        {issue.mpns.map((mpn, mpnIndex) => (
+                          <Stack
+                            key={`${issue.sourceRow}-mpn-${mpnIndex}`}
+                            direction="row"
+                            alignItems="center"
+                            gap={0.75}
+                            sx={{ minHeight: 28 }}
+                          >
+                            {issue.action === 'remove_extra' && (
+                              <Checkbox
+                                size="small"
+                                checked={(issue.mpnDecisions?.[mpnIndex]?.keep ?? true) !== false}
+                                onChange={(event) => updatePairingMpnDecision(index, mpnIndex, { keep: event.target.checked })}
+                                sx={{ p: 0.25 }}
+                              />
+                            )}
+                            <Chip
+                              size="small"
+                              color={issue.action === 'remove_extra' && issue.mpnDecisions?.[mpnIndex]?.keep === false ? 'default' : 'primary'}
+                              variant={issue.action === 'remove_extra' && issue.mpnDecisions?.[mpnIndex]?.keep === false ? 'outlined' : 'filled'}
+                              label={`${mpnIndex + 1}. ${mpn}`}
+                              sx={{ opacity: issue.action === 'remove_extra' && issue.mpnDecisions?.[mpnIndex]?.keep === false ? 0.55 : 1 }}
+                            />
+                          </Stack>
+                        ))}
+                      </Stack>
+                      {issue.action === 'remove_extra' && (
+                        <Typography sx={{ mt: 0.75, fontSize: 12, color: normalizerTheme.muted }}>
+                          Uncheck the MPN values that should be removed.
+                        </Typography>
+                      )}
+                    </TableCell>
+                    <TableCell sx={{ color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
+                      {issue.manufacturers.length ? (
+                        <Stack gap={0.5}>
+                          {issue.manufacturers.map((manufacturer, manufacturerIndex) => (
+                            <Stack
+                              key={`${issue.sourceRow}-mfr-${manufacturerIndex}`}
+                              direction="row"
+                              alignItems="center"
+                              gap={0.75}
+                              sx={{ minHeight: 28 }}
+                            >
+                              {issue.action === 'remove_extra' && (
+                                <Checkbox
+                                  size="small"
+                                  checked={(issue.mfrDecisions?.[manufacturerIndex]?.keep ?? true) !== false}
+                                  onChange={(event) => updatePairingMfrDecision(index, manufacturerIndex, { keep: event.target.checked })}
+                                  sx={{ p: 0.25 }}
+                                />
+                              )}
+                              <Chip
+                                size="small"
+                                variant={issue.action === 'remove_extra' && issue.mfrDecisions?.[manufacturerIndex]?.keep === false ? 'outlined' : 'filled'}
+                                label={`${manufacturerIndex + 1}. ${manufacturer}`}
+                                sx={{ opacity: issue.action === 'remove_extra' && issue.mfrDecisions?.[manufacturerIndex]?.keep === false ? 0.55 : 1 }}
+                              />
+                            </Stack>
+                          ))}
+                        </Stack>
+                      ) : (
+                        <Typography sx={{ fontSize: 13, color: normalizerTheme.muted }}>No manufacturer detected</Typography>
+                      )}
+                      {issue.action === 'remove_extra' && issue.manufacturers.length > 0 && (
+                        <Typography sx={{ mt: 0.75, fontSize: 12, color: normalizerTheme.muted }}>
+                          Uncheck the manufacturer values that should be removed.
+                        </Typography>
+                      )}
+                    </TableCell>
+                    <TableCell sx={{ color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
+                      <FormControl fullWidth size="small">
+                        <Select
+                          value={issue.action || 'keep'}
+                          onChange={(event) => {
+                            const nextAction = event.target.value;
+                            const patch = { action: nextAction };
+                            if (nextAction === 'remove_extra') {
+                              const keepMpnCount = issue.mpns.length > issue.manufacturers.length
+                                ? Math.max(1, issue.manufacturers.length)
+                                : issue.mpns.length;
+                              const keepMfrCount = issue.manufacturers.length > issue.mpns.length
+                                ? Math.max(1, issue.mpns.length)
+                                : issue.manufacturers.length;
+                              patch.mpnDecisions = (issue.mpnDecisions || issue.mpns.map((mpn, mpnIndex) => ({
+                                mpn,
+                                manufacturer: issue.manufacturers[mpnIndex] || issue.manufacturers[0] || '',
+                                keep: true,
+                              }))).map((decision, decisionIndex) => ({
+                                ...decision,
+                                keep: decisionIndex < keepMpnCount,
+                              }));
+                              patch.mfrDecisions = (issue.mfrDecisions || issue.manufacturers.map((manufacturer) => ({
+                                manufacturer,
+                                keep: true,
+                              }))).map((decision, decisionIndex) => ({
+                                ...decision,
+                                keep: decisionIndex < keepMfrCount,
+                              }));
+                            }
+                            updatePairingReviewRow(index, patch);
+                          }}
+                        >
+                          <MenuItem value="keep">Keep parsed output</MenuItem>
+                          <MenuItem value="manual">Use manual manufacturer list</MenuItem>
+                          <MenuItem value="remove_extra">Remove extra MPN/MFR values</MenuItem>
+                        </Select>
+                      </FormControl>
+                    </TableCell>
+                    <TableCell sx={{ color: normalizerTheme.text, borderColor: normalizerTheme.border }}>
+                      <TextField
+                        fullWidth
+                        size="small"
+                        value={issue.manualManufacturers || ''}
+                        onChange={(event) => updatePairingManualManufacturers(index, event.target.value)}
+                        disabled={issue.action !== 'manual'}
+                        placeholder="MFR 1 | MFR 2 | MFR 3"
+                        helperText="Separate manufacturers with |, semicolon, or new line."
+                      />
+                      {issue.action === 'manual' && (
+                        <Stack gap={0.5} sx={{ mt: 1 }}>
+                          {(issue.mpnDecisions || []).map((decision, decisionIndex) => (
+                            <TextField
+                              key={`${issue.sourceRow}-manual-${decisionIndex}`}
+                              size="small"
+                              label={`${decisionIndex + 1}. ${decision.mpn}`}
+                              value={decision.manufacturer || ''}
+                              onChange={(event) => {
+                                const nextDecisions = (issue.mpnDecisions || []).map((item, itemIndex) => (
+                                  itemIndex === decisionIndex ? { ...item, manufacturer: event.target.value } : item
+                                ));
+                                updatePairingReviewRow(index, {
+                                  mpnDecisions: nextDecisions,
+                                  manualManufacturers: nextDecisions.map((item) => item.manufacturer || '').join(' | '),
+                                });
+                              }}
+                            />
+                          ))}
+                        </Stack>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'space-between', gap: 1, flexWrap: 'wrap' }}>
+          <Button
+            onClick={() => {
+              setPairingReviewOpen(false);
+              setPendingNormalization(null);
+              setBusy(false);
+            }}
+          >
+            Back to configure
+          </Button>
+          <Stack direction="row" gap={1}>
+            <Button variant="outlined" onClick={handleKeepPairingReview}>
+              Keep parsed output
+            </Button>
+            <Button variant="contained" onClick={handleApplyPairingReview}>
+              Apply pairing decisions
+            </Button>
+          </Stack>
+        </DialogActions>
+      </Dialog>
       <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Review normalization summary</DialogTitle>
         <DialogContent>
@@ -5693,6 +6890,12 @@ const BomNormalizer = () => {
             <Chip label={`${normalizationSummary?.alternateRows || 0} alternates`} />
             <Chip label={`${normalizationSummary?.uniqueRawMaterials || 0} unique values`} />
             <Chip label={`${normalizationSummary?.skippedRows || 0} skipped source rows`} />
+            <Chip
+              color={(normalizationSummary?.pairingIssueRows || 0) > 0 ? 'warning' : 'success'}
+              label={(normalizationSummary?.pairingIssueRows || 0) > 0
+                ? `${normalizationSummary?.pairingIssueRows || 0} pairing review${normalizationSummary?.pairingIssueRows === 1 ? '' : 's'} handled`
+                : `${normalizationSummary?.pairingMatchedRows || 0}/${normalizationSummary?.pairingCheckedRows || 0} pairing checks passed`}
+            />
           </Stack>
           <Typography sx={{ mt: 2, fontSize: 13, color: '#66717f' }}>
             If these numbers look off, go back and adjust the columns, delimiter, or cleanup options.
@@ -5711,6 +6914,16 @@ const BomNormalizer = () => {
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* BOM structure gate — asked on the way to mapping, once the normalized
+          rows are on screen and the questions can be answered from real output. */}
+      <BomStructureDialog
+        open={bomStructureOpen}
+        onClose={() => { setBomStructureOpen(false); setPendingBomAction(null); }}
+        sheetNames={bomStructureSheetNames}
+        getSheetHeaders={bomStructureHeaderReader}
+        onConfirm={handleBomStructureConfirm}
+      />
     </Box>
   );
 };

@@ -8,6 +8,17 @@ import NotificationsNoneIcon from '@mui/icons-material/NotificationsNone';
 import WbSunnyIcon from '@mui/icons-material/WbSunny';
 import { useThemeContext } from '../utils/ThemeContext';
 
+const MoonIcon = ({ sx }) => (
+  <Box
+    component="svg"
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24"
+    sx={{ width: 20, height: 20, display: 'block', fill: 'currentColor', ...sx }}
+  >
+    <path d="m12.2,22c4.53,0,8.45-2.91,9.76-7.24.11-.35.01-.74-.25-1s-.64-.36-1-.25c-.78.23-1.58.35-2.38.35-4.52,0-8.2-3.68-8.2-8.2,0-.8.12-1.6.35-2.38.11-.35.01-.74-.25-1-.26-.26-.64-.36-1-.25C4.91,3.35,2,7.28,2,11.8c0,5.62,4.58,10.2,10.2,10.2Z" />
+  </Box>
+);
+
 // ─── nav items ──────────────────────────────────────────────────────────────
 const NAV_ITEMS = [
   { label: 'Dashboard',      path: '/dashboard',      icon: DashboardIcon },
@@ -206,7 +217,7 @@ const Header = () => {
               display: { xs: 'none', md: 'grid' },
               gridTemplateColumns: 'auto auto auto',
               alignItems: 'center',
-              gap: 1,
+              gap: 0.8,
               p: 0,
               border: 'none',
               bgcolor: 'transparent',
@@ -220,128 +231,103 @@ const Header = () => {
               },
             }}
           >
-            {/* "Light" label */}
+            {/* "Dark" label */}
             <Typography
               component="span"
               sx={{
-                fontSize: 12,
-                fontWeight: 800,
-                color: r.toggle.lightText,
+                fontSize: '13.5px',
+                fontWeight: 600,
+                color: isDarkMode ? r.text.primary : r.text.disabled,
                 transition: 'color 180ms ease',
               }}
             >
-              Light
+              Dark
             </Typography>
 
             {/* Toggle track */}
             <Box
               sx={{
                 position: 'relative',
-                width: 58,
-                height: 31,
+                width: 76,
+                height: 32,
                 borderRadius: '999px',
                 p: '3px',
                 overflow: 'hidden',
-                background: r.toggle.track,
-                boxShadow: r.shadow.control,
+                background: isDarkMode
+                  ? 'linear-gradient(180deg, #1f2937 0%, #111827 100%)'
+                  : 'linear-gradient(180deg, #f8fafc 0%, #e5e7eb 100%)',
+                border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.24)' : '1px solid rgba(148, 163, 184, 0.45)',
+                boxShadow: isDarkMode
+                  ? 'inset 0 2px 7px rgba(0,0,0,0.52), 0 5px 14px rgba(2,6,23,0.22)'
+                  : '0 10px 24px rgba(15,23,42,0.12), inset 0 1px 2px rgba(255,255,255,0.8)',
                 transition: 'background 220ms ease, box-shadow 220ms ease',
               }}
             >
-              {/* Stars (visible in dark mode) */}
-              {[
-                { top: 8, left: 12, size: 7 },
-                { top: 19, left: 23, size: 6 },
-              ].map((s, i) => (
-                <Box
-                  key={i}
-                  sx={{
-                    position: 'absolute',
-                    top: s.top,
-                    left: s.left,
-                    width: s.size,
-                    height: s.size,
-                    opacity: isDarkMode ? 1 : 0,
-                    transform: `scale(${isDarkMode ? 1 : 0.45})`,
-                    transition: 'opacity 180ms ease, transform 220ms ease',
-                    '&::before, &::after': {
-                      content: '""',
-                      position: 'absolute',
-                      inset: 0,
-                      m: 'auto',
-                      bgcolor: r.toggle.star,
-                      borderRadius: '999px',
-                      boxShadow: r.shadow.control,
-                    },
-                    '&::before': { width: s.size, height: Math.max(2, s.size / 3) },
-                    '&::after':  { width: Math.max(2, s.size / 3), height: s.size },
-                  }}
-                />
-              ))}
-
-              {/* Small decorative dots */}
               <Box
                 sx={{
                   position: 'absolute',
-                  width: 3.5,
-                  height: 3.5,
-                  borderRadius: '50%',
-                  bgcolor: r.toggle.star,
-                  top: isDarkMode ? 11 : 8,
-                  left: isDarkMode ? 31 : 38,
-                  opacity: isDarkMode ? 0.9 : 0.75,
-                  transition: 'all 220ms ease',
-                }}
-              />
-              <Box
-                sx={{
-                  position: 'absolute',
-                  width: 2.75,
-                  height: 2.75,
-                  borderRadius: '50%',
-                  bgcolor: r.toggle.star,
-                  top: 18,
-                  left: isDarkMode ? 8 : 34,
-                  opacity: isDarkMode ? 0.92 : 0.8,
-                  transition: 'all 220ms ease',
+                  top: 3,
+                  left: isDarkMode ? 3 : 40,
+                  width: 33,
+                  height: 26,
+                  borderRadius: '999px',
+                  bgcolor: r.action.primary,
+                  boxShadow: isDarkMode
+                    ? '0 5px 14px rgba(37,99,235,0.34)'
+                    : '0 5px 14px rgba(37,99,235,0.28)',
+                  transition: 'left 240ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 220ms ease',
                 }}
               />
 
-              {/* Thumb */}
               <Box
                 sx={{
                   position: 'absolute',
-                  top: isDarkMode ? 5 : 3.5,
-                  left: isDarkMode ? 31 : 3.5,
-                  width: 24,
-                  height: 24,
-                  borderRadius: '50%',
+                  top: 3,
+                  left: 3,
+                  width: 33,
+                  height: 26,
+                  borderRadius: '999px',
                   display: 'grid',
                   placeItems: 'center',
-                  bgcolor: r.toggle.thumb,
-                  color: r.toggle.thumbIcon,
-                  boxShadow: isDarkMode
-                    ? `-9px 1px 0 0 ${r.toggle.moonCutout} inset`
-                    : r.shadow.control,
-                  transform: 'translateZ(0)',
-                  transition:
-                    'left 240ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 220ms ease, color 220ms ease',
+                  color: isDarkMode ? '#ffffff' : '#9ca3af',
+                  zIndex: 2,
+                  transition: 'color 180ms ease',
                 }}
               >
-                {!isDarkMode && <WbSunnyIcon sx={{ fontSize: 15 }} />}
+                <MoonIcon sx={{ width: 18, height: 18 }} />
+              </Box>
+              <Box
+                sx={{
+                  position: 'absolute',
+                  top: 3,
+                  right: 3,
+                  width: 33,
+                  height: 26,
+                  borderRadius: '999px',
+                  display: 'grid',
+                  placeItems: 'center',
+                  color: isDarkMode ? '#ffffff' : '#ffffff',
+                  zIndex: 2,
+                  opacity: isDarkMode ? 0.82 : 1,
+                  transition: 'opacity 180ms ease, color 180ms ease',
+                }}
+              >
+                <WbSunnyIcon sx={{ fontSize: 18 }} />
               </Box>
             </Box>
 
-            {/* "Dark" label */}
+            {/* "Light" label */}
             <Typography
               component="span"
               sx={{
-                fontSize: 12,
-                fontWeight: 800,
-                color: r.toggle.darkText,
+                fontSize: '13.5px',
+                fontWeight: 600,
+                color: isDarkMode ? r.text.disabled : r.text.primary,
+                letterSpacing: 0,
                 transition: 'color 180ms ease',
               }}
             >
-              Dark
+              Light
             </Typography>
           </Box>
 

@@ -32,29 +32,13 @@ const getProviderCredentialScopeId = () => {
   return existing;
 };
 
-const getSelectedValidationProviders = () => {
-  if (typeof window === 'undefined') return ['digikey', 'mouser', 'element14'];
-  try {
-    const mappings = JSON.parse(window.localStorage.getItem(COLUMN_PROVIDER_MAPPINGS_KEY) || '[]');
-    if (Array.isArray(mappings) && mappings.length) {
-      const allowed = new Set(['digikey', 'mouser', 'element14']);
-      const mappedProviders = mappings
-        .flatMap((mapping) => {
-          const providers = mapping?.providers || mapping?.provider || [];
-          return Array.isArray(providers) ? providers : [providers];
-        })
-        .map((provider) => String(provider || '').toLowerCase())
-        .filter((provider) => allowed.has(provider));
-      if (mappedProviders.length) return Array.from(new Set(mappedProviders));
-    }
-    const saved = JSON.parse(window.localStorage.getItem(VALIDATION_PROVIDERS_KEY) || '[]');
-    const allowed = new Set(['digikey', 'mouser', 'element14']);
-    const selected = Array.isArray(saved) ? saved.filter((provider) => allowed.has(provider)) : [];
-    return selected.length ? Array.from(new Set(selected)) : ['digikey', 'mouser', 'element14'];
-  } catch {
-    return ['digikey', 'mouser', 'element14'];
-  }
-};
+// MPN validation always runs against every provider. Narrowing it by the
+// Settings selection or by column->provider mappings meant a part that DigiKey
+// does not stock came back "invalid" when Mouser or Element14 would have
+// confirmed it — one source saying no is not evidence the part is wrong.
+const ALL_VALIDATION_PROVIDERS = ['digikey', 'mouser', 'element14'];
+
+const getSelectedValidationProviders = () => ALL_VALIDATION_PROVIDERS.slice();
 
 const getColumnProviderMappings = () => {
   if (typeof window === 'undefined') return [];
@@ -401,13 +385,15 @@ const api = {
    * Extract a table by treating the drawn zones as COLUMNS, using word
    * coordinates (blanks preserved, rows aligned, header/footer excluded).
    */
-  processPDFColumnZones: async (sessionId, { mergeWrapped = false, columnLabels = [], skipTopRows = 0 } = {}) => {
+  processPDFColumnZones: async (sessionId, { mergeWrapped = false, columnLabels = [], skipTopRows = 0, zoneMode = 'columns' } = {}) => {
     try {
       showGlobalLoader(true);
       const response = await axios.post(`${API_URL}/pdf/zones/${sessionId}/process-columns/`, {
         merge_wrapped: mergeWrapped,
         column_labels: columnLabels,
-        skip_top_rows: skipTopRows
+        skip_top_rows: skipTopRows,
+        // 'columns' = each box is a column; 'table' = one box is the whole table
+        zone_mode: zoneMode
       }, {
         timeout: 120000
       });
@@ -621,11 +607,14 @@ const api = {
    * @param {string} sessionId - Session ID
    * @param {string} format - File format ('excel' or 'csv')
    */
-  downloadProcessedFile: (sessionId, format = 'excel', columnOrder = null) =>
+  downloadProcessedFile: (sessionId, format = 'excel', columnOrder = null, exportType = 'item') =>
     axios.post(`${API_URL}/download/`, {
       session_id: sessionId,
       format: format,
-      column_order: columnOrder
+      column_order: columnOrder,
+      // 'item' strips BOM structure columns; the two FactWise imports are
+      // different files even though the working grid holds both.
+      export_type: exportType
     }, {
       responseType: 'blob'
     }),
@@ -812,7 +801,7 @@ const api = {
    * @param {array} formulaRules - Optional formula rules
    * @param {array} factwiseRules - Optional factwise ID rules
    */
-  saveMappingTemplate: async (sessionId, templateName, description = '', mappings = null, formulaRules = null, factwiseRules = null, defaultValues = null, columnCounts = null, mpnValidationMetadata = null) => {
+  saveMappingTemplate: async (sessionId, templateName, description = '', mappings = null, formulaRules = null, factwiseRules = null, defaultValues = null, columnCounts = null, mpnValidationMetadata = null, options = {}) => {
     const effectiveSessionId = sessionId || await ensureSession();
     const payload = {
       session_id: effectiveSessionId,
@@ -828,6 +817,7 @@ const api = {
         customer_id_pairs_count: columnCounts.customer_id_pairs_count,
       } : {}),
       ...(mpnValidationMetadata !== null ? { mpn_validation_metadata: mpnValidationMetadata } : {}),
+      ...(options?.overwriteExisting ? { overwrite_existing: true } : {}),
     };
     return axios.post(`${API_URL}/templates/save/`, payload);
   },
@@ -1510,13 +1500,32 @@ const api = {
     }, { timeout: 120000 });
   },
 
-  /** DEMO: fetch the pre-made "golden" export sheet for this input (as a blob). */
+  /** Download the BOM this app generated from the user's own normalized rows. */
   downloadDemoBomSheet: (sessionId) =>
-    axios.get(`${API_URL}/download/demo-bom/${sessionId}/`, { responseType: 'blob', timeout: 120000 }),
+    axios.get(`${API_URL}/bom/download/${sessionId}/`, { responseType: 'blob', timeout: 120000 }),
 
-  /** DEMO: fetch the nested BOM tree (FG → sub-assemblies → components) for the preview. */
+  /** Generated BOM as JSON: headers, rows, item rows, stats, warnings. */
+  generateBomSheet: (sessionId) =>
+    axios.get(`${API_URL}/bom/generate/${sessionId}/`, { timeout: 120000 }),
+
+  /** Import an edited export back into the SAME session (keeps mappings/tags/MPN). */
+  importEditedSheet: (sessionId, file) => {
+    const form = new FormData();
+    form.append('file', file);
+    return axios.post(`${API_URL}/import/${sessionId}/`, form, { timeout: 180000 });
+  },
+
+  /** Per-source MPN validity + lifecycle counts across every row in the session. */
+  mpnValidationSummary: (sessionId) =>
+    axios.get(`${API_URL}/mpn/summary/${sessionId}/`, { timeout: 120000 }),
+
+  /** Validate the generated BOM against BOM rules only (not item rules). */
+  validateBomSheet: (sessionId) =>
+    axios.get(`${API_URL}/bom/validate/${sessionId}/`, { timeout: 120000 }),
+
+  /** Nested BOM tree (FG → sub-assemblies → components) built from the generated BOM. */
   getBomTree: (sessionId) =>
-    axios.get(`${API_URL}/demo/bom-tree/${sessionId}/`, { timeout: 60000 }),
+    axios.get(`${API_URL}/bom/tree/${sessionId}/`, { timeout: 60000 }),
 
   getDemoBomTree: (sessionId) =>
     axios.get(`${API_URL}/demo/bom-tree/${sessionId}/`, { timeout: 60000 }),

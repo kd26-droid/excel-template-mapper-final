@@ -528,9 +528,9 @@ const cleanFileName = (filename) => {
   const parts = String(filename).split('_');
   if (parts.length > 1) {
     const last = parts[parts.length - 1];
-    const extMatch = last.match(/\.(xlsx|xls|csv|pdf)$/i);
+    const extMatch = last.match(/\.(xlsx|xlsm|xls|csv|pdf)$/i);
     const ext = extMatch ? extMatch[0] : '.xlsx';
-    const nameWithoutExt = last.replace(/\.(xlsx|xls|csv|pdf)$/i, '');
+    const nameWithoutExt = last.replace(/\.(xlsx|xlsm|xls|csv|pdf)$/i, '');
     return `${nameWithoutExt}${ext}`;
   }
   return String(filename).length > 30 ? `${String(filename).substring(0, 30)}...` : filename;
@@ -857,7 +857,7 @@ const Dashboard = () => {
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3, flexWrap: 'wrap', gap: 2 }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
             <Typography variant="h5" fontWeight="700" sx={{ color: Ze.text, letterSpacing: '-0.025em' }}>
-              BOM Mapper Workbench
+              FactWise BOM Scrubber
             </Typography>
           </Box>
           <Box />

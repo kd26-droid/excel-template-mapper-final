@@ -54,6 +54,8 @@ import { Pagination } from '@mui/material';
 import {
   Save as SaveIcon,
   Download as DownloadIcon,
+  UploadFile as UploadFileIcon,
+  ImportExport as ImportExportIcon,
   CheckCircle as CheckCircleIcon,
   Error as ErrorIcon,
   Edit as EditIcon,
@@ -79,7 +81,9 @@ import {
   VerifiedUser as VerifiedUserIcon,
   ContentCut as ContentCutIcon,
   Add as AddIcon,
-  DeleteOutline as DeleteIcon
+  DeleteOutline as DeleteIcon,
+  Fullscreen as FullscreenIcon,
+  FullscreenExit as FullscreenExitIcon
 } from '@mui/icons-material';
 import api from '../services/api';
 import * as XLSX from 'xlsx';
@@ -318,6 +322,24 @@ const deriveDisplayName = (col, allHeaders = []) => {
   return col;
 };
 
+// A part is checked against three sources (DigiKey, Mouser, Element14), each
+// writing 'Yes', 'No', or blank when that source was never looked up.
+//
+// One source confirming the part is enough to call it valid — the others simply
+// may not stock it, which is not evidence the part is wrong. Only when no source
+// confirms it and at least one rejects it is the row invalid. If nobody has an
+// opinion, it is unknown rather than a silent pass.
+const MPN_VALID_COLUMNS = ['MPN valid (DigiKey)', 'MPN valid', 'MPN valid (Mouser)', 'MPN valid (Element14)'];
+
+const getMpnRowStatus = (row) => {
+  const values = MPN_VALID_COLUMNS
+    .map(column => String(row?.[column] ?? '').trim().toLowerCase())
+    .filter(Boolean);
+  if (values.includes('yes')) return 'valid';
+  if (values.includes('no')) return 'invalid';
+  return 'unknown';
+};
+
 const EnhancedDataEditor = () => {
   const { sessionId } = useParams();
   const navigate = useNavigate();
@@ -483,6 +505,10 @@ const EnhancedDataEditor = () => {
   const [factwiseExportDialogOpen, setFactwiseExportDialogOpen] = useState(false);
   const [factwisePreviewOpen, setFactwisePreviewOpen] = useState(false);
   const [factwisePreviewType, setFactwisePreviewType] = useState('item');
+  // BOM-specific validation, kept separate from the item required-field guard.
+  const [bomValidationOpen, setBomValidationOpen] = useState(false);
+  const [bomValidationIssues, setBomValidationIssues] = useState([]);
+  const [bomValidationWarnings, setBomValidationWarnings] = useState([]);
   const [factwisePreviewDownloading, setFactwisePreviewDownloading] = useState('');
   const [directoryExportStatus, setDirectoryExportStatus] = useState({
     open: false,
@@ -506,13 +532,15 @@ const EnhancedDataEditor = () => {
   const [secondColumn, setSecondColumn] = useState('');
   const [operator, setOperator] = useState('_');
   const [factwiseGenerationMode, setFactwiseGenerationMode] = useState('columns');
-  const [factwiseSerialPrefix, setFactwiseSerialPrefix] = useState('SFO');
+  const [factwiseSerialPrefix, setFactwiseSerialPrefix] = useState('ITEM');
   const [factwiseSerialStart, setFactwiseSerialStart] = useState(1);
   const [factwiseSerialPadding, setFactwiseSerialPadding] = useState(2);
   const [factwiseSerialIncrement, setFactwiseSerialIncrement] = useState(true);
   
   // Store factwise ID rule for template saving
   const [factwiseIdRule, setFactwiseIdRule] = useState(null);
+  const [postMappingActions, setPostMappingActions] = useState([]);
+  const replayedProcessingTemplateRef = useRef('');
   
   // Column counts for template integration
   const [dynamicColumnCounts, setDynamicColumnCounts] = useState({
@@ -543,6 +571,20 @@ const EnhancedDataEditor = () => {
   const [mpnManufacturerColumn, setMpnManufacturerColumn] = useState(null);
   const [mpnValidating, setMpnValidating] = useState(false);
   const [mpnProgress, setMpnProgress] = useState(null); // { done, total } while chunk-warming
+  // Completion summary shown after MPN validation finishes.
+  const [mpnSummary, setMpnSummary] = useState(null); // { validated, total, failed }
+  const [mpnSummaryOpen, setMpnSummaryOpen] = useState(false);
+  // Import an edited export back into THIS session, so mappings, tags and MPN
+  // validation stay attached instead of a re-upload creating a new session.
+  const [importing, setImporting] = useState(false);
+  const [exportingSheet, setExportingSheet] = useState(false);
+  const [exportImportOpen, setExportImportOpen] = useState(false);
+  const [moreActionsAnchor, setMoreActionsAnchor] = useState(null);
+  // Save-template errors belong in the dialog, next to the field the user
+  // has to change — a corner toast is easy to miss and disappears.
+  const [templateNameError, setTemplateNameError] = useState('');
+  const [importResult, setImportResult] = useState(null);
+  const importFileInputRef = useRef(null);
   const mpnValidationInFlightRef = useRef(false);
   const [mpnValidationCompleted, setMpnValidationCompleted] = useState(false);
   const [mpnFilterInvalidOnly, setMpnFilterInvalidOnly] = useState(false);
@@ -1025,6 +1067,134 @@ const EnhancedDataEditor = () => {
     if (error?.request) return 'Could not reach the server. Please check if backend is running.';
     return fallback;
   }, []);
+
+  const normalizePostMappingAction = useCallback((action) => {
+    if (!action || typeof action !== 'object' || !action.type) return null;
+    return {
+      ...action,
+      id: action.id || `${action.type}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`,
+      created_at: action.created_at || new Date().toISOString(),
+    };
+  }, []);
+
+  const recordPostMappingAction = useCallback((action) => {
+    const normalized = normalizePostMappingAction(action);
+    if (!normalized) return;
+    const actionKey = normalized.key || JSON.stringify({
+      type: normalized.type,
+      rule: normalized.rule || null,
+      config: normalized.config || null,
+      column: normalized.column || null,
+      source_column: normalized.source_column || null,
+      target_column: normalized.target_column || null,
+      defaults: normalized.defaults || null,
+    });
+    setPostMappingActions(prev => {
+      const filtered = prev.filter(item => (item.key || '') !== actionKey);
+      return [...filtered, { ...normalized, key: actionKey }];
+    });
+  }, [normalizePostMappingAction]);
+
+  const getPostMappingActionsFromTemplate = useCallback((template) => {
+    if (!template || typeof template !== 'object') return [];
+    const metadataActions = Array.isArray(template.metadata?.post_mapping_actions)
+      ? template.metadata.post_mapping_actions
+      : [];
+    const editorStage = Array.isArray(template.stages)
+      ? template.stages.find(stage => stage?.type === 'mapped_data_editor')
+      : null;
+    const stageActions = Array.isArray(editorStage?.post_mapping_actions)
+      ? editorStage.post_mapping_actions
+      : [];
+    const seen = new Set();
+    return [...metadataActions, ...stageActions]
+      .map(normalizePostMappingAction)
+      .filter(Boolean)
+      .filter(action => {
+        const key = action.key || JSON.stringify({
+          type: action.type,
+          rule: action.rule || null,
+          config: action.config || null,
+          column: action.column || null,
+          source_column: action.source_column || null,
+          target_column: action.target_column || null,
+          defaults: action.defaults || null,
+        });
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+  }, [normalizePostMappingAction]);
+
+  const buildPostMappingActionsForSave = useCallback((currentFactwiseRules = [], defaults = {}, formulaRules = []) => {
+    const actions = [];
+    const push = (action) => {
+      const normalized = normalizePostMappingAction(action);
+      if (normalized) actions.push(normalized);
+    };
+
+    (Array.isArray(currentFactwiseRules) ? currentFactwiseRules : []).forEach(rule => {
+      if (!rule || typeof rule !== 'object') return;
+      if (rule.type === 'column_value') {
+        push({
+          type: 'fill_or_create_column',
+          label: `Fill/create ${rule.target_column || 'column'}`,
+          rule,
+        });
+      } else if (rule.type === 'factwise_id') {
+        push({
+          type: 'factwise_id',
+          label: 'Create FactWise ID',
+          config: {
+            first_column: rule.first_column,
+            second_column: rule.second_column,
+            operator: rule.operator || '_',
+            strategy: rule.strategy || 'fill_only_null',
+            generation_mode: rule.generation_mode || 'columns',
+            serial_prefix: rule.serial_prefix || '',
+            serial_start: rule.serial_start ?? 1,
+            serial_padding: rule.serial_padding ?? 0,
+            serial_increment: rule.serial_increment !== false,
+          },
+        });
+      }
+    });
+
+    if (defaults && typeof defaults === 'object' && Object.keys(defaults).length > 0) {
+      push({
+        type: 'fill_required_defaults',
+        label: 'Fill required defaults',
+        defaults,
+      });
+    }
+
+    if (Array.isArray(formulaRules) && formulaRules.length > 0) {
+      push({
+        type: 'formula_rules',
+        label: 'Apply formula/tag rules',
+        rules: formulaRules,
+      });
+    }
+
+    postMappingActions.forEach(push);
+
+    const seen = new Set();
+    return actions.filter(action => {
+      const key = action.key || JSON.stringify({
+        type: action.type,
+        rule: action.rule || null,
+        config: action.config || null,
+        column: action.column || null,
+        source_column: action.source_column || null,
+        target_column: action.target_column || null,
+        defaults: action.defaults || null,
+        rules: action.rules || null,
+      });
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [normalizePostMappingAction, postMappingActions]);
 
   const updateDataIntegrity = useCallback((consistent, issues = []) => {
     setDataIntegrity({
@@ -1572,6 +1742,149 @@ const EnhancedDataEditor = () => {
     }
   }, [showSnackbar, updateDataIntegrity, fetchPageData, pageSize]);
 
+  const replayPostMappingActions = useCallback(async (actions = []) => {
+    if (!Array.isArray(actions) || actions.length === 0 || !sessionId) return;
+    const failures = [];
+    let changed = false;
+    const currentFields = new Set(
+      (columnDefs || [])
+        .map(col => col.field)
+        .filter(field => field && field !== '__row_number__')
+    );
+
+    for (const action of actions) {
+      try {
+        if (action.type === 'formula_rules') {
+          const rules = Array.isArray(action.rules) ? action.rules : [];
+          if (!rules.length) continue;
+          await synchronizer.current.applyFormulasSynchronized(rules);
+          setAppliedFormulas(rules);
+          setHasFormulas(true);
+          changed = true;
+        } else if (action.type === 'fill_or_create_column') {
+          const rule = action.rule && typeof action.rule === 'object' ? { ...action.rule } : null;
+          if (!rule?.target_column) continue;
+          if (rule.target_mode === 'new' && currentFields.has(rule.target_column)) {
+            continue;
+          }
+          const resp = await api.fillOrCreateColumn(sessionId, rule);
+          if (!resp.data?.success) throw new Error(resp.data?.error || 'Column action failed');
+          currentFields.add(rule.target_column);
+          changed = true;
+        } else if (action.type === 'factwise_id') {
+          const config = action.config || {};
+          const firstColumn = config.first_column || config.firstColumn || '';
+          const secondColumn = config.second_column || config.secondColumn || '';
+          const generationMode = config.generation_mode || config.generationMode || 'columns';
+          if (generationMode !== 'serial' && (!firstColumn || !secondColumn)) continue;
+          await synchronizer.current.createFactWiseIdSynchronized(
+            firstColumn,
+            secondColumn,
+            config.operator || '_',
+            config.strategy || 'fill_only_null',
+            {
+              generationMode,
+              serialPrefix: config.serial_prefix || config.serialPrefix || '',
+              serialStart: config.serial_start ?? config.serialStart ?? 1,
+              serialPadding: config.serial_padding ?? config.serialPadding ?? 0,
+              serialIncrement: config.serial_increment ?? config.serialIncrement ?? true,
+            }
+          );
+          setFactwiseIdRule({
+            firstColumn,
+            secondColumn,
+            operator: config.operator || '_',
+            strategy: config.strategy || 'fill_only_null',
+            generationMode,
+            serialPrefix: config.serial_prefix || config.serialPrefix || '',
+            serialStart: config.serial_start ?? config.serialStart ?? 1,
+            serialPadding: config.serial_padding ?? config.serialPadding ?? 0,
+            serialIncrement: config.serial_increment ?? config.serialIncrement ?? true,
+          });
+          currentFields.add('Item code');
+          changed = true;
+        } else if (action.type === 'set_column_default') {
+          if (!action.column) continue;
+          const resp = await api.setColumnDefault(
+            sessionId,
+            action.column,
+            action.value ?? '',
+            action.only_empty !== false,
+            action.condition || null
+          );
+          if (!resp.data?.success) throw new Error(resp.data?.error || 'Default fill failed');
+          changed = true;
+        } else if (action.type === 'fill_required_defaults') {
+          const defaults = action.defaults && typeof action.defaults === 'object' ? action.defaults : {};
+          if (Object.keys(defaults).length === 0) continue;
+          const resp = await api.fillRequiredDefaults(sessionId, defaults);
+          if (!resp.data?.success) throw new Error(resp.data?.error || 'Required defaults failed');
+          setDefaultValues(prev => ({ ...prev, ...defaults }));
+          changed = true;
+        } else if (action.type === 'copy_column') {
+          if (!action.source_column || !action.target_column) continue;
+          const resp = await api.copyColumn(sessionId, action.source_column, action.target_column, action.only_empty === true);
+          if (!resp.data?.success) throw new Error(resp.data?.error || 'Copy column failed');
+          changed = true;
+        } else if (action.type === 'fill_missing_values') {
+          if (!action.column || !action.target_mode || !action.strategy) continue;
+          const resp = await api.fillMissingValues(
+            sessionId,
+            action.column,
+            action.target_mode,
+            Array.isArray(action.selected_values) ? action.selected_values : [],
+            action.strategy,
+            action.default_value || '',
+            action.validation || {}
+          );
+          if (!resp.data?.success) throw new Error(resp.data?.error || 'Fill missing values failed');
+          changed = true;
+        }
+      } catch (error) {
+        failures.push(action.label || action.type || 'Saved action');
+      }
+    }
+
+    if (changed) {
+      await fetchDataSynchronized();
+    }
+    if (failures.length > 0) {
+      showSnackbar(`Template opened, but ${failures.length} saved tool action${failures.length === 1 ? '' : 's'} could not be replayed.`, 'warning');
+    } else if (changed) {
+      showSnackbar('Saved template tools applied to this workbook.', 'success');
+    }
+  }, [sessionId, columnDefs, fetchDataSynchronized, showSnackbar]);
+
+  useEffect(() => {
+    if (!isExistingProcessingTemplate || loading || error || !sessionId || !synchronizer.current) return;
+    const template = processingTemplateContext?.selectedProcessingTemplate || location.state?.appliedProcessingTemplate;
+    const actions = getPostMappingActionsFromTemplate(template);
+    if (!template?.id || actions.length === 0) return;
+    const replayKey = `${sessionId}:${template.id}`;
+    if (replayedProcessingTemplateRef.current === replayKey) return;
+    if (!columnDefs || columnDefs.filter(col => col.field && col.field !== '__row_number__').length === 0) return;
+
+    replayedProcessingTemplateRef.current = replayKey;
+    setLoading(true);
+    replayPostMappingActions(actions)
+      .catch((err) => {
+        console.warn('Post-mapping template replay failed:', err);
+        showSnackbar('Template opened, but saved final-page tools could not be fully applied.', 'warning');
+      })
+      .finally(() => setLoading(false));
+  }, [
+    isExistingProcessingTemplate,
+    loading,
+    error,
+    sessionId,
+    processingTemplateContext,
+    location.state,
+    columnDefs,
+    getPostMappingActionsFromTemplate,
+    replayPostMappingActions,
+    showSnackbar,
+  ]);
+
   // Determine if the current dataset is fresh with respect to expected Tag/Factwise columns
   const isDatasetFresh = useCallback((data, meta) => {
     try {
@@ -1729,6 +2042,21 @@ const EnhancedDataEditor = () => {
           serialPadding,
           serialIncrement: factwiseSerialIncrement
         });
+        recordPostMappingAction({
+          type: 'factwise_id',
+          label: 'Create FactWise ID',
+          config: {
+            first_column: firstColumn,
+            second_column: secondColumn,
+            operator,
+            strategy,
+            generation_mode: factwiseGenerationMode,
+            serial_prefix: factwiseSerialPrefix,
+            serial_start: serialStart,
+            serial_padding: serialPadding,
+            serial_increment: factwiseSerialIncrement,
+          },
+        });
         const responseVersion = syncResult?.result?.data?.template_version;
         if (typeof responseVersion === 'number') {
           setSessionVersion(responseVersion);
@@ -1750,7 +2078,7 @@ const EnhancedDataEditor = () => {
     } finally {
       setLoading(false);
     }
-  }, [firstColumn, secondColumn, operator, factwiseGenerationMode, factwiseSerialPrefix, factwiseSerialStart, factwiseSerialPadding, factwiseSerialIncrement, showSnackbar, fetchDataSynchronized, updateDataIntegrity]);
+  }, [firstColumn, secondColumn, operator, factwiseGenerationMode, factwiseSerialPrefix, factwiseSerialStart, factwiseSerialPadding, factwiseSerialIncrement, showSnackbar, fetchDataSynchronized, updateDataIntegrity, recordPostMappingAction]);
 
   const handleCreateFactwiseIdSynchronized = useCallback(async () => {
     if (factwiseGenerationMode === 'columns' && (!firstColumn || !secondColumn)) {
@@ -2056,6 +2384,11 @@ const EnhancedDataEditor = () => {
       };
       const response = await api.fillOrCreateColumn(sessionId, rule);
       if (!response.data?.success) throw new Error(response.data?.error || 'Column update failed');
+      recordPostMappingAction({
+        type: 'fill_or_create_column',
+        label: `${target} fill/create rule`,
+        rule: response.data.rule || rule,
+      });
       setCreateColumnDialogOpen(false);
       await fetchDataSynchronized();
       showSnackbar(`${target} updated across ${response.data.changed || 0} cells. Rule saved for template reuse.`, 'success');
@@ -2091,7 +2424,8 @@ const EnhancedDataEditor = () => {
     factwiseSerialIncrement,
     sessionId,
     showSnackbar,
-    fetchDataSynchronized
+    fetchDataSynchronized,
+    recordPostMappingAction
   ]);
 
   const handleOpenFactwiseIdDialog = useCallback(() => {
@@ -2105,7 +2439,7 @@ const EnhancedDataEditor = () => {
     setSecondColumn('');
     setOperator('_');
     setFactwiseGenerationMode('columns');
-    setFactwiseSerialPrefix('SFO');
+    setFactwiseSerialPrefix('ITEM');
     setFactwiseSerialStart(1);
     setFactwiseSerialPadding(2);
     setFactwiseSerialIncrement(true);
@@ -2235,6 +2569,7 @@ const EnhancedDataEditor = () => {
   const handleCloseSaveTemplateDialog = useCallback(() => {
     setTemplateSaveDialogOpen(false);
     setTemplateName('');
+    setTemplateNameError('');
   }, []);
 
   const handleSaveTemplateSynchronized = useCallback(async (nameOverride = '') => {
@@ -2293,9 +2628,11 @@ const EnhancedDataEditor = () => {
         currentFactwiseRules,
         Object.keys(defaults).length > 0 ? defaults : null,
         counts,
-        mpnValidationMetadata
+        mpnValidationMetadata,
+        { overwriteExisting: isNewProcessingTemplate }
       );
       if (resp?.data?.success && processingTemplateContext) {
+        const postActions = buildPostMappingActionsForSave(currentFactwiseRules || [], defaults, rules);
         let providerSnapshot = {};
         try {
           providerSnapshot = {
@@ -2330,6 +2667,7 @@ const EnhancedDataEditor = () => {
               formula_rules_count: rules.length,
               has_factwise_rules: Array.isArray(currentFactwiseRules) && currentFactwiseRules.length > 0,
               mpn_validation_metadata: mpnValidationMetadata || {},
+              post_mapping_actions: postActions,
             }
           ],
           metadata: {
@@ -2339,24 +2677,36 @@ const EnhancedDataEditor = () => {
               normalizer_workflow: processingTemplateContext.normalizerWorkflow,
             } : {}),
             saved_from_session_id: sessionId,
+            post_mapping_actions: postActions,
           }
         });
       }
       const elapsed = Date.now() - opStart;
       if (elapsed < 3000) await new Promise(r => setTimeout(r, 3000 - elapsed));
       if (resp?.data?.success) {
+        const wasUpdate = Boolean(resp.data.updated);
         setTemplateSaved(true);
-        showSnackbar(`Template "${saveName}" saved successfully!`, 'success');
+        setTemplateNameError('');
+        showSnackbar(`Template "${saveName}" ${wasUpdate ? 'updated' : 'saved'} successfully!`, 'success');
         handleCloseSaveTemplateDialog();
       } else {
         showSnackbar(resp?.data?.error || 'Failed to save template', 'error');
       }
     } catch (e) {
-      showSnackbar('Failed to save template', 'error');
+      const duplicateName = e?.response?.status === 409 ||
+        e?.response?.data?.code === 'duplicate_template_name' ||
+        String(e?.response?.data?.error || '').toLowerCase().includes('already exists');
+      if (duplicateName) {
+        setTemplateName(saveName);
+        setTemplateSaveDialogOpen(true);
+        setTemplateNameError('A template with this name already exists. Enter a different name.');
+      } else {
+        showSnackbar(e?.response?.data?.error || 'Failed to save template', 'error');
+      }
     } finally {
       setTemplateSaving(false);
     }
-  }, [sessionId, templateName, dynamicColumnCounts, defaultValues, appliedFormulas, factwiseIdRule, mpnValidationCompleted, originalMpnColumn, mpnColumn, mpnManufacturerColumn, isExistingProcessingTemplate, processingTemplateContext, showSnackbar, handleCloseSaveTemplateDialog]);
+  }, [sessionId, templateName, dynamicColumnCounts, defaultValues, appliedFormulas, factwiseIdRule, mpnValidationCompleted, originalMpnColumn, mpnColumn, mpnManufacturerColumn, isExistingProcessingTemplate, isNewProcessingTemplate, processingTemplateContext, showSnackbar, handleCloseSaveTemplateDialog, buildPostMappingActionsForSave]);
 
   const handleSaveTemplateFromToolbar = useCallback(() => {
     if (isExistingProcessingTemplate) {
@@ -2466,7 +2816,34 @@ const EnhancedDataEditor = () => {
   // open the dialog instead and hold the export until the user resolves it.
   // Blank counts come from the backend so they reflect the WHOLE dataset, not
   // just the current (server-paginated) page.
-  const runGuardedExport = useCallback(async (exportFn) => {
+  const runGuardedExport = useCallback(async (exportFn, exportType = 'item') => {
+    // The BOM sheet has its own ruleset. Item required fields (Item code, Item
+    // type, Measurement unit...) do not apply to a BOM row, so running them here
+    // would report failures that are not real and hide the ones that are.
+    if (exportType === 'bom') {
+      try {
+        const resp = await api.validateBomSheet(sessionId);
+        const issues = resp?.data?.errors || [];
+        if (issues.length > 0) {
+          setBomValidationIssues(issues);
+          setBomValidationWarnings(resp?.data?.warnings || []);
+          pendingExportRef.current = exportFn;
+          setBomValidationOpen(true);
+          return;
+        }
+      } catch (e) {
+        // A validation outage must not silently pass a broken BOM through.
+        showSnackbar(
+          getFriendlyErrorMessage(e, 'Could not validate the BOM before export.'),
+          'error'
+        );
+        return;
+      }
+      pendingExportRef.current = null;
+      exportFn();
+      return;
+    }
+
     const { isFactwiseSheet, present } = getFactwiseRequiredGaps();
     if (!isFactwiseSheet || present.length === 0) {
       exportFn();
@@ -2535,7 +2912,7 @@ const EnhancedDataEditor = () => {
     }
     pendingExportRef.current = null;
     exportFn();
-  }, [getFactwiseRequiredGaps, sessionId, rowData, BOOLEAN_REQUIRED_FIELDS, getRequiredValidationRule]);
+  }, [getFactwiseRequiredGaps, sessionId, rowData, BOOLEAN_REQUIRED_FIELDS, getRequiredValidationRule, showSnackbar, getFriendlyErrorMessage]);
 
   useEffect(() => {
     requiredGuardRunnerRef.current = runGuardedExport;
@@ -2594,6 +2971,15 @@ const EnhancedDataEditor = () => {
       setRequiredFilling(true);
       const resp = await api.setColumnDefault(sessionId, gap.field, cleanValue, true, null);
       if (!resp.data?.success) throw new Error(resp.data?.error || 'Fill failed');
+      setDefaultValues(prev => ({ ...prev, [gap.field]: cleanValue }));
+      recordPostMappingAction({
+        type: 'set_column_default',
+        label: `Fill ${gap.headerName || gap.req || gap.field}`,
+        column: gap.field,
+        value: cleanValue,
+        only_empty: true,
+        condition: null,
+      });
       await fetchDataSynchronized();
       setRequiredInlineDefaults(prev => {
         const next = { ...prev };
@@ -2616,7 +3002,7 @@ const EnhancedDataEditor = () => {
       setRequiredQuickFillKey('');
       setRequiredFilling(false);
     }
-  }, [sessionId, fetchDataSynchronized, showSnackbar, itemCodeIssue]);
+  }, [sessionId, fetchDataSynchronized, showSnackbar, itemCodeIssue, recordPostMappingAction]);
 
   const openFillMissingDialog = useCallback((field = '', returnToGuard = false) => {
     setToolsMenuAnchor(null);
@@ -2694,6 +3080,16 @@ const EnhancedDataEditor = () => {
         validation
       );
       if (!resp.data?.success) throw new Error(resp.data?.error || 'Fill failed');
+      recordPostMappingAction({
+        type: 'fill_missing_values',
+        label: `Fill missing ${fillMissingColumn}`,
+        column: fillMissingColumn,
+        target_mode: fillMissingMode,
+        selected_values: fillMissingSelectedValues.map(item => item.value),
+        strategy: fillMissingStrategy,
+        default_value: fillMissingDefault,
+        validation,
+      });
       await fetchDataSynchronized();
       setFillMissingOpen(false);
       const changed = resp.data.changed || 0;
@@ -2714,7 +3110,7 @@ const EnhancedDataEditor = () => {
     } finally {
       setFillMissingBusy(false);
     }
-  }, [fillMissingColumn, fillMissingMode, fillMissingTargetCount, fillMissingSelectedValues, fillMissingStrategy, fillMissingDefault, sessionId, getRequiredNameForColumn, getRequiredValidationRule, fetchDataSynchronized, showSnackbar, getFriendlyErrorMessage, runGuardedExport]);
+  }, [fillMissingColumn, fillMissingMode, fillMissingTargetCount, fillMissingSelectedValues, fillMissingStrategy, fillMissingDefault, sessionId, getRequiredNameForColumn, getRequiredValidationRule, fetchDataSynchronized, showSnackbar, getFriendlyErrorMessage, runGuardedExport, recordPostMappingAction]);
 
   const highlightItemCodeDuplicates = useCallback(() => {
     if (!itemCodeIssue?.dupRows) return;
@@ -2757,8 +3153,62 @@ const EnhancedDataEditor = () => {
       handleExportToProject();
       return;
     }
-    runGuardedExport(() => openFactwisePreview(destination));
+    runGuardedExport(() => openFactwisePreview(destination), destination);
   }, [handleExportToProject, runGuardedExport, openFactwisePreview]);
+
+  const handleExportSheetForEditing = useCallback(async () => {
+    setExportingSheet(true);
+    try {
+      // export_type 'raw' skips the item-directory curation (BOM columns are
+      // kept, no finished good appended) so the file mirrors the grid exactly
+      // and can be imported straight back.
+      const response = await api.downloadProcessedFile(
+        sessionId,
+        'excel',
+        getCurrentExportColumnOrder(),
+        'raw'
+      );
+      const blob = new Blob([response.data], {
+        type: response.headers?.['content-type']
+          || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `sheet_${sessionId}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+      showSnackbar('Sheet exported. Edit it, then use Import edited sheet.', 'success');
+    } catch (e) {
+      showSnackbar(getFriendlyErrorMessage(e, 'Could not export the sheet.'), 'error');
+    } finally {
+      setExportingSheet(false);
+    }
+  }, [sessionId, getCurrentExportColumnOrder, showSnackbar, getFriendlyErrorMessage]);
+
+  const handleImportEditedSheet = useCallback(async (event) => {
+    const file = event.target.files?.[0];
+    // Reset immediately so re-selecting the same file still fires onChange.
+    event.target.value = '';
+    if (!file) return;
+    setImporting(true);
+    try {
+      const resp = await api.importEditedSheet(sessionId, file);
+      const data = resp?.data || {};
+      if (!data.success) throw new Error(data.error || 'Import failed');
+      setImportResult(data);
+      // Close the launcher so the result summary is not stacked behind it.
+      setExportImportOpen(false);
+      await fetchDataSynchronized();
+      showSnackbar(`Imported ${data.imported_rows} rows from ${file.name}`, 'success');
+    } catch (e) {
+      showSnackbar(getFriendlyErrorMessage(e, 'Could not import that sheet.'), 'error');
+    } finally {
+      setImporting(false);
+    }
+  }, [sessionId, fetchDataSynchronized, showSnackbar, getFriendlyErrorMessage]);
 
   const downloadFactwisePreview = useCallback(async (format) => {
     const columnOrder = getCurrentExportColumnOrder();
@@ -2770,7 +3220,16 @@ const EnhancedDataEditor = () => {
 
     try {
       setFactwisePreviewDownloading(format);
-      const response = await api.downloadProcessedFile(sessionId, format === 'csv' ? 'csv' : 'excel', columnOrder);
+      // A BOM is not the mapped grid — it is generated from the normalized rows
+      // into the FactWise BOM schema, so it comes from its own endpoint.
+      const response = factwisePreviewType === 'bom'
+        ? await api.downloadDemoBomSheet(sessionId)
+        : await api.downloadProcessedFile(
+            sessionId,
+            format === 'csv' ? 'csv' : 'excel',
+            columnOrder,
+            'item'
+          );
       const contentDisposition = response.headers?.['content-disposition'];
       let filename = `factwise_${label}_${sessionId}.${extension}`;
       if (contentDisposition) {
@@ -2919,7 +3378,7 @@ const EnhancedDataEditor = () => {
     const file = event.target.files?.[0];
     if (!file) return;
     const ext = (file.name.split('.').pop() || '').toLowerCase();
-    if (!['xlsx', 'xls', 'csv'].includes(ext)) {
+    if (!['xlsx', 'xls', 'xlsm', 'csv'].includes(ext)) {
       showSnackbar('Please upload an Excel or CSV manufacturer directory.', 'error');
       return;
     }
@@ -3655,6 +4114,13 @@ const EnhancedDataEditor = () => {
     try {
       const resp = await api.copyColumn(sessionId, copySource, copyTarget, copyOnlyEmpty);
       if (!resp.data?.success) throw new Error(resp.data?.error || 'Copy failed');
+      recordPostMappingAction({
+        type: 'copy_column',
+        label: `Copy ${copySource} to ${copyTarget}`,
+        source_column: copySource,
+        target_column: copyTarget,
+        only_empty: copyOnlyEmpty,
+      });
       showSnackbar(`Copied "${copySource}" into "${copyTarget}" (${resp.data.changed} cells).`, 'success');
       setCopyColOpen(false);
       await fetchDataSynchronized();
@@ -3663,7 +4129,7 @@ const EnhancedDataEditor = () => {
     } finally {
       setCopyBusy(false);
     }
-  }, [copySource, copyTarget, copyOnlyEmpty, sessionId, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage]);
+  }, [copySource, copyTarget, copyOnlyEmpty, sessionId, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage, recordPostMappingAction]);
 
   const handleSetDefault = useCallback(async () => {
     if (!defaultCol) return;
@@ -3684,6 +4150,17 @@ const EnhancedDataEditor = () => {
         : null;
       const resp = await api.setColumnDefault(sessionId, defaultCol, defaultValue, defaultOnlyEmpty, condition);
       if (!resp.data?.success) throw new Error(resp.data?.error || 'Set default failed');
+      if (!conditional && defaultOnlyEmpty && String(defaultValue || '').trim() !== '') {
+        setDefaultValues(prev => ({ ...prev, [defaultCol]: defaultValue }));
+      }
+      recordPostMappingAction({
+        type: 'set_column_default',
+        label: `Set default ${defaultCol}`,
+        column: defaultCol,
+        value: defaultValue,
+        only_empty: defaultOnlyEmpty,
+        condition,
+      });
       showSnackbar(`Set "${defaultCol}" for ${resp.data.changed} cell${resp.data.changed !== 1 ? 's' : ''}.`, 'success');
       setDefaultColOpen(false);
       await fetchDataSynchronized();
@@ -3697,7 +4174,7 @@ const EnhancedDataEditor = () => {
     } finally {
       setDefaultBusy(false);
     }
-  }, [defaultCol, defaultValue, defaultOnlyEmpty, defaultMode, condCol, condOp, condCompare, condThen, condElse, sessionId, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage, runGuardedExport]);
+  }, [defaultCol, defaultValue, defaultOnlyEmpty, defaultMode, condCol, condOp, condCompare, condThen, condElse, sessionId, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage, runGuardedExport, recordPostMappingAction]);
 
   // Delete rows that meet a condition (e.g. "MPN Code is empty").
   const handleDeleteRows = useCallback(async () => {
@@ -3938,8 +4415,8 @@ const EnhancedDataEditor = () => {
 
     // Only allow Excel uploads
     const ext = (file.name.split('.').pop() || '').toLowerCase();
-    if (!['xlsx', 'xls'].includes(ext)) {
-      showSnackbar('Please upload an Excel file (.xlsx or .xls)', 'error');
+    if (!['xlsx', 'xls', 'xlsm'].includes(ext)) {
+      showSnackbar('Please upload an Excel file (.xlsx, .xls, or .xlsm)', 'error');
       return;
     }
 
@@ -4402,19 +4879,12 @@ const EnhancedDataEditor = () => {
   const displayedRows = (rowData || [])
     .map((row, rowIndex) => ({ row, rowIndex }))
     .filter(({ row }) => {
-      if (!mpnFilterInvalidOnly && rowFilterMode !== 'invalid_mpn') return true;
-      const providerValues = [
-        row['MPN valid (DigiKey)'] ?? row['MPN valid'],
-        row['MPN valid (Mouser)'],
-        row['MPN valid (Element14)']
-      ];
-      return providerValues.some(value => String(value || '').toLowerCase() === 'no');
-    })
-    .filter(({ row }) => {
-      if (rowFilterMode !== 'unknown') return true;
-      return Object.values(row || {}).some(value =>
-        String(value ?? '').trim().toLowerCase() === 'unknown'
-      );
+      const wantsInvalid = mpnFilterInvalidOnly || rowFilterMode === 'invalid_mpn';
+      if (!wantsInvalid && rowFilterMode !== 'valid_mpn' && rowFilterMode !== 'unknown') return true;
+      const status = getMpnRowStatus(row);
+      if (wantsInvalid) return status === 'invalid';
+      if (rowFilterMode === 'valid_mpn') return status === 'valid';
+      return status === 'unknown';
     })
     .filter(({ row }) => {
       if (!rowSearchQuery) return true;
@@ -4422,7 +4892,9 @@ const EnhancedDataEditor = () => {
         String(value ?? '').toLowerCase().includes(rowSearchQuery)
       );
     });
-  const editorSubtitle = `${sessionId ? `Session ${sessionId}` : 'Active workbook'} - ${totalRows.toLocaleString()} rows`;
+  // The session id is a UUID that means nothing to the user; the row count
+  // is the part worth showing.
+  const editorSubtitle = `${totalRows.toLocaleString()} rows`;
   return (
     <Box sx={editorPageSx}>
       <Box
@@ -5066,7 +5538,7 @@ const EnhancedDataEditor = () => {
                       letterSpacing: 0
                     }}
                   >
-                    Enhanced Data Editor
+                    FactWise BOM Scrubber
                   </Typography>
                   <Typography
                     variant="body2"
@@ -5087,6 +5559,18 @@ const EnhancedDataEditor = () => {
 
               {/* Right - Primary Actions */}
               <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', justifyContent: { xs: 'flex-start', lg: 'flex-end' }, flexWrap: 'wrap', flex: { xs: '1 1 100%', lg: '0 0 auto' } }}>
+                {/* The end of the workflow, so it sits apart from the editing
+                    tools rather than among them. */}
+                <Button
+                  size="small"
+                  onClick={() => setFactwiseExportDialogOpen(true)}
+                  disabled={downloadLoading || syncStatus.inProgress}
+                  startIcon={<FolderOpenIcon sx={{ fontSize: 18 }} />}
+                  sx={exportFactwiseActionSx}
+                  variant="contained"
+                >
+                  Export to FactWise
+                </Button>
                 <IconButton
                   onClick={handleManualRefresh}
                   disabled={syncStatus.inProgress}
@@ -5107,6 +5591,42 @@ const EnhancedDataEditor = () => {
                 >
                   <RefreshIcon sx={{ fontSize: 20 }} />
                 </IconButton>
+
+                {/* Layout actions sit behind the overflow menu: useful, but not
+                    worth toolbar space beside the primary actions. */}
+                <Tooltip title="More actions">
+                  <IconButton
+                    onClick={(e) => setMoreActionsAnchor(e.currentTarget)}
+                    disabled={syncStatus.inProgress}
+                    sx={{
+                      width: 40,
+                      height: 40,
+                      color: '#ffffff',
+                      bgcolor: isDarkMode ? '#334155' : '#1e293b',
+                      '&:hover': { bgcolor: isDarkMode ? '#334155' : '#1e293b' },
+                      '&.Mui-disabled': {
+                        bgcolor: isDarkMode ? '#1e293b' : '#cbd5e1',
+                        color: '#64748b'
+                      }
+                    }}
+                    aria-label="More actions"
+                  >
+                    <MoreVertIcon sx={{ fontSize: 20 }} />
+                  </IconButton>
+                </Tooltip>
+                <Menu
+                  anchorEl={moreActionsAnchor}
+                  open={Boolean(moreActionsAnchor)}
+                  onClose={() => setMoreActionsAnchor(null)}
+                  PaperProps={{ sx: { borderRadius: '8px', mt: 1, minWidth: 230, border: `1px solid ${t.border.default}`, boxShadow: t.shadow.card } }}
+                >
+                  <MenuItem onClick={() => { setMoreActionsAnchor(null); handleAutoFitAll(); }} disabled={syncStatus.inProgress}>
+                    <ListItemText>Auto-fit all columns</ListItemText>
+                  </MenuItem>
+                  <MenuItem onClick={() => { setMoreActionsAnchor(null); handleRebuildColumns(); }} disabled={rebuildingColumns || syncStatus.inProgress}>
+                    <ListItemText>{rebuildingColumns ? 'Rebuilding...' : 'Rebuild template columns'}</ListItemText>
+                  </MenuItem>
+                </Menu>
 
               {/* Auto-fit All */}
               {false && (
@@ -5155,53 +5675,6 @@ const EnhancedDataEditor = () => {
                   arrangement), alongside the other alternate shapes. */}
 
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap', minWidth: 0 }}>
-              <Button
-                size="small"
-                onClick={() => setFactwiseExportDialogOpen(true)}
-                disabled={downloadLoading || syncStatus.inProgress}
-                startIcon={<FolderOpenIcon sx={{ fontSize: 18 }} />}
-                sx={exportFactwiseActionSx}
-                variant="outlined"
-              >
-                Export to FactWise
-              </Button>
-              <Button
-                size="small"
-                onClick={handleAutoFitAll}
-                disabled={syncStatus.inProgress}
-                sx={outlinedActionSx}
-                variant="outlined"
-              >
-                Auto-fit All
-              </Button>
-              <Tooltip title="Rebuild template columns">
-                <span>
-                  <Button
-                    size="small"
-                    onClick={handleRebuildColumns}
-                    disabled={rebuildingColumns || syncStatus.inProgress}
-                    sx={outlinedActionSx}
-                    variant="outlined"
-                  >
-                    {rebuildingColumns ? 'Rebuilding...' : 'Rebuild Columns'}
-                  </Button>
-                </span>
-              </Tooltip>
-              <Tooltip title={isExistingProcessingTemplate ? 'Existing templates cannot be saved from this run' : (templateSaved ? 'Template already saved' : 'Save this workflow template')}>
-                <span>
-                  <Button
-                    size="small"
-                    onClick={handleSaveTemplateFromToolbar}
-                    disabled={templateSaving || syncStatus.inProgress || isExistingProcessingTemplate || templateSaved}
-                    startIcon={templateSaving ? <CircularProgress size={16} /> : <SaveIcon sx={{ fontSize: 18 }} />}
-                    sx={outlinedActionSx}
-                    variant="outlined"
-                  >
-                    {templateSaving ? 'Saving...' : (templateSaved ? 'Template Saved' : 'Save Template')}
-                  </Button>
-                </span>
-              </Tooltip>
-
               {/* TOOLS dropdown */}
               <Button
                 onClick={(e) => setToolsMenuAnchor(e.currentTarget)}
@@ -5212,6 +5685,21 @@ const EnhancedDataEditor = () => {
               >
                 Tools
               </Button>
+              <Tooltip title={isExistingProcessingTemplate ? 'Existing templates cannot be saved from this run' : (templateSaved ? 'Update this workflow template' : 'Save this workflow template')}>
+                <span>
+                  <Button
+                    size="small"
+                    onClick={handleSaveTemplateFromToolbar}
+                    disabled={templateSaving || syncStatus.inProgress || isExistingProcessingTemplate}
+                    startIcon={templateSaving ? <CircularProgress size={16} /> : <SaveIcon sx={{ fontSize: 18 }} />}
+                    sx={outlinedActionSx}
+                    variant="outlined"
+                  >
+                    {templateSaving ? 'Saving...' : (templateSaved ? 'Update Template' : 'Save Template')}
+                  </Button>
+                </span>
+              </Tooltip>
+
               </Box>
               <Menu
                 anchorEl={toolsMenuAnchor}
@@ -5250,6 +5738,10 @@ const EnhancedDataEditor = () => {
                 <MenuItem onClick={() => { setToolsMenuAnchor(null); setDelCol(''); setDelOp('is_empty'); setDelCompare(''); setDeleteRowsOpen(true); }} disabled={syncStatus.inProgress}>
                   <ListItemIcon><DeleteIcon sx={{ color: '#c62828' }} /></ListItemIcon>
                   <ListItemText>Delete rows by condition</ListItemText>
+                </MenuItem>
+                <MenuItem onClick={() => { setToolsMenuAnchor(null); setExportImportOpen(true); }} disabled={syncStatus.inProgress}>
+                  <ListItemIcon><ImportExportIcon sx={{ color: '#2563eb' }} /></ListItemIcon>
+                  <ListItemText>Export / Import sheet</ListItemText>
                 </MenuItem>
               </Menu>
 
@@ -5301,9 +5793,12 @@ const EnhancedDataEditor = () => {
                   <ListItemIcon>{rowFilterMode === 'all' && !mpnFilterInvalidOnly ? <CheckIcon sx={{ color: t.color.primary }} /> : null}</ListItemIcon>
                   <ListItemText>All rows</ListItemText>
                 </MenuItem>
-                <MenuItem onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('unknown'); setMpnFilterInvalidOnly(false); }}>
-                  <ListItemIcon>{rowFilterMode === 'unknown' ? <CheckIcon sx={{ color: t.color.warningText }} /> : <ErrorIcon sx={{ color: t.color.warningText }} />}</ListItemIcon>
-                  <ListItemText>Unknown values</ListItemText>
+                <MenuItem
+                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('valid_mpn'); setMpnFilterInvalidOnly(false); }}
+                  disabled={!hasMpnValidationColumns}
+                >
+                  <ListItemIcon>{rowFilterMode === 'valid_mpn' ? <CheckIcon sx={{ color: t.color.success }} /> : <VerifiedUserIcon sx={{ color: t.color.success }} />}</ListItemIcon>
+                  <ListItemText>Valid MPN rows</ListItemText>
                 </MenuItem>
                 <MenuItem
                   onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('invalid_mpn'); setMpnFilterInvalidOnly(false); }}
@@ -5311,6 +5806,13 @@ const EnhancedDataEditor = () => {
                 >
                   <ListItemIcon>{(rowFilterMode === 'invalid_mpn' || mpnFilterInvalidOnly) ? <CheckIcon sx={{ color: t.color.danger }} /> : <VerifiedUserIcon sx={{ color: t.color.danger }} />}</ListItemIcon>
                   <ListItemText>Invalid MPN rows</ListItemText>
+                </MenuItem>
+                <MenuItem
+                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('unknown'); setMpnFilterInvalidOnly(false); }}
+                  disabled={!hasMpnValidationColumns}
+                >
+                  <ListItemIcon>{rowFilterMode === 'unknown' ? <CheckIcon sx={{ color: t.color.warningText }} /> : <ErrorIcon sx={{ color: t.color.warningText }} />}</ListItemIcon>
+                  <ListItemText>Unknown MPN rows</ListItemText>
                 </MenuItem>
               </Menu>
               <TextField
@@ -5413,6 +5915,10 @@ const EnhancedDataEditor = () => {
                       let offset = 0;
                       let total = 0;
                       let shown = false;
+                      let validatedCount = 0;
+                      // Providers that could not be reached. Their columns come back
+                      // blank, which must not be read as "no match".
+                      const providerFailures = new Map();
                       setMpnProgress({ done: 0, total: 0 });
                       // eslint-disable-next-line no-constant-condition
                       while (true) {
@@ -5426,7 +5932,11 @@ const EnhancedDataEditor = () => {
                         );
                         const d = resp?.data || {};
                         total = d.total || 0;
-                        setMpnProgress({ done: Math.min(d.validated || 0, total), total });
+                        (d.provider_failures || []).forEach((f) => {
+                          if (f && f.provider) providerFailures.set(f.provider, f);
+                        });
+                        validatedCount = Math.min(d.validated || 0, total);
+                        setMpnProgress({ done: validatedCount, total });
                         // Build + render the grid from the cache so far (live fill-in).
                         try {
                           await api.validateMPNs(
@@ -5444,7 +5954,24 @@ const EnhancedDataEditor = () => {
                       }
                       setMpnProgress(null);
                       setMpnValidationCompleted(true);
-                      showSnackbar('MPN validation complete', 'success');
+                      // Counts are unique MPNs, not rows: the grid holds one page
+                      // at a time, so a per-row tally here would only describe
+                      // whatever page happened to be loaded.
+                      // Per-source counts span every row, so they are computed
+                      // server-side; the grid only holds one page at a time.
+                      let breakdown = null;
+                      try {
+                        const summaryResp = await api.mpnValidationSummary(sessionId);
+                        if (summaryResp?.data?.success) breakdown = summaryResp.data;
+                      } catch (_) { /* the headline counts still stand */ }
+                      setMpnSummary({
+                        validated: validatedCount,
+                        total,
+                        failed: Math.max(0, total - validatedCount),
+                        breakdown,
+                        providerFailures: Array.from(providerFailures.values()),
+                      });
+                      setMpnSummaryOpen(true);
                     } catch (e) {
                       const msg = getFriendlyErrorMessage(e, 'Unable to validate MPNs. Please try again.');
                       if (e?.response?.status === 403) {
@@ -6165,7 +6692,7 @@ const EnhancedDataEditor = () => {
             with the number of parts. Click between two words to add or remove a break. Each segment is one manufacturer.
           </Typography>
         </DialogTitle>
-        <DialogContent dividers>
+        <DialogContent dividers sx={{ px: exportBomFullscreen ? 2.5 : 3, pt: exportBomFullscreen ? 3.25 : 3.5, pb: exportBomFullscreen ? 2.5 : 3 }}>
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
             {reviewRows.map((rr, ri) => {
               const groups = reviewRowGroups(rr);
@@ -6419,26 +6946,36 @@ const EnhancedDataEditor = () => {
 
       {/* Export BOM — preview, with Export to FactWise (mock) + Export Sheet (download) */}
       <Dialog open={exportBomOpen} onClose={() => !exportBomBusy && setExportBomOpen(false)}
-        maxWidth={exportBomFullscreen ? false : 'lg'} fullWidth fullScreen={exportBomFullscreen}>
+        maxWidth={exportBomFullscreen ? false : 'lg'} fullWidth fullScreen={exportBomFullscreen}
+        PaperProps={{
+          sx: {
+            m: exportBomFullscreen ? 0 : undefined,
+            width: exportBomFullscreen ? '100vw' : undefined,
+            height: exportBomFullscreen ? '100vh' : undefined,
+            borderRadius: exportBomFullscreen ? 0 : '12px',
+            overflow: 'hidden'
+          }
+        }}>
         <DialogTitle sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <span>Export BOM</span>
-          <Button size="small" onClick={() => setExportBomFullscreen(f => !f)}>
-            {exportBomFullscreen ? 'Exit full screen' : 'Full screen'}
-          </Button>
+          <Tooltip title={exportBomFullscreen ? 'Exit full screen' : 'Full screen'}>
+            <IconButton size="small" onClick={() => setExportBomFullscreen(f => !f)}>
+              {exportBomFullscreen ? <FullscreenExitIcon fontSize="small" /> : <FullscreenIcon fontSize="small" />}
+            </IconButton>
+          </Tooltip>
         </DialogTitle>
-        <DialogContent dividers>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            Review the BOM below, then export it — as an Excel sheet, or to FactWise.
-          </Typography>
+        <DialogContent dividers sx={{ p: exportBomFullscreen ? 2.5 : 3 }}>
           {/* BOM tree preview */}
-          {exportBomOpen && (
-            <BomTreePreview
-              sessionId={sessionId}
-              fullscreen={exportBomFullscreen}
-              height={exportBomFullscreen ? 'calc(100vh - 280px)' : 420}
-              onRequestFullscreen={() => setExportBomFullscreen(true)}
-            />
-          )}
+          <Box sx={{ mt: exportBomFullscreen ? 1 : 1.5 }}>
+            {exportBomOpen && (
+              <BomTreePreview
+                sessionId={sessionId}
+                fullscreen={exportBomFullscreen}
+                height={exportBomFullscreen ? 'calc(100vh - 162px)' : 420}
+                onRequestFullscreen={() => setExportBomFullscreen(true)}
+              />
+            )}
+          </Box>
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2 }}>
           <Button onClick={() => setExportBomOpen(false)} disabled={exportBomBusy}>Cancel</Button>
@@ -7616,10 +8153,13 @@ const EnhancedDataEditor = () => {
           </DialogContentText>
           <TextField
             fullWidth
+            autoFocus
             margin="normal"
             label="Template Name"
             value={templateName}
-            onChange={(e) => setTemplateName(e.target.value)}
+            error={Boolean(templateNameError)}
+            helperText={templateNameError}
+            onChange={(e) => { setTemplateName(e.target.value); setTemplateNameError(''); }}
           />
         </DialogContent>
         <DialogActions>
@@ -7765,7 +8305,7 @@ const EnhancedDataEditor = () => {
                     label="Prefix"
                     value={factwiseSerialPrefix}
                     onChange={(event) => setFactwiseSerialPrefix(event.target.value)}
-                    placeholder="SFO"
+                    placeholder="ITEM"
                   />
                 </Grid>
                 <Grid item xs={6}>
@@ -7862,8 +8402,19 @@ const EnhancedDataEditor = () => {
       <Dialog
         open={factwiseStrategyDialogOpen}
         onClose={() => setFactwiseStrategyDialogOpen(false)}
-        maxWidth="xs"
+        maxWidth="md"
         fullWidth
+        PaperProps={{
+          sx: {
+            maxWidth: 760,
+            borderRadius: '16px',
+            overflow: 'hidden',
+            bgcolor: t.surface.paper,
+            color: t.text.primary,
+            border: `1px solid ${t.border.default}`,
+            boxShadow: '0 24px 70px rgba(15, 23, 42, 0.18)'
+          }
+        }}
       >
         <DialogTitle>Item Code Already Has Values</DialogTitle>
         <DialogContent>
@@ -7923,8 +8474,8 @@ const EnhancedDataEditor = () => {
             <CloseIcon />
           </IconButton>
         </DialogTitle>
-        <DialogContent sx={{ px: 3, py: 2.5, bgcolor: exportDialogTone.body }}>
-          <Typography variant="body2" sx={{ color: exportDialogTone.secondary, mb: 2 }}>
+        <DialogContent sx={{ px: 3, pt: 3.25, pb: 2.5, bgcolor: exportDialogTone.body }}>
+          <Typography variant="body2" sx={{ color: exportDialogTone.secondary, mb: 2, mt: 1.5 }}>
             Choose where this prepared sheet should go.
           </Typography>
           <Box sx={{ display: 'grid', gap: 1.25 }}>
@@ -7987,9 +8538,16 @@ const EnhancedDataEditor = () => {
         fullScreen={factwisePreviewType === 'bom' && factwisePreviewFullscreen}
         PaperProps={{
           sx: {
-            borderRadius: '12px',
+            borderRadius: factwisePreviewType === 'bom' && factwisePreviewFullscreen ? 0 : '12px',
             overflow: 'hidden',
-            maxWidth: factwisePreviewType === 'bom' ? 1068 : 980,
+            maxWidth: factwisePreviewType === 'bom' && factwisePreviewFullscreen
+              ? 'none'
+              : factwisePreviewType === 'bom'
+                ? 1068
+                : 980,
+            width: factwisePreviewType === 'bom' && factwisePreviewFullscreen ? '100vw' : undefined,
+            height: factwisePreviewType === 'bom' && factwisePreviewFullscreen ? '100vh' : undefined,
+            m: factwisePreviewType === 'bom' && factwisePreviewFullscreen ? 0 : undefined,
             bgcolor: exportDialogTone.paper,
             border: `1px solid ${exportDialogTone.border}`
           }
@@ -8014,12 +8572,20 @@ const EnhancedDataEditor = () => {
             </Typography>
           </Box>
           {factwisePreviewType === 'bom' ? (
-            <Button
-              onClick={() => setFactwisePreviewFullscreen(value => !value)}
-              sx={{ fontSize: 12, fontWeight: 700, color: '#1976d2' }}
-            >
-              {factwisePreviewFullscreen ? 'EXIT FULL SCREEN' : 'FULL SCREEN'}
-            </Button>
+            <Tooltip title={factwisePreviewFullscreen ? 'Exit full screen' : 'Full screen'}>
+              <IconButton
+                onClick={() => setFactwisePreviewFullscreen(value => !value)}
+                size="small"
+                sx={{
+                  color: '#60a5fa',
+                  border: `1px solid ${exportDialogTone.border}`,
+                  bgcolor: 'rgba(37, 99, 235, 0.08)',
+                  '&:hover': { bgcolor: 'rgba(37, 99, 235, 0.18)' }
+                }}
+              >
+                {factwisePreviewFullscreen ? <FullscreenExitIcon fontSize="small" /> : <FullscreenIcon fontSize="small" />}
+              </IconButton>
+            </Tooltip>
           ) : (
             <Button
               onClick={() => setFactwisePreviewOpen(false)}
@@ -8030,41 +8596,31 @@ const EnhancedDataEditor = () => {
             </Button>
           )}
         </DialogTitle>
-        <DialogContent sx={{ px: 3, py: 2.5, bgcolor: exportDialogTone.body }}>
+        <DialogContent sx={{
+          px: factwisePreviewType === 'bom' && factwisePreviewFullscreen ? 2.5 : 3,
+          pt: factwisePreviewType === 'bom' && factwisePreviewFullscreen ? 3 : 3.25,
+          pb: factwisePreviewType === 'bom' ? 2 : 2.5,
+          bgcolor: exportDialogTone.body,
+          display: factwisePreviewType === 'bom' ? 'flex' : 'block',
+          flexDirection: factwisePreviewType === 'bom' ? 'column' : undefined,
+          overflow: factwisePreviewType === 'bom' && factwisePreviewFullscreen ? 'hidden' : undefined
+        }}>
           {factwisePreviewType === 'bom' ? (
             <>
-              <Typography variant="body2" sx={{ color: exportDialogTone.secondary, mb: 2 }}>
-                Review the BOM below, then export it as an Excel sheet, or to FactWise.
-              </Typography>
-              <Typography variant="caption" sx={{ color: exportDialogTone.secondary, display: 'block', mb: 1.5 }}>
-                High-level view - open full screen to drill into every raw material.
-              </Typography>
-              {factwisePreviewOpen && (
-                <BomTreePreview
-                  sessionId={sessionId}
-                  fullscreen={factwisePreviewFullscreen}
-                  height={factwisePreviewFullscreen ? 'calc(100vh - 250px)' : 420}
-                  onRequestFullscreen={() => setFactwisePreviewFullscreen(true)}
-                />
-              )}
-              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2, mt: 1.2 }}>
-                {[
-                  ['#ffffff', 'Finished good'],
-                  ['#93c5fd', 'Sub-assembly'],
-                  ['#bbf7d0', 'Sub-sub-assembly'],
-                  ['#fde047', 'Raw material'],
-                  ['#d1d5db', 'Alternate']
-                ].map(([color, label]) => (
-                  <Box key={label} sx={{ display: 'flex', alignItems: 'center', gap: 0.5, fontSize: 12, color: exportDialogTone.secondary }}>
-                    <Box sx={{ width: 10, height: 10, borderRadius: 0.5, bgcolor: color, border: '1px solid #cbd5e1' }} />
-                    {label}
-                  </Box>
-                ))}
+              <Box sx={{ mt: factwisePreviewFullscreen ? 1 : 1.5 }}>
+                {factwisePreviewOpen && (
+                  <BomTreePreview
+                    sessionId={sessionId}
+                    fullscreen={factwisePreviewFullscreen}
+                    height={factwisePreviewFullscreen ? 'calc(100vh - 178px)' : 420}
+                    onRequestFullscreen={() => setFactwisePreviewFullscreen(true)}
+                  />
+                )}
               </Box>
             </>
           ) : (
             <>
-              <Typography variant="body2" sx={{ color: exportDialogTone.secondary, mb: 1 }}>
+              <Typography variant="body2" sx={{ color: exportDialogTone.secondary, mb: 1, mt: 1.5 }}>
                 Review the item directory below, then download it for FactWise.
               </Typography>
               <Typography variant="caption" sx={{ color: exportDialogTone.secondary, display: 'block', mb: 1.5 }}>
@@ -8141,6 +8697,27 @@ const EnhancedDataEditor = () => {
           >
             Cancel
           </Button>
+          {/* Real download. For a BOM this is the generated FactWise BOM sheet;
+              for the item directory it is the processed sheet with BOM
+              structure columns stripped out. */}
+          <Button
+            variant="outlined"
+            onClick={() => downloadFactwisePreview('excel')}
+            disabled={Boolean(factwisePreviewDownloading)}
+            startIcon={factwisePreviewDownloading === 'excel'
+              ? <CircularProgress size={16} />
+              : <DownloadIcon />}
+            sx={{
+              textTransform: 'none',
+              borderRadius: '999px',
+              fontWeight: 700,
+              px: 3,
+              minHeight: 38,
+            }}
+          >
+            {factwisePreviewDownloading === 'excel' ? 'Preparing…' : 'Export Sheet'}
+          </Button>
+          {/* Mock, like Export to Project — no file is produced. */}
           <Button
             variant="contained"
             onClick={() => handleDirectoryExport(factwisePreviewType)}
@@ -8160,7 +8737,7 @@ const EnhancedDataEditor = () => {
               }
             }}
           >
-            Export
+            Export to FactWise
           </Button>
         </DialogActions>
       </Dialog>
@@ -8243,14 +8820,14 @@ const EnhancedDataEditor = () => {
         </DialogTitle>
         <DialogContent>
           <DialogContentText sx={{ mb: 3 }}>
-            Upload an Excel file (.xlsx or .xls) with corrected data. The file should have the same headers as the exported data.
+            Upload an Excel file (.xlsx, .xls, or .xlsm) with corrected data. The file should have the same headers as the exported data.
             Only matching headers will be updated; unmatched columns are ignored.
           </DialogContentText>
 
           {/* File Upload */}
           <Box sx={{ mb: 3 }}>
             <input
-              accept=".xlsx,.xls"
+              accept=".xlsx,.xls,.xlsm"
               style={{ display: 'none' }}
               id="correction-file-upload"
               type="file"
@@ -8415,9 +8992,9 @@ const EnhancedDataEditor = () => {
           </>
         ) : (
           <>
-            <DialogContent sx={{ px: 3, py: 3, bgcolor: exportDialogTone.body, color: exportDialogTone.text }}>
+            <DialogContent sx={{ px: 3, pt: 3.5, pb: 3, bgcolor: exportDialogTone.body, color: exportDialogTone.text }}>
               {/* Export Mode Selection */}
-              <FormControl component="fieldset" sx={{ mb: 2, width: '100%' }}>
+              <FormControl component="fieldset" sx={{ mb: 2, mt: 1.5, width: '100%' }}>
                 <FormLabel component="legend" sx={{ fontSize: '14px', fontWeight: 500, mb: 0.5, color: `${exportDialogTone.secondary} !important` }}>
                   Export to
                 </FormLabel>
@@ -8694,6 +9271,276 @@ const EnhancedDataEditor = () => {
           {snackbar.message}
         </Alert>
       </Snackbar>
+
+      {/* Export / Import — one entry point, both halves of the same round trip.
+          Export writes the grid exactly as it is; import reads that file back
+          into this same session so mappings, tags and MPN validation survive. */}
+      <Dialog open={exportImportOpen} onClose={() => setExportImportOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <ImportExportIcon fontSize="small" />
+          Export / Import sheet
+        </DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="body2" sx={{ color: 'text.secondary', mb: 2.5 }}>
+            Export the sheet, edit it in Excel, then import it back. Changes land in
+            this session, so your mapping, tags and MPN validation stay attached.
+          </Typography>
+
+          <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+            <Box sx={{ flex: 1, minWidth: 220, p: 2, borderRadius: 1, border: `1px solid ${t.border.default}` }}>
+              <Typography variant="subtitle2" sx={{ mb: 0.5 }}>1 &nbsp;Export</Typography>
+              <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mb: 1.5 }}>
+                Downloads every column exactly as shown here — nothing added or removed.
+              </Typography>
+              <Button
+                fullWidth
+                variant="contained"
+                onClick={handleExportSheetForEditing}
+                disabled={exportingSheet}
+                startIcon={exportingSheet ? <CircularProgress size={16} /> : <DownloadIcon />}
+              >
+                {exportingSheet ? 'Exporting…' : 'Export sheet'}
+              </Button>
+            </Box>
+
+            <Box sx={{ flex: 1, minWidth: 220, p: 2, borderRadius: 1, border: `1px solid ${t.border.default}` }}>
+              <Typography variant="subtitle2" sx={{ mb: 0.5 }}>2 &nbsp;Import</Typography>
+              <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mb: 1.5 }}>
+                Columns match by name, so reordering is safe. Anything unmatched is reported.
+              </Typography>
+              <Button
+                fullWidth
+                variant="outlined"
+                onClick={() => importFileInputRef.current?.click()}
+                disabled={importing}
+                startIcon={importing ? <CircularProgress size={16} /> : <UploadFileIcon />}
+              >
+                {importing ? 'Importing…' : 'Import edited sheet'}
+              </Button>
+            </Box>
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setExportImportOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Hidden picker for "Import edited sheet" in the Tools menu. */}
+      <input
+        ref={importFileInputRef}
+        type="file"
+        accept=".xlsx,.xls,.csv"
+        style={{ display: 'none' }}
+        onChange={handleImportEditedSheet}
+      />
+
+      {/* What the import actually changed — columns it could not match are
+          listed rather than silently dropped. */}
+      <Dialog open={Boolean(importResult)} onClose={() => setImportResult(null)} maxWidth="xs" fullWidth>
+        <DialogTitle>Sheet imported</DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="h4" sx={{ fontWeight: 700 }}>
+            {importResult?.imported_rows}
+          </Typography>
+          <Typography variant="body2" sx={{ color: 'text.secondary', mb: 2 }}>
+            rows imported{importResult && importResult.previous_rows !== importResult.imported_rows
+              ? ` (was ${importResult.previous_rows})` : ''}
+          </Typography>
+          <Alert severity="success" sx={{ mb: 1 }}>
+            {importResult?.matched_columns} columns matched by name.
+          </Alert>
+          {importResult?.ignored_columns?.length > 0 && (
+            <Alert severity="warning" sx={{ mb: 1 }}>
+              Not in this sheet, so ignored: {importResult.ignored_columns.join(', ')}
+            </Alert>
+          )}
+          {importResult?.untouched_columns?.length > 0 && (
+            <Alert severity="info">
+              Absent from your file, so left unchanged: {importResult.untouched_columns.join(', ')}
+            </Alert>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button variant="contained" onClick={() => setImportResult(null)}>Done</Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* MPN validation summary, shown once validation finishes. */}
+      <Dialog
+        open={mpnSummaryOpen}
+        onClose={() => setMpnSummaryOpen(false)}
+        maxWidth="md"
+        fullWidth
+        PaperProps={{
+          sx: {
+            maxWidth: 860,
+            width: 'min(860px, calc(100vw - 48px))',
+            borderRadius: '16px',
+            overflow: 'hidden',
+            bgcolor: t.surface.paper,
+            color: t.text.primary,
+            border: `1px solid ${t.border.default}`,
+            boxShadow: '0 24px 70px rgba(15, 23, 42, 0.18)'
+          }
+        }}
+      >
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1.25, px: 3, py: 2, borderBottom: `1px solid ${t.border.default}` }}>
+          <Box sx={{ width: 36, height: 36, borderRadius: '12px', display: 'grid', placeItems: 'center', bgcolor: mpnSummary && mpnSummary.failed === 0 ? t.state.successBg : t.state.warningBg }}>
+            {mpnSummary && mpnSummary.failed === 0
+              ? <VerifiedUserIcon sx={{ color: t.color.success, fontSize: 20 }} />
+              : <ErrorIcon sx={{ color: t.color.warningText, fontSize: 20 }} />}
+          </Box>
+          <Box>
+            <Typography sx={{ fontSize: 18, lineHeight: 1.25, fontWeight: 650, color: t.text.heading }}>
+              MPN validation complete
+            </Typography>
+            <Typography sx={{ fontSize: 12.5, lineHeight: 1.4, fontWeight: 400, color: t.text.secondary, mt: 0.25 }}>
+              Summary of unique manufacturer part numbers checked.
+            </Typography>
+          </Box>
+        </DialogTitle>
+        <DialogContent sx={{ px: 3, pt: 4.75, pb: 2.5 }}>
+          <Typography sx={{ fontSize: 26, lineHeight: 1.15, fontWeight: 650, mb: 0.75, mt: 2.25, color: t.text.heading }}>
+            {mpnSummary ? `${mpnSummary.validated} of ${mpnSummary.total}` : ''}
+          </Typography>
+          <Typography variant="body2" sx={{ color: t.text.secondary, mb: 2, fontSize: 13.5 }}>
+            unique MPNs matched
+          </Typography>
+          {mpnSummary && mpnSummary.failed === 0 ? (
+            <Alert severity="success" sx={{ borderRadius: '12px', mb: 1.5 }}>
+              All MPNs were matched successfully.
+            </Alert>
+          ) : (
+            <Alert severity="warning" sx={{ borderRadius: '12px', mb: 1.5 }}>
+              {mpnSummary?.failed} MPN{mpnSummary?.failed === 1 ? '' : 's'} could not be
+              matched. Use the Filter menu to review Invalid or Unknown MPN rows.
+            </Alert>
+          )}
+          <Typography variant="caption" sx={{ display: 'block', color: t.text.secondary, fontSize: 12, lineHeight: 1.45 }}>
+            Counts are unique part numbers, not rows — the same MPN used on several
+            rows is validated once.
+          </Typography>
+
+          {mpnSummary?.providerFailures?.length > 0 && (
+            <>
+              <Divider sx={{ my: 2 }} />
+              {mpnSummary.providerFailures.map((failure) => (
+                <Alert severity="error" key={failure.provider} sx={{ mb: 1, borderRadius: '12px' }}>
+                  {failure.message}
+                  {' '}Parts were not checked against {failure.provider} — blank
+                  {' '}columns for it do not mean the part is invalid.
+                </Alert>
+              ))}
+            </>
+          )}
+
+          {mpnSummary?.breakdown && (
+            <>
+              <Divider sx={{ my: 2 }} />
+              <Typography variant="subtitle2" sx={{ mb: 1, fontSize: 13.5, fontWeight: 650, color: t.text.heading }}>
+                By source — {mpnSummary.breakdown.total_rows} rows
+              </Typography>
+              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))' }, gap: 1.25 }}>
+              {(mpnSummary.breakdown.sources || []).map((source) => (
+                <Box key={source.name} sx={{ p: 1.25, borderRadius: '12px', border: `1px solid ${t.border.default}`, bgcolor: t.surface.subtle, minWidth: 0 }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+                    <Typography variant="body2" sx={{ fontWeight: 700, minWidth: 84, fontSize: 13 }}>
+                      {source.name}
+                    </Typography>
+                    <Chip size="small" label={`${source.valid} valid`} sx={{ bgcolor: t.state.successBg, color: t.color.success, '& .MuiChip-label': { fontWeight: 500 } }} />
+                    <Chip size="small" label={`${source.invalid} invalid`} sx={{ bgcolor: t.state.dangerBg, color: t.color.danger, '& .MuiChip-label': { fontWeight: 500 } }} />
+                    {source.unchecked > 0 && (
+                      <Chip size="small" variant="outlined" label={`${source.unchecked} not checked`} sx={{ '& .MuiChip-label': { fontWeight: 500 } }} />
+                    )}
+                  </Box>
+                  {/* Lifecycle is a breakdown OF the valid parts only. An
+                      unmatched part has no status, so nothing here ever
+                      describes the invalid or unchecked counts above. */}
+                  {source.valid > 0 && ((source.statuses || []).length > 0 || source.eol > 0 || source.discontinued > 0) && (
+                    <Box sx={{ mt: 1, pt: 1, borderTop: `1px solid ${t.border.default}` }}>
+                      <Typography variant="caption" sx={{ display: 'block', color: t.text.secondary, mb: 0.6, fontWeight: 400 }}>
+                        Of the {source.valid} valid:
+                      </Typography>
+                      {(source.statuses || []).length > 0 && (
+                        <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap', mb: 0.5 }}>
+                          {source.statuses.map(([label, count]) => (
+                            <Chip key={label} size="small" variant="outlined" label={`${label}: ${count}`} sx={{ '& .MuiChip-label': { fontWeight: 500 } }} />
+                          ))}
+                        </Box>
+                      )}
+                      {(source.eol > 0 || source.discontinued > 0) && (
+                        <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap' }}>
+                          {source.eol > 0 && (
+                            <Chip size="small" variant="outlined" label={`${source.eol} end-of-life`}
+                                  sx={{ color: t.color.warningText, borderColor: t.color.warningText, '& .MuiChip-label': { fontWeight: 500 } }} />
+                          )}
+                          {source.discontinued > 0 && (
+                            <Chip size="small" variant="outlined" label={`${source.discontinued} discontinued`}
+                                  sx={{ color: t.color.danger, borderColor: t.color.danger, '& .MuiChip-label': { fontWeight: 500 } }} />
+                          )}
+                        </Box>
+                      )}
+                    </Box>
+                  )}
+                </Box>
+              ))}
+              </Box>
+              {(mpnSummary.breakdown.sources || []).length === 0 && (
+                <Typography variant="caption" sx={{ color: t.text.secondary }}>
+                  No provider columns found in this sheet.
+                </Typography>
+              )}
+            </>
+          )}
+        </DialogContent>
+        <DialogActions sx={{ px: 3, py: 2, borderTop: `1px solid ${t.border.default}` }}>
+          <Button variant="contained" onClick={() => setMpnSummaryOpen(false)} sx={{ minWidth: 112, height: 44, borderRadius: '999px', textTransform: 'none', fontWeight: 600, px: 3 }}>
+            Done
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* BOM validation — its own ruleset, not the item required-field guard. */}
+      <Dialog
+        open={bomValidationOpen}
+        onClose={() => setBomValidationOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>BOM cannot be exported yet</DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
+            {bomValidationIssues.length} issue{bomValidationIssues.length === 1 ? '' : 's'} would
+            make this BOM fail the FactWise import.
+          </Typography>
+          {bomValidationIssues.slice(0, 25).map((issue, index) => (
+            <Alert severity="error" key={index} sx={{ mb: 1 }}>
+              {issue.message}
+            </Alert>
+          ))}
+          {bomValidationIssues.length > 25 && (
+            <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+              …and {bomValidationIssues.length - 25} more.
+            </Typography>
+          )}
+          {bomValidationWarnings.length > 0 && (
+            <>
+              <Divider sx={{ my: 2 }} />
+              <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                Warnings — these do not block export
+              </Typography>
+              {bomValidationWarnings.slice(0, 10).map((warning, index) => (
+                <Alert severity="warning" key={index} sx={{ mb: 1 }}>
+                  {warning.message}
+                </Alert>
+              ))}
+            </>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setBomValidationOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 };

@@ -76,7 +76,7 @@ SFO_TEMPLATE_REFERENCE_ROWS = [
     [" "],
     [
         "Item code",
-        "SAP Item ID",
+        "ERP Code",
         "CPN Code",
         "MPN Code",
         "HSN Code",

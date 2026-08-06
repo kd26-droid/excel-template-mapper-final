@@ -242,3 +242,119 @@ def extract_table_from_pdf_words(
         'dropped': total_dropped,
         'merged_continuation_rows': rows_before_merge - len(all_rows) if merge_wrapped else 0,
     }
+
+
+def detect_column_ranges(words: List[Word], region: Dict[str, float],
+                         min_gap_ratio: float = 0.012) -> List[Range]:
+    """Infer column x-ranges inside one region from where the words are not.
+
+    A ruled table leaves vertical whitespace between columns. Projecting every
+    word onto the x-axis and looking for gaps wide enough to be deliberate finds
+    those channels without the user having to draw one box per column.
+
+    ``min_gap_ratio`` is a fraction of the region width, so it scales with page
+    size rather than assuming a DPI. Gaps narrower than that are treated as
+    ordinary word spacing.
+
+    Returns [] when nothing convincing is found, so the caller can fall back to
+    the zones the user actually drew instead of inventing a layout.
+    """
+    if not words:
+        return []
+
+    left = region['x0']
+    right = region['x1']
+    width = right - left
+    if width <= 0:
+        return []
+
+    min_gap = max(width * min_gap_ratio, 1.0)
+
+    spans = sorted(
+        ((max(w['x0'], left), min(w['x1'], right)) for w in words),
+        key=lambda s: s[0],
+    )
+    spans = [(a, b) for a, b in spans if b > a]
+    if not spans:
+        return []
+
+    # Merge overlapping/adjacent word spans into occupied bands; whatever sits
+    # between two bands is a candidate column gap.
+    bands: List[List[float]] = [list(spans[0])]
+    for start, end in spans[1:]:
+        if start <= bands[-1][1]:
+            bands[-1][1] = max(bands[-1][1], end)
+        else:
+            bands.append([start, end])
+
+    columns: List[Range] = []
+    current_start = bands[0][0]
+    current_end = bands[0][1]
+    for start, end in bands[1:]:
+        if start - current_end >= min_gap:
+            columns.append((current_start, current_end))
+            current_start = start
+        current_end = max(current_end, end)
+    columns.append((current_start, current_end))
+
+    # One column means no gap was convincing enough — report nothing rather than
+    # claim the whole region is a single column.
+    return columns if len(columns) > 1 else []
+
+
+def extract_ruled_table(pdf_page, rect: Dict[str, float]) -> Dict[str, Any]:
+    """Extract a table from one region using the PDF's own ruling lines.
+
+    A bordered table already declares its column boundaries as drawn lines, so
+    nothing has to be inferred: the user marks the table area and the grid comes
+    from the file. This is what lets a single zone replace one-zone-per-column.
+
+    Falls back to whitespace-inferred columns when the region has no ruling, and
+    reports which strategy produced the result so the caller can say so rather
+    than silently guessing.
+    """
+    crop = pdf_page.crop((rect['x0'], rect['top'], rect['x1'], rect['bottom']))
+
+    # 'lines' vertically keeps real column edges; horizontally it merges a
+    # wrapped description into its own cell instead of splitting it across rows.
+    for horizontal in ('lines', 'text'):
+        try:
+            table = crop.extract_table({
+                'vertical_strategy': 'lines',
+                'horizontal_strategy': horizontal,
+            })
+        except Exception:
+            table = None
+        if table and len(table) > 1 and len(table[0]) > 1:
+            rows = [[('' if cell is None else str(cell).replace('\n', ' ').strip())
+                     for cell in row] for row in table]
+            return {
+                'rows': rows,
+                'n_columns': max(len(r) for r in rows),
+                'strategy': 'ruling_lines_%s' % horizontal,
+                'dropped': 0,
+            }
+
+    # No usable ruling: fall back to the vertical whitespace channels between
+    # words. Weaker — centred headers in wide columns can mislead it — so it is
+    # only reached when the file gives us nothing better.
+    words = [
+        {'text': w['text'], 'x0': w['x0'], 'x1': w['x1'],
+         'top': w['top'], 'bottom': w['bottom']}
+        for w in crop.extract_words()
+    ]
+    if not words:
+        return {'rows': [], 'n_columns': 0, 'strategy': 'none', 'dropped': 0}
+
+    region = {'x0': rect['x0'], 'x1': rect['x1']}
+    columns = detect_column_ranges(words, region)
+    if not columns:
+        return {'rows': [], 'n_columns': 0, 'strategy': 'none', 'dropped': 0}
+
+    result = words_to_table(words, columns)
+    return {
+        'rows': result['rows'],
+        'n_columns': len(columns),
+        'strategy': 'whitespace_gaps',
+        'dropped': result['dropped'],
+    }

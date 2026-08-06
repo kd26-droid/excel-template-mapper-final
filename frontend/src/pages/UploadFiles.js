@@ -1,6 +1,7 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import LoaderOverlay, { useGlobalBlock } from '../components/LoaderOverlay';
+import BomStructureDialog from '../components/BomStructureDialog';
 import {
   Typography,
   Button,
@@ -36,12 +37,13 @@ import {
   CloudUpload as CloudUploadIcon,
   LibraryBooks as LibraryBooksIcon,
   CheckCircle as CheckCircleIcon,
-  TrendingUp as TrendingUpIcon,
   Schedule as ScheduleIcon,
   PlayArrow as PlayArrowIcon,
   Warning as WarningIcon,
   UploadFile as UploadFileIcon,
   Search as SearchIcon,
+  TableChart as TableChartIcon,
+  HighlightAlt as HighlightAltIcon,
   Close as CloseIcon,
   Science as ScienceIcon,
   Add as AddIcon,
@@ -53,6 +55,18 @@ import {
 import * as XLSX from 'xlsx';
 import api, { setGlobalLoaderCallback } from '../services/api';
 import { useThemeContext } from '../utils/ThemeContext';
+
+const SUPPORTED_SOURCE_EXTENSIONS = ['.xlsx', '.xls', '.xlsm', '.csv', '.pdf'];
+const SUPPORTED_WORKBOOK_EXTENSIONS = ['.xlsx', '.xls', '.xlsm'];
+
+const getFileExtension = (fileName = '') => {
+  const match = String(fileName || '').toLowerCase().match(/\.[^.]+$/);
+  return match ? match[0] : '';
+};
+
+const unsupportedFileMessage = (fileName = 'Selected file') => (
+  `${fileName} is not supported. Please upload .xlsx, .xls, .xlsm, .csv, or .pdf files.`
+);
 
 const IST_TIME_ZONE = 'Asia/Kolkata';
 
@@ -331,7 +345,7 @@ const buildCombinedSheetFile = (workbook, sheetNames, headerRow, fileName) => {
   XLSX.utils.book_append_sheet(wb, ws, 'Combined');
   const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
   const blob = new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-  const base = String(fileName || 'combined').replace(/\.(xlsx|xls|csv)$/i, '');
+  const base = String(fileName || 'combined').replace(/\.(xlsx|xlsm|xls|csv)$/i, '');
   return { file: new File([blob], `${base} (combined).xlsx`, { type: blob.type }), rows: dataRows.length };
 };
 
@@ -435,6 +449,32 @@ const normalizePdfTablesForWorkbook = (payload, sourceFile) => {
   return {
     headers,
     rows: sources.flatMap((source) => source.rows),
+  };
+};
+
+const createExtractedPdfWorkbook = (payload, sourceFileName = 'PDF source') => {
+  const normalizedTables = normalizePdfTablesForWorkbook(payload, sourceFileName);
+  const normalized = normalizedTables.rows.length
+    ? normalizedTables
+    : normalizePdfRowsForWorkbook(payload, sourceFileName);
+
+  if (!normalized.headers.length || !normalized.rows.length) {
+    throw new Error('No usable table rows were extracted from this PDF.');
+  }
+
+  const workbook = createWorkbookFromObjects(normalized.rows, normalized.headers, 'PDF_Source');
+  const safeBase = String(sourceFileName || 'pdf-source').replace(/\.[^.]+$/, '') || 'pdf-source';
+  const workbookFile = createWorkbookFileFromWorkbook(workbook, `${safeBase} (extracted).xlsx`);
+
+  return {
+    workbook,
+    file: workbookFile,
+    sheetNames: workbook.SheetNames || ['PDF_Source'],
+    rowCount: normalized.rows.length,
+    columnCount: normalized.headers.length,
+    rows: normalized.rows,
+    headers: normalized.headers,
+    extractionData: payload,
   };
 };
 
@@ -662,6 +702,29 @@ const UploadFiles = () => {
     }
   };
 
+  // Tinted icon chip + muted caveat line for the two PDF method tiles. The
+  // caption carries the gotcha that actually decides the choice, so it stays
+  // visually quieter than the description above it.
+  const choiceIconWrapSx = (tint) => ({
+    flexShrink: 0,
+    width: 52,
+    height: 52,
+    borderRadius: '14px',
+    display: 'grid',
+    placeItems: 'center',
+    color: tint,
+    bgcolor: `${tint}${isDarkMode ? '26' : '1a'}`,
+    border: `1px solid ${tint}3d`
+  });
+
+  const choiceCaptionSx = {
+    mt: 1.25,
+    display: 'block',
+    fontSize: 12,
+    lineHeight: 1.5,
+    color: isDarkMode ? '#7c8ba1' : '#94a3b8'
+  };
+
   const sheetJoinDraftDbName = 'excel-template-mapper-drafts';
   const sheetJoinDraftStoreName = 'files';
   const sheetJoinBomDraftKey = 'sheet-join-bom-draft';
@@ -697,6 +760,14 @@ const UploadFiles = () => {
   const [clientHeaderPreview, setClientHeaderPreview] = useState([]);
   const [clientHeaderAutoDetected, setClientHeaderAutoDetected] = useState(false);
 
+  // BOM structure gate. Asked on whichever exit the user takes, so the direct
+  // Upload -> Mapping path is covered as well as the normalizer route. The
+  // answers travel with the session, and the normalizer will not ask again.
+  const [bomStructureOpen, setBomStructureOpen] = useState(false);
+  const [bomStructureAnswers, setBomStructureAnswers] = useState(null);
+  const [pendingBomStructureAction, setPendingBomStructureAction] = useState(null);
+
+
   // Template file state
   const [templateFile, setTemplateFile] = useState(null);
   const [templateSheetNames, setTemplateSheetNames] = useState([]);
@@ -731,6 +802,9 @@ const UploadFiles = () => {
   const [processingTemplateMode, setProcessingTemplateMode] = useState('');
   const [processingTemplateName, setProcessingTemplateName] = useState('');
   const [processingTemplates, setProcessingTemplates] = useState([]);
+  // Name clashes are caught here, beside the field, rather than surfacing
+  // as a toast after the upload has already started.
+  const [newTemplateNameError, setNewTemplateNameError] = useState('');
   const [selectedProcessingTemplateId, setSelectedProcessingTemplateId] = useState('');
   const [processingTemplatesLoading, setProcessingTemplatesLoading] = useState(false);
   const [processingPath, setProcessingPath] = useState('map');
@@ -748,6 +822,11 @@ const UploadFiles = () => {
   const [pdfChoiceDialogOpen, setPdfChoiceDialogOpen] = useState(false);
   const [pendingPdfSessionId, setPendingPdfSessionId] = useState(null);
   const [pendingPdfContext, setPendingPdfContext] = useState(null);
+  const [pdfExtractionReview, setPdfExtractionReview] = useState(null);
+  const [pdfExtractionReviewOpen, setPdfExtractionReviewOpen] = useState(false);
+  const [pdfExtractionReviewPage, setPdfExtractionReviewPage] = useState(0);
+  const [pdfExtractionVisibleColumns, setPdfExtractionVisibleColumns] = useState([]);
+  const pdfExtractionReviewRowsPerPage = 50;
 
   // Primary column cleanup dialog state
   const [primaryColumnDialogOpen, setPrimaryColumnDialogOpen] = useState(false);
@@ -872,6 +951,37 @@ const UploadFiles = () => {
       setProcessingTemplatesLoading(false);
     }
   };
+
+  const handleClearProcessingTemplateSelection = useCallback(() => {
+    setSelectedProcessingTemplateId('');
+    setProcessingTemplateMode('');
+    setProcessingPath('map');
+    setError(null);
+  }, []);
+
+  const handleDeleteProcessingTemplate = useCallback(async (template, event) => {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    if (!template?.id) return;
+
+    const confirmed = window.confirm(`Delete template "${template.name}"? This cannot be undone.`);
+    if (!confirmed) return;
+
+    try {
+      setProcessingTemplatesLoading(true);
+      await api.deleteProcessingTemplate(template.id);
+      setProcessingTemplates((prev) => prev.filter((item) => String(item.id) !== String(template.id)));
+      if (String(selectedProcessingTemplateId) === String(template.id)) {
+        handleClearProcessingTemplateSelection();
+      }
+      setSuccess(`Template "${template.name}" deleted successfully.`);
+      setError(null);
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Could not delete the selected template.');
+    } finally {
+      setProcessingTemplatesLoading(false);
+    }
+  }, [handleClearProcessingTemplateSelection, selectedProcessingTemplateId]);
 
   const openSheetJoinDraftDb = useCallback(() => new Promise((resolve, reject) => {
     const request = indexedDB.open(sheetJoinDraftDbName, 1);
@@ -1162,27 +1272,7 @@ const UploadFiles = () => {
         data_alignment: pdfDataAlignment
       });
 
-    const normalizedTables = normalizePdfTablesForWorkbook(response.data, file.name);
-    const normalized = normalizedTables.rows.length
-      ? normalizedTables
-      : normalizePdfRowsForWorkbook(response.data, file.name);
-
-    if (!normalized.headers.length || !normalized.rows.length) {
-      throw new Error('No usable table rows were extracted from this PDF.');
-    }
-
-    const workbook = createWorkbookFromObjects(normalized.rows, normalized.headers, 'PDF_Source');
-    const safeBase = file.name.replace(/\.[^.]+$/, '') || 'pdf-source';
-    const workbookFile = createWorkbookFileFromWorkbook(workbook, `${safeBase} (extracted).xlsx`);
-
-    return {
-      workbook,
-      file: workbookFile,
-      sheetNames: workbook.SheetNames || ['PDF_Source'],
-      rowCount: normalized.rows.length,
-      columnCount: normalized.headers.length,
-      extractionData: response.data,
-    };
+    return createExtractedPdfWorkbook(response.data, file.name);
   }, [pdfDataAlignment]);
 
   const getSheetJoinSourceWorkbook = useCallback((sourceId) => {
@@ -1207,6 +1297,18 @@ const UploadFiles = () => {
     const headerIndex = Math.max(0, Number(headerRow || 1) - 1);
     return getUsableColumnDescriptors(rows, headerIndex).map(column => column.header);
   }, [getSheetJoinSourceWorkbook]);
+
+  const bomStructureSheetNames = useMemo(
+    () => (combineSheetsMode && selectedClientSheets.length > 0 ? selectedClientSheets : clientSheetNames),
+    [combineSheetsMode, selectedClientSheets, clientSheetNames]
+  );
+
+  // Level auto-detection has to read headers at the row the user actually
+  // chose — THALES-style sheets put their header well below row 1.
+  const bomStructureHeaderReader = useCallback(
+    sheetName => getSheetHeaders(sheetName, clientHeaderRow, 'primary'),
+    [getSheetHeaders, clientHeaderRow]
+  );
 
   const getSheetRecords = useCallback((sheetName, headerRow = 1, sourceId = 'primary') => {
     const workbook = getSheetJoinSourceWorkbook(sourceId);
@@ -1651,6 +1753,12 @@ const UploadFiles = () => {
   const onDropUserFile = useCallback(acceptedFiles => {
     if (acceptedFiles.length > 0) {
       let file = acceptedFiles[0];
+      const extension = getFileExtension(file.name);
+      if (!SUPPORTED_SOURCE_EXTENSIONS.includes(extension)) {
+        setSuccess(null);
+        setError(unsupportedFileMessage(file.name));
+        return;
+      }
       setError(null);
       setSuccess(null);
       setUserFile(file);
@@ -1662,6 +1770,10 @@ const UploadFiles = () => {
       setClientHeaderAutoDetected(false);
       setCombineSheetsMode(false);
       setSelectedClientSheets([]);
+      // A different workbook means different sheets, so the BOM answers no
+      // longer apply and the gate has to be asked again.
+      setBomStructureAnswers(null);
+      setPendingBomStructureAction(null);
       setSheetJoinSetup(null);
       setActiveSheetJoinComparisonId(null);
       setSheetJoinLegacyHeaderWarning(false);
@@ -1670,6 +1782,8 @@ const UploadFiles = () => {
       setSheetJoinGroupedSuggestion(null);
       setSheetJoinSources([]);
       setSheetJoinSourceFileInputKey(key => key + 1);
+      setPdfExtractionReview(null);
+      setPdfExtractionReviewPage(0);
       
       // Read the file to extract sheet names and column headers for Excel/CSV files
       // Skip processing for PDF files as they will be handled by Azure OCR
@@ -1797,6 +1911,12 @@ const UploadFiles = () => {
     }
   }, []);
 
+  const onDropUserFileRejected = useCallback((fileRejections = []) => {
+    const rejectedFile = fileRejections[0]?.file;
+    setSuccess(null);
+    setError(unsupportedFileMessage(rejectedFile?.name || 'Selected file'));
+  }, []);
+
   const handleRemoveClientFile = useCallback(() => {
     setUserFile(null);
     setClientWorkbook(null);
@@ -1816,6 +1936,10 @@ const UploadFiles = () => {
     setActiveSheetJoinComparisonId(null);
     setPendingPdfSessionId(null);
     setPendingPdfContext(null);
+    setPdfExtractionReview(null);
+    setPdfExtractionReviewOpen(false);
+    setPdfExtractionReviewPage(0);
+    setPdfExtractionVisibleColumns([]);
     setPdfChoiceDialogOpen(false);
     setSuccess(null);
     setError(null);
@@ -1839,12 +1963,38 @@ const UploadFiles = () => {
     navigate('/upload', { replace: true, state: nextState });
   }, [location.state, navigate, onDropUserFile]);
 
+  useEffect(() => {
+    if (!location.state?.fromPdfZoneReview) return;
+
+    try {
+      const extracted = createExtractedPdfWorkbook(
+        location.state.pdfZonePayload,
+        location.state.sourceFileName || 'PDF source'
+      );
+      applyExtractedPdfAsPrimary(extracted, null, {});
+      setWizardStep(0);
+      setProcessingPath('map');
+      setSuccess(`PDF extraction ready for review: ${extracted.rowCount} rows and ${extracted.columnCount} columns.`);
+    } catch (err) {
+      setError(err.message || 'No usable table rows were extracted from this PDF.');
+    } finally {
+      const nextState = { ...(location.state || {}) };
+      delete nextState.fromPdfZoneReview;
+      delete nextState.pdfSessionId;
+      delete nextState.pdfZonePayload;
+      delete nextState.sourceFileName;
+      navigate('/upload', { replace: true, state: nextState });
+    }
+  }, [location.state, navigate]);
+
 
   const { getRootProps: getUserRootProps, getInputProps: getUserInputProps, isDragActive: isUserDragActive } =
     useDropzone({
       onDrop: onDropUserFile,
+      onDropRejected: onDropUserFileRejected,
       accept: {
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+        'application/vnd.ms-excel.sheet.macroEnabled.12': ['.xlsm'],
         'application/vnd.ms-excel': ['.xls'],
         'text/csv': ['.csv'],
         'application/csv': ['.csv'],
@@ -1858,6 +2008,12 @@ const UploadFiles = () => {
   const onDropTemplateFile = useCallback(acceptedFiles => {
     if (acceptedFiles.length > 0) {
       const file = acceptedFiles[0];
+      const extension = getFileExtension(file.name);
+      if (![...SUPPORTED_WORKBOOK_EXTENSIONS, '.csv'].includes(extension)) {
+        setSuccess(null);
+        setError(`${file.name} is not supported as a template file. Please upload .xlsx, .xls, .xlsm, or .csv.`);
+        return;
+      }
       setError(null);
       setTemplateFile(file);
 
@@ -1893,7 +2049,7 @@ const UploadFiles = () => {
           setTemplateHeaderAutoDetected(detectedRow > 1);
         } catch (err) {
           console.error('Error reading template file:', err);
-          setError('Error reading template file. Please make sure it\'s a valid Excel or CSV file.');
+          setError('Error reading template file. Please make sure it\'s a valid Excel, macro-enabled Excel, or CSV file.');
         }
       };
 
@@ -1905,11 +2061,19 @@ const UploadFiles = () => {
     }
   }, []);
 
+  const onDropTemplateFileRejected = useCallback((fileRejections = []) => {
+    const rejectedFile = fileRejections[0]?.file;
+    setSuccess(null);
+    setError(`${rejectedFile?.name || 'Selected file'} is not supported as a template file. Please upload .xlsx, .xls, .xlsm, or .csv.`);
+  }, []);
+
   const { getRootProps: getTemplateRootProps, getInputProps: getTemplateInputProps, isDragActive: isTemplateDragActive } =
     useDropzone({
       onDrop: onDropTemplateFile,
+      onDropRejected: onDropTemplateFileRejected,
       accept: {
         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+        'application/vnd.ms-excel.sheet.macroEnabled.12': ['.xlsm'],
         'application/vnd.ms-excel': ['.xls'],
         'text/csv': ['.csv'],
         'application/csv': ['.csv'],
@@ -2042,9 +2206,20 @@ const UploadFiles = () => {
   const handleConfirmNewProcessingTemplate = () => {
     const name = newTemplateDraftName.trim();
     if (!name) {
-      setError('Enter a template name to continue.');
+      setNewTemplateNameError('Enter a template name to continue.');
       return;
     }
+
+    // The backend rejects duplicates with a 409; catching it here means the
+    // user fixes the name before the upload runs rather than after it fails.
+    const clash = processingTemplates.some(
+      template => String(template?.name || '').trim().toLowerCase() === name.toLowerCase()
+    );
+    if (clash) {
+      setNewTemplateNameError('A template with this name already exists. Enter a different name.');
+      return;
+    }
+    setNewTemplateNameError('');
 
     setProcessingTemplateMode('new');
     setProcessingTemplateName(name);
@@ -2111,6 +2286,11 @@ const UploadFiles = () => {
     const file = event.target.files?.[0];
     if (!file) return;
     const lowerName = file.name.toLowerCase();
+    if (!SUPPORTED_SOURCE_EXTENSIONS.includes(getFileExtension(file.name))) {
+      setError(unsupportedFileMessage(file.name));
+      event.target.value = '';
+      return;
+    }
     if (lowerName.endsWith('.pdf')) {
       await preparePdfExtractionDialog(file, {
         target: 'merge-source',
@@ -2292,6 +2472,30 @@ const UploadFiles = () => {
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Merge_Preview');
     const filterSuffix = sheetJoinPreviewFilter === 'all' ? 'all' : sheetJoinPreviewFilter;
     XLSX.writeFile(workbook, `${sheetJoinConfig.relationshipName || 'sheet_merge'}_${filterSuffix}_preview.xlsx`);
+  };
+
+  const handleDownloadPdfExtractionPreview = () => {
+    if (!pdfExtractionReview) return;
+    const exportHeaders = pdfExtractionVisibleColumns.length
+      ? pdfReviewHeaders.filter(header => pdfExtractionVisibleColumns.includes(header))
+      : pdfReviewHeaders;
+    const exportRows = pdfReviewRows.map(row => {
+      const cleanRow = {};
+      exportHeaders.forEach(header => {
+        cleanRow[header] = row?.[header] ?? '';
+      });
+      return cleanRow;
+    });
+    const worksheet = XLSX.utils.json_to_sheet(exportRows, { header: exportHeaders });
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'PDF_Extraction_Preview');
+    XLSX.writeFile(workbook, 'pdf_extraction_preview.xlsx');
+  };
+
+  const handleContinuePdfExtractionReview = () => {
+    setPdfExtractionReviewOpen(false);
+    setWizardStep(1);
+    setProcessingPath('map');
   };
 
   const handleSheetJoinColumnResize = (header, event) => {
@@ -2522,7 +2726,7 @@ const UploadFiles = () => {
     const name = file?.name?.toLowerCase?.() || '';
     if (name.endsWith('.pdf')) return 'pdf';
     if (name.endsWith('.csv')) return 'csv';
-    if (name.endsWith('.xlsx') || name.endsWith('.xls')) return 'excel';
+    if (SUPPORTED_WORKBOOK_EXTENSIONS.some((extension) => name.endsWith(extension))) return 'excel';
     return 'unknown';
   };
 
@@ -2602,6 +2806,15 @@ const UploadFiles = () => {
     setSheetJoinSources([]);
     setSheetJoinSourceFileInputKey(key => key + 1);
     setActiveSheetJoinComparisonId(null);
+    setPdfExtractionReview({
+      headers: extracted.headers || readHeadersAtRow(extracted.workbook, extracted.sheetNames[0] || 'PDF_Source', 1),
+      rows: extracted.rows || [],
+      rowCount: extracted.rowCount || 0,
+      columnCount: extracted.columnCount || 0,
+    });
+    setPdfExtractionVisibleColumns(extracted.headers || readHeadersAtRow(extracted.workbook, extracted.sheetNames[0] || 'PDF_Source', 1));
+    setPdfExtractionReviewPage(0);
+    setPdfExtractionReviewOpen(true);
     setSuccess(`PDF extracted into ${extracted.rowCount} rows and ${extracted.columnCount} columns.`);
 
     if (action === 'normalize') {
@@ -2662,10 +2875,11 @@ const UploadFiles = () => {
     setNewTemplateDraftName(processingTemplateName.trim() || fallbackName);
     setPendingTemplateAction(action);
     setNewTemplateDialogOpen(true);
+    setNewTemplateNameError('');
     setError(null);
   };
 
-  const handleOpenBomNormalizer = (templateOptions = {}) => {
+  const handleOpenBomNormalizer = (templateOptions = {}, passedAnswers = null) => {
     if (!userFile) {
       setError('Please select a client file');
       return;
@@ -2685,11 +2899,19 @@ const UploadFiles = () => {
       return;
     }
 
+    // No gate here: this route goes to the BOM Normalizer, which asks the
+    // questions itself once the normalized rows are on screen. Asking twice —
+    // or asking about a PDF before it has even been parsed — is just noise.
+    const bomAnswers = passedAnswers || bomStructureAnswers;
+
     navigate('/bom-normalizer', {
       state: {
         initialFile: userFile,
         initialFileMode: 'workbook',
+        initialSheetName: selectedClientSheet,
+        initialHeaderRow: clientHeaderRow,
         templateFile,
+        bomStructure: bomAnswers,
         uploadSource: {
           ...getProcessingTemplateState({
             processingTemplateMode: selectedProcessingTemplateId ? 'use' : 'new',
@@ -2701,7 +2923,7 @@ const UploadFiles = () => {
     });
   };
 
-  const handleUpload = async (templateOptions = {}) => {
+  const handleUpload = async (templateOptions = {}, passedAnswers = null) => {
     if (!userFile) {
       setError('Please select a client file');
       return;
@@ -2731,6 +2953,15 @@ const UploadFiles = () => {
 
     if (!selectedProcessingTemplateId && !templateOptions.processingTemplateName) {
       openNewTemplateDialog('upload');
+      return;
+    }
+
+    // Same questions on the direct route, so a session created without the
+    // normalizer still carries them and BOM generation stays possible.
+    const bomAnswers = passedAnswers || bomStructureAnswers;
+    if (!isPDF && !bomAnswers && clientSheetNames.length > 0) {
+      setPendingBomStructureAction({ action: 'upload', templateOptions });
+      setBomStructureOpen(true);
       return;
     }
 
@@ -2783,6 +3014,12 @@ const UploadFiles = () => {
         formData.append('formulaRules', JSON.stringify(formulaRules));
       }
 
+      // Carry the BOM structure answers onto the session so BOM generation does
+      // not have to re-ask after a reload.
+      if (bomAnswers) {
+        formData.append('bomStructure', JSON.stringify(bomAnswers));
+      }
+
       let response;
 
       const selectedProcessingTemplate = getSelectedProcessingTemplate();
@@ -2812,6 +3049,9 @@ const UploadFiles = () => {
             state: {
               initialFile: uploadClientFile,
               initialFileMode: 'workbook',
+              initialSheetName: uploadSheetName,
+              initialHeaderRow: uploadHeaderRow,
+              bomStructure: bomAnswers,
               autoReplayProcessingTemplate: selectedProcessingTemplate,
               autoReplayMappingTemplateId: processingMappingTemplateId,
               uploadSource: getProcessingTemplateState({
@@ -2908,6 +3148,7 @@ const UploadFiles = () => {
             autoApplyTemplate: selectedTemplate,
             appliedTemplate: selectedTemplate,
             fromUpload: true,
+            bomStructure: bomAnswers,
             smartTagFormulaRules: formulaRules,
             uploadSource: getProcessingTemplateState({
               processingTemplateMode: selectedProcessingTemplateId ? 'use' : 'new',
@@ -2915,6 +3156,7 @@ const UploadFiles = () => {
             })
           } : {
             fromUpload: true,
+            bomStructure: bomAnswers,
             uploadSource: getProcessingTemplateState({
               processingTemplateMode: selectedProcessingTemplateId ? 'use' : 'new',
               ...templateOptions,
@@ -2953,6 +3195,26 @@ const UploadFiles = () => {
     }
   };
 
+  // Resume whichever exit the user clicked, now that the questions are
+  // answered. The guard passes on the second run, so the original body executes
+  // untouched. Answers are handed over directly rather than read from state,
+  // which has not committed yet at this point.
+  const handleBomStructureConfirm = (payload) => {
+    setBomStructureAnswers(payload);
+    setBomStructureOpen(false);
+    const pending = pendingBomStructureAction;
+    setPendingBomStructureAction(null);
+    if (!pending) return;
+    // Only the direct-to-mapping exit is gated here; the normalizer route asks
+    // for itself, so there is nothing else to resume.
+    handleUpload(pending.templateOptions || {}, payload);
+  };
+
+  const handleBomStructureCancel = () => {
+    setBomStructureOpen(false);
+    setPendingBomStructureAction(null);
+  };
+
   // Handle PDF processing choice
   const handlePdfProcessingChoice = async (processingMode) => {
     try {
@@ -2966,7 +3228,9 @@ const UploadFiles = () => {
           navigate(`/pdf-zones/${pendingPdfSessionId}`, {
             state: {
               fromUpload: true,
-              pdfAlignment: pdfDataAlignment
+              returnToUpload: true,
+              pdfAlignment: pdfDataAlignment,
+              sourceFileName: context.file?.name || userFile?.name || 'PDF source',
             }
           });
         }, 1000);
@@ -3014,7 +3278,9 @@ const UploadFiles = () => {
           setSuccess(`PDF merge source extracted into ${extracted.rowCount} rows.`);
         } else if (context.action === 'upload') {
           applyExtractedPdfAsPrimary(extracted, null, context.templateOptions || {});
-          await uploadExtractedPdfForMapping(extracted, context.templateOptions || {});
+          setWizardStep(0);
+          setProcessingPath('map');
+          setSuccess(`PDF extraction ready for review: ${extracted.rowCount} rows and ${extracted.columnCount} columns.`);
         } else if (context.action === 'normalize') {
           applyExtractedPdfAsPrimary(extracted, 'normalize', context.templateOptions || {});
         } else {
@@ -3033,15 +3299,11 @@ const UploadFiles = () => {
         });
         const decision = compareResponse.data?.decision;
         const winner = decision?.winner ? `${decision.winner} extraction` : 'best extraction';
-        setSuccess(`PDF processed successfully with ${winner}. Proceeding to column mapping...`);
-
-        setTimeout(() => {
-          showPrimaryColumnDialog(pendingPdfSessionId, {
-            fromPDF: true,
-            ocrData: compareResponse.data,
-            pdfDecision: decision
-          });
-        }, 1500);
+        const extracted = createExtractedPdfWorkbook(compareResponse.data, pendingPdfContext?.file?.name || userFile?.name || 'PDF source');
+        applyExtractedPdfAsPrimary(extracted, null, {});
+        setWizardStep(0);
+        setProcessingPath('map');
+        setSuccess(`PDF extraction ready for review with ${winner}: ${extracted.rowCount} rows and ${extracted.columnCount} columns.`);
       } else {
         setSuccess('Processing with standard OCR...');
 
@@ -3050,14 +3312,11 @@ const UploadFiles = () => {
           session_id: pendingPdfSessionId,
           data_alignment: pdfDataAlignment
         });
-        setSuccess('PDF processed successfully! Proceeding to column mapping...');
-
-        setTimeout(() => {
-          showPrimaryColumnDialog(pendingPdfSessionId, {
-            fromPDF: true,
-            ocrData: ocrResponse.data
-          });
-        }, 1500);
+        const extracted = createExtractedPdfWorkbook(ocrResponse.data, pendingPdfContext?.file?.name || userFile?.name || 'PDF source');
+        applyExtractedPdfAsPrimary(extracted, null, {});
+        setWizardStep(0);
+        setProcessingPath('map');
+        setSuccess(`PDF extraction ready for review: ${extracted.rowCount} rows and ${extracted.columnCount} columns.`);
       }
     } catch (err) {
       console.error('Error processing PDF:', err);
@@ -3117,6 +3376,14 @@ const UploadFiles = () => {
   const visibleSheetJoinPreviewColumns = sheetJoinPreview
     ? sheetJoinPreview.headers.filter(header => sheetJoinVisibleColumns.includes(header))
     : [];
+  const pdfReviewHeaders = pdfExtractionReview?.headers || [];
+  const pdfReviewRows = pdfExtractionReview?.rows || [];
+  const pdfExtractionReviewTotalPages = Math.max(1, Math.ceil(pdfReviewRows.length / pdfExtractionReviewRowsPerPage));
+  const pdfExtractionReviewStart = pdfExtractionReviewPage * pdfExtractionReviewRowsPerPage;
+  const visiblePdfReviewRows = pdfReviewRows.slice(pdfExtractionReviewStart, pdfExtractionReviewStart + pdfExtractionReviewRowsPerPage);
+  const visiblePdfReviewColumns = pdfExtractionVisibleColumns.length
+    ? pdfReviewHeaders.filter(header => pdfExtractionVisibleColumns.includes(header))
+    : pdfReviewHeaders;
   const sheetJoinMetricChipSx = (tone, active) => {
     const tones = {
       blue: {
@@ -3197,7 +3464,7 @@ const UploadFiles = () => {
           width: wizardStep === 0
             ? 'min(920px, calc(100vw - 32px))'
             : 'min(900px, calc(100vw - 32px))',
-          minHeight: wizardStep === 0 ? '580px' : { xs: '390px', md: '420px' },
+          minHeight: wizardStep === 0 ? '580px' : 'auto',
           borderRadius: '22px',
           border: `1px solid ${Nn.cardBorder}`,
           background: Nn.cardBg,
@@ -3477,7 +3744,7 @@ const UploadFiles = () => {
                     {userFile ? userFile.name : 'Drag and drop or select files'}
                   </Typography>
                   <Typography variant="caption" sx={{ color: Nn.muted, fontSize: '0.8rem', mb: 2 }}>
-                    Supported files: .xlsx, .xls, .csv, .pdf
+                    Supported files: .xlsx, .xls, .xlsm, .csv, .pdf
                   </Typography>
                   <Button
                     variant="contained"
@@ -3606,6 +3873,30 @@ const UploadFiles = () => {
 
                         {clientSheetNames.length > 0 && (
                           <Box sx={{ mt: 1, display: 'flex', gap: 1, alignItems: 'center' }}>
+                            {pdfExtractionReview && (
+                              <Button
+                                variant="outlined"
+                                size="small"
+                                startIcon={<VisibilityIcon />}
+                                onClick={() => setPdfExtractionReviewOpen(true)}
+                                sx={{
+                                  textTransform: 'none',
+                                  borderRadius: '999px',
+                                  px: 2,
+                                  fontSize: 12,
+                                  fontWeight: 800,
+                                  borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.45)' : 'rgba(37, 99, 235, 0.28)',
+                                  color: isDarkMode ? '#93c5fd' : '#2563eb',
+                                  bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff',
+                                  '&:hover': {
+                                    borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.7)' : 'rgba(37, 99, 235, 0.45)',
+                                    bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.18)' : '#dbeafe'
+                                  }
+                                }}
+                              >
+                                REVIEW EXTRACTED PDF
+                              </Button>
+                            )}
                             <Button
                               variant="outlined"
                               size="small"
@@ -3692,10 +3983,10 @@ const UploadFiles = () => {
 
         {/* STEP 2: Choose Options (Mapping Template + Tag Template) */}
         {wizardStep === 1 && (
-          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2, minHeight: { xs: 270, md: 295 }, justifyContent: 'flex-start' }}>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.75, justifyContent: 'flex-start' }}>
             <Grid container spacing={2.5}>
               <Grid item xs={12}>
-                <Box sx={{ p: { xs: 2, md: 2.25 }, borderRadius: '14px', border: `1px solid ${Nn.divider}`, bgcolor: Nn.subtlePanelBg, minHeight: { xs: 135, md: 148 } }}>
+                <Box sx={{ p: { xs: 2, md: 2.25 }, borderRadius: '14px', border: `1px solid ${Nn.divider}`, bgcolor: Nn.subtlePanelBg }}>
                   <Box sx={{ display: 'flex', justifyContent: 'space-between', gap: 2, flexWrap: 'wrap', mb: 1.5 }}>
                     <Box>
                       <Typography variant="subtitle2" sx={{ color: Nn.text, fontWeight: 800, mb: 0.35 }}>
@@ -3771,23 +4062,75 @@ const UploadFiles = () => {
                   )}
 
                   <FormControl fullWidth sx={{ mt: 1.75 }} disabled={processingTemplatesLoading}>
-                      <InputLabel sx={{ color: Nn.muted }}>Use Template</InputLabel>
                       <Select
                         value={selectedProcessingTemplateId}
-                        label="Use Template"
+                        displayEmpty
+                        renderValue={(selected) => {
+                          if (!selected) {
+                            return <Typography sx={{ color: Nn.muted, fontSize: 16 }}>Use Template</Typography>;
+                          }
+                          const template = processingTemplates.find((item) => String(item.id) === String(selected));
+                          return <Typography sx={{ color: Nn.text, fontSize: 16, fontWeight: 700 }}>{template?.name || 'Use Template'}</Typography>;
+                        }}
                         onChange={(event) => {
-                          setSelectedProcessingTemplateId(event.target.value);
-                          setProcessingTemplateMode(event.target.value ? 'use' : '');
-                          if (event.target.value) {
+                          const nextValue = event.target.value;
+                          if (!nextValue) {
+                            handleClearProcessingTemplateSelection();
+                            return;
+                          }
+                          setSelectedProcessingTemplateId(nextValue);
+                          setProcessingTemplateMode('use');
+                          if (nextValue) {
                             setProcessingPath('map');
                           }
                         }}
                         MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
-                        sx={{ borderRadius: '8px', minHeight: 42 }}
+                        size="small"
+                        sx={{
+                          borderRadius: '8px',
+                          minHeight: 40,
+                          '& .MuiSelect-select': {
+                            minHeight: '40px !important',
+                            display: 'flex',
+                            alignItems: 'center',
+                            py: '0 !important',
+                            fontSize: 16,
+                          },
+                        }}
                       >
+                        {processingTemplates.length > 0 && (
+                          <MenuItem value="">
+                            <Typography sx={{ fontSize: 13, color: Nn.muted, fontWeight: 700 }}>
+                              None
+                            </Typography>
+                          </MenuItem>
+                        )}
                         {processingTemplates.map(template => (
-                          <MenuItem key={template.id} value={String(template.id)}>
-                            {template.name}
+                          <MenuItem key={template.id} value={String(template.id)} sx={{ pr: 1 }}>
+                            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, width: '100%' }}>
+                              <Typography sx={{ fontSize: 13, color: Nn.text, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {template.name}
+                              </Typography>
+                              <Tooltip title="Delete template" arrow placement="left">
+                                <IconButton
+                                  size="small"
+                                  onMouseDown={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                  }}
+                                  onClick={(event) => handleDeleteProcessingTemplate(template, event)}
+                                  sx={{
+                                    color: '#dc2626',
+                                    flex: '0 0 auto',
+                                    '&:hover': {
+                                      bgcolor: isDarkMode ? 'rgba(248, 113, 113, 0.16)' : 'rgba(220, 38, 38, 0.08)',
+                                    },
+                                  }}
+                                >
+                                  <DeleteOutlineIcon fontSize="small" />
+                                </IconButton>
+                              </Tooltip>
+                            </Box>
                           </MenuItem>
                         ))}
                       </Select>
@@ -4022,7 +4365,9 @@ const UploadFiles = () => {
             size="small"
             label="Template name"
             value={newTemplateDraftName}
-            onChange={(event) => setNewTemplateDraftName(event.target.value)}
+            error={Boolean(newTemplateNameError)}
+            helperText={newTemplateNameError}
+            onChange={(event) => { setNewTemplateDraftName(event.target.value); setNewTemplateNameError(''); }}
             onKeyDown={(event) => {
               if (event.key === 'Enter') {
                 event.preventDefault();
@@ -4038,6 +4383,7 @@ const UploadFiles = () => {
             onClick={() => {
               setNewTemplateDialogOpen(false);
               setPendingTemplateAction(null);
+              setNewTemplateNameError('');
             }}
             sx={secondaryPillSx}
           >
@@ -4215,6 +4561,206 @@ const UploadFiles = () => {
         </DialogActions>
       </Dialog>
 
+      {/* PDF Extraction Review Dialog */}
+      <Dialog
+        open={pdfExtractionReviewOpen}
+        onClose={() => setPdfExtractionReviewOpen(false)}
+        maxWidth="xl"
+        fullWidth
+        PaperProps={{
+          sx: {
+            ...dialogPaperSx,
+            width: 'min(1240px, calc(100vw - 32px))',
+          }
+        }}
+      >
+        <DialogTitle sx={{ ...dialogHeaderSx, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <Box>
+            <Typography variant="h5" fontWeight="800" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a', letterSpacing: '-0.01em', fontSize: '1.25rem' }}>
+              Review Extracted PDF
+            </Typography>
+            <Typography variant="caption" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', fontSize: '0.82rem' }}>
+              Confirm the extracted table before template mapping
+            </Typography>
+          </Box>
+          <IconButton onClick={() => setPdfExtractionReviewOpen(false)} sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', '&:hover': { color: isDarkMode ? '#ffffff' : '#0f172a', bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.05)' } }}>
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+
+        <DialogContent sx={dialogBodySx}>
+          {pdfExtractionReview && (
+            <Box>
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1.5, mb: 2, alignItems: 'center' }}>
+                <Chip
+                  label={`${pdfReviewRows.length} extracted rows`}
+                  sx={sheetJoinMetricChipSx('blue', true)}
+                />
+                <Chip
+                  label={`${pdfReviewHeaders.length} columns`}
+                  sx={sheetJoinMetricChipSx('green', true)}
+                />
+              </Box>
+
+              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 1.5, mb: 1.5 }}>
+                <Alert
+                  severity="info"
+                  sx={{
+                    py: 0.3,
+                    px: 2,
+                    borderRadius: '999px',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    bgcolor: isDarkMode ? 'rgba(14, 165, 233, 0.12)' : '#e0f2fe',
+                    color: isDarkMode ? '#bae6fd' : '#0369a1',
+                    border: isDarkMode ? '1px solid rgba(56, 189, 248, 0.25)' : '1px solid #7dd3fc',
+                    fontSize: '11.5px',
+                    lineHeight: 1.2,
+                    maxWidth: 'fit-content',
+                    '& .MuiAlert-icon': { py: 0, mr: 1, fontSize: '16px' },
+                    '& .MuiAlert-message': { p: 0 }
+                  }}
+                >
+                  Preview keeps the full extracted data. Showing {visiblePdfReviewRows.length ? pdfExtractionReviewStart + 1 : 0}-{Math.min(pdfExtractionReviewStart + visiblePdfReviewRows.length, pdfReviewRows.length)} of {pdfReviewRows.length} rows to keep the page responsive.
+                </Alert>
+
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.2, ml: 'auto' }}>
+                  <FormControl size="small" sx={{ minWidth: 190 }}>
+                    <Select
+                      multiple
+                      value={pdfExtractionVisibleColumns}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        const selected = (typeof value === 'string' ? value.split(',') : value).filter(column => column !== '__all__');
+                        setPdfExtractionVisibleColumns(selected);
+                      }}
+                      renderValue={(selected) => `${selected.length} columns shown`}
+                      sx={{
+                        height: 34,
+                        fontSize: '12px',
+                        fontWeight: 600,
+                        bgcolor: isDarkMode ? '#1e293b' : '#f8fafc',
+                        color: isDarkMode ? '#ffffff' : '#0f172a',
+                        borderRadius: '10px',
+                        border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.18)' : '1px solid #cbd5e1',
+                        '& .MuiSelect-icon': { color: isDarkMode ? '#94a3b8' : '#64748b' }
+                      }}
+                    >
+                      <MenuItem
+                        value="__all__"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          setPdfExtractionVisibleColumns(pdfReviewHeaders);
+                        }}
+                      >
+                        <Checkbox checked={pdfExtractionVisibleColumns.length === pdfReviewHeaders.length} size="small" />
+                        Show all columns
+                      </MenuItem>
+                      {pdfReviewHeaders.map(header => (
+                        <MenuItem key={header} value={header}>
+                          <Checkbox checked={pdfExtractionVisibleColumns.includes(header)} size="small" />
+                          {header}
+                        </MenuItem>
+                      ))}
+                    </Select>
+                  </FormControl>
+
+                  <IconButton
+                    size="small"
+                    disabled={pdfExtractionReviewPage === 0}
+                    onClick={() => setPdfExtractionReviewPage(page => Math.max(0, page - 1))}
+                    sx={{
+                      width: 34,
+                      height: 34,
+                      borderRadius: '50%',
+                      border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.2)' : '1px solid #cbd5e1',
+                      color: isDarkMode ? '#ffffff' : '#0f172a',
+                      bgcolor: isDarkMode ? '#1e293b' : '#ffffff',
+                      '&:hover:not(.Mui-disabled)': { bgcolor: '#2563eb', borderColor: '#2563eb', color: '#ffffff' },
+                      '&.Mui-disabled': { opacity: 0.4 }
+                    }}
+                  >
+                    <ChevronLeftIcon fontSize="small" />
+                  </IconButton>
+
+                  <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#475569', fontSize: '12px', fontWeight: 600, px: 0.5, whiteSpace: 'nowrap' }}>
+                    Page {pdfExtractionReviewPage + 1} of {pdfExtractionReviewTotalPages}
+                  </Typography>
+
+                  <IconButton
+                    size="small"
+                    disabled={pdfExtractionReviewPage >= pdfExtractionReviewTotalPages - 1}
+                    onClick={() => setPdfExtractionReviewPage(page => Math.min(pdfExtractionReviewTotalPages - 1, page + 1))}
+                    sx={{
+                      width: 34,
+                      height: 34,
+                      borderRadius: '50%',
+                      border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.2)' : '1px solid #cbd5e1',
+                      color: isDarkMode ? '#ffffff' : '#0f172a',
+                      bgcolor: isDarkMode ? '#1e293b' : '#ffffff',
+                      '&:hover:not(.Mui-disabled)': { bgcolor: '#2563eb', borderColor: '#2563eb', color: '#ffffff' },
+                      '&.Mui-disabled': { opacity: 0.4 }
+                    }}
+                  >
+                    <ChevronRightIcon fontSize="small" />
+                  </IconButton>
+                </Box>
+              </Box>
+
+              <Box sx={{ height: 'calc(100vh - 380px)', minHeight: 320, overflow: 'auto', border: isDarkMode ? '1px solid rgba(255, 255, 255, 0.12)' : '1px solid #cbd5e1', borderRadius: '12px', bgcolor: isDarkMode ? '#0b1120' : '#ffffff', '&::-webkit-scrollbar-corner': { backgroundColor: 'transparent' } }}>
+                <Box component="table" sx={{ width: 'max-content', minWidth: '100%', tableLayout: 'fixed', borderCollapse: 'collapse', '& th, & td': { borderBottom: isDarkMode ? '1px solid rgba(255, 255, 255, 0.08)' : '1px solid #e2e8f0', p: 0.85 }, '& th': { position: 'sticky', top: 0, backgroundColor: isDarkMode ? '#0f172a' : '#f1f5f9', zIndex: 2, textAlign: 'left' } }}>
+                  <Box component="thead">
+                    <Box component="tr">
+                      {visiblePdfReviewColumns.map(header => (
+                        <Box component="th" key={header} sx={{ width: 180, minWidth: 180, maxWidth: 180 }}>
+                          <Typography variant="caption" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a', fontSize: '11px', fontWeight: 800, display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {header}
+                          </Typography>
+                        </Box>
+                      ))}
+                    </Box>
+                  </Box>
+                  <Box component="tbody">
+                    {visiblePdfReviewRows.map((row, rowIndex) => (
+                      <Box component="tr" key={`pdf-preview-row-${pdfExtractionReviewStart + rowIndex}`} sx={{ '&:hover': { bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff' } }}>
+                        {visiblePdfReviewColumns.map(header => (
+                          <Box component="td" key={`${pdfExtractionReviewStart + rowIndex}-${header}`} sx={{ width: 180, minWidth: 180, maxWidth: 180 }}>
+                            <Typography title={String(row?.[header] ?? '')} sx={{ color: isDarkMode ? '#ffffff' : '#0f172a', fontSize: '12px', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {String(row?.[header] ?? '')}
+                            </Typography>
+                          </Box>
+                        ))}
+                      </Box>
+                    ))}
+                  </Box>
+                </Box>
+              </Box>
+            </Box>
+          )}
+        </DialogContent>
+
+        <DialogActions sx={{ ...dialogFooterSx, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Box sx={{ display: 'flex', gap: 1 }}>
+            <Button onClick={() => setPdfExtractionReviewOpen(false)} sx={{ ...pillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569', '&:hover': { bgcolor: isDarkMode ? '#1e293b' : '#e2e8f0' } }}>
+              Cancel
+            </Button>
+            <Button onClick={() => setPdfExtractionReviewOpen(false)} sx={{ ...pillButtonSx, color: '#2563eb', '&:hover': { bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff' } }}>
+              Back
+            </Button>
+            <Button onClick={handleDownloadPdfExtractionPreview} sx={{ ...pillButtonSx, color: '#2563eb', '&:hover': { bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff' } }}>
+              Download Preview
+            </Button>
+          </Box>
+          <Button
+            variant="contained"
+            onClick={handleContinuePdfExtractionReview}
+            sx={{ height: 40, px: 2.5, ...primaryPillSx }}
+          >
+            Continue
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       {/* Merge Sheets Dialog */}
       <Dialog
         open={sheetJoinDialogOpen}
@@ -4319,7 +4865,7 @@ const UploadFiles = () => {
                       key={sheetJoinSourceFileInputKey}
                       hidden
                       type="file"
-                      accept=".xlsx,.xls,.csv,.pdf"
+                      accept=".xlsx,.xls,.xlsm,.csv,.pdf"
                       onChange={handleAddSheetJoinSourceFile}
                     />
                   </Button>
@@ -4968,7 +5514,7 @@ const UploadFiles = () => {
           </Box>
         </DialogContent>
         
-        <DialogActions sx={{ ...dialogFooterSx, gap: 1 }}>
+        <DialogActions sx={{ ...dialogFooterSx, px: 2.75, py: 1.5, gap: 1 }}>
           <Button onClick={handleCloseCompatibilityError} sx={{ ...pillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}>
             Cancel
           </Button>
@@ -4985,75 +5531,102 @@ const UploadFiles = () => {
         }}
         maxWidth="sm"
         fullWidth
-        PaperProps={{ sx: dialogPaperSx }}
+        PaperProps={{
+          sx: {
+            ...dialogPaperSx,
+            maxWidth: 640,
+            borderRadius: '16px'
+          }
+        }}
       >
-        <DialogTitle sx={dialogHeaderSx}>
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-            <ScienceIcon color="primary" />
-            <Typography variant="h6" fontWeight="700" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a' }}>
+        <DialogTitle sx={{ ...dialogHeaderSx, px: 3.25, pt: 2.5, pb: 1.25 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
+            <ScienceIcon color="primary" sx={{ fontSize: 20 }} />
+            <Typography variant="h6" fontWeight="700" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a', fontSize: '1.05rem', lineHeight: 1.25 }}>
               Choose PDF Processing Method
             </Typography>
           </Box>
         </DialogTitle>
-        <DialogContent sx={dialogBodySx}>
-          <Typography variant="body1" sx={{ mb: 3, color: isDarkMode ? '#94a3b8' : '#64748b' }}>
-            How would you like to process your PDF? Choose the method that best fits your document:
+        <DialogContent sx={{ ...dialogBodySx, px: 3.25, pt: 0.5, pb: 1.75 }}>
+          <Typography variant="body2" sx={{ mb: 2.25, color: isDarkMode ? '#94a3b8' : '#64748b', fontSize: '0.88rem', lineHeight: 1.45 }}>
+            Pick the option that matches how the PDF page is laid out.
           </Typography>
 
-          <Grid container spacing={3}>
-            <Grid item xs={12} sm={6}>
-              <Card
-                sx={dialogChoiceCardSx}
-                onClick={() => handlePdfProcessingChoice('ocr')}
-              >
-                <CardContent sx={{ textAlign: 'center', p: 3 }}>
-                  <PlayArrowIcon sx={{ fontSize: 48, color: 'success.main', mb: 2 }} />
-                  <Typography variant="h6" gutterBottom>
-                    Simple OCR
-                  </Typography>
-                  <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
-                    For standard documents with clear, linear layout. Faster processing with automatic table detection.
-                  </Typography>
-                </CardContent>
-              </Card>
-            </Grid>
-
-            <Grid item xs={12} sm={6}>
-              <Card
-                sx={dialogChoiceCardSx}
-                onClick={() => handlePdfProcessingChoice('compare')}
-              >
-                <CardContent sx={{ textAlign: 'center', p: 3 }}>
-                  <TrendingUpIcon sx={{ fontSize: 48, color: 'info.main', mb: 2 }} />
-                  <Typography variant="h6" gutterBottom>
-                    Compare
-                  </Typography>
-                  <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
-                    Runs native extraction and Azure OCR, then chooses the cleaner result for mapping.
-                  </Typography>
-                </CardContent>
-              </Card>
-            </Grid>
-
-            <Grid item xs={12} sm={6}>
-              <Card
-                sx={dialogChoiceCardSx}
-                onClick={() => handlePdfProcessingChoice('zonal')}
-              >
-                <CardContent sx={{ textAlign: 'center', p: 3 }}>
-                  <SearchIcon sx={{ fontSize: 48, color: 'warning.main', mb: 2 }} />
-                  <Typography variant="h6" gutterBottom>
-                    Zone Mapping
-                  </Typography>
-                  <Typography variant="body2" sx={{ color: isDarkMode ? '#94a3b8' : '#64748b' }}>
-                    For complex BOMs or documents with irregular layouts. Manual zone selection for precise extraction.
-                  </Typography>
-                </CardContent>
-              </Card>
-            </Grid>
+          <Grid container spacing={2}>
+            {[
+              {
+                key: 'ocr',
+                tint: '#22c55e',
+                icon: <TableChartIcon sx={{ fontSize: 22 }} />,
+                title: 'Simple OCR',
+                body: 'Best when the page is already a clean table — clear rows and columns, all text readable, and nothing else around it.',
+                caption: 'Reads the whole page, so anything outside the table (logos, notes, page headers, totals) comes through as data too.',
+                shortBody: 'For clean tables with readable rows and columns.',
+                detail: 'Reads the whole page, including notes and headers.'
+              },
+              {
+                key: 'zonal',
+                tint: '#f59e0b',
+                icon: <HighlightAltIcon sx={{ fontSize: 22 }} />,
+                title: 'Select Area Manually',
+                body: 'Draw a box when only part of the page should be read.',
+                caption: 'Use for irregular tables, several tables on one page, or pages with extra content you need to leave out.',
+                shortBody: 'Draw a box when only part of the page should be read.',
+                detail: 'Only extracts content inside your selected area.'
+              }
+            ].map((option) => (
+              <Grid item xs={12} sm={6} key={option.key}>
+                <Card
+                  sx={{
+                    ...dialogChoiceCardSx,
+                    height: '100%',
+                    minHeight: 166,
+                    borderRadius: '12px'
+                  }}
+                  onClick={() => handlePdfProcessingChoice(option.key)}
+                >
+                  <CardContent sx={{ p: 2.5, '&:last-child': { pb: 2.5 } }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, mb: 1.75 }}>
+                      <Box
+                        sx={{
+                          ...choiceIconWrapSx(option.tint),
+                          width: 40,
+                          height: 40,
+                          borderRadius: '12px',
+                          flexShrink: 0
+                        }}
+                      >
+                        {option.icon}
+                      </Box>
+                      <Typography variant="subtitle1" fontWeight={750} sx={{ lineHeight: 1.2, color: isDarkMode ? '#f8fafc' : '#0f172a' }}>
+                        {option.title}
+                      </Typography>
+                    </Box>
+                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+                      <Box>
+                        <Typography variant="caption" sx={{ display: 'block', color: isDarkMode ? '#60a5fa' : '#2563eb', fontSize: '0.68rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', mb: 0.25 }}>
+                          Use when
+                        </Typography>
+                        <Typography variant="body2" sx={{ color: isDarkMode ? '#dbe4f0' : '#334155', fontSize: '0.8rem', lineHeight: 1.35, fontWeight: 650 }}>
+                          {option.shortBody || option.body}
+                        </Typography>
+                      </Box>
+                      <Box>
+                        <Typography variant="caption" sx={{ display: 'block', color: isDarkMode ? '#60a5fa' : '#2563eb', fontSize: '0.68rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em', mb: 0.25 }}>
+                          Extracts
+                        </Typography>
+                        <Typography variant="body2" sx={{ color: isDarkMode ? '#9ca8ba' : '#64748b', fontSize: '0.76rem', lineHeight: 1.35 }}>
+                          {option.detail || option.caption}
+                        </Typography>
+                      </Box>
+                    </Box>
+                  </CardContent>
+                </Card>
+              </Grid>
+            ))}
           </Grid>
         </DialogContent>
-        <DialogActions sx={{ ...dialogFooterSx, gap: 1 }}>
+        <DialogActions sx={{ ...dialogFooterSx, px: 3.25, py: 1.75, gap: 1 }}>
           <Button
             onClick={() => {
               setPdfChoiceDialogOpen(false);
@@ -5070,18 +5643,27 @@ const UploadFiles = () => {
       {/* Primary Column Cleanup Dialog */}
       <Dialog
         open={primaryColumnDialogOpen}
-        maxWidth="sm"
+        maxWidth="md"
         fullWidth
-        PaperProps={{ sx: dialogPaperSx }}
+        PaperProps={{ sx: { ...dialogPaperSx, maxWidth: 680, borderRadius: '16px' } }}
       >
-        <DialogTitle sx={{ ...dialogHeaderSx, display: 'flex', alignItems: 'center', gap: 1 }}>
-          <ScienceIcon color="primary" />
-          <Typography variant="h6" fontWeight="700" sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a' }}>Select Primary Column</Typography>
+        <DialogTitle sx={{ ...dialogHeaderSx, display: 'flex', alignItems: 'center', gap: 1.25, px: 3, py: 2 }}>
+          <Box sx={{ width: 36, height: 36, borderRadius: '12px', display: 'grid', placeItems: 'center', bgcolor: isDarkMode ? 'rgba(96, 165, 250, 0.16)' : '#eff6ff', color: isDarkMode ? '#93c5fd' : '#2563eb' }}>
+            <ScienceIcon sx={{ fontSize: 20 }} />
+          </Box>
+          <Box>
+            <Typography sx={{ color: isDarkMode ? '#f8fafc' : '#0f172a', fontSize: 18, lineHeight: 1.25, fontWeight: 650 }}>
+              Select primary column
+            </Typography>
+            <Typography sx={{ color: isDarkMode ? '#94a3b8' : '#64748b', fontSize: 12.5, lineHeight: 1.4, mt: 0.25 }}>
+              Choose the column used to remove empty rows.
+            </Typography>
+          </Box>
         </DialogTitle>
-        <DialogContent sx={dialogBodySx}>
-          <Typography variant="body2" sx={{ mb: 2, color: isDarkMode ? '#94a3b8' : '#64748b' }}>
-            Select the column that should always have data. Rows where this column is empty
-            will be removed (cleans up merged cells, notes, and junk rows).
+        <DialogContent sx={{ ...dialogBodySx, px: 3, py: 2.25 }}>
+          <Typography variant="body2" sx={{ mb: 2, color: isDarkMode ? '#cbd5e1' : '#475569', fontSize: 13.5, lineHeight: 1.5 }}>
+            Rows where this column is empty will be removed. Use this to clean merged cells,
+            notes, and extra rows before mapping.
           </Typography>
           <FormControl fullWidth sx={{ mt: 1 }}>
             <InputLabel sx={{ color: isDarkMode ? '#94a3b8' : '#475569' }}>Primary Column</InputLabel>
@@ -5108,9 +5690,9 @@ const UploadFiles = () => {
             </Alert>
           )}
         </DialogContent>
-        <DialogActions sx={{ ...dialogFooterSx, gap: 1 }}>
-          <Button onClick={handleSkipCleanup} sx={{ ...pillButtonSx, color: isDarkMode ? '#cbd5e1' : '#475569' }}>
-            Skip
+        <DialogActions sx={{ ...dialogFooterSx, px: 3, py: 2, gap: 1.25 }}>
+          <Button onClick={handleSkipCleanup} sx={{ ...pillButtonSx, borderRadius: '999px', px: 2.5, color: isDarkMode ? '#cbd5e1' : '#475569' }}>
+            Keep all rows
           </Button>
           <Button
             onClick={handleCleanup}
@@ -5123,6 +5705,15 @@ const UploadFiles = () => {
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* BOM structure gate — fires on either exit, so both routes carry answers */}
+      <BomStructureDialog
+        open={bomStructureOpen}
+        onClose={handleBomStructureCancel}
+        sheetNames={bomStructureSheetNames}
+        getSheetHeaders={bomStructureHeaderReader}
+        onConfirm={handleBomStructureConfirm}
+      />
 
       {/* Global Loader Overlay */}
       <LoaderOverlay visible={globalLoading} label="Processing..." />

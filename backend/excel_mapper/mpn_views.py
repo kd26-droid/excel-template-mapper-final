@@ -18,6 +18,7 @@ from rest_framework import status
 from .services.digikey_service import DigiKeyClient
 from .services.mouser_service import MouserClient
 from .services.element14_service import Element14Client
+from .services.provider_errors import ProviderUnavailable
 from .provider_credentials import (
     get_saved_provider_credentials,
     request_allows_local_env_credentials,
@@ -38,16 +39,16 @@ def _provider_scope_id(request):
 
 
 def _selected_validation_providers(request):
-    data = getattr(request, 'data', {}) or {}
-    raw = data.get('validation_providers')
-    if raw is None:
-        return set(VALIDATION_PROVIDER_IDS)
-    if isinstance(raw, str):
-        raw = [part.strip() for part in raw.split(',')]
-    if not isinstance(raw, list):
-        return set(VALIDATION_PROVIDER_IDS)
-    selected = {str(provider).strip().lower() for provider in raw if str(provider).strip().lower() in VALIDATION_PROVIDER_IDS}
-    return selected or {'digikey'}
+    """Every configured provider, always.
+
+    Validation used to honour a caller-supplied subset and fall back to DigiKey
+    alone when that subset came through empty. A part DigiKey does not stock then
+    read as invalid even when Mouser or Element14 would have confirmed it, so the
+    answer depended on which distributor happened to be asked. Checking all three
+    costs one extra lookup per uncached part and removes that whole class of
+    false negative.
+    """
+    return set(VALIDATION_PROVIDER_IDS)
 
 
 def _provider_client_kwargs(request, provider):
@@ -1509,15 +1510,6 @@ def mpn_validate_warm(request):
         seen = set()
         for row in rows:
             raw = row[mi] if mi < len(row) else ''
-            if looks_like_combined_mpn_cell(raw):
-                return Response({
-                    'success': False,
-                    'error': (
-                        f'MPN column "{mpn_header}" appears to contain multiple MPNs in one cell based on supplier-prefix or delimiter patterns. '
-                        'Plain spaces inside one MPN are allowed. Split the column into one row per MPN before validation.'
-                    ),
-                    'code': 'combined_mpn_cell'
-                }, status=status.HTTP_400_BAD_REQUEST)
             norm = client.normalize_mpn(raw)
             if not norm or norm in seen:
                 continue
@@ -1621,6 +1613,10 @@ def mpn_validate_warm(request):
             if len(chunk) >= limit:
                 break
 
+        # Providers that could not be reached this round, keyed by name.
+        # Declared outside the chunk branch: a fully cached round still has
+        # to return this key, and referencing it there would be a NameError.
+        provider_failures = {}
         if chunk:
             jobs = {}
             provider_timings = {}
@@ -1668,9 +1664,24 @@ def mpn_validate_warm(request):
                             element14_store.update(additions)
                             info['element14_results'] = element14_store
                             session_changed = True
+                    except ProviderUnavailable as provider_error:
+                        # The provider could not answer at all — a bad key or an
+                        # exhausted quota. Recorded so the run can say so rather
+                        # than reporting those parts as simply "not checked".
+                        provider_failures[provider] = {
+                            'provider': provider,
+                            'reason': provider_error.reason,
+                            'message': str(provider_error),
+                        }
+                        logger.warning("%s unavailable: %s", provider, provider_error)
                     except Exception as provider_error:
                         if provider == 'digikey':
                             raise
+                        provider_failures[provider] = {
+                            'provider': provider,
+                            'reason': 'error',
+                            'message': f'{provider.title()} lookup failed: {provider_error}',
+                        }
                         logger.warning("%s warm skipped (non-critical): %s", provider, provider_error)
 
             if session_changed:
@@ -1695,6 +1706,9 @@ def mpn_validate_warm(request):
             'done': done,
             'timings_ms': timings_ms,
             'validation_providers': sorted(selected_providers),
+            # Empty on a healthy run. A populated list means those providers were
+            # never actually asked, so their blank columns are not "no match".
+            'provider_failures': list(provider_failures.values()),
         })
     except Exception as e:
         logger.error(f"mpn_validate_warm failed: {e}", exc_info=True)
@@ -1806,15 +1820,6 @@ def mpn_validate(request):
         skipped_empty = 0
         for d in dict_rows:
             raw = d.get(mpn_header, '')
-            if looks_like_combined_mpn_cell(raw):
-                return Response({
-                    'success': False,
-                    'error': (
-                        f'MPN column "{mpn_header}" appears to contain multiple MPNs in one cell based on supplier-prefix or delimiter patterns. '
-                        'Plain spaces inside one MPN are allowed. Split the column into one row per MPN before validation.'
-                    ),
-                    'code': 'combined_mpn_cell'
-                }, status=status.HTTP_400_BAD_REQUEST)
             norm = client.normalize_mpn(raw)
             if not norm:
                 skipped_empty += 1
@@ -2642,3 +2647,130 @@ def mpn_validate_parser_specs(request):
         import traceback
         logger.error(traceback.format_exc())
         return Response({'success': False, 'error': str(e)}, status=500)
+
+
+# ---------------------------------------------------------------------------
+# Validation summary
+# ---------------------------------------------------------------------------
+
+# Each provider writes a validity flag plus whatever lifecycle detail it exposes.
+# DigiKey is the only one giving explicit EOL/discontinued flags; the others only
+# report a status string, so the summary reports what each actually provides
+# rather than pretending they are uniform.
+MPN_SUMMARY_SOURCES = [
+    {
+        'name': 'DigiKey',
+        'valid': ['MPN valid (DigiKey)', 'MPN valid'],
+        'status': 'DigiKey Status',
+        'eol': 'DigiKey EOL Status',
+        'discontinued': 'DigiKey Discontinued',
+    },
+    {
+        'name': 'Mouser',
+        'valid': ['MPN valid (Mouser)'],
+        'status': 'Mouser Status',
+        'eol': None,
+        'discontinued': None,
+    },
+    {
+        'name': 'Element14',
+        'valid': ['MPN valid (Element14)'],
+        'status': 'Element14 Status',
+        'eol': None,
+        'discontinued': None,
+    },
+]
+
+
+def _summary_cell(row, headers_index, column):
+    if not column:
+        return ''
+    position = headers_index.get(column)
+    if position is None or position >= len(row):
+        return ''
+    value = row[position]
+    return '' if value is None else str(value).strip()
+
+
+@api_view(['GET'])
+def mpn_validation_summary(request, session_id):
+    """Per-source validity and lifecycle counts across every row in the session.
+
+    Computed server-side because the editor only holds one page at a time; a
+    client-side tally would silently describe the loaded page rather than the
+    whole sheet.
+    """
+    info = get_session_consistent(session_id)
+    if not info:
+        return Response({'success': False, 'error': 'Invalid session'},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    headers, rows = read_session_grid(session_id, info)
+    headers = headers or []
+    rows = rows or []
+    headers_index = {}
+    for position, header in enumerate(headers):
+        name = str(header or '').strip()
+        if name and name not in headers_index:
+            headers_index[name] = position
+
+    sources = []
+    for spec in MPN_SUMMARY_SOURCES:
+        valid_column = next((c for c in spec['valid'] if c in headers_index), None)
+        if not valid_column:
+            continue
+
+        counts = {'valid': 0, 'invalid': 0, 'unchecked': 0}
+        statuses = {}
+        eol = 0
+        discontinued = 0
+
+        for row in rows:
+            if not isinstance(row, list):
+                continue
+            flag = _summary_cell(row, headers_index, valid_column).lower()
+            if flag == 'yes':
+                counts['valid'] += 1
+                label = _summary_cell(row, headers_index, spec['status']) or 'Unknown'
+                statuses[label] = statuses.get(label, 0) + 1
+                if _summary_cell(row, headers_index, spec['eol']).lower() == 'yes':
+                    eol += 1
+                if _summary_cell(row, headers_index, spec['discontinued']).lower() == 'yes':
+                    discontinued += 1
+            elif flag == 'no':
+                counts['invalid'] += 1
+            else:
+                counts['unchecked'] += 1
+
+        sources.append({
+            'name': spec['name'],
+            'valid': counts['valid'],
+            'invalid': counts['invalid'],
+            'unchecked': counts['unchecked'],
+            'statuses': sorted(statuses.items(), key=lambda item: -item[1]),
+            'eol': eol if spec['eol'] else None,
+            'discontinued': discontinued if spec['discontinued'] else None,
+        })
+
+    # Overall verdict per row: one source confirming is enough. A "No" from a
+    # distributor usually means it does not stock the part, not that the part is
+    # wrong, so it only counts against a row when nobody confirmed it.
+    overall = {'valid': 0, 'invalid': 0, 'unknown': 0}
+    valid_columns = [c for spec in MPN_SUMMARY_SOURCES for c in spec['valid'] if c in headers_index]
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        flags = [_summary_cell(row, headers_index, c).lower() for c in valid_columns]
+        if 'yes' in flags:
+            overall['valid'] += 1
+        elif 'no' in flags:
+            overall['invalid'] += 1
+        else:
+            overall['unknown'] += 1
+
+    return Response({
+        'success': True,
+        'total_rows': len(rows),
+        'sources': sources,
+        'overall': overall,
+    })
