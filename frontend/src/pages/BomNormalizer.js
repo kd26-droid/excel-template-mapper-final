@@ -6153,7 +6153,7 @@ const BomNormalizer = () => {
             )}
           </Paper>
           <Grid container spacing={2}>
-            <Grid item xs={12} md={4}>
+            <Grid item xs={12} md={6}>
               <Card
                 elevation={0}
                 onClick={() => handlePdfProcessingChoice('ocr')}
@@ -6162,35 +6162,25 @@ const BomNormalizer = () => {
                 <CardContent>
                   <Typography sx={{ fontSize: 16, fontWeight: 800 }}>Simple OCR</Typography>
                   <Typography sx={{ mt: 0.8, fontSize: 13, color: '#66717f' }}>
-                    Use Azure OCR directly for clear table PDFs.
+                    Best when the page is already a clean table — clear rows and columns, all text
+                    readable, and nothing else around it. Anything outside the table comes through
+                    as data too.
                   </Typography>
                 </CardContent>
               </Card>
             </Grid>
-            <Grid item xs={12} md={4}>
-              <Card
-                elevation={0}
-                onClick={() => handlePdfProcessingChoice('compare')}
-                sx={{ height: '100%', cursor: 'pointer', border: '1px solid #dce2e8', '&:hover': { borderColor: '#1976d2', bgcolor: '#f8fafc' } }}
-              >
-                <CardContent>
-                  <Typography sx={{ fontSize: 16, fontWeight: 800 }}>Compare</Typography>
-                  <Typography sx={{ mt: 0.8, fontSize: 13, color: '#66717f' }}>
-                    Run native extraction and OCR, then use the cleaner result.
-                  </Typography>
-                </CardContent>
-              </Card>
-            </Grid>
-            <Grid item xs={12} md={4}>
+            <Grid item xs={12} md={6}>
               <Card
                 elevation={0}
                 onClick={() => handlePdfProcessingChoice('zonal')}
                 sx={{ height: '100%', cursor: 'pointer', border: '1px solid #dce2e8', '&:hover': { borderColor: '#1976d2', bgcolor: '#f8fafc' } }}
               >
                 <CardContent>
-                  <Typography sx={{ fontSize: 16, fontWeight: 800 }}>Zone Mapping</Typography>
+                  <Typography sx={{ fontSize: 16, fontWeight: 800 }}>Select Area Manually</Typography>
                   <Typography sx={{ mt: 0.8, fontSize: 13, color: '#66717f' }}>
-                    Use manual zones for PDFs with irregular tables or mixed layouts.
+                    You draw a box around the exact part of each page you want, and only what is
+                    inside the box gets extracted. Use for irregular tables or pages with extra
+                    content to leave out.
                   </Typography>
                 </CardContent>
               </Card>

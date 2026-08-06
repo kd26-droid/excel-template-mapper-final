@@ -40,14 +40,19 @@ import {
 import { useThemeContext } from '../utils/ThemeContext';
 import api from '../services/api';
 
+// All three providers are on by default. A part confirmed by any one of them is
+// valid, so querying all three gives the best coverage; a provider without
+// credentials simply returns nothing rather than failing the run.
+const ALL_PROVIDERS = ['digikey', 'mouser', 'element14'];
+
 const initialColumnMappings = [
-  { column: 'MPN valid', providers: ['digikey'], description: 'Part validation status' },
-  { column: 'MPN Status', providers: ['digikey'], description: 'Lifecycle status' },
-  { column: 'EOL Status', providers: ['digikey'], description: 'End of life flag' },
-  { column: 'Discontinued', providers: ['digikey'], description: 'Discontinued status' },
-  { column: 'DKPN', providers: ['digikey'], description: 'Distributor part number' },
-  { column: 'Canonical MPN', providers: ['digikey'], description: 'Standardized manufacturer part number' },
-  { column: 'Category', providers: ['digikey'], description: 'Product category' },
+  { column: 'MPN valid', providers: [...ALL_PROVIDERS], description: 'Part validation status' },
+  { column: 'MPN Status', providers: [...ALL_PROVIDERS], description: 'Lifecycle status' },
+  { column: 'EOL Status', providers: [...ALL_PROVIDERS], description: 'End of life flag' },
+  { column: 'Discontinued', providers: [...ALL_PROVIDERS], description: 'Discontinued status' },
+  { column: 'DKPN', providers: [...ALL_PROVIDERS], description: 'Distributor part number' },
+  { column: 'Canonical MPN', providers: [...ALL_PROVIDERS], description: 'Standardized manufacturer part number' },
+  { column: 'Category', providers: [...ALL_PROVIDERS], description: 'Product category' },
 ];
 
 const providerMeta = {
@@ -76,7 +81,7 @@ const getCredentialScopeId = () => {
   return generated;
 };
 
-const normalizeProviders = (value, fallback = ['digikey']) => {
+const normalizeProviders = (value, fallback = ALL_PROVIDERS) => {
   const allowed = new Set(Object.keys(providerMeta));
   const raw = Array.isArray(value) ? value : (value ? [value] : fallback);
   const selected = raw.filter(provider => allowed.has(provider));

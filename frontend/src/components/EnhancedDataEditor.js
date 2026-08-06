@@ -577,6 +577,10 @@ const EnhancedDataEditor = () => {
   const [importing, setImporting] = useState(false);
   const [exportingSheet, setExportingSheet] = useState(false);
   const [exportImportOpen, setExportImportOpen] = useState(false);
+  const [moreActionsAnchor, setMoreActionsAnchor] = useState(null);
+  // Save-template errors belong in the dialog, next to the field the user
+  // has to change — a corner toast is easy to miss and disappears.
+  const [templateNameError, setTemplateNameError] = useState('');
   const [importResult, setImportResult] = useState(null);
   const importFileInputRef = useRef(null);
   const mpnValidationInFlightRef = useRef(false);
@@ -2563,6 +2567,7 @@ const EnhancedDataEditor = () => {
   const handleCloseSaveTemplateDialog = useCallback(() => {
     setTemplateSaveDialogOpen(false);
     setTemplateName('');
+    setTemplateNameError('');
   }, []);
 
   const handleSaveTemplateSynchronized = useCallback(async (nameOverride = '') => {
@@ -2677,6 +2682,7 @@ const EnhancedDataEditor = () => {
       if (elapsed < 3000) await new Promise(r => setTimeout(r, 3000 - elapsed));
       if (resp?.data?.success) {
         setTemplateSaved(true);
+        setTemplateNameError('');
         showSnackbar(`Template "${saveName}" saved successfully!`, 'success');
         handleCloseSaveTemplateDialog();
       } else {
@@ -2689,7 +2695,7 @@ const EnhancedDataEditor = () => {
       if (duplicateName) {
         setTemplateName(saveName);
         setTemplateSaveDialogOpen(true);
-        showSnackbar('Template with this name already exists. Please enter another name.', 'warning');
+        setTemplateNameError('A template with this name already exists. Enter a different name.');
       } else {
         showSnackbar(e?.response?.data?.error || 'Failed to save template', 'error');
       }
@@ -4882,7 +4888,9 @@ const EnhancedDataEditor = () => {
         String(value ?? '').toLowerCase().includes(rowSearchQuery)
       );
     });
-  const editorSubtitle = `${sessionId ? `Session ${sessionId}` : 'Active workbook'} - ${totalRows.toLocaleString()} rows`;
+  // The session id is a UUID that means nothing to the user; the row count
+  // is the part worth showing.
+  const editorSubtitle = `${totalRows.toLocaleString()} rows`;
   return (
     <Box sx={editorPageSx}>
       <Box
@@ -5526,7 +5534,7 @@ const EnhancedDataEditor = () => {
                       letterSpacing: 0
                     }}
                   >
-                    Enhanced Data Editor
+                    FactWise BOM Scrubber
                   </Typography>
                   <Typography
                     variant="body2"
@@ -5547,6 +5555,18 @@ const EnhancedDataEditor = () => {
 
               {/* Right - Primary Actions */}
               <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', justifyContent: { xs: 'flex-start', lg: 'flex-end' }, flexWrap: 'wrap', flex: { xs: '1 1 100%', lg: '0 0 auto' } }}>
+                {/* The end of the workflow, so it sits apart from the editing
+                    tools rather than among them. */}
+                <Button
+                  size="small"
+                  onClick={() => setFactwiseExportDialogOpen(true)}
+                  disabled={downloadLoading || syncStatus.inProgress}
+                  startIcon={<FolderOpenIcon sx={{ fontSize: 18 }} />}
+                  sx={exportFactwiseActionSx}
+                  variant="contained"
+                >
+                  Export to FactWise
+                </Button>
                 <IconButton
                   onClick={handleManualRefresh}
                   disabled={syncStatus.inProgress}
@@ -5567,6 +5587,42 @@ const EnhancedDataEditor = () => {
                 >
                   <RefreshIcon sx={{ fontSize: 20 }} />
                 </IconButton>
+
+                {/* Layout actions sit behind the overflow menu: useful, but not
+                    worth toolbar space beside the primary actions. */}
+                <Tooltip title="More actions">
+                  <IconButton
+                    onClick={(e) => setMoreActionsAnchor(e.currentTarget)}
+                    disabled={syncStatus.inProgress}
+                    sx={{
+                      width: 40,
+                      height: 40,
+                      color: '#ffffff',
+                      bgcolor: isDarkMode ? '#334155' : '#1e293b',
+                      '&:hover': { bgcolor: isDarkMode ? '#334155' : '#1e293b' },
+                      '&.Mui-disabled': {
+                        bgcolor: isDarkMode ? '#1e293b' : '#cbd5e1',
+                        color: '#64748b'
+                      }
+                    }}
+                    aria-label="More actions"
+                  >
+                    <MoreVertIcon sx={{ fontSize: 20 }} />
+                  </IconButton>
+                </Tooltip>
+                <Menu
+                  anchorEl={moreActionsAnchor}
+                  open={Boolean(moreActionsAnchor)}
+                  onClose={() => setMoreActionsAnchor(null)}
+                  PaperProps={{ sx: { borderRadius: '8px', mt: 1, minWidth: 230, border: `1px solid ${t.border.default}`, boxShadow: t.shadow.card } }}
+                >
+                  <MenuItem onClick={() => { setMoreActionsAnchor(null); handleAutoFitAll(); }} disabled={syncStatus.inProgress}>
+                    <ListItemText>Auto-fit all columns</ListItemText>
+                  </MenuItem>
+                  <MenuItem onClick={() => { setMoreActionsAnchor(null); handleRebuildColumns(); }} disabled={rebuildingColumns || syncStatus.inProgress}>
+                    <ListItemText>{rebuildingColumns ? 'Rebuilding...' : 'Rebuild template columns'}</ListItemText>
+                  </MenuItem>
+                </Menu>
 
               {/* Auto-fit All */}
               {false && (
@@ -5615,38 +5671,16 @@ const EnhancedDataEditor = () => {
                   arrangement), alongside the other alternate shapes. */}
 
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap', minWidth: 0 }}>
+              {/* TOOLS dropdown */}
               <Button
-                size="small"
-                onClick={() => setFactwiseExportDialogOpen(true)}
-                disabled={downloadLoading || syncStatus.inProgress}
-                startIcon={<FolderOpenIcon sx={{ fontSize: 18 }} />}
-                sx={exportFactwiseActionSx}
+                onClick={(e) => setToolsMenuAnchor(e.currentTarget)}
                 variant="outlined"
-              >
-                Export to FactWise
-              </Button>
-              <Button
-                size="small"
-                onClick={handleAutoFitAll}
-                disabled={syncStatus.inProgress}
+                endIcon={<KeyboardArrowDownIcon />}
+                startIcon={<BuildIcon />}
                 sx={outlinedActionSx}
-                variant="outlined"
               >
-                Auto-fit All
+                Tools
               </Button>
-              <Tooltip title="Rebuild template columns">
-                <span>
-                  <Button
-                    size="small"
-                    onClick={handleRebuildColumns}
-                    disabled={rebuildingColumns || syncStatus.inProgress}
-                    sx={outlinedActionSx}
-                    variant="outlined"
-                  >
-                    {rebuildingColumns ? 'Rebuilding...' : 'Rebuild Columns'}
-                  </Button>
-                </span>
-              </Tooltip>
               <Tooltip title={isExistingProcessingTemplate ? 'Existing templates cannot be saved from this run' : (templateSaved ? 'Template already saved' : 'Save this workflow template')}>
                 <span>
                   <Button
@@ -5662,16 +5696,6 @@ const EnhancedDataEditor = () => {
                 </span>
               </Tooltip>
 
-              {/* TOOLS dropdown */}
-              <Button
-                onClick={(e) => setToolsMenuAnchor(e.currentTarget)}
-                variant="outlined"
-                endIcon={<KeyboardArrowDownIcon />}
-                startIcon={<BuildIcon />}
-                sx={outlinedActionSx}
-              >
-                Tools
-              </Button>
               </Box>
               <Menu
                 anchorEl={toolsMenuAnchor}
@@ -8108,10 +8132,13 @@ const EnhancedDataEditor = () => {
           </DialogContentText>
           <TextField
             fullWidth
+            autoFocus
             margin="normal"
             label="Template Name"
             value={templateName}
-            onChange={(e) => setTemplateName(e.target.value)}
+            error={Boolean(templateNameError)}
+            helperText={templateNameError}
+            onChange={(e) => { setTemplateName(e.target.value); setTemplateNameError(''); }}
           />
         </DialogContent>
         <DialogActions>
