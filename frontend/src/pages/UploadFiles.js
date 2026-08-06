@@ -68,6 +68,37 @@ const unsupportedFileMessage = (fileName = 'Selected file') => (
   `${fileName} is not supported. Please upload .xlsx, .xls, .xlsm, .csv, or .pdf files.`
 );
 
+const compactSpreadsheetValue = value => String(value ?? '').trim();
+
+const expandMergedCellsInRows = (worksheet, rows = []) => {
+  const merges = Array.isArray(worksheet?.['!merges']) ? worksheet['!merges'] : [];
+  if (!merges.length) return rows;
+
+  merges.forEach((merge) => {
+    const topRow = Number(merge?.s?.r);
+    const leftCol = Number(merge?.s?.c);
+    const bottomRow = Number(merge?.e?.r);
+    const rightCol = Number(merge?.e?.c);
+    if (![topRow, leftCol, bottomRow, rightCol].every(Number.isFinite)) return;
+
+    const topLeftAddress = XLSX.utils.encode_cell({ r: topRow, c: leftCol });
+    const topLeftCell = worksheet?.[topLeftAddress];
+    const mergedValue = compactSpreadsheetValue(rows[topRow]?.[leftCol] ?? topLeftCell?.w ?? topLeftCell?.v);
+    if (!mergedValue) return;
+
+    for (let rowIndex = topRow; rowIndex <= bottomRow; rowIndex += 1) {
+      if (!rows[rowIndex]) rows[rowIndex] = [];
+      for (let colIndex = leftCol; colIndex <= rightCol; colIndex += 1) {
+        if (!compactSpreadsheetValue(rows[rowIndex][colIndex])) {
+          rows[rowIndex][colIndex] = mergedValue;
+        }
+      }
+    }
+  });
+
+  return rows;
+};
+
 const IST_TIME_ZONE = 'Asia/Kolkata';
 
 const parseHistoryDate = (value) => {
@@ -109,7 +140,7 @@ const isNumericLike = (value = '') => {
 };
 const HEADER_KEYWORDS = [
   /\boperation\b/, /\bsequence\b/, /\bcomponent\b/, /\bitem\b/, /\bpart\b/,
-  /\bdescription\b/, /\btype\b/, /\buom\b/, /\bqty\b/, /\bquantity\b/,
+  /\bdescription\b/, /\btype\b/, /\buom\b/, /\bqty\b/, /\bqnty\b/, /\bquantity\b/,
   /\bmanufacturer\b/, /\bmanufacture\b/, /\bmpn\b/, /\bmfr\b/, /\bdesignator/,
   /\brelease\b/, /\bstatus\b/, /\brevision\b/, /\bclassification\b/,
 ];
@@ -159,7 +190,8 @@ const scoreHeaderRow = (rows = [], rowIndex = 0) => {
   );
 };
 
-const readSheetRows = (workbook, sheetName) => {
+const readSheetRows = (workbook, sheetName, options = {}) => {
+  const { expandMergedCells = true } = options;
   if (!workbook || !sheetName || !workbook.Sheets || !workbook.Sheets[sheetName]) return [];
   const ws = workbook.Sheets[sheetName];
   const opts = { header: 1, raw: false, defval: '', blankrows: true };
@@ -177,12 +209,13 @@ const readSheetRows = (workbook, sheetName) => {
       }
     }
   } catch (_) { /* fall back to default range */ }
-  return XLSX.utils.sheet_to_json(ws, opts);
+  const rows = XLSX.utils.sheet_to_json(ws, opts);
+  return expandMergedCells ? expandMergedCellsInRows(ws, rows) : rows;
 };
 
 // Returns a 1-based row number, matching the "Header Row" field.
 const detectHeaderRow = (workbook, sheetName) => {
-  const rows = readSheetRows(workbook, sheetName).slice(0, HEADER_SCAN_ROWS);
+  const rows = readSheetRows(workbook, sheetName, { expandMergedCells: false }).slice(0, HEADER_SCAN_ROWS);
   let bestRow = 0;
   let bestScore = Number.NEGATIVE_INFINITY;
 
@@ -256,6 +289,46 @@ const uniqueSheetJoinValues = values => {
       seen.add(key);
       return true;
     });
+};
+
+const repeatedSheetJoinValues = values => values
+  .map(cleanSheetJoinValue)
+  .filter(Boolean);
+
+const normalizeSheetJoinHeader = value => String(value ?? '')
+  .toLowerCase()
+  .replace(/[^a-z0-9]+/g, ' ')
+  .trim();
+
+const shouldPreserveRepeatedSheetJoinValues = (column = '') => {
+  const key = normalizeSheetJoinHeader(column);
+  if (!key) return false;
+  if (/\bmpn\b|\bmfr\b|\bmfg\b/.test(key)) return true;
+  if (/manufacturer/.test(key) && /(part|number|num|info|name|vendor|mfr|mfg)/.test(key)) return true;
+  if (/(manufacturer|mfg|mfr).*(part|number|num)/.test(key)) return true;
+  if (/(part|item).*(number|no|num|code)/.test(key)) return true;
+  return false;
+};
+
+const valuesNeedSheetJoinPosition = (rows = [], column = '', selectedColumns = []) => {
+  const seen = new Map();
+  for (const row of rows) {
+    const value = cleanSheetJoinValue(row?.[column]);
+    if (!value) continue;
+    const companionSignature = selectedColumns
+      .filter(selectedColumn => selectedColumn !== column)
+      .map(selectedColumn => cleanSheetJoinValue(row?.[selectedColumn]))
+      .filter(Boolean)
+      .join('::');
+    const key = value.toLowerCase();
+    if (!seen.has(key)) {
+      seen.set(key, new Set(companionSignature ? [companionSignature] : []));
+      continue;
+    }
+    if (companionSignature) seen.get(key).add(companionSignature);
+    if (seen.get(key).size > 1) return true;
+  }
+  return false;
 };
 
 const DEFAULT_GROUPED_DETAIL_IGNORE_PATTERNS = [
@@ -873,6 +946,7 @@ const UploadFiles = () => {
   const [sheetJoinColumnWidths, setSheetJoinColumnWidths] = useState({});
   const [sheetJoinVisibleColumns, setSheetJoinVisibleColumns] = useState([]);
   const [sheetJoinPreviewFilter, setSheetJoinPreviewFilter] = useState('all');
+  const [sheetJoinPreviewSearch, setSheetJoinPreviewSearch] = useState('');
   const sheetJoinPreviewRowsPerPage = 50;
   const [sheetJoinLegacyHeaderWarning, setSheetJoinLegacyHeaderWarning] = useState(false);
   const [savedSheetJoinComparisons, setSavedSheetJoinComparisons] = useState([]);
@@ -1097,6 +1171,7 @@ const UploadFiles = () => {
       setSheetJoinDialogOpen(false);
       setSheetJoinStage('match');
       setSheetJoinPreview(null);
+      setSheetJoinPreviewSearch('');
       setSheetJoinSources([]);
       setSheetJoinSourceFileInputKey(key => key + 1);
       setActiveSheetJoinComparisonId(activeComparisonId);
@@ -1387,7 +1462,7 @@ const UploadFiles = () => {
       : (config.detailHeaders || []);
     // Don't auto-guess the primary match column — the user must pick it deliberately.
     const baseKey = baseHeaders.includes(config.baseKey) ? config.baseKey : '';
-    const detailKey = detailHeaders.includes(config.detailKey) ? config.detailKey : guessKeyColumn(detailHeaders);
+    const detailKey = detailHeaders.includes(config.detailKey) ? config.detailKey : '';
     const detailColumns = (config.detailColumns || []).filter(column => detailHeaders.includes(column) && column !== detailKey);
     const selectedDetailColumns = detailColumns.length ? detailColumns : defaultDetailColumns(detailHeaders, detailKey);
     const groupedDetail = {
@@ -1675,7 +1750,13 @@ const UploadFiles = () => {
             selectedDetailColumns
               .filter(column => column !== groupedDetail.detailColumn)
               .forEach(column => {
-                row[detailHeaderMap[column]] = uniqueSheetJoinValues(detailSourceRows.map(sourceRow => sourceRow[column])).join(' | ');
+                const values = detailSourceRows.map(sourceRow => sourceRow[column]);
+                row[detailHeaderMap[column]] = (
+                  shouldPreserveRepeatedSheetJoinValues(column) ||
+                  valuesNeedSheetJoinPosition(detailSourceRows, column, selectedDetailColumns)
+                    ? repeatedSheetJoinValues(values)
+                    : uniqueSheetJoinValues(values)
+                ).join(' | ');
               });
             rows.push(row);
             expandedRows += 1;
@@ -1685,7 +1766,13 @@ const UploadFiles = () => {
           row.__sheetJoinStatus = 'matched';
           baseHeaders.forEach(header => { row[header] = baseRow[header] ?? ''; });
           selectedDetailColumns.forEach(column => {
-            row[detailHeaderMap[column]] = uniqueValues(matches.map(match => match[column])).join(' | ');
+            const values = matches.map(match => match[column]);
+            row[detailHeaderMap[column]] = (
+              shouldPreserveRepeatedSheetJoinValues(column) ||
+              valuesNeedSheetJoinPosition(matches, column, selectedDetailColumns)
+                ? repeatedSheetJoinValues(values)
+                : uniqueValues(values)
+            ).join(' | ');
           });
           rows.push(row);
           expandedRows += 1;
@@ -1931,6 +2018,7 @@ const UploadFiles = () => {
     setSheetJoinDialogOpen(false);
     setSheetJoinStage('match');
     setSheetJoinPreview(null);
+    setSheetJoinPreviewSearch('');
     setSheetJoinSources([]);
     setSheetJoinSourceFileInputKey(key => key + 1);
     setActiveSheetJoinComparisonId(null);
@@ -2248,13 +2336,15 @@ const UploadFiles = () => {
     const availableDetailSheets = getSheetJoinSourceSheets(detailSourceId);
     const baseSheet = sheetJoinSetup?.baseSheet || selectedClientSheet || clientSheetNames[0];
     const detailSheet = sheetJoinSetup?.detailSheet || availableDetailSheets.find(sheet => detailSourceId !== baseSourceId || sheet !== baseSheet) || availableDetailSheets[0] || '';
-    const baseHeaderRow = sheetJoinSetup?.baseHeaderRow || clientHeaderRow || 1;
-    const detailHeaderRow = sheetJoinSetup?.detailHeaderRow || 1;
+    const baseWorkbook = getSheetJoinSourceWorkbook(baseSourceId);
+    const detailWorkbook = getSheetJoinSourceWorkbook(detailSourceId);
+    const baseHeaderRow = sheetJoinSetup?.baseHeaderRow || (baseWorkbook && baseSheet ? detectHeaderRow(baseWorkbook, baseSheet) : 1);
+    const detailHeaderRow = sheetJoinSetup?.detailHeaderRow || (detailWorkbook && detailSheet ? detectHeaderRow(detailWorkbook, detailSheet) : 1);
     const baseHeaders = getSheetHeaders(baseSheet, baseHeaderRow, baseSourceId);
     const detailHeaders = getSheetHeaders(detailSheet, detailHeaderRow, detailSourceId);
     // Don't auto-guess the primary match column — the user picks it deliberately.
     const baseKey = sheetJoinSetup?.baseKey || '';
-    const detailKey = sheetJoinSetup?.detailKey || guessKeyColumn(detailHeaders);
+    const detailKey = detailHeaders.includes(sheetJoinSetup?.detailKey) ? sheetJoinSetup.detailKey : '';
     const defaultDetailColumnSelection = defaultDetailColumns(detailHeaders, detailKey);
     const defaultCopiedColumnSelection = defaultCopiedBaseColumns(baseHeaders);
 
@@ -2279,6 +2369,7 @@ const UploadFiles = () => {
     setSheetJoinLegacyHeaderWarning(false);
     setSheetJoinStage('match');
     setSheetJoinPreview(null);
+    setSheetJoinPreviewSearch('');
     setSheetJoinDialogOpen(true);
   };
 
@@ -2318,7 +2409,7 @@ const UploadFiles = () => {
       const detailSheet = sheetNames[0];
       const detailHeaderRow = detectHeaderRow(workbook, detailSheet);
       const detailHeaders = readHeadersAtRow(workbook, detailSheet, detailHeaderRow);
-      const detailKey = guessKeyColumn(detailHeaders);
+      const detailKey = '';
       const detailColumns = defaultDetailColumns(detailHeaders, detailKey);
 
       setSheetJoinSources(prev => [...prev, nextSource]);
@@ -2370,6 +2461,7 @@ const UploadFiles = () => {
     if ((!baseRows.length || !detailRows.length) && sheetJoinPreview?.rows?.length) {
       setSheetJoinVisibleColumns(sheetJoinPreview.headers);
       setSheetJoinPreviewFilter('all');
+      setSheetJoinPreviewSearch('');
       setSheetJoinPreviewPage(0);
       setSheetJoinStage('preview');
       return;
@@ -2407,6 +2499,7 @@ const UploadFiles = () => {
     setSheetJoinLegacyHeaderWarning(false);
     setSheetJoinVisibleColumns(preview.headers);
     setSheetJoinPreviewFilter('all');
+    setSheetJoinPreviewSearch('');
     setSheetJoinPreviewPage(0);
     setSheetJoinStage('preview');
   };
@@ -2457,9 +2550,7 @@ const UploadFiles = () => {
     const exportHeaders = sheetJoinVisibleColumns.length
       ? sheetJoinPreview.headers.filter(header => sheetJoinVisibleColumns.includes(header))
       : sheetJoinPreview.headers;
-    const rowsToExport = sheetJoinPreview.rows.filter(row => (
-      sheetJoinPreviewFilter === 'all' || row.__sheetJoinStatus === sheetJoinPreviewFilter
-    ));
+    const rowsToExport = sheetJoinFilteredPreviewRows.map(({ row }) => row);
     const exportRows = rowsToExport.map(row => {
       const cleanRow = {};
       exportHeaders.forEach(header => {
@@ -2517,7 +2608,7 @@ const UploadFiles = () => {
     window.addEventListener('mouseup', handleUp);
   };
 
-  const handleSaveSheetJoinSetup = useCallback(() => {
+  const handleSaveSheetJoinSetup = useCallback(async () => {
     const preview = sheetJoinPreview || buildSheetJoinPreview(sheetJoinConfig);
 
     const setup = {
@@ -2539,8 +2630,20 @@ const UploadFiles = () => {
 
     setSheetJoinSetup(setup);
     setSheetJoinPreview(preview);
-    setSheetJoinDialogOpen(false);
-  }, [buildSheetJoinPreview, sheetJoinConfig, sheetJoinPreview]);
+    try {
+      const draft = await saveSheetJoinDraft(preview);
+      if (draft) {
+        applySheetJoinDraftToUpload(draft, null);
+      } else {
+        setSheetJoinDialogOpen(false);
+      }
+      setWizardStep(1);
+      setProcessingPath('map');
+      setSuccess('Related sheet data is saved as your new BOM/client file. Choose how you want to continue.');
+    } catch (err) {
+      setError('Failed to save generated BOM file: ' + (err.message || err));
+    }
+  }, [applySheetJoinDraftToUpload, buildSheetJoinPreview, saveSheetJoinDraft, sheetJoinConfig, sheetJoinPreview]);
 
   const getSavedSheetJoinDraft = useCallback(async (comparisonId) => {
     const db = await openSheetJoinDraftDb();
@@ -3259,7 +3362,7 @@ const UploadFiles = () => {
           const detailSheet = extracted.sheetNames[0] || 'PDF_Source';
           const detailHeaderRow = 1;
           const detailHeaders = readHeadersAtRow(extracted.workbook, detailSheet, detailHeaderRow);
-          const detailKey = guessKeyColumn(detailHeaders);
+          const detailKey = '';
           const detailColumns = defaultDetailColumns(detailHeaders, detailKey);
 
           setSheetJoinSources(prev => [...prev, nextSource]);
@@ -3274,6 +3377,7 @@ const UploadFiles = () => {
           }));
           setSheetJoinStage('match');
           setSheetJoinPreview(null);
+          setSheetJoinPreviewSearch('');
           setActiveSheetJoinComparisonId(null);
           setSuccess(`PDF merge source extracted into ${extracted.rowCount} rows.`);
         } else if (context.action === 'upload') {
@@ -3365,10 +3469,15 @@ const UploadFiles = () => {
   const sheetJoinDetailSingularLabel = sheetJoinDetailLabel === 'MPNs'
     ? 'MPN'
     : (sheetJoinDetailLabel === 'manufacturers' ? 'manufacturer' : sheetJoinDetailLabel);
+  const normalizedSheetJoinPreviewSearch = sheetJoinPreviewSearch.trim().toLowerCase();
   const sheetJoinFilteredPreviewRows = sheetJoinPreview
     ? sheetJoinPreview.rows
         .map((row, index) => ({ row, index }))
         .filter(({ row }) => sheetJoinPreviewFilter === 'all' || row.__sheetJoinStatus === sheetJoinPreviewFilter)
+        .filter(({ row }) => {
+          if (!normalizedSheetJoinPreviewSearch) return true;
+          return Object.values(row).some(value => cleanSheetJoinValue(value).toLowerCase().includes(normalizedSheetJoinPreviewSearch));
+        })
     : [];
   const sheetJoinPreviewTotalPages = Math.max(1, Math.ceil(sheetJoinFilteredPreviewRows.length / sheetJoinPreviewRowsPerPage));
   const sheetJoinPreviewStart = sheetJoinPreviewPage * sheetJoinPreviewRowsPerPage;
@@ -4801,9 +4910,7 @@ const UploadFiles = () => {
                       const sourceSheets = getSheetJoinSourceSheets(baseSourceId);
                       const baseSheet = sourceSheets[0] || '';
                       const baseWorkbook = getSheetJoinSourceWorkbook(baseSourceId);
-                      const baseHeaderRow = baseSourceId === 'primary'
-                        ? (clientHeaderRow || 1)
-                        : (baseWorkbook && baseSheet ? detectHeaderRow(baseWorkbook, baseSheet) : 1);
+                      const baseHeaderRow = baseWorkbook && baseSheet ? detectHeaderRow(baseWorkbook, baseSheet) : 1;
                       const baseHeaders = getSheetHeaders(baseSheet, baseHeaderRow, baseSourceId);
                       const baseKey = '';
                       setSheetJoinConfig(prev => ({
@@ -4836,11 +4943,9 @@ const UploadFiles = () => {
                         const sourceSheets = getSheetJoinSourceSheets(detailSourceId);
                         const detailSheet = sourceSheets.find(sheet => detailSourceId !== (sheetJoinConfig.baseSourceId || 'primary') || sheet !== sheetJoinConfig.baseSheet) || sourceSheets[0] || '';
                         const detailWorkbook = getSheetJoinSourceWorkbook(detailSourceId);
-                        const detailHeaderRow = detailSourceId === 'primary'
-                          ? (clientHeaderRow || 1)
-                          : (detailWorkbook && detailSheet ? detectHeaderRow(detailWorkbook, detailSheet) : 1);
+                        const detailHeaderRow = detailWorkbook && detailSheet ? detectHeaderRow(detailWorkbook, detailSheet) : 1;
                         const detailHeaders = getSheetHeaders(detailSheet, detailHeaderRow, detailSourceId);
-                        const detailKey = guessKeyColumn(detailHeaders);
+                        const detailKey = '';
                         const detailColumns = defaultDetailColumns(detailHeaders, detailKey);
                         setSheetJoinConfig(prev => ({
                           ...prev,
@@ -4879,11 +4984,14 @@ const UploadFiles = () => {
                     value={sheetJoinConfig.baseSheet}
                     onChange={(event) => {
                       const baseSheet = event.target.value;
-                      const baseHeaders = getSheetHeaders(baseSheet, sheetJoinConfig.baseHeaderRow, sheetJoinConfig.baseSourceId);
+                      const baseWorkbook = getSheetJoinSourceWorkbook(sheetJoinConfig.baseSourceId);
+                      const baseHeaderRow = baseWorkbook && baseSheet ? detectHeaderRow(baseWorkbook, baseSheet) : 1;
+                      const baseHeaders = getSheetHeaders(baseSheet, baseHeaderRow, sheetJoinConfig.baseSourceId);
                       const baseKey = '';
                       setSheetJoinConfig(prev => ({
                         ...prev,
                         baseSheet,
+                        baseHeaderRow,
                         baseKey,
                         uniqueIdBaseColumn: baseKey,
                         copiedBaseColumns: defaultCopiedBaseColumns(baseHeaders)
@@ -4905,12 +5013,15 @@ const UploadFiles = () => {
                     value={sheetJoinConfig.detailSheet}
                     onChange={(event) => {
                       const detailSheet = event.target.value;
-                      const detailHeaders = getSheetHeaders(detailSheet, sheetJoinConfig.detailHeaderRow, sheetJoinConfig.detailSourceId);
-                      const detailKey = guessKeyColumn(detailHeaders);
+                      const detailWorkbook = getSheetJoinSourceWorkbook(sheetJoinConfig.detailSourceId);
+                      const detailHeaderRow = detailWorkbook && detailSheet ? detectHeaderRow(detailWorkbook, detailSheet) : 1;
+                      const detailHeaders = getSheetHeaders(detailSheet, detailHeaderRow, sheetJoinConfig.detailSourceId);
+                      const detailKey = '';
                       const detailColumns = defaultDetailColumns(detailHeaders, detailKey);
                       setSheetJoinConfig(prev => ({
                         ...prev,
                         detailSheet,
+                        detailHeaderRow,
                         detailKey,
                         detailColumns,
                         uniqueIdDetailColumn: detailColumns[0] || detailKey
@@ -4957,7 +5068,7 @@ const UploadFiles = () => {
                   onChange={(event) => {
                     const detailHeaderRow = Math.max(1, Number(event.target.value || 1));
                     const headers = getSheetHeaders(sheetJoinConfig.detailSheet, detailHeaderRow, sheetJoinConfig.detailSourceId);
-                    const detailKey = guessKeyColumn(headers);
+                    const detailKey = '';
                     const detailColumns = defaultDetailColumns(headers, detailKey);
                     setSheetJoinConfig(prev => ({
                       ...prev,
@@ -5147,7 +5258,37 @@ const UploadFiles = () => {
                 </Alert>
 
                 {/* Right-Aligned Control Group: Select + Left Icon + Page X of Y + Right Icon */}
-                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.2, ml: 'auto' }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.2, ml: 'auto', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                  <TextField
+                    size="small"
+                    value={sheetJoinPreviewSearch}
+                    onChange={(event) => {
+                      setSheetJoinPreviewSearch(event.target.value);
+                      setSheetJoinPreviewPage(0);
+                    }}
+                    placeholder="Search merged rows..."
+                    InputProps={{
+                      startAdornment: <SearchIcon sx={{ mr: 0.75, fontSize: 18, color: isDarkMode ? '#94a3b8' : '#64748b' }} />,
+                    }}
+                    sx={{
+                      minWidth: 260,
+                      '& .MuiInputBase-root': {
+                        height: 34,
+                        fontSize: '12px',
+                        fontWeight: 600,
+                        bgcolor: isDarkMode ? '#1e293b' : '#f8fafc',
+                        color: isDarkMode ? '#ffffff' : '#0f172a',
+                        borderRadius: '10px',
+                      },
+                      '& .MuiOutlinedInput-notchedOutline': {
+                        borderColor: isDarkMode ? 'rgba(255, 255, 255, 0.18)' : '#cbd5e1',
+                      },
+                      '& input::placeholder': {
+                        color: isDarkMode ? '#94a3b8' : '#64748b',
+                        opacity: 1,
+                      },
+                    }}
+                  />
                   {/* 1. Visible Columns Dropdown */}
                   <FormControl size="small" sx={{ minWidth: 190 }}>
                     <Select
@@ -5379,14 +5520,14 @@ const UploadFiles = () => {
               <>
                 <Button
                   variant="contained"
-                  onClick={handleContinueWithBomMapping}
+                  onClick={handleSaveSheetJoinSetup}
                   sx={{
                     height: 40,
                     px: 2.5,
                     ...primaryPillSx
                   }}
                 >
-                  Continue with BOM Mapping →
+                  Next →
                 </Button>
               </>
             )}
