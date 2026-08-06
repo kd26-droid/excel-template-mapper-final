@@ -4953,9 +4953,30 @@ def _append_authored_finished_good(info, rows, headers):
 
     constants = _constant_column_values(rows, headers)
 
+    def stamp_identity(target_row, good):
+        """Write the authored identity onto a row, leaving everything else alone."""
+        while len(target_row) <= max(code_index, name_index, description_index, type_index, uom_index):
+            target_row.append('')
+        target_row[code_index] = good['code']
+        if name_index >= 0:
+            target_row[name_index] = good['name']
+        if description_index >= 0:
+            target_row[description_index] = good['name']
+        if type_index >= 0:
+            target_row[type_index] = 'Finished good'
+        if uom_index >= 0:
+            target_row[uom_index] = good['uom']
+
     output = list(rows or [])
     for good in goods:
         if good['code'] in existing:
+            # Already a row — usually because the sheet was exported and imported
+            # back. Re-stamp its identity so it cannot have drifted away from what
+            # the user authored (a bulk fill before the lock existed, an edit in
+            # Excel, a stale template replay).
+            for row in output:
+                if isinstance(row, list) and code_index < len(row)                         and str(row[code_index] or '').strip() == good['code']:
+                    stamp_identity(row, good)
             continue
         new_row = [''] * len(headers)
         # Enterprise-level values (procurement entity, buyer/seller flags) are
@@ -9745,8 +9766,24 @@ def _legacy_factwise_id_as_column_rule(rule):
     }
 
 
-def apply_column_value_rule(headers, rows, raw_rule):
-    """Apply one reusable fill/create rule to a positional grid."""
+# A finished good authored in the BOM structure gate is not an ordinary row: its
+# code, name, type and unit came from the user answering a question, not from the
+# uploaded sheet. Bulk fills must leave those alone, or "set every Item type to
+# Raw material" quietly turns the finished good into a raw material.
+#
+# Everything else — buyer/seller flags, procurement entity, tags, specs — is
+# still filled normally, so the row stays consistent with the rest of the sheet.
+AUTHORED_FINISHED_GOOD_LOCKED_COLUMNS = {
+    'item code', 'item name', 'description', 'item type', 'measurement unit',
+}
+
+
+def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
+    """Apply one reusable fill/create rule to a positional grid.
+
+    ``locked_item_codes`` names rows whose identity columns must not be touched
+    (see AUTHORED_FINISHED_GOOD_LOCKED_COLUMNS).
+    """
     rule = _legacy_factwise_id_as_column_rule(raw_rule) or dict(raw_rule or {})
     if rule.get('type') != 'column_value':
         return list(headers or []), [list(row) for row in (rows or [])], 0
@@ -9861,10 +9898,18 @@ def apply_column_value_rule(headers, rows, raw_rule):
             return any(c in lowered for c in compares)
         return False
 
+    # Resolve the lock once: which rows are protected, for this target column.
+    target_is_locked = _template_label_key(target) in AUTHORED_FINISHED_GOOD_LOCKED_COLUMNS
+    locked_codes = {str(code).strip() for code in (locked_item_codes or []) if str(code).strip()}
+    item_code_index = _grid_column_index(output_headers, 'Item code') if (target_is_locked and locked_codes) else -1
+
     for row_index, row in enumerate(output_rows):
         while len(row) < len(output_headers):
             row.append('')
         if write_mode != 'overwrite' and str(row[target_index] or '').strip():
+            continue
+        if item_code_index >= 0 and str(row[item_code_index] or '').strip() in locked_codes:
+            # Authored finished good: its identity is not the sheet's to rewrite.
             continue
 
         should_write = True
@@ -9934,7 +9979,12 @@ def fill_or_create_column(request):
                 'success': False,
                 'error': f'Column "{clean_rule["target_column"]}" already exists. Use Fill existing column.',
             }, status=status.HTTP_400_BAD_REQUEST)
-        new_headers, new_rows, changed = apply_column_value_rule(headers, rows, clean_rule)
+        # Rows created by the BOM structure gate keep their own identity, so a
+        # bulk fill cannot turn the finished good into a raw material.
+        locked_codes = [good['code'] for good in _authored_finished_goods(info)]
+        new_headers, new_rows, changed = apply_column_value_rule(
+            headers, rows, clean_rule, locked_item_codes=locked_codes
+        )
         write_session_grid(session_id, info, new_headers, new_rows)
 
         target = clean_rule['target_column']
