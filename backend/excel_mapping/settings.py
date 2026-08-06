@@ -222,7 +222,13 @@ PDF_CONFIG = {
     'max_file_size_mb': int(os.environ.get('PDF_MAX_FILE_SIZE_MB', '50')),
     'max_pages': int(os.environ.get('PDF_MAX_PAGES', '50')),
     'image_dpi': int(os.environ.get('PDF_IMAGE_DPI', '300')),  # OCR-quality render, used only when a page is actually OCR'd
-    'preview_image_dpi': int(os.environ.get('PDF_PREVIEW_DPI', '300')),  # Full-res per-page preview so zone drawing is sharp; rendered on demand + cached, so one page at a time stays fast
+    # 200 DPI renders an A4 page at ~1650px wide. The zone canvas caps itself at
+    # 1400px (PDFZoneSelection.js), so anything above this is downscaled in the
+    # browser and thrown away — 300 DPI produced 2024px for the same 1400px canvas.
+    # Rendering is the slow part (~25s per page on the deployed worker), and it
+    # scales with pixel count, so this cuts the wait substantially while still
+    # giving the canvas more pixels than it can display.
+    'preview_image_dpi': int(os.environ.get('PDF_PREVIEW_DPI', '200')),
     'supported_formats': ['.pdf'],
     'ocr_model': 'prebuilt-layout',  # Layout model for table extraction (confirmed available)
     'confidence_threshold': 0.8,  # Higher threshold for better quality

@@ -7,6 +7,7 @@ import tempfile
 import logging
 import threading
 import uuid
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any
@@ -29,6 +30,19 @@ from .services.native_pdf_service import NativePDFService
 from .default_template import get_sfo_reference_headers, get_sfo_template_metadata
 
 logger = logging.getLogger(__name__)
+
+# One lock per (session, page) so a page is only ever rendered once at a time.
+# Rendering a page costs ~25s on the deployed worker; if the upload's background
+# warm-up and the user's own request both render the same page, they contend for
+# CPU and both finish slower than a single render would have.
+_page_render_locks = defaultdict(threading.Lock)
+_page_render_locks_guard = threading.Lock()
+
+
+def _page_render_lock(session_id, page_number):
+    key = f"{session_id}:{page_number}"
+    with _page_render_locks_guard:
+        return _page_render_locks[key]
 
 
 ALLOWED_TEMPLATE_EXTENSIONS = {'.xlsx', '.xls', '.xlsm', '.csv'}
@@ -530,16 +544,25 @@ def upload_pdf(request):
             # (a warm hit serves in ~60ms). Quality is unchanged: this renders exactly
             # what get_page_image would have rendered, just earlier.
             def _warm_first_page(pdf_path, sess_id):
+                # Hold the same per-page lock get_page_image uses, so a user who
+                # arrives mid-render waits for this one instead of starting a rival
+                # render of the same page.
                 try:
-                    warm_processor = PDFProcessor()
-                    p = warm_processor.convert_single_page(
-                        pdf_path, sess_id, 1,
-                        dpi=warm_processor.config.get('preview_image_dpi', 300),
-                        optimize=False,
-                    )
-                    PDFPage.objects.filter(
-                        pdf_session__session_id=sess_id, page_number=1
-                    ).update(image_path=p['image_path'], width=p['width'], height=p['height'])
+                    with _page_render_lock(sess_id, 1):
+                        already = PDFPage.objects.filter(
+                            pdf_session__session_id=sess_id, page_number=1
+                        ).values_list('image_path', flat=True).first()
+                        if already and os.path.exists(already):
+                            return
+                        warm_processor = PDFProcessor()
+                        p = warm_processor.convert_single_page(
+                            pdf_path, sess_id, 1,
+                            dpi=warm_processor.config.get('preview_image_dpi', 200),
+                            optimize=False,
+                        )
+                        PDFPage.objects.filter(
+                            pdf_session__session_id=sess_id, page_number=1
+                        ).update(image_path=p['image_path'], width=p['width'], height=p['height'])
                     logger.info(f"Pre-rendered page 1 for session {sess_id}")
                 except Exception as warm_err:
                     # Best effort only — get_page_image still renders on demand.
@@ -1023,7 +1046,7 @@ def get_page_image(request, session_id, page_number):
             try:
                 p = pdf_processor.convert_single_page(
                     pdf_session.original_pdf_path, session_id, page_number,
-                    dpi=pdf_processor.config.get('preview_image_dpi', 300), optimize=False,
+                    dpi=pdf_processor.config.get('preview_image_dpi', 200), optimize=False,
                 )
                 page, _ = PDFPage.objects.update_or_create(
                     pdf_session=pdf_session,
@@ -1072,7 +1095,23 @@ def get_page_image(request, session_id, page_number):
                     response['Cache-Control'] = 'public, max-age=604800, immutable'  # Cache for 1 hour
                     return response
 
-        # If image doesn't exist, generate it on-demand
+        # If image doesn't exist, generate it on-demand.
+        #
+        # Take the per-page lock first. The upload handler starts rendering page 1 in
+        # the background, and on a slow worker that render is still running when the
+        # user arrives. Without this, their request starts a SECOND render of the same
+        # page and the two compete for CPU — measured at 46s versus 26s for a single
+        # cold render. Waiting for the in-flight one is always faster than racing it.
+        render_lock = _page_render_lock(session_id, page_number)
+        with render_lock:
+            # Re-check: the background render may have finished while we waited.
+            page.refresh_from_db()
+            if page.image_path and os.path.exists(page.image_path):
+                with open(page.image_path, 'rb') as f:
+                    response = HttpResponse(f.read(), content_type='image/png')
+                    response['Cache-Control'] = 'public, max-age=604800, immutable'
+                    return response
+
         logger.info(f"Generating page image on-demand for session {session_id}, page {page_number}")
 
         # Check if original PDF exists
@@ -1086,7 +1125,7 @@ def get_page_image(request, session_id, page_number):
             # Render ONLY the requested page (fast), at preview DPI, and cache it.
             page_data = pdf_processor.convert_single_page(
                 pdf_session.original_pdf_path, session_id, page_number,
-                dpi=pdf_processor.config.get('preview_image_dpi', 300), optimize=False,
+                dpi=pdf_processor.config.get('preview_image_dpi', 200), optimize=False,
             )
             # Keep the upload-computed dims (the frontend scales zones against those);
             # only record where the image now lives. A sub-pixel render rounding
