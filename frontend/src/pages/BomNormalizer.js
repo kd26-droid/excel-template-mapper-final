@@ -453,7 +453,29 @@ const detectHeaderRow = (rows) => {
   return bestIndex;
 };
 
-const inferRoles = (headers) => {
+// A header can lie about what a column holds. THALES exports a column called "MFR"
+// that carries plant codes (F9111, F6137) rather than manufacturers, and matching on
+// the name alone mapped it straight to the manufacturer role. Manufacturer names vary
+// across a BOM and are words; a code column is a handful of short alphanumeric tokens
+// repeated down hundreds of rows. Only used to veto a name match when the values
+// clearly disagree, never to make a match on its own.
+const looksLikeCodeColumn = (values) => {
+  const samples = values.map(fmt).filter(Boolean);
+  if (samples.length < 8) return false;      // too few to judge; trust the header
+  const distinct = new Set(samples.map((value) => value.toLowerCase()));
+  if (distinct.size > Math.max(4, samples.length * 0.2)) return false;
+  // Short, no spaces, and carrying a digit is what a plant/site code looks like.
+  const codeLike = samples.filter((value) => value.length <= 8 && !/\s/.test(value) && /\d/.test(value));
+  return codeLike.length >= samples.length * 0.9;
+};
+
+const columnValues = (header, headers, dataRows) => {
+  const index = headers.indexOf(header);
+  if (index < 0) return [];
+  return dataRows.slice(0, 60).map((row) => (Array.isArray(row) ? row[index] : row?.[header]));
+};
+
+const inferRoles = (headers, dataRows = []) => {
   const learnedHeaders = getLearnedRoleHeaders();
   const findLearnedHeader = (role) => {
     const learned = Array.isArray(learnedHeaders[role]) ? learnedHeaders[role] : [];
@@ -481,11 +503,17 @@ const inferRoles = (headers) => {
   const cpnHeader = learnedCpn || findHeader([/\bcpn\b/, /customer part/, /client part/, /internal part/, /part code/]) ||
     (genericPartHeader && genericPartHeader !== mpnHeader ? genericPartHeader : '');
 
+  // A header the user has taught us wins outright. Otherwise a name match still has to
+  // survive the values: see looksLikeCodeColumn.
+  const namedManufacturer = findHeader([/^manufacturer$/, /\bmfr\b/, /manufacturer name/, /producer/], [/equivalent/, /part/, /\bmpn\b/]) ||
+    findHeader([/manufacturer/], [/equivalent/, /part/, /\bmpn\b/]);
+  const manufacturerHeader = findLearnedHeader('manufacturer') ||
+    (namedManufacturer && looksLikeCodeColumn(columnValues(namedManufacturer, headers, dataRows)) ? '' : namedManufacturer);
+
   return {
     cpn: cpnHeader,
     mpn: mpnHeader,
-    manufacturer: findLearnedHeader('manufacturer') || findHeader([/^manufacturer$/, /\bmfr\b/, /manufacturer name/, /producer/], [/equivalent/, /part/, /\bmpn\b/]) ||
-      findHeader([/manufacturer/], [/equivalent/, /part/, /\bmpn\b/]),
+    manufacturer: manufacturerHeader,
     description: findLearnedHeader('description') || findHeader([/description/, /item name/, /\bname\b/]),
     quantity: findLearnedHeader('quantity') || findHeader([/quantity/, /\bqty\b/, /\bqnty\b/, /^count$/, /\bcount\b/]),
     uom: findLearnedHeader('uom') || findHeader([/\buom\b/, /measurement unit/, /\bunit\b/]),
@@ -656,6 +684,17 @@ const splitMpnCell = (value, config = {}) => {
     return normalizeMpnParts(delimited);
   }
 
+  // Nothing split, so the whole cell is the candidate. Only keep it if it could be a
+  // part number at all: a cell with no digit anywhere is a plant code, a site name or
+  // a note, not an MPN. THALES exports put "ETA BDX" and "CCI VEN" in the manufacturer
+  // column on document and internal-assembly rows, and returning those unchecked filled
+  // the MPN column with site codes. Returning [] lets the caller record a blank MPN and
+  // keep the text in discardedText.
+  // Deliberately NOT gated on looksLikeMpnToken: that also caps length at four tokens
+  // and bans ':' and '()', which would drop real parts like
+  // "DOWSIL RTV 3140 TUBE 90 ML" and "114-RX8900SA:UB0PURESNCT-ND".
+  if (!/[0-9]/.test(text)) return [];
+
   return normalizeMpnParts([text]);
 };
 
@@ -715,6 +754,21 @@ const extractPackedMetadata = (value) => {
   };
 };
 
+// looksLikeMpnToken caps an MPN at four whitespace-separated tokens, which is right when
+// we are guessing whether a bare string is a part number. Inside "PART (MANUFACTURER)"
+// the brackets have already proved the shape, so that cap only does harm: THALES ships
+// "FZ ISO7046-2 M2-5 A2-70 PASSIVE (ALCOA)" (five tokens) and
+// "DOWSIL RTV 3140 TUBE 90 ML (DOW-CHEM)" (six). Both were rejected, and because the
+// caller required every entry in a cell to parse, one long part discarded all of its
+// alternates too. Here we only need to rule out prose and empty text.
+const looksLikeParenthesizedMpn = (value) => {
+  const token = fmt(value);
+  const compact = token.replace(/[^A-Za-z0-9]/g, '');
+  if (compact.length < 3) return false;
+  if (!/[0-9]/.test(compact)) return false;
+  return true;
+};
+
 const parseParenthesizedMpnManufacturerPairs = (value, config = {}) => {
   const text = fmt(value).replace(/\u00a0/g, ' ');
   if (!text || !/[()]/.test(text)) return [];
@@ -725,12 +779,21 @@ const parseParenthesizedMpnManufacturerPairs = (value, config = {}) => {
   const candidates = parts.length ? parts : [text];
 
   const parsed = candidates.map((part) => {
-    const match = fmt(part).match(/^(.+?)\s*\(([^()]*)\)\s*$/);
+    // Trailing {status} and [id] blocks are a common PLM export convention
+    // ("DOWSIL RTV 3140 (DOW-CHEM) {HOM} [3157976]"). Allow them after the
+    // manufacturer bracket and keep them as metadata instead of failing the match.
+    const match = fmt(part).match(/^(.+?)\s*\(([^()]*)\)\s*((?:\{[^}]*\}|\[[^\]]*\]|\s)*)$/);
     if (!match) return null;
 
     const rawMpn = fmt(match[1]);
     const inside = fmt(match[2]);
-    if (!rawMpn || !inside || !looksLikeMpnToken(rawMpn)) return null;
+    const trailing = fmt(match[3]);
+    const statusMatch = trailing.match(/\{([^}]*)\}/);
+    const idMatch = trailing.match(/\[([^\]]*)\]/);
+    const trailingMeta = {};
+    if (statusMatch && fmt(statusMatch[1])) trailingMeta.status = fmt(statusMatch[1]);
+    if (idMatch && fmt(idMatch[1])) trailingMeta.internalId = fmt(idMatch[1]);
+    if (!rawMpn || !inside || !looksLikeParenthesizedMpn(rawMpn)) return null;
 
     const insideParts = splitTopLevelDelimited(inside, [','])
       .map(fmt)
@@ -748,11 +811,20 @@ const parseParenthesizedMpnManufacturerPairs = (value, config = {}) => {
     return {
       mpn: stripVendorPrefix(rawMpn),
       manufacturer,
-      metadata: manufacturerCode ? { manufacturerCode } : {},
+      metadata: {
+        ...(manufacturerCode ? { manufacturerCode } : {}),
+        ...trailingMeta,
+      },
     };
   }).filter(Boolean);
 
-  return parsed.length >= 1 && parsed.length === candidates.length ? parsed : [];
+  // Requiring EVERY entry to parse meant one odd line threw away its siblings: item
+  // A1225407 lists five approved suppliers and lost all five. A cell is still only
+  // treated as packed pairs when most of it parses, so a description that merely
+  // happens to contain a bracket does not slip through — but the entries that did
+  // parse are now kept.
+  if (!parsed.length) return [];
+  return parsed.length * 2 >= candidates.length ? parsed : [];
 };
 
 const parsePackedMpnManufacturerPairs = (value, config = {}) => {
@@ -1914,22 +1986,93 @@ const readWorkbookSafely = (buffer, fileName = 'workbook') => {
   throw new Error(`Could not read "${fileName}". ${rawMessage || 'The workbook appears to be unsupported or corrupted.'}`);
 };
 
+// Rows-to-workbook helper shared by the delimited fallbacks below.
+const workbookFromRows = (rows, sheetName = 'CSV_Source') => {
+  const worksheet = XLSX.utils.aoa_to_sheet(rows);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+  return workbook;
+};
+
+// Some exports (THALES ARTDOC, SAP part lists) put a newline INSIDE a cell without
+// quoting it, so a plain line split shreds one record across several lines. A line
+// that carries fewer separators than the header is a continuation of the row above,
+// not a new row.
+const rejoinWrappedLines = (lines, delimiter) => {
+  if (!lines.length) return [];
+  const expected = lines[0].split(delimiter).length;
+  if (expected < 2) return lines;
+
+  const joined = [];
+  let buffer = null;
+  lines.forEach((line) => {
+    buffer = buffer === null ? line : `${buffer}\n${line}`;
+    if (buffer.split(delimiter).length >= expected) {
+      joined.push(buffer);
+      buffer = null;
+    }
+  });
+  if (buffer !== null) joined.push(buffer);
+  return joined;
+};
+
+// Pick the separator that yields the most consistent column count. Files arrive
+// semicolon-separated (French exports) and tab-separated (named .xls but actually
+// text) as often as comma-separated.
+const detectDelimiter = (text) => {
+  const sample = text.split(/\r?\n/).filter((line) => line.trim()).slice(0, 20);
+  if (!sample.length) return ',';
+
+  let best = ',';
+  let bestScore = -1;
+  [',', ';', '\t', '|'].forEach((candidate) => {
+    const counts = sample.map((line) => line.split(candidate).length);
+    const first = counts[0];
+    if (first < 2) return;
+    // Reward width, penalise rows that disagree with the header width.
+    const agree = counts.filter((count) => count === first).length;
+    const score = first * 2 + agree;
+    if (score > bestScore) {
+      bestScore = score;
+      best = candidate;
+    }
+  });
+  return best;
+};
+
+const splitDelimitedLine = (line, delimiter) => line
+  .split(delimiter)
+  .map((cell) => fmt(cell).replace(/^"|"$/g, '').replace(/""/g, '"'));
+
 const readCsvWorkbookSafely = async (file) => {
   if (!XLSX || !XLSX.read || !XLSX.utils) {
     throw new Error('Spreadsheet parser is not ready. Please refresh the page and try uploading again.');
   }
 
-  const text = await file.text();
+  const buffer = await file.arrayBuffer();
+  const utf8 = new TextDecoder('utf-8').decode(buffer);
+  // A replacement char means the bytes were not UTF-8. These files are usually
+  // latin-1, and decoding them as UTF-8 mangles accented characters.
+  const text = /�/.test(utf8)
+    ? new TextDecoder('iso-8859-1').decode(buffer)
+    : utf8;
+
   const attempts = [
     () => XLSX.read(text, { type: 'string', raw: false, codepage: 65001 }),
     () => {
       const rows = text
         .split(/\r?\n/)
         .map((line) => line.split(',').map((cell) => fmt(cell).replace(/^"|"$/g, '').replace(/""/g, '"')));
-      const worksheet = XLSX.utils.aoa_to_sheet(rows);
-      const workbook = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(workbook, worksheet, 'CSV_Source');
-      return workbook;
+      return workbookFromRows(rows);
+    },
+    // Non-comma separators, with wrapped rows stitched back together.
+    () => {
+      const delimiter = detectDelimiter(text);
+      const lines = text.split(/\r?\n/).filter((line) => line.trim());
+      const rows = rejoinWrappedLines(lines, delimiter)
+        .map((line) => splitDelimitedLine(line, delimiter));
+      if (rows.length < 2 || rows[0].length < 2) return null;
+      return workbookFromRows(rows);
     },
   ];
   let lastError = null;
@@ -1937,10 +2080,34 @@ const readCsvWorkbookSafely = async (file) => {
   for (const attempt of attempts) {
     try {
       const workbook = attempt();
-      if (workbook?.SheetNames?.length) return workbook;
+      if (workbook?.SheetNames?.length) {
+        // A parse that leaves most rows with a single populated cell means the wrong
+        // separator won: the file loaded, but every column collapsed into one. Fall
+        // through to the next attempt rather than returning a broken sheet.
+        const rows = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], {
+          header: 1,
+          defval: '',
+        });
+        const body = rows.slice(1);
+        const shredded = body.length > 10
+          && body.filter((row) => row.filter((cell) => fmt(cell)).length <= 1).length > body.length * 0.25;
+        if (!shredded) return workbook;
+      }
     } catch (err) {
       lastError = err;
     }
+  }
+
+  // Every attempt looked wrong — return the delimiter-sniffed one anyway, since a
+  // best-effort sheet beats refusing the file outright.
+  try {
+    const delimiter = detectDelimiter(text);
+    const lines = text.split(/\r?\n/).filter((line) => line.trim());
+    const rows = rejoinWrappedLines(lines, delimiter)
+      .map((line) => splitDelimitedLine(line, delimiter));
+    if (rows.length) return workbookFromRows(rows);
+  } catch (err) {
+    lastError = err;
   }
 
   throw new Error(`Could not read "${file.name}". ${lastError?.message || 'The CSV appears to be unsupported or empty.'}`);
@@ -3741,7 +3908,7 @@ const BomNormalizer = () => {
       : nextWorkbook.SheetNames[0];
     const prepared = prepareSingleSheet(nextWorkbook, preferredSheet, { headerRow: options.headerRow });
     const nextHeaders = prepared.headers;
-    const nextRoles = inferRoles(nextHeaders);
+    const nextRoles = inferRoles(nextHeaders, prepared.dataRows);
     const nextStructure = detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40));
 
     setWorkbook(nextWorkbook);
@@ -4704,7 +4871,7 @@ const BomNormalizer = () => {
     if (!workbook) return;
     const prepared = prepareSingleSheet(workbook, nextSheetName);
     const nextHeaders = prepared.headers;
-    const nextRoles = inferRoles(nextHeaders);
+    const nextRoles = inferRoles(nextHeaders, prepared.dataRows);
 
     setSheetName(nextSheetName);
     setSelectedSheetNames([nextSheetName]);
@@ -4734,7 +4901,7 @@ const BomNormalizer = () => {
     const prepared = scope === 'single'
       ? prepareSingleSheet(workbook, nextNames[0])
       : prepareMultipleSheets(workbook, nextNames);
-    const nextRoles = inferRoles(prepared.headers);
+    const nextRoles = inferRoles(prepared.headers, prepared.dataRows);
 
     setSheetScope(scope);
     setSelectedSheetNames(nextNames);
@@ -4779,7 +4946,7 @@ const BomNormalizer = () => {
     const nextHeaders = columns.length
       ? columns.map((column) => column.header)
       : makeUniqueHeaders(sheetRows[nextIndex] || []);
-    const nextRoles = inferRoles(nextHeaders);
+    const nextRoles = inferRoles(nextHeaders, sheetRows.slice(nextIndex + 1));
     setHeaderRowIndex(nextIndex);
     setPreparedHeaders(nextHeaders);
     setPreparedDataRows(sheetRows
