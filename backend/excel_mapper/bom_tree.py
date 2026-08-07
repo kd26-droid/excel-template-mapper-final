@@ -87,19 +87,30 @@ def parse_quantity(value):
 def is_document_row(record, quantity_column, code_column=None):
     """True when a row describes a document rather than a consumed part.
 
-    A BOM line exists to say "this assembly consumes N of that part". A row that
-    consumes nothing is not a BOM line, whatever else it carries. THALES files
-    drawings (``Qty = ---``), electronic data (``Qty = 0``) and part rows in one
-    table; this is what separates them, using only the quantity column so no
-    customer-specific column has to be mapped.
+    Two things have to be true, not one.
+
+    A BOM line says "this assembly consumes N of that part", so a row consuming
+    nothing is a candidate - THALES files drawings (``Qty = ---``) and electronic
+    data (``Qty = 0``) in the same table as its parts.
+
+    But consuming nothing is NOT sufficient, and treating it as sufficient
+    deleted real components. A drawing has no part number by design; a component
+    has one whatever its quantity says. Honeywell's export writes ``0`` on 17
+    genuine parts - a light sensor, an SSR relay, and 12 sub-assemblies - and
+    dropping those removed whole branches of the tree from the generated BOM,
+    reported only as a soft "some items are unused" warning.
+
+    So a row is a document only when it consumes nothing AND carries no part
+    number. Anything with a code stays, and a zero quantity on it is then caught
+    by validation, where the user can see it and decide.
     """
     if not quantity_column:
         return False
     quantity = parse_quantity(record.get(quantity_column))
     if quantity is not None and quantity > 0:
         return False
-    # A row with no code cannot become a BOM line either way, but call it a
-    # document only when it has nothing to consume.
+    if code_column and unwrap_cell(record.get(code_column)).strip():
+        return False
     return True
 
 

@@ -398,3 +398,54 @@ Remaining, in order:
 4. Show the codes the collapsed-rows warning already carries.
 5. Confirm the FactWise import spec on line Measurement unit; promote the
    warning to an error if it is genuinely mandatory.
+
+---
+
+## 7. Open: one part used in two places collapses to one BOM line
+
+**Not a regression.** Verified by running the same session through the current
+code and through HEAD: byte-identical output (19 rows, root with 1 child). This
+behaviour predates all the work above.
+
+### What happens
+
+A part number can appear on more than one row, under different parents, with
+different quantities. Grouping is keyed on part identity, so those rows land in
+one group and produce **one** BOM line. The surviving line takes the first row's
+position; every other placement is lost.
+
+Confirmed on two customer files:
+
+    THALES   316626-13     row 26 level 2 (inside the PCBA kit)
+                           row 37 level 1 (on the top assembly)
+             -> one line, at level 2. The root loses a child and shows 1
+                instead of 2.
+
+    Honeywell HAB-45002111  qty 2  R1-R2
+                            qty 13 R5-R6,R13-R16,R19-R21...
+              HAB-45002630  qty 1 / qty 4
+             -> one line each; the second placement and its quantity are gone.
+
+Reference designators make it unambiguous that these are genuinely different
+placements of the same part, not duplicate rows.
+
+### Why keying differently does not fix it
+
+The alternates key was changed from `description` to part number during the
+parent-column work. Both produce the SAME groups here - checked on the THALES
+export, where exactly one part number and one description are shared, and they
+are the same pair of rows. The collapse is inherent to "one part number, one BOM
+line", not to which column keys it.
+
+### The decision to make
+
+Either is defensible and they are not the same BOM:
+
+1. **Two lines** - one per placement, each with its own quantity and parent.
+   Truthful to the source. `duplicate_child` already exists to catch the case
+   where two lines share a parent, which would then need to allow it.
+2. **One line, summed quantity** - 2 + 13 = 15 under a single parent. Only
+   correct when both placements share a parent, which THALES's case does not.
+
+Until this is settled, an export from a sheet that reuses a part under different
+parents is quietly incomplete.

@@ -931,11 +931,39 @@ const rowLooksLikeSectionTitle = (row, headers, roles) => {
 // Description stays as the fallback for rows with no part number, which is what
 // level-only sheets already relied on - checked against a real THALES export,
 // where keying on part number produces exactly the same groups.
-const alternatesKey = (row, roles, sourceRow) => (
-  getCell(row, roles.cpn)
-  || getCell(row, roles.description)
-  || `Source row ${sourceRow}`
-);
+const alternatesKey = (row, roles, sourceRow) => {
+  // WHAT the part is.
+  const identity = getCell(row, roles.cpn)
+    || getCell(row, roles.description)
+    || `Source row ${sourceRow}`;
+
+  // ...and WHERE it sits. A BOM line is identified by both, and keying on either
+  // one alone collapses rows that are not the same line:
+  //
+  //   parent only    every child of an assembly reads as one part
+  //                  (a 36-part assembly became 1 line + 35 "alternates")
+  //   identity only  every placement of a part reads as one line
+  //                  (a screw used in 159 sub-assemblies became 1 line with
+  //                   159 "alternates" - alternates mean different MANUFACTURERS
+  //                   of one part, so 159 was never a possible number)
+  //
+  // Keyed on the pair, one real customer file goes from 287 lines to 634, which
+  // matches its 634 distinct (parent, part) pairs counted straight off the sheet.
+  const parent = getCell(row, roles.parent);
+  if (parent) return `${parent}␟${identity}`;
+
+  // No parent column. Level is then the only thing on the row that says where it
+  // sits, so it stands in: a part listed at level 1 and again at level 2 is two
+  // placements, and merging them loses one. THALES puts a label directly on the
+  // top assembly AND inside its PCBA kit; without this the level-1 placement
+  // vanished and the finished good was left with a single child.
+  //
+  // Weaker than a real parent - two placements at the SAME level under different
+  // assemblies still merge. That needs the parent inferred from row order during
+  // normalization, which is the backend's job today.
+  const level = getCell(row, roles.level);
+  return level ? `L${level}␟${identity}` : identity;
+};
 
 // Blank when the sheet does not state a parent. The tree is then derived from
 // the level column exactly as before, so level-only sheets are untouched.
@@ -1452,6 +1480,23 @@ const normalizeGroupedRows = (rows, roles, config) => {
     };
   };
 
+  // Is this row a PART, or a section header introducing the rows below it?
+  //
+  // Having an MPN or a manufacturer proves it is a part - somebody sells it. But
+  // the reverse does not hold, and assuming it did was costly: an in-house
+  // assembly has neither, because nobody sells it. On one customer file every
+  // one of its 78 assemblies was read as a header, consumed as a label and never
+  // emitted, so every parent reference in the BOM pointed at a row that did not
+  // exist and the tree could not be built at all.
+  //
+  // A part number together with a real quantity is the sheet stating that the
+  // row is consumed - which a section header never is.
+  const rowIsPart = (row) => {
+    if (getCell(row, roles.mpn) || getCell(row, roles.manufacturer)) return true;
+    const quantity = getCell(row, roles.quantity);
+    return Boolean(getCell(row, roles.cpn) && quantity && !isPlaceholderCell(quantity));
+  };
+
   const rowStartsGroup = (row) => {
     const nextParentKey = getCell(row, roles.parent) || getCell(row, roles.cpn) || getCell(row, roles.description);
     const hasIdentity = Boolean(getCell(row, roles.parent) || getCell(row, roles.cpn) || getCell(row, roles.description));
@@ -1460,7 +1505,7 @@ const normalizeGroupedRows = (rows, roles, config) => {
       !isPlaceholderCell(getCell(row, roles.uom)) ||
       !isPlaceholderCell(getCell(row, roles.level))
     );
-    const hasPart = Boolean(getCell(row, roles.mpn) || getCell(row, roles.manufacturer));
+    const hasPart = rowIsPart(row);
     if (hasPart) {
       if (!currentGroup) return hasIdentity && hasRealContext;
       return Boolean(nextParentKey && nextParentKey !== currentGroup.parentKey && hasRealContext);
@@ -1472,7 +1517,9 @@ const normalizeGroupedRows = (rows, roles, config) => {
     const sourceRow = row.__sourceRow || rowIndex + 1;
     const rawMpn = getCell(row, roles.mpn);
     const manufacturer = getCell(row, roles.manufacturer);
-    const rowHasPart = Boolean(rawMpn || manufacturer);
+    // Same test as rowStartsGroup, so a row cannot be a part for one decision
+    // and a header for the other.
+    const rowHasPart = rowIsPart(row);
     const startsGroup = rowStartsGroup(row);
 
     if (startsGroup || !currentGroup) {
@@ -1489,6 +1536,11 @@ const normalizeGroupedRows = (rows, roles, config) => {
         output.push(withSourceColumns({
           sourceRow: currentGroup.sourceRow || sourceRow,
           parentKey: currentGroup.parentKey,
+          // Carried like parentKey. Dropping it left the BOM parent blank on
+          // every row this strategy emits, so the backend fell back to inferring
+          // structure from levels and reported orphans on a sheet that states
+          // its parents outright.
+          parent: currentGroup.parent,
           relation: 'Primary',
           level: currentGroup.level || '1',
           cpn: currentGroup.cpn,
@@ -1519,6 +1571,7 @@ const normalizeGroupedRows = (rows, roles, config) => {
       output.push(withSourceColumns({
         sourceRow: currentGroup.sourceRow || sourceRow,
         parentKey: currentGroup.parentKey,
+        parent: currentGroup.parent || hierarchyParent(row, roles),
         relation: relationIndex === 0 ? 'Primary' : `Alternate ${relationIndex}`,
         level: currentGroup.level || getCell(row, roles.level) || '1',
         cpn: currentGroup.cpn || getCell(row, roles.cpn),
@@ -4575,19 +4628,32 @@ const BomNormalizer = () => {
     [sheetScope, sheetName, selectedSheetNames]
   );
 
-  // Level auto-detection reads the SOURCE headers, not the normalized output —
-  // the normalized table always has a `level` column, so detecting on it would
-  // answer "yes" for every sheet.
+  // Once normalization has run, the gate must describe the NORMALIZED rows,
+  // because those are what BOM generation reads. Asking about the raw sheet gets
+  // it wrong whenever the normalizer derived structure the customer's file did
+  // not spell out: a sheet with no "Level" header at all still comes out of the
+  // normalizer with levels 1/2/3, and the gate would call it flat and generate a
+  // single-level BOM from a tree.
+  //
+  // Before normalization there is nothing else to describe, so the raw sheet
+  // still answers.
+  //
+  // Reading the normalized table is only safe because the gate judges levels on
+  // their VALUES (see hasRealLevels in BomStructureDialog). That table always
+  // carries a `level` column - filled with 1 throughout for a flat sheet - so
+  // detecting on the column's existence alone would call every sheet levelled.
   const bomStructureHeaderReader = useCallback(
-    () => preparedHeaders || [],
-    [preparedHeaders]
+    () => (normalizedRows.length
+      ? getNormalizedExportColumns(normalizedRows)
+      : (preparedHeaders || [])),
+    [normalizedRows, preparedHeaders]
   );
 
-  // Both readers work off the raw sheet, like the header reader above: the gate
-  // asks about the customer's structure, not the normalized output.
   const bomStructureRecordReader = useCallback(
-    () => rowsToObjects(sheetRows.slice(headerRowIndex + 1), headers, headerRowIndex + 2),
-    [sheetRows, headerRowIndex, headers]
+    () => (normalizedRows.length
+      ? normalizedRows
+      : rowsToObjects(sheetRows.slice(headerRowIndex + 1), headers, headerRowIndex + 2)),
+    [normalizedRows, sheetRows, headerRowIndex, headers]
   );
 
   const bomStructurePreambleReader = useCallback(

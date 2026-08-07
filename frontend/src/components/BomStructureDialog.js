@@ -55,6 +55,28 @@ const EXAMPLE_TREE = [
 const detectLevelColumn = (headers = []) =>
   headers.find(header => LEVEL_HEADER_RE.test(String(header || ''))) || '';
 
+// Whether a level column actually describes a hierarchy, judged on its VALUES.
+//
+// The presence of the column says nothing on its own. The BOM Normalizer's
+// output always carries a `level` column, filling it with 1 for a flat sheet, so
+// going by the header alone would call every normalized sheet multi-level. And a
+// sheet whose levels really do run 1, 2, 3 is multi-level however its column is
+// named — which is what a customer export with no "Level" header but derived
+// levels looks like.
+//
+// More than one distinct level is the only thing that makes a tree.
+const hasRealLevels = (records, levelColumn) => {
+  if (!levelColumn || !Array.isArray(records) || !records.length) return false;
+  const seen = new Set();
+  for (const record of records) {
+    const level = parseLevelValue(record?.[levelColumn]);
+    if (level === null) continue;
+    seen.add(level);
+    if (seen.size > 1) return true;
+  }
+  return false;
+};
+
 // Mirrors bom_tree.parse_level / parse_quantity / is_document_row on the backend.
 // The dialog derives structure locally so it can show it before anything is
 // uploaded; the backend re-derives it authoritatively at generation time.
@@ -86,6 +108,48 @@ const findHeader = (headers, pattern) =>
 // Scan the rows above the table for the block that names the assembly. THALES
 // exports put "Part Number / Description" on one row and the values on the next,
 // which is the only place the level-0 finished good appears at all.
+// The root as stated by the DATA: the single shallowest row in the table.
+//
+// Some exports contain their own finished good - Honeywell puts it on the first
+// row at the shallowest outline level, marked "Make Finished Good". Asking the
+// user to name one anyway is how a BOM ends up with an invented parent above the
+// real product, named after the spreadsheet tab.
+//
+// Quantity is deliberately ignored here. A finished good is not consumed by
+// anything, so its quantity cell is routinely blank - the very thing that would
+// disqualify it if this reused the document filter.
+//
+// Returns null unless exactly ONE row sits at the shallowest level. Several tops
+// is a forest, and which of them is "the" finished good is the user's call.
+const detectRootFromRecords = (records = [], levelColumn = '', headers = []) => {
+  const codeColumn = findHeader(headers, CODE_HEADER_RE);
+  if (!levelColumn || !codeColumn) return null;
+  const nameColumn = findHeader(headers, NAME_HEADER_RE);
+  const uomColumn = findHeader(headers, UOM_HEADER_RE);
+
+  const rows = [];
+  (records || []).forEach((record) => {
+    const level = parseLevelValue(record[levelColumn]);
+    if (level === null) return;
+    const code = String(record[codeColumn] ?? '').trim();
+    if (!code) return;
+    rows.push({
+      level,
+      code,
+      name: String(record[nameColumn] ?? '').trim(),
+      uom: String(record[uomColumn] ?? '').trim(),
+    });
+  });
+  if (!rows.length) return null;
+
+  const minLevel = Math.min(...rows.map(row => row.level));
+  const tops = rows.filter(row => row.level === minLevel);
+  if (tops.length !== 1) return null;
+  // A lone row that is also the ONLY row is a one-line sheet, not a hierarchy.
+  if (rows.length === 1) return null;
+  return tops[0];
+};
+
 const detectRootFromPreamble = (preambleRows = []) => {
   for (let index = 0; index < preambleRows.length - 1; index += 1) {
     const labels = (preambleRows[index] || []).map(cell => String(cell ?? '').trim());
@@ -149,6 +213,10 @@ const blankSheetAnswer = () => ({
   hasLevels: false,
   levelColumn: '',
   treeConfirmed: null,
+  // Whether rows that consume nothing are dropped as documents. Defaults on
+  // because a row consuming nothing is usually a drawing, but the user can turn
+  // it off for exports that write 0 on real parts.
+  dropDocuments: true,
   bomHeader: null,
   // Per sub-assembly overrides, keyed by part code. A multi-level sheet produces
   // one BOM per assembly, and each of those BOMs needs its own name, base
@@ -220,6 +288,12 @@ const analyzeLevels = (records, levelColumn, headers) => {
   (records || []).forEach((record) => {
     const level = parseLevelValue(record[levelColumn]);
     if (level === null) return;
+    // Rows that consume nothing are skipped here even though the backend's
+    // is_document_row now keeps the ones carrying a part number. The two are
+    // deliberately NOT aligned: this list exists to name the BOMs, and a row
+    // with no children is not a BOM whatever its quantity says. Including the
+    // finished good here would also make it the shallowest row, shifting every
+    // "Level N BOM" label down by one.
     if (qtyColumn && !consumesQuantity(record[qtyColumn])) { documents += 1; return; }
     const code = String(record[codeColumn] ?? '').trim();
     if (!code) return;
@@ -280,13 +354,25 @@ export const reconcileSavedBomStructure = (saved, { sheetNames = [], getSheetHea
     const savedAnswer = savedSheets[name];
     const headers = typeof getSheetHeaders === 'function' ? getSheetHeaders(name) : [];
 
+    const detected = detectLevelColumn(headers);
+    // Judged on the level VALUES, exactly as the fresh-seed path does. Going by
+    // the column's existence alone disagrees with that path, and the two must
+    // reach the same verdict about the same sheet.
+    let levelled = Boolean(detected);
+    if (detected && typeof getSheetRecords === 'function') {
+      try {
+        levelled = hasRealLevels(getSheetRecords(name), detected);
+      } catch (err) {
+        levelled = Boolean(detected);
+      }
+    }
+
     // A sheet the template has never seen has to be asked about.
     if (!savedAnswer) {
-      const detected = detectLevelColumn(headers);
       answers[name] = {
         ...blankSheetAnswer(),
         hasBom: true,
-        hasLevels: Boolean(detected),
+        hasLevels: levelled,
         levelColumn: detected,
         bomHeader: blankBomHeader(name),
       };
@@ -307,9 +393,25 @@ export const reconcileSavedBomStructure = (saved, { sheetNames = [], getSheetHea
     // The level column is part of the format, but a renamed column makes the
     // saved answer unusable rather than merely stale.
     if (next.hasLevels && next.levelColumn && !headers.includes(next.levelColumn)) {
-      next.levelColumn = detectLevelColumn(headers);
+      next.levelColumn = detected;
       // Even when another column looks right, the saved answer no longer
       // describes this file — confirm rather than substitute silently.
+      complete = false;
+    }
+
+    // The saved single/multi answer contradicting the sheet in front of us.
+    //
+    // This is not a stale identity, it is a stale FORMAT answer, and replaying it
+    // silently is how a four-level BOM gets exported as one flat list: the
+    // template was saved when the level column was not being detected, and every
+    // reuse faithfully repeats that "no levels" answer no matter what the file
+    // says. The data wins, and the gate opens so the correction is seen.
+    if (next.hasBom && levelled !== next.hasLevels) {
+      next.hasLevels = levelled;
+      next.levelColumn = levelled ? (next.levelColumn || detected) : '';
+      // Pre-answered Yes for the same reason as the fresh seed. `complete` is
+      // false regardless, so the gate still opens and the user sees the change.
+      next.treeConfirmed = levelled ? true : null;
       complete = false;
     }
 
@@ -363,11 +465,13 @@ const BomStructureDialog = ({
   // user's answers.
   const sheetNamesRef = useRef(sheetNames);
   const getSheetHeadersRef = useRef(getSheetHeaders);
+  const getSheetRecordsRef = useRef(getSheetRecords);
   const getSheetPreambleRowsRef = useRef(getSheetPreambleRows);
   const initialAnswersRef = useRef(initialAnswers);
   useEffect(() => {
     sheetNamesRef.current = sheetNames;
     getSheetHeadersRef.current = getSheetHeaders;
+    getSheetRecordsRef.current = getSheetRecords;
     getSheetPreambleRowsRef.current = getSheetPreambleRows;
     initialAnswersRef.current = initialAnswers;
   });
@@ -395,26 +499,57 @@ const BomStructureDialog = ({
       const headers = typeof reader === 'function' ? reader(sheetName) : [];
       const detected = detectLevelColumn(headers);
 
-      // Every sheet needs a level-0 finished good, hierarchical included: a
-      // levelled sheet normally starts at level 1 and names its assembly in a
-      // preamble above the table, which is not part of the data.
+      // Judge on the level VALUES, not on the column existing. A sheet whose
+      // levels are all 1 is flat no matter what the column is called, and a
+      // sheet running 1/2/3 is a tree even when the column was derived rather
+      // than supplied by the customer. Falls back to "the column exists" only
+      // when the rows cannot be read.
+      const recordReader = getSheetRecordsRef.current;
+      let records = null;
+      let levelled = Boolean(detected);
+      if (detected && typeof recordReader === 'function') {
+        try {
+          records = recordReader(sheetName);
+          levelled = hasRealLevels(records, detected);
+        } catch (err) {
+          records = null;
+          levelled = Boolean(detected);
+        }
+      }
+
       const bomHeader = blankBomHeader(sheetName);
       if (detected) {
+        // Preamble first. A block above the table that names the assembly is the
+        // sheet SAYING what the finished good is; the shallowest row is only an
+        // inference from shape. On a THALES export both exist and they disagree
+        // - the preamble names 253653-01 while the shallowest row is
+        // 253653-01900, which is that assembly's child. Preferring the inference
+        // demoted the real finished good and put its own child above it.
         const preambleReader = getSheetPreambleRowsRef.current;
         const preamble = typeof preambleReader === 'function' ? preambleReader(sheetName) : [];
-        const root = detectRootFromPreamble(preamble);
+        const root = detectRootFromPreamble(preamble)
+          || detectRootFromRecords(records || [], detected, headers);
         // Nothing detected means nothing prefilled — a wrong guess the user
-        // does not notice is worse than an empty required field.
+        // does not notice is worse than an empty required field. Note this
+        // clears blankBomHeader's sheet-name guess, which is exactly the guess
+        // that shipped BOMs with a finished good called "Sheet1".
         bomHeader.finishedGoodCode = root ? root.code : '';
         bomHeader.itemName = root && root.name ? root.name : '';
+        if (root && root.uom) bomHeader.measurementUnit = root.uom;
         bomHeader.autoDetected = Boolean(root);
       }
 
       seeded[sheetName] = {
         ...blankSheetAnswer(),
         hasBom: true,
-        hasLevels: Boolean(detected),
+        hasLevels: levelled,
         levelColumn: detected,
+        // Pre-answered Yes rather than left blank. A sheet that reached this
+        // step already has levels running 1/2/3, which IS the shape the
+        // illustration describes, so Yes is the answer in nearly every case and
+        // making the user re-assert it each time is friction. "No" stays as the
+        // escape hatch for a sheet that is levelled but not actually a tree.
+        treeConfirmed: levelled ? true : null,
         bomHeader,
       };
     });
@@ -616,6 +751,9 @@ const BomStructureDialog = ({
         levelColumn: answer.hasLevels ? answer.levelColumn : null,
         treeConfirmed: answer.hasLevels ? answer.treeConfirmed : null,
         bomGenerationAvailable: answer.hasLevels ? answer.treeConfirmed !== false : true,
+        // Sent explicitly rather than defaulted server-side, so an older saved
+        // answer without the field keeps the previous behaviour.
+        dropDocuments: answer.dropDocuments !== false,
         bomHeader,
         subBoms,
       };
@@ -684,7 +822,10 @@ const BomStructureDialog = ({
                     patch(name, {
                       hasLevels,
                       levelColumn: hasLevels ? (answer.levelColumn || autoDetected) : '',
-                      treeConfirmed: null,
+                      // Yes by default when switching to multi level, matching
+                      // the seed. Switching back to single level clears it,
+                      // since the Structure step no longer applies.
+                      treeConfirmed: hasLevels ? true : null,
                       // Preserved across the toggle, never nulled. Seeding puts
                       // the preamble-detected root here for a levelled sheet;
                       // discarding it on a toggle meant the confirm step fell
@@ -852,11 +993,33 @@ const BomStructureDialog = ({
                     />
                   </Box>
                 )))}
+                {/* A choice, not a rule. "Consumes nothing" usually means a
+                    drawing, but not always — some exports write 0 on real parts
+                    — and only the user knows which this sheet is. Excluding is
+                    still the default because it is right more often. */}
                 {structure.documents > 0 && (
-                  <Typography variant="caption" sx={{ display: 'block', mt: 1, color: 'text.secondary' }}>
-                    {`${structure.documents} ${structure.documents === 1 ? 'row consumes' : 'rows consume'} no quantity `}
-                    {'and will be excluded as documents rather than parts.'}
-                  </Typography>
+                  <Box sx={{ mt: 1 }}>
+                    <FormControlLabel
+                      control={
+                        <Checkbox
+                          size="small"
+                          checked={answer.dropDocuments !== false}
+                          onChange={e => patch(name, { dropDocuments: e.target.checked })}
+                        />
+                      }
+                      label={
+                        <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                          {`Exclude ${structure.documents} ${structure.documents === 1 ? 'row that consumes' : 'rows that consume'} no quantity `}
+                          {'— treat them as documents rather than parts.'}
+                        </Typography>
+                      }
+                    />
+                    {answer.dropDocuments === false && (
+                      <Typography variant="caption" sx={{ display: 'block', ml: 4, color: 'text.secondary' }}>
+                        They will be kept as BOM lines, and their quantity flagged by validation.
+                      </Typography>
+                    )}
+                  </Box>
                 )}
               </Box>
             )}
