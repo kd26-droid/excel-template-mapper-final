@@ -152,7 +152,7 @@ class BomTree(object):
 
 def derive_tree(records, level_column, code_column,
                 description_column=None, quantity_column=None, uom_column=None,
-                root=None, drop_documents=True):
+                root=None, drop_documents=True, parent_column=None):
     """Derive tree structure from ``records`` (a list of dicts).
 
     Rows whose level cell does not parse are skipped and reported as warnings —
@@ -167,6 +167,11 @@ def derive_tree(records, level_column, code_column,
     ``drop_documents`` removes rows that consume nothing (see ``is_document_row``).
     They are returned on the tree rather than discarded silently, so the caller
     can show what was excluded.
+
+    ``parent_column`` names a column that states each row's parent outright. When
+    any row fills it, the tree is built from those statements and the levels are
+    not used to infer structure - an explicit answer beats one reconstructed from
+    row order. Sheets without such a column are unaffected.
     """
     if not level_column:
         raise BomTreeError('A level column is required to derive a BOM tree.')
@@ -219,6 +224,10 @@ def derive_tree(records, level_column, code_column,
             'quantity': unwrap_cell(record.get(quantity_column)).strip() if quantity_column else '',
             'uom': unwrap_cell(record.get(uom_column)).strip() if uom_column else '',
             'parent': None,
+            # What the sheet SAYS this row's parent is, when it says so at all.
+            # Kept separate from 'parent' above, which is the resolved answer.
+            'stated_parent': (unwrap_cell(record.get(parent_column)).strip()
+                              if parent_column else ''),
             'depth': 0,
             'is_leaf': True,
             'source': record,
@@ -229,33 +238,65 @@ def derive_tree(records, level_column, code_column,
 
     min_level = min(row['level'] for row in rows)
 
-    # Parent resolution. `open_at` holds the most recent code seen at each level,
-    # so a row's parent is whatever is currently open one level above it. Deeper
-    # entries are discarded on the way back up, which is what stops a finished
-    # branch from adopting rows belonging to the next one.
-    open_at = {}
-    for row in rows:
-        level = row['level']
-        row['depth'] = level - min_level
-        if level == min_level:
-            row['parent'] = None
-        else:
-            parent = open_at.get(level - 1)
-            if parent is None:
+    # Two ways to answer "what is this row's parent?", and the sheet decides.
+    #
+    # A sheet that names the parent outright is answering it directly, and that
+    # answer is absolute: shuffle every row and the tree is identical. Inferring
+    # from levels instead makes ROW ORDER part of the data, which is far more
+    # fragile - a single mis-ordered row silently reparents everything under it.
+    # So an explicit parent wins wherever one is given.
+    stated = any(row['stated_parent'] for row in rows)
+
+    if stated:
+        # A row naming itself as its own parent is how these exports mark a root
+        # (AMAT writes PARENT_PART == PART_NUMBER on the assembly line).
+        known = {row['code'] for row in rows}
+        for row in rows:
+            parent = row['stated_parent']
+            row['depth'] = row['level'] - min_level
+            if not parent or parent == row['code']:
+                row['parent'] = None
+                continue
+            if parent not in known:
                 errors.append({
-                    'type': 'orphan_row',
+                    'type': 'parent_not_found',
                     'row': row['row'],
                     'code': row['code'],
-                    'level': level,
-                    'message': (
-                        'Level %d has no level %d row above it, so its parent '
-                        'cannot be determined.' % (level, level - 1)
-                    ),
+                    'parent': parent,
+                    'message': ('Row names "%s" as its parent, but no row in this '
+                                'sheet has that code.' % parent),
                 })
+                row['parent'] = None
+                continue
             row['parent'] = parent
-        open_at[level] = row['code']
-        for deeper in [key for key in open_at if key > level]:
-            del open_at[deeper]
+    else:
+        # Level inference. `open_at` holds the most recent code seen at each
+        # level, so a row's parent is whatever is currently open one level above
+        # it. Deeper entries are discarded on the way back up, which is what
+        # stops a finished branch from adopting rows belonging to the next one.
+        open_at = {}
+        for row in rows:
+            level = row['level']
+            row['depth'] = level - min_level
+            if level == min_level:
+                row['parent'] = None
+            else:
+                parent = open_at.get(level - 1)
+                if parent is None:
+                    errors.append({
+                        'type': 'orphan_row',
+                        'row': row['row'],
+                        'code': row['code'],
+                        'level': level,
+                        'message': (
+                            'Level %d has no level %d row above it, so its parent '
+                            'cannot be determined.' % (level, level - 1)
+                        ),
+                    })
+                row['parent'] = parent
+            open_at[level] = row['code']
+            for deeper in [key for key in open_at if key > level]:
+                del open_at[deeper]
 
     # Leaf classification. A row is an assembly when the row immediately after it
     # sits deeper; anything else terminates the branch.

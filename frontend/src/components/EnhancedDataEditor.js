@@ -2679,16 +2679,32 @@ const EnhancedDataEditor = () => {
       setTemplateSaving(true);
       const opStart = Date.now();
       const counts = dynamicColumnCounts || { tags_count: 1, spec_pairs_count: 1, customer_id_pairs_count: 1 };
-      const defaults = defaultValues || {};
+      const editorDefaults = defaultValues || {};
       const rules = Array.isArray(appliedFormulas) ? appliedFormulas : [];
       let currentMappings = null;
       let currentFactwiseRules = null;
+      // Defaults and conditional if/else rules set on the mapping page live on the
+      // session and are never loaded into this page's state. They have to be read
+      // back and merged: the backend treats a non-null default_values as a full
+      // replace, so sending only the editor's dict silently dropped the mapping
+      // page's defaults from the template the moment anyone set one default here.
+      let sessionDefaults = {};
+      let sessionDefaultRules = {};
 
       try {
         const existing = await api.getExistingMappings(sessionId);
         currentMappings = existing?.data?.mappings || null;
         currentFactwiseRules = existing?.data?.session_metadata?.factwise_rules || null;
+        if (existing?.data?.default_values && typeof existing.data.default_values === 'object') {
+          sessionDefaults = existing.data.default_values;
+        }
+        if (existing?.data?.default_value_rules && typeof existing.data.default_value_rules === 'object') {
+          sessionDefaultRules = existing.data.default_value_rules;
+        }
       } catch (_) {}
+
+      // Editor-side defaults win on conflict — they are the more recent edit.
+      const defaults = { ...sessionDefaults, ...editorDefaults };
 
       if ((!currentFactwiseRules || currentFactwiseRules.length === 0) && factwiseIdRule) {
         currentFactwiseRules = [{
@@ -2722,7 +2738,10 @@ const EnhancedDataEditor = () => {
         Object.keys(defaults).length > 0 ? defaults : null,
         counts,
         mpnValidationMetadata,
-        { overwriteExisting: isNewProcessingTemplate }
+        {
+          overwriteExisting: isNewProcessingTemplate,
+          defaultValueRules: Object.keys(sessionDefaultRules).length > 0 ? sessionDefaultRules : null,
+        }
       );
       if (resp?.data?.success && processingTemplateContext) {
         const existingTemplateForActions =
@@ -2863,6 +2882,110 @@ const EnhancedDataEditor = () => {
   }), []);
 
   const BOOLEAN_REQUIRED_FIELDS = useMemo(() => new Set(['Procurement item', 'Sales item']), []);
+
+  // The BOM sheet's equivalent of REQUIRED_FIELD_GUIDANCE, keyed by the `rule`
+  // the backend stamps on every issue. A message that only states what is wrong
+  // leaves the user to work out what to do about it; these supply the rest.
+  //
+  // `column` names the destination-template header a fix would target, so the
+  // card can offer Fill Column pre-aimed at the right place. Rules with no
+  // column are ones no button can resolve — a duplicate child is delete-or-sum
+  // and only the user knows which — so those get a locator and nothing more.
+  const BOM_RULE_GUIDANCE = useMemo(() => ({
+    quantity_missing: {
+      title: 'Quantity is blank',
+      rule: 'Every BOM line must say how much of the part the assembly consumes.',
+      action: 'Fill the Quantity column, or set a default for the blank rows.',
+      column: 'Quantity',
+    },
+    quantity_invalid: {
+      title: 'Quantity is not a positive number',
+      rule: 'Quantity must be a number greater than zero.',
+      action: 'Replace the offending values — Fill Column can target them specifically.',
+      column: 'Quantity',
+    },
+    item_code_blank: {
+      title: 'Rows have no item code',
+      rule: 'A BOM line references its part by item code, so a blank code cannot be referenced.',
+      action: 'Generate item codes with the FactWise ID tool, then export again.',
+      generateIds: true,
+    },
+    item_code_duplicate: {
+      title: 'Item codes are not unique',
+      rule: 'Two parts sharing a code make every BOM reference to it ambiguous.',
+      action: 'Make the duplicated codes unique before exporting.',
+    },
+    raw_or_sub_missing: {
+      title: 'Rows reference nothing',
+      rule: 'A BOM line must point at exactly one of a raw material code or a sub BOM ID.',
+      action: 'These rows are neither a part nor a sub-assembly — check them in the grid.',
+    },
+    raw_and_sub: {
+      title: 'Rows reference both a part and a sub-assembly',
+      rule: 'A BOM line must point at exactly one of the two, never both.',
+      action: 'Decide which one each row is and clear the other.',
+    },
+    referential_integrity: {
+      title: 'Codes used by the BOM are not in the item directory',
+      rule: 'Every code a BOM references must exist as an item, or the second import file fails.',
+      action: 'Add the missing items, or correct the codes the BOM points at.',
+    },
+    measurement_unit_missing: {
+      title: 'BOM lines have no measurement unit',
+      rule: 'The line unit says how the part is consumed. It is separate from how the item is stocked.',
+      action: 'Fill the Measurement unit column for the affected rows.',
+      column: 'Measurement unit',
+    },
+    duplicate_child: {
+      title: 'A part is listed twice in one BOM',
+      rule: 'One assembly may not list the same child on two lines.',
+      action: 'Delete the repeat, or merge the two into one line with the combined quantity. '
+             + 'Which one is right depends on the sheet, so this is left to you.',
+    },
+    cycle: {
+      title: 'The BOM contains itself',
+      rule: 'A BOM may not be reachable from itself — the import cannot resolve it.',
+      action: 'Either the finished good code or the component code is wrong. Check both.',
+    },
+    level_missing: {
+      title: 'Level is blank',
+      rule: 'Every BOM line sits at a level in the hierarchy.',
+      action: 'Fill the Level column for the affected rows.',
+      column: 'Level',
+    },
+    level_invalid: {
+      title: 'Level is not a whole number',
+      rule: 'Level must be a non-negative whole number.',
+      action: 'Correct the offending values in the Level column.',
+      column: 'Level',
+    },
+    sub_bom_unresolved: {
+      title: 'A sub BOM ID points nowhere',
+      rule: 'A sub BOM ID must name a BOM that exists in this sheet.',
+      action: 'Correct the reference, or add the missing sub-assembly.',
+    },
+    block_inconsistent: {
+      title: 'One BOM has conflicting details',
+      rule: 'Every row of one BOM must agree on its name, finished good and level.',
+      action: 'Make the conflicting rows agree.',
+    },
+    missing_columns: {
+      title: 'The BOM sheet is missing required columns',
+      rule: 'The generated sheet does not have the columns the import needs.',
+      action: 'This is a generation problem rather than a data one — re-check the BOM setup.',
+    },
+    duplicate_item_codes: {
+      title: 'Rows were collapsed into one item',
+      rule: 'Rows sharing an item code become a single item in the directory.',
+      action: 'Correct if these are genuinely different parts that happen to share a code. '
+             + 'If they are the same part listed twice, nothing needs doing.',
+    },
+    document_rows: {
+      title: 'Rows were excluded as documents',
+      rule: 'A row that consumes no quantity is treated as a drawing or reference data, not a part.',
+      action: 'Correct if any of these are real parts whose quantity is simply missing.',
+    },
+  }), []);
 
   const getRequiredValidationRule = useCallback((requiredName) => {
     if (requiredName === 'Measurement unit') return { kind: 'alpha' };
@@ -3043,6 +3166,77 @@ const EnhancedDataEditor = () => {
     pendingExportRef.current = null;
     if (fn) fn();
   }, []);
+
+  // One card per rule, not one alert per row. Nine errors that are two mistakes
+  // read as nine problems, and the truncation that used to cap the list at 25
+  // silently hid the rest.
+  const groupBomIssues = useCallback((issues, severity) => {
+    const groups = new Map();
+    (issues || []).forEach((issue) => {
+      // Validation issues carry `rule`; generator and tree issues carry `type`.
+      // Both land in the same list, so both have to key the same guidance map —
+      // without this, generator warnings render under a bare "other" heading.
+      const rule = issue.rule || issue.type || 'other';
+      if (!groups.has(rule)) {
+        groups.set(rule, { rule, severity, count: 0, rows: [], codes: [], messages: [] });
+      }
+      const group = groups.get(rule);
+      // `count` on an issue means it already speaks for several rows — the
+      // backend aggregates some rules itself.
+      group.count += Number(issue.count) || 1;
+      // grid_row is the row the user can actually find; row indexes the
+      // generated sheet and is only a fallback for issues predating the map.
+      const rows = issue.grid_rows || (issue.grid_row ? [issue.grid_row] : []);
+      rows.forEach(row => { if (!group.rows.includes(row)) group.rows.push(row); });
+      (issue.codes || []).forEach(code => {
+        if (!group.codes.includes(code)) group.codes.push(code);
+      });
+      if (group.messages.length < 3 && !group.messages.includes(issue.message)) {
+        group.messages.push(issue.message);
+      }
+    });
+    return [...groups.values()].map(group => ({
+      ...group,
+      rows: group.rows.sort((a, b) => a - b),
+    }));
+  }, []);
+
+  const bomErrorGroups = useMemo(
+    () => groupBomIssues(bomValidationIssues, 'error'),
+    [bomValidationIssues, groupBomIssues]
+  );
+  const bomWarningGroups = useMemo(
+    () => groupBomIssues(bomValidationWarnings, 'warning'),
+    [bomValidationWarnings, groupBomIssues]
+  );
+
+  // The floor for every BOM issue: even when no button can fix it, the user is
+  // told which row to look at. The grid is server-paginated, so reaching a row
+  // means loading its page first.
+  const jumpToGridRow = useCallback((gridRow) => {
+    const target = Number(gridRow);
+    if (!target || target < 1) return;
+    const targetPage = Math.floor((target - 1) / pageSize) + 1;
+    setBomValidationOpen(false);
+    if (targetPage !== page) {
+      setPage(targetPage);
+      fetchPageData(targetPage, pageSize);
+    }
+    showSnackbar(`Row ${target} is on page ${targetPage}.`, 'info');
+  }, [page, pageSize, fetchPageData, showSnackbar]);
+
+  // Resolve a guidance column name to the grid field that actually holds it.
+  // Header text is what the user sees; `field` is what the fill tools take.
+  const bomGridFieldFor = useCallback((columnName) => {
+    if (!columnName) return '';
+    const wanted = String(columnName).trim().toLowerCase();
+    const match = columnDefs.find((col) => {
+      if (!col.field || col.field === '__row_number__') return false;
+      return String(col.headerName || col.field).trim().toLowerCase() === wanted
+        || String(col.field).trim().toLowerCase() === wanted;
+    });
+    return match ? match.field : '';
+  }, [columnDefs]);
 
   const openFillColumnForRequired = useCallback((gap, suggestedValue = '') => {
     if (!gap?.field) return;
@@ -9604,41 +9798,200 @@ const EnhancedDataEditor = () => {
       <Dialog
         open={bomValidationOpen}
         onClose={() => setBomValidationOpen(false)}
-        maxWidth="sm"
+        maxWidth="md"
         fullWidth
+        PaperProps={{
+          sx: {
+            width: 'min(820px, calc(100vw - 40px))',
+            maxHeight: 'min(780px, calc(100vh - 48px))',
+            borderRadius: '18px',
+            overflow: 'hidden',
+            border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.22)' : '1px solid #e2e8f0',
+            boxShadow: isDarkMode ? '0 28px 80px rgba(0, 0, 0, 0.52)' : '0 28px 70px rgba(15, 23, 42, 0.18)',
+          }
+        }}
       >
-        <DialogTitle>BOM import errors</DialogTitle>
-        <DialogContent dividers>
-          <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
-            {bomValidationIssues.length} issue{bomValidationIssues.length === 1 ? '' : 's'} would
-            make this BOM fail the FactWise import. You can still export the sheet to
-            look at it.
+        <DialogTitle sx={{
+          px: 3,
+          py: 2.25,
+          borderBottom: isDarkMode ? '1px solid rgba(148, 163, 184, 0.16)' : '1px solid #e2e8f0',
+        }}>
+          <Typography variant="h6" sx={{ fontWeight: 850, letterSpacing: 0, color: t.text.heading }}>
+            BOM import errors
           </Typography>
-          {bomValidationIssues.slice(0, 25).map((issue, index) => (
-            <Alert severity="error" key={index} sx={{ mb: 1 }}>
-              {issue.message}
-            </Alert>
-          ))}
-          {bomValidationIssues.length > 25 && (
-            <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-              …and {bomValidationIssues.length - 25} more.
-            </Typography>
-          )}
-          {bomValidationWarnings.length > 0 && (
-            <>
-              <Divider sx={{ my: 2 }} />
-              <Typography variant="subtitle2" sx={{ mb: 1 }}>
-                Warnings — these do not block export
-              </Typography>
-              {bomValidationWarnings.slice(0, 10).map((warning, index) => (
-                <Alert severity="warning" key={index} sx={{ mb: 1 }}>
-                  {warning.message}
-                </Alert>
-              ))}
-            </>
-          )}
+          <Typography variant="body2" sx={{ color: t.text.secondary, mt: 0.25 }}>
+            {bomErrorGroups.length === 0
+              ? 'This BOM has nothing blocking the FactWise import.'
+              : `${bomErrorGroups.length} problem${bomErrorGroups.length === 1 ? '' : 's'} would make this BOM fail the FactWise import. You can still export the sheet to look at it.`}
+          </Typography>
+        </DialogTitle>
+        <DialogContent dividers sx={{
+          px: 3,
+          py: 2,
+          bgcolor: isDarkMode ? '#0b1220' : '#f8fafc',
+          borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.14)' : '#e2e8f0',
+        }}>
+          <Box sx={{ display: 'grid', gap: 1.5 }}>
+            {[...bomErrorGroups, ...bomWarningGroups].map((group) => {
+              const guidance = BOM_RULE_GUIDANCE[group.rule] || {};
+              const isError = group.severity === 'error';
+              const accent = isError ? '#ef4444' : '#f97316';
+              const fillField = bomGridFieldFor(guidance.column);
+              return (
+                <Box
+                  key={`${group.severity}-${group.rule}`}
+                  sx={{
+                    border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.18)' : '1px solid #e2e8f0',
+                    borderLeft: `4px solid ${accent}`,
+                    borderRadius: '12px',
+                    p: 2,
+                    bgcolor: isDarkMode ? '#111827' : '#ffffff',
+                    boxShadow: isDarkMode ? '0 12px 28px rgba(0, 0, 0, 0.18)' : '0 10px 24px rgba(15, 23, 42, 0.06)',
+                    display: 'grid',
+                    gap: 1.25,
+                  }}
+                >
+                  <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 1.5, flexWrap: 'wrap' }}>
+                    <Box sx={{ minWidth: 0 }}>
+                      <Typography variant="subtitle2" sx={{ fontWeight: 800, color: t.text.heading }}>
+                        {guidance.title || group.rule.replace(/_/g, ' ')}
+                      </Typography>
+                      <Typography
+                        variant="caption"
+                        sx={{
+                          display: 'inline-flex',
+                          mt: 0.75,
+                          px: 0.75,
+                          py: 0.25,
+                          borderRadius: '999px',
+                          color: isError ? (isDarkMode ? '#fecaca' : '#b91c1c') : (isDarkMode ? '#fed7aa' : '#c2410c'),
+                          bgcolor: isError
+                            ? (isDarkMode ? 'rgba(239, 68, 68, 0.14)' : '#fef2f2')
+                            : (isDarkMode ? 'rgba(249, 115, 22, 0.14)' : '#fff7ed'),
+                          border: isError
+                            ? (isDarkMode ? '1px solid rgba(248, 113, 113, 0.22)' : '1px solid #fecaca')
+                            : (isDarkMode ? '1px solid rgba(251, 146, 60, 0.22)' : '1px solid #fed7aa'),
+                          fontWeight: 700,
+                        }}
+                      >
+                        {group.count} {group.count === 1 ? 'row' : 'rows'}
+                      </Typography>
+                    </Box>
+                    <Chip
+                      size="small"
+                      label={isError ? 'Blocks import' : 'Warning'}
+                      sx={{
+                        fontWeight: 800,
+                        borderRadius: '999px',
+                        color: isError ? (isDarkMode ? '#fecaca' : '#991b1b') : (isDarkMode ? '#fed7aa' : '#9a3412'),
+                        bgcolor: isError
+                          ? (isDarkMode ? 'rgba(239, 68, 68, 0.16)' : '#fee2e2')
+                          : (isDarkMode ? 'rgba(249, 115, 22, 0.16)' : '#ffedd5'),
+                        border: isError
+                          ? (isDarkMode ? '1px solid rgba(248, 113, 113, 0.28)' : '1px solid #fecaca')
+                          : (isDarkMode ? '1px solid rgba(251, 146, 60, 0.28)' : '1px solid #fed7aa'),
+                      }}
+                    />
+                  </Box>
+
+                  <Box sx={{ display: 'grid', gap: 0.5 }}>
+                    <Typography variant="body2" sx={{ color: t.text.primary }}>
+                      <strong>Rule:</strong> {guidance.rule || group.messages[0] || 'This would fail the FactWise import.'}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      <strong>Fix:</strong> {guidance.action || 'Check the affected rows in the grid.'}
+                    </Typography>
+                    {group.codes.length > 0 && (
+                      <Typography variant="caption" color="text.secondary">
+                        Codes: {group.codes.slice(0, 8).join(', ')}
+                        {group.codes.length > 8 ? ` +${group.codes.length - 8} more` : ''}
+                      </Typography>
+                    )}
+                  </Box>
+
+                  {/* The floor: even a rule no button can fix still says where to
+                      look. Row numbers are the editor's, not the generated
+                      sheet's, so they exist on screen. */}
+                  {group.rows.length > 0 && (
+                    <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap', alignItems: 'center' }}>
+                      <Typography variant="caption" sx={{ color: t.text.secondary, fontWeight: 700 }}>
+                        Rows:
+                      </Typography>
+                      {group.rows.slice(0, 12).map(row => (
+                        <Chip
+                          key={`${group.rule}-row-${row}`}
+                          size="small"
+                          label={row}
+                          onClick={() => jumpToGridRow(row)}
+                          sx={{
+                            fontWeight: 700,
+                            cursor: 'pointer',
+                            borderRadius: '8px',
+                            bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.14)' : '#f1f5f9',
+                            '&:hover': { bgcolor: isDarkMode ? 'rgba(14, 165, 233, 0.18)' : '#e0f2fe' },
+                          }}
+                        />
+                      ))}
+                      {group.rows.length > 12 && (
+                        <Typography variant="caption" sx={{ color: t.text.secondary }}>
+                          +{group.rows.length - 12} more
+                        </Typography>
+                      )}
+                    </Box>
+                  )}
+
+                  {(fillField || guidance.generateIds) && (
+                    <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
+                      {guidance.generateIds && (
+                        <Button
+                          size="small"
+                          variant="contained"
+                          onClick={() => { setBomValidationOpen(false); handleOpenFactwiseIdDialog(); }}
+                          sx={{
+                            textTransform: 'none',
+                            fontWeight: 800,
+                            borderRadius: '999px',
+                            bgcolor: '#0ea5e9',
+                            '&:hover': { bgcolor: '#0284c7' },
+                          }}
+                        >
+                          Generate item codes
+                        </Button>
+                      )}
+                      {fillField && (
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          startIcon={<EditNoteIcon />}
+                          onClick={() => { setBomValidationOpen(false); openFillMissingDialog(fillField); }}
+                          sx={{
+                            textTransform: 'none',
+                            fontWeight: 800,
+                            borderRadius: '999px',
+                            color: isDarkMode ? '#cbd5e1' : '#334155',
+                            borderColor: isDarkMode ? 'rgba(148, 163, 184, 0.3)' : '#cbd5e1',
+                            '&:hover': {
+                              borderColor: '#0ea5e9',
+                              bgcolor: isDarkMode ? 'rgba(14, 165, 233, 0.10)' : '#f0f9ff',
+                            },
+                          }}
+                        >
+                          {`Fill ${guidance.column}`}
+                        </Button>
+                      )}
+                    </Box>
+                  )}
+                </Box>
+              );
+            })}
+          </Box>
         </DialogContent>
-        <DialogActions>
+        <DialogActions sx={{
+          px: 3,
+          py: 2,
+          borderTop: isDarkMode ? '1px solid rgba(148, 163, 184, 0.14)' : '1px solid #e2e8f0',
+          bgcolor: isDarkMode ? '#0f172a' : '#ffffff',
+        }}>
           <Button
             onClick={() => {
               pendingExportRef.current = null;

@@ -26,6 +26,11 @@ class MappingTemplate(models.Model):
     formula_rules = models.JSONField(default=list, blank=True)  # Formula rules for auto-tagging
     factwise_rules = models.JSONField(default=list, blank=True)  # Factwise ID rules
     default_values = models.JSONField(default=dict, blank=True)  # Default values for unmapped fields
+    # Conditional default-value rules set on the mapping page:
+    # {target_col: {column, operator, compare, then, else}}. Kept separate from
+    # default_values because that field is a flat {field: string} map and the many
+    # readers of it would break on a dict value.
+    default_value_rules = models.JSONField(default=dict, blank=True)
     mpn_validation_metadata = models.JSONField(default=dict, blank=True)  # MPN validation metadata
     # Answers from the BOM structure gate, so reusing a template on the same
     # customer's next file does not re-ask which sheet is a BOM, whether it has
@@ -206,7 +211,12 @@ class MappingTemplate(models.Model):
             default_values = getattr(self, 'default_values', {}) or {}
         except AttributeError:
             default_values = {}
-        
+
+        try:
+            default_value_rules = getattr(self, 'default_value_rules', {}) or {}
+        except AttributeError:
+            default_value_rules = {}
+
         # Handle different mapping formats
         if isinstance(self.mappings, list):
             # Direct list format (new format without wrapper)
@@ -247,6 +257,8 @@ class MappingTemplate(models.Model):
             'has_formulas': len(formula_rules) > 0,
             'default_values': default_values,  # Include default values with fallback
             'has_default_values': len(default_values) > 0,
+            'default_value_rules': default_value_rules,  # Conditional if/else defaults
+            'has_default_value_rules': len(default_value_rules) > 0,
             'factwise_rules': getattr(self, 'factwise_rules', []), # Include factwise rules
             'has_factwise_rules': len(getattr(self, 'factwise_rules', [])) > 0,
             # Column counts

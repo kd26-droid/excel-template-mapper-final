@@ -134,6 +134,16 @@ const guessFinishedGoodCode = (sheetName = '') => {
 const DEFAULT_BASE_QUANTITY = 1;
 const DEFAULT_MEASUREMENT_UNIT = 'EA';
 
+// A base quantity has to be a number the user meant. Blank counts as valid only
+// because the prefill fills it - what this rejects is a value that was typed and
+// does not parse, which the confirm step would otherwise rewrite to 1 in silence.
+const isPositiveQuantity = (value) => {
+  const text = String(value ?? '').trim();
+  if (!text) return false;
+  const number = Number(text);
+  return Number.isFinite(number) && number > 0;
+};
+
 const blankSheetAnswer = () => ({
   hasBom: false,
   hasLevels: false,
@@ -523,8 +533,15 @@ const BomStructureDialog = ({
           setError(`Enter a measurement unit for the Level 0 BOM in "${name}".`);
           return false;
         }
+        // A base quantity that does not parse used to be silently rewritten to 1
+        // at confirm time. Typing "abc" and shipping a BOM built on a quantity
+        // nobody chose is worse than being asked to correct it here.
+        if (!isPositiveQuantity(header.baseQuantity)) {
+          setError(`Enter a base quantity greater than zero for the Level 0 BOM in "${name}".`);
+          return false;
+        }
         // Sub-BOMs are held to the same rule. They start prefilled, so this only
-        // fires if the user deliberately cleared one.
+        // fires if the user deliberately cleared or mistyped one.
         const structure = answers[name]?.hasLevels ? structureFor(name) : null;
         for (const level of structure?.levels || []) {
           for (const assembly of level.assemblies) {
@@ -534,6 +551,10 @@ const BomStructureDialog = ({
             }
             if (!String(subBomValue(name, assembly, 'bomName') || '').trim()) {
               setError(`Enter a BOM name for the Level ${level.label} BOM "${assembly.code}".`);
+              return false;
+            }
+            if (!isPositiveQuantity(subBomValue(name, assembly, 'baseQuantity'))) {
+              setError(`Enter a base quantity greater than zero for the Level ${level.label} BOM "${assembly.code}".`);
               return false;
             }
           }
@@ -664,7 +685,13 @@ const BomStructureDialog = ({
                       hasLevels,
                       levelColumn: hasLevels ? (answer.levelColumn || autoDetected) : '',
                       treeConfirmed: null,
-                      bomHeader: hasLevels ? null : (answer.bomHeader || blankBomHeader(name)),
+                      // Preserved across the toggle, never nulled. Seeding puts
+                      // the preamble-detected root here for a levelled sheet;
+                      // discarding it on a toggle meant the confirm step fell
+                      // back to blankBomHeader and shipped a code guessed from
+                      // the sheet name, with the "auto-detected" chip gone and
+                      // nothing telling the user it had been swapped.
+                      bomHeader: answer.bomHeader || blankBomHeader(name),
                     });
                   }}
                 >

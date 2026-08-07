@@ -828,7 +828,27 @@ def apply_default_value_rules(headers, rows, rules, only_empty=False):
     """
     if not rules or not headers or not rows:
         return 0
-    hindex = {h: i for i, h in enumerate(headers)}
+
+    # Columns are matched by BOTH their sheet name and their internal slot key.
+    #
+    # The template repeats headers on purpose - three columns all called "Tag",
+    # several "Specification name". The mapping page refers to those by slot
+    # (`Tag_2`), which is the only way to say WHICH one. Matching on the sheet
+    # name alone meant a rule saved against `Tag_2` matched no column at all, so
+    # every rule on a Tag or Specification field silently did nothing.
+    #
+    # get_sfo_slot_key is what the mapping path already uses for this, so the two
+    # now agree on what a column is called.
+    hindex = {}
+    occurrence = {}
+    for position, header in enumerate(headers):
+        name = str(header or '')
+        occurrence[name] = occurrence.get(name, 0) + 1
+        slot_key = get_sfo_slot_key(name, occurrence[name])
+        # First occurrence wins for the bare name, so a rule keyed on a plain
+        # unique column keeps behaving exactly as it did.
+        hindex.setdefault(name, position)
+        hindex.setdefault(slot_key, position)
     changed = 0
     for target, rule in rules.items():
         if not isinstance(rule, dict):
@@ -1194,11 +1214,23 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
         # These run AFTER the whole grid is built so the condition can read the mapped
         # value of another column in the same row. Rows align to final_headers here.
         session_default_rules = {}
+        rule_warning = ''
         if session_id and session_id in SESSION_STORE:
             session_default_rules = SESSION_STORE[session_id].get("default_value_rules", {}) or {}
         if session_default_rules:
-            rule_ready_rows = [r for r in transformed_rows if len(r) == len(final_headers)]
-            if len(rule_ready_rows) == len(transformed_rows):
+            ragged = [r for r in transformed_rows if len(r) != len(final_headers)]
+            if ragged:
+                # Writing by position into a row of the wrong width would put the
+                # value under a different column, so the rules are not run. This
+                # used to happen in silence, which looked exactly like the rules
+                # not working at all.
+                rule_warning = (
+                    'This sheet does not match the template: %d of %d rows have a '
+                    'different number of columns, so the conditional default rules '
+                    'were not applied.' % (len(ragged), len(transformed_rows))
+                )
+                logger.warning('🔧 %s' % rule_warning)
+            else:
                 n = apply_default_value_rules(final_headers, transformed_rows, session_default_rules, only_empty=False)
                 logger.info(f"🔧 Applied {len(session_default_rules)} conditional default rule(s): {n} cells set")
 
@@ -1209,9 +1241,12 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
 
         return {
             'headers': final_headers,
-            'data': transformed_rows
+            'data': transformed_rows,
+            # Present only when something was skipped. Callers surface it so a
+            # rule that did not run says so instead of looking broken.
+            'warning': rule_warning,
         }
-        
+
     except Exception as e:
         logger.error(f"Error in apply_column_mappings: {e}")
         return {'headers': [], 'data': []}
@@ -1672,6 +1707,12 @@ def upload_files(request):
                     # Update session with applied mappings
                     SESSION_STORE[session_id]["original_template_id"] = int(use_template_id)
                     SESSION_STORE[session_id]["mappings"] = new_format_mappings
+
+                    # Conditional default rules must land on the session before the
+                    # grid is built — apply_column_mappings runs them from there.
+                    template_default_value_rules = getattr(template, 'default_value_rules', {}) or {}
+                    if template_default_value_rules:
+                        SESSION_STORE[session_id]["default_value_rules"] = template_default_value_rules
 
                     # The gate's answers travel with the template. Answers sent
                     # with this upload win — the user just gave them for this
@@ -6614,6 +6655,7 @@ def save_mapping_template(request):
         override_formula_rules = request.data.get('formula_rules')  # Optional formula rules override
         override_factwise_rules = request.data.get('factwise_rules')  # Optional factwise rules override
         override_default_values = request.data.get('default_values')  # Optional default values override
+        override_default_value_rules = request.data.get('default_value_rules')  # Optional conditional defaults override
         mpn_validation_metadata = request.data.get('mpn_validation_metadata', {})  # MPN validation metadata
         overwrite_existing = bool(request.data.get('overwrite_existing'))
         # Taken from the session rather than the request: these are the gate's
@@ -6675,10 +6717,23 @@ def save_mapping_template(request):
                         # Only log if this field was actually supposed to have a default value
                         # (i.e., if the user had set a value but it's now empty)
                         if field_name in ['Specification name', 'Procurement entity name', 'Customer identification name']:
-            
-            
-            # Convert mappings from new format to old format for template storage
                             pass
+
+            # Conditional default-value rules (if/else against another column) set on
+            # the mapping page. They live on the session, so without persisting them
+            # here they died with the session and were silently lost every time the
+            # template was reused.
+            raw_default_value_rules = (
+                override_default_value_rules if override_default_value_rules is not None
+                else info.get("default_value_rules", {})
+            )
+            default_value_rules = {}
+            if raw_default_value_rules and isinstance(raw_default_value_rules, dict):
+                for field_name, rule in raw_default_value_rules.items():
+                    if isinstance(rule, dict) and str(rule.get('column') or '').strip():
+                        default_value_rules[field_name] = rule
+
+            # Convert mappings from new format to old format for template storage
             if raw_mappings and isinstance(raw_mappings, dict) and 'mappings' in raw_mappings:
                 # New format: {'mappings': [{'source': '...', 'target': '...'}, ...]}
                 # For templates, we need to preserve all mappings including duplicates
@@ -6713,7 +6768,10 @@ def save_mapping_template(request):
             # Standalone template (formula-only from Dashboard)
             mappings = override_mappings or {}
             formula_rules = override_formula_rules or []
-            
+            factwise_rules = override_factwise_rules or []
+            default_values = override_default_values or {}
+            default_value_rules = override_default_value_rules or {}
+
             if not formula_rules:
                 return Response({
                     'success': False,
@@ -6779,6 +6837,7 @@ def save_mapping_template(request):
                 template.formula_rules = formula_rules  # Include normalized formula rules
                 template.factwise_rules = factwise_rules  # Include factwise ID rules
                 template.default_values = default_values  # Include default values
+                template.default_value_rules = default_value_rules  # Conditional if/else defaults
                 template.mpn_validation_metadata = mpn_validation_metadata  # Include MPN validation metadata
                 template.bom_structure = bom_structure  # BOM structure gate answers
                 template.tags_count = tags_count
@@ -6796,6 +6855,7 @@ def save_mapping_template(request):
                     formula_rules=formula_rules,  # Include normalized formula rules
                     factwise_rules=factwise_rules,  # Include factwise ID rules
                     default_values=default_values,  # Include default values
+                    default_value_rules=default_value_rules,  # Conditional if/else defaults
                     mpn_validation_metadata=mpn_validation_metadata,  # Include MPN validation metadata
                     bom_structure=bom_structure,  # BOM structure gate answers
                     tags_count=tags_count,
@@ -6813,7 +6873,8 @@ def save_mapping_template(request):
             raise e
         except Exception as e:
             # If new fields don't exist yet, create without them
-            if 'formula_rules' in str(e) or 'factwise_rules' in str(e) or 'default_values' in str(e) or 'mpn_validation_metadata' in str(e):
+            if ('formula_rules' in str(e) or 'factwise_rules' in str(e) or 'default_values' in str(e)
+                    or 'default_value_rules' in str(e) or 'mpn_validation_metadata' in str(e)):
                 try:
                     if existing_template and overwrite_existing:
                         template = existing_template
@@ -6852,6 +6913,7 @@ def save_mapping_template(request):
             'template_name': template.name,
             'description': template.description,
             'default_values': default_values,
+            'default_value_rules': default_value_rules,
             'column_counts': {
                 'tags_count': tags_count,
                 'spec_pairs_count': spec_pairs_count,
@@ -6955,6 +7017,7 @@ def update_mapping_template(request):
         spec_pairs_count = info.get('spec_pairs_count', getattr(template, 'spec_pairs_count', 1))
         customer_id_pairs_count = info.get('customer_id_pairs_count', getattr(template, 'customer_id_pairs_count', 1))
         default_values = info.get('default_values', getattr(template, 'default_values', {}))
+        default_value_rules = info.get('default_value_rules', getattr(template, 'default_value_rules', {}))
 
         try:
             template.tags_count = int(tags_count)
@@ -6966,6 +7029,10 @@ def update_mapping_template(request):
             template.default_values = default_values
         except Exception:
             logger.warning("🔧 DEBUG: Could not set default_values during update_mapping_template")
+        try:
+            template.default_value_rules = default_value_rules or {}
+        except Exception:
+            logger.warning("🔧 DEBUG: Could not set default_value_rules during update_mapping_template")
         
         # Update name and description if provided
         if template_name:
@@ -7063,6 +7130,7 @@ def _serialize_template_for_export(t):
             'formula_rules': t.formula_rules or [],
             'factwise_rules': t.factwise_rules or [],
             'default_values': t.default_values or {},
+            'default_value_rules': getattr(t, 'default_value_rules', {}) or {},
             'mpn_validation_metadata': t.mpn_validation_metadata or {},
             'bom_structure': t.bom_structure or {},
             'tags_count': t.tags_count,
@@ -7145,6 +7213,7 @@ def import_mapping_template(request):
             formula_rules=tpl.get('formula_rules') or [],
             factwise_rules=tpl.get('factwise_rules') or [],
             default_values=tpl.get('default_values') or {},
+            default_value_rules=tpl.get('default_value_rules') or {},
             mpn_validation_metadata=tpl.get('mpn_validation_metadata') or {},
             bom_structure=tpl.get('bom_structure') or {},
             tags_count=_int(tpl.get('tags_count')),
@@ -7469,6 +7538,14 @@ def apply_mapping_template(request):
             # CRITICAL: Update mappingsCacheRef equivalent on backend
             # This ensures the frontend can restore mappings even if edges are cleared
             SESSION_STORE[session_id]["cached_mappings"] = new_format_list
+
+            # Restore conditional default rules BEFORE the grid is built —
+            # apply_column_mappings reads them off the session and runs them once the
+            # whole row exists, which is what lets the condition see another column.
+            template_default_value_rules = getattr(template, 'default_value_rules', {}) or {}
+            if template_default_value_rules:
+                SESSION_STORE[session_id]["default_value_rules"] = template_default_value_rules
+                logger.info(f"🔧 Restored {len(template_default_value_rules)} conditional default rule(s) from template")
 
             # CRITICAL FIX: ALWAYS apply column mappings after template application
             # This transforms source columns to target columns (e.g., MFR → Tag_1)
@@ -7803,6 +7880,7 @@ def apply_mapping_template(request):
             info['mappings'] = new_format_mappings or info.get('mappings')
             info['enhanced_headers'] = regenerated_headers
             info['default_values'] = default_values or info.get('default_values', {})
+            info['default_value_rules'] = template_default_value_rules or info.get('default_value_rules', {})
             # Carry the BOM gate's answers over, but never overwrite answers the
             # user has already given for this upload — a template is a default,
             # not an override.
@@ -13280,6 +13358,12 @@ BOM_GRID_FIELDS = (
 # and the uploaded sheet's copy is still blank.
 BOM_ALIGNMENT_FIELDS = (('cpn', 'CPN Code'), ('mpn', 'MPN Code'))
 
+# Where a record's 1-based position in the editor's grid is stashed as it passes
+# through generation, so validation can report a row the user can actually find.
+# Underscored to keep it out of the normalizer's contract - it is transport, not
+# data, and must never reach a generated sheet.
+GRID_ROW_KEY = '__grid_row__'
+
 
 def _greedy_subsequence(grid_keys, source_keys):
     """Match every grid key to a source key, in order, never reusing one."""
@@ -13416,8 +13500,13 @@ def _merge_grid_values_into_records(records, grid_headers, grid_rows):
 
     changed = {}
     kept = []
-    for row, source_index in zip(grid_rows, alignment):
+    for grid_position, (row, source_index) in enumerate(zip(grid_rows, alignment), start=1):
         record = records[source_index]
+        # Stamped here because this is the only point where the two row spaces
+        # are known to line up. Validation messages are useless without it: a
+        # BOM row number indexes the *generated* sheet, which after grouping and
+        # document exclusion is nothing like the row the user is looking at.
+        record[GRID_ROW_KEY] = grid_position
         kept.append(record)
         if not isinstance(row, list):
             continue
@@ -13543,6 +13632,10 @@ def _generate_hierarchical_bom(records, answer, bom_header):
             quantity_column='quantity' if 'quantity' in (primaries[0] if primaries else {}) else None,
             uom_column='uom' if 'uom' in (primaries[0] if primaries else {}) else None,
             root=root,
+            # Set by the normalizer only when the sheet states its parents. When
+            # it is blank throughout, derive_tree falls back to level inference,
+            # so level-only sheets take exactly the path they always did.
+            parent_column='parent' if 'parent' in (primaries[0] if primaries else {}) else None,
         )
     except BomTreeError as exc:
         return None, Response({
@@ -13828,6 +13921,7 @@ def validate_bom_sheet(request, session_id):
         result.bom_headers,
         bom_rows_as_lists(result),
         item_rows,
+        bom_row_grid_rows=result.bom_row_grid_rows,
     )
 
     return Response({

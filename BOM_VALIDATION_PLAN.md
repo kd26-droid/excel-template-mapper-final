@@ -49,6 +49,10 @@ not currently reached. Latent, not active. Worth closing when convenient.
 
 ## 2. Rule decisions (agreed)
 
+**Backend ruleset implemented** in `bom_validation.py`, covered by
+`tests/test_bom_validation.py` (17 tests). The fix *buttons* in the table below
+are the dialog's half of the work and are not built yet — see §4 and §5.
+
 | Rule | Decision |
 |---|---|
 | `quantity_missing` | Keep. Fix button: Fill Column on grid Quantity, quick default `1`, fill-from-above. |
@@ -138,14 +142,27 @@ genuine part awaiting a quantity it is data loss wearing a warning label. Worth
 deciding whether "no quantity" should mean "document" when the row *has* a part
 code — a drawing has no part number by design, which is a usable discriminator.
 
-### `baseQuantity` still coerces silently — and now in more places
+### ~~`baseQuantity` coerces silently~~ — **fixed**
 
-`Number(raw.baseQuantity) > 0 ? Number(...) : DEFAULT_BASE_QUANTITY`
-(`BomStructureDialog.js`, handleConfirm). Agreed as a **YES** to fix, still
-outstanding, and it now applies per sub-assembly as well as to the root — every
-sub-BOM's base quantity runs through the same silent coercion.
+`validateStep` now rejects a base quantity that was typed and does not parse to a
+positive number, for the root **and** every sub-assembly, via `isPositiveQuantity`.
+The coercion in `handleConfirm` stays as a backstop but can no longer swallow a
+typo, because validation blocks first. Blank still passes — the field is
+prefilled, so blank means the prefill, not a mistake.
 
-### Toggling "Multi level" discards the auto-detected root
+### ~~Toggling "Multi level" discards the auto-detected root~~ — **fixed**
+
+The radio's onChange now preserves `bomHeader` instead of nulling it
+(`bomHeader: answer.bomHeader || blankBomHeader(name)`).
+
+Residual, deliberately not chased: a sheet seeded as *flat* carries a
+sheet-name guess in `bomHeader`, and toggling it to multi-level keeps that guess
+rather than re-running preamble detection. That is the pre-existing prefill
+behaviour and the field is on screen and editable, so it is visible rather than
+silent — unlike the bug below, which swapped a detected root for a guess with no
+indication.
+
+#### Original report
 
 Seeding populates `bomHeader` for a hierarchical sheet from the preamble
 (`detectRootFromPreamble`), setting `autoDetected: true`. But the radio's
@@ -178,9 +195,22 @@ Fix: preserve `bomHeader` across the toggle rather than nulling it.
 - ~~Run validation live rather than only at export~~ — **NO.** Stays a
   gate at export time.
 
+### Implemented
+
+- **BOM line Measurement unit** — now reported as **one aggregated warning**
+  (`measurement_unit_missing`) carrying `count` and `rows`, not one per row.
+  Deliberately a warning, not an error: see the unconfirmed note below. Promoting
+  it is a one-line change once the import spec is checked.
+- **Alternates** — three rules added: `alternate_is_primary`,
+  `alternate_duplicate`, `alternate_quantity_invalid`. A blank alternate quantity
+  is intentionally *not* flagged; the generator inherits the primary's, which is
+  correct. `_alternate_groups` replaces `_alternate_code_indexes` so a group's
+  quantity column is located positionally — the headers repeat, so they cannot be
+  looked up by name.
+
 ### Still open
 
-- **BOM line Measurement unit is never validated.** It is in the schema and
+- **BOM line Measurement unit — error or warning?** It is in the schema and
   populated from `uom` (`bom_generator.py:270`) but has no rule — although
   `bom_validation.py:59-63` already resolves its column index and then never
   uses it (same for `Base quantity`). It is *not* the same field as the item's
@@ -188,25 +218,10 @@ Fix: preserve `bomHeader` across the toggle rather than nulling it.
   how it is consumed, and metres-vs-centimetres is legitimate, so the item sheet
   passing tells you nothing.
 
-  ~6 lines, same shape as `quantity_missing`, plus a Fill Column button.
   **Unconfirmed:** whether the FactWise import actually rejects a blank line UOM.
-  Inferred from the column being in the base template. Check the import spec
-  before making it a blocker rather than a warning.
-
-- **The alternates block is unvalidated** — BOM-only by definition. Three checks
-  worth having, validator-only, no generator changes:
-
-  1. an alternate code equal to its own primary's `Raw material code`
-  2. two alternates on the same row with the same code
-  3. an alternate quantity that is present but zero, negative, or non-numeric
-
-  *Not* worth checking: that an alternate has its own quantity or UOM. The
-  generator falls back to the primary's (`bom_generator.py:280-281`), so the
-  check could never fire — and that fallback is correct, since an alternate is
-  the same BOM line from a different manufacturer.
-
-  Alternate codes are already covered by referential integrity
-  (`bom_validation.py:183-186`).
+  Inferred from the column being in the base template, so it ships as a warning —
+  a wrong blocker stops exports that would have been fine. Check the import spec,
+  then promote if it really is mandatory.
 
 - **Popup `measurementUnit` is free text with no rule**, while the item sheet's
   Measurement unit gets an `alpha` validator (`EnhancedDataEditor.js:2822`).
@@ -251,7 +266,31 @@ an explicit flat-path rule with a message that names the collision.
 
 **Cost:** ~1 hour backend.
 
-### The shared blocker — there is no row locator
+### The shared blocker — backend half **done**, frontend half pending
+
+**Done.** A record is stamped with its 1-based editor row (`GRID_ROW_KEY`) in
+`_merge_grid_values_into_records`, at the one point where the two row spaces are
+known to line up. `GenerationResult.bom_row_grid_rows` carries it parallel to
+`bom_rows` through both generators, and `validate_bom(..., bom_row_grid_rows=)`
+adds `grid_row` / `grid_rows` to every issue via `_attach_grid_rows`. Issues the
+generator invented (an authored finished good) get no locator rather than a wrong
+one. The key is underscored and never reaches a generated sheet — asserted in
+the end-to-end check.
+
+Worked example: three editor rows (5, 6, 9) where 6 is an alternate of 5 produce
+**two** BOM lines mapping to `[5, 9]`, and `quantity_missing` on generated row 2
+resolves to editor row 9. Without this the message said "Row 2", which appears
+nowhere on a screen showing rows 5, 6 and 9.
+
+**Pending — frontend.** `jumpToGridRow(n)`: the page math is
+`Math.floor((n - 1) / pageSize) + 1` then `setPage` + `fetchPageData`
+(`EnhancedDataEditor.js:459-460, 6570`). A row-level *highlight* needs more: the
+grid has no `getRowStyle` / `rowClassRules` today, and `dupHighlight`
+(`EnhancedDataEditor.js:788`) highlights by cell value, not by row. So the
+locator lands in two parts — page jump first, row highlight when the grid gains
+a row-styling hook.
+
+### Original analysis — there was no row locator at all
 
 Both rules, and every other "show me the rows" affordance, need something that
 does not exist.
@@ -335,15 +374,27 @@ above — re-validating inside the dialog after an inline fix — still applies.
 
 ## 6. Suggested order
 
-~~1. §1 generator projection~~ — **done in the working tree.** The blocker on
-everything else is cleared, so fix buttons are now safe to build.
+~~1. §1 generator projection~~ — **done**, committed.
 
-1. Rule changes in §2 + §2a — delete `description_missing`, suppress
-   `raw_or_sub_missing` conditionally, drop the validator's duplicate
-   `level_jump`.
-2. §2b decisions — the `baseQuantity` coercion and the toggle bug are small and
-   self-contained; the document-exclusion question needs a call first.
-3. `sourceRow` plumbing + `scrollToGridRow` (§4 shared blocker) — the largest
-   single piece, and every locator depends on it.
-4. Gaps in §3, once the line-UOM and alternates questions are answered.
-5. Dialog rework §5.
+~~2. Rule changes in §2 + §2a + the §3 additions~~ — **done.**
+`description_missing` deleted, `raw_or_sub_missing` folded into
+`item_code_blank`, the validator's duplicate `level_jump` removed, line
+Measurement unit added as an aggregated warning, three alternate rules added.
+17 tests in `tests/test_bom_validation.py`.
+
+~~3. Grid-row plumbing (backend half of §4)~~ — **done.** 22 tests.
+
+Remaining, in order:
+
+1. **Dialog rework §5** — group by rule, `BOM_RULE_GUIDANCE`, themed cards, Fill
+   Column buttons, row chips reading the new `grid_row` / `grid_rows`, plus
+   `jumpToGridRow`. The largest remaining piece and the one the user actually
+   asked for.
+2. **Row highlight** — needs a `getRowStyle` / `rowClassRules` hook on the grid,
+   which does not exist yet.
+3. §2b decisions — the `baseQuantity` coercion and the "Multi level" toggle bug
+   are small and self-contained; the document-exclusion question needs a call
+   first.
+4. Show the codes the collapsed-rows warning already carries.
+5. Confirm the FactWise import spec on line Measurement unit; promote the
+   warning to an error if it is genuinely mandatory.

@@ -911,6 +911,36 @@ const rowLooksLikeSectionTitle = (row, headers, roles) => {
   return Boolean(descriptionValue) && !mpnValue && !quantityValue;
 };
 
+// --- how a row is keyed ------------------------------------------------------
+//
+// Two different relationships live on a BOM row, and they need two different
+// columns. Conflating them is what broke parent-column sheets.
+//
+//   alternatesKey    identity  - rows sharing it are the SAME part offered by
+//                                different manufacturers, and collapse onto one
+//                                BOM line with the rest as alternates
+//   hierarchyParent  structure - what this row hangs underneath in the tree
+//
+// `roles.parent` belongs only to the second. It used to lead the alternates key,
+// and on a sheet that states its parent outright (AMAT's PARENT_PART) every
+// child of an assembly carries the same value - so 36 distinct parts were read
+// as one part with 35 substitute brands and the whole assembly collapsed into a
+// single BOM line.
+//
+// The part number leads instead, because that is what identifies a part.
+// Description stays as the fallback for rows with no part number, which is what
+// level-only sheets already relied on - checked against a real THALES export,
+// where keying on part number produces exactly the same groups.
+const alternatesKey = (row, roles, sourceRow) => (
+  getCell(row, roles.cpn)
+  || getCell(row, roles.description)
+  || `Source row ${sourceRow}`
+);
+
+// Blank when the sheet does not state a parent. The tree is then derived from
+// the level column exactly as before, so level-only sheets are untouched.
+const hierarchyParent = (row, roles) => getCell(row, roles.parent) || '';
+
 const hasGroupedRowContext = (row, roles) => Boolean(
   getCell(row, roles.parent) ||
   getCell(row, roles.cpn) ||
@@ -978,7 +1008,8 @@ const normalizeSeparateCells = (rows, roles, config) => {
     const quantity = getCell(row, roles.quantity);
     const uom = getCell(row, roles.uom);
     const description = getCell(row, roles.description);
-    const parentKey = getCell(row, roles.parent) || description || `Source row ${sourceRow}`;
+    const parentKey = alternatesKey(row, roles, sourceRow);
+    const parent = hierarchyParent(row, roles);
     const level = getCell(row, roles.level) || '1';
     const rule = explicitDelimiterUsed ? 'separate_cells_user_delimiter' : 'separate_cells_position_pairing';
     const cpn = getCell(row, roles.cpn);
@@ -988,6 +1019,7 @@ const normalizeSeparateCells = (rows, roles, config) => {
         output.push(withSourceColumns({
           sourceRow,
           parentKey,
+          parent,
           relation: partIndex === 0 ? 'Primary' : `Alternate ${partIndex}`,
           level,
           cpn,
@@ -1009,6 +1041,7 @@ const normalizeSeparateCells = (rows, roles, config) => {
       output.push(withSourceColumns({
         sourceRow,
         parentKey,
+        parent,
         relation: 'Primary',
         level,
         cpn,
@@ -1030,6 +1063,7 @@ const normalizeSeparateCells = (rows, roles, config) => {
       output.push(withSourceColumns({
         sourceRow,
         parentKey,
+        parent,
         relation: isPrimary ? 'Primary' : `Alternate ${partIndex}`,
         level,
         cpn,
@@ -1057,7 +1091,8 @@ const normalizeSameCell = (rows, roles, config) => {
     const quantity = getCell(row, roles.quantity);
     const uom = getCell(row, roles.uom);
     const description = getCell(row, roles.description);
-    const parentKey = getCell(row, roles.parent) || description || `Source row ${sourceRow}`;
+    const parentKey = alternatesKey(row, roles, sourceRow);
+    const parent = hierarchyParent(row, roles);
     const level = getCell(row, roles.level) || '1';
     const cpn = getCell(row, roles.cpn);
 
@@ -1066,6 +1101,7 @@ const normalizeSameCell = (rows, roles, config) => {
         output.push(withSourceColumns({
           sourceRow,
           parentKey,
+          parent,
           relation: partIndex === 0 ? 'Primary' : `Alternate ${partIndex}`,
           level,
           cpn,
@@ -1089,6 +1125,7 @@ const normalizeSameCell = (rows, roles, config) => {
         output.push(withSourceColumns({
           sourceRow,
           parentKey,
+          parent,
           relation: 'Primary',
           level,
           cpn,
@@ -1108,6 +1145,7 @@ const normalizeSameCell = (rows, roles, config) => {
         output.push(withSourceColumns({
           sourceRow,
           parentKey,
+          parent,
           relation: partIndex === 0 ? 'Primary' : `Alternate ${partIndex}`,
           level,
           cpn,
@@ -1131,6 +1169,7 @@ const normalizeSameCell = (rows, roles, config) => {
         output.push(withSourceColumns({
           sourceRow,
           parentKey,
+          parent,
           relation: relationIndex === 0 ? 'Primary' : `Alternate ${relationIndex}`,
           level,
           cpn,
@@ -1215,7 +1254,8 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
     const primaryUom = getCell(row, roles.uom);
     const rawParentKey = getCell(row, roles.parent);
     const description = getCell(row, roles.description);
-    const parentKey = rawParentKey || description || `Source row ${sourceRow}`;
+    const parentKey = alternatesKey(row, roles, sourceRow);
+    const parent = hierarchyParent(row, roles);
     const level = getCell(row, roles.level) || '1';
     const cpn = getCell(row, roles.cpn);
     const hasBomIdentity = Boolean(cpn || description || rawParentKey);
@@ -1225,6 +1265,7 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
       output.push(withSourceColumns({
         sourceRow,
         parentKey,
+        parent,
         relation: 'Primary',
         level,
         cpn,
@@ -1249,6 +1290,7 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
       output.push(withSourceColumns({
         sourceRow,
         parentKey,
+        parent,
         relation: emittedAnyPart ? `Alternate ${groupIndex + 1}` : 'Primary',
         level,
         cpn,
@@ -1268,6 +1310,7 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
       output.push(withSourceColumns({
         sourceRow,
         parentKey,
+        parent,
         relation: 'Primary',
         level,
         cpn,
@@ -1291,7 +1334,8 @@ const normalizeOnePerRow = (rows, roles, config = {}) => rows.map((row, rowIndex
   const manufacturer = getCell(row, roles.manufacturer);
   return withSourceColumns({
     sourceRow,
-    parentKey: getCell(row, roles.parent) || getCell(row, roles.description) || `Source row ${sourceRow}`,
+    parentKey: alternatesKey(row, roles, sourceRow),
+    parent: hierarchyParent(row, roles),
     relation: 'Primary',
     level: getCell(row, roles.level) || '1',
     cpn: getCell(row, roles.cpn),
@@ -1330,14 +1374,13 @@ const normalizeSameGroupRows = (rows, roles, config = {}) => {
     const groupKey = getGroupKey(row, rowIndex);
     const groupIndex = seenByGroup.get(groupKey) || 0;
     seenByGroup.set(groupKey, groupIndex + 1);
-    const parentKey = getCell(row, roles.parent)
-      || getCell(row, roles.description)
-      || getCell(row, roles.cpn)
-      || `Source row ${sourceRow}`;
+    const parentKey = alternatesKey(row, roles, sourceRow);
+    const parent = hierarchyParent(row, roles);
 
     return withSourceColumns({
       sourceRow,
       parentKey,
+      parent,
       relation: groupIndex === 0 ? 'Primary' : `Alternate ${groupIndex}`,
       level: getCell(row, roles.level) || '1',
       cpn: getCell(row, roles.cpn),
@@ -1360,7 +1403,8 @@ const normalizeManufacturerOnly = (rows, roles, config, splitCells) => {
     const manufacturers = splitCells
       ? splitManufacturerCell(getCell(row, roles.manufacturer), null, config)
       : [getCell(row, roles.manufacturer)].filter(Boolean);
-    const parentKey = getCell(row, roles.parent) || getCell(row, roles.description) || `Source row ${sourceRow}`;
+    const parentKey = alternatesKey(row, roles, sourceRow);
+    const parent = hierarchyParent(row, roles);
     const level = getCell(row, roles.level) || '1';
     const cpn = getCell(row, roles.cpn);
 
@@ -1368,6 +1412,7 @@ const normalizeManufacturerOnly = (rows, roles, config, splitCells) => {
       output.push(withSourceColumns({
         sourceRow,
         parentKey,
+        parent,
         relation: partIndex === 0 ? 'Primary' : `Alternate ${partIndex}`,
         level,
         cpn,
@@ -1392,10 +1437,12 @@ const normalizeGroupedRows = (rows, roles, config) => {
   const groupValuesFromRow = (row, rowIndex) => {
     const sourceRow = row.__sourceRow || rowIndex + 1;
     const cpn = getCell(row, roles.cpn);
-    const parentKey = getCell(row, roles.parent) || cpn || getCell(row, roles.description) || `Source row ${sourceRow}`;
+    const parentKey = alternatesKey(row, roles, sourceRow);
+    const parent = hierarchyParent(row, roles);
     return {
       sourceRow,
       parentKey,
+      parent,
       cpn,
       description: getCell(row, roles.description),
       quantity: getCell(row, roles.quantity),
@@ -1597,7 +1644,7 @@ const analyzeMpnManufacturerPairing = (rows, headers, roles, config) => {
       scenarios.push({
         key: `source-${sourceRow}`,
         sourceRow,
-        parentKey: getCell(row, roles.parent) || getCell(row, roles.description) || getCell(row, roles.cpn) || `Source row ${sourceRow}`,
+        parentKey: alternatesKey(row, roles, sourceRow),
         mpns: base.mpns,
         manufacturers: base.manufacturers,
         rawMpn: base.rawMpn,
@@ -1615,7 +1662,7 @@ const analyzeMpnManufacturerPairing = (rows, headers, roles, config) => {
         scenarios.push({
           key: `alternate-columns-${sourceRow}`,
           sourceRow,
-          parentKey: getCell(row, roles.parent) || getCell(row, roles.description) || getCell(row, roles.cpn) || `Source row ${sourceRow}`,
+          parentKey: alternatesKey(row, roles, sourceRow),
           mpns,
           manufacturers,
           rawMpn: mpns.join(' | '),

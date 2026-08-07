@@ -109,12 +109,31 @@ def relation_rank(value):
     return None
 
 
+# Set on a record by the grid merge (views.GRID_ROW_KEY) and carried through to
+# `GenerationResult.bom_row_grid_rows`. A generated BOM row does not correspond
+# to the row the user is looking at - rows are grouped by parentKey, documents
+# are dropped, and one editor row can vanish into another's alternate column -
+# so without this a validation message points at a row number that exists
+# nowhere on screen.
+GRID_ROW_KEY = '__grid_row__'
+
+
+def grid_row_of(record):
+    """The editor row a record came from, or None when it was never stamped."""
+    if not isinstance(record, dict):
+        return None
+    value = record.get(GRID_ROW_KEY)
+    return value if isinstance(value, int) else None
+
+
 class GenerationResult(object):
     def __init__(self):
         self.item_headers = []
         self.item_rows = []
         self.bom_headers = []
         self.bom_rows = []
+        # Parallel to bom_rows: the editor row each one came from, or None.
+        self.bom_row_grid_rows = []
         self.errors = []
         self.warnings = []
         self.stats = {}
@@ -122,6 +141,46 @@ class GenerationResult(object):
     @property
     def is_valid(self):
         return not self.errors
+
+
+def _source_row_order(record):
+    """``sourceRow`` as a number, for sorting.
+
+    It has to be compared by value, not as text. Read as text, "10" sorts before
+    "2" - the same reason a phone lists Track 10 before Track 2 - so on a sheet
+    numbered 2..77 the row treated as first was row 10. That is how a capacitor
+    came to be picked as the top of an assembly.
+
+    A missing or non-numeric value sorts last rather than first, and the caller's
+    positional tie-break then keeps those rows in sheet order.
+    """
+    text = _text(record.get(F_SOURCE_ROW))
+    try:
+        return (0, float(text))
+    except (TypeError, ValueError):
+        return (1, 0.0)
+
+
+def _group_sort_key(item):
+    """Order one group: primary first, then sheet order.
+
+    ``item`` is ``(position, record)``, where position is the row's index in the
+    input. Three levels, each only consulted when the one before it ties:
+
+        1. relation  - the primary leads, then Alternate 1, 2, ...
+        2. sourceRow - numerically, so the sheet's own order is preserved
+        3. position  - the order the row already had, when sourceRow cannot say
+
+    Level 3 is what guarantees sheet order survives even on rows whose sourceRow
+    is blank or unparsable.
+    """
+    position, record = item
+    rank = relation_rank(record.get(F_RELATION))
+    return (
+        rank if rank is not None else 9999,
+        _source_row_order(record),
+        position,
+    )
 
 
 def group_normalized_rows(records):
@@ -140,17 +199,13 @@ def group_normalized_rows(records):
             # No group key: treat the row as its own line rather than dropping it.
             key = 'row:%s' % (_text(record.get(F_SOURCE_ROW)) or index)
             ungrouped += 1
-        groups.setdefault(key, []).append(record)
+        # The position is carried so sheet order can be the final tie-break -
+        # see the sort below.
+        groups.setdefault(key, []).append((index, record))
 
     ordered = OrderedDict()
     for key, rows in groups.items():
-        ordered[key] = sorted(
-            rows,
-            key=lambda row: (
-                relation_rank(row.get(F_RELATION)) if relation_rank(row.get(F_RELATION)) is not None else 9999,
-                _text(row.get(F_SOURCE_ROW)),
-            ),
-        )
+        ordered[key] = [record for _position, record in sorted(rows, key=_group_sort_key)]
     return ordered, ungrouped
 
 
@@ -286,6 +341,9 @@ def generate_flat_bom(records, bom_header):
                 row['%s%s' % (name, suffix)] = value
 
         result.bom_rows.append(row)
+        # The primary is the row this BOM line came from; its alternates were
+        # folded sideways into the same line and have no line of their own.
+        result.bom_row_grid_rows.append(grid_row_of(primary))
 
     item_headers, item_rows, duplicate_codes = generate_item_rows(records)
 
@@ -471,6 +529,7 @@ def generate_multi_level_bom(tree, bom_header, alternates_of=None, records=None,
                     row['%s%s' % (name, suffix)] = value
 
             result.bom_rows.append(row)
+            result.bom_row_grid_rows.append(grid_row_of(child.get('source')))
 
     # The item sheet holds every node AND every alternate. An alternate is a
     # different manufacturer's part with its own code, so it is a separate item
