@@ -453,7 +453,29 @@ const detectHeaderRow = (rows) => {
   return bestIndex;
 };
 
-const inferRoles = (headers) => {
+// A header can lie about what a column holds. THALES exports a column called "MFR"
+// that carries plant codes (F9111, F6137) rather than manufacturers, and matching on
+// the name alone mapped it straight to the manufacturer role. Manufacturer names vary
+// across a BOM and are words; a code column is a handful of short alphanumeric tokens
+// repeated down hundreds of rows. Only used to veto a name match when the values
+// clearly disagree, never to make a match on its own.
+const looksLikeCodeColumn = (values) => {
+  const samples = values.map(fmt).filter(Boolean);
+  if (samples.length < 8) return false;      // too few to judge; trust the header
+  const distinct = new Set(samples.map((value) => value.toLowerCase()));
+  if (distinct.size > Math.max(4, samples.length * 0.2)) return false;
+  // Short, no spaces, and carrying a digit is what a plant/site code looks like.
+  const codeLike = samples.filter((value) => value.length <= 8 && !/\s/.test(value) && /\d/.test(value));
+  return codeLike.length >= samples.length * 0.9;
+};
+
+const columnValues = (header, headers, dataRows) => {
+  const index = headers.indexOf(header);
+  if (index < 0) return [];
+  return dataRows.slice(0, 60).map((row) => (Array.isArray(row) ? row[index] : row?.[header]));
+};
+
+const inferRoles = (headers, dataRows = []) => {
   const learnedHeaders = getLearnedRoleHeaders();
   const findLearnedHeader = (role) => {
     const learned = Array.isArray(learnedHeaders[role]) ? learnedHeaders[role] : [];
@@ -481,11 +503,17 @@ const inferRoles = (headers) => {
   const cpnHeader = learnedCpn || findHeader([/\bcpn\b/, /customer part/, /client part/, /internal part/, /part code/]) ||
     (genericPartHeader && genericPartHeader !== mpnHeader ? genericPartHeader : '');
 
+  // A header the user has taught us wins outright. Otherwise a name match still has to
+  // survive the values: see looksLikeCodeColumn.
+  const namedManufacturer = findHeader([/^manufacturer$/, /\bmfr\b/, /manufacturer name/, /producer/], [/equivalent/, /part/, /\bmpn\b/]) ||
+    findHeader([/manufacturer/], [/equivalent/, /part/, /\bmpn\b/]);
+  const manufacturerHeader = findLearnedHeader('manufacturer') ||
+    (namedManufacturer && looksLikeCodeColumn(columnValues(namedManufacturer, headers, dataRows)) ? '' : namedManufacturer);
+
   return {
     cpn: cpnHeader,
     mpn: mpnHeader,
-    manufacturer: findLearnedHeader('manufacturer') || findHeader([/^manufacturer$/, /\bmfr\b/, /manufacturer name/, /producer/], [/equivalent/, /part/, /\bmpn\b/]) ||
-      findHeader([/manufacturer/], [/equivalent/, /part/, /\bmpn\b/]),
+    manufacturer: manufacturerHeader,
     description: findLearnedHeader('description') || findHeader([/description/, /item name/, /\bname\b/]),
     quantity: findLearnedHeader('quantity') || findHeader([/quantity/, /\bqty\b/, /\bqnty\b/, /^count$/, /\bcount\b/]),
     uom: findLearnedHeader('uom') || findHeader([/\buom\b/, /measurement unit/, /\bunit\b/]),
@@ -643,6 +671,17 @@ const splitMpnCell = (value, config = {}) => {
     return normalizeMpnParts(delimited);
   }
 
+  // Nothing split, so the whole cell is the candidate. Only keep it if it could be a
+  // part number at all: a cell with no digit anywhere is a plant code, a site name or
+  // a note, not an MPN. THALES exports put "ETA BDX" and "CCI VEN" in the manufacturer
+  // column on document and internal-assembly rows, and returning those unchecked filled
+  // the MPN column with site codes. Returning [] lets the caller record a blank MPN and
+  // keep the text in discardedText.
+  // Deliberately NOT gated on looksLikeMpnToken: that also caps length at four tokens
+  // and bans ':' and '()', which would drop real parts like
+  // "DOWSIL RTV 3140 TUBE 90 ML" and "114-RX8900SA:UB0PURESNCT-ND".
+  if (!/[0-9]/.test(text)) return [];
+
   return normalizeMpnParts([text]);
 };
 
@@ -702,6 +741,21 @@ const extractPackedMetadata = (value) => {
   };
 };
 
+// looksLikeMpnToken caps an MPN at four whitespace-separated tokens, which is right when
+// we are guessing whether a bare string is a part number. Inside "PART (MANUFACTURER)"
+// the brackets have already proved the shape, so that cap only does harm: THALES ships
+// "FZ ISO7046-2 M2-5 A2-70 PASSIVE (ALCOA)" (five tokens) and
+// "DOWSIL RTV 3140 TUBE 90 ML (DOW-CHEM)" (six). Both were rejected, and because the
+// caller required every entry in a cell to parse, one long part discarded all of its
+// alternates too. Here we only need to rule out prose and empty text.
+const looksLikeParenthesizedMpn = (value) => {
+  const token = fmt(value);
+  const compact = token.replace(/[^A-Za-z0-9]/g, '');
+  if (compact.length < 3) return false;
+  if (!/[0-9]/.test(compact)) return false;
+  return true;
+};
+
 const parseParenthesizedMpnManufacturerPairs = (value, config = {}) => {
   const text = fmt(value).replace(/\u00a0/g, ' ');
   if (!text || !/[()]/.test(text)) return [];
@@ -726,7 +780,7 @@ const parseParenthesizedMpnManufacturerPairs = (value, config = {}) => {
     const trailingMeta = {};
     if (statusMatch && fmt(statusMatch[1])) trailingMeta.status = fmt(statusMatch[1]);
     if (idMatch && fmt(idMatch[1])) trailingMeta.internalId = fmt(idMatch[1]);
-    if (!rawMpn || !inside || !looksLikeMpnToken(rawMpn)) return null;
+    if (!rawMpn || !inside || !looksLikeParenthesizedMpn(rawMpn)) return null;
 
     const insideParts = splitTopLevelDelimited(inside, [','])
       .map(fmt)
@@ -751,7 +805,13 @@ const parseParenthesizedMpnManufacturerPairs = (value, config = {}) => {
     };
   }).filter(Boolean);
 
-  return parsed.length >= 1 && parsed.length === candidates.length ? parsed : [];
+  // Requiring EVERY entry to parse meant one odd line threw away its siblings: item
+  // A1225407 lists five approved suppliers and lost all five. A cell is still only
+  // treated as packed pairs when most of it parses, so a description that merely
+  // happens to contain a bracket does not slip through — but the entries that did
+  // parse are now kept.
+  if (!parsed.length) return [];
+  return parsed.length * 2 >= candidates.length ? parsed : [];
 };
 
 const parsePackedMpnManufacturerPairs = (value, config = {}) => {
@@ -3732,7 +3792,7 @@ const BomNormalizer = () => {
       : nextWorkbook.SheetNames[0];
     const prepared = prepareSingleSheet(nextWorkbook, preferredSheet, { headerRow: options.headerRow });
     const nextHeaders = prepared.headers;
-    const nextRoles = inferRoles(nextHeaders);
+    const nextRoles = inferRoles(nextHeaders, prepared.dataRows);
     const nextStructure = detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40));
 
     setWorkbook(nextWorkbook);
@@ -4636,7 +4696,7 @@ const BomNormalizer = () => {
     if (!workbook) return;
     const prepared = prepareSingleSheet(workbook, nextSheetName);
     const nextHeaders = prepared.headers;
-    const nextRoles = inferRoles(nextHeaders);
+    const nextRoles = inferRoles(nextHeaders, prepared.dataRows);
 
     setSheetName(nextSheetName);
     setSelectedSheetNames([nextSheetName]);
@@ -4666,7 +4726,7 @@ const BomNormalizer = () => {
     const prepared = scope === 'single'
       ? prepareSingleSheet(workbook, nextNames[0])
       : prepareMultipleSheets(workbook, nextNames);
-    const nextRoles = inferRoles(prepared.headers);
+    const nextRoles = inferRoles(prepared.headers, prepared.dataRows);
 
     setSheetScope(scope);
     setSelectedSheetNames(nextNames);
@@ -4711,7 +4771,7 @@ const BomNormalizer = () => {
     const nextHeaders = columns.length
       ? columns.map((column) => column.header)
       : makeUniqueHeaders(sheetRows[nextIndex] || []);
-    const nextRoles = inferRoles(nextHeaders);
+    const nextRoles = inferRoles(nextHeaders, sheetRows.slice(nextIndex + 1));
     setHeaderRowIndex(nextIndex);
     setPreparedHeaders(nextHeaders);
     setPreparedDataRows(sheetRows
