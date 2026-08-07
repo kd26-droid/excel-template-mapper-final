@@ -26,7 +26,18 @@ class MappingTemplate(models.Model):
     formula_rules = models.JSONField(default=list, blank=True)  # Formula rules for auto-tagging
     factwise_rules = models.JSONField(default=list, blank=True)  # Factwise ID rules
     default_values = models.JSONField(default=dict, blank=True)  # Default values for unmapped fields
+    # Conditional default-value rules set on the mapping page:
+    # {target_col: {column, operator, compare, then, else}}. Kept separate from
+    # default_values because that field is a flat {field: string} map and the many
+    # readers of it would break on a dict value.
+    default_value_rules = models.JSONField(default=dict, blank=True)
     mpn_validation_metadata = models.JSONField(default=dict, blank=True)  # MPN validation metadata
+    # Answers from the BOM structure gate, so reusing a template on the same
+    # customer's next file does not re-ask which sheet is a BOM, whether it has
+    # levels, or which column holds them. The identity half — finished good code,
+    # sub-BOM part numbers — describes one specific assembly, so it is stored but
+    # only replayed when it still fits the new sheet.
+    bom_structure = models.JSONField(default=dict, blank=True)
     # Dynamic column counts
     tags_count = models.IntegerField(default=3)  # Number of Tags columns
     spec_pairs_count = models.IntegerField(default=3)  # Number of Specification Name/Value pairs
@@ -200,7 +211,12 @@ class MappingTemplate(models.Model):
             default_values = getattr(self, 'default_values', {}) or {}
         except AttributeError:
             default_values = {}
-        
+
+        try:
+            default_value_rules = getattr(self, 'default_value_rules', {}) or {}
+        except AttributeError:
+            default_value_rules = {}
+
         # Handle different mapping formats
         if isinstance(self.mappings, list):
             # Direct list format (new format without wrapper)
@@ -241,12 +257,18 @@ class MappingTemplate(models.Model):
             'has_formulas': len(formula_rules) > 0,
             'default_values': default_values,  # Include default values with fallback
             'has_default_values': len(default_values) > 0,
+            'default_value_rules': default_value_rules,  # Conditional if/else defaults
+            'has_default_value_rules': len(default_value_rules) > 0,
             'factwise_rules': getattr(self, 'factwise_rules', []), # Include factwise rules
             'has_factwise_rules': len(getattr(self, 'factwise_rules', [])) > 0,
             # Column counts
             'tags_count': getattr(self, 'tags_count', 1),
             'spec_pairs_count': getattr(self, 'spec_pairs_count', 1),
             'customer_id_pairs_count': getattr(self, 'customer_id_pairs_count', 1),
+            # The upload page reads this to decide whether the BOM structure gate
+            # still needs to be shown for the file in hand.
+            'bom_structure': getattr(self, 'bom_structure', {}) or {},
+            'has_bom_structure': bool(getattr(self, 'bom_structure', {}) or {}),
             'created_at': self.created_at.isoformat(),
             'usage_count': self.usage_count
         }

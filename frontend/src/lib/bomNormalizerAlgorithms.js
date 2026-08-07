@@ -6,6 +6,10 @@ const fmt = (value) => {
 export const BASE_NORMALIZED_EXPORT_COLUMNS = [
   'sourceRow',
   'parentKey',
+  // The BOM parent, when the sheet states it outright. Distinct from parentKey,
+  // which groups a part with its alternate manufacturers. Blank on sheets that
+  // only indent by level, where the tree is derived from `level` instead.
+  'parent',
   'relation',
   'level',
   'cpn',

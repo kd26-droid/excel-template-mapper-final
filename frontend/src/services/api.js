@@ -811,6 +811,9 @@ const api = {
       ...(formulaRules !== null ? { formula_rules: formulaRules } : {}),
       ...(factwiseRules !== null ? { factwise_rules: factwiseRules } : {}),
       ...(defaultValues !== null ? { default_values: defaultValues } : {}),
+      // Conditional if/else defaults from the mapping page. Omitted (not sent as
+      // {}) when absent so the backend keeps falling back to the session copy.
+      ...(options?.defaultValueRules ? { default_value_rules: options.defaultValueRules } : {}),
       ...(columnCounts !== null ? {
         tags_count: columnCounts.tags_count,
         spec_pairs_count: columnCounts.spec_pairs_count,

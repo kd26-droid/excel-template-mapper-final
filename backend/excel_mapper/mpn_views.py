@@ -2150,8 +2150,16 @@ def mpn_validate(request):
             'data': rows
         }
 
-        # Save enhanced data back to session
+        # Save enhanced data back to session.
+        #
+        # All three keys, matching every other writer in this module. `edited_data`
+        # is what read_session_grid checks FIRST, so writing only `enhanced_data`
+        # left every server-side reader looking at a snapshot from before
+        # validation ran: the MPN summary reported "no provider columns found"
+        # while the grid displayed them perfectly, because data_view reads
+        # `enhanced_headers` and read_session_grid does not.
         info['enhanced_data'] = enhanced_result
+        info['edited_data'] = enhanced_result
         info['enhanced_headers'] = headers  # CRITICAL: data_view looks for this key!
         logger.info(f"💾 MPN_VALIDATION_HEADERS_SAVED: Saved enhanced_headers with {len(headers)} headers to session")
 

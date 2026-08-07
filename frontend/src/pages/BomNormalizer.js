@@ -47,7 +47,7 @@ import DownloadIcon from '@mui/icons-material/Download';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import api from '../services/api';
-import BomStructureDialog from '../components/BomStructureDialog';
+import BomStructureDialog, { reconcileSavedBomStructure } from '../components/BomStructureDialog';
 import {
   createFactwiseIds,
   createTagColumn,
@@ -550,9 +550,19 @@ const splitTopLevelDelimited = (value, delimiters = [';', '|', '\n', ',']) => {
   const text = fmt(value).replace(/\u00a0/g, ' ');
   if (!text) return [];
   const delimiterSet = new Set(delimiters);
+  const matchingClose = {
+    '(': ')',
+    '[': ']',
+    '{': '}',
+  };
+  const openingForClose = {
+    ')': '(',
+    ']': '[',
+    '}': '{',
+  };
   const parts = [];
   let current = '';
-  let depth = 0;
+  const stack = [];
   let quote = '';
 
   const pushCurrent = () => {
@@ -576,19 +586,22 @@ const splitTopLevelDelimited = (value, delimiters = [';', '|', '\n', ',']) => {
       continue;
     }
 
-    if (char === '(' || char === '[' || char === '{') {
-      depth += 1;
+    if (matchingClose[char]) {
+      const hasMatchingClose = text.indexOf(matchingClose[char], index + 1) !== -1;
+      if (hasMatchingClose) stack.push(char);
       current += char;
       continue;
     }
 
-    if (char === ')' || char === ']' || char === '}') {
-      depth = Math.max(0, depth - 1);
+    if (openingForClose[char]) {
+      if (stack[stack.length - 1] === openingForClose[char]) {
+        stack.pop();
+      }
       current += char;
       continue;
     }
 
-    if (depth === 0 && delimiterSet.has(char)) {
+    if (stack.length === 0 && delimiterSet.has(char)) {
       if (char === ',') {
         const next = text.slice(index + 1).trim().split(/[;,|\n]/)[0];
         if (!next || /^\d{1,4}(\s|$)/.test(next)) {
@@ -970,6 +983,36 @@ const rowLooksLikeSectionTitle = (row, headers, roles) => {
   return Boolean(descriptionValue) && !mpnValue && !quantityValue;
 };
 
+// --- how a row is keyed ------------------------------------------------------
+//
+// Two different relationships live on a BOM row, and they need two different
+// columns. Conflating them is what broke parent-column sheets.
+//
+//   alternatesKey    identity  - rows sharing it are the SAME part offered by
+//                                different manufacturers, and collapse onto one
+//                                BOM line with the rest as alternates
+//   hierarchyParent  structure - what this row hangs underneath in the tree
+//
+// `roles.parent` belongs only to the second. It used to lead the alternates key,
+// and on a sheet that states its parent outright (AMAT's PARENT_PART) every
+// child of an assembly carries the same value - so 36 distinct parts were read
+// as one part with 35 substitute brands and the whole assembly collapsed into a
+// single BOM line.
+//
+// The part number leads instead, because that is what identifies a part.
+// Description stays as the fallback for rows with no part number, which is what
+// level-only sheets already relied on - checked against a real THALES export,
+// where keying on part number produces exactly the same groups.
+const alternatesKey = (row, roles, sourceRow) => (
+  getCell(row, roles.cpn)
+  || getCell(row, roles.description)
+  || `Source row ${sourceRow}`
+);
+
+// Blank when the sheet does not state a parent. The tree is then derived from
+// the level column exactly as before, so level-only sheets are untouched.
+const hierarchyParent = (row, roles) => getCell(row, roles.parent) || '';
+
 const hasGroupedRowContext = (row, roles) => Boolean(
   getCell(row, roles.parent) ||
   getCell(row, roles.cpn) ||
@@ -1037,7 +1080,8 @@ const normalizeSeparateCells = (rows, roles, config) => {
     const quantity = getCell(row, roles.quantity);
     const uom = getCell(row, roles.uom);
     const description = getCell(row, roles.description);
-    const parentKey = getCell(row, roles.parent) || description || `Source row ${sourceRow}`;
+    const parentKey = alternatesKey(row, roles, sourceRow);
+    const parent = hierarchyParent(row, roles);
     const level = getCell(row, roles.level) || '1';
     const rule = explicitDelimiterUsed ? 'separate_cells_user_delimiter' : 'separate_cells_position_pairing';
     const cpn = getCell(row, roles.cpn);
@@ -1047,6 +1091,7 @@ const normalizeSeparateCells = (rows, roles, config) => {
         output.push(withSourceColumns({
           sourceRow,
           parentKey,
+          parent,
           relation: partIndex === 0 ? 'Primary' : `Alternate ${partIndex}`,
           level,
           cpn,
@@ -1068,6 +1113,7 @@ const normalizeSeparateCells = (rows, roles, config) => {
       output.push(withSourceColumns({
         sourceRow,
         parentKey,
+        parent,
         relation: 'Primary',
         level,
         cpn,
@@ -1089,6 +1135,7 @@ const normalizeSeparateCells = (rows, roles, config) => {
       output.push(withSourceColumns({
         sourceRow,
         parentKey,
+        parent,
         relation: isPrimary ? 'Primary' : `Alternate ${partIndex}`,
         level,
         cpn,
@@ -1116,7 +1163,8 @@ const normalizeSameCell = (rows, roles, config) => {
     const quantity = getCell(row, roles.quantity);
     const uom = getCell(row, roles.uom);
     const description = getCell(row, roles.description);
-    const parentKey = getCell(row, roles.parent) || description || `Source row ${sourceRow}`;
+    const parentKey = alternatesKey(row, roles, sourceRow);
+    const parent = hierarchyParent(row, roles);
     const level = getCell(row, roles.level) || '1';
     const cpn = getCell(row, roles.cpn);
 
@@ -1125,6 +1173,7 @@ const normalizeSameCell = (rows, roles, config) => {
         output.push(withSourceColumns({
           sourceRow,
           parentKey,
+          parent,
           relation: partIndex === 0 ? 'Primary' : `Alternate ${partIndex}`,
           level,
           cpn,
@@ -1148,6 +1197,7 @@ const normalizeSameCell = (rows, roles, config) => {
         output.push(withSourceColumns({
           sourceRow,
           parentKey,
+          parent,
           relation: 'Primary',
           level,
           cpn,
@@ -1167,6 +1217,7 @@ const normalizeSameCell = (rows, roles, config) => {
         output.push(withSourceColumns({
           sourceRow,
           parentKey,
+          parent,
           relation: partIndex === 0 ? 'Primary' : `Alternate ${partIndex}`,
           level,
           cpn,
@@ -1190,6 +1241,7 @@ const normalizeSameCell = (rows, roles, config) => {
         output.push(withSourceColumns({
           sourceRow,
           parentKey,
+          parent,
           relation: relationIndex === 0 ? 'Primary' : `Alternate ${relationIndex}`,
           level,
           cpn,
@@ -1274,7 +1326,8 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
     const primaryUom = getCell(row, roles.uom);
     const rawParentKey = getCell(row, roles.parent);
     const description = getCell(row, roles.description);
-    const parentKey = rawParentKey || description || `Source row ${sourceRow}`;
+    const parentKey = alternatesKey(row, roles, sourceRow);
+    const parent = hierarchyParent(row, roles);
     const level = getCell(row, roles.level) || '1';
     const cpn = getCell(row, roles.cpn);
     const hasBomIdentity = Boolean(cpn || description || rawParentKey);
@@ -1284,6 +1337,7 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
       output.push(withSourceColumns({
         sourceRow,
         parentKey,
+        parent,
         relation: 'Primary',
         level,
         cpn,
@@ -1308,6 +1362,7 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
       output.push(withSourceColumns({
         sourceRow,
         parentKey,
+        parent,
         relation: emittedAnyPart ? `Alternate ${groupIndex + 1}` : 'Primary',
         level,
         cpn,
@@ -1327,6 +1382,7 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
       output.push(withSourceColumns({
         sourceRow,
         parentKey,
+        parent,
         relation: 'Primary',
         level,
         cpn,
@@ -1350,7 +1406,8 @@ const normalizeOnePerRow = (rows, roles, config = {}) => rows.map((row, rowIndex
   const manufacturer = getCell(row, roles.manufacturer);
   return withSourceColumns({
     sourceRow,
-    parentKey: getCell(row, roles.parent) || getCell(row, roles.description) || `Source row ${sourceRow}`,
+    parentKey: alternatesKey(row, roles, sourceRow),
+    parent: hierarchyParent(row, roles),
     relation: 'Primary',
     level: getCell(row, roles.level) || '1',
     cpn: getCell(row, roles.cpn),
@@ -1389,14 +1446,13 @@ const normalizeSameGroupRows = (rows, roles, config = {}) => {
     const groupKey = getGroupKey(row, rowIndex);
     const groupIndex = seenByGroup.get(groupKey) || 0;
     seenByGroup.set(groupKey, groupIndex + 1);
-    const parentKey = getCell(row, roles.parent)
-      || getCell(row, roles.description)
-      || getCell(row, roles.cpn)
-      || `Source row ${sourceRow}`;
+    const parentKey = alternatesKey(row, roles, sourceRow);
+    const parent = hierarchyParent(row, roles);
 
     return withSourceColumns({
       sourceRow,
       parentKey,
+      parent,
       relation: groupIndex === 0 ? 'Primary' : `Alternate ${groupIndex}`,
       level: getCell(row, roles.level) || '1',
       cpn: getCell(row, roles.cpn),
@@ -1419,7 +1475,8 @@ const normalizeManufacturerOnly = (rows, roles, config, splitCells) => {
     const manufacturers = splitCells
       ? splitManufacturerCell(getCell(row, roles.manufacturer), null, config)
       : [getCell(row, roles.manufacturer)].filter(Boolean);
-    const parentKey = getCell(row, roles.parent) || getCell(row, roles.description) || `Source row ${sourceRow}`;
+    const parentKey = alternatesKey(row, roles, sourceRow);
+    const parent = hierarchyParent(row, roles);
     const level = getCell(row, roles.level) || '1';
     const cpn = getCell(row, roles.cpn);
 
@@ -1427,6 +1484,7 @@ const normalizeManufacturerOnly = (rows, roles, config, splitCells) => {
       output.push(withSourceColumns({
         sourceRow,
         parentKey,
+        parent,
         relation: partIndex === 0 ? 'Primary' : `Alternate ${partIndex}`,
         level,
         cpn,
@@ -1451,10 +1509,12 @@ const normalizeGroupedRows = (rows, roles, config) => {
   const groupValuesFromRow = (row, rowIndex) => {
     const sourceRow = row.__sourceRow || rowIndex + 1;
     const cpn = getCell(row, roles.cpn);
-    const parentKey = getCell(row, roles.parent) || cpn || getCell(row, roles.description) || `Source row ${sourceRow}`;
+    const parentKey = alternatesKey(row, roles, sourceRow);
+    const parent = hierarchyParent(row, roles);
     return {
       sourceRow,
       parentKey,
+      parent,
       cpn,
       description: getCell(row, roles.description),
       quantity: getCell(row, roles.quantity),
@@ -1656,7 +1716,7 @@ const analyzeMpnManufacturerPairing = (rows, headers, roles, config) => {
       scenarios.push({
         key: `source-${sourceRow}`,
         sourceRow,
-        parentKey: getCell(row, roles.parent) || getCell(row, roles.description) || getCell(row, roles.cpn) || `Source row ${sourceRow}`,
+        parentKey: alternatesKey(row, roles, sourceRow),
         mpns: base.mpns,
         manufacturers: base.manufacturers,
         rawMpn: base.rawMpn,
@@ -1674,7 +1734,7 @@ const analyzeMpnManufacturerPairing = (rows, headers, roles, config) => {
         scenarios.push({
           key: `alternate-columns-${sourceRow}`,
           sourceRow,
-          parentKey: getCell(row, roles.parent) || getCell(row, roles.description) || getCell(row, roles.cpn) || `Source row ${sourceRow}`,
+          parentKey: alternatesKey(row, roles, sourceRow),
           mpns,
           manufacturers,
           rawMpn: mpns.join(' | '),
@@ -3085,6 +3145,9 @@ const BomNormalizer = () => {
   // question about real output instead of raw headers.
   const [bomStructureOpen, setBomStructureOpen] = useState(false);
   const [bomStructureAnswers, setBomStructureAnswers] = useState(null);
+  // Answers carried over from a reused mapping template, already checked
+  // against this file. The gate opens pre-filled with whatever survived.
+  const [bomStructureSeed, setBomStructureSeed] = useState(null);
   const [pendingBomAction, setPendingBomAction] = useState(null);
   const [workbook, setWorkbook] = useState(null);
   const [fileName, setFileName] = useState('');
@@ -4497,7 +4560,24 @@ const BomNormalizer = () => {
     const passed = (maybeAnswers && maybeAnswers.sheets) ? maybeAnswers : null;
     // Answers may already have been captured on the upload page; asking a
     // second time for the same workbook would just be noise.
-    const answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
+    let answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
+
+    // A reused mapping template may already answer the gate. Its format answers
+    // always apply; its identity answers only while they still describe this
+    // file. All surviving means the gate never opens.
+    if (!answers) {
+      const saved = location.state?.savedBomStructure;
+      if (saved) {
+        const reconciled = reconcileSavedBomStructure(saved, {
+          sheetNames: bomStructureSheetNames,
+          getSheetHeaders: bomStructureHeaderReader,
+          getSheetRecords: bomStructureRecordReader,
+        });
+        if (reconciled.complete) answers = saved;
+        else setBomStructureSeed(reconciled.answers);
+      }
+    }
+
     if (!answers) {
       setPendingBomAction('normalized');
       setBomStructureOpen(true);
@@ -4579,7 +4659,24 @@ const BomNormalizer = () => {
     const passed = (maybeAnswers && maybeAnswers.sheets) ? maybeAnswers : null;
     // Answers may already have been captured on the upload page; asking a
     // second time for the same workbook would just be noise.
-    const answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
+    let answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
+
+    // A reused mapping template may already answer the gate. Its format answers
+    // always apply; its identity answers only while they still describe this
+    // file. All surviving means the gate never opens.
+    if (!answers) {
+      const saved = location.state?.savedBomStructure;
+      if (saved) {
+        const reconciled = reconcileSavedBomStructure(saved, {
+          sheetNames: bomStructureSheetNames,
+          getSheetHeaders: bomStructureHeaderReader,
+          getSheetRecords: bomStructureRecordReader,
+        });
+        if (reconciled.complete) answers = saved;
+        else setBomStructureSeed(reconciled.answers);
+      }
+    }
+
     if (!answers) {
       setPendingBomAction('merge');
       setBomStructureOpen(true);
@@ -4651,6 +4748,18 @@ const BomNormalizer = () => {
   const bomStructureHeaderReader = useCallback(
     () => preparedHeaders || [],
     [preparedHeaders]
+  );
+
+  // Both readers work off the raw sheet, like the header reader above: the gate
+  // asks about the customer's structure, not the normalized output.
+  const bomStructureRecordReader = useCallback(
+    () => rowsToObjects(sheetRows.slice(headerRowIndex + 1), headers, headerRowIndex + 2),
+    [sheetRows, headerRowIndex, headers]
+  );
+
+  const bomStructurePreambleReader = useCallback(
+    () => sheetRows.slice(0, headerRowIndex),
+    [sheetRows, headerRowIndex]
   );
 
   const handleBomStructureConfirm = useCallback((payload) => {
@@ -5325,6 +5434,82 @@ const BomNormalizer = () => {
       };
     });
   }, [config, currentStep, dataRows, parserTouched, roles.mpn]);
+
+  const autoReplayTemplate = location.state?.autoReplayProcessingTemplate || null;
+  if (autoReplayTemplate) {
+    const replayName = autoReplayTemplate.name || 'selected template';
+    const progressTotal = Number(progress.total || 0);
+    const progressValue = progressTotal
+      ? Math.min(100, Math.round((Number(progress.processed || 0) / progressTotal) * 100))
+      : 35;
+
+    return (
+      <Box
+        sx={{
+          minHeight: '100vh',
+          bgcolor: normalizerTheme.page,
+          color: normalizerTheme.text,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          px: 2,
+        }}
+      >
+        <Paper
+          elevation={0}
+          sx={{
+            width: 'min(520px, 100%)',
+            p: { xs: 3, sm: 4 },
+            border: `1px solid ${normalizerTheme.border}`,
+            borderRadius: 3,
+            bgcolor: `${normalizerTheme.paper} !important`,
+            color: `${normalizerTheme.text} !important`,
+            boxShadow: isDarkMode ? '0 24px 80px rgba(0,0,0,0.42)' : '0 24px 80px rgba(15,23,42,0.12)',
+          }}
+        >
+          <Stack spacing={2.25}>
+            <Box>
+              <Typography variant="h5" fontWeight={900} sx={{ color: normalizerTheme.text }}>
+                Applying template
+              </Typography>
+              <Typography sx={{ mt: 0.75, color: normalizerTheme.muted, lineHeight: 1.5 }}>
+                Preparing the workbook with "{replayName}" and opening the final mapped data.
+              </Typography>
+            </Box>
+
+            {error ? (
+              <Alert severity="error">
+                {error}
+              </Alert>
+            ) : (
+              <>
+                <LinearProgress
+                  variant={progressTotal ? 'determinate' : 'indeterminate'}
+                  value={progressValue}
+                  sx={{
+                    height: 8,
+                    borderRadius: 999,
+                    bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.18)' : '#e2e8f0',
+                  }}
+                />
+                <Typography variant="body2" sx={{ color: normalizerTheme.muted }}>
+                  Running saved normalization, mapping, and final-page tool rules in order.
+                </Typography>
+              </>
+            )}
+
+            {error && (
+              <Stack direction="row" justifyContent="flex-end">
+                <Button variant="contained" onClick={() => navigate('/upload')}>
+                  Back to Upload
+                </Button>
+              </Stack>
+            )}
+          </Stack>
+        </Paper>
+      </Box>
+    );
+  }
 
   return (
     <Box
@@ -7311,6 +7496,9 @@ const BomNormalizer = () => {
         onClose={() => { setBomStructureOpen(false); setPendingBomAction(null); }}
         sheetNames={bomStructureSheetNames}
         getSheetHeaders={bomStructureHeaderReader}
+        getSheetRecords={bomStructureRecordReader}
+        getSheetPreambleRows={bomStructurePreambleReader}
+        initialAnswers={bomStructureSeed}
         onConfirm={handleBomStructureConfirm}
       />
     </Box>
