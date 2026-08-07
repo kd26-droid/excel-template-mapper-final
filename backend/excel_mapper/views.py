@@ -10143,10 +10143,20 @@ def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
                 output_source_index = _grid_column_index(output_headers, output_source_column)
                 if output_source_index < 0:
                     raise ValueError(f'Condition output column "{output_source_column}" is not in the grid')
+            # Several values mean "any of these" and MUST stay a list -
+            # condition_matches below is built for that shape. Flattening it with
+            # str() produced the literal text "['asd', 'asdfaf']", so a contains
+            # test looked for those brackets inside the cell and never matched.
+            raw_compare = branch.get('compare')
+            if isinstance(raw_compare, (list, tuple)):
+                compare_value = [str(value) for value in raw_compare]
+            else:
+                compare_value = str(raw_compare or '')
+
             prepared_branches.append({
                 'condition_index': condition_index,
                 'operator': str(branch.get('operator') or 'is_empty'),
-                'compare': str(branch.get('compare') or ''),
+                'compare': compare_value,
                 'output_value': '' if branch.get('output_value') is None else str(branch.get('output_value')),
                 'output_source_index': output_source_index,
             })
