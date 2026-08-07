@@ -130,14 +130,23 @@ const PROVIDER_LABELS = {
   mouser: 'Mouser',
   element14: 'Element14'
 };
+// Validation always runs against all three providers (see ALL_VALIDATION_PROVIDERS
+// in services/api.js), so all three are shown by default. Anything narrower hides
+// columns that were fetched, written to the sheet, and paid for.
+//
+// KEEP IN SYNC with `initialColumnMappings` in pages/Settings.js. These two lists
+// are the same configuration held in two places, and they had already drifted —
+// Settings defaulted to all three while this defaulted to DigiKey alone, so the
+// Settings screen showed every provider ticked while the grid rendered one.
+const ALL_VALIDATION_PROVIDERS = ['digikey', 'mouser', 'element14'];
 const DEFAULT_VALIDATION_COLUMN_MAPPINGS = [
-  { column: 'MPN valid', providers: ['digikey'] },
-  { column: 'MPN Status', providers: ['digikey'] },
-  { column: 'EOL Status', providers: ['digikey'] },
-  { column: 'Discontinued', providers: ['digikey'] },
-  { column: 'DKPN', providers: ['digikey'] },
-  { column: 'Canonical MPN', providers: ['digikey'] },
-  { column: 'Category', providers: ['digikey'] },
+  { column: 'MPN valid', providers: [...ALL_VALIDATION_PROVIDERS] },
+  { column: 'MPN Status', providers: [...ALL_VALIDATION_PROVIDERS] },
+  { column: 'EOL Status', providers: [...ALL_VALIDATION_PROVIDERS] },
+  { column: 'Discontinued', providers: [...ALL_VALIDATION_PROVIDERS] },
+  { column: 'DKPN', providers: [...ALL_VALIDATION_PROVIDERS] },
+  { column: 'Canonical MPN', providers: [...ALL_VALIDATION_PROVIDERS] },
+  { column: 'Category', providers: [...ALL_VALIDATION_PROVIDERS] },
 ];
 const VALIDATION_PROVIDER_COLUMN_MAP = {
   'MPN valid': {
