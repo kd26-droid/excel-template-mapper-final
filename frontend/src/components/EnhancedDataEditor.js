@@ -97,7 +97,7 @@ import { useThemeContext } from '../utils/ThemeContext';
 
 // Keep the arrangement-specific row expansion implementation dormant while a
 // generic, user-configured row expansion model is designed.
-const ENABLE_LEGACY_EXPAND_ROWS = false;
+const ENABLE_LEGACY_EXPAND_ROWS = true;
 
 // The manufacturer groups a review row currently represents: either the manually
 // typed override, or the word tokens joined at the un-cut boundaries.
@@ -398,6 +398,13 @@ const EnhancedDataEditor = () => {
   const processingTemplateName = String(processingTemplateContext?.processingTemplateName || '').trim();
   const isExistingProcessingTemplate = processingTemplateMode === 'use' || Boolean(processingTemplateContext?.selectedProcessingTemplateId);
   const isNewProcessingTemplate = processingTemplateMode === 'new' && Boolean(processingTemplateName);
+
+  useEffect(() => {
+    if (!location.state?.mappingBackState) return;
+    try {
+      sessionStorage.setItem(`editorBackState_${sessionId}`, JSON.stringify(location.state.mappingBackState));
+    } catch (_) {}
+  }, [location.state, sessionId]);
 
   // ─── STATE MANAGEMENT ───────────────────────────────────────────────────────
   const [loading, setLoading] = useState(true);
@@ -4868,8 +4875,89 @@ const EnhancedDataEditor = () => {
     }
     
     sessionStorage.setItem('navigatedFromDataEditor', 'true');
-    navigate(`/mapping/${sessionId}`);
-  }, [hasUnsavedChanges, navigate, sessionId, dynamicColumnCounts]);
+    const mappingBackState = {
+      route: '/editor',
+      sessionId,
+    };
+    try {
+      sessionStorage.setItem(`mappingBackState_${sessionId}`, JSON.stringify(mappingBackState));
+    } catch (_) {}
+    navigate(`/mapping/${sessionId}`, {
+      replace: true,
+      state: {
+        fromDataEditor: true,
+        ...(processingTemplateContext ? { uploadSource: processingTemplateContext } : {}),
+        mappingBackState,
+      }
+    });
+  }, [hasUnsavedChanges, navigate, sessionId, dynamicColumnCounts, processingTemplateContext]);
+
+  const handleBackToPreviousStep = useCallback(async () => {
+    if (hasUnsavedChanges) {
+      const confirmed = window.confirm('You have unsaved changes. Going back will lose them. Continue?');
+      if (!confirmed) return;
+    }
+
+    const columnCounts = {
+      tags_count: dynamicColumnCounts.tags_count,
+      spec_pairs_count: dynamicColumnCounts.spec_pairs_count,
+      customer_id_pairs_count: dynamicColumnCounts.customer_id_pairs_count
+    };
+
+    try {
+      await api.updateColumnCounts(sessionId, columnCounts);
+    } catch (error) {
+      console.warn('Failed to persist column counts:', error);
+    }
+
+    let backState = location.state?.mappingBackState || null;
+    if (!backState) {
+      try {
+        const raw = sessionStorage.getItem(`editorBackState_${sessionId}`);
+        backState = raw ? JSON.parse(raw) : null;
+      } catch (_) {
+        backState = null;
+      }
+    }
+
+    if (!backState && (
+      location.state?.fromBomNormalizer ||
+      processingTemplateContext?.processingPath === 'normalize' ||
+      processingTemplateContext?.normalizerWorkflow
+    )) {
+      try {
+        const rawSnapshot = sessionStorage.getItem('bomNormalizer.latestResultsSnapshot');
+        const snapshot = rawSnapshot ? JSON.parse(rawSnapshot) : null;
+        backState = {
+          route: '/bom-normalizer',
+          ...(snapshot ? { bomNormalizerReturnSnapshot: snapshot } : {}),
+          ...(Array.isArray(snapshot?.normalizedRows) ? { bomNormalizerReturnRows: snapshot.normalizedRows } : {}),
+        };
+      } catch (_) {
+        backState = { route: '/bom-normalizer' };
+      }
+    }
+
+    if (backState?.route === '/bom-normalizer') {
+      try {
+        sessionStorage.setItem('bomNormalizer.sourceMappingSessionId', sessionId);
+      } catch (_) {}
+      navigate('/bom-normalizer', {
+        replace: true,
+        state: {
+          ...(processingTemplateContext ? { uploadSource: processingTemplateContext } : {}),
+          ...(backState.bomNormalizerReturnKey ? { bomNormalizerReturnKey: backState.bomNormalizerReturnKey } : {}),
+          ...(backState.bomNormalizerReturnSnapshot ? { bomNormalizerReturnSnapshot: backState.bomNormalizerReturnSnapshot } : {}),
+          ...(backState.bomNormalizerReturnRows ? { bomNormalizerReturnRows: backState.bomNormalizerReturnRows } : {}),
+          sourceMappingSessionId: sessionId,
+          returnFromMapping: true,
+        }
+      });
+      return;
+    }
+
+    handleBackToMapping();
+  }, [hasUnsavedChanges, dynamicColumnCounts, sessionId, location.state, processingTemplateContext, navigate, handleBackToMapping]);
 
   // ─── RENDER CONDITIONS ──────────────────────────────────────────────────────
   if (loading) {
@@ -5874,9 +5962,9 @@ const EnhancedDataEditor = () => {
               {/* Left - Back Arrow and Context */}
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, minWidth: 0, flex: '1 1 360px' }}>
                 <IconButton
-                  onClick={handleBackToMapping}
+                  onClick={handleBackToPreviousStep}
                   sx={iconButtonSx}
-                  aria-label="Back to mapping"
+                  aria-label="Back to previous step"
                 >
                   <ArrowBackIcon />
                 </IconButton>
@@ -6060,6 +6148,10 @@ const EnhancedDataEditor = () => {
                 onClose={() => setToolsMenuAnchor(null)}
                 PaperProps={{ sx: { borderRadius: '8px', mt: 1, minWidth: 220, border: `1px solid ${t.border.default}`, boxShadow: t.shadow.card } }}
               >
+                <MenuItem onClick={() => { setToolsMenuAnchor(null); handleBackToMapping(); }} disabled={syncStatus.inProgress}>
+                  <ListItemIcon><EditNoteIcon sx={{ color: '#2563eb' }} /></ListItemIcon>
+                  <ListItemText>Modify Mappings</ListItemText>
+                </MenuItem>
                 <MenuItem onClick={() => { setToolsMenuAnchor(null); handleOpenCreateColumnDialog(); }} disabled={syncStatus.inProgress}>
                   <ListItemIcon><AddIcon sx={{ color: '#2e7d32' }} /></ListItemIcon>
                   <ListItemText>Fill / Create Column</ListItemText>
@@ -6080,14 +6172,6 @@ const EnhancedDataEditor = () => {
                   </ListItemIcon>
                   <ListItemText>{splitRowsRunning ? 'Splitting...' : 'Split into Rows'}</ListItemText>
                 </MenuItem>
-                {ENABLE_LEGACY_EXPAND_ROWS && (
-                <MenuItem onClick={() => { setToolsMenuAnchor(null); handleOpenSmartExpand(); }} disabled={syncStatus.inProgress || mpnSplitting}>
-                  <ListItemIcon>
-                    {mpnSplitting ? <CircularProgress size={18} /> : <AccountTreeIcon sx={{ color: '#00796b' }} />}
-                  </ListItemIcon>
-                  <ListItemText>{mpnSplitting ? 'Expanding…' : 'Expand Alternates into Rows'}</ListItemText>
-                </MenuItem>
-                )}
                 <MenuItem onClick={() => { setToolsMenuAnchor(null); setDelCol(''); setDelOp('is_empty'); setDelCompare(''); setDeleteRowsOpen(true); }} disabled={syncStatus.inProgress}>
                   <ListItemIcon><DeleteIcon sx={{ color: '#c62828' }} /></ListItemIcon>
                   <ListItemText>Delete rows by condition</ListItemText>
@@ -8358,11 +8442,11 @@ const EnhancedDataEditor = () => {
       </Dialog>
 
       {/* MPN Split Dialog */}
-      <Dialog open={ENABLE_LEGACY_EXPAND_ROWS && mpnSplitDialogOpen} onClose={() => setMpnSplitDialogOpen(false)} maxWidth="sm" fullWidth>
-        <DialogTitle>Expand Alternates · Packed in one column</DialogTitle>
+      <Dialog open={ENABLE_LEGACY_EXPAND_ROWS && mpnSplitDialogOpen} onClose={() => setMpnSplitDialogOpen(false)} maxWidth="md" fullWidth>
+        <DialogTitle>Split MPN Cells</DialogTitle>
         <DialogContent>
           <DialogContentText sx={{ mb: 2 }}>
-            Select the MPN column to expand into one row per MPN. Cells are split only when they contain clear separators or recognized supplier prefixes; plain spaces stay part of the MPN.
+            Configure how supplier prefixes and manufacturer names should be cleaned while expanding one row into one row per MPN.
           </DialogContentText>
           <FormControl fullWidth size="small" sx={{ mb: 2 }}>
             <InputLabel>MPN Column to Split</InputLabel>
@@ -8383,37 +8467,88 @@ const EnhancedDataEditor = () => {
           <Alert severity="info" sx={{ mb: 2 }}>
             Empty cells are skipped. A cell with spaces only, like a single MPN containing spaces, is kept as one MPN.
           </Alert>
-          <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 700 }}>
-            MPN Prefix Cleanup
-          </Typography>
-          <FormControlLabel
-            control={
-              <Checkbox
-                checked={mpnSplitOptions.stripAlphaPrefix}
-                onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, stripAlphaPrefix: e.target.checked }))}
+          <Grid container spacing={2}>
+            <Grid item xs={12} md={6}>
+              <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 700 }}>
+                MPN Prefix Rules
+              </Typography>
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    checked={mpnSplitOptions.stripAlphaPrefix}
+                    onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, stripAlphaPrefix: e.target.checked }))}
+                  />
+                }
+                label="Strip alphabetic prefixes"
               />
-            }
-            label="Strip alphabetic prefixes"
-          />
-          <FormControlLabel
-            control={
-              <Checkbox
-                checked={mpnSplitOptions.stripNumericPrefix}
-                onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, stripNumericPrefix: e.target.checked }))}
+              <TextField
+                fullWidth
+                type="number"
+                size="small"
+                label="Minimum alphabetic prefix length"
+                value={mpnSplitOptions.alphaPrefixMinLength}
+                onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, alphaPrefixMinLength: e.target.value }))}
+                disabled={!mpnSplitOptions.stripAlphaPrefix}
+                inputProps={{ min: 1 }}
+                sx={{ mt: 1 }}
               />
-            }
-            label="Strip numeric prefixes"
-          />
-          <TextField
-            fullWidth
-            multiline
-            minRows={2}
-            label="Always strip these prefixes"
-            value={mpnSplitOptions.extraPrefixes}
-            onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, extraPrefixes: e.target.value }))}
-            sx={{ mt: 1 }}
-            helperText="Example: AGILE. One per line or comma separated."
-          />
+              <FormControlLabel
+                sx={{ mt: 1 }}
+                control={
+                  <Checkbox
+                    checked={mpnSplitOptions.stripNumericPrefix}
+                    onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, stripNumericPrefix: e.target.checked }))}
+                  />
+                }
+                label="Strip numeric prefixes"
+              />
+              <TextField
+                fullWidth
+                type="number"
+                size="small"
+                label="Numeric prefix length"
+                value={mpnSplitOptions.numericPrefixLength}
+                onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, numericPrefixLength: e.target.value }))}
+                disabled={!mpnSplitOptions.stripNumericPrefix}
+                inputProps={{ min: 1 }}
+                sx={{ mt: 1 }}
+              />
+              <TextField
+                fullWidth
+                multiline
+                minRows={3}
+                label="Always strip these prefixes"
+                value={mpnSplitOptions.extraPrefixes}
+                onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, extraPrefixes: e.target.value }))}
+                sx={{ mt: 2 }}
+                helperText="Example: AGILE. One per line or comma separated."
+              />
+            </Grid>
+            <Grid item xs={12} md={6}>
+              <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 700 }}>
+                Manufacturer Rules
+              </Typography>
+              <TextField
+                fullWidth
+                multiline
+                minRows={6}
+                label="Aliases"
+                value={mpnSplitOptions.manufacturerAliases}
+                onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, manufacturerAliases: e.target.value }))}
+                helperText="Use SOURCE=TARGET. Empty target discards the source."
+              />
+              <TextField
+                fullWidth
+                multiline
+                minRows={4}
+                label="Discard Tokens"
+                value={mpnSplitOptions.manufacturerDiscardTokens}
+                onChange={(e) => setMpnSplitOptions(prev => ({ ...prev, manufacturerDiscardTokens: e.target.value }))}
+                sx={{ mt: 2 }}
+                helperText="One per line or comma separated."
+              />
+            </Grid>
+          </Grid>
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setMpnSplitDialogOpen(false)} disabled={mpnSplitting}>

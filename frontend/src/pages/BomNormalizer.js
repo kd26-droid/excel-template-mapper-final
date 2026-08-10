@@ -466,6 +466,7 @@ const inferRoles = (headers) => {
       !excludePatterns.some((pattern) => pattern.test(normalized));
   }) || '';
   const strongMpnHeader = findHeader([
+    /^approved\s*manufacturer$/,
     /\bmpn\b/,
     /manufacturer equivalent/,
     /manufacturer part/,
@@ -473,11 +474,13 @@ const inferRoles = (headers) => {
     /\bmfr part/,
     /\bmfg part/,
     /producer/,
+    /^po\s*text$/,
+    /^potext$/,
   ]);
   const genericPartHeader = findHeader([/^part number$/, /^part no$/, /^part$/, /^partno$/], [/manufacturer/, /\bmpn\b/, /\bmfr\b/, /\bmfg\b/]);
   const learnedMpn = findLearnedHeader('mpn');
   const learnedCpn = findLearnedHeader('cpn');
-  const mpnHeader = strongMpnHeader || learnedMpn || findHeader([/manufacturer equivalent/, /manufacturer part/, /\bmpn\b/, /producer/, /part number/]);
+  const mpnHeader = strongMpnHeader || learnedMpn || findHeader([/^approved\s*manufacturer$/, /manufacturer equivalent/, /manufacturer part/, /\bmpn\b/, /producer/, /^po\s*text$/, /^potext$/, /part number/]);
   const cpnHeader = learnedCpn || findHeader([/\bcpn\b/, /customer part/, /client part/, /internal part/, /part code/]) ||
     (genericPartHeader && genericPartHeader !== mpnHeader ? genericPartHeader : '');
 
@@ -715,6 +718,107 @@ const extractPackedMetadata = (value) => {
   };
 };
 
+const decodeBasicHtmlEntities = (value) => fmt(value)
+  .replace(/&amp;/gi, '&')
+  .replace(/&quot;/gi, '"')
+  .replace(/&#39;|&apos;/gi, "'")
+  .replace(/&nbsp;/gi, ' ');
+
+const cleanCaretManufacturer = (value) => decodeBasicHtmlEntities(value)
+  .replace(/\([^()]*\)/g, ' ')
+  .replace(/\b(?:discontinued|disc(?:ontinued)?|dis)\s+by\s+m(?:fg|fr|fgr|ft|anufacturer)\.?\b/ig, ' ')
+  .replace(/\bdiscontinued\b/ig, ' ')
+  .replace(/\binactive\b/ig, ' ')
+  .replace(/\buse\s+up(?:\s+stock)?\b/ig, ' ')
+  .replace(/\bdo\s+not\s+reorder\b/ig, ' ')
+  .replace(/\bpurchase\s+on\s+spools?\b/ig, ' ')
+  .replace(/\bsee\s+note\s+above\b/ig, ' ')
+  .replace(/\bnew\s+rev\s+next\s+buy\b/ig, ' ')
+  .replace(/\bstd\s+pkg\s+\d[\d,]*\b/ig, ' ')
+  .replace(/\bnote\s*:[^,;^]*$/ig, ' ')
+  .replace(/[@*]+/g, ' ')
+  .replace(/\s+/g, ' ')
+  .replace(/^[,;:\s]+|[,;:\s]+$/g, '')
+  .trim();
+
+const cleanCaretMpn = (value) => decodeBasicHtmlEntities(value)
+  .replace(/\((?:[^()]*(?:bulk|pkg|package|pack|purchase|spool|discontinued|inactive|note)[^()]*)\)/ig, ' ')
+  .replace(/[@*]+$/g, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const findTopLevelCommaIndex = (value) => {
+  const text = fmt(value);
+  const matchingClose = { '(': ')', '[': ']', '{': '}' };
+  const openingForClose = { ')': '(', ']': '[', '}': '{' };
+  const stack = [];
+  let quote = '';
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote) {
+      if (char === quote) quote = '';
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (matchingClose[char]) {
+      stack.push(char);
+      continue;
+    }
+    if (openingForClose[char]) {
+      if (stack[stack.length - 1] === openingForClose[char]) stack.pop();
+      continue;
+    }
+    if (char === ',' && stack.length === 0) return index;
+  }
+
+  return -1;
+};
+
+const parseCaretMpnManufacturerPairs = (value) => {
+  const text = decodeBasicHtmlEntities(value).replace(/\u00a0/g, ' ');
+  if (!text || !text.includes('^')) return [];
+
+  const hasMaterialDescription = /\bmaterial\s*description\b/i.test(text);
+  const hasApprovedManufacturer = /\bapproved\s*manufacturer\b/i.test(text);
+  const segments = text
+    .split('^')
+    .map((part) => fmt(part).replace(/^(\*+\s*)+/, '').trim());
+  const firstSupplierIndex = hasMaterialDescription
+    ? segments.findIndex((part, index) => (
+      index > 0 &&
+      (/^[-*\s@]*$/.test(part) || /\bapproved\s*manufacturer\b/i.test(part))
+    ))
+    : -1;
+  if (hasMaterialDescription && !hasApprovedManufacturer && firstSupplierIndex === -1) return [];
+
+  const parsed = text
+    .split('^')
+    .map((part) => fmt(part).replace(/^(\*+\s*)+/, '').trim())
+    .slice(firstSupplierIndex >= 0 ? firstSupplierIndex + 1 : 0)
+    .map((part) => {
+      const commaIndex = findTopLevelCommaIndex(part);
+      if (commaIndex <= 0) return null;
+
+      const rawMpn = cleanCaretMpn(part.slice(0, commaIndex).replace(/^(\*+\s*)+/, ''));
+      const manufacturer = cleanCaretManufacturer(part.slice(commaIndex + 1));
+      const validationMpn = rawMpn.replace(/\([^()]*\)/g, '').replace(/\[[^\]]*\]/g, '').trim();
+      if (!rawMpn || !manufacturer || (!looksLikeMpnToken(rawMpn) && !looksLikeMpnToken(validationMpn))) return null;
+
+      return {
+        mpn: stripVendorPrefix(rawMpn),
+        manufacturer,
+        metadata: {},
+      };
+    })
+    .filter(Boolean);
+
+  return parsed.length ? parsed : [];
+};
+
 const parseParenthesizedMpnManufacturerPairs = (value, config = {}) => {
   const text = fmt(value).replace(/\u00a0/g, ' ');
   if (!text || !/[()]/.test(text)) return [];
@@ -755,9 +859,38 @@ const parseParenthesizedMpnManufacturerPairs = (value, config = {}) => {
   return parsed.length >= 1 && parsed.length === candidates.length ? parsed : [];
 };
 
+const parseTrailingParenthesizedMpnManufacturerPair = (value) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ');
+  if (!text || !/[()]/.test(text)) return [];
+
+  const extraMatch = text.match(/\s*(\{[^}]*\}\s*\[[^\]]*\])\s*$/);
+  const extra = extraMatch ? fmt(extraMatch[1]) : '';
+  const core = extraMatch ? fmt(text.slice(0, extraMatch.index)) : text;
+  const match = core.match(/^(.+)\s+\(([^()]*)\)\s*$/);
+  if (!match) return [];
+
+  const rawMpn = fmt(match[1]);
+  const manufacturer = fmt(match[2]);
+  const validationMpn = rawMpn.replace(/\([^()]*\)/g, '').trim();
+  if (!rawMpn || !manufacturer || !/[A-Za-z]/.test(manufacturer)) return [];
+  if (!looksLikeMpnToken(rawMpn) && !looksLikeMpnToken(validationMpn)) return [];
+
+  return [{
+    mpn: stripVendorPrefix(rawMpn),
+    manufacturer,
+    metadata: extra ? { discardedText: extra } : {},
+  }];
+};
+
 const parsePackedMpnManufacturerPairs = (value, config = {}) => {
   const text = fmt(value).replace(/\u00a0/g, ' ');
   if (!text) return [];
+
+  const caretPairs = parseCaretMpnManufacturerPairs(text);
+  if (caretPairs.length) return caretPairs;
+
+  const trailingParenthesizedPair = parseTrailingParenthesizedMpnManufacturerPair(text);
+  if (trailingParenthesizedPair.length) return trailingParenthesizedPair;
 
   const parenthesizedPairs = parseParenthesizedMpnManufacturerPairs(text, config);
   if (parenthesizedPairs.length) return parenthesizedPairs;
@@ -1000,7 +1133,9 @@ const normalizeSeparateCells = (rows, roles, config) => {
     const sourceRow = row.__sourceRow || rowIndex + 1;
     const rawMpn = getCell(row, roles.mpn);
     const rawManufacturer = getCell(row, roles.manufacturer);
-    const packedPairs = rawManufacturer ? [] : parseParenthesizedMpnManufacturerPairs(rawMpn, config);
+    const manufacturerPackedPairs = parsePackedMpnManufacturerPairs(rawManufacturer, config);
+    const mpnPackedPairs = rawManufacturer ? [] : parsePackedMpnManufacturerPairs(rawMpn, config);
+    const packedPairs = manufacturerPackedPairs.length ? manufacturerPackedPairs : mpnPackedPairs;
     const mpns = splitMpnCell(rawMpn, config);
     const explicitDelimiterUsed = Boolean(selectedDelimiter(config)) && mpns.length > 1;
     const manufacturers = splitManufacturerCell(rawManufacturer, mpns.length, config);
@@ -1057,6 +1192,26 @@ const normalizeSeparateCells = (rows, roles, config) => {
       return;
     }
 
+    if (!packedPairs.length && /\bmaterial\s*description\b/i.test(rawMpn) && rawMpn.includes('^') && hasPreservableBomIdentity(row, roles)) {
+      output.push(withSourceColumns({
+        sourceRow,
+        parentKey,
+        parent,
+        relation: 'Primary',
+        level,
+        cpn,
+        description,
+        mpn: '',
+        manufacturer: '',
+        quantity,
+        uom,
+        rule: 'separate_cells_caret_description_without_mpn_mfr',
+        confidence: 58,
+        discardedText: '',
+      }, row, config));
+      return;
+    }
+
     mpns.forEach((mpn, partIndex) => {
       const isPrimary = partIndex === 0;
       const manufacturer = manufacturers[partIndex] || (!isPrimary && config.manufacturerMode === 'inherit_blank' ? primaryManufacturer : '');
@@ -1085,8 +1240,12 @@ const normalizeSameCell = (rows, roles, config) => {
   const output = [];
   rows.forEach((row, rowIndex) => {
     const sourceRow = row.__sourceRow || rowIndex + 1;
-    const sourceText = getCell(row, roles.mpn) || getCell(row, roles.manufacturer);
-    const packedPairs = parsePackedMpnManufacturerPairs(sourceText, config);
+    const rawMpn = getCell(row, roles.mpn);
+    const rawManufacturer = roles.manufacturer && roles.manufacturer !== roles.mpn ? getCell(row, roles.manufacturer) : '';
+    const mpnPackedPairs = parsePackedMpnManufacturerPairs(rawMpn, config);
+    const manufacturerPackedPairs = parsePackedMpnManufacturerPairs(rawManufacturer, config);
+    const sourceText = mpnPackedPairs.length || !manufacturerPackedPairs.length ? rawMpn : rawManufacturer;
+    const packedPairs = mpnPackedPairs.length ? mpnPackedPairs : manufacturerPackedPairs;
     const segments = parseColonSegments(sourceText);
     const quantity = getCell(row, roles.quantity);
     const uom = getCell(row, roles.uom);
@@ -1120,6 +1279,28 @@ const normalizeSameCell = (rows, roles, config) => {
     }
 
     if (!segments.length) {
+      if (sourceText.includes('^')) {
+        if (hasPreservableBomIdentity(row, roles)) {
+          output.push(withSourceColumns({
+            sourceRow,
+            parentKey,
+            parent,
+            relation: 'Primary',
+            level,
+            cpn,
+            description,
+            mpn: '',
+            manufacturer: '',
+            quantity,
+            uom,
+            rule: 'same_cell_caret_item_without_mpn_mfr',
+            confidence: 58,
+            discardedText: '',
+          }, row, config));
+        }
+        return;
+      }
+
       const fallbackMpns = splitMpnCell(sourceText, config);
       if (!fallbackMpns.length && hasPreservableBomIdentity(row, roles)) {
         output.push(withSourceColumns({
@@ -1238,7 +1419,135 @@ const getConsumedSourceHeaders = (roles = {}, config = {}, headers = []) => {
       if (group?.[field]) consumed.add(normalizeKey(group[field]));
     });
   });
+  if (config.alternateLayout === 'following_rows' && config.followingRowAlternateColumn) {
+    consumed.add(normalizeKey(config.followingRowAlternateColumn));
+  }
   return consumed;
+};
+
+const normalizeFollowingRows = (rows, roles, config = {}) => {
+  const output = [];
+  const alternateColumn = config.followingRowAlternateColumn || '';
+  let currentGroup = null;
+
+  const parseAlternateText = (value) => {
+    const packedPairs = parsePackedMpnManufacturerPairs(value, config);
+    if (packedPairs.length) return packedPairs;
+    return splitMpnCell(value, config).map((mpn) => ({
+      mpn: stripVendorPrefix(mpn),
+      manufacturer: '',
+      metadata: {},
+    }));
+  };
+
+  const emitPrimaryParts = (row, rowIndex) => {
+    const sourceRow = row.__sourceRow || rowIndex + 1;
+    const rawMpn = getCell(row, roles.mpn);
+    const rawManufacturer = getCell(row, roles.manufacturer);
+    const packedPairs = parsePackedMpnManufacturerPairs(rawManufacturer, config).length
+      ? parsePackedMpnManufacturerPairs(rawManufacturer, config)
+      : parsePackedMpnManufacturerPairs(rawMpn, config);
+    const mpns = packedPairs.length ? [] : splitMpnCell(rawMpn, config);
+    const manufacturers = packedPairs.length
+      ? []
+      : splitManufacturerCell(rawManufacturer, mpns.length, config);
+    const primaryManufacturer = manufacturers[0] || '';
+    const parentKey = alternatesKey(row, roles, sourceRow);
+    const group = {
+      sourceRow,
+      parentKey,
+      parent: hierarchyParent(row, roles),
+      level: getCell(row, roles.level) || '1',
+      cpn: getCell(row, roles.cpn),
+      description: getCell(row, roles.description),
+      quantity: getCell(row, roles.quantity),
+      uom: getCell(row, roles.uom),
+      relationCount: 0,
+    };
+
+    const pairs = packedPairs.length
+      ? packedPairs
+      : mpns.map((mpn, index) => ({
+        mpn,
+        manufacturer: manufacturers[index] || (!index ? primaryManufacturer : ''),
+        metadata: {},
+      }));
+
+    if (!pairs.length && (rawMpn || rawManufacturer)) {
+      output.push(withSourceColumns({
+        ...group,
+        relation: 'Primary',
+        mpn: stripVendorPrefix(rawMpn),
+        manufacturer: rawManufacturer,
+        rule: 'following_rows_primary_passthrough',
+        confidence: confidenceForRow(rawMpn, rawManufacturer, 'following_rows'),
+        discardedText: '',
+      }, row, config));
+      group.relationCount = 1;
+      return group;
+    }
+
+    pairs.forEach((pair, pairIndex) => {
+      output.push(withSourceColumns({
+        ...group,
+        relation: pairIndex === 0 ? 'Primary' : `Alternate ${pairIndex}`,
+        mpn: pair.mpn,
+        manufacturer: pair.manufacturer,
+        rule: packedPairs.length ? 'following_rows_primary_packed_pair' : 'following_rows_primary',
+        confidence: Math.min(confidenceForRow(pair.mpn, pair.manufacturer, 'following_rows') + 8, 98),
+        discardedText: '',
+        ...pair.metadata,
+      }, row, config));
+    });
+    group.relationCount = Math.max(1, pairs.length);
+    return group;
+  };
+
+  rows.forEach((row, rowIndex) => {
+    const sourceRow = row.__sourceRow || rowIndex + 1;
+    const alternateText = getCell(row, alternateColumn);
+    const rawMpn = getCell(row, roles.mpn);
+    const rawManufacturer = getCell(row, roles.manufacturer);
+    const rowHasNormalPart = Boolean(rawMpn || rawManufacturer);
+    const rowLooksLikeFollowingAlternate = Boolean(
+      alternateColumn &&
+      alternateText &&
+      !rowHasNormalPart &&
+      currentGroup
+    );
+
+    if (rowLooksLikeFollowingAlternate) {
+      const pairs = parseAlternateText(alternateText);
+      pairs.forEach((pair) => {
+        const relationIndex = currentGroup.relationCount || 1;
+        output.push(withSourceColumns({
+          sourceRow,
+          parentKey: currentGroup.parentKey,
+          parent: currentGroup.parent,
+          relation: `Alternate ${relationIndex}`,
+          level: currentGroup.level,
+          cpn: currentGroup.cpn,
+          description: currentGroup.description,
+          mpn: pair.mpn,
+          manufacturer: pair.manufacturer,
+          quantity: currentGroup.quantity,
+          uom: currentGroup.uom,
+          rule: 'following_rows_alternate',
+          confidence: Math.min(confidenceForRow(pair.mpn, pair.manufacturer, 'following_rows') + 12, 98),
+          discardedText: '',
+          ...pair.metadata,
+        }, row, config));
+        currentGroup.relationCount = relationIndex + 1;
+      });
+      return;
+    }
+
+    if (rowHasNormalPart) {
+      currentGroup = emitPrimaryParts(row, rowIndex);
+    }
+  });
+
+  return output;
 };
 
 const normalizeAlternateColumns = (rows, headers, roles, config) => {
@@ -1551,6 +1860,7 @@ const normalizeRows = (rows, headers, roles, config) => {
   if (!roles.mpn && !roles.manufacturer) {
     return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
   }
+  if (config.alternateLayout === 'following_rows') return normalizeFollowingRows(rows, roles, configWithSourceHeaders);
   if (config.structure === 'grouped_rows') return normalizeGroupedRows(rows, roles, configWithSourceHeaders);
   if (config.alternateLayout === 'separate_columns') return normalizeAlternateColumns(rows, headers, roles, configWithSourceHeaders);
   if (config.structure === 'mpn_only_same_cell') return normalizeSeparateCells(rows, roles, configWithSourceHeaders);
@@ -1936,6 +2246,8 @@ const detectBestStructure = (headers, roles, sampleRows) => {
 
   if (roles.mpn && !roles.manufacturer) {
     const mpnSamples = sampleRows.map((row) => getCell(row, roles.mpn)).filter(Boolean);
+    const caretPairHeavy = mpnSamples.filter((value) => parseCaretMpnManufacturerPairs(value).length > 0).length;
+    if (caretPairHeavy >= 1) return 'same_cell';
     const multiMpn = mpnSamples.filter((value) => splitMpnCell(value).length > 1).length;
     return multiMpn ? 'mpn_only_same_cell' : 'mpn_only_rows';
   }
@@ -1950,6 +2262,8 @@ const detectBestStructure = (headers, roles, sampleRows) => {
 
   const mpnSamples = sampleRows.map((row) => getCell(row, roles.mpn)).filter(Boolean);
   const mfrSamples = sampleRows.map((row) => getCell(row, roles.manufacturer)).filter(Boolean);
+  const caretPairHeavy = [...mpnSamples, ...mfrSamples].filter((value) => parseCaretMpnManufacturerPairs(value).length > 0).length;
+  if (caretPairHeavy >= 1) return 'same_cell';
   const colonHeavy = mpnSamples.filter((value) => parseColonSegments(value).length > 1).length;
   if (colonHeavy >= Math.max(2, Math.ceil(mpnSamples.length * 0.2))) return 'same_cell';
 
@@ -2598,6 +2912,57 @@ const buildNormalizerSuggestedMappings = (columns = [], rows = []) => {
     }));
 };
 
+const normalizeMappingHeaderKey = (value) => fmt(value).toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+const findMappingHeaderByCandidates = (headers = [], candidates = []) => {
+  const keyToHeader = new Map((headers || []).map((header) => [normalizeMappingHeaderKey(header), header]));
+  for (const candidate of candidates || []) {
+    const header = keyToHeader.get(normalizeMappingHeaderKey(candidate));
+    if (header) return header;
+  }
+  return '';
+};
+
+const buildResolvedNormalizerMappings = (suggestedMappings = [], clientHeaders = [], templateHeaders = []) => {
+  const usedSources = new Set();
+  const usedTargets = new Set();
+  return (suggestedMappings || []).map((mapping) => {
+    const source = findMappingHeaderByCandidates(clientHeaders, [mapping.source, mapping.sourceLabel].filter(Boolean));
+    const target = findMappingHeaderByCandidates(templateHeaders, mapping.targets || [mapping.target].filter(Boolean));
+    if (!source || !target || usedSources.has(source) || usedTargets.has(target)) return null;
+    usedSources.add(source);
+    usedTargets.add(target);
+    return { source, target };
+  }).filter(Boolean);
+};
+
+const extractSavedMappingsArray = (payload) => {
+  const mappings = payload?.data?.mappings;
+  if (Array.isArray(mappings)) return mappings;
+  if (Array.isArray(mappings?.mappings)) return mappings.mappings;
+  if (mappings && typeof mappings === 'object') {
+    return Object.entries(mappings)
+      .map(([target, source]) => ({ source, target }))
+      .filter((mapping) => mapping.source && mapping.target);
+  }
+  return [];
+};
+
+const mergeExistingMappingsWithNormalizer = (existingMappings = [], normalizerMappings = []) => {
+  const byTarget = new Map();
+  const addMapping = (mapping) => {
+    const source = fmt(mapping?.source);
+    const target = fmt(mapping?.target);
+    if (!source || !target) return;
+    const key = normalizeMappingHeaderKey(target);
+    if (!byTarget.has(key)) byTarget.set(key, { source, target });
+  };
+
+  (existingMappings || []).forEach(addMapping);
+  (normalizerMappings || []).forEach(addMapping);
+  return Array.from(byTarget.values());
+};
+
 const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenceOnlyChange }) => {
   const { isDarkMode, tokens: themeTokens } = useThemeContext();
   const tableTone = {
@@ -3009,6 +3374,7 @@ const BomNormalizer = () => {
     skipDoNotPopulate: false,
     skipDeletedRows: true,
     alternateColumnGroups: [],
+    followingRowAlternateColumn: '',
   });
   const [normalizedRows, setNormalizedRows] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -3151,6 +3517,30 @@ const BomNormalizer = () => {
     () => QTY_OPTIONS.find((option) => option.value === config.quantityMode),
     [config.quantityMode]
   );
+
+  const parserLogicRules = useMemo(() => {
+    const sourceHeader = roles.mpn || roles.manufacturer || 'selected source column';
+    const rules = [];
+
+    if (normalizeKey(sourceHeader) === 'approved manufacturer') {
+      rules.push('1. Read Approved Manufacturer as packed MPN/MFR text');
+    } else if (config.structure === 'same_cell') {
+      rules.push(`1. Read ${sourceHeader} as combined MPN/MFR text`);
+    } else {
+      rules.push(`1. Read ${sourceHeader} for part/manufacturer values`);
+    }
+
+    if (config.alternateLayout === 'following_rows') {
+      rules.push(`2. Attach values from ${config.followingRowAlternateColumn || 'the selected following-row column'} to the nearest previous primary row`);
+    } else if (config.structure === 'same_cell' || config.structure === 'separate_cells') {
+      rules.push('2. Split alternates on ^, then split each pair on the first valid comma');
+    } else {
+      rules.push('2. Group repeated part rows as primary plus alternates');
+    }
+
+    rules.push('3. Remove status notes from MFR names, keep only clean MPN/MFR output');
+    return rules;
+  }, [config.alternateLayout, config.followingRowAlternateColumn, config.structure, roles.manufacturer, roles.mpn]);
 
   const showManufacturerInheritanceOption = useMemo(() => (
     !String(config.structure || '').startsWith('mpn_only') &&
@@ -4439,19 +4829,88 @@ const BomNormalizer = () => {
     setBusy(true);
     setError('');
     api.uploadFiles(formData)
-      .then((response) => {
+      .then(async (response) => {
         const sessionId = response.data?.session_id;
         if (!sessionId) throw new Error('Upload response missing session id.');
+
+        const uploadSource = location.state?.uploadSource || null;
+        const workflow = buildNormalizerWorkflowRecipe('normalized-results', normalizedRows);
+        const nextUploadSource = uploadSource ? {
+          ...uploadSource,
+          processingPath: 'normalize',
+          normalizerWorkflow: workflow,
+        } : null;
+        const shouldOpenEditorDirectly = nextUploadSource?.processingTemplateMode === 'new' &&
+          nextUploadSource?.processingPath === 'normalize';
+
+        if (shouldOpenEditorDirectly) {
+          const mappingResponse = await api.getColumnMappingSuggestions(sessionId);
+          const clientHeaders = mappingResponse.data?.client_headers || mappingResponse.data?.user_columns || columns;
+          const templateHeaders = mappingResponse.data?.template_headers || mappingResponse.data?.template_columns || [];
+          const mappings = buildResolvedNormalizerMappings(suggestedMappings, clientHeaders, templateHeaders);
+
+          if (!mappings.length) {
+            throw new Error('Could not resolve normalized columns against the destination template. Use Modify Mappings to review this file.');
+          }
+
+          let existingMappings = [];
+          let existingDefaultValues = {};
+          let existingDefaultValueRules = {};
+          let existingColumnCounts = null;
+          const sourceMappingSessionId = location.state?.sourceMappingSessionId
+            || sessionStorage.getItem('bomNormalizer.sourceMappingSessionId')
+            || '';
+          try {
+            const existingResponse = await api.getExistingMappings(sourceMappingSessionId || sessionId);
+            existingMappings = extractSavedMappingsArray(existingResponse);
+            existingDefaultValues = existingResponse.data?.default_values || {};
+            existingDefaultValueRules = existingResponse.data?.default_value_rules || {};
+            existingColumnCounts = existingResponse.data?.session_metadata?.column_counts || null;
+          } catch (_) {
+            existingMappings = [];
+            existingDefaultValues = {};
+            existingDefaultValueRules = {};
+            existingColumnCounts = null;
+          }
+          const mergedMappings = mergeExistingMappingsWithNormalizer(existingMappings, mappings);
+
+          if (existingColumnCounts) {
+            try {
+              await api.updateColumnCounts(sessionId, existingColumnCounts);
+            } catch (_) {}
+          }
+
+          await api.saveColumnMappings(sessionId, {
+            mappings: mergedMappings,
+            default_values: existingDefaultValues,
+            default_value_rules: existingDefaultValueRules,
+            apply_now: true,
+            force_persist: true,
+          });
+
+          navigate(`/editor/${sessionId}`, {
+            state: {
+              fromUpload: true,
+              fromBomNormalizer: true,
+              templateAlreadyApplied: true,
+              uploadSource: nextUploadSource,
+              mappingBackState: {
+                route: '/bom-normalizer',
+                bomNormalizerReturnKey: returnSnapshotKey,
+                bomNormalizerReturnRows: normalizedRows,
+                bomNormalizerReturnSnapshot: returnSnapshot,
+              },
+            },
+          });
+          return;
+        }
+
         navigate(`/mapping/${sessionId}`, {
           state: {
             fromUpload: true,
             fromBomNormalizer: true,
             normalizerSuggestedMappings: suggestedMappings,
-            uploadSource: location.state?.uploadSource ? {
-              ...location.state.uploadSource,
-              processingPath: 'normalize',
-              normalizerWorkflow: buildNormalizerWorkflowRecipe('normalized-results', normalizedRows),
-            } : null,
+            uploadSource: nextUploadSource,
             mappingBackState: {
               route: '/bom-normalizer',
               bomNormalizerReturnKey: returnSnapshotKey,
@@ -4462,7 +4921,7 @@ const BomNormalizer = () => {
         });
       })
       .catch((err) => {
-        setError(err.response?.data?.error || err.message || 'Could not continue to BOM Mapping.');
+        setError(err.response?.data?.error || err.message || 'Could not continue.');
       })
       .finally(() => setBusy(false));
   }, [
@@ -5089,6 +5548,7 @@ const BomNormalizer = () => {
       skipDoNotPopulate: false,
       skipDeletedRows: true,
       alternateColumnGroups: [],
+      followingRowAlternateColumn: '',
     });
     setNormalizedRows([]);
     setCurrentStep(0);
@@ -5173,6 +5633,7 @@ const BomNormalizer = () => {
       skipDoNotPopulate: false,
       skipDeletedRows: true,
       alternateColumnGroups: [],
+      followingRowAlternateColumn: '',
     });
     setNormalizedRows([]);
     setCurrentStep(0);
@@ -5795,7 +6256,7 @@ const BomNormalizer = () => {
                         <Stack direction="row" justifyContent="space-between" gap={1} sx={{ mt: 1.5 }}>
                           <Button variant="outlined" onClick={() => setMergeStage('options')}>Back</Button>
                           <Stack direction="row" gap={1} flexWrap="wrap" justifyContent="flex-end">
-                            <Button variant="outlined" onClick={() => handleContinueMergePreviewToBomMapping()}>Continue to BOM Mapping</Button>
+                            <Button variant="outlined" onClick={() => handleContinueMergePreviewToBomMapping()}>Continue</Button>
                             <Button variant="contained" onClick={handleUseMergePreview}>Continue with normalizer</Button>
                           </Stack>
                         </Stack>
@@ -6039,6 +6500,9 @@ const BomNormalizer = () => {
                               alternateColumnGroups: nextLayout === 'separate_columns' && !(prev.alternateColumnGroups || []).length
                                 ? [suggestAlternateColumnGroup()]
                                 : prev.alternateColumnGroups,
+                              followingRowAlternateColumn: nextLayout === 'following_rows'
+                                ? (prev.followingRowAlternateColumn || roles.level || '')
+                                : prev.followingRowAlternateColumn,
                             }));
                           }}
                         >
@@ -6048,6 +6512,26 @@ const BomNormalizer = () => {
                         </Select>
                       </FormControl>
                     </Grid>
+                    {config.alternateLayout === 'following_rows' && (
+                      <Grid item xs={12} md={3}>
+                        <FormControl fullWidth size="small">
+                          <InputLabel>Following-row alternate column</InputLabel>
+                          <Select
+                            value={config.followingRowAlternateColumn || ''}
+                            label="Following-row alternate column"
+                            onChange={(event) => setConfig((prev) => ({
+                              ...prev,
+                              followingRowAlternateColumn: event.target.value,
+                            }))}
+                          >
+                            <MenuItem value="">Select column</MenuItem>
+                            {headers.map((header) => (
+                              <MenuItem key={header} value={header}>{header}</MenuItem>
+                            ))}
+                          </Select>
+                        </FormControl>
+                      </Grid>
+                    )}
                     <Grid item xs={12} md={3}>
                       <FormControl fullWidth size="small">
                         <InputLabel>Quantity/UOM handling</InputLabel>
@@ -6222,6 +6706,11 @@ const BomNormalizer = () => {
                       Select a Parent / group key such as Ref Designator for best results. Without it, grouping falls back to description, quantity, UOM, and level.
                     </Alert>
                   )}
+                  {config.alternateLayout === 'following_rows' && !config.followingRowAlternateColumn && (
+                    <Alert severity="warning" sx={{ mt: 1 }}>
+                      Select the column where alternate values appear in the rows below the main BOM line.
+                    </Alert>
+                  )}
                   {detectedCleanupOptions.length > 0 && (
                     <Box sx={{ mt: 1.5 }}>
                       <Typography sx={{ fontSize: 13, fontWeight: 800 }}>Clean visual rows before parsing</Typography>
@@ -6373,6 +6862,12 @@ const BomNormalizer = () => {
                     <Chip size="small" label={selectedQuantityOption?.label || 'Quantity/UOM: default'} />
                     <Chip size="small" label="Blank BOM level: 1" />
                   </Stack>
+                  <Typography sx={{ mt: 1.1, fontSize: 12.5, fontWeight: 800 }}>Logic rules applied</Typography>
+                  <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 0.7 }}>
+                    {parserLogicRules.map((rule) => (
+                      <Chip key={rule} size="small" variant="outlined" label={rule} />
+                    ))}
+                  </Stack>
                 </Paper>
                 <NormalizedTable
                   rows={normalizedRows}
@@ -6385,7 +6880,7 @@ const BomNormalizer = () => {
                   <Stack direction="row" gap={1} flexWrap="wrap" justifyContent="flex-end">
                     <Button variant="outlined" onClick={handleUseNormalizedAsBase} disabled={busy || !normalizedRows.length}>Use merged sheet as base</Button>
                     <Button variant="outlined" onClick={handleNormalize} disabled={busy}>Run again</Button>
-                    <Button variant="contained" onClick={() => handleContinueNormalizedToBomMapping()} disabled={busy || !normalizedRows.length}>Continue to BOM Mapping</Button>
+                    <Button variant="contained" onClick={() => handleContinueNormalizedToBomMapping()} disabled={busy || !normalizedRows.length}>Continue</Button>
                   </Stack>
                 </Stack>
               </Paper>

@@ -25,7 +25,6 @@ import {
   Library,
   X,
   Settings,
-  ArrowLeft,
   Edit3,
   Save,
   X as Cancel,
@@ -827,6 +826,16 @@ export default function ColumnMapping() {
     // reload discards location.state and the destination loses everything it needs
     // to restore.
     bypassUnloadGuardRef.current = true;
+    if (backState.route === '/editor') {
+      const editorSessionId = backState.sessionId || sessionId;
+      navigate(`/editor/${editorSessionId}`, {
+        state: {
+          ...(location.state?.uploadSource ? { uploadSource: location.state.uploadSource } : {}),
+          returnFromMapping: true,
+        }
+      });
+      return;
+    }
     if (location.state?.fromBomNormalizer || storedFromNormalizer || backState.route === '/bom-normalizer') {
       navigate('/bom-normalizer', {
         state: {
@@ -844,11 +853,21 @@ export default function ColumnMapping() {
       return;
     }
 
-    navigate('/upload', {
+    if (backState.initialClientFile || backState.wizardStep != null || backState.processingPath) {
+      navigate('/upload', {
+        state: {
+          ...(backState.initialClientFile ? { initialClientFile: backState.initialClientFile } : {}),
+          wizardStep: backState.wizardStep ?? 1,
+          processingPath: backState.processingPath || 'map',
+          returnFromMapping: true,
+        }
+      });
+      return;
+    }
+
+    navigate(`/editor/${sessionId}`, {
       state: {
-        ...(backState.initialClientFile ? { initialClientFile: backState.initialClientFile } : {}),
-        wizardStep: backState.wizardStep ?? 1,
-        processingPath: backState.processingPath || 'map',
+        ...(location.state?.uploadSource ? { uploadSource: location.state.uploadSource } : {}),
         returnFromMapping: true,
       }
     });
@@ -2384,7 +2403,7 @@ export default function ColumnMapping() {
         // eslint-disable-next-line no-console
         
         const { 
-          client_headers = [], 
+          client_headers: responseClientHeaders = [], 
           template_headers = [], 
           template_columns = [], 
           column_counts = {}, 
@@ -2393,6 +2412,15 @@ export default function ColumnMapping() {
           template_file = '',
           template_optionals = []
         } = data;
+        let client_headers = responseClientHeaders;
+        if ((!Array.isArray(client_headers) || client_headers.length === 0) && location.state?.uploadSource?.sourceRequirements?.sources) {
+          const sourceHeaders = location.state.uploadSource.sourceRequirements.sources
+            .map(source => Array.isArray(source?.headers) ? source.headers : [])
+            .find(headers => headers.length > 0);
+          if (sourceHeaders) {
+            client_headers = sourceHeaders;
+          }
+        }
 
         // Validate headers
         if (!Array.isArray(client_headers)) {
@@ -4482,6 +4510,37 @@ export default function ColumnMapping() {
     setPrimaryDialogOpen(false);
     const sid = sessionId;
     const uploadSource = location.state?.uploadSource || null;
+    let backState = location.state?.mappingBackState || null;
+    if (!backState) {
+      try {
+        const raw = sessionStorage.getItem(`mappingBackState_${sid}`);
+        backState = raw ? JSON.parse(raw) : null;
+      } catch (_) {
+        backState = null;
+      }
+    }
+    let storedEditorBackState = null;
+    try {
+      const raw = sessionStorage.getItem(`editorBackState_${sid}`);
+      storedEditorBackState = raw ? JSON.parse(raw) : null;
+    } catch (_) {
+      storedEditorBackState = null;
+    }
+    const cameFromEditor = Boolean(location.state?.fromDataEditor || backState?.route === '/editor');
+    const isNormalizerWorkflow = Boolean(
+      location.state?.fromBomNormalizer ||
+      backState?.route === '/bom-normalizer' ||
+      storedEditorBackState?.route === '/bom-normalizer' ||
+      uploadSource?.processingPath === 'normalize' ||
+      uploadSource?.normalizerWorkflow
+    );
+    const editorBackState = isNormalizerWorkflow
+      ? (
+        storedEditorBackState?.route === '/bom-normalizer'
+          ? storedEditorBackState
+          : (backState?.route === '/bom-normalizer' ? backState : { route: '/bom-normalizer' })
+      )
+      : (cameFromEditor ? null : backState);
     if (uploadSource) {
       try {
         sessionStorage.setItem(`processingTemplateContext_${sid}`, JSON.stringify(uploadSource));
@@ -4492,17 +4551,21 @@ export default function ColumnMapping() {
     // returns with nothing and its own back button falls through to /upload instead
     // of the screen the user actually came from.
     try {
-      const backState = location.state?.mappingBackState;
       if (backState) {
         sessionStorage.setItem(`mappingBackState_${sid}`, JSON.stringify({
           ...backState,
           fromBomNormalizer: Boolean(location.state?.fromBomNormalizer),
         }));
       }
+      if (editorBackState) {
+        sessionStorage.setItem(`editorBackState_${sid}`, JSON.stringify(editorBackState));
+      }
     } catch (_) {}
     setTimeout(() => navigate(`/editor/${sid}`, {
+      replace: true,
       state: {
         ...(uploadSource ? { uploadSource } : {}),
+        ...(editorBackState ? { mappingBackState: editorBackState } : {}),
       }
     }), 0);
   }, [sessionId, navigate, location.state]);
@@ -4717,32 +4780,18 @@ export default function ColumnMapping() {
 
 
       {/* Clean Top Header - Theme Adaptive & Premium */}
-      <div className={`px-6 py-3.5 border-b shadow-md transition-colors ${
+      <div className={`px-6 py-4 border-b shadow-md transition-colors ${
         isDarkMode ? 'bg-[#0b101b] border-slate-800 text-white' : 'bg-white/95 backdrop-blur-md border-slate-200 text-slate-800'
       }`}>
-        <div className="flex flex-wrap justify-between items-center gap-3">
-          {/* Left side - Back button, Logo and Template Status */}
-          <div className="flex items-center gap-3">
-            <Tooltip title="Back to previous step" arrow placement="bottom">
-              <button
-                onClick={handleBackNavigation}
-                aria-label="Back to previous step"
-                className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full border text-sm font-semibold shadow-sm transition-all ${
-                  isDarkMode
-                    ? 'bg-slate-900 border-slate-700 text-slate-200 hover:bg-slate-800 hover:text-white'
-                    : 'bg-white border-slate-200 text-slate-700 hover:bg-blue-50 hover:border-blue-200 hover:text-blue-700'
-                }`}
-              >
-                <ArrowLeft size={18} />
-              </button>
-            </Tooltip>
-
-            <div className={`text-base font-extrabold tracking-tight ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
+        <div className="flex min-h-[44px] flex-wrap justify-between items-center gap-3">
+          {/* Left side - Logo and Template Status */}
+          <div className="flex items-center gap-3.5">
+            <div className={`text-lg font-extrabold tracking-tight leading-none ${isDarkMode ? 'text-white' : 'text-slate-900'}`}>
               Column Mapping
             </div>
 
             <div className="ml-2 flex items-center gap-2">
-              <span className={`px-2.5 py-0.5 text-xs font-bold rounded-full transition-all ${
+              <span className={`px-3 py-1 text-xs font-bold leading-none rounded-full transition-all ${
                 syncNotice.visible
                   ? 'bg-amber-500/15 text-amber-500 border border-amber-500/30'
                   : 'bg-emerald-500/15 text-emerald-500 border border-emerald-500/30'

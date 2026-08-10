@@ -61,10 +61,19 @@ const buildParts = (text, boundaries, trimValues, dropEmptyValues) => {
   if (!text || boundaries.length === 0) return [];
   const ordered = [...boundaries].sort((a, b) => a.index - b.index);
   const cleanValue = value => trimValues ? value.trim() : value;
+  const occurrenceForBoundary = boundary => {
+    let occurrence = 0;
+    for (let index = 0; index <= boundary.index; index += 1) {
+      if (text[index] === boundary.char) occurrence += 1;
+    }
+    return occurrence || 1;
+  };
   const parts = [{
     id: 0,
     type: 'before',
     delimiter: ordered[0].char,
+    delimiterIndex: ordered[0].index,
+    delimiterOccurrence: occurrenceForBoundary(ordered[0]),
     preview: cleanValue(text.substring(0, ordered[0].index)),
     outputType: 'spec',
     specName: '',
@@ -78,6 +87,10 @@ const buildParts = (text, boundaries, trimValues, dropEmptyValues) => {
       type: 'between',
       startDelimiter: ordered[index].char,
       endDelimiter: ordered[index + 1].char,
+      startDelimiterIndex: ordered[index].index,
+      endDelimiterIndex: ordered[index + 1].index,
+      startDelimiterOccurrence: occurrenceForBoundary(ordered[index]),
+      endDelimiterOccurrence: occurrenceForBoundary(ordered[index + 1]),
       preview: cleanValue(text.substring(start, end)),
       outputType: 'spec',
       specName: '',
@@ -89,6 +102,8 @@ const buildParts = (text, boundaries, trimValues, dropEmptyValues) => {
     id: ordered.length,
     type: 'after',
     delimiter: last.char,
+    delimiterIndex: last.index,
+    delimiterOccurrence: occurrenceForBoundary(last),
     preview: cleanValue(text.substring(last.index + 1)),
     outputType: 'spec',
     specName: '',
@@ -294,8 +309,12 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
       return {
         type: part.type,
         part_index: part.partIndex ?? index,
-        char1: part.type === 'before' ? part.delimiter : part.startDelimiter,
+        char1: part.type === 'between' ? part.startDelimiter : part.delimiter,
         char2: part.type === 'between' ? part.endDelimiter : '',
+        char1_index: part.type === 'between' ? part.startDelimiterIndex : part.delimiterIndex,
+        char2_index: part.type === 'between' ? part.endDelimiterIndex : null,
+        char1_occurrence: part.type === 'between' ? part.startDelimiterOccurrence : part.delimiterOccurrence,
+        char2_occurrence: part.type === 'between' ? part.endDelimiterOccurrence : null,
         output_type: splitMode === 'delimiter' ? simpleOutputType : part.outputType,
         spec_name: simpleSpecOutput
           ? (simpleSpecTarget === 'new' ? simpleSpecName.trim() : `Specification pair ${selectedSpecPairIndex}`)

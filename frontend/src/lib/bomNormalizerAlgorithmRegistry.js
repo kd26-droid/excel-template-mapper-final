@@ -73,6 +73,11 @@ export const ALTERNATE_LAYOUT_OPTIONS = [
     label: 'Rows with the same group key are alternates',
     description: 'Use this when each row has one MPN/MFR pair, but repeated item/group details mean the later rows are alternates of the first row.',
   },
+  {
+    value: 'following_rows',
+    label: 'Alternates are in following rows',
+    description: 'Use this when alternate values appear in rows below the main BOM row, often in a different column.',
+  },
 ];
 
 export const QTY_OPTIONS = [

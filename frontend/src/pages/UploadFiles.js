@@ -3159,6 +3159,12 @@ const UploadFiles = () => {
       formData.append('clientFile', uploadClientFile);
       formData.append('sheetName', uploadSheetName);
       formData.append('headerRow', uploadHeaderRow.toString());
+      const uploadClientHeaders = uploadHeaderRow === clientHeaderRow
+        ? clientHeaderPreview
+        : readHeadersAtRow(clientWorkbook, uploadSheetName, uploadHeaderRow);
+      if (Array.isArray(uploadClientHeaders) && uploadClientHeaders.length > 0) {
+        formData.append('clientHeaders', JSON.stringify(uploadClientHeaders));
+      }
       if (templateFile) {
         formData.append('templateFile', templateFile);
         formData.append('templateSheetName', selectedTemplateSheet);

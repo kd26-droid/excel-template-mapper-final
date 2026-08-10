@@ -57,7 +57,28 @@ def split_by_separator(text, separator, trim_values=True, drop_empty=True):
     return [part for part in parts if not drop_empty or part != '']
 
 
-def extract_part(text, extraction_type, char1='', char2='', trim_value=True):
+def find_delimiter_occurrence(text, delimiter, occurrence=1, start=0):
+    """Find the zero-based index for the requested delimiter occurrence."""
+    if not delimiter:
+        return -1
+    try:
+        occurrence = max(1, int(occurrence or 1))
+    except (TypeError, ValueError):
+        occurrence = 1
+
+    index = start
+    found_count = 0
+    while True:
+        found_index = text.find(delimiter, index)
+        if found_index == -1:
+            return -1
+        found_count += 1
+        if found_count == occurrence:
+            return found_index
+        index = found_index + len(delimiter)
+
+
+def extract_part(text, extraction_type, char1='', char2='', trim_value=True, char1_occurrence=1, char2_occurrence=1):
     """
     Extract a part from text based on extraction type.
 
@@ -77,7 +98,7 @@ def extract_part(text, extraction_type, char1='', char2='', trim_value=True):
         if not char1:
             logger.warning(f"🔍 EXTRACT before: char1 is EMPTY!")
             return text
-        idx = text.find(char1)
+        idx = find_delimiter_occurrence(text, char1, char1_occurrence)
         if idx == -1:
             result = text  # char not found, return whole text
         else:
@@ -88,7 +109,7 @@ def extract_part(text, extraction_type, char1='', char2='', trim_value=True):
         if not char1:
             logger.warning(f"🔍 EXTRACT after: char1 is EMPTY!")
             return ''
-        idx = text.find(char1)
+        idx = find_delimiter_occurrence(text, char1, char1_occurrence)
         if idx == -1:
             result = ''  # char not found
         else:
@@ -99,12 +120,14 @@ def extract_part(text, extraction_type, char1='', char2='', trim_value=True):
         if not char1:
             logger.warning(f"🔍 EXTRACT between: char1 is EMPTY!")
             return ''
-        idx1 = text.find(char1)
+        idx1 = find_delimiter_occurrence(text, char1, char1_occurrence)
         if idx1 == -1:
             result = ''
         else:
             # Find char2 AFTER char1
-            idx2 = text.find(char2, idx1 + len(char1)) if char2 else -1
+            idx2 = find_delimiter_occurrence(text, char2, char2_occurrence) if char2 else -1
+            if idx2 != -1 and idx2 <= idx1:
+                idx2 = text.find(char2, idx1 + len(char1))
             if idx2 == -1:
                 # char2 not found, return everything after char1
                 result = text[idx1 + len(char1):]
@@ -117,6 +140,98 @@ def extract_part(text, extraction_type, char1='', char2='', trim_value=True):
         result = text
 
     return result.strip() if trim_value else result
+
+
+def normalize_extraction_rule(extraction):
+    """Return a common extraction tuple for current and legacy rule shapes."""
+    if 'type' in extraction:
+        return extraction.get('type'), extraction.get('char1', ''), extraction.get('char2', '')
+
+    start = extraction.get('start', 0)
+    end = extraction.get('end', '')
+    if start == 0 or start == '0':
+        return 'before', str(end) if end else '', ''
+    if end == '' or end is None or end == 'end':
+        return 'after', str(start), ''
+    return 'between', str(start), str(end)
+
+
+def extraction_sort_key(extraction):
+    try:
+        return int(extraction.get('part_index') or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def append_extracted_value(result, extraction, value, drop_empty):
+    """Append a parsed value using the same output routing as normal extraction."""
+    if drop_empty and value == '':
+        return
+
+    output_type = extraction.get('output_type', 'spec')
+    spec_name = extraction.get('spec_name', '')
+    custom_name = str(extraction.get('custom_name') or '').strip()
+
+    if output_type == 'spec' and spec_name:
+        result['spec'].setdefault(spec_name, []).append(value)
+    elif output_type == 'tag':
+        result['tag'].append(value)
+    elif output_type == 'custom' and custom_name:
+        result['custom'].setdefault(custom_name, []).append(value)
+
+
+def is_final_parenthetical_structured_pattern(extractions, split_mode):
+    """
+    Detect the generic MPN/MFR/extra shape built by the Structured split UI.
+    The row parser can then preserve MPN-internal parentheses and use the final
+    parenthesized group before any trailing status/reference block as MFR.
+    """
+    if split_mode != 'pattern' or len(extractions) < 2:
+        return False
+
+    ordered = sorted(extractions, key=extraction_sort_key)
+    second_type, second_char1, second_char2 = normalize_extraction_rule(ordered[1])
+    first_type, _, _ = normalize_extraction_rule(ordered[0])
+    if first_type != 'before':
+        return False
+    return second_type == 'between' and second_char1 == '(' and second_char2 == ')'
+
+
+def parse_final_parenthetical_group(text, trim_values=True):
+    """
+    Parse:
+      <MPN possibly containing parentheses> (<MFR>) {status} [ref]
+
+    This is shape-based rather than value-based.
+    """
+    text = str(text or '')
+    if trim_values:
+        text = text.strip()
+
+    extra = ''
+    extra_match = re.search(r'\s*(\{[^}]*\}\s*\[[^\]]*\])\s*$', text)
+    core = text
+    if extra_match:
+        extra = extra_match.group(1)
+        core = text[:extra_match.start()]
+
+    if trim_values:
+        core = core.strip()
+        extra = extra.strip()
+
+    mfr = ''
+    mfr_match = re.search(r'\s*\(([^()]*)\)\s*$', core)
+    if mfr_match:
+        mfr = mfr_match.group(1)
+        mpn = core[:mfr_match.start()]
+    else:
+        mpn = core
+
+    if trim_values:
+        mpn = mpn.strip()
+        mfr = mfr.strip()
+
+    return [mpn, mfr, extra]
 
 
 _parse_log_count = 0
@@ -172,34 +287,23 @@ def parse_cell_single_pattern(cell_value, pattern_config):
         logger.error(f"❌ NO EXTRACTIONS DEFINED! pattern_config={pattern_config}")
         return result
 
+    if is_final_parenthetical_structured_pattern(extractions, split_mode):
+        ordered_extractions = sorted(extractions, key=extraction_sort_key)
+        for group in groups:
+            values = parse_final_parenthetical_group(group, trim_values)
+            for extraction, value in zip(ordered_extractions, values):
+                append_extracted_value(result, extraction, value, drop_empty)
+                if _parse_log_count <= 3:
+                    logger.info(f"   â†’ Smart final-parenthetical extract: '{value[:30] if value else 'EMPTY'}'")
+
+        if _parse_log_count <= 3:
+            logger.info(f"   Result: specs={list(result['spec'].keys())}, tags={len(result['tag'])}, custom={list(result['custom'].keys())}")
+        return result
+
     # Process each extraction for each group
     for extraction in extractions:
-        # Support both formats:
-        #   Backend format: {type, char1, char2}
-        #   Frontend format: {start, end}
-        if 'type' in extraction:
-            ext_type = extraction['type']
-            char1 = extraction.get('char1', '')
-            char2 = extraction.get('char2', '')
-        else:
-            # Convert frontend format (start/end) to backend format
-            start = extraction.get('start', 0)
-            end = extraction.get('end', '')
-            if start == 0 or start == '0':
-                ext_type = 'before'
-                char1 = str(end) if end else ''
-                char2 = ''
-            elif end == '' or end is None or end == 'end':
-                ext_type = 'after'
-                char1 = str(start)
-                char2 = ''
-            else:
-                ext_type = 'between'
-                char1 = str(start)
-                char2 = str(end)
-        output_type = extraction.get('output_type', 'spec')
-        spec_name = extraction.get('spec_name', '')
-        custom_name = str(extraction.get('custom_name') or '').strip()
+        # Support both current {type, char1, char2} and legacy {start, end}.
+        ext_type, char1, char2 = normalize_extraction_rule(extraction)
         try:
             part_index = max(0, int(extraction.get('part_index') or 0))
         except (TypeError, ValueError):
@@ -220,7 +324,15 @@ def parse_cell_single_pattern(cell_value, pattern_config):
                     values = [value for value in values if value != '']
                 value = values[part_index] if part_index < len(values) else ''
             else:
-                value = extract_part(group, ext_type, char1, char2, trim_values)
+                value = extract_part(
+                    group,
+                    ext_type,
+                    char1,
+                    char2,
+                    trim_values,
+                    extraction.get('char1_occurrence', 1),
+                    extraction.get('char2_occurrence', 1),
+                )
 
             if drop_empty and value == '':
                 continue
@@ -228,14 +340,7 @@ def parse_cell_single_pattern(cell_value, pattern_config):
             if _parse_log_count <= 3:
                 logger.info(f"   → Extracted: type={ext_type}, char1='{char1}', char2='{char2}' → '{value[:30] if value else 'EMPTY'}'")
 
-            if output_type == 'spec' and spec_name:
-                if spec_name not in result['spec']:
-                    result['spec'][spec_name] = []
-                result['spec'][spec_name].append(value)
-            elif output_type == 'tag':
-                result['tag'].append(value)
-            elif output_type == 'custom' and custom_name:
-                result['custom'].setdefault(custom_name, []).append(value)
+            append_extracted_value(result, extraction, value, drop_empty)
 
     if _parse_log_count <= 3:
         logger.info(f"   Result: specs={list(result['spec'].keys())}, tags={len(result['tag'])}, custom={list(result['custom'].keys())}")

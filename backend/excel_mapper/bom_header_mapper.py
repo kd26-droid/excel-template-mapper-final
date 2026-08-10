@@ -229,12 +229,18 @@ class BOMHeaderMapper:
                     # If all encodings failed, raise the last error
                     raise Exception("Could not read CSV file with any supported encoding")
             else:
-                if sheet_name is None:
-                    xl_file = pd.ExcelFile(file_path)
-                    sheet_name = xl_file.sheet_names[0]
-                
-                df = pd.read_excel(file_path, sheet_name=sheet_name, 
-                                 header=header_row, nrows=1)
+                try:
+                    if sheet_name is None:
+                        xl_file = pd.ExcelFile(file_path)
+                        sheet_name = xl_file.sheet_names[0]
+                    
+                    df = pd.read_excel(file_path, sheet_name=sheet_name, 
+                                     header=header_row, nrows=1)
+                except Exception:
+                    # Some supplier "xls" exports are really tab/comma-delimited
+                    # text with an Excel extension. Pandas cannot infer them as
+                    # workbooks, but it can parse the text table.
+                    df = self._read_delimited_text(file_path, header_row, nrows=1)
             
             headers = [str(col).strip() for col in df.columns if str(col).strip()]
             return headers
@@ -242,6 +248,28 @@ class BOMHeaderMapper:
         except Exception as e:
             print(f"Error reading headers from {file_path}: {e}")
             return []
+
+    def _read_delimited_text(self, file_path: Union[str, Path], header_row: int = 0, **kwargs):
+        encodings_to_try = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1', 'windows-1252']
+        last_error = None
+        for encoding in encodings_to_try:
+            try:
+                return pd.read_csv(
+                    file_path,
+                    header=header_row,
+                    encoding=encoding,
+                    sep=None,
+                    engine='python',
+                    on_bad_lines='skip',
+                    **kwargs
+                )
+            except (UnicodeDecodeError, UnicodeError) as exc:
+                last_error = exc
+                continue
+            except Exception as exc:
+                last_error = exc
+                continue
+        raise last_error or Exception("Could not read delimited text file")
     
     def read_sample_data(self, file_path: Union[str, Path], 
                         sheet_name: str = None, 
@@ -276,12 +304,15 @@ class BOMHeaderMapper:
                 else:
                     raise Exception("Could not read CSV file with any supported encoding")
             else:
-                if sheet_name is None:
-                    xl_file = pd.ExcelFile(file_path)
-                    sheet_name = xl_file.sheet_names[0]
-                
-                df = pd.read_excel(file_path, sheet_name=sheet_name, 
-                                 header=header_row, nrows=sample_rows)
+                try:
+                    if sheet_name is None:
+                        xl_file = pd.ExcelFile(file_path)
+                        sheet_name = xl_file.sheet_names[0]
+                    
+                    df = pd.read_excel(file_path, sheet_name=sheet_name, 
+                                     header=header_row, nrows=sample_rows)
+                except Exception:
+                    df = self._read_delimited_text(file_path, header_row, nrows=sample_rows)
             
             sample_data = {}
             for col in df.columns:

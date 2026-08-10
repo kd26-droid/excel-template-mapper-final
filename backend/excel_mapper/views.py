@@ -296,6 +296,193 @@ def read_csv_with_encoding(file_path, header_row, **kwargs):
     raise Exception("Could not read CSV file with any supported encoding")
 
 
+def _looks_like_delimited_text_file(file_path) -> bool:
+    try:
+        with open(file_path, 'rb') as handle:
+            sample = handle.read(4096)
+        if not sample:
+            return False
+        # Real XLS/XLSX files start with binary/OLE/ZIP signatures. Supplier
+        # exports often use .xls for plain tab-delimited text.
+        if sample.startswith(b'\xD0\xCF\x11\xE0') or sample.startswith(b'PK\x03\x04'):
+            return False
+        return b'\t' in sample or b',' in sample or b';' in sample
+    except Exception:
+        return False
+
+
+def read_spreadsheet_or_delimited(file_path, sheet_name=None, header=0, **kwargs):
+    path_text = str(file_path).lower()
+    if path_text.endswith('.csv') or _looks_like_delimited_text_file(file_path):
+        return read_csv_with_encoding(
+            file_path,
+            header,
+            sep=None,
+            engine='python',
+            **kwargs
+        )
+    return pd.read_excel(file_path, sheet_name=sheet_name, header=header, **kwargs)
+
+
+PACKED_CELL_DELIMITERS = ('\t', ';', '|', ',')
+
+
+def _cell_as_upload_text(value) -> str:
+    if _is_blank_cell(value):
+        return ''
+    return str(value).replace('\u00a0', ' ').strip()
+
+
+def _split_packed_cell(value, delimiter):
+    return [part.strip() for part in _cell_as_upload_text(value).split(delimiter)]
+
+
+def _detect_packed_cell_delimiter(header_value):
+    """Pick a delimiter when one spreadsheet cell clearly contains many columns."""
+    text = _cell_as_upload_text(header_value)
+    if not text:
+        return None
+
+    best = None
+    for delimiter in PACKED_CELL_DELIMITERS:
+        parts = [part for part in _split_packed_cell(text, delimiter) if part]
+        delimiter_count = text.count(delimiter)
+        if delimiter_count < 2 or len(parts) < 3:
+            continue
+        score = (len(parts), delimiter_count)
+        if best is None or score > best[0]:
+            best = (score, delimiter)
+    return best[1] if best else None
+
+
+def _read_raw_upload_table(file_path, sheet_name=None):
+    """Read upload rows positionally so we can repair packed one-cell tables."""
+    path_text = str(file_path).lower()
+    if path_text.endswith('.csv') or _looks_like_delimited_text_file(file_path):
+        return read_csv_with_encoding(
+            file_path,
+            header=None,
+            sep=None,
+            engine='python',
+            dtype=str,
+            keep_default_na=False
+        )
+    return pd.read_excel(
+        file_path,
+        sheet_name=sheet_name,
+        header=None,
+        dtype=str,
+        keep_default_na=False
+    )
+
+
+def _non_empty_cells(row_values):
+    cells = []
+    for index, value in enumerate(row_values):
+        text = _cell_as_upload_text(value)
+        if text:
+            cells.append((index, text))
+    return cells
+
+
+def _maybe_expand_packed_cell_upload(client_path, sheet_name, header_row):
+    """
+    Normalize files where each logical row was pasted/exported into one cell.
+
+    This is delimiter-based only; it does not know or care what the headers are.
+    If the chosen header row has one non-empty cell containing many semicolon,
+    tab, pipe, or comma-separated labels, the whole table is rewritten as a
+    normal workbook so all later mapping/export code sees real columns.
+    """
+    try:
+        raw = _read_raw_upload_table(client_path, sheet_name=sheet_name)
+        if isinstance(raw, dict):
+            raw = raw.get(sheet_name) if sheet_name in raw else next(iter(raw.values()), pd.DataFrame())
+        if raw is None or raw.empty:
+            return None
+
+        header_index = max(0, int(header_row or 1) - 1)
+        if header_index >= len(raw.index):
+            return None
+
+        header_cells = _non_empty_cells(raw.iloc[header_index].tolist())
+        if len(header_cells) != 1:
+            return None
+
+        source_column_index, header_text = header_cells[0]
+        delimiter = _detect_packed_cell_delimiter(header_text)
+        if not delimiter:
+            return None
+
+        headers = [part for part in _split_packed_cell(header_text, delimiter) if part]
+        if len(headers) < 3:
+            return None
+
+        rows = []
+        max_width = len(headers)
+        for _, row in raw.iloc[header_index + 1:].iterrows():
+            values = row.tolist()
+            row_cells = _non_empty_cells(values)
+            if not row_cells:
+                continue
+
+            # Prefer the same cell as the header. If the row also only has one
+            # non-empty cell elsewhere, split that one; this tolerates shifted
+            # pasted blocks without baking in any source-specific knowledge.
+            if source_column_index < len(values) and _cell_as_upload_text(values[source_column_index]):
+                packed_text = values[source_column_index]
+            elif len(row_cells) == 1:
+                packed_text = row_cells[0][1]
+            else:
+                return None
+
+            parts = _split_packed_cell(packed_text, delimiter)
+            if len([part for part in parts if part]) <= 1 and delimiter not in _cell_as_upload_text(packed_text):
+                continue
+            max_width = max(max_width, len(parts))
+            rows.append(parts)
+
+        if max_width > len(headers):
+            headers = headers + [f'Column {index + 1}' for index in range(len(headers), max_width)]
+
+        normalized_rows = [
+            list(row[:max_width]) + [''] * max(0, max_width - len(row))
+            for row in rows
+        ]
+        normalized_df = pd.DataFrame(normalized_rows, columns=headers[:max_width])
+
+        upload_dir = getattr(hybrid_file_manager, 'local_upload_dir', Path(settings.BASE_DIR) / 'uploaded_files')
+        upload_dir = Path(upload_dir)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        normalized_path = upload_dir / f"{uuid.uuid4()}_packed_cell_expanded.xlsx"
+        normalized_df.to_excel(normalized_path, index=False, sheet_name='Expanded')
+
+        logger.info(
+            "Expanded packed one-cell upload %s using delimiter %r into %s columns and %s rows",
+            client_path,
+            delimiter,
+            len(headers[:max_width]),
+            len(normalized_rows),
+        )
+        return {
+            'client_path': str(normalized_path),
+            'sheet_name': 'Expanded',
+            'header_row': 1,
+            'client_headers': headers[:max_width],
+            'source_transform': {
+                'type': 'packed_cell_delimiter_expand',
+                'delimiter': delimiter,
+                'source_column_index': source_column_index,
+                'original_path': str(client_path),
+                'columns': len(headers[:max_width]),
+                'rows': len(normalized_rows),
+            }
+        }
+    except Exception as exc:
+        logger.warning("Packed-cell upload expansion skipped for %s: %s", client_path, exc)
+        return None
+
+
 def generate_template_columns(tags_count=3, spec_pairs_count=3, customer_id_pairs_count=1):
     """
     Generate complete template column headers including all standard template fields.
@@ -974,10 +1161,12 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
         # Helper to read only headers quickly
         def _read_only_headers() -> list:
             try:
-                if str(client_local_path).lower().endswith('.csv'):
-                    df0 = read_csv_with_encoding(client_local_path, header_row, nrows=0)
-                else:
-                    df0 = pd.read_excel(client_local_path, sheet_name=sheet_name, header=header_row, nrows=0)
+                df0 = read_spreadsheet_or_delimited(
+                    client_local_path,
+                    sheet_name=sheet_name,
+                    header=header_row,
+                    nrows=0
+                )
                 return [str(c).strip() for c in df0.columns]
             except Exception:
                 return []
@@ -1007,15 +1196,15 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
                     pdf_headers = None
 
         if offset is None or limit is None:
-            if str(client_local_path).lower().endswith('.csv'):
+            if str(client_local_path).lower().endswith('.csv') or _looks_like_delimited_text_file(client_local_path):
                 if is_pdf_session and pdf_headers:
                     # PDF CSV has no headers, read with header=None and provide column names
-                    df = read_csv_with_encoding(client_local_path, header_row=None, names=pdf_headers)
+                    df = read_spreadsheet_or_delimited(client_local_path, header=None, names=pdf_headers)
                     logger.info(f"🔍 PDF session: Read CSV without headers, applied PDF headers: {pdf_headers}")
                 else:
-                    df = read_csv_with_encoding(client_local_path, header_row)
+                    df = read_spreadsheet_or_delimited(client_local_path, header=header_row)
             else:
-                result = pd.read_excel(client_local_path, sheet_name=sheet_name, header=header_row)
+                result = read_spreadsheet_or_delimited(client_local_path, sheet_name=sheet_name, header=header_row)
                 # Handle multiple sheets case
                 if isinstance(result, dict):
                     first_sheet_name = list(result.keys())[0]
@@ -1029,13 +1218,13 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
             else:
                 cols = _read_only_headers()
 
-            if str(client_local_path).lower().endswith('.csv'):
+            if str(client_local_path).lower().endswith('.csv') or _looks_like_delimited_text_file(client_local_path):
                 if is_pdf_session and pdf_headers:
                     # PDF CSV has no headers, skip only the offset rows (no header row to skip)
                     skiprows = max(0, int(offset)) if offset > 0 else None
-                    df = read_csv_with_encoding(
+                    df = read_spreadsheet_or_delimited(
                         client_local_path,
-                        header_row=None,
+                        header=None,
                         names=pdf_headers,
                         skiprows=skiprows,
                         nrows=int(limit)
@@ -1046,9 +1235,9 @@ def apply_column_mappings(client_file, mappings, sheet_name=None, header_row=0, 
                     skip_start = header_row + 1
                     skip_end = skip_start + max(0, int(offset))
                     skiprows = list(range(skip_start, skip_end)) if skip_end > skip_start else None
-                    df = read_csv_with_encoding(
+                    df = read_spreadsheet_or_delimited(
                         client_local_path,
-                        header_row=None,
+                        header=None,
                         names=cols if cols else None,
                         skiprows=skiprows,
                         nrows=int(limit)
@@ -1542,6 +1731,15 @@ def upload_files(request):
         template_sheet_name = request.data.get('templateSheetName') or default_template_metadata["template_sheet_name"]
         template_header_row = int(request.data.get('templateHeaderRow') or default_template_metadata["template_header_row"])
         use_template_id = request.data.get('useTemplateId')
+        client_headers = []
+        client_headers_json = request.data.get('clientHeaders')
+        if client_headers_json:
+            try:
+                parsed_client_headers = json.loads(client_headers_json) if isinstance(client_headers_json, str) else client_headers_json
+                if isinstance(parsed_client_headers, list):
+                    client_headers = [str(header).strip() for header in parsed_client_headers if str(header).strip()]
+            except (json.JSONDecodeError, TypeError, ValueError):
+                logger.warning("Invalid clientHeaders JSON on upload; ignoring")
         
         # Extract formula rules if provided
         formula_rules_json = request.data.get('formulaRules')
@@ -1600,6 +1798,29 @@ def upload_files(request):
             template_path = default_template_metadata["template_path"]
             template_original_name = default_template_metadata["original_template_name"]
 
+        packed_cell_transform = _maybe_expand_packed_cell_upload(
+            hybrid_file_manager.get_file_path(client_path),
+            sheet_name,
+            header_row
+        )
+        if packed_cell_transform:
+            client_path = packed_cell_transform['client_path']
+            sheet_name = packed_cell_transform['sheet_name']
+            header_row = packed_cell_transform['header_row']
+            client_headers = packed_cell_transform['client_headers']
+
+        template_packed_cell_transform = None
+        if template_file:
+            template_packed_cell_transform = _maybe_expand_packed_cell_upload(
+                hybrid_file_manager.get_file_path(template_path),
+                template_sheet_name,
+                template_header_row
+            )
+            if template_packed_cell_transform:
+                template_path = template_packed_cell_transform['client_path']
+                template_sheet_name = template_packed_cell_transform['sheet_name']
+                template_header_row = template_packed_cell_transform['header_row']
+
         # Generate session ID
         session_id = str(uuid.uuid4())
 
@@ -1634,6 +1855,7 @@ def upload_files(request):
             "original_template_name": template_original_name,
             "sheet_name": sheet_name,
             "header_row": header_row,
+            "client_headers": client_headers,
             "template_sheet_name": template_sheet_name,
             "template_header_row": template_header_row,
             "template_headers": clustered_template_headers or template_headers,
@@ -1650,6 +1872,8 @@ def upload_files(request):
             "customer_id_pairs_count": default_counts["customer_id_pairs_count"],
             "column_counts": default_counts,
             "template_source": "uploaded" if template_file else "default",
+            "source_transforms": [packed_cell_transform["source_transform"]] if packed_cell_transform else [],
+            "template_transforms": [template_packed_cell_transform["source_transform"]] if template_packed_cell_transform else [],
             # Answers from the BOM structure gate on the upload page: which
             # sheets hold a BOM, whether they have levels, and the finished good
             # authored for flat sheets. BOM generation reads this instead of
@@ -1969,6 +2193,7 @@ def apply_sheet_join(request):
             info['client_path'] = str(joined_path)
             info['sheet_name'] = 'Sheet_Joined'
             info['header_row'] = 1
+            info['client_headers'] = [str(header) for header in preview_headers]
             info['sheet_join'] = {
                 'base_sheet': base_sheet,
                 'detail_sheet': detail_sheet,
@@ -2165,6 +2390,7 @@ def apply_sheet_join(request):
         info['client_path'] = str(joined_path)
         info['sheet_name'] = 'Sheet_Joined'
         info['header_row'] = 1
+        info['client_headers'] = list(output_headers)
         info['sheet_join'] = {
             'base_sheet': base_sheet,
             'detail_sheet': detail_sheet,
@@ -2431,6 +2657,12 @@ def get_headers(request, session_id):
         except Exception:
             pass
         
+        cached_client_headers = [
+            str(header).strip()
+            for header in (info.get("client_headers") or [])
+            if str(header).strip()
+        ]
+
         # Read client headers (support Azure Blob by resolving to local cache)
         # For PDF sessions, get headers from PDF extraction data instead of CSV file
         if str(info.get("source_type", "")).startswith("pdf"):
@@ -2466,6 +2698,12 @@ def get_headers(request, session_id):
                 sheet_name=info["sheet_name"],
                 header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0
             )
+        if not client_headers and cached_client_headers:
+            client_headers = cached_client_headers
+            logger.info(f"get_headers: using cached client headers for session {session_id}: {len(client_headers)} columns")
+        elif client_headers and client_headers != cached_client_headers:
+            info["client_headers"] = client_headers
+            save_session(session_id, info)
         
         # Read template headers (allow enhanced headers override)
         template_headers = mapper.read_excel_headers(
@@ -2836,12 +3074,19 @@ def mapping_suggestions(request):
         save_session(session_id, info)
         logger.info(f"🔍 Stored template_headers in session: {template_headers}")
 
-        # Get client headers from file
+        # Get client headers from file, with cached upload-detected headers as a
+        # fallback for workbooks where the second read cannot recover the header row.
         client_headers = mapper.read_excel_headers(
             file_path=hybrid_file_manager.get_file_path(info["client_path"]),
             sheet_name=info["sheet_name"],
             header_row=info["header_row"] - 1 if info["header_row"] > 0 else 0
         )
+        if not client_headers and info.get("client_headers"):
+            client_headers = [
+                str(header).strip()
+                for header in (info.get("client_headers") or [])
+                if str(header).strip()
+            ]
         
         # Prepare AI suggestions in format expected by frontend
         ai_suggestions = {}

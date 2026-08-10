@@ -504,6 +504,8 @@ const api = {
       session_id: sessionId,
       mappings: mappingData.mappings,
       default_values: mappingData.default_values || {},
+      default_value_rules: mappingData.default_value_rules || {},
+      header_corrections: mappingData.header_corrections || {},
       formula_rules: mappingData.formula_rules || null,
       factwise_rules: mappingData.factwise_rules || null,
       force_persist: mappingData.force_persist === true,
