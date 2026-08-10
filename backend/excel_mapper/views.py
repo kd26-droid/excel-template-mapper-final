@@ -13891,6 +13891,9 @@ def _generate_hierarchical_bom(records, answer, bom_header):
             # it is blank throughout, derive_tree falls back to level inference,
             # so level-only sheets take exactly the path they always did.
             parent_column='parent' if 'parent' in (primaries[0] if primaries else {}) else None,
+            # The user's answer from the BOM structure gate. Absent on answers
+            # saved before the checkbox existed, which keeps the old default.
+            drop_documents=answer.get('dropDocuments', True) is not False,
         )
     except BomTreeError as exc:
         return None, Response({

@@ -242,6 +242,10 @@ def validate_bom(bom_headers, bom_rows, item_rows=None, bom_row_grid_rows=None):
             except (TypeError, ValueError):
                 errors.append({
                     'rule': 'quantity_invalid', 'row': line, 'field': 'Quantity',
+                    # The offending cell contents travel with the issue so the UI
+                    # can act on exactly these values - replace just them, or
+                    # delete just their rows - instead of the whole column.
+                    'value': quantity,
                     'message': 'Row %d has Quantity "%s"; it must be a number greater than zero.'
                                % (line, quantity),
                 })

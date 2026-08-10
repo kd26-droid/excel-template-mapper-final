@@ -3185,7 +3185,7 @@ const EnhancedDataEditor = () => {
       // without this, generator warnings render under a bare "other" heading.
       const rule = issue.rule || issue.type || 'other';
       if (!groups.has(rule)) {
-        groups.set(rule, { rule, severity, count: 0, rows: [], codes: [], messages: [] });
+        groups.set(rule, { rule, severity, count: 0, rows: [], codes: [], values: [], messages: [] });
       }
       const group = groups.get(rule);
       // `count` on an issue means it already speaks for several rows — the
@@ -3198,6 +3198,9 @@ const EnhancedDataEditor = () => {
       (issue.codes || []).forEach(code => {
         if (!group.codes.includes(code)) group.codes.push(code);
       });
+      // The exact cell contents that failed, so a fix can target just them.
+      const offending = String(issue.value ?? '').trim();
+      if (offending && !group.values.includes(offending)) group.values.push(offending);
       if (group.messages.length < 3 && !group.messages.includes(issue.message)) {
         group.messages.push(issue.message);
       }
@@ -3231,6 +3234,71 @@ const EnhancedDataEditor = () => {
     }
     showSnackbar(`Row ${target} is on page ${targetPage}.`, 'info');
   }, [page, pageSize, fetchPageData, showSnackbar]);
+
+  // The two ways out of a bad-value issue, offered side by side because only the
+  // user knows which is right: a row whose quantity is 0 is either a real part
+  // missing its quantity (replace) or something that does not belong in the BOM
+  // at all (delete). Both act on the offending VALUES rather than the whole
+  // column, so rows that are already correct are never touched.
+  const [bomFixBusy, setBomFixBusy] = useState('');
+  const [bomFixDefaults, setBomFixDefaults] = useState({});
+
+  const replaceBomIssueValues = useCallback(async (group, field, replacement) => {
+    const value = String(replacement || '').trim();
+    if (!field || !value || !group.values.length) return;
+    try {
+      setBomFixBusy(`replace:${group.rule}`);
+      const resp = await api.fillMissingValues(
+        sessionId, field, 'selected_values', group.values, 'default', value
+      );
+      if (!resp.data?.success) throw new Error(resp.data?.error || 'Could not replace the values');
+      recordPostMappingAction({
+        type: 'fill_missing_values',
+        label: `Replace ${group.values.join(', ')} in ${field}`,
+        column: field,
+        target_mode: 'selected_values',
+        selected_values: group.values,
+        strategy: 'default',
+        default_value: value,
+      });
+      await fetchDataSynchronized();
+      showSnackbar(`Replaced ${group.values.join(', ')} with "${value}".`, 'success');
+      setBomValidationOpen(false);
+    } catch (e) {
+      showSnackbar(getFriendlyErrorMessage(e, 'Could not replace the values.'), 'error');
+    } finally {
+      setBomFixBusy('');
+    }
+  }, [sessionId, fetchDataSynchronized, showSnackbar, getFriendlyErrorMessage, recordPostMappingAction]);
+
+  const deleteBomIssueRows = useCallback(async (group, field) => {
+    if (!field || !group.values.length) return;
+    try {
+      setBomFixBusy(`delete:${group.rule}`);
+      let removed = 0;
+      // One call per distinct value: the endpoint tests a single value, and a
+      // column can legitimately hold "0" and "0.00000000" for the same problem.
+      for (const value of group.values) {
+        const resp = await api.deleteRowsConditional(sessionId, field, 'equals', value);
+        if (!resp.data?.success) throw new Error(resp.data?.error || 'Could not delete the rows');
+        removed += Number(resp.data?.deleted || resp.data?.removed || 0);
+      }
+      recordPostMappingAction({
+        type: 'delete_rows_conditional',
+        label: `Delete rows where ${field} is ${group.values.join(' or ')}`,
+        column: field,
+        operator: 'equals',
+        values: group.values,
+      });
+      await fetchDataSynchronized();
+      showSnackbar(`Deleted ${removed} row${removed === 1 ? '' : 's'}.`, 'success');
+      setBomValidationOpen(false);
+    } catch (e) {
+      showSnackbar(getFriendlyErrorMessage(e, 'Could not delete the rows.'), 'error');
+    } finally {
+      setBomFixBusy('');
+    }
+  }, [sessionId, fetchDataSynchronized, showSnackbar, getFriendlyErrorMessage, recordPostMappingAction]);
 
   // Resolve a guidance column name to the grid field that actually holds it.
   // Header text is what the user sees; `field` is what the fill tools take.
@@ -8174,238 +8242,6 @@ const EnhancedDataEditor = () => {
       <Dialog open={splitColsDialogOpen} onClose={() => setSplitColsDialogOpen(false)} maxWidth="md" fullWidth>
         <DialogTitle>Split into Columns</DialogTitle>
         <DialogContent>
-          <Tabs
-            value={splitColsTab}
-            onChange={(_, value) => setSplitColsTab(value)}
-            sx={{ borderBottom: '1px solid #e5e7eb', mb: 2 }}
-          >
-            <Tab label="Delimiter" />
-            <Tab label="Structured" />
-          </Tabs>
-
-          {splitColsTab === 0 ? (
-            <>
-          <DialogContentText sx={{ mb: 2 }}>
-            Separate one cell into adjacent columns at the selected column's position. For example, <code>A, B, C</code> becomes <code>A | B | C</code>.
-          </DialogContentText>
-
-            <Box sx={{ display: 'flex', gap: 2, mb: 2, flexWrap: 'wrap' }}>
-              <FormControl size="small" sx={{ minWidth: 220, flex: 1 }}>
-                <InputLabel>Column to split</InputLabel>
-                <Select
-                  label="Column to split"
-                  value={splitColsConfig.sourceColumn}
-                  onChange={(e) => {
-                    const field = e.target.value;
-                    const cand = splitColsCandidates.find(c => c.field === field);
-                    const factWiseType = /^Tag_\d+$/.test(field) || field === 'Tag'
-                      ? 'Tag'
-                      : (/^Specification_Value_\d+$/.test(field) || field === 'Specification value'
-                        ? 'Specification value'
-                        : '');
-                    setSplitColsConfig(prev => ({
-                      ...prev,
-                      sourceColumn: field,
-                      destinationPrefix: factWiseType || (cand ? cand.label : (prev.destinationPrefix || field)),
-                    }));
-                  }}
-                >
-                  {splitColsCandidates.map(col => (
-                    <MenuItem key={`${col.field}-${col.index}`} value={col.field}>{columnLabel(col.field, col.label)}</MenuItem>
-                  ))}
-                </Select>
-              </FormControl>
-
-              <FormControl size="small" sx={{ minWidth: 190 }}>
-                <InputLabel>Split by</InputLabel>
-                <Select
-                  label="Split by"
-                  value={splitColsConfig.splitMode}
-                  onChange={(e) => setSplitColsConfig(prev => ({ ...prev, splitMode: e.target.value }))}
-                >
-                  <MenuItem value="delimiter">A delimiter</MenuItem>
-                  <MenuItem value="characters">Every N characters</MenuItem>
-                </Select>
-              </FormControl>
-
-              {splitColsConfig.splitMode === 'delimiter' ? (
-                <>
-                  <FormControl size="small" sx={{ minWidth: 160 }}>
-                    <InputLabel>Delimiter</InputLabel>
-                    <Select
-                      label="Delimiter"
-                      value={splitColsConfig.delimiter}
-                      onChange={(e) => setSplitColsConfig(prev => ({ ...prev, delimiter: e.target.value }))}
-                    >
-                      <MenuItem value="comma">Comma ,</MenuItem>
-                      <MenuItem value="semicolon">Semicolon ;</MenuItem>
-                      <MenuItem value="pipe">Pipe |</MenuItem>
-                      <MenuItem value="slash">Slash /</MenuItem>
-                      <MenuItem value="newline">New line</MenuItem>
-                      <MenuItem value="tab">Tab</MenuItem>
-                      <MenuItem value="space">Space</MenuItem>
-                      <MenuItem value="custom">Custom character...</MenuItem>
-                    </Select>
-                  </FormControl>
-
-                  {splitColsConfig.delimiter === 'custom' && (
-                    <TextField
-                      size="small"
-                      label="Custom delimiter"
-                      sx={{ minWidth: 160 }}
-                      value={splitColsConfig.customDelimiter}
-                      onChange={(e) => setSplitColsConfig(prev => ({ ...prev, customDelimiter: e.target.value }))}
-                      helperText="Any character or text"
-                    />
-                  )}
-                </>
-              ) : (
-                <TextField
-                  size="small"
-                  type="number"
-                  label="Characters per column"
-                  sx={{ minWidth: 190 }}
-                  InputProps={{ inputProps: { min: 1 } }}
-                  value={splitColsConfig.chunkSize}
-                  onChange={(e) => setSplitColsConfig(prev => ({ ...prev, chunkSize: e.target.value }))}
-                  helperText="e.g. 3 turns ABCDEFGH into ABC | DEF | GH"
-                />
-              )}
-            </Box>
-
-            <Box sx={{ display: 'flex', gap: 2, mb: 2, flexWrap: 'wrap' }}>
-              <TextField
-                size="small"
-                label={splitColsFactWiseType ? 'Generated column type' : 'Output column name'}
-                sx={{ minWidth: 220, flex: 1 }}
-                value={splitColsFactWiseType || splitColsConfig.destinationPrefix}
-                disabled={Boolean(splitColsFactWiseType)}
-                onChange={(e) => setSplitColsConfig(prev => ({ ...prev, destinationPrefix: e.target.value }))}
-                helperText={
-                  splitColsFactWiseType
-                    ? `Each generated ${splitColsFactWiseType} column stays beside the selected column.`
-                    : splitColsConfig.destinationPrefix.trim()
-                    ? `New columns will use "${splitColsConfig.destinationPrefix.trim()}".`
-                    : 'Select a column to fill this automatically.'
-                }
-              />
-              <TextField
-                size="small"
-                type="number"
-                label="Max columns"
-                sx={{ minWidth: 160 }}
-                InputProps={{ inputProps: { min: 0 } }}
-                value={splitColsConfig.maxColumns}
-                onChange={(e) => setSplitColsConfig(prev => ({ ...prev, maxColumns: e.target.value }))}
-                helperText="Blank = as many as needed"
-              />
-            </Box>
-
-            <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center', mb: 1 }}>
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    checked={splitColsConfig.trim}
-                    onChange={(e) => setSplitColsConfig(prev => ({ ...prev, trim: e.target.checked }))}
-                  />
-                }
-                label="Trim spaces"
-              />
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    checked={splitColsConfig.dropEmpty}
-                    onChange={(e) => setSplitColsConfig(prev => ({ ...prev, dropEmpty: e.target.checked }))}
-                  />
-                }
-                label="Drop empty values"
-              />
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    checked={splitColsConfig.keepSourceColumn}
-                    onChange={(e) => setSplitColsConfig(prev => ({ ...prev, keepSourceColumn: e.target.checked }))}
-                  />
-                }
-                label="Keep the original column"
-              />
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    checked={splitColsConfig.overwriteExisting}
-                    onChange={(e) => setSplitColsConfig(prev => ({ ...prev, overwriteExisting: e.target.checked }))}
-                  />
-                }
-                label="Fill matching existing columns"
-              />
-            </Box>
-
-            {Number(splitColsConfig.maxColumns) > 0 && (
-              <FormControl fullWidth size="small" sx={{ mb: 2 }}>
-                <InputLabel>If a row has more values than fit</InputLabel>
-                <Select
-                  label="If a row has more values than fit"
-                  value={splitColsConfig.onOverflow}
-                  onChange={(e) => setSplitColsConfig(prev => ({ ...prev, onOverflow: e.target.value }))}
-                >
-                  <MenuItem value="review">Flag the extra values for review</MenuItem>
-                  <MenuItem value="truncate">Drop the extras quietly</MenuItem>
-                </Select>
-              </FormControl>
-            )}
-
-            {splitColsError && <Alert severity="error" sx={{ mt: 2 }}>{splitColsError}</Alert>}
-
-            {splitColsPreview && (
-              <Box sx={{ mt: 2 }}>
-                <Alert severity="success" sx={{ mb: 1 }}>
-                  {splitColsPreview.columns_created} column(s) created from {splitColsPreview.rows_split} row(s)
-                  holding more than one value. Widest row had {splitColsPreview.widest_row}.
-                  {splitColsPreview.overflow_rows > 0 && ` ${splitColsPreview.overflow_rows} row(s) overflowed.`}
-                </Alert>
-                <Box sx={{ maxHeight: 240, overflow: 'auto', border: '1px solid #e0e0e0', borderRadius: 1 }}>
-                  <Box component="table" sx={{ borderCollapse: 'collapse', width: '100%', fontSize: 12 }}>
-                    <Box component="thead" sx={{ position: 'sticky', top: 0, bgcolor: '#fafafa' }}>
-                      <Box component="tr">
-                        {splitColsPreview.headers.map((header, columnIndex) => (
-                          <Box
-                            component="th"
-                            key={`${header}-${columnIndex}`}
-                            sx={{
-                              p: 0.75,
-                              textAlign: 'left',
-                              borderBottom: '1px solid #e0e0e0',
-                              whiteSpace: 'nowrap',
-                              fontWeight: splitColsPreview.new_columns?.includes(header) ? 700 : 500,
-                              color: splitColsPreview.new_columns?.includes(header) ? '#0277bd' : 'inherit'
-                            }}
-                          >
-                            {header}
-                          </Box>
-                        ))}
-                      </Box>
-                    </Box>
-                    <Box component="tbody">
-                      {(splitColsPreview.rows || splitColsPreview.data).map((row, rowIndex) => (
-                        <Box component="tr" key={rowIndex}>
-                          {splitColsPreview.headers.map((header, columnIndex) => (
-                            <Box
-                              component="td"
-                              key={`${header}-${columnIndex}`}
-                              sx={{ p: 0.75, borderBottom: '1px solid #f0f0f0', whiteSpace: 'nowrap' }}
-                            >
-                              {Array.isArray(row) ? row[columnIndex] : row[header]}
-                            </Box>
-                          ))}
-                        </Box>
-                      ))}
-                    </Box>
-                  </Box>
-                </Box>
-              </Box>
-            )}
-            </>
-          ) : (
             <ColumnParser
               sessionId={sessionId}
               initialColumn={splitColsConfig.sourceColumn}
@@ -8416,28 +8252,9 @@ const EnhancedDataEditor = () => {
                 fetchDataSynchronized();
               }}
             />
-          )}
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setSplitColsDialogOpen(false)} disabled={splitColsRunning} sx={{ mr: 'auto' }}>Cancel</Button>
-          {splitColsTab === 0 && (
-            <>
-              <Button
-                onClick={handlePreviewSplitCols}
-                disabled={splitColsPreviewLoading || splitColsRunning || !splitColsConfig.sourceColumn}
-              >
-                {splitColsPreviewLoading ? 'Previewing...' : 'Preview'}
-              </Button>
-              <Button
-                onClick={handleApplySplitCols}
-                variant="contained"
-                startIcon={splitColsRunning ? <CircularProgress size={16} /> : <ContentCutIcon />}
-                disabled={splitColsRunning || !splitColsConfig.sourceColumn || (!splitColsFactWiseType && !splitColsConfig.destinationPrefix.trim())}
-              >
-                {splitColsRunning ? 'Splitting...' : 'Apply'}
-              </Button>
-            </>
-          )}
         </DialogActions>
       </Dialog>
 
@@ -10072,6 +9889,52 @@ const EnhancedDataEditor = () => {
                           +{group.rows.length - 12} more
                         </Typography>
                       )}
+                    </Box>
+                  )}
+
+                  {/* Only when the backend told us WHICH values failed. Acting on
+                      the column as a whole would hit rows that are already fine. */}
+                  {fillField && group.values.length > 0 && (
+                    <Box sx={{
+                      display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center',
+                      p: 1.25, borderRadius: '10px',
+                      bgcolor: isDarkMode ? 'rgba(148, 163, 184, 0.08)' : '#f8fafc',
+                      border: isDarkMode ? '1px solid rgba(148, 163, 184, 0.16)' : '1px solid #e2e8f0',
+                    }}>
+                      <Typography variant="caption" sx={{ color: t.text.secondary, fontWeight: 700 }}>
+                        {`Found ${group.values.map(v => `"${v}"`).join(', ')} —`}
+                      </Typography>
+                      <TextField
+                        size="small"
+                        label={`New ${guidance.column}`}
+                        value={bomFixDefaults[group.rule] || ''}
+                        onChange={(event) => setBomFixDefaults(prev => ({ ...prev, [group.rule]: event.target.value }))}
+                        sx={{ width: 150 }}
+                      />
+                      <Button
+                        size="small"
+                        variant="contained"
+                        disabled={Boolean(bomFixBusy) || !String(bomFixDefaults[group.rule] || '').trim()}
+                        startIcon={bomFixBusy === `replace:${group.rule}` ? <CircularProgress size={14} sx={{ color: 'white' }} /> : null}
+                        onClick={() => replaceBomIssueValues(group, fillField, bomFixDefaults[group.rule])}
+                        sx={{
+                          textTransform: 'none', fontWeight: 800, borderRadius: '999px',
+                          bgcolor: '#0ea5e9', '&:hover': { bgcolor: '#0284c7' },
+                        }}
+                      >
+                        Replace
+                      </Button>
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        color="error"
+                        disabled={Boolean(bomFixBusy)}
+                        startIcon={bomFixBusy === `delete:${group.rule}` ? <CircularProgress size={14} /> : null}
+                        onClick={() => deleteBomIssueRows(group, fillField)}
+                        sx={{ textTransform: 'none', fontWeight: 800, borderRadius: '999px' }}
+                      >
+                        {`Delete ${group.count} row${group.count === 1 ? '' : 's'}`}
+                      </Button>
                     </Box>
                   )}
 
