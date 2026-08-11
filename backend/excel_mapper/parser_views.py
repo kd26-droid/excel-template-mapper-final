@@ -24,9 +24,12 @@ from .views import (
     read_session_grid,
     write_session_grid,
 )
+from .delimited_reader import read_delimited_text_safely
 from .models import PDFSession, PDFExtractionResult
 
 logger = logging.getLogger(__name__)
+
+STRUCTURED_STATUS_GROUP_SEPARATOR = '__structured_status_block__'
 
 
 # =============================================================================
@@ -42,6 +45,8 @@ def split_by_separator(text, separator, trim_values=True, drop_empty=True):
     """
     if text is None or not separator:
         parts = [text] if text is not None else []
+    elif separator == STRUCTURED_STATUS_GROUP_SEPARATOR:
+        parts = split_structured_status_blocks(text)
     else:
         parts = str(text).split(separator)
 
@@ -55,6 +60,36 @@ def split_by_separator(text, separator, trim_values=True, drop_empty=True):
     else:
         parts = [str(part) for part in parts]
     return [part for part in parts if not drop_empty or part != '']
+
+
+def split_structured_status_blocks(text):
+    """
+    Split repeated blocks shaped like:
+      <part number> (<manufacturer>) {<status>} [<reference>]
+
+    The separator is structural, not a literal character, so spaces inside MPN,
+    manufacturer, status, or reference text are preserved.
+    """
+    raw = str(text or '')
+    matches = list(re.finditer(r'\{[^}]*\}\s*\[[^\]]*\]', raw))
+    if not matches:
+        return [raw]
+
+    groups = []
+    start = 0
+    for match in matches:
+        end = match.end()
+        group = raw[start:end].strip()
+        if group:
+            groups.append(group)
+        start = end
+        while start < len(raw) and raw[start].isspace():
+            start += 1
+
+    tail = raw[start:].strip()
+    if tail:
+        groups.append(tail)
+    return groups or [raw]
 
 
 def find_delimiter_occurrence(text, delimiter, occurrence=1, start=0):
@@ -172,12 +207,18 @@ def append_extracted_value(result, extraction, value, drop_empty):
     spec_name = extraction.get('spec_name', '')
     custom_name = str(extraction.get('custom_name') or '').strip()
 
+    if output_type == 'discard':
+        return
     if output_type == 'spec' and spec_name:
         result['spec'].setdefault(spec_name, []).append(value)
     elif output_type == 'tag':
         result['tag'].append(value)
     elif output_type == 'custom' and custom_name:
         result['custom'].setdefault(custom_name, []).append(value)
+    elif output_type in ('direct', 'factwise'):
+        target_column = str(extraction.get('target_column') or '').strip()
+        if target_column:
+            result['direct'].setdefault(target_column, []).append(value)
 
 
 def is_final_parenthetical_structured_pattern(extractions, split_mode):
@@ -244,7 +285,7 @@ def parse_cell_single_pattern(cell_value, pattern_config):
     global _parse_log_count
 
     if not cell_value:
-        return {'spec': {}, 'tag': [], 'custom': {}}
+        return {'spec': {}, 'tag': [], 'custom': {}, 'direct': {}}
 
     trim_values = bool(pattern_config.get('trim_values', True))
     drop_empty = bool(pattern_config.get('drop_empty', True))
@@ -260,7 +301,7 @@ def parse_cell_single_pattern(cell_value, pattern_config):
         groups = [cell_value]
 
     # Initialize result
-    result = {'spec': {}, 'tag': [], 'custom': {}}
+    result = {'spec': {}, 'tag': [], 'custom': {}, 'direct': {}}
 
     extractions = pattern_config.get('extractions', [])
     split_mode = str(pattern_config.get('split_mode') or 'pattern')
@@ -297,7 +338,7 @@ def parse_cell_single_pattern(cell_value, pattern_config):
                     logger.info(f"   â†’ Smart final-parenthetical extract: '{value[:30] if value else 'EMPTY'}'")
 
         if _parse_log_count <= 3:
-            logger.info(f"   Result: specs={list(result['spec'].keys())}, tags={len(result['tag'])}, custom={list(result['custom'].keys())}")
+            logger.info(f"   Result: specs={list(result['spec'].keys())}, tags={len(result['tag'])}, custom={list(result['custom'].keys())}, direct={list(result['direct'].keys())}")
         return result
 
     # Process each extraction for each group
@@ -343,7 +384,7 @@ def parse_cell_single_pattern(cell_value, pattern_config):
             append_extracted_value(result, extraction, value, drop_empty)
 
     if _parse_log_count <= 3:
-        logger.info(f"   Result: specs={list(result['spec'].keys())}, tags={len(result['tag'])}, custom={list(result['custom'].keys())}")
+        logger.info(f"   Result: specs={list(result['spec'].keys())}, tags={len(result['tag'])}, custom={list(result['custom'].keys())}, direct={list(result['direct'].keys())}")
 
     return result
 
@@ -419,7 +460,7 @@ def parse_cell(cell_value, parser_config):
         }
     """
     if not cell_value:
-        return {'spec': {}, 'tag': [], 'custom': {}, 'matched_pattern': None}
+        return {'spec': {}, 'tag': [], 'custom': {}, 'direct': {}, 'matched_pattern': None}
 
     cell_value = str(cell_value).strip()
 
@@ -452,11 +493,14 @@ def detect_delimiter_pattern(value):
     s = str(value).strip()
 
     # Check for common patterns
+    structured_status_blocks = re.findall(r'\{[^}]*\}\s*\[[^\]]*\]', s)
     has_paren_comma = '(' in s and ',' in s and ')' in s
     has_pipe = '|' in s
     has_semicolon = ';' in s
 
-    if has_paren_comma:
+    if len(structured_status_blocks) >= 2:
+        return ('structured_status_blocks', STRUCTURED_STATUS_GROUP_SEPARATOR)
+    elif has_paren_comma:
         if '),' in s:
             return ('paren_comma_repeat', '),')
         return ('paren_comma', '')
@@ -628,6 +672,8 @@ def apply_parser_to_data(data, headers, source_column, parser_config):
     max_spec_counts = {}  # {spec_name: max_count}
     max_tag_count = 0
     max_custom_counts = {}
+    direct_outputs = []
+    seen_direct_outputs = set()
 
     for row in data:
         cell_value = row[source_idx] if source_idx < len(row) else ''
@@ -643,10 +689,16 @@ def apply_parser_to_data(data, headers, source_column, parser_config):
         for custom_name, values in parsed.get('custom', {}).items():
             max_custom_counts[custom_name] = max(max_custom_counts.get(custom_name, 0), len(values))
 
+        for target_column in parsed.get('direct', {}).keys():
+            if target_column and target_column not in seen_direct_outputs:
+                seen_direct_outputs.add(target_column)
+                direct_outputs.append(target_column)
+
     logger.info(f"   Parsed {len(parsed_rows)} rows")
     logger.info(f"   max_spec_counts: {max_spec_counts}")
     logger.info(f"   max_tag_count: {max_tag_count}")
     logger.info(f"   max_custom_counts: {max_custom_counts}")
+    logger.info(f"   direct_outputs: {direct_outputs}")
 
     # Build output definitions once. Multiple delimiter parts aimed at one
     # specification belong to one pair, not one duplicated pair per part.
@@ -735,6 +787,9 @@ def apply_parser_to_data(data, headers, source_column, parser_config):
         for offset in range(max_custom_counts[output['name']]):
             new_headers.append(f"{output['name']}_{output['start_index'] + offset}")
 
+    for target_column in direct_outputs:
+        new_headers.append(target_column)
+
     for i in range(max_tag_count):
         new_headers.append(f'Tag_{tag_start_index + i}')
 
@@ -760,6 +815,10 @@ def apply_parser_to_data(data, headers, source_column, parser_config):
             for i in range(max_custom_counts[output['name']]):
                 row_values.append(values[i] if i < len(values) else '')
 
+        for target_column in direct_outputs:
+            values = [value for value in parsed.get('direct', {}).get(target_column, []) if value not in (None, '')]
+            row_values.append(' | '.join(str(value) for value in values))
+
         # Add tags
         tags = parsed['tag']
         for i in range(max_tag_count):
@@ -779,6 +838,7 @@ def apply_parser_to_data(data, headers, source_column, parser_config):
             'specs': max_spec_counts,
             'tags': max_tag_count,
             'custom': max_custom_counts,
+            'direct': direct_outputs,
         }
     }
 
@@ -867,7 +927,7 @@ def get_parser_headers_and_data(info):
             try:
                 actual_path = hybrid_file_manager.get_file_path(client_path)
                 if os.path.exists(str(actual_path)):
-                    df = pd.read_csv(str(actual_path), header=None, dtype=str, keep_default_na=False)
+                    df = read_delimited_text_safely(str(actual_path), header=None, dtype=str, keep_default_na=False)
                     if headers:
                         if len(headers) < df.shape[1]:
                             headers = list(headers) + [f'Column_{i+1}' for i in range(len(headers), df.shape[1])]
@@ -889,7 +949,7 @@ def get_parser_headers_and_data(info):
             ext = Path(str(actual_path)).suffix.lower()
 
             if ext == '.csv':
-                df = pd.read_csv(str(actual_path), header=actual_header_row, dtype=str, keep_default_na=False)
+                df = read_delimited_text_safely(str(actual_path), header=actual_header_row, dtype=str, keep_default_na=False)
                 headers = list(df.columns)
                 data = df.values.tolist()
             else:
@@ -904,7 +964,7 @@ def get_parser_destination_grid(session_id, info):
     """Return the mapped review grid using the same destination fields as the editor."""
     headers, rows = read_session_grid(session_id, info)
     if not headers or rows is None:
-        return [], []
+        return get_parser_headers_and_data(info)
     return make_unique_field_headers(headers), rows
 
 @api_view(['POST'])
@@ -1107,6 +1167,8 @@ def parser_apply(request):
     return Response({
         'success': True,
         'new_headers_count': len(new_headers),
+        'new_headers': new_headers,
+        'new_data': new_data,
         'max_counts': result['max_counts'],
         'source_removed': source_removed,
         'message': f'Parser applied. Added {len(new_headers)} new columns.'

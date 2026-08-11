@@ -9,6 +9,7 @@ import {
   CardContent,
   Checkbox,
   Chip,
+  CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
@@ -48,6 +49,7 @@ import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import api from '../services/api';
 import BomStructureDialog, { reconcileSavedBomStructure } from '../components/BomStructureDialog';
+import ColumnParser from '../components/ColumnParser/ColumnParser';
 import {
   createFactwiseIds,
   createTagColumn,
@@ -308,7 +310,6 @@ const getUsableColumnDescriptors = (rows, headerIndex) => {
 };
 
 const rowsToObjects = (rows, currentHeaders, startRowNumber = 1) => rows
-  .filter((row) => row.some((cell) => fmt(cell)))
   .map((row, rowIndex) => {
     const mapped = {};
     currentHeaders.forEach((header, index) => {
@@ -390,10 +391,17 @@ const worksheetToCompactRows = (worksheet, options = {}) => {
   const { expandMergedCells = true } = options;
   const cells = Object.keys(worksheet).filter((key) => !key.startsWith('!'));
   let maxRow = -1;
+  let maxColumn = -1;
   const valuesByCell = new Map();
   const metaByRow = new Map();
   const usedColumns = new Set();
   const outlineRows = Array.isArray(worksheet?.['!rows']) ? worksheet['!rows'] : [];
+  const range = worksheet?.['!ref'] ? XLSX.utils.decode_range(worksheet['!ref']) : null;
+
+  if (range) {
+    maxRow = Math.max(maxRow, range.e.r);
+    maxColumn = Math.max(maxColumn, range.e.c);
+  }
 
   outlineRows.forEach((rowInfo, rowIndex) => {
     const rawLevel = Number(rowInfo?.level);
@@ -410,6 +418,7 @@ const worksheetToCompactRows = (worksheet, options = {}) => {
     if (!value) return;
     const position = XLSX.utils.decode_cell(cellAddress);
     maxRow = Math.max(maxRow, position.r);
+    maxColumn = Math.max(maxColumn, position.c);
     usedColumns.add(position.c);
     valuesByCell.set(`${position.r}:${position.c}`, value);
     const styleInfo = getCellStyleInfo(cell);
@@ -424,15 +433,22 @@ const worksheetToCompactRows = (worksheet, options = {}) => {
 
   if (expandMergedCells) {
     maxRow = Math.max(maxRow, applyMergedCellValues(worksheet, valuesByCell, usedColumns, metaByRow));
+    if (usedColumns.size) {
+      maxColumn = Math.max(maxColumn, ...usedColumns);
+    }
   }
 
-  if (maxRow < 0 || !usedColumns.size) return [];
+  if (maxRow < 0 || maxColumn < 0) return [];
 
-  const columns = [...usedColumns].sort((a, b) => a - b);
+  const startColumn = 0;
+  const endColumn = maxColumn;
 
   const rows = [];
   for (let rowIndex = 0; rowIndex <= maxRow; rowIndex += 1) {
-    const row = columns.map((colIndex) => valuesByCell.get(`${rowIndex}:${colIndex}`) || '');
+    const row = [];
+    for (let colIndex = startColumn; colIndex <= endColumn; colIndex += 1) {
+      row.push(valuesByCell.get(`${rowIndex}:${colIndex}`) || '');
+    }
     row.__rowMeta = metaByRow.get(rowIndex) || null;
     rows.push(row);
   }
@@ -1530,27 +1546,97 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
   const alternateColumn = config.followingRowAlternateColumn || '';
   let currentGroup = null;
 
+  const looksLikeHierarchyPath = (value) => {
+    const text = fmt(value);
+    return Boolean(text && /(?:^|\s)\d+\s*>/.test(text));
+  };
+
   const parseAlternateText = (value) => {
+    if (looksLikeHierarchyPath(value)) return [];
     const packedPairs = parsePackedMpnManufacturerPairs(value, config);
     if (packedPairs.length) return packedPairs;
-    return splitMpnCell(value, config).map((mpn) => ({
-      mpn: stripVendorPrefix(mpn),
+    return splitMpnCell(value, config)
+      .map(stripVendorPrefix)
+      .filter((mpn) => looksLikeMpnToken(mpn))
+      .map((mpn) => ({
+        mpn,
+        manufacturer: '',
+        metadata: {},
+      }));
+  };
+
+  const parseStandaloneMpnText = (value) => {
+    if (looksLikeHierarchyPath(value)) return [];
+    return splitMpnCell(value, config)
+      .map(stripVendorPrefix)
+      .filter((mpn) => looksLikeMpnToken(mpn) || looksLikeParenthesizedMpn(mpn));
+  };
+
+  const parsePrimaryPairs = (rawMpn, rawManufacturer) => {
+    const manufacturerPackedPairs = parsePackedMpnManufacturerPairs(rawManufacturer, config);
+    const mpnPackedPairs = parsePackedMpnManufacturerPairs(rawMpn, config);
+    const packedPairs = manufacturerPackedPairs.length ? manufacturerPackedPairs : mpnPackedPairs;
+    if (packedPairs.length) return { packedPairs, mpns: [], manufacturers: [] };
+
+    const mpns = parseStandaloneMpnText(rawMpn);
+    const manufacturers = mpns.length
+      ? splitManufacturerCell(rawManufacturer, mpns.length, config)
+      : [];
+    return { packedPairs: [], mpns, manufacturers };
+  };
+
+  const hasPrimaryContextWithoutPart = (row) => {
+    if (
+      getCell(row, roles.parent) ||
+      getCell(row, roles.cpn) ||
+      getCell(row, roles.description) ||
+      getCell(row, roles.quantity) ||
+      getCell(row, roles.uom)
+    ) {
+      return true;
+    }
+
+    const ignoredHeaders = new Set([alternateColumn, roles.level].filter(Boolean).map(normalizeKey));
+    return (config.sourceHeaders || []).some((header) => (
+      header &&
+      !header.startsWith('__') &&
+      !ignoredHeaders.has(normalizeKey(header)) &&
+      getCell(row, header)
+    ));
+  };
+
+  const emitContextPrimary = (row, rowIndex) => {
+    const sourceRow = row.__sourceRow || rowIndex + 1;
+    const group = {
+      sourceRow,
+      parentKey: alternatesKey(row, roles, sourceRow),
+      parent: hierarchyParent(row, roles),
+      level: getCell(row, roles.level) || '1',
+      cpn: getCell(row, roles.cpn),
+      description: getCell(row, roles.description),
+      quantity: getCell(row, roles.quantity),
+      uom: getCell(row, roles.uom),
+      relationCount: 1,
+    };
+
+    output.push(withSourceColumns({
+      ...group,
+      relation: 'Primary',
+      mpn: '',
       manufacturer: '',
-      metadata: {},
-    }));
+      rule: 'following_rows_context_without_mpn_mfr',
+      confidence: 58,
+      discardedText: '',
+    }, row, config));
+
+    return group;
   };
 
   const emitPrimaryParts = (row, rowIndex) => {
     const sourceRow = row.__sourceRow || rowIndex + 1;
     const rawMpn = getCell(row, roles.mpn);
     const rawManufacturer = getCell(row, roles.manufacturer);
-    const packedPairs = parsePackedMpnManufacturerPairs(rawManufacturer, config).length
-      ? parsePackedMpnManufacturerPairs(rawManufacturer, config)
-      : parsePackedMpnManufacturerPairs(rawMpn, config);
-    const mpns = packedPairs.length ? [] : splitMpnCell(rawMpn, config);
-    const manufacturers = packedPairs.length
-      ? []
-      : splitManufacturerCell(rawManufacturer, mpns.length, config);
+    const { packedPairs, mpns, manufacturers } = parsePrimaryPairs(rawMpn, rawManufacturer);
     const primaryManufacturer = manufacturers[0] || '';
     const parentKey = alternatesKey(row, roles, sourceRow);
     const group = {
@@ -1573,7 +1659,7 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
         metadata: {},
       }));
 
-    if (!pairs.length && (rawMpn || rawManufacturer)) {
+    if (!pairs.length && rawMpn && !looksLikeHierarchyPath(rawMpn)) {
       output.push(withSourceColumns({
         ...group,
         relation: 'Primary',
@@ -1608,17 +1694,18 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
     const alternateText = getCell(row, alternateColumn);
     const rawMpn = getCell(row, roles.mpn);
     const rawManufacturer = getCell(row, roles.manufacturer);
-    const rowHasNormalPart = Boolean(rawMpn || rawManufacturer);
-    const rowLooksLikeFollowingAlternate = Boolean(
-      alternateColumn &&
-      alternateText &&
-      !rowHasNormalPart &&
-      currentGroup
+    const primaryParts = parsePrimaryPairs(rawMpn, rawManufacturer);
+    const rowHasNormalPart = Boolean(
+      primaryParts.packedPairs.length ||
+      primaryParts.mpns.length
     );
+    const followingAlternatePairs = alternateColumn && alternateText && !rowHasNormalPart && currentGroup
+      ? parseAlternateText(alternateText)
+      : [];
+    const rowLooksLikeFollowingAlternate = followingAlternatePairs.length > 0;
 
     if (rowLooksLikeFollowingAlternate) {
-      const pairs = parseAlternateText(alternateText);
-      pairs.forEach((pair) => {
+      followingAlternatePairs.forEach((pair) => {
         const relationIndex = currentGroup.relationCount || 1;
         output.push(withSourceColumns({
           sourceRow,
@@ -1644,6 +1731,11 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
 
     if (rowHasNormalPart) {
       currentGroup = emitPrimaryParts(row, rowIndex);
+      return;
+    }
+
+    if (hasPrimaryContextWithoutPart(row)) {
+      currentGroup = emitContextPrimary(row, rowIndex);
     }
   });
 
@@ -2304,20 +2396,72 @@ const workbookFromRows = (rows, sheetName = 'CSV_Source') => {
   return workbook;
 };
 
+const cleanDelimitedCell = (value) => {
+  let text = fmt(value).trim();
+  if (text.length >= 2 && text[0] === '"' && text[text.length - 1] === '"') {
+    text = text.slice(1, -1);
+  }
+  return text.replace(/""/g, '"');
+};
+
+const splitDelimitedLineSafely = (line, delimiter) => {
+  const text = String(line || '');
+  const cells = [];
+  let current = '';
+  let inQuotes = false;
+  let groupDepth = 0;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+
+    if (char === '"') {
+      if (inQuotes && text[index + 1] === '"') {
+        current += '""';
+        index += 1;
+        continue;
+      }
+      inQuotes = !inQuotes;
+      current += char;
+      continue;
+    }
+
+    if (!inQuotes) {
+      if ('([{'.includes(char)) {
+        groupDepth += 1;
+      } else if (')]}'.includes(char) && groupDepth > 0) {
+        groupDepth -= 1;
+      }
+
+      if (char === delimiter && groupDepth === 0) {
+        cells.push(cleanDelimitedCell(current));
+        current = '';
+        continue;
+      }
+    }
+
+    current += char;
+  }
+
+  cells.push(cleanDelimitedCell(current));
+  return cells;
+};
+
+const countDelimitedFieldsSafely = (line, delimiter) => splitDelimitedLineSafely(line, delimiter).length;
+
 // Some exports (THALES ARTDOC, SAP part lists) put a newline INSIDE a cell without
 // quoting it, so a plain line split shreds one record across several lines. A line
 // that carries fewer separators than the header is a continuation of the row above,
 // not a new row.
 const rejoinWrappedLines = (lines, delimiter) => {
   if (!lines.length) return [];
-  const expected = lines[0].split(delimiter).length;
+  const expected = countDelimitedFieldsSafely(lines[0], delimiter);
   if (expected < 2) return lines;
 
   const joined = [];
   let buffer = null;
   lines.forEach((line) => {
     buffer = buffer === null ? line : `${buffer}\n${line}`;
-    if (buffer.split(delimiter).length >= expected) {
+    if (countDelimitedFieldsSafely(buffer, delimiter) >= expected) {
       joined.push(buffer);
       buffer = null;
     }
@@ -2336,7 +2480,7 @@ const detectDelimiter = (text) => {
   let best = ',';
   let bestScore = -1;
   [',', ';', '\t', '|'].forEach((candidate) => {
-    const counts = sample.map((line) => line.split(candidate).length);
+    const counts = sample.map((line) => countDelimitedFieldsSafely(line, candidate));
     const first = counts[0];
     if (first < 2) return;
     // Reward width, penalise rows that disagree with the header width.
@@ -2350,9 +2494,18 @@ const detectDelimiter = (text) => {
   return best;
 };
 
-const splitDelimitedLine = (line, delimiter) => line
-  .split(delimiter)
-  .map((cell) => fmt(cell).replace(/^"|"$/g, '').replace(/""/g, '"'));
+const splitDelimitedLine = (line, delimiter) => splitDelimitedLineSafely(line, delimiter);
+
+const workbookLooksColumnCollapsed = (rows) => {
+  const headerWidth = (rows[0] || []).filter((cell) => fmt(cell)).length;
+  if (headerWidth < 2) return true;
+
+  const body = rows.slice(1).filter((row) => row.some((cell) => fmt(cell)));
+  if (body.length <= 10) return false;
+
+  const multiCellRows = body.filter((row) => row.filter((cell) => fmt(cell)).length > 1).length;
+  return multiCellRows < Math.max(3, body.length * 0.15);
+};
 
 const readCsvWorkbookSafely = async (file) => {
   if (!XLSX || !XLSX.read || !XLSX.utils) {
@@ -2372,7 +2525,7 @@ const readCsvWorkbookSafely = async (file) => {
     () => {
       const rows = text
         .split(/\r?\n/)
-        .map((line) => line.split(',').map((cell) => fmt(cell).replace(/^"|"$/g, '').replace(/""/g, '"')));
+        .map((line) => splitDelimitedLine(line, ','));
       return workbookFromRows(rows);
     },
     // Non-comma separators, with wrapped rows stitched back together.
@@ -2391,17 +2544,13 @@ const readCsvWorkbookSafely = async (file) => {
     try {
       const workbook = attempt();
       if (workbook?.SheetNames?.length) {
-        // A parse that leaves most rows with a single populated cell means the wrong
-        // separator won: the file loaded, but every column collapsed into one. Fall
-        // through to the next attempt rather than returning a broken sheet.
+        // Reject only genuinely collapsed parses. Sparse one-cell rows can be valid
+        // BOM alternate rows and must stay visible in the source preview.
         const rows = XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], {
           header: 1,
           defval: '',
         });
-        const body = rows.slice(1);
-        const shredded = body.length > 10
-          && body.filter((row) => row.filter((cell) => fmt(cell)).length <= 1).length > body.length * 0.25;
-        if (!shredded) return workbook;
+        if (!workbookLooksColumnCollapsed(rows)) return workbook;
       }
     } catch (err) {
       lastError = err;
@@ -2596,7 +2745,6 @@ const prepareSingleSheet = (currentWorkbook, currentSheetName, options = {}) => 
   const outputHeaders = outlineLevelHeader ? [...currentHeaders, outlineLevelHeader] : currentHeaders;
   const currentRows = rows
     .slice(headerIndex + 1)
-    .filter((row) => row.some((cell) => fmt(cell)))
     .map((row, rowIndex) => {
       const mapped = {};
       columns.forEach((column) => {
@@ -3644,6 +3792,10 @@ const BomNormalizer = () => {
   const [selectedManufacturerMatches, setSelectedManufacturerMatches] = useState([]);
   const [downloadMenuAnchor, setDownloadMenuAnchor] = useState(null);
   const [toolsMenuAnchor, setToolsMenuAnchor] = useState(null);
+  const [configureToolsMenuAnchor, setConfigureToolsMenuAnchor] = useState(null);
+  const [configureSplitColsOpen, setConfigureSplitColsOpen] = useState(false);
+  const [configureParserSessionId, setConfigureParserSessionId] = useState('');
+  const [configureParserPreparing, setConfigureParserPreparing] = useState(false);
   const [combineItems, setCombineItems] = useState([]);
   const [combineBusy, setCombineBusy] = useState(false);
   const [combineError, setCombineError] = useState('');
@@ -4974,6 +5126,10 @@ const BomNormalizer = () => {
     setLowConfidenceOnly(false);
     setDownloadMenuAnchor(null);
     setToolsMenuAnchor(null);
+    setConfigureToolsMenuAnchor(null);
+    setConfigureSplitColsOpen(false);
+    setConfigureParserSessionId('');
+    setConfigureParserPreparing(false);
     setCombineItems([baseItem]);
     setMergeSources([]);
     setMergePreview(null);
@@ -5410,7 +5566,6 @@ const BomNormalizer = () => {
     setPreparedHeaders(nextHeaders);
     setPreparedDataRows(sheetRows
       .slice(nextIndex + 1)
-      .filter((row) => row.some((cell) => fmt(cell)))
       .map((row, rowIndex) => {
         const mapped = {};
         columns.forEach((column) => {
@@ -5683,6 +5838,85 @@ const BomNormalizer = () => {
     }
   }, [commitNormalizedResult, config, dataRows, headers, roles]);
 
+  const handleOpenConfigureSplitColumns = useCallback(async () => {
+    setConfigureToolsMenuAnchor(null);
+    if (!headers.length || !dataRows.length) {
+      setError('No source rows are available for Split into Columns.');
+      return;
+    }
+
+    setConfigureParserPreparing(true);
+    setError('');
+    try {
+      const rows = dataRows.map((row) => {
+        const cleanRow = {};
+        headers.forEach((header) => {
+          cleanRow[header] = row?.[header] ?? '';
+        });
+        return cleanRow;
+      });
+      const file = createWorkbookFileFromRows(rows, headers, 'normalizer-source-for-split.xlsx', 'Source');
+      const formData = new FormData();
+      formData.append('clientFile', file);
+      formData.append('sheetName', 'Source');
+      formData.append('headerRow', '1');
+
+      const response = await api.uploadFiles(formData);
+      const sessionId = response.data?.session_id;
+      if (!sessionId) throw new Error('Upload response missing session id.');
+
+      setConfigureParserSessionId(sessionId);
+      setConfigureSplitColsOpen(true);
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Could not prepare Split into Columns.');
+    } finally {
+      setConfigureParserPreparing(false);
+    }
+  }, [dataRows, headers]);
+
+  const handleApplyConfigureSplitColumns = useCallback((result) => {
+    const parserHeaders = Array.isArray(result?.new_headers) ? result.new_headers : [];
+    const parserData = Array.isArray(result?.new_data) ? result.new_data : [];
+    if (!parserHeaders.length || !parserData.length) {
+      setError('Split into Columns applied, but no parsed data was returned.');
+      return;
+    }
+
+    const nextHeaders = [...headers];
+    const parserHeaderMap = parserHeaders.map((header) => {
+      if (nextHeaders.includes(header)) return header;
+      const safeHeader = uniqueHeaderName(header, nextHeaders);
+      nextHeaders.push(safeHeader);
+      return safeHeader;
+    });
+
+    const sourceRows = sourceDataRows.length ? sourceDataRows : dataRows;
+    const nextRows = sourceRows.map((source, index) => {
+      const parserRow = parserData[index] || [];
+      const nextRow = {
+        ...source,
+        __sourceRow: source.__sourceRow || index + headerRowIndex + 2,
+      };
+      parserHeaderMap.forEach((header, columnIndex) => {
+        nextRow[header] = Array.isArray(parserRow)
+          ? (parserRow[columnIndex] ?? '')
+          : (parserRow?.[parserHeaders[columnIndex]] ?? '');
+      });
+      return nextRow;
+    });
+
+    const headerSet = new Set(nextHeaders);
+    setPreparedHeaders(nextHeaders);
+    setPreparedDataRows(nextRows);
+    setRoles((prev) => Object.fromEntries(
+      Object.entries(prev).map(([key, value]) => [key, headerSet.has(value) ? value : ''])
+    ));
+    setConfigureSplitColsOpen(false);
+    setConfigureParserSessionId('');
+    setParserTouched(true);
+    setSuccessMessage(`Structured split applied. Added ${result.new_headers_count || 0} columns.`);
+  }, [dataRows, headerRowIndex, headers, sourceDataRows]);
+
   const handleOpenFactwiseDialog = useCallback(() => {
     setFactwiseConfig((prev) => ({
       ...prev,
@@ -5800,6 +6034,10 @@ const BomNormalizer = () => {
     setManufacturerMatchOpen(false);
     setDownloadMenuAnchor(null);
     setToolsMenuAnchor(null);
+    setConfigureToolsMenuAnchor(null);
+    setConfigureSplitColsOpen(false);
+    setConfigureParserSessionId('');
+    setConfigureParserPreparing(false);
     setCombineItems([]);
     setCombineBusy(false);
     setCombineError('');
@@ -6640,10 +6878,44 @@ const BomNormalizer = () => {
 
             {currentStep === 2 && (
               <Paper elevation={0} sx={{ p: 2.5, border: '1px solid #dce2e8' }}>
-                <Typography sx={{ fontSize: 18, fontWeight: 800 }}>Configure source columns and parsing</Typography>
-                <Typography sx={{ mt: 0.5, fontSize: 13, color: '#66717f' }}>
-                  Pick the important columns first. Parser assumptions update automatically from those choices.
-                </Typography>
+                <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'flex-start' }} gap={1.5}>
+                  <Box>
+                    <Typography sx={{ fontSize: 18, fontWeight: 800 }}>Configure source columns and parsing</Typography>
+                    <Typography sx={{ mt: 0.5, fontSize: 13, color: '#66717f' }}>
+                      Pick the important columns first. Parser assumptions update automatically from those choices.
+                    </Typography>
+                  </Box>
+                  <Box sx={{ display: 'flex', justifyContent: { xs: 'flex-start', sm: 'flex-end' }, gap: 1, flexWrap: 'wrap' }}>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={() => setSourceGridOpen(true)}
+                      disabled={!sourceDataRows.length}
+                    >
+                      View all rows
+                    </Button>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      disabled={busy || configureParserPreparing || !headers.length || !dataRows.length}
+                      onClick={(event) => setConfigureToolsMenuAnchor(event.currentTarget)}
+                    >
+                      {configureParserPreparing ? 'Preparing...' : 'Tools'}
+                    </Button>
+                    <Menu
+                      anchorEl={configureToolsMenuAnchor}
+                      open={Boolean(configureToolsMenuAnchor)}
+                      onClose={() => setConfigureToolsMenuAnchor(null)}
+                    >
+                      <MenuItem
+                        disabled={busy || configureParserPreparing || !headers.length || !dataRows.length}
+                        onClick={handleOpenConfigureSplitColumns}
+                      >
+                        <ListItemText>Split into Columns</ListItemText>
+                      </MenuItem>
+                    </Menu>
+                  </Box>
+                </Stack>
                 <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 1.2 }}>
                   <Chip size="small" label={`${headers.length} columns`} />
                   <Chip
@@ -8046,6 +8318,42 @@ const BomNormalizer = () => {
             }}
           >
             Proceed
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={configureSplitColsOpen}
+        onClose={() => {
+          setConfigureSplitColsOpen(false);
+          setConfigureParserSessionId('');
+        }}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>Split into Columns</DialogTitle>
+        <DialogContent>
+          {configureParserSessionId ? (
+            <ColumnParser
+              sessionId={configureParserSessionId}
+              availableColumns={headers}
+              onApply={handleApplyConfigureSplitColumns}
+            />
+          ) : (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, py: 3 }}>
+              <CircularProgress size={18} />
+              <Typography sx={{ fontSize: 14, color: '#66717f' }}>Preparing...</Typography>
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              setConfigureSplitColsOpen(false);
+              setConfigureParserSessionId('');
+            }}
+          >
+            Cancel
           </Button>
         </DialogActions>
       </Dialog>

@@ -37,8 +37,9 @@ import {
 const API_BASE = process.env.REACT_APP_API_BASE_URL || '/api';
 const STEPS = ['Split points', 'Outputs', 'Preview'];
 const CUSTOM_GROUP_SEPARATOR = '__custom__';
+const STRUCTURED_STATUS_GROUP_SEPARATOR = '__structured_status_block__';
 const CUSTOM_SIMPLE_DELIMITER = '__custom__';
-const GROUP_SEPARATOR_PRESETS = ['', '),', ',', '/', '|', ';', ' '];
+const GROUP_SEPARATOR_PRESETS = ['', STRUCTURED_STATUS_GROUP_SEPARATOR, '),', ',', '/', '|', ';', ' '];
 const SIMPLE_DELIMITER_PRESETS = [
   { value: ',', label: 'Comma ,' },
   { value: ';', label: 'Semicolon ;' },
@@ -48,6 +49,16 @@ const SIMPLE_DELIMITER_PRESETS = [
   { value: '\t', label: 'Tab' },
   { value: '\n', label: 'New line' },
 ];
+const FACTWISE_OUTPUT_COLUMNS = [
+  { value: 'MPN', label: 'MPN' },
+  { value: 'MFR', label: 'MFR' },
+  { value: 'CPN', label: 'CPN' },
+  { value: 'Description', label: 'Description' },
+  { value: 'Quantity', label: 'Quantity' },
+  { value: 'UOM', label: 'UOM' },
+  { value: 'Reference Designator', label: 'Reference Designator' },
+  { value: 'Extra', label: 'Extra' },
+];
 
 const numberedColumnIndex = (value, pattern, genericName) => {
   const match = String(value || '').match(pattern);
@@ -56,6 +67,36 @@ const numberedColumnIndex = (value, pattern, genericName) => {
 };
 
 const escapeRegExp = value => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const splitStructuredStatusBlocks = (value) => {
+  const text = String(value || '');
+  const matches = [...text.matchAll(/\{[^}]*\}\s*\[[^\]]*\]/g)];
+  if (!matches.length) return [text];
+
+  const groups = [];
+  let start = 0;
+  matches.forEach((match) => {
+    const end = (match.index || 0) + match[0].length;
+    const group = text.slice(start, end).trim();
+    if (group) groups.push(group);
+    start = end;
+    while (start < text.length && /\s/.test(text[start])) start += 1;
+  });
+  const tail = text.slice(start).trim();
+  if (tail) groups.push(tail);
+  return groups.length ? groups : [text];
+};
+
+const splitGroups = (value, separator) => {
+  const text = String(value || '');
+  if (!separator) return [text];
+  if (separator === STRUCTURED_STATUS_GROUP_SEPARATOR) return splitStructuredStatusBlocks(text);
+  let groups = text.split(separator);
+  if (separator === '),') {
+    groups = groups.map((group, index) => index < groups.length - 1 ? `${group})` : group);
+  }
+  return groups;
+};
 
 const buildParts = (text, boundaries, trimValues, dropEmptyValues) => {
   if (!text || boundaries.length === 0) return [];
@@ -77,6 +118,8 @@ const buildParts = (text, boundaries, trimValues, dropEmptyValues) => {
     preview: cleanValue(text.substring(0, ordered[0].index)),
     outputType: 'spec',
     specName: '',
+    customName: '',
+    targetColumn: '',
   }];
 
   for (let index = 0; index < ordered.length - 1; index += 1) {
@@ -94,6 +137,8 @@ const buildParts = (text, boundaries, trimValues, dropEmptyValues) => {
       preview: cleanValue(text.substring(start, end)),
       outputType: 'spec',
       specName: '',
+      customName: '',
+      targetColumn: '',
     });
   }
 
@@ -107,6 +152,8 @@ const buildParts = (text, boundaries, trimValues, dropEmptyValues) => {
     preview: cleanValue(text.substring(last.index + 1)),
     outputType: 'spec',
     specName: '',
+    customName: '',
+    targetColumn: '',
   });
 
   return dropEmptyValues ? parts.filter(part => part.preview !== '') : parts;
@@ -203,10 +250,7 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
   }, [columns, simpleCustomName]);
   const firstGroup = useMemo(() => {
     if (!currentSample || !groupSeparator) return currentSample;
-    let groups = currentSample.split(groupSeparator);
-    if (groupSeparator === '),') {
-      groups = groups.map((group, index) => index < groups.length - 1 ? `${group})` : group);
-    }
+    const groups = splitGroups(currentSample, groupSeparator);
     const first = groups[0] ?? currentSample;
     return trimValues ? first.trim() : first;
   }, [currentSample, groupSeparator, trimValues]);
@@ -226,6 +270,8 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
           preview: value,
           outputType: 'spec',
           specName: '',
+          customName: '',
+          targetColumn: '',
         }))
         : [];
     } else if (splitMode === 'characters') {
@@ -242,6 +288,8 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
           preview,
           outputType: 'spec',
           specName: '',
+          customName: '',
+          targetColumn: '',
         });
       }
     } else {
@@ -251,6 +299,8 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
       ...part,
       outputType: previous[index]?.outputType || part.outputType,
       specName: previous[index]?.specName || '',
+      customName: previous[index]?.customName || '',
+      targetColumn: previous[index]?.targetColumn || '',
     })));
   }, [boundaries, chunkSize, dropEmptyValues, firstGroup, simpleDelimiter, splitMode, trimValues]);
 
@@ -305,7 +355,6 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
 
   const parserConfig = useMemo(() => {
     const extractions = parts.map((part, index) => {
-      const simpleSpecOutput = splitMode === 'delimiter' && simpleOutputType === 'spec';
       return {
         type: part.type,
         part_index: part.partIndex ?? index,
@@ -315,15 +364,12 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
         char2_index: part.type === 'between' ? part.endDelimiterIndex : null,
         char1_occurrence: part.type === 'between' ? part.startDelimiterOccurrence : part.delimiterOccurrence,
         char2_occurrence: part.type === 'between' ? part.endDelimiterOccurrence : null,
-        output_type: splitMode === 'delimiter' ? simpleOutputType : part.outputType,
-        spec_name: simpleSpecOutput
-          ? (simpleSpecTarget === 'new' ? simpleSpecName.trim() : `Specification pair ${selectedSpecPairIndex}`)
-          : (part.specName || ''),
-        spec_pair_index: simpleSpecOutput ? selectedSpecPairIndex : null,
-        include_spec_name: simpleSpecOutput ? simpleSpecTarget === 'new' : true,
-        custom_name: splitMode === 'delimiter' && simpleOutputType === 'custom'
-          ? simpleCustomName.trim()
-          : '',
+        output_type: part.outputType,
+        spec_name: part.outputType === 'spec' ? (part.specName || '') : '',
+        spec_pair_index: null,
+        include_spec_name: true,
+        custom_name: part.outputType === 'custom' ? (part.customName || '').trim() : '',
+        target_column: part.outputType === 'direct' ? (part.targetColumn || '').trim() : '',
       };
     });
     return { patterns: [{
@@ -337,19 +383,19 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
       keep_source_column: keepSourceColumn,
       extractions,
     }] };
-  }, [chunkSize, dropEmptyValues, groupSeparator, keepSourceColumn, parts, selectedSpecPairIndex, simpleCustomName, simpleDelimiter, simpleOutputType, simpleSpecName, simpleSpecTarget, splitMode, trimValues]);
+  }, [chunkSize, dropEmptyValues, groupSeparator, keepSourceColumn, parts, simpleDelimiter, splitMode, trimValues]);
 
   const loadPreview = async () => {
-    if (splitMode === 'delimiter' && simpleOutputType === 'spec' && simpleSpecTarget === 'new' && !simpleSpecName.trim()) {
-      setError('Enter a name for the new Specification pair.');
-      return;
-    }
-    if (splitMode === 'delimiter' && simpleOutputType === 'custom' && !simpleCustomName.trim()) {
-      setError('Enter a name for the custom columns.');
-      return;
-    }
-    if (splitMode !== 'delimiter' && parts.some(part => part.outputType === 'spec' && !part.specName.trim())) {
+    if (parts.some(part => part.outputType === 'spec' && !part.specName.trim())) {
       setError('Enter a name for every Specification output.');
+      return;
+    }
+    if (parts.some(part => part.outputType === 'custom' && !part.customName.trim())) {
+      setError('Enter a name for every Custom column output.');
+      return;
+    }
+    if (parts.some(part => part.outputType === 'direct' && !part.targetColumn.trim())) {
+      setError('Select a target column for every FactWise output.');
       return;
     }
     try {
@@ -398,6 +444,94 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
       setLoading(false);
     }
   };
+
+  const renderPartOutputRows = () => (
+    <Box sx={{ borderTop: '1px solid #e5e7eb', mb: 2 }}>
+      {parts.map((part, index) => (
+        <Box
+          key={part.id}
+          sx={{
+            display: 'grid',
+            gridTemplateColumns: { xs: '1fr', md: 'minmax(140px, 1fr) 190px minmax(200px, 1fr)' },
+            gap: 1.5,
+            alignItems: 'center',
+            py: 1.25,
+            borderBottom: '1px solid #e5e7eb',
+          }}
+        >
+          <Typography variant="body2" sx={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+            {index + 1}. {part.preview || '(empty)'}
+          </Typography>
+          <FormControl size="small">
+            <InputLabel>Output</InputLabel>
+            <Select
+              label="Output"
+              value={part.outputType}
+              onChange={event => {
+                updatePart(part.id, 'outputType', event.target.value);
+                setError('');
+                setPreviewData(null);
+              }}
+            >
+              <MenuItem value="direct">FactWise column</MenuItem>
+              <MenuItem value="spec">Specification</MenuItem>
+              <MenuItem value="tag">Tag</MenuItem>
+              <MenuItem value="custom">Custom column</MenuItem>
+              <MenuItem value="discard">Discard text</MenuItem>
+            </Select>
+          </FormControl>
+          {part.outputType === 'direct' ? (
+            <FormControl size="small">
+              <InputLabel>Target column</InputLabel>
+              <Select
+                label="Target column"
+                value={part.targetColumn}
+                onChange={event => {
+                  updatePart(part.id, 'targetColumn', event.target.value);
+                  setError('');
+                  setPreviewData(null);
+                }}
+              >
+                {FACTWISE_OUTPUT_COLUMNS.map(option => (
+                  <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+          ) : part.outputType === 'spec' ? (
+            <TextField
+              size="small"
+              label="Specification name"
+              value={part.specName}
+              onChange={event => {
+                updatePart(part.id, 'specName', event.target.value);
+                setError('');
+                setPreviewData(null);
+              }}
+            />
+          ) : part.outputType === 'custom' ? (
+            <TextField
+              size="small"
+              label="Column name"
+              value={part.customName}
+              onChange={event => {
+                updatePart(part.id, 'customName', event.target.value);
+                setError('');
+                setPreviewData(null);
+              }}
+            />
+          ) : part.outputType === 'tag' ? (
+            <Typography variant="caption" color="text.secondary">
+              Adds the value as the next Tag column.
+            </Typography>
+          ) : (
+            <Typography variant="caption" color="text.secondary">
+              This value will not be added to the output.
+            </Typography>
+          )}
+        </Box>
+      ))}
+    </Box>
+  );
 
   return (
     <Box sx={{ pt: 1 }}>
@@ -460,31 +594,10 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
 
               <Box sx={{ mb: 2.5 }}>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 1.5, flexWrap: 'wrap', mb: 1.5 }}>
-                  <Typography variant="subtitle2" sx={{ pt: 1 }}>Select split points</Typography>
+                  <Typography variant="subtitle2" sx={{ pt: 1 }}>
+                    {splitMode === 'delimiter' ? 'Delimiter settings' : 'Select split points'}
+                  </Typography>
                   <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1, flexWrap: 'wrap', ml: 'auto', maxWidth: '100%' }}>
-                    <FormControl size="small" sx={{ width: { xs: '100%', sm: 190 }, maxWidth: '100%' }}>
-                      <InputLabel>Split by</InputLabel>
-                      <Select
-                        label="Split by"
-                        value={splitMode}
-                        onChange={event => {
-                          const nextMode = event.target.value;
-                          setSplitMode(nextMode);
-                          setBoundaries([]);
-                          setSimpleDelimiter('');
-                          setSimpleDelimiterMode('');
-                          setPreviewData(null);
-                          if (nextMode !== 'pattern') {
-                            setGroupSeparator('');
-                            setGroupSeparatorMode('');
-                          }
-                        }}
-                      >
-                        <MenuItem value="pattern">Pattern</MenuItem>
-                        <MenuItem value="delimiter">Simple delimiter</MenuItem>
-                        <MenuItem value="characters">Every N characters</MenuItem>
-                      </Select>
-                    </FormControl>
                     {splitMode === 'delimiter' && (
                       <FormControl size="small" sx={{ width: { xs: '100%', sm: 190 }, maxWidth: '100%' }}>
                         <InputLabel>Delimiter</InputLabel>
@@ -542,6 +655,7 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
                         }}
                       >
                         <MenuItem value="">None</MenuItem>
+                        <MenuItem value={STRUCTURED_STATUS_GROUP_SEPARATOR}>Structured block&nbsp; (...) {'{...}'} [...]</MenuItem>
                         <MenuItem value="),">Closing bracket + comma&nbsp; ),</MenuItem>
                         <MenuItem value=",">Comma&nbsp; ,</MenuItem>
                         <MenuItem value="/">Slash&nbsp; /</MenuItem>
@@ -646,115 +760,7 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
 
       {step === 1 && (
         <Box>
-          {splitMode === 'delimiter' ? (
-            <Box sx={{ display: 'grid', gap: 2.25, mb: 2.5 }}>
-              <FormControl size="small" fullWidth>
-                <InputLabel>Output</InputLabel>
-                <Select
-                  label="Output"
-                  value={simpleOutputType}
-                  onChange={event => {
-                    setSimpleOutputType(event.target.value);
-                    setError('');
-                    setPreviewData(null);
-                  }}
-                >
-                  <MenuItem value="tag">Add Tags</MenuItem>
-                  <MenuItem value="spec">Add Specification Values</MenuItem>
-                  <MenuItem value="custom">Custom columns</MenuItem>
-                </Select>
-              </FormControl>
-
-              {simpleOutputType === 'spec' && (
-                <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: 'minmax(220px, 1fr) minmax(220px, 1fr)' }, gap: 1.5 }}>
-                  <FormControl size="small" fullWidth>
-                    <InputLabel>Specification pair</InputLabel>
-                    <Select
-                      label="Specification pair"
-                      value={simpleSpecTarget}
-                      onChange={event => {
-                        setSimpleSpecTarget(event.target.value);
-                        setError('');
-                        setPreviewData(null);
-                      }}
-                    >
-                      {existingSpecPairs.map(pairIndex => (
-                        <MenuItem key={pairIndex} value={String(pairIndex)}>Specification pair ({pairIndex})</MenuItem>
-                      ))}
-                      <MenuItem value="new">Add specification pair ({nextSpecPairIndex})</MenuItem>
-                    </Select>
-                  </FormControl>
-                  {simpleSpecTarget === 'new' && (
-                    <TextField
-                      size="small"
-                      label="Specification name"
-                      value={simpleSpecName}
-                      onChange={event => setSimpleSpecName(event.target.value)}
-                    />
-                  )}
-                </Box>
-              )}
-
-              {simpleOutputType === 'custom' && (
-                <TextField
-                  size="small"
-                  fullWidth
-                  label="Column name"
-                  placeholder="e.g. Reference Designator"
-                  value={simpleCustomName}
-                  onChange={event => {
-                    setSimpleCustomName(event.target.value);
-                    setError('');
-                    setPreviewData(null);
-                  }}
-                />
-              )}
-
-              <Box sx={{ display: 'grid', gap: 1 }}>
-                <Typography variant="subtitle2">Columns to add</Typography>
-                <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                  {simpleOutputType === 'tag' ? parts.map((part, index) => (
-                      <Chip key={part.id} label={`Tag (${existingTagMax + index + 1}): ${part.preview || '(empty)'}`} />
-                    )) : simpleOutputType === 'spec' ? parts.map((part, index) => (
-                      <Chip key={part.id} label={`Specification value (${selectedSpecPairIndex}.${index + 1}): ${part.preview || '(empty)'}`} />
-                    )) : parts.map((part, index) => (
-                      <Chip
-                        key={part.id}
-                        label={`${simpleCustomName.trim() || 'Custom column'} (${existingCustomMax + index + 1}): ${part.preview || '(empty)'}`}
-                      />
-                    ))}
-                </Box>
-              </Box>
-            </Box>
-          ) : (
-          <Box sx={{ borderTop: '1px solid #e5e7eb', mb: 2 }}>
-            {parts.map((part, index) => (
-              <Box
-                key={part.id}
-                sx={{ display: 'grid', gridTemplateColumns: 'minmax(140px, 1fr) 160px minmax(180px, 1fr)', gap: 1.5, alignItems: 'center', py: 1.25, borderBottom: '1px solid #e5e7eb' }}
-              >
-                <Typography variant="body2" sx={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {index + 1}. {part.preview || '(empty)'}
-                </Typography>
-                <FormControl size="small">
-                  <InputLabel>Output</InputLabel>
-                  <Select label="Output" value={part.outputType} onChange={event => updatePart(part.id, 'outputType', event.target.value)}>
-                    <MenuItem value="spec">Specification</MenuItem>
-                    <MenuItem value="tag">Tag</MenuItem>
-                  </Select>
-                </FormControl>
-                {part.outputType === 'spec' ? (
-                  <TextField
-                    size="small"
-                    label="Specification name"
-                    value={part.specName}
-                    onChange={event => updatePart(part.id, 'specName', event.target.value)}
-                  />
-                ) : <Box />}
-              </Box>
-            ))}
-          </Box>
-          )}
+          {renderPartOutputRows()}
           <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
             <Button startIcon={<ArrowBackIcon />} onClick={() => setStep(0)}>Back</Button>
             <Button variant="contained" startIcon={<ContentCutIcon />} onClick={loadPreview} disabled={loading}>

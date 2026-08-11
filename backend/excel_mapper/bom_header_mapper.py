@@ -6,6 +6,8 @@ from pathlib import Path
 import json
 from rapidfuzz import fuzz, distance
 
+from .delimited_reader import read_delimited_text_safely
+
 
 class AdvancedElectronicsSpecificationParser:
     """
@@ -205,29 +207,7 @@ class BOMHeaderMapper:
                 raise FileNotFoundError(f"File not found: {file_path}")
             
             if str(file_path).lower().endswith('.csv'):
-                # For CSV files, try different encodings to handle various formats
-                encodings_to_try = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1', 'windows-1252']
-                
-                for encoding in encodings_to_try:
-                    try:
-                        df = pd.read_csv(
-                            file_path, 
-                            header=header_row, 
-                            nrows=1,
-                            encoding=encoding,
-                            on_bad_lines='skip'
-                        )
-                        break
-                    except (UnicodeDecodeError, UnicodeError):
-                        continue
-                    except Exception as e:
-                        # If it's not an encoding error, try the next encoding
-                        if encoding == encodings_to_try[-1]:
-                            raise e
-                        continue
-                else:
-                    # If all encodings failed, raise the last error
-                    raise Exception("Could not read CSV file with any supported encoding")
+                df = read_delimited_text_safely(file_path, header=header_row, nrows=1)
             else:
                 try:
                     if sheet_name is None:
@@ -250,26 +230,7 @@ class BOMHeaderMapper:
             return []
 
     def _read_delimited_text(self, file_path: Union[str, Path], header_row: int = 0, **kwargs):
-        encodings_to_try = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1', 'windows-1252']
-        last_error = None
-        for encoding in encodings_to_try:
-            try:
-                return pd.read_csv(
-                    file_path,
-                    header=header_row,
-                    encoding=encoding,
-                    sep=None,
-                    engine='python',
-                    on_bad_lines='skip',
-                    **kwargs
-                )
-            except (UnicodeDecodeError, UnicodeError) as exc:
-                last_error = exc
-                continue
-            except Exception as exc:
-                last_error = exc
-                continue
-        raise last_error or Exception("Could not read delimited text file")
+        return read_delimited_text_safely(file_path, header=header_row, **kwargs)
     
     def read_sample_data(self, file_path: Union[str, Path], 
                         sheet_name: str = None, 
@@ -282,27 +243,7 @@ class BOMHeaderMapper:
                 raise FileNotFoundError(f"File not found: {file_path}")
             
             if str(file_path).lower().endswith('.csv'):
-                # For CSV files, try different encodings to handle various formats
-                encodings_to_try = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1', 'windows-1252']
-                
-                for encoding in encodings_to_try:
-                    try:
-                        df = pd.read_csv(
-                            file_path,
-                            header=header_row,
-                            nrows=sample_rows,
-                            encoding=encoding,
-                            on_bad_lines='skip'
-                        )
-                        break
-                    except (UnicodeDecodeError, UnicodeError):
-                        continue
-                    except Exception as e:
-                        if encoding == encodings_to_try[-1]:
-                            raise e
-                        continue
-                else:
-                    raise Exception("Could not read CSV file with any supported encoding")
+                df = read_delimited_text_safely(file_path, header=header_row, nrows=sample_rows)
             else:
                 try:
                     if sheet_name is None:

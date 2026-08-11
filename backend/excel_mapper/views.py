@@ -35,6 +35,11 @@ import json
 import tempfile
 import shutil
 
+from .delimited_reader import (
+    ENCODINGS_TO_TRY,
+    dataframe_from_delimited_text,
+    read_delimited_text_safely,
+)
 from .bom_header_mapper import BOMHeaderMapper
 from .default_template import (
     get_sfo_template_metadata,
@@ -274,26 +279,7 @@ def read_csv_with_encoding(file_path, header_row, **kwargs):
     Helper function to read CSV files with proper encoding detection.
     Tries multiple encodings to handle various CSV formats.
     """
-    encodings_to_try = ['utf-8', 'latin-1', 'cp1252', 'iso-8859-1', 'windows-1252']
-
-    for encoding in encodings_to_try:
-        try:
-            df = pd.read_csv(
-                file_path,
-                header=header_row,
-                encoding=encoding,
-                on_bad_lines='skip',
-                **kwargs
-            )
-            return df
-        except (UnicodeDecodeError, UnicodeError):
-            continue
-        except Exception as e:
-            if encoding == encodings_to_try[-1]:
-                raise e
-            continue
-
-    raise Exception("Could not read CSV file with any supported encoding")
+    return read_delimited_text_safely(file_path, header=header_row, **kwargs)
 
 
 def _looks_like_delimited_text_file(file_path) -> bool:
@@ -2731,7 +2717,7 @@ def get_headers(request, session_id):
             if template_header_row_idx > 0:
                 # Read all rows above the header row to scan for annotations
                 if str(template_path).lower().endswith('.csv'):
-                    df_ann = pd.read_csv(template_path, header=None, nrows=template_header_row_idx)
+                    df_ann = read_delimited_text_safely(template_path, header=None, nrows=template_header_row_idx)
                 else:
                     df_ann = pd.read_excel(template_path, sheet_name=info.get("template_sheet_name"), header=None, nrows=template_header_row_idx)
                 # For each header column, scan upward for any cell containing 'optional'
@@ -12739,7 +12725,7 @@ def _read_source_table_for_bom_preview(info):
             return [], []
 
         if str(source_path).lower().endswith('.csv'):
-            df = pd.read_csv(source_path, header=None, dtype=object)
+            df = read_delimited_text_safely(source_path, header=None, dtype=object)
         else:
             df = pd.read_excel(
                 source_path,
@@ -13805,7 +13791,7 @@ def _read_normalized_source_table(info):
         skiprows = max(0, header_row - 1)
 
         if str(source_path).lower().endswith('.csv'):
-            df = pd.read_csv(source_path, skiprows=skiprows, dtype=object)
+            df = read_delimited_text_safely(source_path, header=skiprows, dtype=object)
         else:
             df = pd.read_excel(
                 source_path,
@@ -14220,7 +14206,17 @@ def import_edited_sheet(request, session_id):
     try:
         name = str(uploaded.name or '').lower()
         if name.endswith('.csv'):
-            frame = pd.read_csv(uploaded, dtype=object)
+            raw_upload = uploaded.read()
+            last_decode_error = None
+            for encoding in ENCODINGS_TO_TRY:
+                try:
+                    frame = dataframe_from_delimited_text(raw_upload.decode(encoding), header=0, dtype=object)
+                    break
+                except (UnicodeDecodeError, UnicodeError) as exc:
+                    last_decode_error = exc
+                    continue
+            else:
+                raise last_decode_error or Exception("Could not decode CSV upload")
         else:
             frame = pd.read_excel(uploaded, dtype=object)
     except Exception as exc:
