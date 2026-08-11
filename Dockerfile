@@ -35,6 +35,11 @@ WORKDIR /app/frontend
 ARG REACT_APP_API_BASE_URL
 ENV REACT_APP_API_BASE_URL=${REACT_APP_API_BASE_URL}
 
+# Build stamp shown beside the logo, so a deploy can be confirmed at a glance.
+# deploy-fresh.sh passes the image tag; defaults to "unknown" for a bare build.
+ARG REACT_APP_BUILD_STAMP=unknown
+ENV REACT_APP_BUILD_STAMP=${REACT_APP_BUILD_STAMP}
+
 # Copy frontend package files
 COPY frontend/package*.json ./
 

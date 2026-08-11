@@ -86,7 +86,9 @@ echo -e "${BLUE}🔨 Step 5: Building fresh Docker image${NC}"
 echo -e "${YELLOW}Building: ${REGISTRY_URL}/${IMAGE_NAME}:${TAG_NAME}${NC}"
 echo -e "${YELLOW}This may take several minutes...${NC}"
 
-if docker build --platform linux/amd64 --no-cache -t ${REGISTRY_URL}/${IMAGE_NAME}:${TAG_NAME} -f Dockerfile .; then
+if docker build --platform linux/amd64 --no-cache \
+    --build-arg REACT_APP_BUILD_STAMP="${TAG_NAME}" \
+    -t ${REGISTRY_URL}/${IMAGE_NAME}:${TAG_NAME} -f Dockerfile .; then
     echo -e "${GREEN}✅ Docker image built successfully${NC}"
 else
     echo -e "${RED}❌ Docker build failed!${NC}"
