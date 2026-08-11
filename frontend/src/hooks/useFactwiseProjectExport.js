@@ -11,8 +11,82 @@ import {
   reviseProjectBom,
   reviseEnterpriseBom,
   fetchEnterpriseBomCodes,
+  fetchEnterpriseBomDetail,
 } from '../services/factwiseApi';
 import api from '../services/api';
+
+// Rewrites the mapper's BOM Excel so every occurrence of the sheet's main
+// BOM ID in the BOM ID / Sub BOM ID columns becomes `targetCode`. Needed for
+// the revise flow — FactWise's BOM_UPDATE validator errors with
+// UnreferencedSubBOMConfiguration on any BOM ID row that isn't the target
+// BOM's code AND isn't referenced as a sub-BOM.
+async function retargetBomSheetToCode(file, targetCode) {
+  if (!targetCode) return file;
+  try {
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array' });
+    const sheetName = wb.SheetNames[0];
+    const ws = wb.Sheets[sheetName];
+    const aoa = XLSX.utils.sheet_to_json(ws, {
+      header: 1,
+      defval: '',
+      blankrows: false,
+    });
+    if (!aoa.length) return file;
+    const headers = aoa[0].map((h) => String(h ?? '').trim());
+    const idxBomId = headers.findIndex(
+      (h) => /^bom\s*id$/i.test(h) || /^bom_code$/i.test(h)
+    );
+    const idxSubBomId = headers.findIndex(
+      (h) => /^sub\s*bom\s*id$/i.test(h) || /^sub_bom_code$/i.test(h)
+    );
+    if (idxBomId < 0) return file;
+
+    // First pass: build the set of Sub BOM IDs referenced anywhere. Any BOM ID
+    // that IS also a Sub BOM ID represents a legitimate sub-BOM in the tree
+    // and must stay named the same. All other BOM ID values are candidates
+    // for the "main" BOM row — those get retargeted to targetCode.
+    const referencedAsSub = new Set();
+    if (idxSubBomId >= 0) {
+      for (let r = 1; r < aoa.length; r++) {
+        const v = String(aoa[r][idxSubBomId] ?? '').trim();
+        if (v) referencedAsSub.add(v);
+      }
+    }
+
+    // Renames map: whatever the mapper called the main BOM → targetCode.
+    const renames = {};
+    for (let r = 1; r < aoa.length; r++) {
+      const v = String(aoa[r][idxBomId] ?? '').trim();
+      if (!v) continue;
+      if (referencedAsSub.has(v)) continue; // real sub-BOM, leave alone
+      if (!renames[v]) renames[v] = targetCode;
+    }
+    if (!Object.keys(renames).length) return file;
+
+    for (let r = 1; r < aoa.length; r++) {
+      const b = String(aoa[r][idxBomId] ?? '').trim();
+      if (b && renames[b]) aoa[r][idxBomId] = renames[b];
+      // Also rewrite Sub BOM ID cells that pointed at the mapper's main code
+      // (children of the top-level BOM must reference the new code).
+      if (idxSubBomId >= 0) {
+        const s = String(aoa[r][idxSubBomId] ?? '').trim();
+        if (s && renames[s]) aoa[r][idxSubBomId] = renames[s];
+      }
+    }
+
+    const newWs = XLSX.utils.aoa_to_sheet(aoa);
+    const newWb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(newWb, newWs, sheetName);
+    const out = XLSX.write(newWb, { bookType: 'xlsx', type: 'array' });
+    const blob = new Blob([out], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    return new File([blob], file.name, { type: blob.type });
+  } catch {
+    return file;
+  }
+}
 
 // Rewrites the mapper's BOM Excel so its BOM ID / Sub BOM ID cells that
 // collide with an existing ONGOING enterprise BOM code get a unique suffix
@@ -299,11 +373,130 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
       const columnOrder = getColumnOrder?.() || null;
       let file = await buildFile(sessionId, columnOrder, 'bom', 'bom', refreshHost);
 
-      // If the mapper's BOM code collides with an existing ONGOING enterprise
-      // BOM, FactWise rejects the BOM_DASHBOARD import with "Cannot update
-      // submitted BOM". Rewrite colliding codes with a unique suffix so the
-      // import lands as a fresh new BOM. The attach step still uses
-      // reviseProjectBom to repoint the project's module correctly.
+      const saved = loadCheckpoint(sessionId) || {};
+      const originalReviseId = saved.reviseEnterpriseBomId || null;
+      const alreadyRevised = saved.revisedNewEnterpriseBomId || null;
+
+      // -------- Path A: user picked "Revise: X" --------
+      // Mirrors FactWise admin's EditBomPage bulk import:
+      //   1. Call /bom/admin/<X>/revise/ to get a fresh DRAFT copy (X_R2). This
+      //      new BOM has no project linkages, so item delete/recreate is safe.
+      //   2. Fetch the DRAFT's detail to pull template_id + finished_good_id
+      //      + entity_ids — required by BOMRevisionImport.
+      //   3. Upload with resource_type = BOM_REVISION (routes to the correct
+      //      import service).
+      //   4. process/ with additional_information = { enterprise_bom_id: new_draft,
+      //      template_id, finished_good_id, entity_ids }, import_type = BOM_UPDATE.
+      //   5. Attach step later repoints the project's bom_module to new_draft.
+      if (originalReviseId) {
+        let newDraftId = alreadyRevised;
+        if (!newDraftId) {
+          // FactWise only lets you revise ONGOING BOMs. Check status first so
+          // we can react intelligently instead of always calling revise/ and
+          // hitting INVALID BOM STATUS:
+          //   ONGOING  → normal path, create a fresh DRAFT copy to upload into
+          //   DRAFT    → the picked BOM IS already a draft (maybe from a prior
+          //              half-completed run) — reuse it directly
+          //   REVISED  → the picked BOM has been superseded, stop and tell user
+          const pickedDetailResp = await fetchEnterpriseBomDetail(originalReviseId);
+          const pickedBom = pickedDetailResp?.bom;
+          const pickedStatus = pickedBom?.bom_status;
+          if (pickedStatus === 'ONGOING') {
+            const revised = await reviseEnterpriseBom(originalReviseId);
+            if (!revised?.success || !revised?.enterprise_bom_id) {
+              patch({
+                phase: PHASES.BOM_ERROR,
+                lastError: revised?.error || 'Could not create a BOM revision in Factwise',
+              });
+              return { ok: false };
+            }
+            newDraftId = revised.enterprise_bom_id;
+          } else if (pickedStatus === 'DRAFT') {
+            newDraftId = originalReviseId;
+          } else {
+            patch({
+              phase: PHASES.BOM_ERROR,
+              lastError:
+                `Picked BOM is in "${pickedStatus || 'unknown'}" status, `
+                + 'not ONGOING. Click "Start over", refresh the picker, and pick '
+                + 'the current version instead.',
+            });
+            return { ok: false };
+          }
+          patch({ revisedNewEnterpriseBomId: newDraftId });
+        }
+
+        const detailResp = await fetchEnterpriseBomDetail(newDraftId);
+        const draft = detailResp?.bom;
+        const templateId = draft?.enterprise_item?.bom_template?.template_id || null;
+        const finishedGoodId = draft?.enterprise_item?.enterprise_item_id || null;
+        const targetBomCode = draft?.bom_code || null;
+        const entityIds = (draft?.entities || [])
+          .map((e) => e.buyer_entity_id || e.entity_id)
+          .filter(Boolean);
+        if (!templateId || !finishedGoodId || !targetBomCode) {
+          patch({
+            phase: PHASES.BOM_ERROR,
+            lastError: detailResp?.error
+              || "Could not read the revision's template / finished good / code — cannot proceed.",
+          });
+          return { ok: false };
+        }
+
+        // FactWise's BOM_UPDATE validator requires the sheet's main BOM ID to
+        // equal the target BOM's code. The mapper's Excel uses its own
+        // bom_code (say "MAPPED_BOM_1"), so we rewrite the sheet so its main
+        // BOM ID (and any Sub BOM ID references pointing at it) become the
+        // draft's code (e.g. "ABB5_R2"). Real sub-BOMs keep their own codes.
+        const retargetedFile = await retargetBomSheetToCode(file, targetBomCode);
+
+        const uploaded = await uploadFileToFactwiseBulkImport(retargetedFile, 'BOM_REVISION');
+        if (!uploaded?.success) {
+          patch({
+            phase: PHASES.BOM_ERROR,
+            lastError: uploaded?.error || 'BOM revision upload failed',
+          });
+          return { ok: false };
+        }
+        patch({
+          phase: PHASES.BOM_PROCESSING,
+          bomBulkImportId: uploaded.bulk_import_id,
+        });
+
+        const processed = await processFactwiseBulkImport(uploaded.bulk_import_id, {
+          import_type: 'BOM_UPDATE',
+          enterprise_bom_id: newDraftId,
+          template_id: templateId,
+          finished_good_id: finishedGoodId,
+          entity_ids: entityIds,
+        });
+        if (!processed?.success) {
+          patch({
+            phase: PHASES.BOM_ERROR,
+            lastError: processed?.error || 'BOM revision process call failed',
+            lastBulkImportId: uploaded.bulk_import_id,
+          });
+          return { ok: false };
+        }
+        const resp = processed?.response || processed;
+        const rtype = resp?.response_type;
+        if (rtype && rtype !== 'Success') {
+          patch({
+            phase: PHASES.BOM_ERROR,
+            lastError: resp?.error || `BOM revision validation failed (${rtype})`,
+            lastResponseType: rtype,
+            lastBulkImportId: uploaded.bulk_import_id,
+          });
+          return { ok: false };
+        }
+        const bomIds = (resp?.bom_ids && resp.bom_ids.length)
+          ? resp.bom_ids
+          : [newDraftId];
+        patch({ phase: PHASES.BOM_DONE, bomIds });
+        return { ok: true };
+      }
+
+      // -------- Path B: fresh create --------
       const codesResp = await fetchEnterpriseBomCodes();
       if (codesResp?.success) {
         const existingCodes = (codesResp.boms || []).map((b) => b.bom_code);
@@ -350,11 +543,7 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
       }
 
       const bomIds = resp?.bom_ids || [];
-
-      patch({
-        phase: PHASES.BOM_DONE,
-        bomIds,
-      });
+      patch({ phase: PHASES.BOM_DONE, bomIds });
       return { ok: true };
     } catch (error) {
       patch({

@@ -3,20 +3,31 @@ import * as XLSX from 'xlsx';
 import {
   Box,
   Button,
+  Chip,
   CircularProgress,
+  FormControlLabel,
   Stack,
+  Switch,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import { DataGrid } from '@mui/x-data-grid';
 import SaveIcon from '@mui/icons-material/Save';
+import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
 import {
   getBulkImportErrorFileUrl,
   uploadFileToFactwiseBulkImport,
   processFactwiseBulkImport,
 } from '../services/factwiseApi';
 
-// Reads the FW-generated error Excel. Cells that look like error phrases get
-// flagged so the DataGrid can highlight them red.
+// Reads the FactWise-generated error file for a failed bulk_import_id and
+// splits it into (headers, rows, per-row per-column error map).
+//
+// FactWise's format (see construct_utils.construct_file_with_errors):
+//   - Last column is named "errors"
+//   - Its value per row is a JSON dict {"1": ["Code"], "2": ["Code1","Code2"]}
+//     where keys are 1-based column indices and commas were replaced with
+//     semicolons to survive CSV. Rows with errors are sorted first.
 async function loadErrorWorkbook(bulkImportId) {
   const urlResp = await getBulkImportErrorFileUrl(bulkImportId);
   if (!urlResp?.success || !urlResp?.url) {
@@ -36,18 +47,51 @@ async function loadErrorWorkbook(bulkImportId) {
     });
     if (!rows.length) return { ok: false, error: 'Error file is empty' };
     const rawHeaders = rows[0].map((h) => String(h ?? '').trim());
-    // Deduplicate + fill blanks so DataGrid columns have stable ids.
+    // Detect the "errors" column (always LAST per FW).
+    const errorColIdx = rawHeaders.findIndex((h) => h.toLowerCase() === 'errors');
+    const dataHeaders = errorColIdx >= 0
+      ? rawHeaders.slice(0, errorColIdx)
+      : rawHeaders;
+    // Deduplicate + fill blank headers so DataGrid column ids are stable.
     const seen = new Map();
-    const headers = rawHeaders.map((h, i) => {
+    const headers = dataHeaders.map((h, i) => {
       const base = h || `Column ${i + 1}`;
       const count = seen.get(base) || 0;
       seen.set(base, count + 1);
       return count ? `${base} (${count + 1})` : base;
     });
+
+    // Build the per-row per-column error map.
+    // errorMap: { [rowId]: { [headerName]: string[] } }
+    const errorMap = {};
+    const dataRows = rows.slice(1);
+    dataRows.forEach((row, idx) => {
+      if (errorColIdx < 0) return;
+      const raw = String(row[errorColIdx] ?? '').trim();
+      if (!raw) return;
+      let parsed = null;
+      try {
+        parsed = JSON.parse(raw.replace(/;/g, ','));
+      } catch {
+        parsed = null;
+      }
+      if (!parsed || typeof parsed !== 'object') return;
+      const perRow = {};
+      Object.keys(parsed).forEach((colIndex1Based) => {
+        const colIdx = parseInt(colIndex1Based, 10) - 1;
+        if (Number.isNaN(colIdx) || colIdx < 0 || colIdx >= headers.length) return;
+        const codes = Array.isArray(parsed[colIndex1Based]) ? parsed[colIndex1Based] : [];
+        if (!codes.length) return;
+        perRow[headers[colIdx]] = codes.map(String);
+      });
+      if (Object.keys(perRow).length) errorMap[idx] = perRow;
+    });
+
     return {
       ok: true,
       headers,
-      dataRows: rows.slice(1),
+      dataRows,
+      errorMap,
       sheetName: firstSheetName,
     };
   } catch (e) {
@@ -56,8 +100,6 @@ async function loadErrorWorkbook(bulkImportId) {
 }
 
 function rowsToXlsxFile(headers, gridRows, fileName, sheetName = 'Sheet1') {
-  // gridRows are {id, [header]: value, ...}. Strip the synthetic id and
-  // reorder to header order before writing.
   const aoa = [
     headers,
     ...gridRows.map((r) => headers.map((h) => r[h] ?? '')),
@@ -72,14 +114,12 @@ function rowsToXlsxFile(headers, gridRows, fileName, sheetName = 'Sheet1') {
   return new File([blob], fileName, { type: blob.type });
 }
 
-// Heuristic — FW error cells typically contain phrases like "invalid",
-// "missing", "required", "does not exist", "duplicate", etc.
-const ERROR_HINT_RE = /invalid|missing|required|does not exist|duplicate|not found|error|must be|is not/i;
-function cellLooksLikeError(value) {
-  if (value == null) return false;
-  const s = String(value);
-  if (!s.trim()) return false;
-  return ERROR_HINT_RE.test(s);
+// Turn a Factwise error code into a short human label for the tooltip.
+function humanizeErrorCode(code) {
+  return String(code || '')
+    .replace(/([A-Z])/g, ' $1')
+    .replace(/^\s+/, '')
+    .replace(/^./, (c) => c.toUpperCase());
 }
 
 export default function FactwiseBulkImportErrorGrid({
@@ -93,10 +133,12 @@ export default function FactwiseBulkImportErrorGrid({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
   const [headers, setHeaders] = useState([]);
-  const [rows, setRows] = useState([]); // {id, [h]: v}[]
+  const [rows, setRows] = useState([]); // {id, __hasErrors, [h]: v}[]
+  const [errorMap, setErrorMap] = useState({}); // {rowId: {header: string[]}}
   const [sheetName, setSheetName] = useState('Sheet1');
   const [retrying, setRetrying] = useState(false);
   const [retryMessage, setRetryMessage] = useState(null);
+  const [showOnlyErrors, setShowOnlyErrors] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
@@ -111,17 +153,28 @@ export default function FactwiseBulkImportErrorGrid({
         return;
       }
       const objRows = result.dataRows.map((row, idx) => {
-        const obj = { id: idx };
+        const obj = { id: idx, __hasErrors: Boolean(result.errorMap[idx]) };
         result.headers.forEach((h, i) => { obj[h] = row[i] ?? ''; });
         return obj;
       });
       setHeaders(result.headers);
       setRows(objRows);
+      setErrorMap(result.errorMap);
       setSheetName(result.sheetName);
       setLoading(false);
     })();
     return () => { cancelled = true; };
   }, [bulkImportId]);
+
+  const totalErrorRows = useMemo(
+    () => rows.filter((r) => r.__hasErrors).length,
+    [rows]
+  );
+
+  const visibleRows = useMemo(() => {
+    if (!showOnlyErrors) return rows;
+    return rows.filter((r) => r.__hasErrors);
+  }, [rows, showOnlyErrors]);
 
   const columns = useMemo(() => headers.map((h) => ({
     field: h,
@@ -131,8 +184,44 @@ export default function FactwiseBulkImportErrorGrid({
     editable: !disabled && !retrying,
     sortable: false,
     filterable: false,
-    cellClassName: (params) => (cellLooksLikeError(params.value) ? 'fw-error-cell' : ''),
-  })), [headers, disabled, retrying]);
+    cellClassName: (params) => {
+      const rowErrors = errorMap[params.id];
+      return rowErrors?.[h] ? 'fw-error-cell' : '';
+    },
+    renderCell: (params) => {
+      const codes = errorMap[params.id]?.[h];
+      const value = params.value ?? '';
+      if (!codes) return value;
+      return (
+        <Tooltip
+          title={
+            <Stack spacing={0.5} sx={{ py: 0.25 }}>
+              {codes.map((c, i) => (
+                <Typography key={i} variant="caption" sx={{ fontWeight: 500 }}>
+                  {humanizeErrorCode(c)}
+                </Typography>
+              ))}
+            </Stack>
+          }
+          arrow
+          placement="top"
+        >
+          <Box
+            component="span"
+            sx={{ display: 'flex', alignItems: 'center', gap: 0.5, width: '100%', overflow: 'hidden' }}
+          >
+            <ErrorOutlineIcon sx={{ fontSize: 14, flexShrink: 0 }} />
+            <Typography
+              variant="body2"
+              sx={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+            >
+              {value}
+            </Typography>
+          </Box>
+        </Tooltip>
+      );
+    },
+  })), [headers, errorMap, disabled, retrying]);
 
   const handleCellEdit = useCallback((newRow) => {
     setRows((prev) => prev.map((r) => (r.id === newRow.id ? newRow : r)));
@@ -144,6 +233,8 @@ export default function FactwiseBulkImportErrorGrid({
     setRetryMessage(null);
     try {
       const fileName = `bom-mapper-fixed-${bulkImportId}.xlsx`;
+      // Always write ALL rows back (not just visible), so hiding non-error rows
+      // in the UI never truncates the data we send to Factwise.
       const file = rowsToXlsxFile(headers, rows, fileName, sheetName);
       const uploaded = await uploadFileToFactwiseBulkImport(file, resourceType);
       if (!uploaded?.success) {
@@ -200,9 +291,9 @@ export default function FactwiseBulkImportErrorGrid({
           {loadError}
         </Typography>
         <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
-          Factwise typically only generates the editable error file when the failure is per-row
-          (a DataError against specific cells). Template-level failures (missing whole columns,
-          wrong file format) skip that step — fix the underlying issue in the mapper and retry.
+          Factwise typically only generates the editable error file when the failure is per-row.
+          Template-level failures (missing whole columns, wrong file format) skip that step —
+          fix the underlying issue in the mapper and retry.
         </Typography>
       </Box>
     );
@@ -210,7 +301,6 @@ export default function FactwiseBulkImportErrorGrid({
 
   return (
     <Box sx={{
-      // Give the red-cell class actual color even inside dark themes.
       '& .fw-error-cell': {
         backgroundColor: (t) => t.palette.mode === 'dark'
           ? 'rgba(239, 68, 68, 0.28)'
@@ -219,28 +309,56 @@ export default function FactwiseBulkImportErrorGrid({
         fontWeight: 600,
       },
     }}>
-      <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 1 }}>
-        <Typography variant="caption" color="text.secondary">
-          {rows.length} rows · edit any red cell inline, then save &amp; retry.
-        </Typography>
-        <Button
-          variant="contained"
-          size="small"
-          startIcon={retrying ? <CircularProgress size={14} /> : <SaveIcon />}
-          onClick={handleSaveAndRetry}
-          disabled={disabled || retrying || !headers.length}
-        >
-          {retrying ? 'Retrying…' : 'Save & retry'}
-        </Button>
+      <Stack
+        direction="row"
+        justifyContent="space-between"
+        alignItems="center"
+        spacing={2}
+        sx={{ mb: 1, flexWrap: 'wrap' }}
+      >
+        <Stack direction="row" alignItems="center" spacing={1.5}>
+          <Chip
+            size="small"
+            color="error"
+            variant="outlined"
+            icon={<ErrorOutlineIcon />}
+            label={`${totalErrorRows} rows with errors`}
+          />
+          <Typography variant="caption" color="text.secondary">
+            {rows.length} total · edit any red cell inline, then save &amp; retry.
+          </Typography>
+        </Stack>
+        <Stack direction="row" alignItems="center" spacing={1}>
+          <FormControlLabel
+            control={
+              <Switch
+                size="small"
+                checked={showOnlyErrors}
+                onChange={(e) => setShowOnlyErrors(e.target.checked)}
+              />
+            }
+            label={<Typography variant="caption">Show only error rows</Typography>}
+            sx={{ mr: 0.5 }}
+          />
+          <Button
+            variant="contained"
+            size="small"
+            startIcon={retrying ? <CircularProgress size={14} /> : <SaveIcon />}
+            onClick={handleSaveAndRetry}
+            disabled={disabled || retrying || !headers.length}
+          >
+            {retrying ? 'Retrying…' : 'Save & retry'}
+          </Button>
+        </Stack>
       </Stack>
       {retryMessage && (
         <Typography variant="caption" sx={{ display: 'block', mb: 1, color: 'text.secondary' }}>
           {retryMessage}
         </Typography>
       )}
-      <Box sx={{ height: 420, width: '100%' }}>
+      <Box sx={{ height: 460, width: '100%' }}>
         <DataGrid
-          rows={rows}
+          rows={visibleRows}
           columns={columns}
           density="compact"
           disableRowSelectionOnClick
@@ -251,6 +369,7 @@ export default function FactwiseBulkImportErrorGrid({
             pagination: { paginationModel: { pageSize: 25 } },
           }}
           pageSizeOptions={[25, 50, 100]}
+          getRowClassName={(params) => (params.row.__hasErrors ? 'fw-error-row' : '')}
         />
       </Box>
     </Box>
