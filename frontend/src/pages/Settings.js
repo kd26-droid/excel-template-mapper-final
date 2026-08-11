@@ -42,6 +42,7 @@ import {
 } from '@mui/icons-material';
 import { useThemeContext } from '../utils/ThemeContext';
 import api from '../services/api';
+import { useFactwise } from '../contexts/FactwiseContext';
 
 // All three providers are on by default. A part confirmed by any one of them is
 // valid, so querying all three gives the best coverage; a provider without
@@ -139,6 +140,11 @@ const Settings = () => {
   const hasMouser = Boolean(providerStatus.mouser?.configured);
   const hasElement14 = Boolean(providerStatus.element14?.configured);
   const hasAnyProvider = hasDigikey || hasMouser || hasElement14;
+
+  // When embedded inside Factwise, distributor credentials are managed in
+  // Factwise Admin and silently synced into this app's own store. Hide the
+  // "API Providers" panel — the rest of Settings still works as normal.
+  const { isEmbedded: isFactwiseEmbedded } = useFactwise();
 
   const readyCount = useMemo(
     () => columnMappings.filter(mapping => normalizeProviders(mapping.providers || mapping.provider).every(provider => Boolean(providerStatus[provider]?.configured))).length,
@@ -527,6 +533,59 @@ const Settings = () => {
         </Box>
 
         <Grid container spacing={2.5}>
+          {isFactwiseEmbedded && (
+            <Grid item xs={12}>
+              <Paper
+                elevation={0}
+                sx={{
+                  px: 2.25,
+                  py: 1.5,
+                  borderRadius: '12px',
+                  border: `1px solid ${t.border.subtle}`,
+                  bgcolor: t.surface.panel,
+                  display: 'flex',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: 1.25,
+                }}
+              >
+                <Typography
+                  sx={{
+                    fontSize: 12.5,
+                    fontWeight: 650,
+                    color: t.text.secondary,
+                    mr: 0.5,
+                  }}
+                >
+                  API keys managed in Factwise
+                </Typography>
+                {ALL_PROVIDERS.map((provider) => {
+                  const connected = Boolean(providerStatus[provider]?.configured);
+                  const label = providerMeta[provider]?.label || provider;
+                  return (
+                    <Chip
+                      key={provider}
+                      size="small"
+                      icon={connected ? <CheckCircleIcon /> : <ErrorIcon />}
+                      label={`${label}: ${connected ? 'Connected' : 'Not connected'}`}
+                      sx={{
+                        height: 22,
+                        fontWeight: 650,
+                        fontSize: 11.5,
+                        color: connected ? t.color.successText : t.text.secondary,
+                        bgcolor: connected ? t.state.successBg : t.surface.controlSoft,
+                        border: `1px solid ${connected ? t.state.successBorder : t.border.default}`,
+                        '& .MuiChip-icon': {
+                          color: connected ? t.color.success : t.text.secondary,
+                        },
+                      }}
+                    />
+                  );
+                })}
+              </Paper>
+            </Grid>
+          )}
+          {!isFactwiseEmbedded && (
           <Grid item xs={12}>
             <Paper elevation={0} sx={panelSx}>
               <Box sx={sectionHeaderSx}>
@@ -657,6 +716,7 @@ const Settings = () => {
               </Box>
             </Paper>
           </Grid>
+          )}
 
           <Grid item xs={12}>
             <Paper elevation={0} sx={panelSx}>

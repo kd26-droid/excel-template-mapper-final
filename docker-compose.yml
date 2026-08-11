@@ -17,6 +17,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.backend
+    # 8001 on the host, because 8000 belongs to the FactWise backend that embeds
+    # this app as an iframe. The host port exists so the React dev server
+    # (npm start, outside Docker) can proxy /api/ here — see frontend/package.json.
     ports:
       - "8001:8000"
     environment:
@@ -50,8 +53,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.frontend.local
+    # 3000 belongs to the FactWise frontend running outside Docker.
     ports:
-      - "3000:80"
+      - "3001:80"
     depends_on:
       - backend
     networks:

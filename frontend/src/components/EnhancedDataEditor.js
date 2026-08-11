@@ -87,6 +87,9 @@ import {
   FullscreenExit as FullscreenExitIcon
 } from '@mui/icons-material';
 import api from '../services/api';
+import { uploadFileToFactwiseBulkImport } from '../services/factwiseApi';
+import { useFactwise, postToFactwiseParent } from '../contexts/FactwiseContext';
+import FactwiseProjectExportDialog from './FactwiseProjectExportDialog';
 import * as XLSX from 'xlsx';
 import FormulaBuilder from './FormulaBuilder';
 import BomTreePreview from './BomTreePreview';
@@ -382,6 +385,7 @@ const EnhancedDataEditor = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const { isDarkMode, tokens: themeTokens } = useThemeContext();
+  const { isEmbedded: isFactwiseEmbedded } = useFactwise();
   const synchronizer = useRef(null);
   const scrollContainerRef = useRef(null);
   const [mousePos, setMousePos] = useState({ x: 50, y: 50 });
@@ -3520,14 +3524,33 @@ const EnhancedDataEditor = () => {
     setFactwisePreviewOpen(true);
   }, []);
 
+  // Real project export runs inside the mapper (no redirects) when embedded
+  // in Factwise. Standalone tool keeps the existing mock-only flow.
+  const [projectExportDialogOpen, setProjectExportDialogOpen] = useState(false);
+
   const handleChooseFactwiseDestination = useCallback((destination) => {
     setFactwiseExportDialogOpen(false);
     if (destination === 'project') {
+      if (isFactwiseEmbedded) {
+        // Same pre-flight the standalone Export flow uses — required-field
+        // gaps for the ITEM sheet (Item code, Measurement unit, Item type,
+        // …) and BOM validation issues (finished good code, quantities,
+        // hierarchy) must be resolved before we hand rows to Factwise, or
+        // Factwise rejects with TemplateError / MissingColumn.
+        runGuardedExport(
+          () => runGuardedExport(
+            () => setProjectExportDialogOpen(true),
+            'bom'
+          ),
+          'item'
+        );
+        return;
+      }
       handleExportToProject();
       return;
     }
     runGuardedExport(() => openFactwisePreview(destination), destination);
-  }, [handleExportToProject, runGuardedExport, openFactwisePreview]);
+  }, [handleExportToProject, runGuardedExport, openFactwisePreview, isFactwiseEmbedded]);
 
   const handleExportSheetForEditing = useCallback(async () => {
     setExportingSheet(true);
@@ -3628,14 +3651,63 @@ const EnhancedDataEditor = () => {
     }
   }, [factwisePreviewType, getCurrentExportColumnOrder, sessionId, showSnackbar]);
 
-  const handleDirectoryExport = useCallback((type = factwisePreviewType) => {
+  const handleDirectoryExport = useCallback(async (type = factwisePreviewType) => {
     const exportType = type === 'bom' ? 'bom' : 'item';
     setFactwisePreviewOpen(false);
     setDirectoryExportStatus({ open: true, type: exportType, phase: 'loading' });
-    window.setTimeout(() => {
-      setDirectoryExportStatus({ open: true, type: exportType, phase: 'success' });
-    }, 1400);
-  }, [factwisePreviewType]);
+
+    // Standalone tool (not inside Factwise iframe): keep the existing 1.4s mock
+    // behaviour so nothing changes for direct users of the tool.
+    if (!isFactwiseEmbedded) {
+      window.setTimeout(() => {
+        setDirectoryExportStatus({ open: true, type: exportType, phase: 'success' });
+      }, 1400);
+      return;
+    }
+
+    // Embedded in Factwise: hand off to FW's existing bulk-import pipeline.
+    // 1. Ask the mapper backend for the Excel it already knows how to build.
+    //    - Item: downloadProcessedFile('item') — mapped normalized rows.
+    //    - BOM:  downloadDemoBomSheet — the FactWise BOM Directory schema
+    //      (includes Finished good code, Assembly qty, …). Downloading via
+    //      downloadProcessedFile('bom') produces a DIFFERENT file that
+    //      FactWise's BOM bulk-import rejects with MissingColumn.
+    // 2. Upload the file to FW (get pre-signed URL, PUT to Azure).
+    // 3. postMessage to parent so FW opens its own BulkImportPage for that
+    //    bulk_import_id — the editable error grid + reupload UX Factwise already has.
+    const fwResourceType = exportType === 'bom' ? 'BOM' : 'ITEM';
+    const fileLabel = exportType === 'bom' ? 'bom' : 'items';
+    try {
+      const columnOrder = getCurrentExportColumnOrder();
+      const response = exportType === 'bom'
+        ? await api.downloadDemoBomSheet(sessionId)
+        : await api.downloadProcessedFile(sessionId, 'excel', columnOrder, 'item');
+      const blob = new Blob([response.data], {
+        type: response.headers?.['content-type']
+          || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
+      const fileName = `bom-mapper-${fileLabel}-${sessionId || 'session'}.xlsx`;
+      const file = new File([blob], fileName, { type: blob.type });
+
+      const result = await uploadFileToFactwiseBulkImport(file, fwResourceType);
+      if (!result?.success) {
+        setDirectoryExportStatus({ open: false, type: exportType, phase: 'success' });
+        showSnackbar(result?.error || 'Failed to hand off to Factwise', 'error');
+        return;
+      }
+
+      postToFactwiseParent('FW_BULK_IMPORT_START', {
+        bulk_import_id: result.bulk_import_id,
+        resource_type: fwResourceType,
+        file_name: result.file_name,
+      });
+      // Factwise takes over rendering (BulkImportPage) — close our own dialog silently.
+      setDirectoryExportStatus({ open: false, type: exportType, phase: 'success' });
+    } catch (error) {
+      setDirectoryExportStatus({ open: false, type: exportType, phase: 'success' });
+      showSnackbar(error?.message || 'Failed to hand off to Factwise', 'error');
+    }
+  }, [factwisePreviewType, isFactwiseEmbedded, sessionId, getCurrentExportColumnOrder, showSnackbar]);
 
   const handleExportProjectConfirm = useCallback(() => {
     // Every column is exported — the per-field picker was removed, so there is no
@@ -8773,6 +8845,20 @@ const EnhancedDataEditor = () => {
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* Factwise embedded Project export — real orchestration (item → BOM → project)
+          with resumable checkpoints. Only ever rendered when the mapper is inside
+          the Factwise iframe. */}
+      {isFactwiseEmbedded && (
+        <FactwiseProjectExportDialog
+          open={projectExportDialogOpen}
+          onClose={() => setProjectExportDialogOpen(false)}
+          sessionId={sessionId}
+          getColumnOrder={getCurrentExportColumnOrder}
+          refreshHost={fetchDataSynchronized}
+          defaultProjectName={`Project - ${new Date().toLocaleDateString()}`}
+        />
+      )}
 
       {/* FactWise export destination chooser */}
       <Dialog
