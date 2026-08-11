@@ -491,6 +491,121 @@ const columnValues = (header, headers, dataRows) => {
   return dataRows.slice(0, 60).map((row) => (Array.isArray(row) ? row[index] : row?.[header]));
 };
 
+const roleSampleValues = (values) => values.map(fmt).filter(Boolean);
+
+const looksLikeHierarchyColumn = (values) => {
+  const samples = roleSampleValues(values);
+  if (samples.length < 4) return false;
+  const hierarchyLike = samples.filter((value) => value.includes('>') || /^[-.\d\s]*>/.test(value));
+  return hierarchyLike.length >= samples.length * 0.6;
+};
+
+const looksLikeDocumentHeader = (header) => (
+  /\b(doc|document|lien|link|date|status|statut|revision|indice|security|securite)\b/.test(normalizeKey(header))
+);
+
+const parseStructuredMpnMfrValue = (value) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ');
+  if (!text || text.includes('>')) return null;
+  const match = text.match(/^(.*?)\s+\(([^()]*)\)\s*(?:\{[^}]*\})?\s*(?:\[[^\]]*\])?\s*$/);
+  if (!match) return null;
+  const mpn = fmt(match[1]);
+  const manufacturer = fmt(match[2]);
+  if (!mpn || !manufacturer || !/[0-9]/.test(mpn) || !/[A-Za-z]/.test(manufacturer)) return null;
+  if (/^F\d{3,}$/.test(manufacturer) || /^\d+$/.test(manufacturer)) return null;
+  return { mpn, manufacturer };
+};
+
+const getDiscardedPackedText = (value, pair = {}) => {
+  if (pair.metadata?.discardedText) return pair.metadata.discardedText;
+  const text = fmt(value).replace(/\u00a0/g, ' ');
+  const trailing = text.match(/\s*((?:\{[^}]*\}|\[[^\]]*\]|\s)+)\s*$/);
+  if (!trailing) return '';
+  const blocks = trailing[1].match(/\{[^}]*\}|\[[^\]]*\]/g);
+  return blocks ? blocks.join(' ') : '';
+};
+
+const escapeRegExp = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const replaceFirstToken = (text, token, placeholder) => {
+  const cleanToken = fmt(token);
+  if (!cleanToken) return text;
+  return text.replace(new RegExp(escapeRegExp(cleanToken), 'i'), placeholder);
+};
+
+const buildParsedPatternShape = (value, pairs = []) => {
+  const source = fmt(value).replace(/\u00a0/g, ' ');
+  if (!source || !pairs.length) return '';
+
+  let shape = source
+    .replace(/\{[^}]*\}/g, '{<STATUS>}')
+    .replace(/\[[^\]]*\]/g, '[<REF>]');
+
+  pairs.forEach((pair) => {
+    shape = replaceFirstToken(shape, pair.mpn, '<MPN>');
+    shape = replaceFirstToken(shape, pair.manufacturer, '<MFR>');
+  });
+
+  return shape
+    .replace(/\((?:\s|<STATUS>|<REF>)*\)/g, '(<EXTRA>)')
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
+const describePatternShape = (shape = '') => {
+  const rules = ['Extract every <MPN> and <MFR> pair from values matching this shape.'];
+  if (shape.includes('@')) rules.push('Ignore @ as a separator before reading the manufacturer bracket.');
+  if (shape.includes('^')) rules.push('Treat ^ as a repeated alternate separator.');
+  if (shape.includes(',')) rules.push('Use comma-separated segments only when they form valid MPN/MFR pairs.');
+  if (shape.includes('(<MFR>)')) rules.push('Use text inside (...) as Manufacturer.');
+  if (shape.includes('{<STATUS>}') || shape.includes('[<REF>]')) rules.push('Treat {...} and [...] blocks as status/reference text.');
+  return rules;
+};
+
+const scoreStructuredMpnMfrColumn = (header, values) => {
+  const samples = roleSampleValues(values);
+  if (!samples.length || looksLikeHierarchyColumn(samples)) return 0;
+  const parsed = samples.map(parseStructuredMpnMfrValue).filter(Boolean);
+  if (parsed.length < 2) return 0;
+  const key = normalizeKey(header);
+  const headerBonus = /(manufacturer|mfr|mfg|fabricant|fab|approved|source|ref)/.test(key) ? 25 : 0;
+  return (parsed.length / samples.length) * 100 + headerBonus;
+};
+
+const looksLikePartCodeValue = (value) => {
+  const text = fmt(value);
+  if (!text || text.includes('>')) return false;
+  if (looksLikeDocumentHeader(text)) return false;
+  const compact = text.replace(/[^A-Za-z0-9]/g, '');
+  return compact.length >= 4 && /[0-9]/.test(compact) && /^[A-Za-z0-9._/#,+:\-\s]+$/.test(text);
+};
+
+const scoreCpnColumn = (header, values) => {
+  if (looksLikeDocumentHeader(header) || looksLikeHierarchyColumn(values)) return 0;
+  const samples = roleSampleValues(values);
+  if (!samples.length) return 0;
+  const key = normalizeKey(header);
+  let score = 0;
+  if (/\b(cpn|customer part|client part|internal part|part code|item code)\b/.test(key)) score += 70;
+  if (/\b(ref article|article|article ref|reference article)\b/.test(key)) score += 65;
+  if (/\b(part number|part no|part)\b/.test(key) && !/(manufacturer|mfr|mfg|fabricant)/.test(key)) score += 45;
+  const partLike = samples.filter(looksLikePartCodeValue).length / samples.length;
+  score += partLike * 35;
+  if (score && /(manufacturer|mfr|mfg|fabricant|supplier|vendor)/.test(key)) score -= 60;
+  return Math.max(0, score);
+};
+
+const bestScoredHeader = (headers, dataRows, scorer, minScore = 1) => {
+  const ranked = headers
+    .map((header) => ({
+      header,
+      score: scorer(header, columnValues(header, headers, dataRows)),
+    }))
+    .filter((candidate) => candidate.score >= minScore)
+    .sort((a, b) => b.score - a.score);
+  return ranked[0]?.header || '';
+};
+
 const inferRoles = (headers, dataRows = []) => {
   const learnedHeaders = getLearnedRoleHeaders();
   const findLearnedHeader = (role) => {
@@ -518,15 +633,20 @@ const inferRoles = (headers, dataRows = []) => {
   const genericPartHeader = findHeader([/^part number$/, /^part no$/, /^part$/, /^partno$/], [/manufacturer/, /\bmpn\b/, /\bmfr\b/, /\bmfg\b/]);
   const learnedMpn = findLearnedHeader('mpn');
   const learnedCpn = findLearnedHeader('cpn');
-  const mpnHeader = strongMpnHeader || learnedMpn || findHeader([/^approved\s*manufacturer$/, /manufacturer equivalent/, /manufacturer part/, /\bmpn\b/, /producer/, /^po\s*text$/, /^potext$/, /part number/]);
-  const cpnHeader = learnedCpn || findHeader([/\bcpn\b/, /customer part/, /client part/, /internal part/, /part code/]) ||
+  const structuredMpnMfrHeader = bestScoredHeader(headers, dataRows, scoreStructuredMpnMfrColumn, 70);
+  const scoredCpnHeader = bestScoredHeader(headers, dataRows, scoreCpnColumn, 65);
+  const mpnHeader = structuredMpnMfrHeader || learnedMpn || strongMpnHeader ||
+    findHeader([/^approved\s*manufacturer$/, /manufacturer equivalent/, /manufacturer part/, /\bmpn\b/, /producer/, /^po\s*text$/, /^potext$/, /part number/]);
+  const cpnHeader = scoredCpnHeader || learnedCpn || findHeader([/\bcpn\b/, /customer part/, /client part/, /internal part/, /part code/, /ref article/, /\barticle\b/]) ||
     (genericPartHeader && genericPartHeader !== mpnHeader ? genericPartHeader : '');
 
   // A header the user has taught us wins outright. Otherwise a name match still has to
   // survive the values: see looksLikeCodeColumn.
   const namedManufacturer = findHeader([/^manufacturer$/, /\bmfr\b/, /manufacturer name/, /producer/], [/equivalent/, /part/, /\bmpn\b/]) ||
     findHeader([/manufacturer/], [/equivalent/, /part/, /\bmpn\b/]);
-  const manufacturerHeader = findLearnedHeader('manufacturer') ||
+  const learnedManufacturer = findLearnedHeader('manufacturer');
+  const manufacturerHeader = structuredMpnMfrHeader ||
+    (learnedManufacturer && looksLikeCodeColumn(columnValues(learnedManufacturer, headers, dataRows)) ? '' : learnedManufacturer) ||
     (namedManufacturer && looksLikeCodeColumn(columnValues(namedManufacturer, headers, dataRows)) ? '' : namedManufacturer);
 
   return {
@@ -3792,10 +3912,12 @@ const BomNormalizer = () => {
   const [selectedManufacturerMatches, setSelectedManufacturerMatches] = useState([]);
   const [downloadMenuAnchor, setDownloadMenuAnchor] = useState(null);
   const [toolsMenuAnchor, setToolsMenuAnchor] = useState(null);
-  const [configureToolsMenuAnchor, setConfigureToolsMenuAnchor] = useState(null);
+  const [parsingLogicOpen, setParsingLogicOpen] = useState(false);
   const [configureSplitColsOpen, setConfigureSplitColsOpen] = useState(false);
   const [configureParserSessionId, setConfigureParserSessionId] = useState('');
   const [configureParserPreparing, setConfigureParserPreparing] = useState(false);
+  const [configureParserInitialColumn, setConfigureParserInitialColumn] = useState('');
+  const [configureParserTitle, setConfigureParserTitle] = useState('Split into Columns');
   const [combineItems, setCombineItems] = useState([]);
   const [combineBusy, setCombineBusy] = useState(false);
   const [combineError, setCombineError] = useState('');
@@ -3913,6 +4035,67 @@ const BomNormalizer = () => {
     rules.push('3. Remove status notes from MFR names, keep only clean MPN/MFR output');
     return rules;
   }, [config.alternateLayout, config.followingRowAlternateColumn, config.structure, roles.manufacturer, roles.mpn]);
+
+  const detectedParsingLogic = useMemo(() => {
+    const sourceHeader = roles.mpn || roles.manufacturer;
+    const readsCombinedField = Boolean(
+      sourceHeader &&
+      roles.mpn &&
+      roles.manufacturer &&
+      roles.mpn === roles.manufacturer &&
+      config.structure === 'same_cell'
+    );
+    if (!readsCombinedField) return null;
+
+    const patternMap = new Map();
+
+    dataRows.forEach((row) => {
+      const source = getCell(row, sourceHeader);
+      const pairs = parsePackedMpnManufacturerPairs(source, config)
+        .filter((pair) => pair?.mpn && pair?.manufacturer);
+      if (!pairs.length) return;
+
+      const shape = buildParsedPatternShape(source, pairs);
+      if (!shape) return;
+
+      const current = patternMap.get(shape) || {
+        shape,
+        count: 0,
+        examples: [],
+        rules: describePatternShape(shape),
+      };
+      current.count += 1;
+      if (current.examples.length < 3) {
+        const firstPair = pairs[0];
+        current.examples.push({
+          sourceRow: row?.__sourceRow || '',
+          source,
+          pairs: pairs.slice(0, 3).map((pair) => ({
+            mpn: pair.mpn,
+            manufacturer: pair.manufacturer,
+            discarded: getDiscardedPackedText(source, pair),
+          })),
+          discarded: getDiscardedPackedText(source, firstPair),
+        });
+      }
+      patternMap.set(shape, current);
+    });
+
+    const patterns = [...patternMap.values()]
+      .sort((a, b) => b.count - a.count || a.shape.localeCompare(b.shape));
+
+    if (!patterns.length) return null;
+
+    return {
+      sourceHeader,
+      patterns,
+      rules: [
+        `Read ${sourceHeader} as one combined field.`,
+        `Detected ${patterns.length} distinct parsing pattern${patterns.length === 1 ? '' : 's'} from the parsed values.`,
+        'Apply the matching pattern per row, then send clean MPN/MFR values into normalization.',
+      ],
+    };
+  }, [config, dataRows, roles.manufacturer, roles.mpn]);
 
   const showManufacturerInheritanceOption = useMemo(() => (
     !String(config.structure || '').startsWith('mpn_only') &&
@@ -5126,10 +5309,12 @@ const BomNormalizer = () => {
     setLowConfidenceOnly(false);
     setDownloadMenuAnchor(null);
     setToolsMenuAnchor(null);
-    setConfigureToolsMenuAnchor(null);
+    setParsingLogicOpen(false);
     setConfigureSplitColsOpen(false);
     setConfigureParserSessionId('');
     setConfigureParserPreparing(false);
+    setConfigureParserInitialColumn('');
+    setConfigureParserTitle('Split into Columns');
     setCombineItems([baseItem]);
     setMergeSources([]);
     setMergePreview(null);
@@ -5804,7 +5989,7 @@ const BomNormalizer = () => {
     commitNormalizedResult(pendingNormalization.rows, pendingNormalization.pairingCheck);
   }, [commitNormalizedResult, pendingNormalization]);
 
-  const handleNormalize = useCallback(async () => {
+  const runNormalization = useCallback(async () => {
     if (!dataRows.length) {
       setError('No data rows found below the selected header row.');
       return;
@@ -5838,8 +6023,15 @@ const BomNormalizer = () => {
     }
   }, [commitNormalizedResult, config, dataRows, headers, roles]);
 
-  const handleOpenConfigureSplitColumns = useCallback(async () => {
-    setConfigureToolsMenuAnchor(null);
+  const handleNormalize = useCallback(async () => {
+    if (detectedParsingLogic) {
+      setParsingLogicOpen(true);
+      return;
+    }
+    await runNormalization();
+  }, [detectedParsingLogic, runNormalization]);
+
+  const handleOpenConfigureSplitColumns = useCallback(async ({ title = 'Split into Columns', initialColumn = '' } = {}) => {
     if (!headers.length || !dataRows.length) {
       setError('No source rows are available for Split into Columns.');
       return;
@@ -5847,6 +6039,8 @@ const BomNormalizer = () => {
 
     setConfigureParserPreparing(true);
     setError('');
+    setConfigureParserTitle(title);
+    setConfigureParserInitialColumn(initialColumn && headers.includes(initialColumn) ? initialColumn : '');
     try {
       const rows = dataRows.map((row) => {
         const cleanRow = {};
@@ -5913,6 +6107,8 @@ const BomNormalizer = () => {
     ));
     setConfigureSplitColsOpen(false);
     setConfigureParserSessionId('');
+    setConfigureParserInitialColumn('');
+    setConfigureParserTitle('Split into Columns');
     setParserTouched(true);
     setSuccessMessage(`Structured split applied. Added ${result.new_headers_count || 0} columns.`);
   }, [dataRows, headerRowIndex, headers, sourceDataRows]);
@@ -6034,10 +6230,12 @@ const BomNormalizer = () => {
     setManufacturerMatchOpen(false);
     setDownloadMenuAnchor(null);
     setToolsMenuAnchor(null);
-    setConfigureToolsMenuAnchor(null);
+    setParsingLogicOpen(false);
     setConfigureSplitColsOpen(false);
     setConfigureParserSessionId('');
     setConfigureParserPreparing(false);
+    setConfigureParserInitialColumn('');
+    setConfigureParserTitle('Split into Columns');
     setCombineItems([]);
     setCombineBusy(false);
     setCombineError('');
@@ -6894,26 +7092,6 @@ const BomNormalizer = () => {
                     >
                       View all rows
                     </Button>
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      disabled={busy || configureParserPreparing || !headers.length || !dataRows.length}
-                      onClick={(event) => setConfigureToolsMenuAnchor(event.currentTarget)}
-                    >
-                      {configureParserPreparing ? 'Preparing...' : 'Tools'}
-                    </Button>
-                    <Menu
-                      anchorEl={configureToolsMenuAnchor}
-                      open={Boolean(configureToolsMenuAnchor)}
-                      onClose={() => setConfigureToolsMenuAnchor(null)}
-                    >
-                      <MenuItem
-                        disabled={busy || configureParserPreparing || !headers.length || !dataRows.length}
-                        onClick={handleOpenConfigureSplitColumns}
-                      >
-                        <ListItemText>Split into Columns</ListItemText>
-                      </MenuItem>
-                    </Menu>
                   </Box>
                 </Stack>
                 <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 1.2 }}>
@@ -8285,6 +8463,125 @@ const BomNormalizer = () => {
           </Stack>
         </DialogActions>
       </Dialog>
+
+      <Dialog
+        open={parsingLogicOpen}
+        onClose={() => setParsingLogicOpen(false)}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>Detected Parsing Logic</DialogTitle>
+        <DialogContent>
+          <Typography sx={{ fontSize: 14, color: normalizerTheme.muted, mb: 1.5 }}>
+            FactWise found a combined MPN and Manufacturer field and will apply these rules before normalization.
+          </Typography>
+          <Paper elevation={0} sx={{ p: 1.5, bgcolor: normalizerTheme.paperSoft, border: `1px solid ${normalizerTheme.border}` }}>
+            <Typography sx={{ fontSize: 13, fontWeight: 850, color: normalizerTheme.text }}>
+              Rules
+            </Typography>
+            <Stack gap={0.75} sx={{ mt: 1 }}>
+              {(detectedParsingLogic?.rules || parserLogicRules).map((rule) => (
+                <Typography key={rule} sx={{ fontSize: 13, color: normalizerTheme.muted }}>
+                  {rule}
+                </Typography>
+              ))}
+            </Stack>
+          </Paper>
+
+          <Box sx={{ mt: 2 }}>
+            <Typography sx={{ fontSize: 13, fontWeight: 850, color: normalizerTheme.text }}>
+              Detected patterns
+            </Typography>
+            <Stack gap={1} sx={{ mt: 1 }}>
+              {(detectedParsingLogic?.patterns || []).map((pattern) => (
+                <Paper
+                  key={pattern.shape}
+                  elevation={0}
+                  sx={{ p: 1.5, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}
+                >
+                  <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1}>
+                    <Box>
+                      <Typography sx={{ fontSize: 13, fontWeight: 850, color: normalizerTheme.text }}>
+                        {pattern.shape}
+                      </Typography>
+                      <Typography sx={{ mt: 0.4, fontSize: 12, color: normalizerTheme.muted }}>
+                        {pattern.count} matching row{pattern.count === 1 ? '' : 's'} in {detectedParsingLogic?.sourceHeader}
+                      </Typography>
+                    </Box>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      disabled={configureParserPreparing}
+                      onClick={() => {
+                        setParsingLogicOpen(false);
+                        handleOpenConfigureSplitColumns({
+                          title: 'Parse Fields',
+                          initialColumn: detectedParsingLogic?.sourceHeader || '',
+                        });
+                      }}
+                    >
+                      Edit Parsing
+                    </Button>
+                  </Stack>
+                  <Stack gap={0.5} sx={{ mt: 1 }}>
+                    {(pattern.rules || []).map((rule) => (
+                      <Typography key={`${pattern.shape}-${rule}`} sx={{ fontSize: 12, color: normalizerTheme.muted }}>
+                        {rule}
+                      </Typography>
+                    ))}
+                  </Stack>
+                  <Stack gap={1} sx={{ mt: 1.25 }}>
+                    {(pattern.examples || []).map((example, index) => (
+                      <Box key={`${pattern.shape}-${example.sourceRow || index}`} sx={{ pl: 1, borderLeft: `2px solid ${normalizerTheme.borderStrong}` }}>
+                        <Typography sx={{ fontSize: 12, color: normalizerTheme.muted }}>
+                          {example.sourceRow ? `Source row ${example.sourceRow}` : `Example ${index + 1}`}
+                        </Typography>
+                        <Typography sx={{ fontSize: 13, fontWeight: 700, color: normalizerTheme.text }}>
+                          {example.source}
+                        </Typography>
+                        <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 0.75 }}>
+                          {(example.pairs || []).map((pair, pairIndex) => (
+                            <React.Fragment key={`${example.sourceRow || index}-${pairIndex}-${pair.mpn}-${pair.manufacturer}`}>
+                              <Chip size="small" label={`MPN -> ${pair.mpn}`} />
+                              <Chip size="small" label={`MFR -> ${pair.manufacturer}`} />
+                              {pair.discarded && <Chip size="small" variant="outlined" label={`Discard -> ${pair.discarded}`} />}
+                            </React.Fragment>
+                          ))}
+                        </Stack>
+                      </Box>
+                    ))}
+                  </Stack>
+                </Paper>
+              ))}
+            </Stack>
+          </Box>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'space-between', gap: 1, flexWrap: 'wrap' }}>
+          <Button
+            variant="outlined"
+            disabled={configureParserPreparing}
+            onClick={() => {
+              setParsingLogicOpen(false);
+              handleOpenConfigureSplitColumns({
+                title: 'Parse Fields',
+                initialColumn: detectedParsingLogic?.sourceHeader || '',
+              });
+            }}
+          >
+            Edit Parsing
+          </Button>
+          <Button
+            variant="contained"
+            onClick={() => {
+              setParsingLogicOpen(false);
+              runNormalization();
+            }}
+          >
+            Continue
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Review normalization summary</DialogTitle>
         <DialogContent>
@@ -8327,16 +8624,19 @@ const BomNormalizer = () => {
         onClose={() => {
           setConfigureSplitColsOpen(false);
           setConfigureParserSessionId('');
+          setConfigureParserInitialColumn('');
+          setConfigureParserTitle('Split into Columns');
         }}
         maxWidth="md"
         fullWidth
       >
-        <DialogTitle>Split into Columns</DialogTitle>
+        <DialogTitle>{configureParserTitle}</DialogTitle>
         <DialogContent>
           {configureParserSessionId ? (
             <ColumnParser
               sessionId={configureParserSessionId}
               availableColumns={headers}
+              initialColumn={configureParserInitialColumn}
               onApply={handleApplyConfigureSplitColumns}
             />
           ) : (
@@ -8351,6 +8651,8 @@ const BomNormalizer = () => {
             onClick={() => {
               setConfigureSplitColsOpen(false);
               setConfigureParserSessionId('');
+              setConfigureParserInitialColumn('');
+              setConfigureParserTitle('Split into Columns');
             }}
           >
             Cancel
