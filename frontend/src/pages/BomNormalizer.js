@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import {
@@ -49,6 +49,10 @@ import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import TuneIcon from '@mui/icons-material/Tune';
 import VisibilityIcon from '@mui/icons-material/Visibility';
+import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
+import ChevronRightIcon from '@mui/icons-material/ChevronRight';
+import ExpandLessIcon from '@mui/icons-material/ExpandLess';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import api from '../services/api';
 import BomStructureDialog, { reconcileSavedBomStructure } from '../components/BomStructureDialog';
 import ColumnParser from '../components/ColumnParser/ColumnParser';
@@ -4020,6 +4024,8 @@ const BomNormalizer = () => {
   const [downloadMenuAnchor, setDownloadMenuAnchor] = useState(null);
   const [toolsMenuAnchor, setToolsMenuAnchor] = useState(null);
   const [parsingLogicOpen, setParsingLogicOpen] = useState(false);
+  const [selectedParsingPatternKey, setSelectedParsingPatternKey] = useState('');
+  const [selectedParsingDetailsOpen, setSelectedParsingDetailsOpen] = useState(false);
   const [configureSplitColsOpen, setConfigureSplitColsOpen] = useState(false);
   const [configureParserSessionId, setConfigureParserSessionId] = useState('');
   const [configureParserPreparing, setConfigureParserPreparing] = useState(false);
@@ -4316,6 +4322,53 @@ const BomNormalizer = () => {
       ],
     };
   }, [config, dataRows, headerRowIndex, headers, roles.manufacturer, roles.mpn]);
+
+  const parsingPatternOptions = useMemo(() => (
+    (detectedParsingLogic?.sections || []).flatMap((section) => (
+      (section.patterns || []).map((pattern, index) => ({
+        key: `${section.id}::${pattern.shape || index}`,
+        section,
+        pattern,
+        label: `${section.title}: ${pattern.shape}`,
+      }))
+    ))
+  ), [detectedParsingLogic]);
+
+  const selectedParsingPattern = useMemo(() => (
+    parsingPatternOptions.find((option) => option.key === selectedParsingPatternKey) ||
+    parsingPatternOptions[0] ||
+    null
+  ), [parsingPatternOptions, selectedParsingPatternKey]);
+
+  const selectedParsingPatternIndex = useMemo(() => {
+    if (!selectedParsingPattern) return -1;
+    return parsingPatternOptions.findIndex((option) => option.key === selectedParsingPattern.key);
+  }, [parsingPatternOptions, selectedParsingPattern]);
+
+  const selectedParsingPatternNumber = selectedParsingPatternIndex >= 0
+    ? selectedParsingPatternIndex + 1
+    : 1;
+
+  const handleStepParsingPattern = useCallback((direction) => {
+    if (!parsingPatternOptions.length) return;
+    const currentIndex = selectedParsingPatternIndex >= 0 ? selectedParsingPatternIndex : 0;
+    const nextIndex = Math.min(
+      parsingPatternOptions.length - 1,
+      Math.max(0, currentIndex + direction)
+    );
+    setSelectedParsingPatternKey(parsingPatternOptions[nextIndex].key);
+  }, [parsingPatternOptions, selectedParsingPatternIndex]);
+
+  useEffect(() => {
+    if (!parsingLogicOpen || !parsingPatternOptions.length) return;
+    if (parsingPatternOptions.some((option) => option.key === selectedParsingPatternKey)) return;
+    setSelectedParsingPatternKey(parsingPatternOptions[0].key);
+  }, [parsingLogicOpen, parsingPatternOptions, selectedParsingPatternKey]);
+
+  useEffect(() => {
+    if (!parsingLogicOpen) return;
+    setSelectedParsingDetailsOpen(false);
+  }, [parsingLogicOpen, selectedParsingPattern?.key]);
 
   const showManufacturerInheritanceOption = useMemo(() => (
     !String(config.structure || '').startsWith('mpn_only') &&
@@ -8788,161 +8841,157 @@ const BomNormalizer = () => {
         maxWidth="md"
         fullWidth
       >
-        <DialogTitle>Detected Parsing Logic</DialogTitle>
-        <DialogContent>
-          <Typography sx={{ fontSize: 14, color: normalizerTheme.muted, mb: 1.5 }}>
-            FactWise found a combined MPN and Manufacturer field and will apply these rules before normalization.
-          </Typography>
-          <Paper elevation={0} sx={{ p: 1.5, bgcolor: normalizerTheme.paperSoft, border: `1px solid ${normalizerTheme.border}` }}>
-            <Typography sx={{ fontSize: 13, fontWeight: 850, color: normalizerTheme.text }}>
-              Rules
+        <DialogTitle>
+          <Box>
+            <Typography sx={{ fontSize: 19, fontWeight: 760, letterSpacing: 0 }}>Review detected parsing</Typography>
+            <Typography sx={{ mt: 0.45, fontSize: 13, lineHeight: 1.45, color: normalizerTheme.muted }}>
+              Combined MPN/MFR values were detected. Choose a pattern to inspect or continue with the automatic parser.
             </Typography>
-            <Stack gap={0.75} sx={{ mt: 1 }}>
-              {(detectedParsingLogic?.rules || parserLogicRules).map((rule) => (
-                <Typography key={rule} sx={{ fontSize: 13, color: normalizerTheme.muted }}>
-                  {rule}
+          </Box>
+        </DialogTitle>
+        <DialogContent>
+          <Stack direction="row" gap={0.8} flexWrap="wrap" sx={{ mb: 2 }}>
+            <Chip size="small" variant="outlined" label={`${detectedParsingLogic?.sections?.length || 0} source${detectedParsingLogic?.sections?.length === 1 ? '' : 's'}`} sx={{ fontWeight: 650, color: normalizerTheme.text, bgcolor: 'rgba(148, 163, 184, 0.08)' }} />
+            <Chip size="small" variant="outlined" label={`${parsingPatternOptions.length} pattern${parsingPatternOptions.length === 1 ? '' : 's'}`} sx={{ fontWeight: 650, color: normalizerTheme.text, bgcolor: 'rgba(148, 163, 184, 0.08)' }} />
+            <Chip size="small" color="success" variant="outlined" label={`${detectedParsingLogic?.matchingRows || 0} matching values`} sx={{ fontWeight: 650 }} />
+            {selectedParsingPattern?.section?.unmatched?.count > 0 && (
+              <Chip size="small" color="warning" variant="outlined" label={`${selectedParsingPattern.section.unmatched.count} unmatched`} sx={{ fontWeight: 650 }} />
+            )}
+          </Stack>
+
+          <Paper elevation={0} sx={{ p: 1.35, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
+            <Grid container spacing={1.5} alignItems="center">
+              <Grid item xs={12} md={8}>
+                <Typography sx={{ fontSize: 12, color: normalizerTheme.muted }}>
+                  Detected pattern
                 </Typography>
-              ))}
-            </Stack>
+                <Typography sx={{ mt: 0.2, fontSize: 15, fontWeight: 760, lineHeight: 1.35, color: normalizerTheme.text }} noWrap>
+                  {selectedParsingPatternNumber}. {selectedParsingPattern?.pattern?.shape || 'No pattern detected'}
+                </Typography>
+                {selectedParsingPattern && (
+                  <Typography sx={{ mt: 0.25, fontSize: 11.5, color: normalizerTheme.muted }} noWrap>
+                    {selectedParsingPattern.section.sourceHeader} - {selectedParsingPattern.pattern.count} row{selectedParsingPattern.pattern.count === 1 ? '' : 's'}
+                  </Typography>
+                )}
+              </Grid>
+              <Grid item xs={12} md={4}>
+                <Stack spacing={1} alignItems="flex-end" sx={{ maxWidth: 300, ml: 'auto' }}>
+                  <Stack direction="row" spacing={0.75} alignItems="center" justifyContent="flex-end">
+                    <IconButton
+                      size="small"
+                      disabled={selectedParsingPatternIndex <= 0}
+                      onClick={() => handleStepParsingPattern(-1)}
+                      sx={{ border: `1px solid ${normalizerTheme.border}` }}
+                    >
+                      <ChevronLeftIcon fontSize="small" />
+                    </IconButton>
+                    <Typography sx={{ minWidth: 52, textAlign: 'center', fontSize: 12.5, fontWeight: 700, color: normalizerTheme.muted }}>
+                      {selectedParsingPatternNumber}/{Math.max(1, parsingPatternOptions.length)}
+                    </Typography>
+                    <IconButton
+                      size="small"
+                      disabled={selectedParsingPatternIndex < 0 || selectedParsingPatternIndex >= parsingPatternOptions.length - 1}
+                      onClick={() => handleStepParsingPattern(1)}
+                      sx={{ border: `1px solid ${normalizerTheme.border}` }}
+                    >
+                      <ChevronRightIcon fontSize="small" />
+                    </IconButton>
+                  </Stack>
+                  <Button
+                    variant="outlined"
+                    disabled={!selectedParsingPattern || configureParserPreparing}
+                    sx={{ width: { xs: '100%', sm: 150 }, minWidth: 0, px: 2, fontWeight: 700 }}
+                    onClick={() => {
+                      if (!selectedParsingPattern) return;
+                      setParsingLogicOpen(false);
+                      handleOpenConfigureSplitColumns({
+                        title: 'Parse Fields',
+                        initialColumn: selectedParsingPattern.section.sourceHeader || '',
+                        scope: {
+                          mode: 'pattern',
+                          sourceHeader: selectedParsingPattern.section.sourceHeader || '',
+                          patternShape: selectedParsingPattern.pattern.shape,
+                          sourceRows: selectedParsingPattern.pattern.sourceRows || [],
+                        },
+                      });
+                    }}
+                  >
+                    Edit pattern
+                  </Button>
+                </Stack>
+              </Grid>
+            </Grid>
           </Paper>
 
-          <Box sx={{ mt: 2 }}>
-            <Typography sx={{ fontSize: 13, fontWeight: 850, color: normalizerTheme.text }}>
-              Detected patterns
-            </Typography>
-            {(detectedParsingLogic?.sections || []).length > 1 && (
-              <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} sx={{ mt: 1 }}>
-                {(detectedParsingLogic?.sections || []).map((section) => (
-                  <Paper
-                    key={`${section.id}-summary`}
-                    elevation={0}
+          {selectedParsingPattern && (
+            <Paper elevation={0} sx={{ mt: 1.5, p: 1.6, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+              <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1.2} alignItems={{ xs: 'stretch', sm: 'flex-start' }}>
+                <Box sx={{ minWidth: 0 }}>
+                  <Typography sx={{ fontSize: 14, fontWeight: 400, color: normalizerTheme.text }}>
+                    {selectedParsingPattern.section.title}
+                  </Typography>
+                  <Typography sx={{ mt: 0.35, fontSize: 12.5, color: normalizerTheme.muted }}>
+                    Source column: {selectedParsingPattern.section.sourceHeader}
+                  </Typography>
+                </Box>
+                <Stack direction="row" gap={0.75} flexWrap="wrap" alignItems="center" justifyContent={{ xs: 'flex-start', sm: 'flex-end' }}>
+                  <Chip size="small" variant="outlined" label={`${selectedParsingPattern.pattern.count} rows`} sx={{ fontWeight: 650 }} />
+                  <Chip size="small" variant="outlined" label={`${selectedParsingPattern.pattern.examples?.length || 0} examples`} sx={{ fontWeight: 650 }} />
+                  <IconButton
+                    size="small"
+                    onClick={() => setSelectedParsingDetailsOpen(open => !open)}
+                    sx={{ ml: 0.25, border: `1px solid ${normalizerTheme.border}` }}
+                  >
+                    {selectedParsingDetailsOpen ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
+                  </IconButton>
+                </Stack>
+              </Stack>
+
+              {selectedParsingDetailsOpen && (
+                <>
+                  <Typography sx={{ mt: 1.25, fontSize: 13, fontWeight: 680, color: normalizerTheme.text }}>
+                    {selectedParsingPattern.pattern.shape}
+                  </Typography>
+
+                  <Stack direction="row" gap={0.75} flexWrap="wrap" sx={{ mt: 1 }}>
+                    {(selectedParsingPattern.pattern.rules || []).slice(0, 3).map((rule) => (
+                      <Chip key={rule} size="small" variant="outlined" label={rule} sx={{ fontWeight: 600, color: normalizerTheme.muted, bgcolor: 'transparent' }} />
+                    ))}
+                  </Stack>
+                </>
+              )}
+
+              <Stack gap={1} sx={{ mt: 1.5 }}>
+                {(selectedParsingPattern.pattern.examples || []).slice(0, 2).map((example, index) => (
+                  <Box
+                    key={`${selectedParsingPattern.key}-${example.sourceRow || index}`}
                     sx={{
-                      flex: 1,
-                      p: 1.25,
+                      p: 1.15,
+                      borderRadius: '8px',
                       border: `1px solid ${normalizerTheme.border}`,
                       bgcolor: normalizerTheme.paperSoft,
                     }}
                   >
-                    <Typography sx={{ fontSize: 12, fontWeight: 850, color: normalizerTheme.text }}>
-                      {section.title}
+                    <Typography sx={{ fontSize: 11.5, fontWeight: 650, color: normalizerTheme.muted }}>
+                      {example.sourceRow ? `Source row ${example.sourceRow}` : `Example ${index + 1}`}
                     </Typography>
-                    <Typography sx={{ mt: 0.35, fontSize: 12, color: normalizerTheme.muted }}>
-                      {section.sourceHeader}: {section.matchingRows || 0} matching value{section.matchingRows === 1 ? '' : 's'} across {section.patternCount || 0} pattern{section.patternCount === 1 ? '' : 's'}
+                    <Typography sx={{ mt: 0.35, fontSize: 13, fontWeight: 650, lineHeight: 1.4, color: normalizerTheme.text, wordBreak: 'break-word' }}>
+                      {example.source}
                     </Typography>
-                  </Paper>
+                    <Stack direction="row" gap={0.75} flexWrap="wrap" sx={{ mt: 0.85 }}>
+                      {(example.pairs || []).map((pair, pairIndex) => (
+                        <React.Fragment key={`${selectedParsingPattern.key}-${pairIndex}-${pair.mpn}-${pair.manufacturer}`}>
+                          <Chip size="small" color="success" label={`MPN: ${pair.mpn}`} sx={{ fontWeight: 650 }} />
+                          <Chip size="small" color="info" label={`MFR: ${pair.manufacturer}`} sx={{ fontWeight: 650 }} />
+                          {pair.discarded && <Chip size="small" variant="outlined" label={`Ignore: ${pair.discarded}`} sx={{ fontWeight: 600, color: normalizerTheme.muted }} />}
+                        </React.Fragment>
+                      ))}
+                    </Stack>
+                  </Box>
                 ))}
               </Stack>
-            )}
-            <Stack gap={1} sx={{ mt: 1 }}>
-              {(detectedParsingLogic?.sections || []).map((section) => (
-                <Paper
-                  key={section.id}
-                  elevation={0}
-                  sx={{ p: 1.5, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}
-                >
-                  <Typography sx={{ fontSize: 14, fontWeight: 850, color: normalizerTheme.text }}>
-                    {section.title}
-                  </Typography>
-                  <Typography sx={{ mt: 0.4, fontSize: 12, color: normalizerTheme.muted }}>
-                    {section.description || `Source column: ${section.sourceHeader}`}
-                  </Typography>
-                  <Typography sx={{ mt: 0.4, fontSize: 12, color: normalizerTheme.muted }}>
-                    Source column: {section.sourceHeader} - {section.matchingRows || 0} matching value{section.matchingRows === 1 ? '' : 's'} across {section.patternCount || 0} pattern{section.patternCount === 1 ? '' : 's'}
-                  </Typography>
-                  <Stack gap={1} sx={{ mt: 1.25 }}>
-                    {(section.patterns || []).map((pattern) => (
-                      <Paper
-                        key={`${section.id}-${pattern.shape}`}
-                        elevation={0}
-                        sx={{ p: 1.25, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}
-                      >
-                        <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1}>
-                          <Box>
-                            <Typography sx={{ fontSize: 13, fontWeight: 850, color: normalizerTheme.text }}>
-                              {pattern.shape}
-                            </Typography>
-                            <Typography sx={{ mt: 0.4, fontSize: 12, color: normalizerTheme.muted }}>
-                              {pattern.count} matching row{pattern.count === 1 ? '' : 's'} in {section.sourceHeader}
-                            </Typography>
-                          </Box>
-                          <Button
-                            size="small"
-                            variant="outlined"
-                            disabled={configureParserPreparing}
-                            onClick={() => {
-                              setParsingLogicOpen(false);
-                              handleOpenConfigureSplitColumns({
-                                title: 'Parse Fields',
-                                initialColumn: section.sourceHeader || '',
-                                scope: {
-                                  mode: 'pattern',
-                                  sourceHeader: section.sourceHeader || '',
-                                  patternShape: pattern.shape,
-                                  sourceRows: pattern.sourceRows || [],
-                                },
-                              });
-                            }}
-                          >
-                            Edit Parsing
-                          </Button>
-                        </Stack>
-                        <Stack gap={0.5} sx={{ mt: 1 }}>
-                          {(pattern.rules || []).map((rule) => (
-                            <Typography key={`${section.id}-${pattern.shape}-${rule}`} sx={{ fontSize: 12, color: normalizerTheme.muted }}>
-                              {rule}
-                            </Typography>
-                          ))}
-                        </Stack>
-                        <Stack gap={1} sx={{ mt: 1.25 }}>
-                          {(pattern.examples || []).map((example, index) => (
-                            <Box key={`${section.id}-${pattern.shape}-${example.sourceRow || index}`} sx={{ pl: 1, borderLeft: `2px solid ${normalizerTheme.borderStrong}` }}>
-                              <Typography sx={{ fontSize: 12, color: normalizerTheme.muted }}>
-                                {example.sourceRow ? `Source row ${example.sourceRow}` : `Example ${index + 1}`}
-                              </Typography>
-                              <Typography sx={{ fontSize: 13, fontWeight: 700, color: normalizerTheme.text }}>
-                                {example.source}
-                              </Typography>
-                              <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 0.75 }}>
-                                {(example.pairs || []).map((pair, pairIndex) => (
-                                  <React.Fragment key={`${section.id}-${example.sourceRow || index}-${pairIndex}-${pair.mpn}-${pair.manufacturer}`}>
-                                    <Chip size="small" label={`MPN -> ${pair.mpn}`} />
-                                    <Chip size="small" label={`MFR -> ${pair.manufacturer}`} />
-                                    {pair.discarded && <Chip size="small" variant="outlined" label={`Discard -> ${pair.discarded}`} />}
-                                  </React.Fragment>
-                                ))}
-                              </Stack>
-                            </Box>
-                          ))}
-                        </Stack>
-                      </Paper>
-                    ))}
-                  </Stack>
-                  {(section.unmatched?.count || 0) > 0 && (
-                    <Box sx={{ mt: 1.5 }}>
-                      <Typography sx={{ fontSize: 13, fontWeight: 850, color: normalizerTheme.text }}>
-                        Values not matched to combined MPN/MFR patterns
-                      </Typography>
-                      <Typography sx={{ mt: 0.5, fontSize: 12, color: normalizerTheme.muted }}>
-                        {section.unmatched.count} non-empty value{section.unmatched.count === 1 ? '' : 's'} did not match this source's combined-field rules.
-                      </Typography>
-                      <Stack gap={0.75} sx={{ mt: 1 }}>
-                        {(section.unmatched.examples || []).map((example, index) => (
-                          <Box key={`${section.id}-unmatched-${example.sourceRow || index}-${example.source}`} sx={{ pl: 1, borderLeft: `2px solid ${normalizerTheme.borderStrong}` }}>
-                            <Typography sx={{ fontSize: 12, color: normalizerTheme.muted }}>
-                              {example.sourceRow ? `Source row ${example.sourceRow}` : `Example ${index + 1}`}
-                            </Typography>
-                            <Typography sx={{ fontSize: 13, fontWeight: 700, color: normalizerTheme.text }}>
-                              {example.source}
-                            </Typography>
-                          </Box>
-                        ))}
-                      </Stack>
-                    </Box>
-                  )}
-                </Paper>
-              ))}
-            </Stack>
-          </Box>
+            </Paper>
+          )}
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'space-between', gap: 1, flexWrap: 'wrap' }}>
           <Button

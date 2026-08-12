@@ -129,6 +129,10 @@ from .provider_credentials import (
     provider_credential_detail,
     provider_credential_test,
 )
+from .editor_defaults import (
+    editor_default_settings,
+    editor_default_apply_preview,
+)
 from .intermediate_artifacts import (
     intermediate_artifacts,
     save_intermediate_artifact,
@@ -274,6 +278,8 @@ urlpatterns = [
     path('settings/provider-credentials/', provider_credentials, name='provider-credentials'),
     path('settings/provider-credentials/<str:provider>/test/', provider_credential_test, name='provider-credential-test'),
     path('settings/provider-credentials/<str:provider>/', provider_credential_detail, name='provider-credential-detail'),
+    path('settings/editor-defaults/', editor_default_settings, name='editor-default-settings'),
+    path('settings/editor-defaults/apply-preview/', editor_default_apply_preview, name='editor-default-apply-preview'),
     path('intermediate-artifacts/', intermediate_artifacts, name='intermediate-artifacts'),
     path('intermediate-artifacts/save/', save_intermediate_artifact, name='save-intermediate-artifact'),
     path('intermediate-artifacts/<int:artifact_id>/download/', download_intermediate_artifact, name='download-intermediate-artifact'),

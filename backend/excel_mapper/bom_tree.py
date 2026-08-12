@@ -161,6 +161,160 @@ class BomTree(object):
         }
 
 
+# Separators a breadcrumb path might be written with. '/' and '\' are included
+# because some exports use them, but a part number can legitimately contain one
+# (THALES ships 'QCPF11/041'), so a separator is only ever adopted when it
+# demonstrably resolves more parents than leaving the value alone.
+PATH_SEPARATORS = ('>', '::', '|', '\\', '/')
+
+# A candidate is rejected if it leaves more than this share of rows pointing at
+# a parent that does not exist. Not zero: one malformed row should not veto a
+# reading that works for the other eight hundred.
+PATH_UNRESOLVED_TOLERANCE = 0.05
+
+
+def _path_parent(value, separator, take_leaf):
+    """Pull the parent's code out of one breadcrumb path."""
+    segments = [segment.strip() for segment in value.split(separator)]
+    segments = [segment for segment in segments if segment]
+    if not segments:
+        return ''
+    if take_leaf:
+        # The path names the parent, so its last segment is the parent.
+        return segments[-1]
+    # The path is the row's own trail, so the parent is the segment before the
+    # row itself. A one-segment trail is the root and has no parent.
+    return segments[-2] if len(segments) > 1 else ''
+
+
+def _report_unusable_parent_paths(stated_rows, known, warnings):
+    """Explain a parent column of paths that match nothing in the code column.
+
+    Paths are built out of SOME identifier. When they match none of the codes,
+    the usual cause is that the wrong source column was mapped as the part
+    number - the paths are fine, the identity is not. Left alone this produces
+    one parent_not_found per row and no clue which column to fix, so look for
+    the column the paths were actually built from and name it.
+    """
+    segments = set()
+    for row in stated_rows:
+        for separator in PATH_SEPARATORS:
+            if separator in row['stated_parent']:
+                segments.update(part.strip()
+                                for part in row['stated_parent'].split(separator)
+                                if part.strip())
+                break
+    if not segments or segments & known:
+        return
+
+    # Every column of every row, scored by how much of it the paths are made of.
+    tally = {}
+    for row in stated_rows:
+        for column, value in (row.get('source') or {}).items():
+            text = unwrap_cell(value).strip()
+            if not text:
+                continue
+            seen, hit = tally.setdefault(column, [0, 0])
+            tally[column] = [seen + 1, hit + (1 if text in segments else 0)]
+
+    best = ''
+    best_share = 0.0
+    for column, (seen, hit) in tally.items():
+        share = hit / seen if seen else 0.0
+        if share > best_share:
+            best, best_share = column, share
+
+    note = {
+        'type': 'parent_paths_unusable',
+        'count': len(stated_rows),
+        'message': ('The parent column holds paths, but none of their segments '
+                    'match a part number on this sheet, so no row can be placed.'),
+    }
+    if best_share >= 0.9:
+        note['suggested_column'] = best
+        note['message'] += (' They are built from "%s" - map that column as the '
+                            'part number and re-run.' % best)
+    warnings.append(note)
+
+
+def _unpack_stated_parent_paths(rows, warnings):
+    """Rewrite breadcrumb-path parents into plain parent codes, in place.
+
+    A sheet may answer "what is this row's parent?" with a whole path rather
+    than a code, and it may write either the parent's path or the row's own
+    path. Both are unusable as given: the value is matched against row codes and
+    never matches, so every row reports parent_not_found and the BOM comes out
+    empty.
+
+    Which convention a sheet uses cannot be assumed, so it is measured. Every
+    (separator, reading) pair is scored by the number of real parent-child edges
+    it produces, and one is adopted only if it beats leaving the values alone.
+    Scoring counts edges rather than "did it resolve" on purpose: reading a
+    row's own path as its parent's makes every row its own parent, which
+    resolves perfectly and yields a tree of roots that says nothing.
+
+    A sheet of plain codes contains no separator, scores no candidates, and is
+    left untouched.
+    """
+    stated_rows = [row for row in rows if row['stated_parent']]
+    if not stated_rows:
+        return
+    known = {row['code'] for row in rows if row['code']}
+    tolerance = len(stated_rows) * PATH_UNRESOLVED_TOLERANCE
+
+    def score(derive):
+        """Edge count for one reading, or None if too much of it dangles."""
+        edges = 0
+        unresolved = 0
+        for row in stated_rows:
+            parent = derive(row)
+            if not parent or parent == row['code']:
+                continue  # a root; correct, but says nothing about structure
+            if parent not in known:
+                unresolved += 1
+                if unresolved > tolerance:
+                    return None
+                continue
+            edges += 1
+        return edges
+
+    baseline = score(lambda row: row['stated_parent'])
+    if baseline is not None and baseline == len(stated_rows):
+        return  # already plain codes, every row placed
+
+    best = None
+    for separator in PATH_SEPARATORS:
+        if not any(separator in row['stated_parent'] for row in stated_rows):
+            continue
+        for take_leaf in (False, True):
+            edges = score(lambda row, s=separator, t=take_leaf:
+                          _path_parent(row['stated_parent'], s, t))
+            if edges is None:
+                continue
+            if best is None or edges > best[0]:
+                best = (edges, separator, take_leaf)
+
+    if best is None or best[0] <= (baseline or 0):
+        _report_unusable_parent_paths(stated_rows, known, warnings)
+        return
+    edges, separator, take_leaf = best
+    for row in stated_rows:
+        row['stated_parent'] = _path_parent(row['stated_parent'], separator,
+                                            take_leaf)
+    warnings.append({
+        'type': 'parent_paths_unpacked',
+        'count': len(stated_rows),
+        'separator': separator,
+        'edges': edges,
+        'message': ('Parent column holds "%s"-separated paths, read as %s. '
+                    '%d of %d rows were placed under a parent.'
+                    % (separator,
+                       "the parent's trail" if take_leaf
+                       else "each row's own trail",
+                       edges, len(stated_rows))),
+    })
+
+
 def derive_tree(records, level_column, code_column,
                 description_column=None, quantity_column=None, uom_column=None,
                 root=None, drop_documents=True, parent_column=None):
@@ -259,6 +413,9 @@ def derive_tree(records, level_column, code_column,
     stated = any(row['stated_parent'] for row in rows)
 
     if stated:
+        # A parent may be given as a breadcrumb path rather than a code. Turn
+        # those into codes first so the matching below has something to match.
+        _unpack_stated_parent_paths(rows, warnings)
         # A row naming itself as its own parent is how these exports mark a root
         # (AMAT writes PARENT_PART == PART_NUMBER on the assembly line).
         known = {row['code'] for row in rows}

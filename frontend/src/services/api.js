@@ -185,6 +185,20 @@ const api = {
     }, { timeout: 30000 });
   },
 
+  getEditorDefaultSettings: (entityName) => {
+    return axios.get(`${API_URL}/settings/editor-defaults/`, {
+      params: { entity_name: entityName },
+      timeout: 30000
+    });
+  },
+
+  saveEditorDefaultSettings: (entityName, settings = {}) => {
+    return axios.post(`${API_URL}/settings/editor-defaults/`, {
+      entity_name: entityName,
+      ...settings
+    }, { timeout: 30000 });
+  },
+
   deleteProviderCredential: (provider, scopeId = 'default') => {
     return axios.delete(`${API_URL}/settings/provider-credentials/${provider}/`, {
       params: { scope_id: scopeId },
@@ -574,6 +588,7 @@ const api = {
       _mpn,
       _bust: _ts,
     };
+    if (options.entityName) params.entity_name = options.entityName;
     if (options.force_fresh) params.force_fresh = 'true';
     if (options._fresh) params._fresh = options._fresh;
     return axios.get(`${API_URL}/data/`, {
@@ -1714,13 +1729,13 @@ const api = {
    * blankStrategy: 'prefix_sequence' | 'leave'
    * duplicateStrategy: 'suffix' | 'prefix_sequence' | 'leave'
    */
-  resolveItemCode: (sessionId, { column = 'Item code', blankStrategy = 'leave', duplicateStrategy = 'leave', prefix = '', separator = '-', start = 1, padding = 0 } = {}) => {
+  resolveItemCode: (sessionId, { column = 'Item code', blankStrategy = 'leave', duplicateStrategy = 'leave', prefix = '', separator = '-', start = 1, padding = 0, increment = true } = {}) => {
     return axios.post(`${API_URL}/transforms/resolve-item-code/`, {
       session_id: sessionId,
       column,
       blank_strategy: blankStrategy,
       duplicate_strategy: duplicateStrategy,
-      prefix, separator, start, padding,
+      prefix, separator, start, padding, increment,
     }, { timeout: 120000 });
   },
 

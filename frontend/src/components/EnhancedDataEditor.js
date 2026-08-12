@@ -1,4 +1,4 @@
-// EnhancedDataEditor.js - DataEditor with comprehensive synchronization
+﻿// EnhancedDataEditor.js - DataEditor with comprehensive synchronization
 // Fixes all refresh issues on Azure deployment
 
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
@@ -100,6 +100,7 @@ import ColumnParser from './ColumnParser/ColumnParser';
 import { LoaderCard } from './LoaderOverlay';
 import { getDataSynchronizer, cleanupSynchronizer } from '../utils/DataSynchronizer';
 import { useThemeContext } from '../utils/ThemeContext';
+import { readItemDirectoryDefaults } from '../utils/itemDirectoryDefaults';
 
 // Keep the arrangement-specific row expansion implementation dormant while a
 // generic, user-configured row expansion model is designed.
@@ -397,7 +398,7 @@ const EnhancedDataEditor = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const { isDarkMode, tokens: themeTokens } = useThemeContext();
-  const { isEmbedded: isFactwiseEmbedded } = useFactwise();
+  const { isEmbedded: isFactwiseEmbedded, entityName: factwiseEntityName } = useFactwise();
   const synchronizer = useRef(null);
   const scrollContainerRef = useRef(null);
   const [mousePos, setMousePos] = useState({ x: 50, y: 50 });
@@ -812,6 +813,7 @@ const EnhancedDataEditor = () => {
   const pendingExportRef = useRef(null);
   const returnToRequiredGuardRef = useRef(false);
   const requiredGuardRunnerRef = useRef(null);
+  const itemDirectoryDefaultsAppliedRef = useRef({});
   // Item code gets special export handling: it must be filled AND unique. This
   // holds the detected blanks/duplicates so export can stop before FactWise rejects it.
   const [itemCodeIssue, setItemCodeIssue] = useState(null); // { field, blanks, dupRows, dupValues }
@@ -1388,6 +1390,82 @@ const EnhancedDataEditor = () => {
     }
   }, [isCellEmpty]);
 
+  const applySavedItemDirectoryDefaultsOnLoad = useCallback(async (headers = []) => {
+    if (!sessionId || !Array.isArray(headers) || headers.length === 0) return false;
+    if (itemDirectoryDefaultsAppliedRef.current[sessionId]) return false;
+    itemDirectoryDefaultsAppliedRef.current[sessionId] = true;
+
+    try {
+      const savedDefaults = readItemDirectoryDefaults();
+      const headerSet = new Set(headers);
+      const defaults = {};
+      const addDefault = (column, value) => {
+        const text = String(value ?? '').trim();
+        if (text && headerSet.has(column)) {
+          defaults[column] = text;
+        }
+      };
+
+      addDefault('Procurement entity name', savedDefaults.procurementEntityName);
+      addDefault('Item type', savedDefaults.itemType);
+      addDefault('Procurement item', savedDefaults.procurementItem);
+      addDefault('Sales item', savedDefaults.salesItem);
+      addDefault('Measurement unit', savedDefaults.measurementUnit);
+
+      let changed = false;
+      if (Object.keys(defaults).length > 0) {
+        const resp = await api.fillRequiredDefaults(sessionId, defaults);
+        if (!resp.data?.success) {
+          throw new Error(resp.data?.error || 'Could not apply saved editor defaults');
+        }
+        const filled = resp.data?.filled || {};
+        changed = Object.values(filled).some(count => Number(count || 0) > 0);
+      }
+
+      const itemCodePrefix = String(savedDefaults.itemCodePrefix || '').trim();
+      const itemCodeColumn = headerSet.has('Item code') ? 'Item code' : '';
+      if (itemCodeColumn) {
+        const blankStrategy = (
+          savedDefaults.itemCodeBlankStrategy === 'prefix_sequence' && itemCodePrefix
+        ) ? 'prefix_sequence' : 'leave';
+        const duplicateStrategy = (() => {
+          const requested = savedDefaults.itemCodeDuplicateStrategy || 'prefix_sequence';
+          if (requested === 'suffix') return 'suffix';
+          if (requested === 'prefix_sequence' && itemCodePrefix) return 'prefix_sequence';
+          return 'leave';
+        })();
+
+        if (blankStrategy !== 'leave' || duplicateStrategy !== 'leave') {
+          const resp = await api.resolveItemCode(sessionId, {
+            column: itemCodeColumn,
+            blankStrategy,
+            duplicateStrategy,
+            prefix: itemCodePrefix,
+            separator: savedDefaults.itemCodeSeparator ?? '-',
+            start: Math.max(1, Number.parseInt(savedDefaults.itemCodeStart || '1', 10) || 1),
+            padding: Math.max(0, Number.parseInt(savedDefaults.itemCodePadding || '3', 10) || 0),
+            increment: savedDefaults.itemCodeIncrement !== false,
+          });
+          if (!resp.data?.success) {
+            throw new Error(resp.data?.error || 'Could not apply saved item code settings');
+          }
+          changed = changed
+            || Number(resp.data?.blanks_filled || 0) > 0
+            || Number(resp.data?.duplicates_resolved || 0) > 0;
+        }
+      }
+
+      if (changed) {
+        setDefaultValues(prev => ({ ...prev, ...defaults }));
+        showSnackbar('Applied saved Item Directory defaults to blank editor cells.', 'success');
+      }
+      return changed;
+    } catch (error) {
+      delete itemDirectoryDefaultsAppliedRef.current[sessionId];
+      throw error;
+    }
+  }, [sessionId, showSnackbar]);
+
   // Load the whole sheet, then page/search/filter over it in the browser.
   //
   // This used to fetch one server page at a time, which quietly broke three
@@ -1404,16 +1482,43 @@ const EnhancedDataEditor = () => {
       const resp = await api.getMappedDataWithSpecs(sessionId, 1, ALL_ROWS_PAGE_SIZE, true, {
         force_fresh: true,
         _fresh: Date.now(),
-        timeoutMs
+        timeoutMs,
+        entityName: factwiseEntityName
       });
 
-      const payload = resp?.data || {};
-      const headers = payload.headers || [];
-      const displayHeaders = Array.isArray(payload.display_headers) && payload.display_headers.length === headers.length
+      let payload = resp?.data || {};
+      let headers = payload.headers || [];
+      let displayHeaders = Array.isArray(payload.display_headers) && payload.display_headers.length === headers.length
         ? payload.display_headers
         : headers;
-      const rows = Array.isArray(payload.data) ? payload.data : [];
-      const pg = payload.pagination || { page: targetPage, total_pages: 1, total_rows: rows.length };
+      let rows = Array.isArray(payload.data) ? payload.data : [];
+      let pg = payload.pagination || { page: targetPage, total_pages: 1, total_rows: rows.length };
+
+      let appliedSavedDefaults = false;
+      try {
+        appliedSavedDefaults = await applySavedItemDirectoryDefaultsOnLoad(headers);
+      } catch (defaultsError) {
+        console.warn('Could not apply saved Item Directory defaults:', defaultsError);
+        showSnackbar(
+          defaultsError?.message || 'Could not apply saved Item Directory defaults.',
+          'warning'
+        );
+      }
+      if (appliedSavedDefaults) {
+        const refreshedResp = await api.getMappedDataWithSpecs(sessionId, 1, ALL_ROWS_PAGE_SIZE, true, {
+          force_fresh: true,
+          _fresh: Date.now(),
+          timeoutMs,
+          entityName: factwiseEntityName
+        });
+        payload = refreshedResp?.data || {};
+        headers = payload.headers || [];
+        displayHeaders = Array.isArray(payload.display_headers) && payload.display_headers.length === headers.length
+          ? payload.display_headers
+          : headers;
+        rows = Array.isArray(payload.data) ? payload.data : [];
+        pg = payload.pagination || { page: targetPage, total_pages: 1, total_rows: rows.length };
+      }
       const pageHasMpnValidation = headers.some(header => isMpnValidationColumn(header));
       if (pageHasMpnValidation) {
         setMpnValidationCompleted(true);
@@ -1516,7 +1621,7 @@ const EnhancedDataEditor = () => {
     } finally {
       setPageLoading(false);
     }
-  }, [sessionId, page, pageSize, columnDefs, showSnackbar, isMpnValidationColumn]);
+  }, [sessionId, page, pageSize, columnDefs, showSnackbar, isMpnValidationColumn, applySavedItemDirectoryDefaultsOnLoad, factwiseEntityName]);
 
   // ─── ENHANCED DATA LOADING WITH SYNCHRONIZATION ─────────────────────────────
   const initializeData = useCallback(async () => {
@@ -3091,7 +3196,7 @@ const EnhancedDataEditor = () => {
   // open the dialog instead and hold the export until the user resolves it.
   // Blank counts come from the backend so they reflect the WHOLE dataset, not
   // just the current (server-paginated) page.
-  const runGuardedExport = useCallback(async (exportFn, exportType = 'item') => {
+  const runGuardedExport = useCallback(async (exportFn, exportType = 'item', applySavedDefaults = true) => {
     // The BOM sheet has its own ruleset. Item required fields (Item code, Item
     // type, Measurement unit...) do not apply to a BOM row, so running them here
     // would report failures that are not real and hide the ones that are.
@@ -3178,6 +3283,123 @@ const EnhancedDataEditor = () => {
         invalidValues: [],
       })).filter(g => g.emptyCount > 0);
     }
+
+    if (applySavedDefaults) {
+      const savedDefaults = readItemDirectoryDefaults();
+      const defaultForRequired = (requiredName) => {
+        if (requiredName === 'Measurement unit') return savedDefaults.measurementUnit;
+        if (requiredName === 'Item type') return savedDefaults.itemType;
+        if (requiredName === 'Procurement entity name') return savedDefaults.procurementEntityName;
+        if (requiredName === 'Procurement item') return savedDefaults.procurementItem;
+        if (requiredName === 'Sales item') return savedDefaults.salesItem;
+        return '';
+      };
+      const itemCodePrefix = String(savedDefaults.itemCodePrefix || '').trim();
+      const itemCodeSeparator = savedDefaults.itemCodeSeparator ?? '-';
+      const itemCodeStart = Math.max(1, Number.parseInt(savedDefaults.itemCodeStart || '1', 10) || 1);
+      const itemCodePadding = Math.max(0, Number.parseInt(savedDefaults.itemCodePadding || '3', 10) || 0);
+      const itemCodeIncrement = savedDefaults.itemCodeIncrement !== false;
+      const requestedBlankStrategy = savedDefaults.itemCodeBlankStrategy || 'prefix_sequence';
+      const requestedDuplicateStrategy = savedDefaults.itemCodeDuplicateStrategy || 'prefix_sequence';
+      let appliedSavedDefault = false;
+
+      try {
+        if (itemCodeField && icIssue) {
+          const blankStrategy = (
+            (icIssue.blanks || 0) > 0 &&
+            requestedBlankStrategy === 'prefix_sequence' &&
+            itemCodePrefix
+          ) ? 'prefix_sequence' : 'leave';
+          const duplicateStrategy = (() => {
+            if ((icIssue.dupRows || 0) <= 0) return 'leave';
+            if (requestedDuplicateStrategy === 'suffix') return 'suffix';
+            if (requestedDuplicateStrategy === 'prefix_sequence' && itemCodePrefix) return 'prefix_sequence';
+            return 'leave';
+          })();
+
+          if (blankStrategy !== 'leave' || duplicateStrategy !== 'leave') {
+            const resp = await api.resolveItemCode(sessionId, {
+              column: itemCodeField,
+              blankStrategy,
+              duplicateStrategy,
+              prefix: itemCodePrefix,
+              separator: itemCodeSeparator,
+              start: itemCodeStart,
+              padding: itemCodePadding,
+              increment: itemCodeIncrement,
+            });
+            if (!resp.data?.success) throw new Error(resp.data?.error || 'Could not generate item codes');
+            recordPostMappingAction({
+              type: 'resolve_item_code',
+              label: 'Resolve Item code values from settings',
+              column: itemCodeField,
+              blank_strategy: blankStrategy,
+              duplicate_strategy: duplicateStrategy,
+              prefix: itemCodePrefix,
+              separator: itemCodeSeparator,
+              start: itemCodeStart,
+              padding: itemCodePadding,
+              increment: itemCodeIncrement,
+            });
+            appliedSavedDefault = true;
+          }
+        }
+
+        for (const gap of gaps) {
+          if (gap.field === itemCodeField) continue;
+          const defaultValue = String(defaultForRequired(gap.req) || '').trim();
+          if (!defaultValue) continue;
+          const validation = getRequiredValidationRule(gap.req);
+          if ((gap.emptyCount || 0) > 0) {
+            const resp = await api.setColumnDefault(sessionId, gap.field, defaultValue, true, null);
+            if (!resp.data?.success) throw new Error(resp.data?.error || `Could not fill ${gap.req}`);
+            recordPostMappingAction({
+              type: 'set_column_default',
+              label: `Fill ${gap.headerName || gap.req || gap.field} from settings`,
+              column: gap.field,
+              value: defaultValue,
+              only_empty: true,
+              condition: null,
+            });
+            appliedSavedDefault = true;
+          }
+          if ((gap.invalidCount || 0) > 0 && (gap.invalidValues || []).length > 0) {
+            const selectedValues = (gap.invalidValues || []).map(item => (
+              item && typeof item === 'object' ? item.value : item
+            ));
+            const resp = await api.fillMissingValues(
+              sessionId,
+              gap.field,
+              'selected_values',
+              selectedValues,
+              'default',
+              defaultValue,
+              validation
+            );
+            if (!resp.data?.success) throw new Error(resp.data?.error || `Could not replace invalid ${gap.req}`);
+            recordPostMappingAction({
+              type: 'fill_missing_values',
+              label: `Replace invalid ${gap.headerName || gap.req || gap.field} from settings`,
+              column: gap.field,
+              target_mode: 'selected_values',
+              selected_values: selectedValues,
+              strategy: 'default',
+              default_value: defaultValue,
+              validation,
+            });
+            appliedSavedDefault = true;
+          }
+        }
+
+        if (appliedSavedDefault) {
+          await fetchDataSynchronized();
+          return runGuardedExport(exportFn, exportType, false);
+        }
+      } catch (error) {
+        showSnackbar(getFriendlyErrorMessage(error, 'Could not apply saved Item Directory defaults.'), 'warning');
+      }
+    }
+
     // Item code gets its own section; keep other required fields as simple fills.
     const otherGaps = gaps.filter(g => g.field !== itemCodeField);
     if (otherGaps.length > 0 || icIssue) {
@@ -3190,7 +3412,7 @@ const EnhancedDataEditor = () => {
     }
     pendingExportRef.current = null;
     exportFn();
-  }, [getFactwiseRequiredGaps, sessionId, rowData, BOOLEAN_REQUIRED_FIELDS, getRequiredValidationRule, showSnackbar, getFriendlyErrorMessage]);
+  }, [getFactwiseRequiredGaps, sessionId, rowData, BOOLEAN_REQUIRED_FIELDS, getRequiredValidationRule, showSnackbar, getFriendlyErrorMessage, fetchDataSynchronized, recordPostMappingAction]);
 
   useEffect(() => {
     requiredGuardRunnerRef.current = runGuardedExport;

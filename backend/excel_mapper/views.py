@@ -49,6 +49,7 @@ from .default_template import (
     SFO_TEMPLATE_NAME,
 )
 from .models import MappingTemplate, TagTemplate, PDFSession, PDFExtractionResult, Project
+from .editor_defaults import apply_editor_defaults_to_rows, get_editor_defaults_for_entity
 try:
     # Prefer relative import; fall back gracefully on any import error
     from .azure_storage import hybrid_file_manager
@@ -3725,6 +3726,15 @@ def data_view(request):
         logger.info(f"📊 DATA_VIEW: current_template_headers = {info.get('current_template_headers')}")
         logger.info(f"📊 DATA_VIEW: column_counts = {info.get('column_counts')}")
         raw_mappings_for_log = info.get('mappings') or []
+        editor_defaults_entity = (
+            str(request.GET.get('entity_name') or '').strip()
+            or str(request.headers.get('X-Entity-Name') or '').strip()
+            or str(info.get('editor_defaults_entity_name') or '').strip()
+            or str(info.get('entity_name') or '').strip()
+        )
+        if editor_defaults_entity and info.get('editor_defaults_entity_name') != editor_defaults_entity:
+            info['editor_defaults_entity_name'] = editor_defaults_entity
+            save_session(session_id, info)
         logger.info(f"📊 DATA_VIEW: mappings count = {len(raw_mappings_for_log)}")
 
         def _normalize_session_rows(value):
@@ -3772,6 +3782,15 @@ def data_view(request):
                 final_headers = [final_headers[i] for i in _ord]
             total_rows = len(transformed_rows)
             final_data = transformed_rows[start_idx:end_idx]
+            editor_defaults_summary = None
+            settings_obj = get_editor_defaults_for_entity(editor_defaults_entity)
+            if settings_obj:
+                final_data, editor_defaults_summary = apply_editor_defaults_to_rows(
+                    final_headers,
+                    final_data,
+                    settings_obj,
+                    sequence_offset=start_idx,
+                )
             confidence_data = {}
             header_confidence_scores = {}
             quality_metrics = calculate_data_quality_metrics(final_data, final_headers, header_confidence_scores, confidence_data)
@@ -3783,6 +3802,7 @@ def data_view(request):
                 'total_rows': total_rows,
                 'formula_rules': info.get('formula_rules', []),
                 'template_version': info.get('template_version', 0),
+                'editor_defaults': editor_defaults_summary,
                 'quality_metrics': quality_metrics,
                 'header_confidence_scores': header_confidence_scores,
                 'target_column_confidence_scores': header_confidence_scores,
@@ -4894,6 +4914,15 @@ def data_view(request):
         field_headers = make_unique_field_headers(display_headers)
         response_data = []
         response_defaults = info.get("default_values", {}) or {}
+        editor_defaults_summary = None
+        settings_obj = get_editor_defaults_for_entity(editor_defaults_entity)
+        if settings_obj and isinstance(final_data, list):
+            final_data, editor_defaults_summary = apply_editor_defaults_to_rows(
+                display_headers,
+                final_data,
+                settings_obj,
+                sequence_offset=start_idx,
+            )
         if isinstance(final_data, list):
             for row in final_data:
                 if isinstance(row, dict):
@@ -4925,6 +4954,7 @@ def data_view(request):
             'total_rows': total_rows,
             'formula_rules': formula_rules,
             'template_version': info.get('template_version', 0),
+            'editor_defaults': editor_defaults_summary,
             'quality_metrics': quality_metrics,
             'header_confidence_scores': header_confidence_scores,
             'target_column_confidence_scores': header_confidence_scores,
@@ -5153,28 +5183,6 @@ def _cluster_factwise_columns(headers):
             return 'customer'
         return None
 
-    def spec_sort_key(h):
-        # Keep every value of one specification together. A split spec produces
-        # a base pair plus "_2, _3…" siblings (e.g. Designator, Designator_2…);
-        # a second, different spec is a ".1" family (e.g. Manufacturer). Order by
-        # (family, split index, name<value<uom) so all of one family's pairs are
-        # adjacent instead of interleaved with another spec.
-        n = re.sub(r'\s+', ' ', str(h or '').strip().lower())
-        m_int = re.match(r'^specification_(name|value|uom)_(\d+)$', n)
-        if m_int:
-            kind, fam, split = m_int.group(1), int(m_int.group(2)), 0
-        else:
-            kind = 'name' if 'name' in n else ('uom' if 'uom' in n else 'value')
-            m_split = re.search(r'_(\d+)$', n)
-            split = int(m_split.group(1)) if m_split else 0
-            core = n[:m_split.start()] if m_split else n
-            m_dot = re.search(r'\.(\d+)$', core)
-            fam = int(m_dot.group(1)) if m_dot else 0
-        # Order within a specification family: the single name first, then all of
-        # its values (value #1, #2, #3 …), then UOM. FactWise reads a spec's values
-        # from its name column up to the next name, so one name owns many values.
-        return (fam, {'name': 0, 'value': 1, 'uom': 2}.get(kind, 1), split)
-
     groups = {}
     for i, h in enumerate(headers):
         g = group_of(h)
@@ -5187,32 +5195,60 @@ def _cluster_factwise_columns(headers):
         n = re.sub(r'\s+', ' ', str(h or '').strip().lower())
         return 0 if 'name' in n else (2 if 'uom' in n else 1)
 
-    # Within the spec group, group each specification's pairs together by family.
+    def spec_sort_keys(spec_indices):
+        """Map each spec column index to (family, name<value<uom, split index).
+
+        Which specification a column belongs to is read from its name when the
+        name says so, and from its position when it does not:
+
+          Specification_Name_2   internal slot  -> family ('slot', 2)
+          Specification name.1   pandas rename  -> family ('dup', 1)
+          Specification name     plain label    -> family opens at this column
+
+        Deciding that per column matters because one header list can carry both
+        styles at once — an uploaded template repeats the plain label while the
+        session also holds the internal slots — and a single all-or-nothing flag
+        then read the plain labels as one family, emitting three names, then
+        three values, then three UOMs instead of three name/value/UOM triplets.
+
+        Families are ordered by where they first appear, so the block still reads
+        in sheet order. Within a family: the single name first, then all of its
+        values (value #1, #2, #3 …), then UOM — FactWise reads a spec's values
+        from its name column up to the next name, so one name owns many values.
+        """
+        keys = {}
+        first_seen = {}
+        current = None
+        opened = 0
+        for position, j in enumerate(spec_indices):
+            n = re.sub(r'\s+', ' ', str(headers[j] or '').strip().lower())
+            kind = spec_kind(headers[j])
+            m_slot = re.match(r'^specification_(name|value|uom)_(\d+)$', n)
+            if m_slot:
+                family, split = ('slot', int(m_slot.group(2))), 0
+            else:
+                # "_2, _3…" is a split sibling of the column before it (Designator,
+                # Designator_2…), not a specification of its own.
+                m_split = re.search(r'_(\d+)$', n)
+                split = int(m_split.group(1)) if m_split else 0
+                core = n[:m_split.start()] if m_split else n
+                m_dup = re.search(r'\.(\d+)$', core)
+                if m_dup:
+                    family = ('dup', int(m_dup.group(1)))
+                else:
+                    if current is None or (kind == 0 and split == 0):
+                        opened += 1
+                        current = ('pos', opened)
+                    family = current
+            first_seen.setdefault(family, position)
+            keys[j] = (family, kind, split)
+        return {j: (first_seen[family], kind, split)
+                for j, (family, kind, split) in keys.items()}
+
+    # Within the spec group, group each specification's columns together by family.
     if 'spec' in groups:
-        spec_indices = groups['spec']
-        # A template that repeats the plain label — "Specification name" three
-        # times, as the FactWise sheet does — gives every column the same sort
-        # key, so a stable sort left all the names together, then all the values,
-        # then all the UOMs. Three specifications came out as one malformed one.
-        # With nothing in the name to tell them apart, the family is positional:
-        # a name column opens a specification and the value/UOM after it belong
-        # to that one, which is how the importer reads them anyway.
-        distinguishable = any(
-            re.search(r'(_\d+|\.\d+)$', re.sub(r'\s+', ' ', str(headers[j] or '').strip().lower()))
-            for j in spec_indices
-        )
-        if distinguishable:
-            groups['spec'] = sorted(spec_indices, key=lambda j: spec_sort_key(headers[j]))
-        else:
-            family_of = {}
-            family = 0
-            for j in spec_indices:
-                if spec_kind(headers[j]) == 0 and family_of:
-                    family += 1
-                family_of[j] = family
-            groups['spec'] = sorted(
-                spec_indices, key=lambda j: (family_of[j], spec_kind(headers[j]))
-            )
+        sort_keys = spec_sort_keys(groups['spec'])
+        groups['spec'] = sorted(groups['spec'], key=lambda j: sort_keys[j])
 
     consumed = set()
     order = []
@@ -10261,6 +10297,19 @@ def write_session_source(session_id, info, headers, rows, extraction=None):
     return str(csv_path)
 
 
+def _apply_editor_defaults_for_session(headers, rows, info):
+    entity_name = str((info or {}).get('editor_defaults_entity_name') or (info or {}).get('entity_name') or '').strip()
+    if not entity_name:
+        return headers, rows
+    settings_obj = get_editor_defaults_for_entity(entity_name)
+    if not settings_obj:
+        return headers, rows
+    output_rows, summary = apply_editor_defaults_to_rows(headers, rows, settings_obj)
+    if isinstance(info, dict):
+        info['editor_defaults_last_applied'] = summary
+    return headers, output_rows
+
+
 def read_session_grid(session_id, info):
     """
     Read the mapped grid the review screen shows: destination headers and rows.
@@ -10288,7 +10337,8 @@ def read_session_grid(session_id, info):
         snapshot = info.get(key)
         if isinstance(snapshot, dict) and snapshot.get('headers') and snapshot.get('data'):
             hdrs = list(snapshot['headers'])
-            return hdrs, _as_lists(hdrs, snapshot['data'])
+            rows = _as_lists(hdrs, snapshot['data'])
+            return _apply_editor_defaults_for_session(hdrs, rows, info)
 
     # Formula/tag operations store their latest full-grid result separately.
     # Prefer it over rebuilding the basic mapping so later column operations
@@ -10297,7 +10347,8 @@ def read_session_grid(session_id, info):
     formula_headers = info.get('enhanced_headers')
     if isinstance(formula_data, list) and formula_headers:
         hdrs = list(formula_headers)
-        return hdrs, _as_lists(hdrs, formula_data)
+        rows = _as_lists(hdrs, formula_data)
+        return _apply_editor_defaults_for_session(hdrs, rows, info)
 
     mapping = info.get('mappings')
     if not mapping:
@@ -10311,7 +10362,8 @@ def read_session_grid(session_id, info):
         session_id=session_id
     )
     hdrs = list(result.get('headers') or [])
-    return hdrs, _as_lists(hdrs, result.get('data'))
+    rows = _as_lists(hdrs, result.get('data'))
+    return _apply_editor_defaults_for_session(hdrs, rows, info)
 
 
 def write_session_grid(session_id, info, headers, rows):
@@ -13171,7 +13223,7 @@ def resolve_item_code(request):
       column: 'Item code' (default)
       blank_strategy:     'prefix_sequence' | 'leave'
       duplicate_strategy: 'suffix' | 'prefix_sequence' | 'leave'
-      prefix, separator ('-'), start (1), padding (0)
+      prefix, separator ('-'), start (1), padding (0), increment (true)
     """
     try:
         session_id = request.data.get('session_id')
@@ -13195,6 +13247,7 @@ def resolve_item_code(request):
             padding = max(0, int(request.data.get('padding') or 0))
         except (TypeError, ValueError):
             padding = 0
+        increment_each_row = str(request.data.get('increment', True)).lower() not in {'false', '0', 'no', 'off'}
 
         headers, rows = read_session_grid(session_id, info)
         if not headers or rows is None:
@@ -13212,6 +13265,9 @@ def resolve_item_code(request):
 
         def next_code():
             nonlocal counter
+            if not increment_each_row:
+                num = str(counter).zfill(padding) if padding else str(counter)
+                return f"{prefix}{num}"
             while True:
                 num = str(counter).zfill(padding) if padding else str(counter)
                 code = f"{prefix}{num}"
