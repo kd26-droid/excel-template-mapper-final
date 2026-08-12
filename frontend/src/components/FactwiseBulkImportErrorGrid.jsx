@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import {
+  Alert,
   Box,
   Button,
   Chip,
@@ -11,9 +12,10 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import { DataGrid } from '@mui/x-data-grid';
+import { DataGrid, useGridApiRef } from '@mui/x-data-grid';
 import SaveIcon from '@mui/icons-material/Save';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
+import LocalOfferIcon from '@mui/icons-material/LocalOffer';
 import {
   getBulkImportErrorFileUrl,
   uploadFileToFactwiseBulkImport,
@@ -139,6 +141,7 @@ export default function FactwiseBulkImportErrorGrid({
   const [retrying, setRetrying] = useState(false);
   const [retryMessage, setRetryMessage] = useState(null);
   const [showOnlyErrors, setShowOnlyErrors] = useState(true);
+  const apiRef = useGridApiRef();
 
   useEffect(() => {
     let cancelled = false;
@@ -170,6 +173,34 @@ export default function FactwiseBulkImportErrorGrid({
     () => rows.filter((r) => r.__hasErrors).length,
     [rows]
   );
+
+  // FactWise emits ItemTagDoesNotExist per-cell when the sheet references a
+  // tag that isn't in the Item Directory yet. Instead of forcing the user to
+  // manually create every tag first (or edit the sheet to remove tags), we
+  // offer a one-click "Create these tags and retry" — mirrors FactWise's own
+  // NewTagsConfirmationPopup on the admin bulk-import page.
+  const ITEM_TAG_ERROR = 'ItemTagDoesNotExist';
+  const newTagsFromErrors = useMemo(() => {
+    const set = new Set();
+    Object.keys(errorMap).forEach((rowId) => {
+      const perRow = errorMap[rowId] || {};
+      const row = rows.find((r) => String(r.id) === String(rowId));
+      if (!row) return;
+      Object.keys(perRow).forEach((header) => {
+        if ((perRow[header] || []).includes(ITEM_TAG_ERROR)) {
+          const raw = row[header];
+          if (raw !== null && raw !== undefined && String(raw).trim()) {
+            String(raw)
+              .split(/[,;]/)
+              .map((s) => s.trim())
+              .filter(Boolean)
+              .forEach((tag) => set.add(tag));
+          }
+        }
+      });
+    });
+    return Array.from(set);
+  }, [errorMap, rows]);
 
   const visibleRows = useMemo(() => {
     if (!showOnlyErrors) return rows;
@@ -228,14 +259,37 @@ export default function FactwiseBulkImportErrorGrid({
     return newRow;
   }, []);
 
-  const handleSaveAndRetry = useCallback(async () => {
+  const runRetry = useCallback(async (extraAdditionalInformation = {}) => {
     setRetrying(true);
     setRetryMessage(null);
     try {
       const fileName = `bom-mapper-fixed-${bulkImportId}.xlsx`;
-      // Always write ALL rows back (not just visible), so hiding non-error rows
-      // in the UI never truncates the data we send to Factwise.
-      const file = rowsToXlsxFile(headers, rows, fileName, sheetName);
+
+      // Commit any cell that's still in edit mode (user typed then clicked
+      // Save without pressing Tab/Enter first). Without this, DataGrid's
+      // processRowUpdate never fires and the pending edit gets discarded,
+      // so we'd upload the pre-edit data. Belt-and-suspenders: also pull
+      // the freshest row values from the grid's internal store instead of
+      // our React state, in case setState hasn't re-rendered yet.
+      const cellMode = apiRef?.current?.getCellMode;
+      const stopEdit = apiRef?.current?.stopCellEditMode;
+      if (cellMode && stopEdit) {
+        try {
+          const editingCell = apiRef.current.state?.editRows;
+          if (editingCell && typeof editingCell === 'object') {
+            Object.entries(editingCell).forEach(([rowId, fields]) => {
+              Object.keys(fields || {}).forEach((field) => {
+                stopEdit({ id: rowId, field, ignoreModifications: false });
+              });
+            });
+          }
+        } catch { /* best-effort */ }
+      }
+      const liveRows = apiRef?.current?.getRowModels
+        ? Array.from(apiRef.current.getRowModels().values())
+        : rows;
+
+      const file = rowsToXlsxFile(headers, liveRows, fileName, sheetName);
       const uploaded = await uploadFileToFactwiseBulkImport(file, resourceType);
       if (!uploaded?.success) {
         setRetryMessage(uploaded?.error || 'Reupload failed');
@@ -244,7 +298,7 @@ export default function FactwiseBulkImportErrorGrid({
       }
       const processed = await processFactwiseBulkImport(
         uploaded.bulk_import_id,
-        additionalInformation || {}
+        { ...(additionalInformation || {}), ...(extraAdditionalInformation || {}) }
       );
       if (!processed?.success) {
         setRetryMessage(processed?.error || 'Process failed');
@@ -267,9 +321,27 @@ export default function FactwiseBulkImportErrorGrid({
       setRetrying(false);
     }
   }, [
-    bulkImportId, headers, rows, sheetName, resourceType,
+    bulkImportId, headers, rows, sheetName, resourceType, apiRef,
     additionalInformation, onRetryFailure, onRetrySuccess,
   ]);
+
+  const handleSaveAndRetry = useCallback(() => runRetry({}), [runRetry]);
+
+  // "Create these tags and retry" — sends new_tags + ignore_new_tag_validation
+  // in additional_information, matching what FactWise's NewTagsConfirmationPopup
+  // does. Server creates the tags before validating item rows, so the
+  // ItemTagDoesNotExist errors disappear.
+  const handleCreateTagsAndRetry = useCallback(() => {
+    if (!newTagsFromErrors.length) return;
+    const newTags = newTagsFromErrors.reduce((acc, tag) => {
+      acc[tag] = { synonym: '' };
+      return acc;
+    }, {});
+    runRetry({
+      ignore_new_tag_validation: true,
+      new_tags: newTags,
+    });
+  }, [runRetry, newTagsFromErrors]);
 
   if (loading) {
     return (
@@ -351,6 +423,35 @@ export default function FactwiseBulkImportErrorGrid({
           </Button>
         </Stack>
       </Stack>
+      {newTagsFromErrors.length > 0 && (
+        <Alert
+          severity="info"
+          icon={<LocalOfferIcon />}
+          sx={{ mb: 1 }}
+          action={
+            <Button
+              size="small"
+              variant="contained"
+              startIcon={retrying ? <CircularProgress size={14} /> : <LocalOfferIcon />}
+              onClick={handleCreateTagsAndRetry}
+              disabled={disabled || retrying}
+            >
+              Create tags &amp; retry
+            </Button>
+          }
+        >
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+            {newTagsFromErrors.length} new tag{newTagsFromErrors.length === 1 ? '' : 's'} referenced in the sheet don't exist in Factwise yet.
+          </Typography>
+          <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mt: 0.5 }}>
+            {newTagsFromErrors.slice(0, 6).join(', ')}
+            {newTagsFromErrors.length > 6 ? `, +${newTagsFromErrors.length - 6} more` : ''}
+          </Typography>
+          <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mt: 0.25 }}>
+            Click "Create tags &amp; retry" to have Factwise create these tags automatically and re-run the import.
+          </Typography>
+        </Alert>
+      )}
       {retryMessage && (
         <Typography variant="caption" sx={{ display: 'block', mb: 1, color: 'text.secondary' }}>
           {retryMessage}
@@ -358,6 +459,7 @@ export default function FactwiseBulkImportErrorGrid({
       )}
       <Box sx={{ height: 460, width: '100%' }}>
         <DataGrid
+          apiRef={apiRef}
           rows={visibleRows}
           columns={columns}
           density="compact"

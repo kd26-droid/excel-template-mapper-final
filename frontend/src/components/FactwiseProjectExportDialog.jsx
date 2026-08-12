@@ -35,7 +35,7 @@ import {
   PROJECT_MODES,
   useFactwiseProjectExport,
 } from '../hooks/useFactwiseProjectExport';
-import { postToFactwiseParent } from '../contexts/FactwiseContext';
+import { postToFactwiseParent, useFactwise } from '../contexts/FactwiseContext';
 import {
   fetchProjects,
   fetchProjectBomVersions,
@@ -57,6 +57,7 @@ function phaseToStepIndex(phase) {
   ) return 0;
   if (
     phase === PHASES.ITEMS_DONE
+    || phase === PHASES.ITEMS_SETTLING
     || phase === PHASES.BOM_UPLOADING
     || phase === PHASES.BOM_PROCESSING
     || phase === PHASES.BOM_ERROR
@@ -94,6 +95,7 @@ function phaseLabel(phase, isRevising) {
     case PHASES.ITEMS_PROCESSING: return 'Validating items against Factwise directory…';
     case PHASES.ITEMS_ERROR: return 'Item import failed — see errors below.';
     case PHASES.ITEMS_DONE: return 'Items imported. Starting BOM upload…';
+    case PHASES.ITEMS_SETTLING: return 'Waiting for Factwise to index the new items before uploading BOM…';
     case PHASES.BOM_UPLOADING: return 'Uploading BOM file to Factwise…';
     case PHASES.BOM_PROCESSING: return 'Validating BOM structure…';
     case PHASES.BOM_ERROR: return 'BOM import failed — items were saved. See errors below.';
@@ -338,17 +340,28 @@ export default function FactwiseProjectExportDialog({
     runFromCheckpoint(buildRunPayload());
   }, [runFromCheckpoint, buildRunPayload]);
 
+  const { fwOrigin } = useFactwise();
   const openTarget = projectId || existingProjectId;
   const handleOpenInFactwise = useCallback(() => {
     if (!openTarget) return;
-    // Newly-created projects start in DRAFT — FactWise's own /custom/cost-tracking
-    // create flow drops the user on /<id>/draft after create. Existing projects
-    // (EXISTING mode) go to /<id>/view.
+    // Newly-created projects start in DRAFT (/<id>/draft), existing ones go
+    // to /<id>/view. When we're inside FW's iframe, postMessage to parent so
+    // it navigates in-place. When opened as a standalone tab, fw_origin was
+    // supplied in the launch URL so we can open a fresh FW tab from here.
     const suffix = mode === PROJECT_MODES.EXISTING ? 'view' : 'draft';
-    postToFactwiseParent('NAVIGATE', {
-      url: `/custom/cost-tracking/projects/${openTarget}/${suffix}`,
-    });
-  }, [openTarget, mode]);
+    const path = `/custom/cost-tracking/projects/${openTarget}/${suffix}`;
+    const inIframe = window.parent && window.parent !== window;
+    if (inIframe) {
+      postToFactwiseParent('NAVIGATE', { url: path });
+      return;
+    }
+    if (fwOrigin) {
+      window.open(fwOrigin + path, '_blank', 'noopener,noreferrer');
+    } else {
+      // Fallback — no origin passed. Best effort: same-tab navigation.
+      window.location.href = path;
+    }
+  }, [openTarget, mode, fwOrigin]);
 
   const handleResetAndClose = useCallback(() => {
     reset();
