@@ -7,6 +7,10 @@ import json
 from rapidfuzz import fuzz, distance
 
 from .delimited_reader import read_delimited_text_safely
+from .services.mpn_pattern_library import (
+    score_column_as_manufacturer,
+    score_column_as_mpn,
+)
 
 
 class AdvancedElectronicsSpecificationParser:
@@ -296,6 +300,56 @@ class BOMHeaderMapper:
             return 0.85
         
         return 0.0
+
+    def calculate_pattern_library_boost(self, template_header: str, client_header: str, sample_values: List[str]) -> Tuple[float, str]:
+        """Use bundled MPN/MFR pattern assets as a value-shape signal.
+
+        Header similarity still decides most mappings. This only boosts columns
+        whose values look like known MPN shapes or known manufacturer names, so a
+        random numeric column is less likely to beat the real MPN/MFR column.
+        """
+        target = re.sub(r"[\W_]+", " ", str(template_header or "").lower()).strip()
+        source = re.sub(r"[\W_]+", " ", str(client_header or "").lower()).strip()
+        if not sample_values:
+            return 0.0, ""
+
+        is_mpn_target = (
+            "mpn" in target
+            or "manufacturer part" in target
+            or "mfr part" in target
+            or ("part number" in target and "manufacturer" in target)
+        )
+        is_mfr_target = (
+            "manufacturer" in target
+            or re.search(r"\bmfr\b", target)
+            or "maker" in target
+            or "brand" in target
+        ) and not is_mpn_target
+        is_cpn_target = (
+            "cpn" in target
+            or "customer part" in target
+            or ("part number" in target and "customer" in target)
+        )
+
+        if is_mpn_target or (("mpn" in source or "mfr part" in source) and "manufacturer" not in source):
+            score = score_column_as_mpn(sample_values)
+            if score["score"] >= 0.45:
+                return min(0.25, score["score"] * 0.25), (
+                    f"MPN pattern library match ({score['match_rate']:.0%} of sampled values)"
+                )
+        if is_mfr_target or "manufacturer" in source or re.search(r"\bmfr\b", source):
+            score = score_column_as_manufacturer(sample_values)
+            if score["score"] >= 0.45:
+                return min(0.25, score["score"] * 0.25), (
+                    f"Manufacturer library match ({score['match_rate']:.0%} of sampled values)"
+                )
+        if is_cpn_target and ("cpn" in source or "customer" in source):
+            score = score_column_as_mpn(sample_values)
+            if score["score"] >= 0.40:
+                return min(0.15, score["score"] * 0.15), (
+                    f"Part-number shape match ({score['match_rate']:.0%} of sampled values)"
+                )
+        return 0.0, ""
     
     def map_headers_to_template(self, client_file: str, template_file: str, 
                                client_sheet_name: str = None, template_sheet_name: str = None,
@@ -328,6 +382,8 @@ class BOMHeaderMapper:
                     token_score = fuzz.token_sort_ratio(template_header.lower(), client_header.lower()) / 100.0
                     partial_score = fuzz.partial_ratio(template_header.lower(), client_header.lower()) / 100.0
                     
+                    sample_values = client_sample_data.get(client_header, [])
+
                     # Weighted average
                     final_score = (
                         semantic_score * self.similarity_weights['semantic'] +
@@ -335,12 +391,20 @@ class BOMHeaderMapper:
                         token_score * self.similarity_weights['token_sort'] +
                         partial_score * self.similarity_weights['partial_ratio']
                     )
+                    pattern_boost, pattern_explanation = self.calculate_pattern_library_boost(
+                        template_header,
+                        client_header,
+                        sample_values,
+                    )
+                    final_score = min(1.0, final_score + pattern_boost)
                     
                     if final_score > best_score:
                         best_score = final_score
                         best_match = client_header
                         
-                        if semantic_score > 0:
+                        if pattern_explanation:
+                            best_explanation = pattern_explanation
+                        elif semantic_score > 0:
                             best_explanation = f"Semantic match (score: {semantic_score:.2f})"
                         else:
                             best_explanation = f"Fuzzy match (score: {final_score:.2f})"

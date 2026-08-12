@@ -159,7 +159,7 @@ const buildParts = (text, boundaries, trimValues, dropEmptyValues) => {
   return dropEmptyValues ? parts.filter(part => part.preview !== '') : parts;
 };
 
-const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns = null }) => {
+const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns = null, parseReference = null }) => {
   const [step, setStep] = useState(0);
   const [columns, setColumns] = useState([]);
   const [selectedColumn, setSelectedColumn] = useState(initialColumn);
@@ -187,6 +187,7 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
   const [previewData, setPreviewData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const hasParseReference = Boolean(parseReference?.source);
 
   useEffect(() => {
     const loadColumns = async () => {
@@ -319,7 +320,10 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
         throw new Error(data.error || 'No values found in this column');
       }
       setSampleValues(data.sample_values);
-      setCurrentSampleIndex(0);
+      const referenceIndex = parseReference?.source
+        ? data.sample_values.findIndex(value => String(value || '') === String(parseReference.source || ''))
+        : -1;
+      setCurrentSampleIndex(referenceIndex >= 0 ? referenceIndex : 0);
       setTotalValues(data.total_values || data.sample_values.length);
       const suggestedSeparator = data.suggested_separator || '';
       setGroupSeparator(suggestedSeparator);
@@ -351,6 +355,66 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
 
   const updatePart = (id, field, value) => {
     setParts(current => current.map(part => part.id === id ? { ...part, [field]: value } : part));
+  };
+
+  const outputPreviewItems = useMemo(() => {
+    if (step === 0 || !parts.length) {
+      return (parseReference?.pairs || []).flatMap((pair) => ([
+        pair.mpn ? { type: 'mpn', label: `MPN: ${pair.mpn}` } : null,
+        pair.manufacturer ? { type: 'mfr', label: `MFR: ${pair.manufacturer}` } : null,
+        pair.discarded ? { type: 'discard', label: `Ignore: ${pair.discarded}` } : null,
+      ].filter(Boolean)));
+    }
+
+    return parts
+      .map((part) => {
+        const value = part.preview || '';
+        if (!value) return null;
+        if (part.outputType === 'discard') return { type: 'discard', label: `Ignore: ${value}` };
+        if (part.outputType === 'tag') return { type: 'tag', label: `Tag: ${value}` };
+        if (part.outputType === 'spec') return { type: 'spec', label: `${part.specName || 'Spec'}: ${value}` };
+        if (part.outputType === 'custom') return { type: 'custom', label: `${part.customName || 'Custom'}: ${value}` };
+        if (part.outputType === 'direct') {
+          const target = part.targetColumn || 'FactWise';
+          if (target === 'MPN') return { type: 'mpn', label: `MPN: ${value}` };
+          if (target === 'MFR') return { type: 'mfr', label: `MFR: ${value}` };
+          return { type: 'direct', label: `${target}: ${value}` };
+        }
+        return null;
+      })
+      .filter(Boolean);
+  }, [parseReference?.pairs, parts, step]);
+
+  const previewChipSx = (type) => {
+    if (type === 'discard') return { fontWeight: 650, color: '#94a3b8', borderColor: '#334155' };
+    if (type === 'tag') return { fontWeight: 700, bgcolor: '#7c3aed', color: '#fff' };
+    if (type === 'spec') return { fontWeight: 700, bgcolor: '#f59e0b', color: '#111827' };
+    if (type === 'custom') return { fontWeight: 700, bgcolor: '#6366f1', color: '#fff' };
+    if (type === 'direct') return { fontWeight: 700, bgcolor: '#0f766e', color: '#fff' };
+    return { fontWeight: 700 };
+  };
+
+  const renderParseReference = () => {
+    if (!parseReference?.source) return null;
+    return (
+      <Box sx={{ p: 1.15, mb: 1.5, border: '1px solid #273244', bgcolor: '#0b1220', borderRadius: 1 }}>
+        <Typography sx={{ fontSize: 13, fontWeight: 700, color: '#f8fafc', lineHeight: 1.4, wordBreak: 'break-word' }}>
+          {parseReference.source}
+        </Typography>
+        <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap', mt: 0.9 }}>
+          {outputPreviewItems.map((item, index) => (
+            <Chip
+              key={`${item.type}-${item.label}-${index}`}
+              size="small"
+              color={item.type === 'mpn' ? 'success' : item.type === 'mfr' ? 'info' : undefined}
+              variant={item.type === 'discard' ? 'outlined' : 'filled'}
+              label={item.label}
+              sx={previewChipSx(item.type)}
+            />
+          ))}
+        </Box>
+      </Box>
+    );
   };
 
   const parserConfig = useMemo(() => {
@@ -437,7 +501,15 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
       });
       const data = await response.json();
       if (!data.success) throw new Error(data.error || 'Could not apply parser');
-      onApply?.(data);
+      onApply?.({
+        ...data,
+        parser_config: parserConfig,
+        parser_parts: parts,
+        parser_preview: {
+          source: parseReference?.source || currentSample,
+          items: outputPreviewItems,
+        },
+      });
     } catch (applyError) {
       setError(applyError.message || 'Could not apply parser');
     } finally {
@@ -582,15 +654,18 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
                   <Typography variant="subtitle2">Sample {currentSampleIndex + 1} of {sampleValues.length}</Typography>
                   <Typography variant="caption" color="text.secondary">{totalValues} populated rows</Typography>
                 </Box>
-                <Box sx={{ display: 'flex', gap: 0.5 }}>
-                  <IconButton size="small" onClick={() => setCurrentSampleIndex(index => index - 1)} disabled={currentSampleIndex === 0}>
-                    <ChevronLeftIcon />
-                  </IconButton>
-                  <IconButton size="small" onClick={() => setCurrentSampleIndex(index => index + 1)} disabled={currentSampleIndex >= sampleValues.length - 1}>
-                    <ChevronRightIcon />
-                  </IconButton>
-                </Box>
+                {!hasParseReference && (
+                  <Box sx={{ display: 'flex', gap: 0.5 }}>
+                    <IconButton size="small" onClick={() => setCurrentSampleIndex(index => index - 1)} disabled={currentSampleIndex === 0}>
+                      <ChevronLeftIcon />
+                    </IconButton>
+                    <IconButton size="small" onClick={() => setCurrentSampleIndex(index => index + 1)} disabled={currentSampleIndex >= sampleValues.length - 1}>
+                      <ChevronRightIcon />
+                    </IconButton>
+                  </Box>
+                )}
               </Box>
+              {renderParseReference()}
 
               <Box sx={{ mb: 2.5 }}>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 1.5, flexWrap: 'wrap', mb: 1.5 }}>
@@ -727,11 +802,13 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
                     control={<Checkbox checked={trimValues} onChange={event => setTrimValues(event.target.checked)} />}
                     label="Trim spaces"
                   />
-                  <FormControlLabel
-                    sx={{ m: 0 }}
-                    control={<Checkbox checked={dropEmptyValues} onChange={event => setDropEmptyValues(event.target.checked)} />}
-                    label="Drop empty values"
-                  />
+                  {!hasParseReference && (
+                    <FormControlLabel
+                      sx={{ m: 0 }}
+                      control={<Checkbox checked={dropEmptyValues} onChange={event => setDropEmptyValues(event.target.checked)} />}
+                      label="Drop empty values"
+                    />
+                  )}
                   <FormControlLabel
                     sx={{ m: 0 }}
                     control={<Checkbox checked={keepSourceColumn} onChange={event => setKeepSourceColumn(event.target.checked)} />}
@@ -760,6 +837,7 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
 
       {step === 1 && (
         <Box>
+          {renderParseReference()}
           {renderPartOutputRows()}
           <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
             <Button startIcon={<ArrowBackIcon />} onClick={() => setStep(0)}>Back</Button>
@@ -772,6 +850,7 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
 
       {step === 2 && previewData && (
         <Box>
+          {renderParseReference()}
           <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', mb: 1.5 }}>
             <Chip label={`${previewData.total_rows || 0} rows`} />
             <Chip label={`${previewData.preview_headers?.length || 0} output columns`} />
