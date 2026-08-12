@@ -13223,7 +13223,7 @@ def resolve_item_code(request):
       column: 'Item code' (default)
       blank_strategy:     'prefix_sequence' | 'leave'
       duplicate_strategy: 'suffix' | 'prefix_sequence' | 'leave'
-      prefix, separator ('-'), start (1), padding (0)
+      prefix, separator ('-'), start (1), padding (0), increment (true)
     """
     try:
         session_id = request.data.get('session_id')
@@ -13247,6 +13247,7 @@ def resolve_item_code(request):
             padding = max(0, int(request.data.get('padding') or 0))
         except (TypeError, ValueError):
             padding = 0
+        increment_each_row = str(request.data.get('increment', True)).lower() not in {'false', '0', 'no', 'off'}
 
         headers, rows = read_session_grid(session_id, info)
         if not headers or rows is None:
@@ -13264,6 +13265,9 @@ def resolve_item_code(request):
 
         def next_code():
             nonlocal counter
+            if not increment_each_row:
+                num = str(counter).zfill(padding) if padding else str(counter)
+                return f"{prefix}{num}"
             while True:
                 num = str(counter).zfill(padding) if padding else str(counter)
                 code = f"{prefix}{num}"

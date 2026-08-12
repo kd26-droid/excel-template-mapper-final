@@ -1444,6 +1444,7 @@ const EnhancedDataEditor = () => {
             separator: savedDefaults.itemCodeSeparator ?? '-',
             start: Math.max(1, Number.parseInt(savedDefaults.itemCodeStart || '1', 10) || 1),
             padding: Math.max(0, Number.parseInt(savedDefaults.itemCodePadding || '3', 10) || 0),
+            increment: savedDefaults.itemCodeIncrement !== false,
           });
           if (!resp.data?.success) {
             throw new Error(resp.data?.error || 'Could not apply saved item code settings');
@@ -3297,6 +3298,7 @@ const EnhancedDataEditor = () => {
       const itemCodeSeparator = savedDefaults.itemCodeSeparator ?? '-';
       const itemCodeStart = Math.max(1, Number.parseInt(savedDefaults.itemCodeStart || '1', 10) || 1);
       const itemCodePadding = Math.max(0, Number.parseInt(savedDefaults.itemCodePadding || '3', 10) || 0);
+      const itemCodeIncrement = savedDefaults.itemCodeIncrement !== false;
       const requestedBlankStrategy = savedDefaults.itemCodeBlankStrategy || 'prefix_sequence';
       const requestedDuplicateStrategy = savedDefaults.itemCodeDuplicateStrategy || 'prefix_sequence';
       let appliedSavedDefault = false;
@@ -3324,6 +3326,7 @@ const EnhancedDataEditor = () => {
               separator: itemCodeSeparator,
               start: itemCodeStart,
               padding: itemCodePadding,
+              increment: itemCodeIncrement,
             });
             if (!resp.data?.success) throw new Error(resp.data?.error || 'Could not generate item codes');
             recordPostMappingAction({
@@ -3336,6 +3339,7 @@ const EnhancedDataEditor = () => {
               separator: itemCodeSeparator,
               start: itemCodeStart,
               padding: itemCodePadding,
+              increment: itemCodeIncrement,
             });
             appliedSavedDefault = true;
           }
