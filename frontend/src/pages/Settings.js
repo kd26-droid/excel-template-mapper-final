@@ -1,0 +1,1126 @@
+﻿import React, { useEffect, useMemo, useState } from 'react';
+import {
+  Alert,
+  Box,
+  Button,
+  Chip,
+  FormControl,
+  Grid,
+  IconButton,
+  InputAdornment,
+  MenuItem,
+  Paper,
+  Select,
+  Snackbar,
+  Stack,
+  Table,
+  TableBody,
+  TableCell,
+  TableContainer,
+  TableHead,
+  TableRow,
+  Checkbox,
+  CircularProgress,
+  ListItemText,
+  TextField,
+  Typography
+} from '@mui/material';
+import {
+  CheckCircle as CheckCircleIcon,
+  Error as ErrorIcon,
+  Info as InfoIcon,
+  Save as SaveIcon,
+  Delete as DeleteIcon,
+  TableChart as TableChartIcon,
+  Visibility,
+  VisibilityOff,
+  VpnKey as VpnKeyIcon,
+  Storefront as StorefrontIcon,
+  Public as PublicIcon,
+  Hub as HubIcon
+} from '@mui/icons-material';
+import { useThemeContext } from '../utils/ThemeContext';
+import api from '../services/api';
+import { useFactwise } from '../contexts/FactwiseContext';
+import {
+  ITEM_DIRECTORY_DEFAULTS,
+  readItemDirectoryDefaults,
+  writeItemDirectoryDefaults,
+} from '../utils/itemDirectoryDefaults';
+
+// All three providers are on by default. A part confirmed by any one of them is
+// valid, so querying all three gives the best coverage; a provider without
+// credentials simply returns nothing rather than failing the run.
+const ALL_PROVIDERS = ['digikey', 'mouser', 'element14'];
+
+const initialColumnMappings = [
+  { column: 'MPN valid', providers: [...ALL_PROVIDERS], description: 'Part validation status' },
+  { column: 'MPN Status', providers: [...ALL_PROVIDERS], description: 'Lifecycle status' },
+  { column: 'EOL Status', providers: [...ALL_PROVIDERS], description: 'End of life flag' },
+  { column: 'Discontinued', providers: [...ALL_PROVIDERS], description: 'Discontinued status' },
+  { column: 'DKPN', providers: [...ALL_PROVIDERS], description: 'Distributor part number' },
+  { column: 'Canonical MPN', providers: [...ALL_PROVIDERS], description: 'Standardized manufacturer part number' },
+  { column: 'Category', providers: [...ALL_PROVIDERS], description: 'Product category' },
+];
+
+const providerMeta = {
+  digikey: { label: 'DigiKey', color: '#3b82f6', soft: 'rgba(59, 130, 246, 0.14)', Icon: VpnKeyIcon },
+  mouser: { label: 'Mouser', color: '#10b981', soft: 'rgba(16, 185, 129, 0.14)', Icon: StorefrontIcon },
+  element14: { label: 'Element14', color: '#f59e0b', soft: 'rgba(245, 158, 11, 0.16)', Icon: PublicIcon },
+};
+
+const CREDENTIAL_SCOPE_KEY = 'mpn_provider_credential_scope_id';
+const VALIDATION_PROVIDERS_KEY = 'mpn_validation_providers';
+const COLUMN_PROVIDER_MAPPINGS_KEY = 'mpn_column_provider_mappings';
+const MASK_VALUE = '************';
+const ITEM_CODE_BLANK_STRATEGIES = [
+  { value: 'prefix_sequence', label: 'Generate with prefix sequence' },
+  { value: 'leave', label: 'Leave blank' },
+];
+const ITEM_CODE_DUPLICATE_STRATEGIES = [
+  { value: 'prefix_sequence', label: 'Generate new prefix sequence' },
+  { value: 'suffix', label: 'Add suffix to duplicates' },
+  { value: 'leave', label: 'Leave duplicates' },
+];
+const ITEM_TYPE_OPTIONS = ['Raw material', 'Finished good'];
+const MEASUREMENT_UNIT_OPTIONS = ['Nos', 'EA', 'Unit', 'PCS', 'KG', 'M', 'L'];
+const CUSTOM_MEASUREMENT_UNIT_VALUE = '__custom_measurement_unit__';
+
+const emptyProviderStatus = {
+  digikey: { configured: false, has_credentials: false, masked: {}, public: {}, last_test_message: '' },
+  mouser: { configured: false, has_credentials: false, masked: {}, public: {}, last_test_message: '' },
+  element14: { configured: false, has_credentials: false, masked: {}, public: {}, last_test_message: '' }
+};
+
+const getCredentialScopeId = () => {
+  if (typeof window === 'undefined') return 'default';
+  const existing = window.localStorage.getItem(CREDENTIAL_SCOPE_KEY);
+  if (existing) return existing;
+  const generated = window.crypto?.randomUUID?.() || `scope-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  window.localStorage.setItem(CREDENTIAL_SCOPE_KEY, generated);
+  return generated;
+};
+
+const normalizeProviders = (value, fallback = ALL_PROVIDERS) => {
+  const allowed = new Set(Object.keys(providerMeta));
+  const raw = Array.isArray(value) ? value : (value ? [value] : fallback);
+  const selected = raw.filter(provider => allowed.has(provider));
+  return selected.length ? Array.from(new Set(selected)) : fallback;
+};
+
+const providersFromColumnMappings = (mappings) => {
+  const selected = Array.from(new Set((mappings || []).flatMap(mapping => normalizeProviders(mapping.providers || mapping.provider))));
+  return selected.length ? selected : ['digikey', 'mouser', 'element14'];
+};
+
+const getInitialColumnMappings = () => {
+  if (typeof window === 'undefined') return initialColumnMappings;
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(COLUMN_PROVIDER_MAPPINGS_KEY) || '[]');
+    if (!Array.isArray(saved) || !saved.length) return initialColumnMappings;
+    const savedByColumn = new Map(saved.map(mapping => [mapping.column, mapping]));
+    return initialColumnMappings.map(mapping => {
+      const savedMapping = savedByColumn.get(mapping.column);
+      return {
+        ...mapping,
+        providers: normalizeProviders(savedMapping?.providers || savedMapping?.provider, mapping.providers)
+      };
+    });
+  } catch {
+    return initialColumnMappings;
+  }
+};
+
+const Settings = () => {
+  const { tokens: t, isDarkMode } = useThemeContext();
+  const [digikeyClientId, setDigikeyClientId] = useState('');
+  const [digikeyClientSecret, setDigikeyClientSecret] = useState('');
+  const [digikeyRedirectUri, setDigikeyRedirectUri] = useState('');
+  const [mouserApiKey, setMouserApiKey] = useState('');
+  const [element14ApiKey, setElement14ApiKey] = useState('');
+  const [showDigikeySecret, setShowDigikeySecret] = useState(false);
+  const [showMouserKey, setShowMouserKey] = useState(false);
+  const [showElement14Key, setShowElement14Key] = useState(false);
+  const [columnMappings, setColumnMappings] = useState(getInitialColumnMappings);
+  const [itemDirectoryDefaults, setItemDirectoryDefaults] = useState(readItemDirectoryDefaults);
+  const [credentialScopeId] = useState(getCredentialScopeId);
+  const [providerStatus, setProviderStatus] = useState(emptyProviderStatus);
+  const [loadingCredentials, setLoadingCredentials] = useState(false);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [testingProvider, setTestingProvider] = useState('');
+  const [deletingProvider, setDeletingProvider] = useState('');
+  const [providerMessages, setProviderMessages] = useState({ digikey: null, mouser: null, element14: null });
+  const [toast, setToast] = useState({ open: false, severity: 'success', message: '' });
+  const [mousePos, setMousePos] = useState({ x: 50, y: 36 });
+  const [measurementUnitCustomMode, setMeasurementUnitCustomMode] = useState(() => {
+    const value = readItemDirectoryDefaults().measurementUnit;
+    return Boolean(value && !MEASUREMENT_UNIT_OPTIONS.includes(value));
+  });
+
+  const hasDigikey = Boolean(providerStatus.digikey?.configured);
+  const hasMouser = Boolean(providerStatus.mouser?.configured);
+  const hasElement14 = Boolean(providerStatus.element14?.configured);
+  const hasAnyProvider = hasDigikey || hasMouser || hasElement14;
+
+  // When embedded inside Factwise, distributor credentials are managed in
+  // Factwise Admin and silently synced into this app's own store. Hide the
+  // "API Providers" panel — the rest of Settings still works as normal.
+  const { isEmbedded: isFactwiseEmbedded } = useFactwise();
+
+  const readyCount = useMemo(
+    () => columnMappings.filter(mapping => normalizeProviders(mapping.providers || mapping.provider).every(provider => Boolean(providerStatus[provider]?.configured))).length,
+    [columnMappings, providerStatus]
+  );
+
+  const hasItemDirectoryDefaults = useMemo(() => (
+    ['procurementEntityName', 'itemType', 'procurementItem', 'salesItem', 'itemCodePrefix', 'measurementUnit']
+      .some(key => String(itemDirectoryDefaults[key] || '').trim())
+  ), [itemDirectoryDefaults]);
+
+  useEffect(() => {
+    const handleMouseMove = (event) => {
+      setMousePos({
+        x: (event.clientX / window.innerWidth) * 100,
+        y: (event.clientY / window.innerHeight) * 100
+      });
+    };
+    window.addEventListener('mousemove', handleMouseMove);
+    return () => window.removeEventListener('mousemove', handleMouseMove);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadCredentials = async () => {
+      setLoadingCredentials(true);
+      try {
+        const response = await api.getProviderCredentials(credentialScopeId);
+        if (cancelled) return;
+        const nextStatus = { ...emptyProviderStatus };
+        (response.data.providers || []).forEach(provider => {
+          nextStatus[provider.provider] = provider;
+        });
+        setProviderStatus(nextStatus);
+        setDigikeyClientId(nextStatus.digikey?.public?.client_id || '');
+        setDigikeyRedirectUri(nextStatus.digikey?.public?.redirect_uri || '');
+        setDigikeyClientSecret(nextStatus.digikey?.masked?.client_secret ? MASK_VALUE : '');
+        setMouserApiKey(nextStatus.mouser?.masked?.api_key ? MASK_VALUE : '');
+        setElement14ApiKey(nextStatus.element14?.masked?.api_key ? MASK_VALUE : '');
+      } catch (error) {
+        if (!cancelled) {
+          setToast({ open: true, severity: 'error', message: error.response?.data?.error || 'Failed to load provider settings.' });
+        }
+      } finally {
+        if (!cancelled) setLoadingCredentials(false);
+      }
+    };
+    loadCredentials();
+    return () => {
+      cancelled = true;
+    };
+  }, [credentialScopeId]);
+
+  const pageSx = {
+    minHeight: '100vh',
+    px: { xs: 2, md: 3 },
+    py: { xs: 2, md: 2.5 },
+    bgcolor: t.background.app,
+    color: t.text.primary,
+    position: 'relative',
+    overflow: 'hidden',
+    '& > *': { position: 'relative', zIndex: 1 }
+  };
+
+  const panelSx = {
+    borderRadius: '16px',
+    border: `1px solid ${t.border.default}`,
+    background: t.surface.elevatedGradient,
+    boxShadow: t.shadow.card,
+    overflow: 'hidden'
+  };
+
+  const sectionHeaderSx = {
+    px: 2.5,
+    py: 2,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 2,
+    borderBottom: `1px solid ${t.border.subtle}`,
+    bgcolor: isDarkMode ? 'rgba(2, 6, 23, 0.28)' : 'rgba(248, 250, 252, 0.78)'
+  };
+
+  const fieldSx = {
+    '& .MuiOutlinedInput-root': {
+      borderRadius: '12px',
+      bgcolor: t.surface.input,
+      fontSize: 14
+    },
+    '& .MuiFormHelperText-root': {
+      color: t.text.secondary
+    }
+  };
+
+  const secretInputSx = {
+    ...fieldSx
+  };
+
+  const providerLabel = (provider) => providerMeta[provider]?.label || provider;
+
+  const setProviderMessage = (provider, type, message) => {
+    setProviderMessages(prev => ({ ...prev, [provider]: message ? { type, message } : null }));
+  };
+
+  const isSavedMaskedValue = (value, provider, field) => (
+    value === MASK_VALUE || Boolean(providerStatus[provider]?.masked?.[field] && value === providerStatus[provider].masked[field])
+  );
+
+  const setMaskedFieldsFromStatus = (nextStatus) => {
+    if (nextStatus.digikey?.masked?.client_secret) setDigikeyClientSecret(MASK_VALUE);
+    if (nextStatus.mouser?.masked?.api_key) setMouserApiKey(MASK_VALUE);
+    if (nextStatus.element14?.masked?.api_key) setElement14ApiKey(MASK_VALUE);
+  };
+
+  const toggleSavedSecretVisibility = (provider) => {
+    if (provider === 'digikey') {
+      const saved = providerStatus.digikey?.masked?.client_secret || '';
+      if (isSavedMaskedValue(digikeyClientSecret, 'digikey', 'client_secret') && saved) {
+        setDigikeyClientSecret(showDigikeySecret ? MASK_VALUE : saved);
+      }
+      setShowDigikeySecret(prev => !prev);
+    } else if (provider === 'mouser') {
+      const saved = providerStatus.mouser?.masked?.api_key || '';
+      if (isSavedMaskedValue(mouserApiKey, 'mouser', 'api_key') && saved) {
+        setMouserApiKey(showMouserKey ? MASK_VALUE : saved);
+      }
+      setShowMouserKey(prev => !prev);
+    } else if (provider === 'element14') {
+      const saved = providerStatus.element14?.masked?.api_key || '';
+      if (isSavedMaskedValue(element14ApiKey, 'element14', 'api_key') && saved) {
+        setElement14ApiKey(showElement14Key ? MASK_VALUE : saved);
+      }
+      setShowElement14Key(prev => !prev);
+    }
+  };
+
+  const buildProviderPayload = () => {
+    const shouldSendSecret = (value, provider, field) => String(value || '').trim() && !isSavedMaskedValue(value, provider, field);
+    return {
+      digikey: {
+        client_id: digikeyClientId,
+        redirect_uri: digikeyRedirectUri,
+        ...(shouldSendSecret(digikeyClientSecret, 'digikey', 'client_secret') ? { client_secret: digikeyClientSecret } : {})
+      },
+      mouser: {
+        ...(shouldSendSecret(mouserApiKey, 'mouser', 'api_key') ? { api_key: mouserApiKey } : {})
+      },
+      element14: {
+        ...(shouldSendSecret(element14ApiKey, 'element14', 'api_key') ? { api_key: element14ApiKey } : {})
+      }
+    };
+  };
+
+  const hasProviderRequiredDetails = (provider) => {
+    if (provider === 'digikey') return Boolean(digikeyClientId && (digikeyClientSecret || providerStatus.digikey?.has_credentials));
+    if (provider === 'mouser') return Boolean(mouserApiKey || providerStatus.mouser?.has_credentials);
+    if (provider === 'element14') return Boolean(element14ApiKey || providerStatus.element14?.has_credentials);
+    return false;
+  };
+
+  const providerChip = (configured) => (
+    <Chip
+      size="small"
+      icon={configured ? <CheckCircleIcon /> : <ErrorIcon />}
+      label={configured ? 'Configured' : 'Not configured'}
+      sx={{
+        height: 22,
+        fontWeight: 650,
+        fontSize: 11.5,
+        color: configured ? t.color.successText : t.text.secondary,
+        bgcolor: configured ? t.state.successBg : t.surface.controlSoft,
+        border: `1px solid ${configured ? t.state.successBorder : t.border.default}`,
+        '& .MuiChip-icon': { color: configured ? t.color.success : t.text.secondary }
+      }}
+    />
+  );
+
+  const handleColumnProviderChange = (columnName, providers) => {
+    const selected = normalizeProviders(typeof providers === 'string' ? providers.split(',') : providers);
+    setColumnMappings(prev => {
+      const next = prev.map(mapping => mapping.column === columnName ? { ...mapping, providers: selected } : mapping);
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(COLUMN_PROVIDER_MAPPINGS_KEY, JSON.stringify(next));
+        window.localStorage.setItem(VALIDATION_PROVIDERS_KEY, JSON.stringify(providersFromColumnMappings(next)));
+      }
+      return next;
+    });
+  };
+
+  const handleItemDirectoryDefaultChange = (key, value) => {
+    setItemDirectoryDefaults(prev => ({ ...prev, [key]: value }));
+  };
+
+  const handleClearItemDirectoryDefaults = () => {
+    const cleared = Object.fromEntries(ITEM_DIRECTORY_DEFAULTS.map(item => [item.key, '']));
+    setItemDirectoryDefaults(cleared);
+    setMeasurementUnitCustomMode(false);
+    writeItemDirectoryDefaults(cleared);
+    setToast({ open: true, severity: 'success', message: 'Item Directory defaults cleared.' });
+  };
+
+  const handleSaveSettings = async () => {
+    const hasAnyEntered = hasProviderRequiredDetails('digikey') || hasProviderRequiredDetails('mouser') || hasProviderRequiredDetails('element14');
+    if (!hasAnyEntered && !hasItemDirectoryDefaults) {
+      setToast({ open: true, severity: 'error', message: 'Enter at least one provider credential before saving.' });
+      return;
+    }
+
+    const selectedProviders = providersFromColumnMappings(columnMappings);
+    const invalidProviders = selectedProviders.filter(provider => !hasProviderRequiredDetails(provider));
+
+    if (hasAnyEntered && invalidProviders.length > 0) {
+      setToast({
+        open: true,
+        severity: 'error',
+        message: `Column mappings use providers without credentials: ${invalidProviders.map(providerLabel).join(', ')}`
+      });
+      return;
+    }
+
+    setSavingSettings(true);
+    try {
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem(COLUMN_PROVIDER_MAPPINGS_KEY, JSON.stringify(columnMappings));
+        window.localStorage.setItem(VALIDATION_PROVIDERS_KEY, JSON.stringify(selectedProviders));
+      }
+      writeItemDirectoryDefaults(itemDirectoryDefaults);
+      if (!hasAnyEntered) {
+        setToast({ open: true, severity: 'success', message: 'Item Directory defaults saved successfully' });
+        return;
+      }
+      const response = await api.saveProviderCredentials(credentialScopeId, buildProviderPayload());
+      const nextStatus = { ...providerStatus };
+      (response.data.providers || []).forEach(provider => {
+        nextStatus[provider.provider] = provider;
+      });
+      setProviderStatus(nextStatus);
+      setMaskedFieldsFromStatus(nextStatus);
+      setToast({ open: true, severity: 'success', message: 'Settings saved successfully' });
+    } catch (error) {
+      setToast({ open: true, severity: 'error', message: error.response?.data?.error || 'Failed to save provider settings.' });
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  const handleTestProvider = async (provider) => {
+    if (!hasProviderRequiredDetails(provider)) {
+      setProviderMessage(provider, 'error', 'Enter the required details before testing.');
+      return;
+    }
+
+    const providerPayload = buildProviderPayload()[provider] || {};
+    const hasInputToSave = Object.values(providerPayload).some(value => String(value || '').trim());
+    setTestingProvider(provider);
+    setProviderMessage(provider, null, '');
+    try {
+      if (hasInputToSave) {
+        const saveResponse = await api.saveProviderCredentials(credentialScopeId, { [provider]: providerPayload });
+        const nextStatus = { ...providerStatus };
+        (saveResponse.data.providers || []).forEach(item => {
+          nextStatus[item.provider] = item;
+        });
+        setProviderStatus(nextStatus);
+        setMaskedFieldsFromStatus(nextStatus);
+      }
+
+      const response = await api.testProviderCredential(provider, credentialScopeId);
+      if (response.data.provider_status) {
+        setProviderStatus(prev => ({ ...prev, [provider]: response.data.provider_status }));
+      }
+      setToast({ open: true, severity: 'success', message: `${providerLabel(provider)} configured successfully` });
+    } catch (error) {
+      const providerStatusUpdate = error.response?.data?.provider_status;
+      if (providerStatusUpdate) {
+        setProviderStatus(prev => ({ ...prev, [provider]: providerStatusUpdate }));
+      }
+      setProviderMessage(provider, 'error', error.response?.data?.error || error.response?.data?.message || 'Details unverified. Please check the entered details.');
+    } finally {
+      setTestingProvider('');
+    }
+  };
+
+  const handleDeleteProvider = async (provider) => {
+    setDeletingProvider(provider);
+    try {
+      await api.deleteProviderCredential(provider, credentialScopeId);
+      setProviderStatus(prev => ({ ...prev, [provider]: { ...emptyProviderStatus[provider] } }));
+      setProviderMessage(provider, null, '');
+      if (provider === 'digikey') {
+        setDigikeyClientId('');
+        setDigikeyClientSecret('');
+        setDigikeyRedirectUri('');
+      } else if (provider === 'mouser') {
+        setMouserApiKey('');
+      } else if (provider === 'element14') {
+        setElement14ApiKey('');
+      }
+      setToast({ open: true, severity: 'success', message: `${providerLabel(provider)} removed successfully` });
+    } catch (error) {
+      setToast({ open: true, severity: 'error', message: error.response?.data?.error || `Failed to remove ${providerLabel(provider)}.` });
+    } finally {
+      setDeletingProvider('');
+    }
+  };
+
+  const renderProviderCard = ({
+    provider,
+    title,
+    description,
+    configured,
+    children
+  }) => {
+    const meta = providerMeta[provider];
+    const ProviderIcon = meta.Icon || VpnKeyIcon;
+    const message = providerMessages[provider];
+    const minCardHeight = provider === 'digikey' ? 334 : 168;
+    return (
+      <Paper elevation={0} sx={{ p: 2.25, minHeight: minCardHeight, height: provider === 'digikey' ? '100%' : 'auto', borderRadius: '14px', border: `1px solid ${t.border.subtle}`, bgcolor: t.surface.panel, display: 'flex', flexDirection: 'column' }}>
+        <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 1.5, mb: 1.75 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, minWidth: 0 }}>
+            <Box sx={{ width: 34, height: 34, borderRadius: '10px', display: 'grid', placeItems: 'center', bgcolor: meta.soft, color: meta.color }}>
+              <ProviderIcon fontSize="small" />
+            </Box>
+            <Box sx={{ minWidth: 0 }}>
+              <Typography sx={{ fontSize: 15, fontWeight: 650, color: t.text.heading, lineHeight: 1.25 }}>{title}</Typography>
+              {description && (
+                <Typography sx={{ fontSize: 12.5, color: t.text.secondary, mt: 0.25, lineHeight: 1.35 }}>{description}</Typography>
+              )}
+            </Box>
+          </Box>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+            {providerChip(configured)}
+            {message?.type === 'error' && (
+              <Chip
+                size="small"
+                icon={<ErrorIcon />}
+                label={message.message}
+                color="error"
+                variant="outlined"
+                sx={{ maxWidth: 340, '& .MuiChip-label': { overflow: 'hidden', textOverflow: 'ellipsis' } }}
+              />
+            )}
+          </Box>
+        </Box>
+        <Box sx={{ flex: 1 }}>
+          {children}
+        </Box>
+        <Stack direction="row" spacing={1} sx={{ flexShrink: 0, justifyContent: 'flex-end', mt: provider === 'digikey' ? 'auto' : 1.75, pt: provider === 'digikey' ? 2 : 0 }}>
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={() => handleTestProvider(provider)}
+              disabled={Boolean(testingProvider || deletingProvider) || !hasProviderRequiredDetails(provider)}
+              startIcon={testingProvider === provider ? <CircularProgress size={14} /> : <CheckCircleIcon />}
+            >
+              Test
+            </Button>
+            <Button
+              size="small"
+              color="error"
+              variant="outlined"
+              onClick={() => handleDeleteProvider(provider)}
+              disabled={Boolean(deletingProvider) || !providerStatus[provider]?.has_credentials}
+              startIcon={deletingProvider === provider ? <CircularProgress size={14} /> : <DeleteIcon />}
+            >
+              Remove
+            </Button>
+          </Stack>
+      </Paper>
+    );
+  };
+
+  return (
+    <Box sx={pageSx}>
+      <Box
+        sx={{
+          pointerEvents: 'none',
+          position: 'absolute',
+          transition: 'all 0.7s cubic-bezier(0.16, 1, 0.3, 1)',
+          borderRadius: '50%',
+          opacity: 0.36,
+          width: '62vw',
+          height: '62vw',
+          left: `${mousePos.x}%`,
+          top: `${mousePos.y}%`,
+          transform: 'translate(-50%, -50%)',
+          filter: 'blur(90px)',
+          background: 'radial-gradient(circle, var(--color-brand, #2383e2) 0%, transparent 70%)',
+          zIndex: 0
+        }}
+      />
+      <Box
+        className="auth-grid-pattern"
+        sx={{ position: 'absolute', inset: 0, pointerEvents: 'none', opacity: 0.45, zIndex: 0 }}
+      />
+      <Box sx={{ maxWidth: 1320, mx: 'auto' }}>
+        <Box sx={{ mb: 2.5, display: 'flex', justifyContent: 'space-between', alignItems: { xs: 'flex-start', md: 'center' }, gap: 2, flexDirection: { xs: 'column', md: 'row' } }}>
+          <Box>
+            <Typography sx={{ fontSize: { xs: 26, md: 30 }, fontWeight: 700, letterSpacing: 0, color: t.text.heading, lineHeight: 1.1 }}>
+              Settings
+            </Typography>
+          </Box>
+          <Stack direction="row" spacing={1} sx={{ flexWrap: 'wrap' }}>
+            <Chip label={`${readyCount}/${columnMappings.length} columns ready`} size="small" sx={{ height: 24, fontWeight: 650, fontSize: 11.5, bgcolor: t.action.primarySoft, color: t.color.primarySoftText }} />
+            <Chip label={hasAnyProvider ? 'Provider available' : 'Setup required'} size="small" sx={{ height: 24, fontWeight: 650, fontSize: 11.5, bgcolor: hasAnyProvider ? t.state.successBg : t.state.warningBg, color: hasAnyProvider ? t.color.successText : t.color.warningText }} />
+          </Stack>
+        </Box>
+
+        <Grid container spacing={2.5}>
+          {isFactwiseEmbedded && (
+            <Grid item xs={12}>
+              <Paper
+                elevation={0}
+                sx={{
+                  px: 2.25,
+                  py: 1.5,
+                  borderRadius: '12px',
+                  border: `1px solid ${t.border.subtle}`,
+                  bgcolor: t.surface.panel,
+                  display: 'flex',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: 1.25,
+                }}
+              >
+                <Typography
+                  sx={{
+                    fontSize: 12.5,
+                    fontWeight: 650,
+                    color: t.text.secondary,
+                    mr: 0.5,
+                  }}
+                >
+                  API keys managed in Factwise
+                </Typography>
+                {ALL_PROVIDERS.map((provider) => {
+                  const connected = Boolean(providerStatus[provider]?.configured);
+                  const label = providerMeta[provider]?.label || provider;
+                  return (
+                    <Chip
+                      key={provider}
+                      size="small"
+                      icon={connected ? <CheckCircleIcon /> : <ErrorIcon />}
+                      label={`${label}: ${connected ? 'Connected' : 'Not connected'}`}
+                      sx={{
+                        height: 22,
+                        fontWeight: 650,
+                        fontSize: 11.5,
+                        color: connected ? t.color.successText : t.text.secondary,
+                        bgcolor: connected ? t.state.successBg : t.surface.controlSoft,
+                        border: `1px solid ${connected ? t.state.successBorder : t.border.default}`,
+                        '& .MuiChip-icon': {
+                          color: connected ? t.color.success : t.text.secondary,
+                        },
+                      }}
+                    />
+                  );
+                })}
+              </Paper>
+            </Grid>
+          )}
+          {!isFactwiseEmbedded && (
+          <Grid item xs={12}>
+            <Paper elevation={0} sx={panelSx}>
+              <Box sx={sectionHeaderSx}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
+                  <Box sx={{ width: 36, height: 36, borderRadius: '12px', display: 'grid', placeItems: 'center', bgcolor: t.action.primarySoft, color: t.color.primaryLight }}>
+                    <HubIcon fontSize="small" />
+                  </Box>
+                  <Box>
+                    <Typography sx={{ fontSize: 16, fontWeight: 700, color: t.text.heading }}>API Providers</Typography>
+                  </Box>
+                </Box>
+                {loadingCredentials && <CircularProgress size={20} />}
+              </Box>
+
+              <Box sx={{ p: 2.5 }}>
+                <Grid container spacing={2}>
+                  <Grid item xs={12} lg={7} sx={{ display: 'flex' }}>
+                    {renderProviderCard({
+                      provider: 'digikey',
+                      title: 'DigiKey API',
+                      description: '',
+                      configured: hasDigikey,
+                      children: (
+                        <Grid container columnSpacing={1.75} rowSpacing={2.25} sx={{ alignContent: 'flex-start' }}>
+                          <Grid item xs={12} md={6}>
+                            <TextField fullWidth size="small" label="Client ID" value={digikeyClientId} onChange={(e) => setDigikeyClientId(e.target.value)} placeholder="Enter client ID" sx={fieldSx} />
+                          </Grid>
+                          <Grid item xs={12} md={6}>
+                            <TextField
+                              fullWidth
+                              size="small"
+                              label="Client Secret"
+                              type={showDigikeySecret ? 'text' : 'password'}
+                              value={digikeyClientSecret}
+                              onChange={(e) => setDigikeyClientSecret(e.target.value)}
+                              onFocus={() => {
+                                if (isSavedMaskedValue(digikeyClientSecret, 'digikey', 'client_secret')) setDigikeyClientSecret('');
+                              }}
+                              placeholder="Enter client secret"
+                              helperText={providerStatus.digikey?.has_credentials ? 'Saved secret is hidden. Type a new value to replace it.' : ''}
+                              sx={secretInputSx}
+                              InputProps={{
+                                endAdornment: (
+                                  <InputAdornment position="end">
+                                    <IconButton onClick={() => toggleSavedSecretVisibility('digikey')} edge="end" size="small">
+                                      {showDigikeySecret ? <VisibilityOff /> : <Visibility />}
+                                    </IconButton>
+                                  </InputAdornment>
+                                )
+                              }}
+                            />
+                          </Grid>
+                          <Grid item xs={12} sx={{ mt: 0.25 }}>
+                            <TextField fullWidth size="small" label="Redirect URI" value={digikeyRedirectUri} onChange={(e) => setDigikeyRedirectUri(e.target.value)} placeholder="https://your-app.com/api/mpn/oauth/callback" helperText="Must match the callback URL in DigiKey app settings." sx={fieldSx} />
+                          </Grid>
+                        </Grid>
+                      )
+                    })}
+                  </Grid>
+
+                  <Grid item xs={12} lg={5}>
+                    <Stack spacing={2}>
+                      {renderProviderCard({
+                        provider: 'mouser',
+                        title: 'Mouser API',
+                        description: '',
+                        configured: hasMouser,
+                        children: (
+                          <TextField
+                            fullWidth
+                            size="small"
+                            label="API Key"
+                            type={showMouserKey ? 'text' : 'password'}
+                            value={mouserApiKey}
+                            onChange={(e) => setMouserApiKey(e.target.value)}
+                            onFocus={() => {
+                              if (isSavedMaskedValue(mouserApiKey, 'mouser', 'api_key')) setMouserApiKey('');
+                            }}
+                            placeholder="Enter Mouser API key"
+                            helperText={providerStatus.mouser?.has_credentials ? 'Saved key is hidden. Type a new value to replace it.' : 'Available from the Mouser developer portal.'}
+                            sx={secretInputSx}
+                            InputProps={{
+                              endAdornment: (
+                                <InputAdornment position="end">
+                                  <IconButton onClick={() => toggleSavedSecretVisibility('mouser')} edge="end" size="small">
+                                    {showMouserKey ? <VisibilityOff /> : <Visibility />}
+                                  </IconButton>
+                                </InputAdornment>
+                              )
+                            }}
+                          />
+                        )
+                      })}
+                      {renderProviderCard({
+                        provider: 'element14',
+                        title: 'Element14 API',
+                        description: '',
+                        configured: hasElement14,
+                        children: (
+                          <TextField
+                            fullWidth
+                            size="small"
+                            label="API Key"
+                            type={showElement14Key ? 'text' : 'password'}
+                            value={element14ApiKey}
+                            onChange={(e) => setElement14ApiKey(e.target.value)}
+                            onFocus={() => {
+                              if (isSavedMaskedValue(element14ApiKey, 'element14', 'api_key')) setElement14ApiKey('');
+                            }}
+                            placeholder="Enter Element14 API key"
+                            helperText={providerStatus.element14?.has_credentials ? 'Saved key is hidden. Type a new value to replace it.' : 'Available from the Element14 developer portal.'}
+                            sx={secretInputSx}
+                            InputProps={{
+                              endAdornment: (
+                                <InputAdornment position="end">
+                                  <IconButton onClick={() => toggleSavedSecretVisibility('element14')} edge="end" size="small">
+                                    {showElement14Key ? <VisibilityOff /> : <Visibility />}
+                                  </IconButton>
+                                </InputAdornment>
+                              )
+                            }}
+                          />
+                        )
+                      })}
+                    </Stack>
+                  </Grid>
+                </Grid>
+              </Box>
+            </Paper>
+          </Grid>
+          )}
+
+          <Grid item xs={12}>
+            <Paper elevation={0} sx={panelSx}>
+              <Box sx={sectionHeaderSx}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
+                  <Box sx={{ width: 36, height: 36, borderRadius: '12px', display: 'grid', placeItems: 'center', bgcolor: t.action.primarySoft, color: t.color.primaryLight }}>
+                    <TableChartIcon fontSize="small" />
+                  </Box>
+                  <Box>
+                    <Typography sx={{ fontSize: 16, fontWeight: 700, color: t.text.heading }}>Item Directory Defaults</Typography>
+                    <Typography sx={{ mt: 0.25, fontSize: 12.5, color: t.text.secondary }}>
+                      Used to fill recurring required fields before exporting to FactWise.
+                    </Typography>
+                  </Box>
+                </Box>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  color="error"
+                  onClick={handleClearItemDirectoryDefaults}
+                  disabled={!hasItemDirectoryDefaults}
+                  sx={{ borderRadius: '999px', fontWeight: 700, textTransform: 'none' }}
+                >
+                  Clear
+                </Button>
+              </Box>
+
+              <Box sx={{ p: 2.5 }}>
+                <Grid container spacing={2}>
+                  <Grid item xs={12} md={3}>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      label="Procurement entity name"
+                      value={itemDirectoryDefaults.procurementEntityName || ''}
+                      onChange={(event) => handleItemDirectoryDefaultChange('procurementEntityName', event.target.value)}
+                      placeholder="Example: FactWise Manufacturing"
+                      helperText=" "
+                      sx={fieldSx}
+                    />
+                  </Grid>
+                  <Grid item xs={12} sm={6} md={3}>
+                    <FormControl fullWidth size="small" sx={fieldSx}>
+                      <Select
+                        displayEmpty
+                        value={itemDirectoryDefaults.itemType || ''}
+                        onChange={(event) => handleItemDirectoryDefaultChange('itemType', event.target.value)}
+                        renderValue={(value) => value || 'Item type'}
+                      >
+                        <MenuItem value="">No default</MenuItem>
+                        {ITEM_TYPE_OPTIONS.map(option => (
+                          <MenuItem key={option} value={option}>{option}</MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  </Grid>
+                  {[
+                    { key: 'procurementItem', label: 'Procurement item' },
+                    { key: 'salesItem', label: 'Sales item' },
+                  ].map((item) => (
+                    <Grid item xs={12} sm={6} md={3} key={item.key}>
+                      <FormControl fullWidth size="small" sx={fieldSx}>
+                        <Select
+                          displayEmpty
+                          value={itemDirectoryDefaults[item.key] || ''}
+                          onChange={(event) => handleItemDirectoryDefaultChange(item.key, event.target.value)}
+                          renderValue={(value) => value || item.label}
+                        >
+                          <MenuItem value="">No default</MenuItem>
+                          <MenuItem value="TRUE">TRUE</MenuItem>
+                          <MenuItem value="FALSE">FALSE</MenuItem>
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                  ))}
+
+                  <Grid item xs={12}>
+                    <Paper elevation={0} sx={{ p: 2, borderRadius: '14px', border: `1px solid ${t.border.subtle}`, bgcolor: t.surface.panel }}>
+                      <Typography sx={{ fontSize: 13, fontWeight: 800, color: t.text.heading, mb: 1.5 }}>
+                        Item code behavior
+                      </Typography>
+                      <Grid container spacing={1.5}>
+                        <Grid item xs={12} md={3}>
+                          <TextField
+                            fullWidth
+                            size="small"
+                            label="Prefix"
+                            value={itemDirectoryDefaults.itemCodePrefix || ''}
+                            onChange={(event) => handleItemDirectoryDefaultChange('itemCodePrefix', event.target.value)}
+                            placeholder="Example: RM"
+                            helperText="Creates values like RM-001."
+                            sx={fieldSx}
+                          />
+                        </Grid>
+                        <Grid item xs={12} md={3}>
+                          <FormControl fullWidth size="small" sx={fieldSx}>
+                            <Select
+                              displayEmpty
+                              value={itemDirectoryDefaults.itemCodeBlankStrategy || 'prefix_sequence'}
+                              onChange={(event) => handleItemDirectoryDefaultChange('itemCodeBlankStrategy', event.target.value)}
+                            >
+                              {ITEM_CODE_BLANK_STRATEGIES.map(option => (
+                                <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                        </Grid>
+                        <Grid item xs={12} md={3}>
+                          <FormControl fullWidth size="small" sx={fieldSx}>
+                            <Select
+                              displayEmpty
+                              value={itemDirectoryDefaults.itemCodeDuplicateStrategy || 'prefix_sequence'}
+                              onChange={(event) => handleItemDirectoryDefaultChange('itemCodeDuplicateStrategy', event.target.value)}
+                            >
+                              {ITEM_CODE_DUPLICATE_STRATEGIES.map(option => (
+                                <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                        </Grid>
+                        <Grid item xs={4} md={1}>
+                          <TextField
+                            fullWidth
+                            size="small"
+                            label="Separator"
+                            value={itemDirectoryDefaults.itemCodeSeparator ?? '-'}
+                            onChange={(event) => handleItemDirectoryDefaultChange('itemCodeSeparator', event.target.value)}
+                            sx={fieldSx}
+                          />
+                        </Grid>
+                        <Grid item xs={4} md={1}>
+                          <TextField
+                            fullWidth
+                            size="small"
+                            type="number"
+                            label="Start"
+                            value={itemDirectoryDefaults.itemCodeStart || '1'}
+                            onChange={(event) => handleItemDirectoryDefaultChange('itemCodeStart', event.target.value)}
+                            sx={fieldSx}
+                          />
+                        </Grid>
+                        <Grid item xs={4} md={1}>
+                          <TextField
+                            fullWidth
+                            size="small"
+                            type="number"
+                            label="Padding"
+                            value={itemDirectoryDefaults.itemCodePadding || '3'}
+                            onChange={(event) => handleItemDirectoryDefaultChange('itemCodePadding', event.target.value)}
+                            sx={fieldSx}
+                          />
+                        </Grid>
+                      </Grid>
+                    </Paper>
+                  </Grid>
+
+                  <Grid item xs={12} md={4}>
+                    {measurementUnitCustomMode ? (
+                      <Stack direction="row" spacing={1} alignItems="flex-start">
+                        <TextField
+                          autoFocus
+                          fullWidth
+                          size="small"
+                          label="Measurement unit"
+                          value={MEASUREMENT_UNIT_OPTIONS.includes(itemDirectoryDefaults.measurementUnit) ? '' : (itemDirectoryDefaults.measurementUnit || '')}
+                          onChange={(event) => handleItemDirectoryDefaultChange('measurementUnit', event.target.value)}
+                          placeholder="Example: Box"
+                          helperText="Custom unit"
+                          sx={fieldSx}
+                        />
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          onClick={() => {
+                            setMeasurementUnitCustomMode(false);
+                            handleItemDirectoryDefaultChange('measurementUnit', '');
+                          }}
+                          sx={{ mt: 0.25, minWidth: 58, height: 36, borderRadius: '10px', fontWeight: 700, textTransform: 'none' }}
+                        >
+                          List
+                        </Button>
+                      </Stack>
+                    ) : (
+                      <TextField
+                        select
+                        fullWidth
+                        size="small"
+                        label="Measurement unit"
+                        value={MEASUREMENT_UNIT_OPTIONS.includes(itemDirectoryDefaults.measurementUnit) ? itemDirectoryDefaults.measurementUnit : ''}
+                        onChange={(event) => {
+                          if (event.target.value === CUSTOM_MEASUREMENT_UNIT_VALUE) {
+                            setMeasurementUnitCustomMode(true);
+                            handleItemDirectoryDefaultChange('measurementUnit', '');
+                          } else {
+                            handleItemDirectoryDefaultChange('measurementUnit', event.target.value);
+                          }
+                        }}
+                        helperText=" "
+                        sx={fieldSx}
+                      >
+                        <MenuItem value="">No default</MenuItem>
+                        {MEASUREMENT_UNIT_OPTIONS.map(unit => (
+                          <MenuItem key={unit} value={unit}>{unit}</MenuItem>
+                        ))}
+                        <MenuItem value={CUSTOM_MEASUREMENT_UNIT_VALUE}>Custom measurement unit</MenuItem>
+                      </TextField>
+                    )}
+                  </Grid>
+                </Grid>
+              </Box>
+            </Paper>
+          </Grid>
+
+          <Grid item xs={12}>
+            <Paper elevation={0} sx={panelSx}>
+              <Box sx={sectionHeaderSx}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
+                  <Box sx={{ width: 36, height: 36, borderRadius: '12px', display: 'grid', placeItems: 'center', bgcolor: t.state.successBg, color: t.color.success }}>
+                    <TableChartIcon fontSize="small" />
+                  </Box>
+                  <Box>
+                    <Typography sx={{ fontSize: 16, fontWeight: 700, color: t.text.heading }}>Column Provider Mapping</Typography>
+                  </Box>
+                </Box>
+                <Chip label={`${readyCount} ready`} size="small" sx={{ height: 23, fontWeight: 650, fontSize: 11.5, bgcolor: t.state.successBg, color: t.color.successText }} />
+              </Box>
+
+              <Box sx={{ p: 2.5 }}>
+                <Alert
+                  severity="info"
+                  icon={<InfoIcon />}
+                  sx={{
+                    mb: 2,
+                    bgcolor: t.state.infoBg,
+                    border: `1px solid ${t.state.infoBorder}`,
+                    color: t.color.infoText,
+                    '& .MuiAlert-icon': { color: t.color.info }
+                  }}
+                >
+                  Configure providers above, then map each validation column to the source you want to trust.
+                </Alert>
+
+                <TableContainer component={Paper} elevation={0} sx={{ borderRadius: '14px', border: `1px solid ${t.border.default}`, bgcolor: t.table.background, maxHeight: 460 }}>
+                  <Table stickyHeader size="small">
+                    <TableHead>
+                      <TableRow>
+                        {['Column', 'Purpose', 'Provider', 'Status'].map(label => (
+                          <TableCell key={label} sx={{ bgcolor: t.table.header, color: t.text.heading, fontWeight: 650, fontSize: 12, borderBottom: `1px solid ${t.border.default}` }}>
+                            {label}
+                          </TableCell>
+                        ))}
+                      </TableRow>
+                    </TableHead>
+                    <TableBody>
+                      {columnMappings.map((mapping) => {
+                        const selectedProviders = normalizeProviders(mapping.providers || mapping.provider);
+                        const meta = providerMeta[selectedProviders[0]];
+                        const ready = selectedProviders.every(provider => Boolean(providerStatus[provider]?.configured));
+                        return (
+                          <TableRow key={mapping.column} hover sx={{ '&:hover td': { bgcolor: t.table.hover }, '& td': { borderBottom: `1px solid ${t.table.line}` } }}>
+                            <TableCell sx={{ color: t.text.primary, fontWeight: 650, fontSize: 13 }}>{mapping.column}</TableCell>
+                            <TableCell sx={{ color: t.text.secondary, fontSize: 13 }}>{mapping.description}</TableCell>
+                            <TableCell sx={{ width: 330, minWidth: 330 }}>
+                              <FormControl size="small" sx={{ width: 300 }}>
+                                <Select
+                                  multiple
+                                  value={selectedProviders}
+                                  onChange={(e) => {
+                                    const nextProviders = normalizeProviders(e.target.value)
+                                      .filter(provider => Boolean(providerStatus[provider]?.configured));
+                                    handleColumnProviderChange(mapping.column, nextProviders);
+                                  }}
+                                  renderValue={(selected) => normalizeProviders(selected).map(providerLabel).join(', ') || 'Select provider'}
+                                  sx={{
+                                    borderRadius: '12px',
+                                    bgcolor: meta?.soft || t.surface.controlSoft,
+                                    color: t.text.primary,
+                                    fontWeight: 650,
+                                    fontSize: 12.5,
+                                    height: 34,
+                                    width: 300,
+                                    '& .MuiSelect-select': {
+                                      overflow: 'hidden',
+                                      textOverflow: 'ellipsis',
+                                      whiteSpace: 'nowrap',
+                                      pr: 4
+                                    },
+                                    '& .MuiOutlinedInput-notchedOutline': { borderColor: meta?.color || t.border.default }
+                                  }}
+                                >
+                                  {Object.entries(providerMeta).map(([key, provider]) => {
+                                    const configured = Boolean(providerStatus[key]?.configured);
+                                    return (
+                                    <MenuItem key={key} value={key} disabled={!configured} sx={{ color: configured ? t.text.primary : t.text.disabled }}>
+                                      <Checkbox checked={selectedProviders.includes(key)} disabled={!configured} />
+                                      <ListItemText
+                                        primary={provider.label}
+                                        secondary={configured ? '' : 'Not configured'}
+                                        primaryTypographyProps={{ sx: { color: configured ? t.text.primary : t.text.disabled } }}
+                                        secondaryTypographyProps={{ sx: { color: t.text.disabled, fontSize: 11 } }}
+                                      />
+                                      <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: configured ? provider.color : t.text.disabled, ml: 1, opacity: configured ? 1 : 0.45 }} />
+                                    </MenuItem>
+                                  );})}
+                                </Select>
+                              </FormControl>
+                            </TableCell>
+                            <TableCell sx={{ width: 170 }}>
+                              <Chip
+                                size="small"
+                                icon={ready ? <CheckCircleIcon /> : <ErrorIcon />}
+                                label={ready ? 'Ready' : 'Needs setup'}
+                                sx={{
+                                  height: 22,
+                                  fontWeight: 650,
+                                  fontSize: 11.5,
+                                  bgcolor: ready ? t.state.successBg : t.state.warningBg,
+                                  color: ready ? t.color.successText : t.color.warningText,
+                                  border: `1px solid ${ready ? t.state.successBorder : t.state.warningBorder}`,
+                                  '& .MuiChip-icon': { color: ready ? t.color.success : t.color.warning }
+                                }}
+                              />
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </TableContainer>
+              </Box>
+            </Paper>
+          </Grid>
+
+          <Grid item xs={12}>
+            <Box sx={{ display: 'flex', justifyContent: 'flex-end', pb: 1 }}>
+              <Button variant="contained" startIcon={<SaveIcon />} onClick={handleSaveSettings} disabled={savingSettings || loadingCredentials} sx={{ px: 3.25, height: 42, fontWeight: 700 }}>
+                {savingSettings ? 'Saving...' : 'Save Settings'}
+              </Button>
+            </Box>
+          </Grid>
+        </Grid>
+      </Box>
+
+      <Snackbar
+        open={toast.open}
+        autoHideDuration={5000}
+        onClose={() => setToast(prev => ({ ...prev, open: false }))}
+        anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
+        sx={{ mt: 7 }}
+      >
+        <Alert
+          variant="filled"
+          severity={toast.severity}
+          onClose={() => setToast(prev => ({ ...prev, open: false }))}
+          sx={{ borderRadius: '14px', boxShadow: t.shadow.card }}
+        >
+          {toast.message}
+        </Alert>
+      </Snackbar>
+    </Box>
+  );
+};
+
+export default Settings;
