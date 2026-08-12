@@ -165,6 +165,9 @@ export const PHASES = {
   ITEMS_PROCESSING: 'ITEMS_PROCESSING',
   ITEMS_ERROR: 'ITEMS_ERROR',
   ITEMS_DONE: 'ITEMS_DONE',
+  // Short pause between item-create success and BOM upload so FactWise BE
+  // finishes indexing the new items before BOMRevisionImport looks them up.
+  ITEMS_SETTLING: 'ITEMS_SETTLING',
   BOM_UPLOADING: 'BOM_UPLOADING',
   BOM_PROCESSING: 'BOM_PROCESSING',
   BOM_ERROR: 'BOM_ERROR',
@@ -706,6 +709,9 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
     reviseEnterpriseBomId,
     reviseBomModuleId,
     reviseBomCode,
+    // When true, orchestrator stops after BOM_DONE and marks DONE. Used by the
+    // Export-to-BOM-Directory dialog which only needs items + BOM, no project.
+    stopAfterBom = false,
   } = {}) => {
     if (!isEmbedded || !entityId) {
       patch({ lastError: 'Factwise session not available' });
@@ -713,13 +719,16 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
     }
     const effectiveMode = mode || state.mode || PROJECT_MODES.NEW;
 
-    if (effectiveMode === PROJECT_MODES.EXISTING && !(existingProjectId || state.existingProjectId)) {
-      patch({ lastError: 'Please pick a project to export into.' });
-      return;
-    }
-    if (effectiveMode === PROJECT_MODES.NEW && !(projectName || state.projectName)) {
-      patch({ lastError: 'Please enter a project name.' });
-      return;
+    // Project-related validations only when we're actually going to touch a project.
+    if (!stopAfterBom) {
+      if (effectiveMode === PROJECT_MODES.EXISTING && !(existingProjectId || state.existingProjectId)) {
+        patch({ lastError: 'Please pick a project to export into.' });
+        return;
+      }
+      if (effectiveMode === PROJECT_MODES.NEW && !(projectName || state.projectName)) {
+        patch({ lastError: 'Please enter a project name.' });
+        return;
+      }
     }
 
     // Persist config first so later steps can read from checkpoint.
@@ -763,6 +772,11 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
     if (!itemDone) {
       const res = await runItemStep();
       if (!res.ok) return;
+      // Give FactWise a moment to index the newly-created items before BOM
+      // validation runs — without this the BOM sheet occasionally reports
+      // "item does not exist" for items we just POSTed.
+      patch({ phase: PHASES.ITEMS_SETTLING });
+      await new Promise((resolve) => setTimeout(resolve, 2500));
     }
 
     // BOM step
@@ -775,6 +789,12 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
     if (!bomDone) {
       const res = await runBomStep();
       if (!res.ok) return;
+    }
+
+    // Export-to-BOM-Directory ends here — no project, no attach.
+    if (stopAfterBom) {
+      patch({ phase: PHASES.DONE });
+      return;
     }
 
     // Project creation (only for NEW mode; EXISTING mode skips straight to attach)

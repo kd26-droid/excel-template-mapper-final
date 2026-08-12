@@ -750,6 +750,26 @@ class ProviderCredential(models.Model):
         return f"{self.scope_id}:{self.provider} configured={self.configured}"
 
 
+class EditorDefaultSettings(models.Model):
+    """Persistent blank-only editor defaults scoped by entity."""
+
+    entity_name = models.CharField(max_length=200, unique=True, db_index=True)
+    item_type = models.CharField(max_length=80, blank=True, default='')
+    procurement_item = models.BooleanField(null=True, blank=True)
+    sales_item = models.BooleanField(null=True, blank=True)
+    measurement_unit = models.CharField(max_length=80, blank=True, default='')
+    item_code_rule = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'excel_mapper_editor_default_settings'
+        ordering = ['entity_name']
+
+    def __str__(self):
+        return f"Editor defaults for {self.entity_name}"
+
+
 class IntermediateArtifact(models.Model):
     """Durable file snapshot for merge, normalization, and mapping checkpoints."""
 

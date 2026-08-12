@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import {
@@ -4020,6 +4020,7 @@ const BomNormalizer = () => {
   const [downloadMenuAnchor, setDownloadMenuAnchor] = useState(null);
   const [toolsMenuAnchor, setToolsMenuAnchor] = useState(null);
   const [parsingLogicOpen, setParsingLogicOpen] = useState(false);
+  const [selectedParsingPatternKey, setSelectedParsingPatternKey] = useState('');
   const [configureSplitColsOpen, setConfigureSplitColsOpen] = useState(false);
   const [configureParserSessionId, setConfigureParserSessionId] = useState('');
   const [configureParserPreparing, setConfigureParserPreparing] = useState(false);
@@ -4316,6 +4317,29 @@ const BomNormalizer = () => {
       ],
     };
   }, [config, dataRows, headerRowIndex, headers, roles.manufacturer, roles.mpn]);
+
+  const parsingPatternOptions = useMemo(() => (
+    (detectedParsingLogic?.sections || []).flatMap((section) => (
+      (section.patterns || []).map((pattern, index) => ({
+        key: `${section.id}::${pattern.shape || index}`,
+        section,
+        pattern,
+        label: `${section.title}: ${pattern.shape}`,
+      }))
+    ))
+  ), [detectedParsingLogic]);
+
+  const selectedParsingPattern = useMemo(() => (
+    parsingPatternOptions.find((option) => option.key === selectedParsingPatternKey) ||
+    parsingPatternOptions[0] ||
+    null
+  ), [parsingPatternOptions, selectedParsingPatternKey]);
+
+  useEffect(() => {
+    if (!parsingLogicOpen || !parsingPatternOptions.length) return;
+    if (parsingPatternOptions.some((option) => option.key === selectedParsingPatternKey)) return;
+    setSelectedParsingPatternKey(parsingPatternOptions[0].key);
+  }, [parsingLogicOpen, parsingPatternOptions, selectedParsingPatternKey]);
 
   const showManufacturerInheritanceOption = useMemo(() => (
     !String(config.structure || '').startsWith('mpn_only') &&
@@ -8788,161 +8812,140 @@ const BomNormalizer = () => {
         maxWidth="md"
         fullWidth
       >
-        <DialogTitle>Detected Parsing Logic</DialogTitle>
-        <DialogContent>
-          <Typography sx={{ fontSize: 14, color: normalizerTheme.muted, mb: 1.5 }}>
-            FactWise found a combined MPN and Manufacturer field and will apply these rules before normalization.
-          </Typography>
-          <Paper elevation={0} sx={{ p: 1.5, bgcolor: normalizerTheme.paperSoft, border: `1px solid ${normalizerTheme.border}` }}>
-            <Typography sx={{ fontSize: 13, fontWeight: 850, color: normalizerTheme.text }}>
-              Rules
+        <DialogTitle>
+          <Box>
+            <Typography sx={{ fontSize: 19, fontWeight: 760, letterSpacing: 0 }}>Review detected parsing</Typography>
+            <Typography sx={{ mt: 0.45, fontSize: 13, lineHeight: 1.45, color: normalizerTheme.muted }}>
+              Combined MPN/MFR values were detected. Choose a pattern to inspect or continue with the automatic parser.
             </Typography>
-            <Stack gap={0.75} sx={{ mt: 1 }}>
-              {(detectedParsingLogic?.rules || parserLogicRules).map((rule) => (
-                <Typography key={rule} sx={{ fontSize: 13, color: normalizerTheme.muted }}>
-                  {rule}
-                </Typography>
-              ))}
-            </Stack>
+          </Box>
+        </DialogTitle>
+        <DialogContent>
+          <Stack direction="row" gap={0.8} flexWrap="wrap" sx={{ mb: 2 }}>
+            <Chip size="small" variant="outlined" label={`${detectedParsingLogic?.sections?.length || 0} source${detectedParsingLogic?.sections?.length === 1 ? '' : 's'}`} sx={{ fontWeight: 650, color: normalizerTheme.text, bgcolor: 'rgba(148, 163, 184, 0.08)' }} />
+            <Chip size="small" variant="outlined" label={`${parsingPatternOptions.length} pattern${parsingPatternOptions.length === 1 ? '' : 's'}`} sx={{ fontWeight: 650, color: normalizerTheme.text, bgcolor: 'rgba(148, 163, 184, 0.08)' }} />
+            <Chip size="small" color="success" variant="outlined" label={`${detectedParsingLogic?.matchingRows || 0} matching values`} sx={{ fontWeight: 650 }} />
+            {selectedParsingPattern?.section?.unmatched?.count > 0 && (
+              <Chip size="small" color="warning" variant="outlined" label={`${selectedParsingPattern.section.unmatched.count} unmatched`} sx={{ fontWeight: 650 }} />
+            )}
+          </Stack>
+
+          <Paper elevation={0} sx={{ p: 1.35, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
+            <Grid container spacing={1.5} alignItems="center">
+              <Grid item xs={12} md={8}>
+                <FormControl fullWidth size="small">
+                  <InputLabel>Detected pattern</InputLabel>
+                  <Select
+                    label="Detected pattern"
+                    value={selectedParsingPattern?.key || ''}
+                    onChange={(event) => setSelectedParsingPatternKey(event.target.value)}
+                    sx={{
+                      '& .MuiSelect-select': {
+                        fontWeight: 650,
+                        lineHeight: 1.35,
+                      },
+                    }}
+                  >
+                    {parsingPatternOptions.map((option) => (
+                      <MenuItem key={option.key} value={option.key}>
+                        <Box sx={{ minWidth: 0 }}>
+                          <Typography sx={{ fontSize: 13, fontWeight: 680 }} noWrap>
+                            {option.pattern.shape}
+                          </Typography>
+                          <Typography sx={{ fontSize: 11.5, color: normalizerTheme.muted }} noWrap>
+                            {option.section.sourceHeader} - {option.pattern.count} row{option.pattern.count === 1 ? '' : 's'}
+                          </Typography>
+                        </Box>
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              </Grid>
+              <Grid item xs={12} md={4}>
+                <Button
+                  fullWidth
+                  variant="outlined"
+                  disabled={!selectedParsingPattern || configureParserPreparing}
+                  sx={{ fontWeight: 700 }}
+                  onClick={() => {
+                    if (!selectedParsingPattern) return;
+                    setParsingLogicOpen(false);
+                    handleOpenConfigureSplitColumns({
+                      title: 'Parse Fields',
+                      initialColumn: selectedParsingPattern.section.sourceHeader || '',
+                      scope: {
+                        mode: 'pattern',
+                        sourceHeader: selectedParsingPattern.section.sourceHeader || '',
+                        patternShape: selectedParsingPattern.pattern.shape,
+                        sourceRows: selectedParsingPattern.pattern.sourceRows || [],
+                      },
+                    });
+                  }}
+                >
+                  Edit selected pattern
+                </Button>
+              </Grid>
+            </Grid>
           </Paper>
 
-          <Box sx={{ mt: 2 }}>
-            <Typography sx={{ fontSize: 13, fontWeight: 850, color: normalizerTheme.text }}>
-              Detected patterns
-            </Typography>
-            {(detectedParsingLogic?.sections || []).length > 1 && (
-              <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} sx={{ mt: 1 }}>
-                {(detectedParsingLogic?.sections || []).map((section) => (
-                  <Paper
-                    key={`${section.id}-summary`}
-                    elevation={0}
+          {selectedParsingPattern && (
+            <Paper elevation={0} sx={{ mt: 1.5, p: 1.6, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+              <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1.2}>
+                <Box sx={{ minWidth: 0 }}>
+                  <Typography sx={{ fontSize: 14, fontWeight: 720, color: normalizerTheme.text }}>
+                    {selectedParsingPattern.section.title}
+                  </Typography>
+                  <Typography sx={{ mt: 0.35, fontSize: 12.5, color: normalizerTheme.muted }}>
+                    Source column: {selectedParsingPattern.section.sourceHeader}
+                  </Typography>
+                </Box>
+                <Stack direction="row" gap={0.75} flexWrap="wrap">
+                  <Chip size="small" variant="outlined" label={`${selectedParsingPattern.pattern.count} rows`} sx={{ fontWeight: 650 }} />
+                  <Chip size="small" variant="outlined" label={`${selectedParsingPattern.pattern.examples?.length || 0} examples`} sx={{ fontWeight: 650 }} />
+                </Stack>
+              </Stack>
+
+              <Typography sx={{ mt: 1.25, fontSize: 13, fontWeight: 680, color: normalizerTheme.text }}>
+                {selectedParsingPattern.pattern.shape}
+              </Typography>
+
+              <Stack direction="row" gap={0.75} flexWrap="wrap" sx={{ mt: 1 }}>
+                {(selectedParsingPattern.pattern.rules || []).slice(0, 3).map((rule) => (
+                  <Chip key={rule} size="small" variant="outlined" label={rule} sx={{ fontWeight: 600, color: normalizerTheme.muted, bgcolor: 'transparent' }} />
+                ))}
+              </Stack>
+
+              <Stack gap={1} sx={{ mt: 1.5 }}>
+                {(selectedParsingPattern.pattern.examples || []).slice(0, 2).map((example, index) => (
+                  <Box
+                    key={`${selectedParsingPattern.key}-${example.sourceRow || index}`}
                     sx={{
-                      flex: 1,
-                      p: 1.25,
+                      p: 1.15,
+                      borderRadius: '8px',
                       border: `1px solid ${normalizerTheme.border}`,
                       bgcolor: normalizerTheme.paperSoft,
                     }}
                   >
-                    <Typography sx={{ fontSize: 12, fontWeight: 850, color: normalizerTheme.text }}>
-                      {section.title}
+                    <Typography sx={{ fontSize: 11.5, fontWeight: 650, color: normalizerTheme.muted }}>
+                      {example.sourceRow ? `Source row ${example.sourceRow}` : `Example ${index + 1}`}
                     </Typography>
-                    <Typography sx={{ mt: 0.35, fontSize: 12, color: normalizerTheme.muted }}>
-                      {section.sourceHeader}: {section.matchingRows || 0} matching value{section.matchingRows === 1 ? '' : 's'} across {section.patternCount || 0} pattern{section.patternCount === 1 ? '' : 's'}
+                    <Typography sx={{ mt: 0.35, fontSize: 13, fontWeight: 650, lineHeight: 1.4, color: normalizerTheme.text, wordBreak: 'break-word' }}>
+                      {example.source}
                     </Typography>
-                  </Paper>
+                    <Stack direction="row" gap={0.75} flexWrap="wrap" sx={{ mt: 0.85 }}>
+                      {(example.pairs || []).map((pair, pairIndex) => (
+                        <React.Fragment key={`${selectedParsingPattern.key}-${pairIndex}-${pair.mpn}-${pair.manufacturer}`}>
+                          <Chip size="small" color="success" label={`MPN: ${pair.mpn}`} sx={{ fontWeight: 650 }} />
+                          <Chip size="small" color="info" label={`MFR: ${pair.manufacturer}`} sx={{ fontWeight: 650 }} />
+                          {pair.discarded && <Chip size="small" variant="outlined" label={`Ignore: ${pair.discarded}`} sx={{ fontWeight: 600, color: normalizerTheme.muted }} />}
+                        </React.Fragment>
+                      ))}
+                    </Stack>
+                  </Box>
                 ))}
               </Stack>
-            )}
-            <Stack gap={1} sx={{ mt: 1 }}>
-              {(detectedParsingLogic?.sections || []).map((section) => (
-                <Paper
-                  key={section.id}
-                  elevation={0}
-                  sx={{ p: 1.5, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}
-                >
-                  <Typography sx={{ fontSize: 14, fontWeight: 850, color: normalizerTheme.text }}>
-                    {section.title}
-                  </Typography>
-                  <Typography sx={{ mt: 0.4, fontSize: 12, color: normalizerTheme.muted }}>
-                    {section.description || `Source column: ${section.sourceHeader}`}
-                  </Typography>
-                  <Typography sx={{ mt: 0.4, fontSize: 12, color: normalizerTheme.muted }}>
-                    Source column: {section.sourceHeader} - {section.matchingRows || 0} matching value{section.matchingRows === 1 ? '' : 's'} across {section.patternCount || 0} pattern{section.patternCount === 1 ? '' : 's'}
-                  </Typography>
-                  <Stack gap={1} sx={{ mt: 1.25 }}>
-                    {(section.patterns || []).map((pattern) => (
-                      <Paper
-                        key={`${section.id}-${pattern.shape}`}
-                        elevation={0}
-                        sx={{ p: 1.25, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}
-                      >
-                        <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1}>
-                          <Box>
-                            <Typography sx={{ fontSize: 13, fontWeight: 850, color: normalizerTheme.text }}>
-                              {pattern.shape}
-                            </Typography>
-                            <Typography sx={{ mt: 0.4, fontSize: 12, color: normalizerTheme.muted }}>
-                              {pattern.count} matching row{pattern.count === 1 ? '' : 's'} in {section.sourceHeader}
-                            </Typography>
-                          </Box>
-                          <Button
-                            size="small"
-                            variant="outlined"
-                            disabled={configureParserPreparing}
-                            onClick={() => {
-                              setParsingLogicOpen(false);
-                              handleOpenConfigureSplitColumns({
-                                title: 'Parse Fields',
-                                initialColumn: section.sourceHeader || '',
-                                scope: {
-                                  mode: 'pattern',
-                                  sourceHeader: section.sourceHeader || '',
-                                  patternShape: pattern.shape,
-                                  sourceRows: pattern.sourceRows || [],
-                                },
-                              });
-                            }}
-                          >
-                            Edit Parsing
-                          </Button>
-                        </Stack>
-                        <Stack gap={0.5} sx={{ mt: 1 }}>
-                          {(pattern.rules || []).map((rule) => (
-                            <Typography key={`${section.id}-${pattern.shape}-${rule}`} sx={{ fontSize: 12, color: normalizerTheme.muted }}>
-                              {rule}
-                            </Typography>
-                          ))}
-                        </Stack>
-                        <Stack gap={1} sx={{ mt: 1.25 }}>
-                          {(pattern.examples || []).map((example, index) => (
-                            <Box key={`${section.id}-${pattern.shape}-${example.sourceRow || index}`} sx={{ pl: 1, borderLeft: `2px solid ${normalizerTheme.borderStrong}` }}>
-                              <Typography sx={{ fontSize: 12, color: normalizerTheme.muted }}>
-                                {example.sourceRow ? `Source row ${example.sourceRow}` : `Example ${index + 1}`}
-                              </Typography>
-                              <Typography sx={{ fontSize: 13, fontWeight: 700, color: normalizerTheme.text }}>
-                                {example.source}
-                              </Typography>
-                              <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 0.75 }}>
-                                {(example.pairs || []).map((pair, pairIndex) => (
-                                  <React.Fragment key={`${section.id}-${example.sourceRow || index}-${pairIndex}-${pair.mpn}-${pair.manufacturer}`}>
-                                    <Chip size="small" label={`MPN -> ${pair.mpn}`} />
-                                    <Chip size="small" label={`MFR -> ${pair.manufacturer}`} />
-                                    {pair.discarded && <Chip size="small" variant="outlined" label={`Discard -> ${pair.discarded}`} />}
-                                  </React.Fragment>
-                                ))}
-                              </Stack>
-                            </Box>
-                          ))}
-                        </Stack>
-                      </Paper>
-                    ))}
-                  </Stack>
-                  {(section.unmatched?.count || 0) > 0 && (
-                    <Box sx={{ mt: 1.5 }}>
-                      <Typography sx={{ fontSize: 13, fontWeight: 850, color: normalizerTheme.text }}>
-                        Values not matched to combined MPN/MFR patterns
-                      </Typography>
-                      <Typography sx={{ mt: 0.5, fontSize: 12, color: normalizerTheme.muted }}>
-                        {section.unmatched.count} non-empty value{section.unmatched.count === 1 ? '' : 's'} did not match this source's combined-field rules.
-                      </Typography>
-                      <Stack gap={0.75} sx={{ mt: 1 }}>
-                        {(section.unmatched.examples || []).map((example, index) => (
-                          <Box key={`${section.id}-unmatched-${example.sourceRow || index}-${example.source}`} sx={{ pl: 1, borderLeft: `2px solid ${normalizerTheme.borderStrong}` }}>
-                            <Typography sx={{ fontSize: 12, color: normalizerTheme.muted }}>
-                              {example.sourceRow ? `Source row ${example.sourceRow}` : `Example ${index + 1}`}
-                            </Typography>
-                            <Typography sx={{ fontSize: 13, fontWeight: 700, color: normalizerTheme.text }}>
-                              {example.source}
-                            </Typography>
-                          </Box>
-                        ))}
-                      </Stack>
-                    </Box>
-                  )}
-                </Paper>
-              ))}
-            </Stack>
-          </Box>
+            </Paper>
+          )}
         </DialogContent>
         <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'space-between', gap: 1, flexWrap: 'wrap' }}>
           <Button

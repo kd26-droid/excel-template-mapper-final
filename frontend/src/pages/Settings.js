@@ -1,10 +1,9 @@
-import React, { useEffect, useMemo, useState } from 'react';
+﻿import React, { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Box,
   Button,
   Chip,
-  Divider,
   FormControl,
   Grid,
   IconButton,
@@ -43,6 +42,11 @@ import {
 import { useThemeContext } from '../utils/ThemeContext';
 import api from '../services/api';
 import { useFactwise } from '../contexts/FactwiseContext';
+import {
+  ITEM_DIRECTORY_DEFAULTS,
+  readItemDirectoryDefaults,
+  writeItemDirectoryDefaults,
+} from '../utils/itemDirectoryDefaults';
 
 // All three providers are on by default. A part confirmed by any one of them is
 // valid, so querying all three gives the best coverage; a provider without
@@ -69,6 +73,18 @@ const CREDENTIAL_SCOPE_KEY = 'mpn_provider_credential_scope_id';
 const VALIDATION_PROVIDERS_KEY = 'mpn_validation_providers';
 const COLUMN_PROVIDER_MAPPINGS_KEY = 'mpn_column_provider_mappings';
 const MASK_VALUE = '************';
+const ITEM_CODE_BLANK_STRATEGIES = [
+  { value: 'prefix_sequence', label: 'Generate with prefix sequence' },
+  { value: 'leave', label: 'Leave blank' },
+];
+const ITEM_CODE_DUPLICATE_STRATEGIES = [
+  { value: 'prefix_sequence', label: 'Generate new prefix sequence' },
+  { value: 'suffix', label: 'Add suffix to duplicates' },
+  { value: 'leave', label: 'Leave duplicates' },
+];
+const ITEM_TYPE_OPTIONS = ['Raw material', 'Finished good'];
+const MEASUREMENT_UNIT_OPTIONS = ['Nos', 'EA', 'Unit', 'PCS', 'KG', 'M', 'L'];
+const CUSTOM_MEASUREMENT_UNIT_VALUE = '__custom_measurement_unit__';
 
 const emptyProviderStatus = {
   digikey: { configured: false, has_credentials: false, masked: {}, public: {}, last_test_message: '' },
@@ -126,6 +142,7 @@ const Settings = () => {
   const [showMouserKey, setShowMouserKey] = useState(false);
   const [showElement14Key, setShowElement14Key] = useState(false);
   const [columnMappings, setColumnMappings] = useState(getInitialColumnMappings);
+  const [itemDirectoryDefaults, setItemDirectoryDefaults] = useState(readItemDirectoryDefaults);
   const [credentialScopeId] = useState(getCredentialScopeId);
   const [providerStatus, setProviderStatus] = useState(emptyProviderStatus);
   const [loadingCredentials, setLoadingCredentials] = useState(false);
@@ -135,6 +152,10 @@ const Settings = () => {
   const [providerMessages, setProviderMessages] = useState({ digikey: null, mouser: null, element14: null });
   const [toast, setToast] = useState({ open: false, severity: 'success', message: '' });
   const [mousePos, setMousePos] = useState({ x: 50, y: 36 });
+  const [measurementUnitCustomMode, setMeasurementUnitCustomMode] = useState(() => {
+    const value = readItemDirectoryDefaults().measurementUnit;
+    return Boolean(value && !MEASUREMENT_UNIT_OPTIONS.includes(value));
+  });
 
   const hasDigikey = Boolean(providerStatus.digikey?.configured);
   const hasMouser = Boolean(providerStatus.mouser?.configured);
@@ -150,6 +171,11 @@ const Settings = () => {
     () => columnMappings.filter(mapping => normalizeProviders(mapping.providers || mapping.provider).every(provider => Boolean(providerStatus[provider]?.configured))).length,
     [columnMappings, providerStatus]
   );
+
+  const hasItemDirectoryDefaults = useMemo(() => (
+    ['procurementEntityName', 'itemType', 'procurementItem', 'salesItem', 'itemCodePrefix', 'measurementUnit']
+      .some(key => String(itemDirectoryDefaults[key] || '').trim())
+  ), [itemDirectoryDefaults]);
 
   useEffect(() => {
     const handleMouseMove = (event) => {
@@ -329,9 +355,21 @@ const Settings = () => {
     });
   };
 
+  const handleItemDirectoryDefaultChange = (key, value) => {
+    setItemDirectoryDefaults(prev => ({ ...prev, [key]: value }));
+  };
+
+  const handleClearItemDirectoryDefaults = () => {
+    const cleared = Object.fromEntries(ITEM_DIRECTORY_DEFAULTS.map(item => [item.key, '']));
+    setItemDirectoryDefaults(cleared);
+    setMeasurementUnitCustomMode(false);
+    writeItemDirectoryDefaults(cleared);
+    setToast({ open: true, severity: 'success', message: 'Item Directory defaults cleared.' });
+  };
+
   const handleSaveSettings = async () => {
     const hasAnyEntered = hasProviderRequiredDetails('digikey') || hasProviderRequiredDetails('mouser') || hasProviderRequiredDetails('element14');
-    if (!hasAnyEntered) {
+    if (!hasAnyEntered && !hasItemDirectoryDefaults) {
       setToast({ open: true, severity: 'error', message: 'Enter at least one provider credential before saving.' });
       return;
     }
@@ -339,7 +377,7 @@ const Settings = () => {
     const selectedProviders = providersFromColumnMappings(columnMappings);
     const invalidProviders = selectedProviders.filter(provider => !hasProviderRequiredDetails(provider));
 
-    if (invalidProviders.length > 0) {
+    if (hasAnyEntered && invalidProviders.length > 0) {
       setToast({
         open: true,
         severity: 'error',
@@ -353,6 +391,11 @@ const Settings = () => {
       if (typeof window !== 'undefined') {
         window.localStorage.setItem(COLUMN_PROVIDER_MAPPINGS_KEY, JSON.stringify(columnMappings));
         window.localStorage.setItem(VALIDATION_PROVIDERS_KEY, JSON.stringify(selectedProviders));
+      }
+      writeItemDirectoryDefaults(itemDirectoryDefaults);
+      if (!hasAnyEntered) {
+        setToast({ open: true, severity: 'success', message: 'Item Directory defaults saved successfully' });
+        return;
       }
       const response = await api.saveProviderCredentials(credentialScopeId, buildProviderPayload());
       const nextStatus = { ...providerStatus };
@@ -717,6 +760,218 @@ const Settings = () => {
             </Paper>
           </Grid>
           )}
+
+          <Grid item xs={12}>
+            <Paper elevation={0} sx={panelSx}>
+              <Box sx={sectionHeaderSx}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
+                  <Box sx={{ width: 36, height: 36, borderRadius: '12px', display: 'grid', placeItems: 'center', bgcolor: t.action.primarySoft, color: t.color.primaryLight }}>
+                    <TableChartIcon fontSize="small" />
+                  </Box>
+                  <Box>
+                    <Typography sx={{ fontSize: 16, fontWeight: 700, color: t.text.heading }}>Item Directory Defaults</Typography>
+                    <Typography sx={{ mt: 0.25, fontSize: 12.5, color: t.text.secondary }}>
+                      Used to fill recurring required fields before exporting to FactWise.
+                    </Typography>
+                  </Box>
+                </Box>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  color="error"
+                  onClick={handleClearItemDirectoryDefaults}
+                  disabled={!hasItemDirectoryDefaults}
+                  sx={{ borderRadius: '999px', fontWeight: 700, textTransform: 'none' }}
+                >
+                  Clear
+                </Button>
+              </Box>
+
+              <Box sx={{ p: 2.5 }}>
+                <Grid container spacing={2}>
+                  <Grid item xs={12} md={3}>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      label="Procurement entity name"
+                      value={itemDirectoryDefaults.procurementEntityName || ''}
+                      onChange={(event) => handleItemDirectoryDefaultChange('procurementEntityName', event.target.value)}
+                      placeholder="Example: FactWise Manufacturing"
+                      helperText=" "
+                      sx={fieldSx}
+                    />
+                  </Grid>
+                  <Grid item xs={12} sm={6} md={3}>
+                    <FormControl fullWidth size="small" sx={fieldSx}>
+                      <Select
+                        displayEmpty
+                        value={itemDirectoryDefaults.itemType || ''}
+                        onChange={(event) => handleItemDirectoryDefaultChange('itemType', event.target.value)}
+                        renderValue={(value) => value || 'Item type'}
+                      >
+                        <MenuItem value="">No default</MenuItem>
+                        {ITEM_TYPE_OPTIONS.map(option => (
+                          <MenuItem key={option} value={option}>{option}</MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  </Grid>
+                  {[
+                    { key: 'procurementItem', label: 'Procurement item' },
+                    { key: 'salesItem', label: 'Sales item' },
+                  ].map((item) => (
+                    <Grid item xs={12} sm={6} md={3} key={item.key}>
+                      <FormControl fullWidth size="small" sx={fieldSx}>
+                        <Select
+                          displayEmpty
+                          value={itemDirectoryDefaults[item.key] || ''}
+                          onChange={(event) => handleItemDirectoryDefaultChange(item.key, event.target.value)}
+                          renderValue={(value) => value || item.label}
+                        >
+                          <MenuItem value="">No default</MenuItem>
+                          <MenuItem value="TRUE">TRUE</MenuItem>
+                          <MenuItem value="FALSE">FALSE</MenuItem>
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                  ))}
+
+                  <Grid item xs={12}>
+                    <Paper elevation={0} sx={{ p: 2, borderRadius: '14px', border: `1px solid ${t.border.subtle}`, bgcolor: t.surface.panel }}>
+                      <Typography sx={{ fontSize: 13, fontWeight: 800, color: t.text.heading, mb: 1.5 }}>
+                        Item code behavior
+                      </Typography>
+                      <Grid container spacing={1.5}>
+                        <Grid item xs={12} md={3}>
+                          <TextField
+                            fullWidth
+                            size="small"
+                            label="Prefix"
+                            value={itemDirectoryDefaults.itemCodePrefix || ''}
+                            onChange={(event) => handleItemDirectoryDefaultChange('itemCodePrefix', event.target.value)}
+                            placeholder="Example: RM"
+                            helperText="Creates values like RM-001."
+                            sx={fieldSx}
+                          />
+                        </Grid>
+                        <Grid item xs={12} md={3}>
+                          <FormControl fullWidth size="small" sx={fieldSx}>
+                            <Select
+                              displayEmpty
+                              value={itemDirectoryDefaults.itemCodeBlankStrategy || 'prefix_sequence'}
+                              onChange={(event) => handleItemDirectoryDefaultChange('itemCodeBlankStrategy', event.target.value)}
+                            >
+                              {ITEM_CODE_BLANK_STRATEGIES.map(option => (
+                                <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                        </Grid>
+                        <Grid item xs={12} md={3}>
+                          <FormControl fullWidth size="small" sx={fieldSx}>
+                            <Select
+                              displayEmpty
+                              value={itemDirectoryDefaults.itemCodeDuplicateStrategy || 'prefix_sequence'}
+                              onChange={(event) => handleItemDirectoryDefaultChange('itemCodeDuplicateStrategy', event.target.value)}
+                            >
+                              {ITEM_CODE_DUPLICATE_STRATEGIES.map(option => (
+                                <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                        </Grid>
+                        <Grid item xs={4} md={1}>
+                          <TextField
+                            fullWidth
+                            size="small"
+                            label="Separator"
+                            value={itemDirectoryDefaults.itemCodeSeparator ?? '-'}
+                            onChange={(event) => handleItemDirectoryDefaultChange('itemCodeSeparator', event.target.value)}
+                            sx={fieldSx}
+                          />
+                        </Grid>
+                        <Grid item xs={4} md={1}>
+                          <TextField
+                            fullWidth
+                            size="small"
+                            type="number"
+                            label="Start"
+                            value={itemDirectoryDefaults.itemCodeStart || '1'}
+                            onChange={(event) => handleItemDirectoryDefaultChange('itemCodeStart', event.target.value)}
+                            sx={fieldSx}
+                          />
+                        </Grid>
+                        <Grid item xs={4} md={1}>
+                          <TextField
+                            fullWidth
+                            size="small"
+                            type="number"
+                            label="Padding"
+                            value={itemDirectoryDefaults.itemCodePadding || '3'}
+                            onChange={(event) => handleItemDirectoryDefaultChange('itemCodePadding', event.target.value)}
+                            sx={fieldSx}
+                          />
+                        </Grid>
+                      </Grid>
+                    </Paper>
+                  </Grid>
+
+                  <Grid item xs={12} md={4}>
+                    {measurementUnitCustomMode ? (
+                      <Stack direction="row" spacing={1} alignItems="flex-start">
+                        <TextField
+                          autoFocus
+                          fullWidth
+                          size="small"
+                          label="Measurement unit"
+                          value={MEASUREMENT_UNIT_OPTIONS.includes(itemDirectoryDefaults.measurementUnit) ? '' : (itemDirectoryDefaults.measurementUnit || '')}
+                          onChange={(event) => handleItemDirectoryDefaultChange('measurementUnit', event.target.value)}
+                          placeholder="Example: Box"
+                          helperText="Custom unit"
+                          sx={fieldSx}
+                        />
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          onClick={() => {
+                            setMeasurementUnitCustomMode(false);
+                            handleItemDirectoryDefaultChange('measurementUnit', '');
+                          }}
+                          sx={{ mt: 0.25, minWidth: 58, height: 36, borderRadius: '10px', fontWeight: 700, textTransform: 'none' }}
+                        >
+                          List
+                        </Button>
+                      </Stack>
+                    ) : (
+                      <TextField
+                        select
+                        fullWidth
+                        size="small"
+                        label="Measurement unit"
+                        value={MEASUREMENT_UNIT_OPTIONS.includes(itemDirectoryDefaults.measurementUnit) ? itemDirectoryDefaults.measurementUnit : ''}
+                        onChange={(event) => {
+                          if (event.target.value === CUSTOM_MEASUREMENT_UNIT_VALUE) {
+                            setMeasurementUnitCustomMode(true);
+                            handleItemDirectoryDefaultChange('measurementUnit', '');
+                          } else {
+                            handleItemDirectoryDefaultChange('measurementUnit', event.target.value);
+                          }
+                        }}
+                        helperText=" "
+                        sx={fieldSx}
+                      >
+                        <MenuItem value="">No default</MenuItem>
+                        {MEASUREMENT_UNIT_OPTIONS.map(unit => (
+                          <MenuItem key={unit} value={unit}>{unit}</MenuItem>
+                        ))}
+                        <MenuItem value={CUSTOM_MEASUREMENT_UNIT_VALUE}>Custom measurement unit</MenuItem>
+                      </TextField>
+                    )}
+                  </Grid>
+                </Grid>
+              </Box>
+            </Paper>
+          </Grid>
 
           <Grid item xs={12}>
             <Paper elevation={0} sx={panelSx}>

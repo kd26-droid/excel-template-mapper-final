@@ -49,6 +49,7 @@ from .default_template import (
     SFO_TEMPLATE_NAME,
 )
 from .models import MappingTemplate, TagTemplate, PDFSession, PDFExtractionResult, Project
+from .editor_defaults import apply_editor_defaults_to_rows, get_editor_defaults_for_entity
 try:
     # Prefer relative import; fall back gracefully on any import error
     from .azure_storage import hybrid_file_manager
@@ -3666,6 +3667,15 @@ def data_view(request):
         logger.info(f"📊 DATA_VIEW: current_template_headers = {info.get('current_template_headers')}")
         logger.info(f"📊 DATA_VIEW: column_counts = {info.get('column_counts')}")
         raw_mappings_for_log = info.get('mappings') or []
+        editor_defaults_entity = (
+            str(request.GET.get('entity_name') or '').strip()
+            or str(request.headers.get('X-Entity-Name') or '').strip()
+            or str(info.get('editor_defaults_entity_name') or '').strip()
+            or str(info.get('entity_name') or '').strip()
+        )
+        if editor_defaults_entity and info.get('editor_defaults_entity_name') != editor_defaults_entity:
+            info['editor_defaults_entity_name'] = editor_defaults_entity
+            save_session(session_id, info)
         logger.info(f"📊 DATA_VIEW: mappings count = {len(raw_mappings_for_log)}")
 
         def _normalize_session_rows(value):
@@ -3713,6 +3723,15 @@ def data_view(request):
                 final_headers = [final_headers[i] for i in _ord]
             total_rows = len(transformed_rows)
             final_data = transformed_rows[start_idx:end_idx]
+            editor_defaults_summary = None
+            settings_obj = get_editor_defaults_for_entity(editor_defaults_entity)
+            if settings_obj:
+                final_data, editor_defaults_summary = apply_editor_defaults_to_rows(
+                    final_headers,
+                    final_data,
+                    settings_obj,
+                    sequence_offset=start_idx,
+                )
             confidence_data = {}
             header_confidence_scores = {}
             quality_metrics = calculate_data_quality_metrics(final_data, final_headers, header_confidence_scores, confidence_data)
@@ -3724,6 +3743,7 @@ def data_view(request):
                 'total_rows': total_rows,
                 'formula_rules': info.get('formula_rules', []),
                 'template_version': info.get('template_version', 0),
+                'editor_defaults': editor_defaults_summary,
                 'quality_metrics': quality_metrics,
                 'header_confidence_scores': header_confidence_scores,
                 'target_column_confidence_scores': header_confidence_scores,
@@ -4835,6 +4855,15 @@ def data_view(request):
         field_headers = make_unique_field_headers(display_headers)
         response_data = []
         response_defaults = info.get("default_values", {}) or {}
+        editor_defaults_summary = None
+        settings_obj = get_editor_defaults_for_entity(editor_defaults_entity)
+        if settings_obj and isinstance(final_data, list):
+            final_data, editor_defaults_summary = apply_editor_defaults_to_rows(
+                display_headers,
+                final_data,
+                settings_obj,
+                sequence_offset=start_idx,
+            )
         if isinstance(final_data, list):
             for row in final_data:
                 if isinstance(row, dict):
@@ -4866,6 +4895,7 @@ def data_view(request):
             'total_rows': total_rows,
             'formula_rules': formula_rules,
             'template_version': info.get('template_version', 0),
+            'editor_defaults': editor_defaults_summary,
             'quality_metrics': quality_metrics,
             'header_confidence_scores': header_confidence_scores,
             'target_column_confidence_scores': header_confidence_scores,
@@ -10202,6 +10232,19 @@ def write_session_source(session_id, info, headers, rows, extraction=None):
     return str(csv_path)
 
 
+def _apply_editor_defaults_for_session(headers, rows, info):
+    entity_name = str((info or {}).get('editor_defaults_entity_name') or (info or {}).get('entity_name') or '').strip()
+    if not entity_name:
+        return headers, rows
+    settings_obj = get_editor_defaults_for_entity(entity_name)
+    if not settings_obj:
+        return headers, rows
+    output_rows, summary = apply_editor_defaults_to_rows(headers, rows, settings_obj)
+    if isinstance(info, dict):
+        info['editor_defaults_last_applied'] = summary
+    return headers, output_rows
+
+
 def read_session_grid(session_id, info):
     """
     Read the mapped grid the review screen shows: destination headers and rows.
@@ -10229,7 +10272,8 @@ def read_session_grid(session_id, info):
         snapshot = info.get(key)
         if isinstance(snapshot, dict) and snapshot.get('headers') and snapshot.get('data'):
             hdrs = list(snapshot['headers'])
-            return hdrs, _as_lists(hdrs, snapshot['data'])
+            rows = _as_lists(hdrs, snapshot['data'])
+            return _apply_editor_defaults_for_session(hdrs, rows, info)
 
     # Formula/tag operations store their latest full-grid result separately.
     # Prefer it over rebuilding the basic mapping so later column operations
@@ -10238,7 +10282,8 @@ def read_session_grid(session_id, info):
     formula_headers = info.get('enhanced_headers')
     if isinstance(formula_data, list) and formula_headers:
         hdrs = list(formula_headers)
-        return hdrs, _as_lists(hdrs, formula_data)
+        rows = _as_lists(hdrs, formula_data)
+        return _apply_editor_defaults_for_session(hdrs, rows, info)
 
     mapping = info.get('mappings')
     if not mapping:
@@ -10252,7 +10297,8 @@ def read_session_grid(session_id, info):
         session_id=session_id
     )
     hdrs = list(result.get('headers') or [])
-    return hdrs, _as_lists(hdrs, result.get('data'))
+    rows = _as_lists(hdrs, result.get('data'))
+    return _apply_editor_defaults_for_session(hdrs, rows, info)
 
 
 def write_session_grid(session_id, info, headers, rows):

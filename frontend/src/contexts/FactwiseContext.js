@@ -6,6 +6,7 @@ const STORAGE_KEYS = {
   apiUrl: 'fw_api_url',
   sessionId: 'fw_session_id',
   entityId: 'fw_entity_id',
+  fwOrigin: 'fw_origin',
   embedded: 'fw_embedded',
 };
 
@@ -24,6 +25,7 @@ function readInitialContext() {
     apiUrl: params.get('api_url'),
     sessionId: params.get('session_id'),
     entityId: params.get('entity_id'),
+    fwOrigin: params.get('fw_origin'),
   };
 
   Object.entries(captured).forEach(([key, value]) => {
@@ -45,6 +47,8 @@ function readInitialContext() {
       captured.sessionId || window.localStorage.getItem(STORAGE_KEYS.sessionId),
     entityId:
       captured.entityId || window.localStorage.getItem(STORAGE_KEYS.entityId),
+    fwOrigin:
+      captured.fwOrigin || window.localStorage.getItem(STORAGE_KEYS.fwOrigin),
   };
 }
 
@@ -55,6 +59,7 @@ const FactwiseContext = createContext({
   apiUrl: null,
   sessionId: null,
   entityId: null,
+  fwOrigin: null,
 });
 
 export function FactwiseProvider({ children }) {
@@ -73,4 +78,23 @@ export function useFactwise() {
 export function postToFactwiseParent(type, payload) {
   if (!window.parent || window.parent === window) return;
   window.parent.postMessage({ type, ...payload }, '*');
+}
+
+// Open a Factwise route from the mapper. Works in both worlds:
+//   - Iframe:  postMessage a NAVIGATE to the parent so FW navigates in-place.
+//   - New tab: use the fw_origin captured at launch time to open a fresh FW
+//              browser tab (mapper stays on screen).
+// Falls back to same-tab navigation if fw_origin is missing.
+export function openInFactwise(path) {
+  const inIframe = window.parent && window.parent !== window;
+  if (inIframe) {
+    postToFactwiseParent('NAVIGATE', { url: path });
+    return;
+  }
+  const origin = window.localStorage.getItem('fw_origin');
+  if (origin) {
+    window.open(origin + path, '_blank', 'noopener,noreferrer');
+    return;
+  }
+  window.location.href = path;
 }
