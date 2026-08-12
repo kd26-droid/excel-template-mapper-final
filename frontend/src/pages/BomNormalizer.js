@@ -51,6 +51,10 @@ import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import TuneIcon from '@mui/icons-material/Tune';
 import VisibilityIcon from '@mui/icons-material/Visibility';
+import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
+import ChevronRightIcon from '@mui/icons-material/ChevronRight';
+import ExpandLessIcon from '@mui/icons-material/ExpandLess';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import api from '../services/api';
 import BomStructureDialog, { reconcileSavedBomStructure } from '../components/BomStructureDialog';
 import ColumnParser from '../components/ColumnParser/ColumnParser';
@@ -4135,6 +4139,7 @@ const BomNormalizer = () => {
   const [toolsMenuAnchor, setToolsMenuAnchor] = useState(null);
   const [parsingLogicOpen, setParsingLogicOpen] = useState(false);
   const [selectedParsingPatternKey, setSelectedParsingPatternKey] = useState('');
+  const [selectedParsingDetailsOpen, setSelectedParsingDetailsOpen] = useState(false);
   const [configureSplitColsOpen, setConfigureSplitColsOpen] = useState(false);
   const [configureParserSessionId, setConfigureParserSessionId] = useState('');
   const [configureParserPreparing, setConfigureParserPreparing] = useState(false);
@@ -4476,11 +4481,35 @@ const BomNormalizer = () => {
     };
   }, [configureParserScope, parsingPatternOptions, selectedParsingPattern]);
 
+  const selectedParsingPatternIndex = useMemo(() => {
+    if (!selectedParsingPattern) return -1;
+    return parsingPatternOptions.findIndex((option) => option.key === selectedParsingPattern.key);
+  }, [parsingPatternOptions, selectedParsingPattern]);
+
+  const selectedParsingPatternNumber = selectedParsingPatternIndex >= 0
+    ? selectedParsingPatternIndex + 1
+    : 1;
+
+  const handleStepParsingPattern = useCallback((direction) => {
+    if (!parsingPatternOptions.length) return;
+    const currentIndex = selectedParsingPatternIndex >= 0 ? selectedParsingPatternIndex : 0;
+    const nextIndex = Math.min(
+      parsingPatternOptions.length - 1,
+      Math.max(0, currentIndex + direction)
+    );
+    setSelectedParsingPatternKey(parsingPatternOptions[nextIndex].key);
+  }, [parsingPatternOptions, selectedParsingPatternIndex]);
+
   useEffect(() => {
     if (!parsingLogicOpen || !parsingPatternOptions.length) return;
     if (parsingPatternOptions.some((option) => option.key === selectedParsingPatternKey)) return;
     setSelectedParsingPatternKey(parsingPatternOptions[0].key);
   }, [parsingLogicOpen, parsingPatternOptions, selectedParsingPatternKey]);
+
+  useEffect(() => {
+    if (!parsingLogicOpen) return;
+    setSelectedParsingDetailsOpen(false);
+  }, [parsingLogicOpen, selectedParsingPattern?.key]);
 
   const showManufacturerInheritanceOption = useMemo(() => (
     !String(config.structure || '').startsWith('mpn_only') &&
@@ -9039,87 +9068,101 @@ const BomNormalizer = () => {
           <Paper elevation={0} sx={{ p: 1.35, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
             <Grid container spacing={1.5} alignItems="center">
               <Grid item xs={12} md={8}>
-                <FormControl fullWidth size="small">
-                  <InputLabel>Detected pattern</InputLabel>
-                  <Select
-                    label="Detected pattern"
-                    value={selectedParsingPattern?.key || ''}
-                    onChange={(event) => setSelectedParsingPatternKey(event.target.value)}
-                    sx={{
-                      '& .MuiSelect-select': {
-                        fontWeight: 650,
-                        lineHeight: 1.35,
-                      },
-                    }}
-                  >
-                    {parsingPatternOptions.map((option) => (
-                      <MenuItem key={option.key} value={option.key}>
-                        <Box sx={{ minWidth: 0 }}>
-                          <Typography sx={{ fontSize: 13, fontWeight: 680 }} noWrap>
-                            {option.pattern.shape}
-                          </Typography>
-                          <Typography sx={{ fontSize: 11.5, color: normalizerTheme.muted }} noWrap>
-                            {option.section.sourceHeader} - {option.pattern.count} row{option.pattern.count === 1 ? '' : 's'}
-                          </Typography>
-                        </Box>
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
+                <Typography sx={{ fontSize: 12, color: normalizerTheme.muted }}>
+                  Detected pattern
+                </Typography>
+                <Typography sx={{ mt: 0.2, fontSize: 15, fontWeight: 760, lineHeight: 1.35, color: normalizerTheme.text }} noWrap>
+                  {selectedParsingPatternNumber}. {selectedParsingPattern?.pattern?.shape || 'No pattern detected'}
+                </Typography>
+                {selectedParsingPattern && (
+                  <Typography sx={{ mt: 0.25, fontSize: 11.5, color: normalizerTheme.muted }} noWrap>
+                    {selectedParsingPattern.section.sourceHeader} - {selectedParsingPattern.pattern.count} row{selectedParsingPattern.pattern.count === 1 ? '' : 's'}
+                  </Typography>
+                )}
               </Grid>
               <Grid item xs={12} md={4}>
-                <Button
-                  fullWidth
-                  variant="outlined"
-                  disabled={!selectedParsingPattern || configureParserPreparing}
-                  sx={{ fontWeight: 700 }}
-                  onClick={() => {
-                    if (!selectedParsingPattern) return;
-                    setParsingLogicOpen(false);
-                    handleOpenConfigureSplitColumns({
-                      title: 'Parse Fields',
-                      initialColumn: selectedParsingPattern.section.sourceHeader || '',
-                      scope: {
-                        mode: 'pattern',
-                        patternKey: selectedParsingPattern.key,
-                        sourceHeader: selectedParsingPattern.section.sourceHeader || '',
-                        patternShape: selectedParsingPattern.pattern.shape,
-                        sourceRows: selectedParsingPattern.pattern.sourceRows || [],
-                      },
-                    });
-                  }}
-                >
-                  Edit selected pattern
-                </Button>
+                <Stack spacing={1} alignItems="flex-end" sx={{ maxWidth: 300, ml: 'auto' }}>
+                  <Stack direction="row" spacing={0.75} alignItems="center" justifyContent="flex-end">
+                    <IconButton
+                      size="small"
+                      disabled={selectedParsingPatternIndex <= 0}
+                      onClick={() => handleStepParsingPattern(-1)}
+                      sx={{ border: `1px solid ${normalizerTheme.border}` }}
+                    >
+                      <ChevronLeftIcon fontSize="small" />
+                    </IconButton>
+                    <IconButton
+                      size="small"
+                      disabled={selectedParsingPatternIndex < 0 || selectedParsingPatternIndex >= parsingPatternOptions.length - 1}
+                      onClick={() => handleStepParsingPattern(1)}
+                      sx={{ border: `1px solid ${normalizerTheme.border}` }}
+                    >
+                      <ChevronRightIcon fontSize="small" />
+                    </IconButton>
+                  </Stack>
+                  <Button
+                    variant="outlined"
+                    disabled={!selectedParsingPattern || configureParserPreparing}
+                    sx={{ width: { xs: '100%', sm: 150 }, minWidth: 0, px: 2, fontWeight: 700 }}
+                    onClick={() => {
+                      if (!selectedParsingPattern) return;
+                      setParsingLogicOpen(false);
+                      handleOpenConfigureSplitColumns({
+                        title: 'Parse Fields',
+                        initialColumn: selectedParsingPattern.section.sourceHeader || '',
+                        scope: {
+                          mode: 'pattern',
+                          patternKey: selectedParsingPattern.key,
+                          sourceHeader: selectedParsingPattern.section.sourceHeader || '',
+                          patternShape: selectedParsingPattern.pattern.shape,
+                          sourceRows: selectedParsingPattern.pattern.sourceRows || [],
+                        },
+                      });
+                    }}
+                  >
+                    Edit pattern
+                  </Button>
+                </Stack>
               </Grid>
             </Grid>
           </Paper>
 
           {selectedParsingPattern && (
             <Paper elevation={0} sx={{ mt: 1.5, p: 1.6, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
-              <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1.2}>
+              <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1.2} alignItems={{ xs: 'stretch', sm: 'flex-start' }}>
                 <Box sx={{ minWidth: 0 }}>
-                  <Typography sx={{ fontSize: 14, fontWeight: 720, color: normalizerTheme.text }}>
+                  <Typography sx={{ fontSize: 14, fontWeight: 400, color: normalizerTheme.text }}>
                     {selectedParsingPattern.section.title}
                   </Typography>
                   <Typography sx={{ mt: 0.35, fontSize: 12.5, color: normalizerTheme.muted }}>
                     Source column: {selectedParsingPattern.section.sourceHeader}
                   </Typography>
                 </Box>
-                <Stack direction="row" gap={0.75} flexWrap="wrap">
+                <Stack direction="row" gap={0.75} flexWrap="wrap" alignItems="center" justifyContent={{ xs: 'flex-start', sm: 'flex-end' }}>
                   <Chip size="small" variant="outlined" label={`${selectedParsingPattern.pattern.count} rows`} sx={{ fontWeight: 650 }} />
+                  <IconButton
+                    size="small"
+                    onClick={() => setSelectedParsingDetailsOpen(open => !open)}
+                    sx={{ ml: 0.25, border: `1px solid ${normalizerTheme.border}` }}
+                  >
+                    {selectedParsingDetailsOpen ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
+                  </IconButton>
                 </Stack>
               </Stack>
 
-              <Typography sx={{ mt: 1.25, fontSize: 13, fontWeight: 680, color: normalizerTheme.text }}>
-                {selectedParsingPattern.pattern.shape}
-              </Typography>
+              {selectedParsingDetailsOpen && (
+                <>
+                  <Typography sx={{ mt: 1.25, fontSize: 13, fontWeight: 680, color: normalizerTheme.text }}>
+                    {selectedParsingPattern.pattern.shape}
+                  </Typography>
 
-              <Stack direction="row" gap={0.75} flexWrap="wrap" sx={{ mt: 1 }}>
-                {(selectedParsingPattern.pattern.rules || []).slice(0, 3).map((rule) => (
-                  <Chip key={rule} size="small" variant="outlined" label={rule} sx={{ fontWeight: 600, color: normalizerTheme.muted, bgcolor: 'transparent' }} />
-                ))}
-              </Stack>
+                  <Stack direction="row" gap={0.75} flexWrap="wrap" sx={{ mt: 1 }}>
+                    {(selectedParsingPattern.pattern.rules || []).slice(0, 3).map((rule) => (
+                      <Chip key={rule} size="small" variant="outlined" label={rule} sx={{ fontWeight: 600, color: normalizerTheme.muted, bgcolor: 'transparent' }} />
+                    ))}
+                  </Stack>
+                </>
+              )}
 
               <Stack gap={1} sx={{ mt: 1.5 }}>
                 {(selectedParsingPattern.pattern.examples || []).slice(0, 1).map((example, index) => (

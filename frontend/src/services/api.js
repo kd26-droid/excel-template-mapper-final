@@ -1729,13 +1729,13 @@ const api = {
    * blankStrategy: 'prefix_sequence' | 'leave'
    * duplicateStrategy: 'suffix' | 'prefix_sequence' | 'leave'
    */
-  resolveItemCode: (sessionId, { column = 'Item code', blankStrategy = 'leave', duplicateStrategy = 'leave', prefix = '', separator = '-', start = 1, padding = 0 } = {}) => {
+  resolveItemCode: (sessionId, { column = 'Item code', blankStrategy = 'leave', duplicateStrategy = 'leave', prefix = '', separator = '-', start = 1, padding = 0, increment = true } = {}) => {
     return axios.post(`${API_URL}/transforms/resolve-item-code/`, {
       session_id: sessionId,
       column,
       blank_strategy: blankStrategy,
       duplicate_strategy: duplicateStrategy,
-      prefix, separator, start, padding,
+      prefix, separator, start, padding, increment,
     }, { timeout: 120000 });
   },
 

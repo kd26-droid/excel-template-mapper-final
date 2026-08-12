@@ -5,6 +5,7 @@ import {
   Button,
   Chip,
   FormControl,
+  FormControlLabel,
   Grid,
   IconButton,
   InputAdornment,
@@ -73,18 +74,19 @@ const CREDENTIAL_SCOPE_KEY = 'mpn_provider_credential_scope_id';
 const VALIDATION_PROVIDERS_KEY = 'mpn_validation_providers';
 const COLUMN_PROVIDER_MAPPINGS_KEY = 'mpn_column_provider_mappings';
 const MASK_VALUE = '************';
-const ITEM_CODE_BLANK_STRATEGIES = [
-  { value: 'prefix_sequence', label: 'Generate with prefix sequence' },
-  { value: 'leave', label: 'Leave blank' },
+const ITEM_CODE_CONTENT_TYPE_OPTIONS = [
+  { value: 'fixed', label: 'Use a default value' },
+  { value: 'copy', label: 'Copy from one column' },
+  { value: 'concat', label: 'Join two columns' },
+  { value: 'conditional', label: 'Use an if / else condition' },
+  { value: 'serial', label: 'Generate a serial sequence' },
 ];
-const ITEM_CODE_DUPLICATE_STRATEGIES = [
-  { value: 'prefix_sequence', label: 'Generate new prefix sequence' },
-  { value: 'suffix', label: 'Add suffix to duplicates' },
-  { value: 'leave', label: 'Leave duplicates' },
+const ITEM_CODE_ROWS_TO_UPDATE_OPTIONS = [
+  { value: 'fill_empty', label: 'Only rows where this column is empty' },
+  { value: 'overwrite', label: 'All rows' },
+  { value: 'duplicates', label: 'Only rows with a duplicate value' },
 ];
 const ITEM_TYPE_OPTIONS = ['Raw material', 'Finished good'];
-const MEASUREMENT_UNIT_OPTIONS = ['Nos', 'EA', 'Unit', 'PCS', 'KG', 'M', 'L'];
-const CUSTOM_MEASUREMENT_UNIT_VALUE = '__custom_measurement_unit__';
 
 const cleanText = (value) => String(value ?? '').trim();
 
@@ -103,10 +105,11 @@ const serverSettingsToItemDirectoryDefaults = (settings, currentDefaults = {}) =
     measurementUnit: cleanText(settings?.measurement_unit),
     itemCodePrefix: cleanText(rule.prefix),
     itemCodeBlankStrategy: rule.prefix || rule.value ? 'prefix_sequence' : (currentDefaults.itemCodeBlankStrategy || 'prefix_sequence'),
-    itemCodeDuplicateStrategy: currentDefaults.itemCodeDuplicateStrategy || 'prefix_sequence',
+    itemCodeDuplicateStrategy: currentDefaults.itemCodeDuplicateStrategy || 'leave',
     itemCodeSeparator: currentDefaults.itemCodeSeparator ?? '-',
     itemCodeStart: String(rule.start ?? currentDefaults.itemCodeStart ?? '1'),
     itemCodePadding: String(rule.padding ?? currentDefaults.itemCodePadding ?? '3'),
+    itemCodeIncrement: rule.increment === undefined ? (currentDefaults.itemCodeIncrement ?? true) : rule.increment !== false,
   };
 };
 
@@ -123,11 +126,19 @@ const itemDirectoryDefaultsToServerSettings = (defaults) => {
         prefix,
         start: Math.max(1, Number.parseInt(defaults.itemCodeStart || '1', 10) || 1),
         padding: Math.max(0, Number.parseInt(defaults.itemCodePadding || '3', 10) || 0),
-        increment: true,
+        increment: defaults.itemCodeIncrement !== false,
       }
       : {},
   };
 };
+
+const normalizeItemDirectoryDefaultsForSave = (defaults) => ({
+  ...defaults,
+  itemCodeBlankStrategy: 'prefix_sequence',
+  itemCodeDuplicateStrategy: 'leave',
+  itemCodeSeparator: '-',
+  itemCodeIncrement: defaults.itemCodeIncrement !== false,
+});
 
 const emptyProviderStatus = {
   digikey: { configured: false, has_credentials: false, masked: {}, public: {}, last_test_message: '' },
@@ -195,10 +206,8 @@ const Settings = () => {
   const [providerMessages, setProviderMessages] = useState({ digikey: null, mouser: null, element14: null });
   const [toast, setToast] = useState({ open: false, severity: 'success', message: '' });
   const [mousePos, setMousePos] = useState({ x: 50, y: 36 });
-  const [measurementUnitCustomMode, setMeasurementUnitCustomMode] = useState(() => {
-    const value = readItemDirectoryDefaults().measurementUnit;
-    return Boolean(value && !MEASUREMENT_UNIT_OPTIONS.includes(value));
-  });
+  const [itemCodeContentType, setItemCodeContentType] = useState('serial');
+  const [itemCodeRowsToUpdate, setItemCodeRowsToUpdate] = useState('fill_empty');
 
   const hasDigikey = Boolean(providerStatus.digikey?.configured);
   const hasMouser = Boolean(providerStatus.mouser?.configured);
@@ -239,7 +248,6 @@ const Settings = () => {
           ? serverSettingsToItemDirectoryDefaults(response.data.settings, existingDefaults)
           : { ...existingDefaults, procurementEntityName: cleanEntityName };
         setItemDirectoryDefaults(next);
-        setMeasurementUnitCustomMode(Boolean(next.measurementUnit && !MEASUREMENT_UNIT_OPTIONS.includes(next.measurementUnit)));
         writeItemDirectoryDefaults(next);
       } catch (error) {
         if (!cancelled) {
@@ -446,7 +454,6 @@ const Settings = () => {
       cleared.procurementEntityName = cleanEntityName;
     }
     setItemDirectoryDefaults(cleared);
-    setMeasurementUnitCustomMode(false);
     writeItemDirectoryDefaults(cleared);
     setToast({ open: true, severity: 'success', message: 'Item Directory defaults cleared.' });
   };
@@ -477,23 +484,24 @@ const Settings = () => {
         window.localStorage.setItem(VALIDATION_PROVIDERS_KEY, JSON.stringify(selectedProviders));
       }
       const cleanEntityName = String(factwiseEntityName || itemDirectoryDefaults.procurementEntityName || '').trim();
+      const defaultsToSave = normalizeItemDirectoryDefaultsForSave(itemDirectoryDefaults);
       if (cleanEntityName) {
         const response = await api.saveEditorDefaultSettings(
           cleanEntityName,
-          itemDirectoryDefaultsToServerSettings(itemDirectoryDefaults)
+          itemDirectoryDefaultsToServerSettings(defaultsToSave)
         );
         if (response.data?.settings) {
           const next = serverSettingsToItemDirectoryDefaults(response.data.settings, {
-            ...itemDirectoryDefaults,
+            ...defaultsToSave,
             procurementEntityName: cleanEntityName,
           });
           setItemDirectoryDefaults(next);
           writeItemDirectoryDefaults(next);
         } else {
-          writeItemDirectoryDefaults({ ...itemDirectoryDefaults, procurementEntityName: cleanEntityName });
+          writeItemDirectoryDefaults({ ...defaultsToSave, procurementEntityName: cleanEntityName });
         }
       } else {
-        writeItemDirectoryDefaults(itemDirectoryDefaults);
+        writeItemDirectoryDefaults(defaultsToSave);
       }
       if (!hasAnyEntered) {
         setToast({ open: true, severity: 'success', message: 'Item Directory defaults saved successfully' });
@@ -891,7 +899,7 @@ const Settings = () => {
 
               <Box sx={{ p: 2.5 }}>
                 <Grid container spacing={2}>
-                  <Grid item xs={12} md={3}>
+                  <Grid item xs={12} sm={6} md={2.4}>
                     <TextField
                       fullWidth
                       size="small"
@@ -903,184 +911,152 @@ const Settings = () => {
                         }
                       }}
                       placeholder={factwiseEntityName ? '' : 'Waiting for FactWise entity name'}
-                      helperText={
-                        factwiseEntityName
-                          ? 'Captured from FactWise.'
-                          : (factwiseEntityId
-                            ? 'Opened with entity ID only; resolving the name from FactWise.'
-                            : 'Open from FactWise to capture the entity name.')
-                      }
                       InputProps={{ readOnly: Boolean(factwiseEntityName) }}
                       sx={fieldSx}
                     />
                   </Grid>
-                  <Grid item xs={12} sm={6} md={3}>
-                    <FormControl fullWidth size="small" sx={fieldSx}>
-                      <Select
-                        displayEmpty
-                        value={itemDirectoryDefaults.itemType || ''}
-                        onChange={(event) => handleItemDirectoryDefaultChange('itemType', event.target.value)}
-                        renderValue={(value) => value || 'Item type'}
-                      >
-                        <MenuItem value="">No default</MenuItem>
-                        {ITEM_TYPE_OPTIONS.map(option => (
-                          <MenuItem key={option} value={option}>{option}</MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
+                  <Grid item xs={12} sm={6} md={2.4}>
+                    <TextField
+                      select
+                      fullWidth
+                      size="small"
+                      label="Item type"
+                      value={itemDirectoryDefaults.itemType || ''}
+                      onChange={(event) => handleItemDirectoryDefaultChange('itemType', event.target.value)}
+                      sx={fieldSx}
+                    >
+                      {ITEM_TYPE_OPTIONS.map(option => (
+                        <MenuItem key={option} value={option}>{option}</MenuItem>
+                      ))}
+                    </TextField>
                   </Grid>
                   {[
                     { key: 'procurementItem', label: 'Procurement item' },
                     { key: 'salesItem', label: 'Sales item' },
                   ].map((item) => (
-                    <Grid item xs={12} sm={6} md={3} key={item.key}>
-                      <FormControl fullWidth size="small" sx={fieldSx}>
-                        <Select
-                          displayEmpty
-                          value={itemDirectoryDefaults[item.key] || ''}
-                          onChange={(event) => handleItemDirectoryDefaultChange(item.key, event.target.value)}
-                          renderValue={(value) => value || item.label}
-                        >
-                          <MenuItem value="">No default</MenuItem>
-                          <MenuItem value="TRUE">TRUE</MenuItem>
-                          <MenuItem value="FALSE">FALSE</MenuItem>
-                        </Select>
-                      </FormControl>
-                    </Grid>
-                  ))}
-
-                  <Grid item xs={12}>
-                    <Paper elevation={0} sx={{ p: 2, borderRadius: '14px', border: `1px solid ${t.border.subtle}`, bgcolor: t.surface.panel }}>
-                      <Typography sx={{ fontSize: 13, fontWeight: 800, color: t.text.heading, mb: 1.5 }}>
-                        Item code behavior
-                      </Typography>
-                      <Grid container spacing={1.5}>
-                        <Grid item xs={12} md={3}>
-                          <TextField
-                            fullWidth
-                            size="small"
-                            label="Prefix"
-                            value={itemDirectoryDefaults.itemCodePrefix || ''}
-                            onChange={(event) => handleItemDirectoryDefaultChange('itemCodePrefix', event.target.value)}
-                            placeholder="Example: RM"
-                            helperText="Creates values like RM-001."
-                            sx={fieldSx}
-                          />
-                        </Grid>
-                        <Grid item xs={12} md={3}>
-                          <FormControl fullWidth size="small" sx={fieldSx}>
-                            <Select
-                              displayEmpty
-                              value={itemDirectoryDefaults.itemCodeBlankStrategy || 'prefix_sequence'}
-                              onChange={(event) => handleItemDirectoryDefaultChange('itemCodeBlankStrategy', event.target.value)}
-                            >
-                              {ITEM_CODE_BLANK_STRATEGIES.map(option => (
-                                <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
-                              ))}
-                            </Select>
-                          </FormControl>
-                        </Grid>
-                        <Grid item xs={12} md={3}>
-                          <FormControl fullWidth size="small" sx={fieldSx}>
-                            <Select
-                              displayEmpty
-                              value={itemDirectoryDefaults.itemCodeDuplicateStrategy || 'prefix_sequence'}
-                              onChange={(event) => handleItemDirectoryDefaultChange('itemCodeDuplicateStrategy', event.target.value)}
-                            >
-                              {ITEM_CODE_DUPLICATE_STRATEGIES.map(option => (
-                                <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
-                              ))}
-                            </Select>
-                          </FormControl>
-                        </Grid>
-                        <Grid item xs={4} md={1}>
-                          <TextField
-                            fullWidth
-                            size="small"
-                            label="Separator"
-                            value={itemDirectoryDefaults.itemCodeSeparator ?? '-'}
-                            onChange={(event) => handleItemDirectoryDefaultChange('itemCodeSeparator', event.target.value)}
-                            sx={fieldSx}
-                          />
-                        </Grid>
-                        <Grid item xs={4} md={1}>
-                          <TextField
-                            fullWidth
-                            size="small"
-                            type="number"
-                            label="Start"
-                            value={itemDirectoryDefaults.itemCodeStart || '1'}
-                            onChange={(event) => handleItemDirectoryDefaultChange('itemCodeStart', event.target.value)}
-                            sx={fieldSx}
-                          />
-                        </Grid>
-                        <Grid item xs={4} md={1}>
-                          <TextField
-                            fullWidth
-                            size="small"
-                            type="number"
-                            label="Padding"
-                            value={itemDirectoryDefaults.itemCodePadding || '3'}
-                            onChange={(event) => handleItemDirectoryDefaultChange('itemCodePadding', event.target.value)}
-                            sx={fieldSx}
-                          />
-                        </Grid>
-                      </Grid>
-                    </Paper>
-                  </Grid>
-
-                  <Grid item xs={12} md={4}>
-                    {measurementUnitCustomMode ? (
-                      <Stack direction="row" spacing={1} alignItems="flex-start">
-                        <TextField
-                          autoFocus
-                          fullWidth
-                          size="small"
-                          label="Measurement unit"
-                          value={MEASUREMENT_UNIT_OPTIONS.includes(itemDirectoryDefaults.measurementUnit) ? '' : (itemDirectoryDefaults.measurementUnit || '')}
-                          onChange={(event) => handleItemDirectoryDefaultChange('measurementUnit', event.target.value)}
-                          placeholder="Example: Box"
-                          helperText="Custom unit"
-                          sx={fieldSx}
-                        />
-                        <Button
-                          size="small"
-                          variant="outlined"
-                          onClick={() => {
-                            setMeasurementUnitCustomMode(false);
-                            handleItemDirectoryDefaultChange('measurementUnit', '');
-                          }}
-                          sx={{ mt: 0.25, minWidth: 58, height: 36, borderRadius: '10px', fontWeight: 700, textTransform: 'none' }}
-                        >
-                          List
-                        </Button>
-                      </Stack>
-                    ) : (
+                    <Grid item xs={12} sm={6} md={2.4} key={item.key}>
                       <TextField
                         select
                         fullWidth
                         size="small"
-                        label="Measurement unit"
-                        value={MEASUREMENT_UNIT_OPTIONS.includes(itemDirectoryDefaults.measurementUnit) ? itemDirectoryDefaults.measurementUnit : ''}
-                        onChange={(event) => {
-                          if (event.target.value === CUSTOM_MEASUREMENT_UNIT_VALUE) {
-                            setMeasurementUnitCustomMode(true);
-                            handleItemDirectoryDefaultChange('measurementUnit', '');
-                          } else {
-                            handleItemDirectoryDefaultChange('measurementUnit', event.target.value);
-                          }
-                        }}
-                        helperText=" "
+                        label={item.label}
+                        value={itemDirectoryDefaults[item.key] || ''}
+                        onChange={(event) => handleItemDirectoryDefaultChange(item.key, event.target.value)}
                         sx={fieldSx}
                       >
-                        <MenuItem value="">No default</MenuItem>
-                        {MEASUREMENT_UNIT_OPTIONS.map(unit => (
-                          <MenuItem key={unit} value={unit}>{unit}</MenuItem>
-                        ))}
-                        <MenuItem value={CUSTOM_MEASUREMENT_UNIT_VALUE}>Custom measurement unit</MenuItem>
+                        <MenuItem value="TRUE">TRUE</MenuItem>
+                        <MenuItem value="FALSE">FALSE</MenuItem>
                       </TextField>
-                    )}
+                    </Grid>
+                  ))}
+
+                  <Grid item xs={12} sm={6} md={2.4}>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      label="Measurement unit"
+                      value={itemDirectoryDefaults.measurementUnit || ''}
+                      onChange={(event) => handleItemDirectoryDefaultChange('measurementUnit', event.target.value)}
+                      placeholder="Example: EA"
+                      sx={fieldSx}
+                    />
                   </Grid>
+
+                  <Grid item xs={12}>
+                    <Paper elevation={0} sx={{ p: 2.25, borderRadius: '14px', border: `1px solid ${t.border.subtle}`, bgcolor: t.surface.panel }}>
+                      <Typography sx={{ fontSize: 16, fontWeight: 400, color: t.text.heading, mb: 3 }}>
+                        Item code behavior
+                      </Typography>
+                      <Grid container spacing={1.5}>
+                        <Grid item xs={12} sm={6}>
+                          <TextField
+                            select
+                            fullWidth
+                            size="small"
+                            label="How to set the value"
+                            value={itemCodeContentType}
+                            onChange={(event) => setItemCodeContentType(event.target.value)}
+                            sx={fieldSx}
+                          >
+                            {ITEM_CODE_CONTENT_TYPE_OPTIONS.map(option => (
+                              <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                            ))}
+                          </TextField>
+                        </Grid>
+                        <Grid item xs={12} sm={6}>
+                          <TextField
+                            select
+                            fullWidth
+                            size="small"
+                            label="Rows to update"
+                            value={itemCodeRowsToUpdate}
+                            onChange={(event) => setItemCodeRowsToUpdate(event.target.value)}
+                            sx={fieldSx}
+                          >
+                            {ITEM_CODE_ROWS_TO_UPDATE_OPTIONS.map(option => (
+                              <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                            ))}
+                          </TextField>
+                        </Grid>
+                        {itemCodeContentType === 'serial' && (
+                          <>
+                            <Grid item xs={12} sm={4}>
+                              <TextField
+                                fullWidth
+                                size="small"
+                                label="Prefix"
+                                value={itemDirectoryDefaults.itemCodePrefix || ''}
+                                onChange={(event) => handleItemDirectoryDefaultChange('itemCodePrefix', event.target.value)}
+                                helperText="Creates values like ITEM01."
+                                sx={fieldSx}
+                              />
+                            </Grid>
+                            <Grid item xs={6} sm={4}>
+                              <TextField
+                                fullWidth
+                                size="small"
+                                type="number"
+                                label="Start at"
+                                value={itemDirectoryDefaults.itemCodeStart || '1'}
+                                onChange={(event) => handleItemDirectoryDefaultChange('itemCodeStart', event.target.value)}
+                                sx={fieldSx}
+                              />
+                            </Grid>
+                            <Grid item xs={6} sm={4}>
+                              <TextField
+                                fullWidth
+                                size="small"
+                                type="number"
+                                label="Number padding"
+                                value={itemDirectoryDefaults.itemCodePadding || '3'}
+                                onChange={(event) => handleItemDirectoryDefaultChange('itemCodePadding', event.target.value)}
+                                sx={fieldSx}
+                              />
+                            </Grid>
+                            <Grid item xs={12}>
+                              <FormControlLabel
+                                control={(
+                                  <Checkbox
+                                    size="small"
+                                    checked={itemDirectoryDefaults.itemCodeIncrement !== false}
+                                    onChange={(event) => handleItemDirectoryDefaultChange('itemCodeIncrement', event.target.checked)}
+                                  />
+                                )}
+                                label="Increment for each row"
+                                sx={{
+                                  color: t.text.primary,
+                                  '& .MuiFormControlLabel-label': {
+                                    fontSize: 14,
+                                  },
+                                }}
+                              />
+                            </Grid>
+                          </>
+                        )}
+                      </Grid>
+                    </Paper>
+                  </Grid>
+
                 </Grid>
               </Box>
             </Paper>

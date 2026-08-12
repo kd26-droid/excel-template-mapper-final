@@ -45,7 +45,7 @@ export const ITEM_DIRECTORY_DEFAULTS = [
     field: 'Item code',
     label: 'Duplicate item codes',
     type: 'itemCodeDuplicateStrategy',
-    defaultValue: 'prefix_sequence',
+    defaultValue: 'leave',
   },
   {
     key: 'itemCodeSeparator',
@@ -67,6 +67,13 @@ export const ITEM_DIRECTORY_DEFAULTS = [
     label: 'Number padding',
     type: 'number',
     defaultValue: '3',
+  },
+  {
+    key: 'itemCodeIncrement',
+    field: 'Item code',
+    label: 'Increment for each row',
+    type: 'boolean',
+    defaultValue: true,
   },
   {
     key: 'measurementUnit',
