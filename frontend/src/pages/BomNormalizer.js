@@ -501,6 +501,8 @@ const columnValues = (header, headers, dataRows) => {
 
 const roleSampleValues = (values) => values.map(fmt).filter(Boolean);
 
+const hasUsefulRoleValues = (values, minimum = 1) => roleSampleValues(values).length >= minimum;
+
 const looksLikeHierarchyColumn = (values) => {
   const samples = roleSampleValues(values);
   if (samples.length < 4) return false;
@@ -635,6 +637,107 @@ const scoreStructuredMpnMfrColumn = (header, values) => {
   return (parsed.length / samples.length) * 100 + headerBonus;
 };
 
+const MFR_HEADER_PATTERNS = [
+  /^mfr$/,
+  /^mfg$/,
+  /^mfgr$/,
+  /^manufacturer$/,
+  /^manufacturers$/,
+  /manufacturer name/,
+  /\bmfr name\b/,
+  /\bmfg name\b/,
+  /\bmaker\b/,
+  /\bbrand\b/,
+  /\bfabricant\b/,
+  /\bfab\b/,
+  /\bsupplier\b/,
+  /\bvendor\b/,
+  /\bsource\b/,
+  /suggested.*mfr/,
+  /corrected.*mfr/,
+];
+
+const MFR_HEADER_EXCLUDES = [/equivalent/, /part/, /\bmpn\b/, /\bpn\b/];
+
+const isPlausibleManufacturerPhrase = (value) => {
+  const text = fmt(value);
+  if (text.length < 2 || text.length > 80) return false;
+  const compact = text.replace(/[^A-Za-z0-9]/g, '');
+  if (compact.length < 2) return false;
+  const digitCount = (compact.match(/\d/g) || []).length;
+  const letterCount = (compact.match(/[A-Za-z]/g) || []).length;
+  if (!letterCount) return false;
+  if (digitCount / compact.length > 0.45 && !/\b(3m|2j)\b/i.test(text)) return false;
+  if (looksLikePartCodeValue(text) && !/\b(inc|corp|corporation|co|ltd|llc|gmbh|ag|electronics|semi|semiconductor|technologies|components)\b/i.test(text)) return false;
+  return true;
+};
+
+const buildManufacturerPhraseLookup = (directory = {}) => {
+  const aliases = directory.aliases || {};
+  const phrases = [
+    ...Object.keys(aliases),
+    ...Object.values(aliases),
+    ...(Array.isArray(directory.names) ? directory.names : []),
+    ...KNOWN_MANUFACTURERS,
+  ];
+  const lookup = new Set();
+  phrases.forEach((phrase) => {
+    if (!isPlausibleManufacturerPhrase(phrase)) return;
+    const key = normalizeKey(phrase).toUpperCase();
+    if (key) lookup.add(key);
+  });
+  return lookup;
+};
+
+const manufacturerFragments = (value) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ');
+  const fragments = [text];
+  text.replace(/\(([^)]+)\)/g, (_, inner) => {
+    fragments.push(inner);
+    return '';
+  });
+  text.split(/[;,|/]+/).forEach((part) => fragments.push(part));
+  return fragments
+    .map((part) => fmt(part).replace(/^[()[\]{}]+|[()[\]{}]+$/g, ''))
+    .filter(Boolean);
+};
+
+const matchesManufacturerPhrase = (value, lookup, lookupList = null) => {
+  if (!lookup?.size) return false;
+  const phrases = lookupList || [...lookup];
+  return manufacturerFragments(value).some((fragment) => {
+    if (!isPlausibleManufacturerPhrase(fragment)) return false;
+    const key = normalizeKey(fragment).toUpperCase();
+    if (!key) return false;
+    if (lookup.has(key)) return true;
+    if (key.length < 4) return false;
+    return phrases.some((phrase) => phrase.length >= 4 && (key.includes(phrase) || phrase.includes(key)));
+  });
+};
+
+const scoreManufacturerDirectoryColumn = (header, values, directory = {}, phraseLookup = null) => {
+  if (looksLikeDocumentHeader(header) || looksLikeHierarchyColumn(values)) return 0;
+  const samples = roleSampleValues(values);
+  if (!samples.length) return 0;
+  const key = normalizeKey(header);
+  const lookup = phraseLookup || buildManufacturerPhraseLookup(directory);
+  const lookupList = [...lookup];
+  const matchRate = lookup.size
+    ? samples.filter((value) => matchesManufacturerPhrase(value, lookup, lookupList)).length / samples.length
+    : 0;
+  let score = matchRate * 100;
+  if (MFR_HEADER_PATTERNS.some((pattern) => pattern.test(key)) &&
+      !MFR_HEADER_EXCLUDES.some((pattern) => pattern.test(key))) {
+    score += 65;
+  } else if (/(manufacturer|mfr|mfg|mfgr|fabricant|maker|brand|supplier|vendor)/.test(key) &&
+      !/(part|mpn|pn|equivalent)/.test(key)) {
+    score += 45;
+  }
+  if (/(mpn|part number|part no|ref article|article ref|item code|cpn|customer part)/.test(key)) score -= 50;
+  if (samples.filter(looksLikePartCodeValue).length / samples.length > 0.65 && matchRate < 0.35) score -= 40;
+  return Math.max(0, score);
+};
+
 const looksLikePartCodeValue = (value) => {
   const text = fmt(value);
   if (!text || text.includes('>')) return false;
@@ -669,8 +772,10 @@ const bestScoredHeader = (headers, dataRows, scorer, minScore = 1) => {
   return ranked[0]?.header || '';
 };
 
-const inferRoles = (headers, dataRows = []) => {
+const inferRoles = (headers, dataRows = [], options = {}) => {
   const learnedHeaders = getLearnedRoleHeaders();
+  const manufacturerDirectory = options.manufacturerDirectory || {};
+  const manufacturerPhraseLookup = buildManufacturerPhraseLookup(manufacturerDirectory);
   const findLearnedHeader = (role) => {
     const learned = Array.isArray(learnedHeaders[role]) ? learnedHeaders[role] : [];
     const learnedKeys = learned.map(normalizeKey);
@@ -681,6 +786,15 @@ const inferRoles = (headers, dataRows = []) => {
     return patterns.some((pattern) => pattern.test(normalized)) &&
       !excludePatterns.some((pattern) => pattern.test(normalized));
   }) || '';
+  const exactMpnHeader = findHeader([
+    /^mpn$/,
+    /^mfg\s*part$/,
+    /^mfr\s*part$/,
+    /^manufacturer\s*part(?:\s*number)?$/,
+    /^manufacturer\s*pn$/,
+    /^part\s*number$/,
+    /^part\s*no$/,
+  ]);
   const strongMpnHeader = findHeader([
     /^approved\s*manufacturer$/,
     /\bmpn\b/,
@@ -698,19 +812,38 @@ const inferRoles = (headers, dataRows = []) => {
   const learnedCpn = findLearnedHeader('cpn');
   const structuredMpnMfrHeader = bestScoredHeader(headers, dataRows, scoreStructuredMpnMfrColumn, 70);
   const scoredCpnHeader = bestScoredHeader(headers, dataRows, scoreCpnColumn, 65);
-  const mpnHeader = structuredMpnMfrHeader || learnedMpn || strongMpnHeader ||
+  const mpnHeader = exactMpnHeader || learnedMpn || strongMpnHeader || structuredMpnMfrHeader ||
     findHeader([/^approved\s*manufacturer$/, /manufacturer equivalent/, /manufacturer part/, /\bmpn\b/, /producer/, /^po\s*text$/, /^potext$/, /part number/]);
   const cpnHeader = scoredCpnHeader || learnedCpn || findHeader([/\bcpn\b/, /customer part/, /client part/, /internal part/, /part code/, /ref article/, /\barticle\b/]) ||
     (genericPartHeader && genericPartHeader !== mpnHeader ? genericPartHeader : '');
 
   // A header the user has taught us wins outright. Otherwise a name match still has to
   // survive the values: see looksLikeCodeColumn.
-  const namedManufacturer = findHeader([/^manufacturer$/, /\bmfr\b/, /manufacturer name/, /producer/], [/equivalent/, /part/, /\bmpn\b/]) ||
-    findHeader([/manufacturer/], [/equivalent/, /part/, /\bmpn\b/]);
+  const namedManufacturer = findHeader(MFR_HEADER_PATTERNS, MFR_HEADER_EXCLUDES) ||
+    findHeader([/manufacturer/, /\bmfr\b/, /\bmfg\b/, /\bmfgr\b/, /fabricant/, /maker/, /brand/, /supplier/, /vendor/], [/equivalent/, /part/, /\bmpn\b/, /\bpn\b/]);
   const learnedManufacturer = findLearnedHeader('manufacturer');
-  const manufacturerHeader = structuredMpnMfrHeader ||
-    (learnedManufacturer && looksLikeCodeColumn(columnValues(learnedManufacturer, headers, dataRows)) ? '' : learnedManufacturer) ||
-    (namedManufacturer && looksLikeCodeColumn(columnValues(namedManufacturer, headers, dataRows)) ? '' : namedManufacturer);
+  const scoredManufacturerHeader = bestScoredHeader(
+    headers.filter((header) => header !== mpnHeader && header !== cpnHeader),
+    dataRows,
+    (header, values) => scoreManufacturerDirectoryColumn(header, values, manufacturerDirectory, manufacturerPhraseLookup),
+    70
+  );
+  const learnedManufacturerSafe = learnedManufacturer &&
+    learnedManufacturer !== mpnHeader &&
+    learnedManufacturer !== cpnHeader &&
+    hasUsefulRoleValues(columnValues(learnedManufacturer, headers, dataRows)) &&
+    !looksLikeCodeColumn(columnValues(learnedManufacturer, headers, dataRows))
+    ? learnedManufacturer
+    : '';
+  const namedManufacturerSafe = namedManufacturer &&
+    namedManufacturer !== mpnHeader &&
+    namedManufacturer !== cpnHeader &&
+    hasUsefulRoleValues(columnValues(namedManufacturer, headers, dataRows)) &&
+    !looksLikeCodeColumn(columnValues(namedManufacturer, headers, dataRows))
+    ? namedManufacturer
+    : '';
+  const manufacturerHeader = namedManufacturerSafe || learnedManufacturerSafe || scoredManufacturerHeader ||
+    (structuredMpnMfrHeader && structuredMpnMfrHeader === mpnHeader ? structuredMpnMfrHeader : '');
 
   return {
     cpn: cpnHeader,
@@ -4130,6 +4263,11 @@ const BomNormalizer = () => {
     ],
     applyMode: 'overwrite',
   });
+  const [deleteRowsOpen, setDeleteRowsOpen] = useState(false);
+  const [deleteRowsColumn, setDeleteRowsColumn] = useState('');
+  const [deleteRowsOperator, setDeleteRowsOperator] = useState('is_empty');
+  const [deleteRowsCompare, setDeleteRowsCompare] = useState('');
+  const [deleteRowsBusy, setDeleteRowsBusy] = useState(false);
   const [manufacturerDirectory, setManufacturerDirectory] = useState({ names: [], aliases: {}, loaded: false });
   const [manufacturerMatchOpen, setManufacturerMatchOpen] = useState(false);
   const [manufacturerMatchLoading, setManufacturerMatchLoading] = useState(false);
@@ -5051,7 +5189,7 @@ const BomNormalizer = () => {
       : nextWorkbook.SheetNames[0];
     const prepared = prepareSingleSheet(nextWorkbook, preferredSheet, { headerRow: options.headerRow });
     const nextHeaders = prepared.headers;
-    const nextRoles = inferRoles(nextHeaders, prepared.dataRows);
+    const nextRoles = inferRoles(nextHeaders, prepared.dataRows, { manufacturerDirectory });
     const nextStructure = detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40));
 
     setWorkbook(nextWorkbook);
@@ -5076,7 +5214,7 @@ const BomNormalizer = () => {
     setNormalizationSummary(null);
     setConfirmOpen(false);
     setError('');
-  }, []);
+  }, [manufacturerDirectory]);
 
   useEffect(() => {
     const state = location.state || {};
@@ -6093,7 +6231,7 @@ const BomNormalizer = () => {
     if (!workbook) return;
     const prepared = prepareSingleSheet(workbook, nextSheetName);
     const nextHeaders = prepared.headers;
-    const nextRoles = inferRoles(nextHeaders, prepared.dataRows);
+    const nextRoles = inferRoles(nextHeaders, prepared.dataRows, { manufacturerDirectory });
 
     setSheetName(nextSheetName);
     setSelectedSheetNames([nextSheetName]);
@@ -6113,7 +6251,7 @@ const BomNormalizer = () => {
     setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
-  }, [workbook]);
+  }, [manufacturerDirectory, workbook]);
 
   const applySheetSelection = useCallback((scope, names) => {
     if (!workbook) return;
@@ -6124,7 +6262,7 @@ const BomNormalizer = () => {
     const prepared = scope === 'single'
       ? prepareSingleSheet(workbook, nextNames[0])
       : prepareMultipleSheets(workbook, nextNames);
-    const nextRoles = inferRoles(prepared.headers, prepared.dataRows);
+    const nextRoles = inferRoles(prepared.headers, prepared.dataRows, { manufacturerDirectory });
 
     setSheetScope(scope);
     setSelectedSheetNames(nextNames);
@@ -6145,7 +6283,7 @@ const BomNormalizer = () => {
     setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
-  }, [workbook]);
+  }, [manufacturerDirectory, workbook]);
 
   const handleSheetScopeChange = useCallback((nextScope) => {
     if (!workbook) return;
@@ -6170,7 +6308,7 @@ const BomNormalizer = () => {
     const nextHeaders = columns.length
       ? columns.map((column) => column.header)
       : makeUniqueHeaders(sheetRows[nextIndex] || []);
-    const nextRoles = inferRoles(nextHeaders, sheetRows.slice(nextIndex + 1));
+    const nextRoles = inferRoles(nextHeaders, sheetRows.slice(nextIndex + 1), { manufacturerDirectory });
     setHeaderRowIndex(nextIndex);
     setPreparedHeaders(nextHeaders);
     setPreparedDataRows(sheetRows
@@ -6192,7 +6330,7 @@ const BomNormalizer = () => {
     setParserTouched(false);
     setSkipSourceSetupForMerge(false);
     setConfirmOpen(false);
-  }, [sheetRows]);
+  }, [manufacturerDirectory, sheetRows]);
 
   const handleRoleChange = useCallback((role, header) => {
     setRoles((prev) => ({ ...prev, [role]: header }));
@@ -6660,6 +6798,54 @@ const BomNormalizer = () => {
     setTagDialogOpen(false);
   }, [tagConfig]);
 
+  const handleOpenDeleteRowsDialog = useCallback(() => {
+    setDeleteRowsColumn((prev) => (
+      normalizedColumnOptions.includes(prev)
+        ? prev
+        : (normalizedColumnOptions.includes('mpn') ? 'mpn' : normalizedColumnOptions[0] || '')
+    ));
+    setDeleteRowsOpen(true);
+  }, [normalizedColumnOptions]);
+
+  const rowMatchesDeleteCondition = useCallback((row) => {
+    const cell = String(row?.[deleteRowsColumn] ?? '').trim();
+    const normalizedCell = cell.toLowerCase();
+    const compare = deleteRowsCompare.trim().toLowerCase();
+    if (deleteRowsOperator === 'is_empty') return cell === '';
+    if (deleteRowsOperator === 'not_empty') return cell !== '';
+    if (deleteRowsOperator === 'equals') return normalizedCell === compare;
+    if (deleteRowsOperator === 'not_equals') return normalizedCell !== compare;
+    if (deleteRowsOperator === 'contains') return normalizedCell.includes(compare);
+    return false;
+  }, [deleteRowsColumn, deleteRowsCompare, deleteRowsOperator]);
+
+  const handleDeleteRowsByCondition = useCallback(() => {
+    if (!deleteRowsColumn) return;
+    if (['equals', 'not_equals', 'contains'].includes(deleteRowsOperator) && !deleteRowsCompare.trim()) {
+      setError('Enter the text to compare against.');
+      return;
+    }
+
+    setDeleteRowsBusy(true);
+    try {
+      const keptRows = normalizedRows.filter((row) => !rowMatchesDeleteCondition(row));
+      const removed = normalizedRows.length - keptRows.length;
+      setNormalizedRows(keptRows);
+      setNormalizationSummary(buildNormalizationSummary(keptRows));
+      setProgress((prev) => ({
+        ...prev,
+        outputRows: keptRows.length,
+      }));
+      setDeleteRowsOpen(false);
+      setError('');
+      setSuccessMessage(`Deleted ${removed} row${removed === 1 ? '' : 's'} - ${keptRows.length} remaining.`);
+    } catch (err) {
+      setError(err.message || 'Could not delete rows.');
+    } finally {
+      setDeleteRowsBusy(false);
+    }
+  }, [buildNormalizationSummary, deleteRowsColumn, deleteRowsCompare, deleteRowsOperator, normalizedRows, rowMatchesDeleteCondition]);
+
   const handleOpenManufacturerMatch = useCallback(async () => {
     setManufacturerMatchOpen(true);
     setManufacturerMatchError('');
@@ -6681,6 +6867,51 @@ const BomNormalizer = () => {
       setManufacturerMatchLoading(false);
     }
   }, [manufacturerDirectory.loaded]);
+
+  useEffect(() => {
+    if (manufacturerDirectory.loaded) return undefined;
+    let cancelled = false;
+    const loadDirectory = async () => {
+      try {
+        const response = await api.getManufacturerDirectory();
+        if (cancelled) return;
+        setManufacturerDirectory({
+          names: response.data?.names || [],
+          aliases: response.data?.aliases || {},
+          loaded: true,
+          entryCount: response.data?.entry_count || 0,
+          aliasCount: response.data?.alias_count || 0,
+        });
+      } catch (err) {
+        // Header detection still works from synonyms if the directory is unavailable.
+      }
+    };
+    loadDirectory();
+    return () => {
+      cancelled = true;
+    };
+  }, [manufacturerDirectory.loaded]);
+
+  useEffect(() => {
+    if (!manufacturerDirectory.loaded || currentStep > 2 || !headers.length || !dataRows.length) return;
+    const nextRoles = inferRoles(headers, dataRows, { manufacturerDirectory });
+    setRoles((prev) => {
+      const updates = {};
+      const shouldReplaceManufacturer = !prev.manufacturer ||
+        prev.manufacturer === prev.mpn ||
+        prev.manufacturer === prev.cpn ||
+        !hasUsefulRoleValues(columnValues(prev.manufacturer, headers, dataRows)) ||
+        looksLikeCodeColumn(columnValues(prev.manufacturer, headers, dataRows));
+      if (shouldReplaceManufacturer && nextRoles.manufacturer && nextRoles.manufacturer !== prev.manufacturer) {
+        updates.manufacturer = nextRoles.manufacturer;
+      }
+      const shouldReplaceMpn = !prev.mpn || prev.mpn === prev.manufacturer;
+      if (shouldReplaceMpn && nextRoles.mpn && nextRoles.mpn !== prev.mpn) {
+        updates.mpn = nextRoles.mpn;
+      }
+      return Object.keys(updates).length ? { ...prev, ...updates } : prev;
+    });
+  }, [currentStep, dataRows, headers, manufacturerDirectory]);
 
   const handleApplyManufacturerMatch = useCallback(() => {
     const selectedMap = new Map(
@@ -8064,6 +8295,15 @@ const BomNormalizer = () => {
                         Add Tags
                       </MenuItem>
                       <MenuItem
+                        disabled={!normalizedRows.length}
+                        onClick={() => {
+                          setToolsMenuAnchor(null);
+                          handleOpenDeleteRowsDialog();
+                        }}
+                      >
+                        Delete rows by condition
+                      </MenuItem>
+                      <MenuItem
                         disabled={!normalizedRows.length || workflowTemplateSaving}
                         onClick={() => {
                           setToolsMenuAnchor(null);
@@ -8750,6 +8990,59 @@ const BomNormalizer = () => {
           </Button>
         </DialogActions>
       </Dialog>
+      <Dialog open={deleteRowsOpen} onClose={() => !deleteRowsBusy && setDeleteRowsOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>Delete rows by condition</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+            Remove every row where a column matches the condition below. For example, delete rows where <strong>MPN Code</strong> is empty.
+          </Typography>
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 1.5 }}>
+            <Typography variant="body2" sx={{ fontWeight: 600 }}>Delete a row when</Typography>
+            <FormControl size="small" sx={{ minWidth: 180, flex: 1 }}>
+              <InputLabel>Column</InputLabel>
+              <Select label="Column" value={deleteRowsColumn} onChange={(event) => setDeleteRowsColumn(event.target.value)}>
+                {normalizedColumnOptions.map((column) => (
+                  <MenuItem key={column} value={column}>{column}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            <FormControl size="small" sx={{ minWidth: 150 }}>
+              <InputLabel>Test</InputLabel>
+              <Select label="Test" value={deleteRowsOperator} onChange={(event) => setDeleteRowsOperator(event.target.value)}>
+                <MenuItem value="is_empty">is empty</MenuItem>
+                <MenuItem value="not_empty">is not empty</MenuItem>
+                <MenuItem value="equals">equals</MenuItem>
+                <MenuItem value="not_equals">does not equal</MenuItem>
+                <MenuItem value="contains">contains</MenuItem>
+              </Select>
+            </FormControl>
+            {(deleteRowsOperator === 'equals' || deleteRowsOperator === 'not_equals' || deleteRowsOperator === 'contains') && (
+              <TextField
+                size="small"
+                label="Text"
+                value={deleteRowsCompare}
+                onChange={(event) => setDeleteRowsCompare(event.target.value)}
+                sx={{ minWidth: 120, flex: 1 }}
+              />
+            )}
+          </Box>
+          <Alert severity="warning" sx={{ mt: 2 }}>
+            This permanently removes matching rows from the working grid. You can’t undo it here — re-run the mapping if you need them back.
+          </Alert>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeleteRowsOpen(false)} disabled={deleteRowsBusy}>Cancel</Button>
+          <Button
+            variant="contained"
+            color="error"
+            onClick={handleDeleteRowsByCondition}
+            disabled={deleteRowsBusy || !deleteRowsColumn}
+            startIcon={deleteRowsBusy ? <CircularProgress size={16} sx={{ color: 'white' }} /> : <DeleteOutlineIcon />}
+          >
+            {deleteRowsBusy ? 'Deleting...' : 'Delete rows'}
+          </Button>
+        </DialogActions>
+      </Dialog>
       <Dialog open={manufacturerMatchOpen} onClose={() => setManufacturerMatchOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Manufacturer Match</DialogTitle>
         <DialogContent>
@@ -9211,21 +9504,7 @@ const BomNormalizer = () => {
             </Paper>
           )}
         </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'space-between', gap: 1, flexWrap: 'wrap' }}>
-          <Button
-            variant="outlined"
-            disabled={configureParserPreparing}
-            onClick={() => {
-              setParsingLogicOpen(false);
-              setPatternApplyNotice('');
-              handleOpenConfigureSplitColumns({
-                title: 'Parse Fields',
-                initialColumn: detectedParsingLogic?.sourceHeader || '',
-              });
-            }}
-          >
-            Edit Parsing
-          </Button>
+        <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'flex-end', gap: 1, flexWrap: 'wrap' }}>
           <Button
             variant="contained"
             onClick={() => {
