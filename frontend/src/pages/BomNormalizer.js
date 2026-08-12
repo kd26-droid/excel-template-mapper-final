@@ -47,6 +47,8 @@ import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import DownloadIcon from '@mui/icons-material/Download';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
+import TuneIcon from '@mui/icons-material/Tune';
+import VisibilityIcon from '@mui/icons-material/Visibility';
 import api from '../services/api';
 import BomStructureDialog, { reconcileSavedBomStructure } from '../components/BomStructureDialog';
 import ColumnParser from '../components/ColumnParser/ColumnParser';
@@ -525,38 +527,93 @@ const getDiscardedPackedText = (value, pair = {}) => {
   return blocks ? blocks.join(' ') : '';
 };
 
-const escapeRegExp = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const stripTrailingMpnSeparator = (value) => fmt(value).replace(/\s+@$/, '').trim();
 
-const replaceFirstToken = (text, token, placeholder) => {
-  const cleanToken = fmt(token);
-  if (!cleanToken) return text;
-  return text.replace(new RegExp(escapeRegExp(cleanToken), 'i'), placeholder);
+const stripTrailingStatusRefBlocks = (value) => {
+  let core = fmt(value).replace(/\u00a0/g, ' ');
+  const blocks = [];
+  let changed = true;
+  while (changed) {
+    changed = false;
+    core = core.replace(/\s*(\{[^}]*\}|\[[^\]]*\])\s*$/, (_, block) => {
+      blocks.unshift(block);
+      changed = true;
+      return '';
+    }).trim();
+  }
+  return { core, blocks };
+};
+
+const popTrailingParenthesizedSegment = (value) => {
+  const text = fmt(value);
+  if (!text.endsWith(')')) return null;
+
+  let depth = 0;
+  for (let index = text.length - 1; index >= 0; index -= 1) {
+    const char = text[index];
+    if (char === ')') depth += 1;
+    if (char === '(') {
+      depth -= 1;
+      if (depth === 0) {
+        return {
+          before: fmt(text.slice(0, index)),
+          inside: fmt(text.slice(index + 1, -1)),
+        };
+      }
+    }
+  }
+
+  return null;
+};
+
+const buildSinglePairPatternShape = (value, pair = {}) => {
+  const { core, blocks } = stripTrailingStatusRefBlocks(value);
+  const manufacturerSegment = popTrailingParenthesizedSegment(core);
+  if (!manufacturerSegment) return '';
+
+  let mpnSide = manufacturerSegment.before;
+  let qualifierCount = 0;
+  let qualifierSegment = popTrailingParenthesizedSegment(mpnSide);
+  while (qualifierSegment) {
+    qualifierCount += 1;
+    mpnSide = qualifierSegment.before;
+    qualifierSegment = popTrailingParenthesizedSegment(mpnSide);
+  }
+
+  const atSeparator = /\s@$/.test(mpnSide);
+  if (atSeparator) mpnSide = stripTrailingMpnSeparator(mpnSide);
+
+  const hasSlashVariant = !qualifierCount && /(?:\s\/\s|\s\/|\/\s)/.test(mpnSide);
+  let shape = '<MPN>';
+  if (atSeparator) shape += ' @';
+  if (qualifierCount) shape += ` ${Array.from({ length: qualifierCount }, () => '(<QUALIFIER>)').join(' ')}`;
+  if (hasSlashVariant) shape += ' / <TEXT>';
+  shape += ' (<MFR>)';
+
+  if (blocks.some((block) => block.startsWith('{'))) shape += ' {<STATUS>}';
+  if (blocks.some((block) => block.startsWith('['))) shape += ' [<REF>]';
+
+  return shape.replace(/\s+/g, ' ').trim();
 };
 
 const buildParsedPatternShape = (value, pairs = []) => {
   const source = fmt(value).replace(/\u00a0/g, ' ');
   if (!source || !pairs.length) return '';
 
-  let shape = source
-    .replace(/\{[^}]*\}/g, '{<STATUS>}')
-    .replace(/\[[^\]]*\]/g, '[<REF>]');
+  if (source.includes('^') && pairs.length > 1) {
+    return '^<MPN>, <MFR> repeated';
+  }
 
-  pairs.forEach((pair) => {
-    shape = replaceFirstToken(shape, pair.mpn, '<MPN>');
-    shape = replaceFirstToken(shape, pair.manufacturer, '<MFR>');
-  });
-
-  return shape
-    .replace(/\((?:\s|<STATUS>|<REF>)*\)/g, '(<EXTRA>)')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return buildSinglePairPatternShape(source, pairs[0]);
 };
 
 const describePatternShape = (shape = '') => {
   const rules = ['Extract every <MPN> and <MFR> pair from values matching this shape.'];
-  if (shape.includes('@')) rules.push('Ignore @ as a separator before reading the manufacturer bracket.');
+  if (shape.includes(' @')) rules.push('Ignore @ as a separator before reading the manufacturer bracket.');
+  if (shape.includes('<QUALIFIER>')) rules.push('Keep qualifier brackets before the manufacturer as part of the MPN side.');
   if (shape.includes('^')) rules.push('Treat ^ as a repeated alternate separator.');
   if (shape.includes(',')) rules.push('Use comma-separated segments only when they form valid MPN/MFR pairs.');
+  if (shape.includes('/ <TEXT>')) rules.push('Keep slash-separated material text on the MPN side.');
   if (shape.includes('(<MFR>)')) rules.push('Use text inside (...) as Manufacturer.');
   if (shape.includes('{<STATUS>}') || shape.includes('[<REF>]')) rules.push('Treat {...} and [...] blocks as status/reference text.');
   return rules;
@@ -1049,7 +1106,7 @@ const parseParenthesizedMpnManufacturerPairs = (value, config = {}) => {
     if (!manufacturer || !/[A-Za-z]/.test(manufacturer)) return null;
 
     return {
-      mpn: stripVendorPrefix(rawMpn),
+      mpn: stripTrailingMpnSeparator(stripVendorPrefix(rawMpn)),
       manufacturer,
       metadata: {
         ...(manufacturerCode ? { manufacturerCode } : {}),
@@ -1084,7 +1141,7 @@ const parseTrailingParenthesizedMpnManufacturerPair = (value) => {
   if (!looksLikeParenthesizedMpn(rawMpn) && !looksLikeParenthesizedMpn(validationMpn)) return [];
 
   return [{
-    mpn: stripVendorPrefix(rawMpn),
+    mpn: stripTrailingMpnSeparator(stripVendorPrefix(rawMpn)),
     manufacturer,
     metadata: extra ? { discardedText: extra } : {},
   }];
@@ -3462,6 +3519,40 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
     focusBg: themeTokens.surface?.elevatedSoft || (isDarkMode ? '#0f172a' : '#ffffff'),
     warningBg: themeTokens.state?.warningBg || (isDarkMode ? 'rgba(245, 158, 11, 0.14)' : '#fff8e5'),
   };
+  const buttonSx = {
+    borderRadius: '999px',
+    minHeight: 32,
+    px: 1.6,
+    fontSize: 12,
+    fontWeight: 800,
+    textTransform: 'none',
+    transition: 'transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease',
+    '&:hover': {
+      transform: 'translateY(-1px)',
+    },
+  };
+  const outlineButtonSx = {
+    ...buttonSx,
+    color: isDarkMode ? '#dbeafe' : '#1d4ed8',
+    borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.32)' : 'rgba(37, 99, 235, 0.32)',
+    background: isDarkMode ? 'rgba(15, 23, 42, 0.52)' : 'rgba(255, 255, 255, 0.82)',
+    '&:hover': {
+      ...buttonSx['&:hover'],
+      borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.7)' : 'rgba(37, 99, 235, 0.72)',
+      background: isDarkMode ? 'rgba(37, 99, 235, 0.14)' : 'rgba(239, 246, 255, 0.96)',
+      boxShadow: isDarkMode ? '0 12px 26px -18px rgba(37, 99, 235, 0.9)' : '0 12px 24px -18px rgba(37, 99, 235, 0.42)',
+    },
+  };
+  const containedButtonSx = {
+    ...buttonSx,
+    background: 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
+    boxShadow: '0 12px 24px -14px rgba(37, 99, 235, 0.82), inset 0 1px 0 rgba(255, 255, 255, 0.28)',
+    '&:hover': {
+      ...buttonSx['&:hover'],
+      background: 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
+      boxShadow: '0 16px 30px -16px rgba(37, 99, 235, 0.95), inset 0 1px 0 rgba(255, 255, 255, 0.38)',
+    },
+  };
   const columns = useMemo(() => {
     const knownKeys = new Set(NORMALIZED_TABLE_BASE_COLUMNS.map((column) => column.key));
     const dynamicColumns = getNormalizedExportColumns(rows)
@@ -3565,7 +3656,14 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
           )}
         </Stack>
         <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap" justifyContent="flex-end">
-          <Button size="small" variant="outlined" onClick={() => setAllRowsOpen(true)} disabled={!filteredRows.length}>
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={<VisibilityIcon />}
+            onClick={() => setAllRowsOpen(true)}
+            disabled={!filteredRows.length}
+            sx={outlineButtonSx}
+          >
             View all rows
           </Button>
           <TextField
@@ -3767,6 +3865,7 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
               variant="outlined"
               disabled={allRowsPage === 0}
               onClick={() => setAllRowsPage((page) => Math.max(0, page - 1))}
+              sx={outlineButtonSx}
             >
               Previous
             </Button>
@@ -3774,10 +3873,11 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
               variant="outlined"
               disabled={allRowsPage >= allRowsTotalPages - 1}
               onClick={() => setAllRowsPage((page) => Math.min(allRowsTotalPages - 1, page + 1))}
+              sx={outlineButtonSx}
             >
               Next
             </Button>
-            <Button variant="contained" onClick={() => setAllRowsOpen(false)}>Done</Button>
+            <Button variant="contained" onClick={() => setAllRowsOpen(false)} sx={containedButtonSx}>Done</Button>
           </Stack>
         </DialogActions>
       </Dialog>
@@ -3825,7 +3925,14 @@ const BomNormalizer = () => {
     border: themeTokens.border?.default || (isDarkMode ? 'rgba(255,255,255,0.14)' : 'rgba(226, 232, 240, 0.8)'),
     borderStrong: themeTokens.border?.strong || (isDarkMode ? 'rgba(255,255,255,0.2)' : 'rgba(203, 213, 225, 0.8)'),
     warningBg: themeTokens.state?.warningBg || (isDarkMode ? 'rgba(245, 158, 11, 0.14)' : '#fff8e5'),
+    panelGradient: isDarkMode
+      ? 'linear-gradient(145deg, rgba(20, 27, 44, 0.94) 0%, rgba(11, 16, 26, 0.98) 100%)'
+      : 'linear-gradient(145deg, rgba(255, 255, 255, 0.96) 0%, rgba(248, 250, 252, 0.92) 100%)',
+    panelSoftGradient: isDarkMode
+      ? 'linear-gradient(145deg, rgba(15, 23, 42, 0.76) 0%, rgba(8, 13, 24, 0.86) 100%)'
+      : 'linear-gradient(145deg, rgba(255, 255, 255, 0.9) 0%, rgba(241, 245, 249, 0.82) 100%)',
   }), [isDarkMode, themeTokens]);
+  const [mousePos, setMousePos] = useState({ x: 72, y: 22 });
   // BOM structure gate. Asked here rather than at upload so the user answers
   // after seeing the normalized rows, when "does this have levels" is a
   // question about real output instead of raw headers.
@@ -3918,6 +4025,7 @@ const BomNormalizer = () => {
   const [configureParserPreparing, setConfigureParserPreparing] = useState(false);
   const [configureParserInitialColumn, setConfigureParserInitialColumn] = useState('');
   const [configureParserTitle, setConfigureParserTitle] = useState('Split into Columns');
+  const [configureParserScope, setConfigureParserScope] = useState(null);
   const [combineItems, setCombineItems] = useState([]);
   const [combineBusy, setCombineBusy] = useState(false);
   const [combineError, setCombineError] = useState('');
@@ -3956,6 +4064,17 @@ const BomNormalizer = () => {
   const restoredReturnSnapshotRef = useRef('');
   const autoReplayTemplateRef = useRef('');
   const restoreInFlightRef = useRef(false);
+
+  useEffect(() => {
+    const handleMouseMove = (event) => {
+      setMousePos({
+        x: (event.clientX / window.innerWidth) * 100,
+        y: (event.clientY / window.innerHeight) * 100,
+      });
+    };
+    window.addEventListener('mousemove', handleMouseMove);
+    return () => window.removeEventListener('mousemove', handleMouseMove);
+  }, []);
 
   const headers = useMemo(
     () => preparedHeaders.length ? preparedHeaders : makeUniqueHeaders(sheetRows[headerRowIndex] || []),
@@ -4037,65 +4156,166 @@ const BomNormalizer = () => {
   }, [config.alternateLayout, config.followingRowAlternateColumn, config.structure, roles.manufacturer, roles.mpn]);
 
   const detectedParsingLogic = useMemo(() => {
-    const sourceHeader = roles.mpn || roles.manufacturer;
-    const readsCombinedField = Boolean(
-      sourceHeader &&
+    const rowSourceNumber = (row, index) => row?.__sourceRow || index + headerRowIndex + 2;
+
+    const buildSourceSection = ({
+      id,
+      title,
+      sourceHeader,
+      rows = dataRows,
+      description = '',
+      includeUnmatched = true,
+    }) => {
+      if (!sourceHeader) return null;
+      const patternMap = new Map();
+      const unmatched = { count: 0, examples: [] };
+
+      rows.forEach((row, rowIndex) => {
+        const source = getCell(row, sourceHeader);
+        if (!source) return;
+        const pairs = parsePackedMpnManufacturerPairs(source, config)
+          .filter((pair) => pair?.mpn && pair?.manufacturer);
+        const sourceRow = rowSourceNumber(row, rowIndex);
+        if (!pairs.length) {
+          if (includeUnmatched) {
+            unmatched.count += 1;
+            if (unmatched.examples.length < 3) {
+              unmatched.examples.push({ sourceRow, source });
+            }
+          }
+          return;
+        }
+
+        const shape = buildParsedPatternShape(source, pairs);
+        if (!shape) {
+          if (includeUnmatched) {
+            unmatched.count += 1;
+            if (unmatched.examples.length < 3) {
+              unmatched.examples.push({ sourceRow, source });
+            }
+          }
+          return;
+        }
+
+        const current = patternMap.get(shape) || {
+          shape,
+          count: 0,
+          examples: [],
+          sourceRows: [],
+          rules: describePatternShape(shape),
+        };
+        current.count += 1;
+        current.sourceRows.push(sourceRow);
+        if (current.examples.length < 3) {
+          const firstPair = pairs[0];
+          current.examples.push({
+            sourceRow,
+            source,
+            pairs: pairs.slice(0, 3).map((pair) => ({
+              mpn: pair.mpn,
+              manufacturer: pair.manufacturer,
+              discarded: getDiscardedPackedText(source, pair),
+            })),
+            discarded: getDiscardedPackedText(source, firstPair),
+          });
+        }
+        patternMap.set(shape, current);
+      });
+
+      const patterns = [...patternMap.values()]
+        .sort((a, b) => b.count - a.count || a.shape.localeCompare(b.shape));
+      if (!patterns.length && !unmatched.count) return null;
+
+      const matchingRows = patterns.reduce((total, pattern) => total + pattern.count, 0);
+
+      return {
+        id,
+        title,
+        description,
+        sourceHeader,
+        patterns,
+        unmatched,
+        matchingRows,
+        patternCount: patterns.length,
+      };
+    };
+
+    const primarySourceHeader = roles.mpn || roles.manufacturer;
+    const readsCombinedPrimary = Boolean(
+      primarySourceHeader &&
       roles.mpn &&
       roles.manufacturer &&
       roles.mpn === roles.manufacturer &&
       config.structure === 'same_cell'
     );
-    if (!readsCombinedField) return null;
 
-    const patternMap = new Map();
+    const sections = [];
+    if (readsCombinedPrimary) {
+      const primarySection = buildSourceSection({
+        id: 'primary',
+        title: 'Primary MPN/MFR source',
+        sourceHeader: primarySourceHeader,
+        description: 'Values from the selected primary MPN/MFR column.',
+        includeUnmatched: true,
+      });
+      if (primarySection?.patterns?.length) sections.push(primarySection);
+    }
 
-    dataRows.forEach((row) => {
-      const source = getCell(row, sourceHeader);
-      const pairs = parsePackedMpnManufacturerPairs(source, config)
-        .filter((pair) => pair?.mpn && pair?.manufacturer);
-      if (!pairs.length) return;
+    if (config.alternateLayout === 'following_rows' && config.followingRowAlternateColumn) {
+      const alternateRows = dataRows.filter((row) => {
+        const alternateText = getCell(row, config.followingRowAlternateColumn);
+        if (!alternateText) return false;
+        return parsePackedMpnManufacturerPairs(alternateText, config)
+          .some((pair) => pair?.mpn && pair?.manufacturer);
+      });
+      const followingSection = buildSourceSection({
+        id: 'following-row-alternates',
+        title: 'Following-row alternate source',
+        sourceHeader: config.followingRowAlternateColumn,
+        rows: alternateRows,
+        description: 'Alternate values found in following rows and attached to the nearest previous primary row.',
+        includeUnmatched: false,
+      });
+      if (followingSection?.patterns?.length) sections.push(followingSection);
+    }
 
-      const shape = buildParsedPatternShape(source, pairs);
-      if (!shape) return;
-
-      const current = patternMap.get(shape) || {
-        shape,
-        count: 0,
-        examples: [],
-        rules: describePatternShape(shape),
-      };
-      current.count += 1;
-      if (current.examples.length < 3) {
-        const firstPair = pairs[0];
-        current.examples.push({
-          sourceRow: row?.__sourceRow || '',
-          source,
-          pairs: pairs.slice(0, 3).map((pair) => ({
-            mpn: pair.mpn,
-            manufacturer: pair.manufacturer,
-            discarded: getDiscardedPackedText(source, pair),
-          })),
-          discarded: getDiscardedPackedText(source, firstPair),
+    if (config.alternateLayout === 'separate_columns') {
+      const groups = cleanAlternateColumnGroups(config.alternateColumnGroups || [], headers);
+      groups.forEach((group, index) => {
+        const section = buildSourceSection({
+          id: `alternate-column-${index + 1}`,
+          title: `Alternate column group ${index + 1}`,
+          sourceHeader: group.mpn,
+          description: group.mfr
+            ? `Alternate MPN values from ${group.mpn}; manufacturer values are paired from ${group.mfr}.`
+            : `Alternate MPN/MFR values from ${group.mpn}.`,
+          includeUnmatched: true,
         });
-      }
-      patternMap.set(shape, current);
+        if (section?.patterns?.length) sections.push(section);
+      });
+    }
+
+    if (!sections.length) return null;
+
+    const orderedSections = [...sections].sort((a, b) => {
+      if (a.id === 'primary') return 1;
+      if (b.id === 'primary') return -1;
+      return 0;
     });
-
-    const patterns = [...patternMap.values()]
-      .sort((a, b) => b.count - a.count || a.shape.localeCompare(b.shape));
-
-    if (!patterns.length) return null;
+    const patternCount = orderedSections.reduce((total, section) => total + section.patterns.length, 0);
+    const matchingRows = orderedSections.reduce((total, section) => total + (section.matchingRows || 0), 0);
 
     return {
-      sourceHeader,
-      patterns,
+      sourceHeader: primarySourceHeader || orderedSections[0]?.sourceHeader || '',
+      sections: orderedSections,
+      matchingRows,
       rules: [
-        `Read ${sourceHeader} as one combined field.`,
-        `Detected ${patterns.length} distinct parsing pattern${patterns.length === 1 ? '' : 's'} from the parsed values.`,
+        `Detected ${patternCount} distinct parsing pattern${patternCount === 1 ? '' : 's'} across ${orderedSections.length} configured source${orderedSections.length === 1 ? '' : 's'}.`,
+        `Matched ${matchingRows} source value${matchingRows === 1 ? '' : 's'} that can produce clean MPN/MFR output.`,
         'Apply the matching pattern per row, then send clean MPN/MFR values into normalization.',
       ],
     };
-  }, [config, dataRows, roles.manufacturer, roles.mpn]);
+  }, [config, dataRows, headerRowIndex, headers, roles.manufacturer, roles.mpn]);
 
   const showManufacturerInheritanceOption = useMemo(() => (
     !String(config.structure || '').startsWith('mpn_only') &&
@@ -5315,6 +5535,7 @@ const BomNormalizer = () => {
     setConfigureParserPreparing(false);
     setConfigureParserInitialColumn('');
     setConfigureParserTitle('Split into Columns');
+    setConfigureParserScope(null);
     setCombineItems([baseItem]);
     setMergeSources([]);
     setMergePreview(null);
@@ -6031,7 +6252,7 @@ const BomNormalizer = () => {
     await runNormalization();
   }, [detectedParsingLogic, runNormalization]);
 
-  const handleOpenConfigureSplitColumns = useCallback(async ({ title = 'Split into Columns', initialColumn = '' } = {}) => {
+  const handleOpenConfigureSplitColumns = useCallback(async ({ title = 'Split into Columns', initialColumn = '', scope = null } = {}) => {
     if (!headers.length || !dataRows.length) {
       setError('No source rows are available for Split into Columns.');
       return;
@@ -6041,8 +6262,16 @@ const BomNormalizer = () => {
     setError('');
     setConfigureParserTitle(title);
     setConfigureParserInitialColumn(initialColumn && headers.includes(initialColumn) ? initialColumn : '');
+    setConfigureParserScope(scope);
     try {
-      const rows = dataRows.map((row) => {
+      const scopedRows = scope?.mode === 'pattern' && Array.isArray(scope.sourceRows) && scope.sourceRows.length
+        ? dataRows.filter((row) => scope.sourceRows.includes(row?.__sourceRow))
+        : dataRows;
+      if (!scopedRows.length) {
+        throw new Error('No rows matched this detected pattern.');
+      }
+
+      const rows = scopedRows.map((row) => {
         const cleanRow = {};
         headers.forEach((header) => {
           cleanRow[header] = row?.[header] ?? '';
@@ -6063,6 +6292,7 @@ const BomNormalizer = () => {
       setConfigureSplitColsOpen(true);
     } catch (err) {
       setError(err.response?.data?.error || err.message || 'Could not prepare Split into Columns.');
+      setConfigureParserScope(null);
     } finally {
       setConfigureParserPreparing(false);
     }
@@ -6085,12 +6315,23 @@ const BomNormalizer = () => {
     });
 
     const sourceRows = sourceDataRows.length ? sourceDataRows : dataRows;
+    const scopedSourceRows = configureParserScope?.mode === 'pattern' && Array.isArray(configureParserScope.sourceRows)
+      ? configureParserScope.sourceRows
+      : null;
+    const scopedDataBySourceRow = scopedSourceRows
+      ? new Map(scopedSourceRows.map((sourceRow, scopedIndex) => [sourceRow, parserData[scopedIndex] || []]))
+      : null;
     const nextRows = sourceRows.map((source, index) => {
-      const parserRow = parserData[index] || [];
       const nextRow = {
         ...source,
         __sourceRow: source.__sourceRow || index + headerRowIndex + 2,
       };
+      const parserRow = scopedDataBySourceRow
+        ? scopedDataBySourceRow.get(nextRow.__sourceRow)
+        : (parserData[index] || []);
+      if (scopedDataBySourceRow && !scopedDataBySourceRow.has(nextRow.__sourceRow)) {
+        return nextRow;
+      }
       parserHeaderMap.forEach((header, columnIndex) => {
         nextRow[header] = Array.isArray(parserRow)
           ? (parserRow[columnIndex] ?? '')
@@ -6109,9 +6350,13 @@ const BomNormalizer = () => {
     setConfigureParserSessionId('');
     setConfigureParserInitialColumn('');
     setConfigureParserTitle('Split into Columns');
+    setConfigureParserScope(null);
     setParserTouched(true);
-    setSuccessMessage(`Structured split applied. Added ${result.new_headers_count || 0} columns.`);
-  }, [dataRows, headerRowIndex, headers, sourceDataRows]);
+    const scopedCount = scopedSourceRows?.length || 0;
+    setSuccessMessage(scopedCount
+      ? `Structured split applied to ${scopedCount} row${scopedCount === 1 ? '' : 's'} in the selected pattern.`
+      : `Structured split applied. Added ${result.new_headers_count || 0} columns.`);
+  }, [configureParserScope, dataRows, headerRowIndex, headers, sourceDataRows]);
 
   const handleOpenFactwiseDialog = useCallback(() => {
     setFactwiseConfig((prev) => ({
@@ -6236,6 +6481,7 @@ const BomNormalizer = () => {
     setConfigureParserPreparing(false);
     setConfigureParserInitialColumn('');
     setConfigureParserTitle('Split into Columns');
+    setConfigureParserScope(null);
     setCombineItems([]);
     setCombineBusy(false);
     setCombineError('');
@@ -6478,16 +6724,24 @@ const BomNormalizer = () => {
     <Box
       sx={{
         minHeight: '100vh',
+        position: 'relative',
+        isolation: 'isolate',
+        overflow: 'hidden',
         bgcolor: normalizerTheme.page,
         color: normalizerTheme.text,
         '& .MuiPaper-root, & .MuiCard-root': {
-          bgcolor: `${normalizerTheme.paper} !important`,
+          background: `${normalizerTheme.panelGradient} !important`,
           color: `${normalizerTheme.text} !important`,
           borderColor: `${normalizerTheme.border} !important`,
+          borderRadius: '8px',
+          boxShadow: isDarkMode
+            ? '0 18px 48px -34px rgba(0, 0, 0, 0.9), inset 0 1px 0 rgba(255, 255, 255, 0.04)'
+            : '0 18px 44px -34px rgba(15, 23, 42, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.84)',
         },
         '& .MuiTableContainer-root': {
           bgcolor: `${normalizerTheme.table} !important`,
           borderColor: `${normalizerTheme.border} !important`,
+          borderRadius: '8px',
         },
         '& .MuiTableCell-root': {
           color: `${normalizerTheme.text} !important`,
@@ -6517,6 +6771,8 @@ const BomNormalizer = () => {
         },
         '& .MuiInputBase-root': {
           color: normalizerTheme.text,
+          borderRadius: '8px',
+          backgroundColor: isDarkMode ? 'rgba(15, 23, 42, 0.42)' : 'rgba(255, 255, 255, 0.8)',
         },
         '& .MuiInputLabel-root, & .MuiFormHelperText-root, & .MuiStepLabel-label': {
           color: `${normalizerTheme.muted} !important`,
@@ -6524,9 +6780,69 @@ const BomNormalizer = () => {
         '& .MuiOutlinedInput-notchedOutline': {
           borderColor: `${normalizerTheme.borderStrong} !important`,
         },
+        '& .MuiButton-root': {
+          borderRadius: '999px',
+          minHeight: 34,
+          px: 1.8,
+          fontSize: 12,
+          fontWeight: 800,
+          textTransform: 'none',
+          transition: 'transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease',
+        },
+        '& .MuiButton-root:hover': {
+          transform: 'translateY(-1px)',
+        },
+        '& .MuiButton-contained': {
+          background: 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%) !important',
+          boxShadow: '0 12px 24px -14px rgba(37, 99, 235, 0.82), inset 0 1px 0 rgba(255, 255, 255, 0.28)',
+        },
+        '& .MuiButton-contained:hover': {
+          background: 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%) !important',
+          boxShadow: '0 16px 30px -16px rgba(37, 99, 235, 0.95), inset 0 1px 0 rgba(255, 255, 255, 0.38)',
+        },
+        '& .MuiButton-outlined': {
+          color: `${isDarkMode ? '#dbeafe' : '#1d4ed8'} !important`,
+          borderColor: `${isDarkMode ? 'rgba(96, 165, 250, 0.32)' : 'rgba(37, 99, 235, 0.32)'} !important`,
+          background: `${isDarkMode ? 'rgba(15, 23, 42, 0.52)' : 'rgba(255, 255, 255, 0.82)'} !important`,
+        },
+        '& .MuiButton-outlined:hover': {
+          borderColor: `${isDarkMode ? 'rgba(96, 165, 250, 0.7)' : 'rgba(37, 99, 235, 0.72)'} !important`,
+          background: `${isDarkMode ? 'rgba(37, 99, 235, 0.14)' : 'rgba(239, 246, 255, 0.96)'} !important`,
+          boxShadow: isDarkMode ? '0 12px 26px -18px rgba(37, 99, 235, 0.9)' : '0 12px 24px -18px rgba(37, 99, 235, 0.42)',
+        },
+        '& .MuiButton-root.Mui-disabled': {
+          transform: 'none',
+          opacity: 0.56,
+          boxShadow: 'none',
+        },
+        '& .MuiChip-root': {
+          borderRadius: '999px',
+          fontWeight: 800,
+        },
       }}
     >
-      <Box sx={{ px: { xs: 2, lg: 4 }, py: 2.5, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.header }}>
+      <Box
+        sx={{
+          pointerEvents: 'none',
+          position: 'fixed',
+          width: '62vw',
+          height: '62vw',
+          minWidth: 520,
+          minHeight: 520,
+          left: `${mousePos.x}%`,
+          top: `${mousePos.y}%`,
+          transform: 'translate(-50%, -50%)',
+          borderRadius: '50%',
+          filter: 'blur(90px)',
+          opacity: isDarkMode ? 0.26 : 0.18,
+          background: 'radial-gradient(circle, var(--color-brand, #2383e2) 0%, transparent 70%)',
+          transition: 'left 0.7s cubic-bezier(0.16, 1, 0.3, 1), top 0.7s cubic-bezier(0.16, 1, 0.3, 1)',
+          zIndex: 0,
+        }}
+      />
+      <Box className="auth-grid-pattern" sx={{ position: 'fixed', inset: 0, pointerEvents: 'none', opacity: isDarkMode ? 0.36 : 0.28, zIndex: 0 }} />
+
+      <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, py: 2.5, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.header, backdropFilter: 'blur(18px) saturate(170%)' }}>
         <Stack direction={{ xs: 'column', md: 'row' }} alignItems={{ xs: 'flex-start', md: 'center' }} justifyContent="space-between" gap={2}>
           <Box>
             <Typography sx={{ fontSize: 24, fontWeight: 800, color: normalizerTheme.text }}>BOM Normalizer</Typography>
@@ -6537,7 +6853,7 @@ const BomNormalizer = () => {
         </Stack>
       </Box>
 
-      <Box sx={{ px: { xs: 2, lg: 4 }, py: 3, bgcolor: normalizerTheme.page }}>
+      <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, py: 3 }}>
         <Stepper activeStep={displayedStep} alternativeLabel sx={{ mb: 3 }}>
           {['Upload', 'Source', 'Configure', 'Results'].map((label) => (
             <Step key={label}>
@@ -7056,7 +7372,7 @@ const BomNormalizer = () => {
                 <Box sx={{ mt: 2 }}>
                   <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1} flexWrap="wrap">
                     <Typography sx={{ fontWeight: 800 }}>Source preview</Typography>
-                    <Button size="small" variant="outlined" onClick={() => setSourceGridOpen(true)} disabled={!sourceDataRows.length}>
+                    <Button size="small" variant="outlined" startIcon={<VisibilityIcon />} onClick={() => setSourceGridOpen(true)} disabled={!sourceDataRows.length}>
                       View all rows
                     </Button>
                   </Stack>
@@ -7087,6 +7403,7 @@ const BomNormalizer = () => {
                     <Button
                       size="small"
                       variant="outlined"
+                      startIcon={<VisibilityIcon />}
                       onClick={() => setSourceGridOpen(true)}
                       disabled={!sourceDataRows.length}
                     >
@@ -7441,6 +7758,7 @@ const BomNormalizer = () => {
                     <Button
                       size="small"
                       variant="outlined"
+                      startIcon={<TuneIcon />}
                       disabled={!normalizedRows.length}
                       onClick={(event) => setToolsMenuAnchor(event.currentTarget)}
                     >
@@ -8492,65 +8810,135 @@ const BomNormalizer = () => {
             <Typography sx={{ fontSize: 13, fontWeight: 850, color: normalizerTheme.text }}>
               Detected patterns
             </Typography>
+            {(detectedParsingLogic?.sections || []).length > 1 && (
+              <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} sx={{ mt: 1 }}>
+                {(detectedParsingLogic?.sections || []).map((section) => (
+                  <Paper
+                    key={`${section.id}-summary`}
+                    elevation={0}
+                    sx={{
+                      flex: 1,
+                      p: 1.25,
+                      border: `1px solid ${normalizerTheme.border}`,
+                      bgcolor: normalizerTheme.paperSoft,
+                    }}
+                  >
+                    <Typography sx={{ fontSize: 12, fontWeight: 850, color: normalizerTheme.text }}>
+                      {section.title}
+                    </Typography>
+                    <Typography sx={{ mt: 0.35, fontSize: 12, color: normalizerTheme.muted }}>
+                      {section.sourceHeader}: {section.matchingRows || 0} matching value{section.matchingRows === 1 ? '' : 's'} across {section.patternCount || 0} pattern{section.patternCount === 1 ? '' : 's'}
+                    </Typography>
+                  </Paper>
+                ))}
+              </Stack>
+            )}
             <Stack gap={1} sx={{ mt: 1 }}>
-              {(detectedParsingLogic?.patterns || []).map((pattern) => (
+              {(detectedParsingLogic?.sections || []).map((section) => (
                 <Paper
-                  key={pattern.shape}
+                  key={section.id}
                   elevation={0}
                   sx={{ p: 1.5, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}
                 >
-                  <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1}>
-                    <Box>
-                      <Typography sx={{ fontSize: 13, fontWeight: 850, color: normalizerTheme.text }}>
-                        {pattern.shape}
-                      </Typography>
-                      <Typography sx={{ mt: 0.4, fontSize: 12, color: normalizerTheme.muted }}>
-                        {pattern.count} matching row{pattern.count === 1 ? '' : 's'} in {detectedParsingLogic?.sourceHeader}
-                      </Typography>
-                    </Box>
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      disabled={configureParserPreparing}
-                      onClick={() => {
-                        setParsingLogicOpen(false);
-                        handleOpenConfigureSplitColumns({
-                          title: 'Parse Fields',
-                          initialColumn: detectedParsingLogic?.sourceHeader || '',
-                        });
-                      }}
-                    >
-                      Edit Parsing
-                    </Button>
-                  </Stack>
-                  <Stack gap={0.5} sx={{ mt: 1 }}>
-                    {(pattern.rules || []).map((rule) => (
-                      <Typography key={`${pattern.shape}-${rule}`} sx={{ fontSize: 12, color: normalizerTheme.muted }}>
-                        {rule}
-                      </Typography>
-                    ))}
-                  </Stack>
+                  <Typography sx={{ fontSize: 14, fontWeight: 850, color: normalizerTheme.text }}>
+                    {section.title}
+                  </Typography>
+                  <Typography sx={{ mt: 0.4, fontSize: 12, color: normalizerTheme.muted }}>
+                    {section.description || `Source column: ${section.sourceHeader}`}
+                  </Typography>
+                  <Typography sx={{ mt: 0.4, fontSize: 12, color: normalizerTheme.muted }}>
+                    Source column: {section.sourceHeader} - {section.matchingRows || 0} matching value{section.matchingRows === 1 ? '' : 's'} across {section.patternCount || 0} pattern{section.patternCount === 1 ? '' : 's'}
+                  </Typography>
                   <Stack gap={1} sx={{ mt: 1.25 }}>
-                    {(pattern.examples || []).map((example, index) => (
-                      <Box key={`${pattern.shape}-${example.sourceRow || index}`} sx={{ pl: 1, borderLeft: `2px solid ${normalizerTheme.borderStrong}` }}>
-                        <Typography sx={{ fontSize: 12, color: normalizerTheme.muted }}>
-                          {example.sourceRow ? `Source row ${example.sourceRow}` : `Example ${index + 1}`}
-                        </Typography>
-                        <Typography sx={{ fontSize: 13, fontWeight: 700, color: normalizerTheme.text }}>
-                          {example.source}
-                        </Typography>
-                        <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 0.75 }}>
-                          {(example.pairs || []).map((pair, pairIndex) => (
-                            <React.Fragment key={`${example.sourceRow || index}-${pairIndex}-${pair.mpn}-${pair.manufacturer}`}>
-                              <Chip size="small" label={`MPN -> ${pair.mpn}`} />
-                              <Chip size="small" label={`MFR -> ${pair.manufacturer}`} />
-                              {pair.discarded && <Chip size="small" variant="outlined" label={`Discard -> ${pair.discarded}`} />}
-                            </React.Fragment>
+                    {(section.patterns || []).map((pattern) => (
+                      <Paper
+                        key={`${section.id}-${pattern.shape}`}
+                        elevation={0}
+                        sx={{ p: 1.25, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}
+                      >
+                        <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1}>
+                          <Box>
+                            <Typography sx={{ fontSize: 13, fontWeight: 850, color: normalizerTheme.text }}>
+                              {pattern.shape}
+                            </Typography>
+                            <Typography sx={{ mt: 0.4, fontSize: 12, color: normalizerTheme.muted }}>
+                              {pattern.count} matching row{pattern.count === 1 ? '' : 's'} in {section.sourceHeader}
+                            </Typography>
+                          </Box>
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            disabled={configureParserPreparing}
+                            onClick={() => {
+                              setParsingLogicOpen(false);
+                              handleOpenConfigureSplitColumns({
+                                title: 'Parse Fields',
+                                initialColumn: section.sourceHeader || '',
+                                scope: {
+                                  mode: 'pattern',
+                                  sourceHeader: section.sourceHeader || '',
+                                  patternShape: pattern.shape,
+                                  sourceRows: pattern.sourceRows || [],
+                                },
+                              });
+                            }}
+                          >
+                            Edit Parsing
+                          </Button>
+                        </Stack>
+                        <Stack gap={0.5} sx={{ mt: 1 }}>
+                          {(pattern.rules || []).map((rule) => (
+                            <Typography key={`${section.id}-${pattern.shape}-${rule}`} sx={{ fontSize: 12, color: normalizerTheme.muted }}>
+                              {rule}
+                            </Typography>
                           ))}
                         </Stack>
-                      </Box>
+                        <Stack gap={1} sx={{ mt: 1.25 }}>
+                          {(pattern.examples || []).map((example, index) => (
+                            <Box key={`${section.id}-${pattern.shape}-${example.sourceRow || index}`} sx={{ pl: 1, borderLeft: `2px solid ${normalizerTheme.borderStrong}` }}>
+                              <Typography sx={{ fontSize: 12, color: normalizerTheme.muted }}>
+                                {example.sourceRow ? `Source row ${example.sourceRow}` : `Example ${index + 1}`}
+                              </Typography>
+                              <Typography sx={{ fontSize: 13, fontWeight: 700, color: normalizerTheme.text }}>
+                                {example.source}
+                              </Typography>
+                              <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 0.75 }}>
+                                {(example.pairs || []).map((pair, pairIndex) => (
+                                  <React.Fragment key={`${section.id}-${example.sourceRow || index}-${pairIndex}-${pair.mpn}-${pair.manufacturer}`}>
+                                    <Chip size="small" label={`MPN -> ${pair.mpn}`} />
+                                    <Chip size="small" label={`MFR -> ${pair.manufacturer}`} />
+                                    {pair.discarded && <Chip size="small" variant="outlined" label={`Discard -> ${pair.discarded}`} />}
+                                  </React.Fragment>
+                                ))}
+                              </Stack>
+                            </Box>
+                          ))}
+                        </Stack>
+                      </Paper>
                     ))}
                   </Stack>
+                  {(section.unmatched?.count || 0) > 0 && (
+                    <Box sx={{ mt: 1.5 }}>
+                      <Typography sx={{ fontSize: 13, fontWeight: 850, color: normalizerTheme.text }}>
+                        Values not matched to combined MPN/MFR patterns
+                      </Typography>
+                      <Typography sx={{ mt: 0.5, fontSize: 12, color: normalizerTheme.muted }}>
+                        {section.unmatched.count} non-empty value{section.unmatched.count === 1 ? '' : 's'} did not match this source's combined-field rules.
+                      </Typography>
+                      <Stack gap={0.75} sx={{ mt: 1 }}>
+                        {(section.unmatched.examples || []).map((example, index) => (
+                          <Box key={`${section.id}-unmatched-${example.sourceRow || index}-${example.source}`} sx={{ pl: 1, borderLeft: `2px solid ${normalizerTheme.borderStrong}` }}>
+                            <Typography sx={{ fontSize: 12, color: normalizerTheme.muted }}>
+                              {example.sourceRow ? `Source row ${example.sourceRow}` : `Example ${index + 1}`}
+                            </Typography>
+                            <Typography sx={{ fontSize: 13, fontWeight: 700, color: normalizerTheme.text }}>
+                              {example.source}
+                            </Typography>
+                          </Box>
+                        ))}
+                      </Stack>
+                    </Box>
+                  )}
                 </Paper>
               ))}
             </Stack>
@@ -8626,6 +9014,7 @@ const BomNormalizer = () => {
           setConfigureParserSessionId('');
           setConfigureParserInitialColumn('');
           setConfigureParserTitle('Split into Columns');
+          setConfigureParserScope(null);
         }}
         maxWidth="md"
         fullWidth
@@ -8653,6 +9042,7 @@ const BomNormalizer = () => {
               setConfigureParserSessionId('');
               setConfigureParserInitialColumn('');
               setConfigureParserTitle('Split into Columns');
+              setConfigureParserScope(null);
             }}
           >
             Cancel
