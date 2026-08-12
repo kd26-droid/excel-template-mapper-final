@@ -86,6 +86,49 @@ const ITEM_TYPE_OPTIONS = ['Raw material', 'Finished good'];
 const MEASUREMENT_UNIT_OPTIONS = ['Nos', 'EA', 'Unit', 'PCS', 'KG', 'M', 'L'];
 const CUSTOM_MEASUREMENT_UNIT_VALUE = '__custom_measurement_unit__';
 
+const cleanText = (value) => String(value ?? '').trim();
+
+const serverSettingsToItemDirectoryDefaults = (settings, currentDefaults = {}) => {
+  const rule = settings?.item_code_rule || {};
+  return {
+    ...currentDefaults,
+    procurementEntityName: cleanText(settings?.entity_name) || currentDefaults.procurementEntityName || '',
+    itemType: cleanText(settings?.item_type),
+    procurementItem: settings?.procurement_item === null || settings?.procurement_item === undefined
+      ? ''
+      : (settings.procurement_item ? 'TRUE' : 'FALSE'),
+    salesItem: settings?.sales_item === null || settings?.sales_item === undefined
+      ? ''
+      : (settings.sales_item ? 'TRUE' : 'FALSE'),
+    measurementUnit: cleanText(settings?.measurement_unit),
+    itemCodePrefix: cleanText(rule.prefix),
+    itemCodeBlankStrategy: rule.prefix || rule.value ? 'prefix_sequence' : (currentDefaults.itemCodeBlankStrategy || 'prefix_sequence'),
+    itemCodeDuplicateStrategy: currentDefaults.itemCodeDuplicateStrategy || 'prefix_sequence',
+    itemCodeSeparator: currentDefaults.itemCodeSeparator ?? '-',
+    itemCodeStart: String(rule.start ?? currentDefaults.itemCodeStart ?? '1'),
+    itemCodePadding: String(rule.padding ?? currentDefaults.itemCodePadding ?? '3'),
+  };
+};
+
+const itemDirectoryDefaultsToServerSettings = (defaults) => {
+  const prefix = cleanText(defaults.itemCodePrefix);
+  return {
+    item_type: cleanText(defaults.itemType),
+    procurement_item: cleanText(defaults.procurementItem) || null,
+    sales_item: cleanText(defaults.salesItem) || null,
+    measurement_unit: cleanText(defaults.measurementUnit),
+    item_code_rule: prefix
+      ? {
+        mode: 'prefix_sequence',
+        prefix,
+        start: Math.max(1, Number.parseInt(defaults.itemCodeStart || '1', 10) || 1),
+        padding: Math.max(0, Number.parseInt(defaults.itemCodePadding || '3', 10) || 0),
+        increment: true,
+      }
+      : {},
+  };
+};
+
 const emptyProviderStatus = {
   digikey: { configured: false, has_credentials: false, masked: {}, public: {}, last_test_message: '' },
   mouser: { configured: false, has_credentials: false, masked: {}, public: {}, last_test_message: '' },
@@ -165,7 +208,7 @@ const Settings = () => {
   // When embedded inside Factwise, distributor credentials are managed in
   // Factwise Admin and silently synced into this app's own store. Hide the
   // "API Providers" panel — the rest of Settings still works as normal.
-  const { isEmbedded: isFactwiseEmbedded } = useFactwise();
+  const { isEmbedded: isFactwiseEmbedded, entityId: factwiseEntityId, entityName: factwiseEntityName } = useFactwise();
 
   const readyCount = useMemo(
     () => columnMappings.filter(mapping => normalizeProviders(mapping.providers || mapping.provider).every(provider => Boolean(providerStatus[provider]?.configured))).length,
@@ -176,6 +219,43 @@ const Settings = () => {
     ['procurementEntityName', 'itemType', 'procurementItem', 'salesItem', 'itemCodePrefix', 'measurementUnit']
       .some(key => String(itemDirectoryDefaults[key] || '').trim())
   ), [itemDirectoryDefaults]);
+
+  useEffect(() => {
+    const cleanEntityName = String(factwiseEntityName || '').trim();
+    if (!cleanEntityName) return;
+    let cancelled = false;
+    setItemDirectoryDefaults(prev => {
+      if (prev.procurementEntityName === cleanEntityName) return prev;
+      const next = { ...prev, procurementEntityName: cleanEntityName };
+      writeItemDirectoryDefaults(next);
+      return next;
+    });
+    const loadEditorDefaults = async () => {
+      try {
+        const response = await api.getEditorDefaultSettings(cleanEntityName);
+        if (cancelled || !response.data?.success) return;
+        const existingDefaults = readItemDirectoryDefaults();
+        const next = response.data.settings?.updated_at
+          ? serverSettingsToItemDirectoryDefaults(response.data.settings, existingDefaults)
+          : { ...existingDefaults, procurementEntityName: cleanEntityName };
+        setItemDirectoryDefaults(next);
+        setMeasurementUnitCustomMode(Boolean(next.measurementUnit && !MEASUREMENT_UNIT_OPTIONS.includes(next.measurementUnit)));
+        writeItemDirectoryDefaults(next);
+      } catch (error) {
+        if (!cancelled) {
+          setToast({
+            open: true,
+            severity: 'warning',
+            message: error.response?.data?.error || 'Could not load saved Item Directory defaults for this entity.',
+          });
+        }
+      }
+    };
+    loadEditorDefaults();
+    return () => {
+      cancelled = true;
+    };
+  }, [factwiseEntityName]);
 
   useEffect(() => {
     const handleMouseMove = (event) => {
@@ -361,6 +441,10 @@ const Settings = () => {
 
   const handleClearItemDirectoryDefaults = () => {
     const cleared = Object.fromEntries(ITEM_DIRECTORY_DEFAULTS.map(item => [item.key, '']));
+    const cleanEntityName = String(factwiseEntityName || '').trim();
+    if (cleanEntityName) {
+      cleared.procurementEntityName = cleanEntityName;
+    }
     setItemDirectoryDefaults(cleared);
     setMeasurementUnitCustomMode(false);
     writeItemDirectoryDefaults(cleared);
@@ -392,7 +476,25 @@ const Settings = () => {
         window.localStorage.setItem(COLUMN_PROVIDER_MAPPINGS_KEY, JSON.stringify(columnMappings));
         window.localStorage.setItem(VALIDATION_PROVIDERS_KEY, JSON.stringify(selectedProviders));
       }
-      writeItemDirectoryDefaults(itemDirectoryDefaults);
+      const cleanEntityName = String(factwiseEntityName || itemDirectoryDefaults.procurementEntityName || '').trim();
+      if (cleanEntityName) {
+        const response = await api.saveEditorDefaultSettings(
+          cleanEntityName,
+          itemDirectoryDefaultsToServerSettings(itemDirectoryDefaults)
+        );
+        if (response.data?.settings) {
+          const next = serverSettingsToItemDirectoryDefaults(response.data.settings, {
+            ...itemDirectoryDefaults,
+            procurementEntityName: cleanEntityName,
+          });
+          setItemDirectoryDefaults(next);
+          writeItemDirectoryDefaults(next);
+        } else {
+          writeItemDirectoryDefaults({ ...itemDirectoryDefaults, procurementEntityName: cleanEntityName });
+        }
+      } else {
+        writeItemDirectoryDefaults(itemDirectoryDefaults);
+      }
       if (!hasAnyEntered) {
         setToast({ open: true, severity: 'success', message: 'Item Directory defaults saved successfully' });
         return;
@@ -795,9 +897,20 @@ const Settings = () => {
                       size="small"
                       label="Procurement entity name"
                       value={itemDirectoryDefaults.procurementEntityName || ''}
-                      onChange={(event) => handleItemDirectoryDefaultChange('procurementEntityName', event.target.value)}
-                      placeholder="Example: FactWise Manufacturing"
-                      helperText=" "
+                      onChange={(event) => {
+                        if (!factwiseEntityName) {
+                          handleItemDirectoryDefaultChange('procurementEntityName', event.target.value);
+                        }
+                      }}
+                      placeholder={factwiseEntityName ? '' : 'Waiting for FactWise entity name'}
+                      helperText={
+                        factwiseEntityName
+                          ? 'Captured from FactWise.'
+                          : (factwiseEntityId
+                            ? 'Opened with entity ID only; resolving the name from FactWise.'
+                            : 'Open from FactWise to capture the entity name.')
+                      }
+                      InputProps={{ readOnly: Boolean(factwiseEntityName) }}
                       sx={fieldSx}
                     />
                   </Grid>
