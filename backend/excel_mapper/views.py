@@ -5183,28 +5183,6 @@ def _cluster_factwise_columns(headers):
             return 'customer'
         return None
 
-    def spec_sort_key(h):
-        # Keep every value of one specification together. A split spec produces
-        # a base pair plus "_2, _3…" siblings (e.g. Designator, Designator_2…);
-        # a second, different spec is a ".1" family (e.g. Manufacturer). Order by
-        # (family, split index, name<value<uom) so all of one family's pairs are
-        # adjacent instead of interleaved with another spec.
-        n = re.sub(r'\s+', ' ', str(h or '').strip().lower())
-        m_int = re.match(r'^specification_(name|value|uom)_(\d+)$', n)
-        if m_int:
-            kind, fam, split = m_int.group(1), int(m_int.group(2)), 0
-        else:
-            kind = 'name' if 'name' in n else ('uom' if 'uom' in n else 'value')
-            m_split = re.search(r'_(\d+)$', n)
-            split = int(m_split.group(1)) if m_split else 0
-            core = n[:m_split.start()] if m_split else n
-            m_dot = re.search(r'\.(\d+)$', core)
-            fam = int(m_dot.group(1)) if m_dot else 0
-        # Order within a specification family: the single name first, then all of
-        # its values (value #1, #2, #3 …), then UOM. FactWise reads a spec's values
-        # from its name column up to the next name, so one name owns many values.
-        return (fam, {'name': 0, 'value': 1, 'uom': 2}.get(kind, 1), split)
-
     groups = {}
     for i, h in enumerate(headers):
         g = group_of(h)
@@ -5217,32 +5195,60 @@ def _cluster_factwise_columns(headers):
         n = re.sub(r'\s+', ' ', str(h or '').strip().lower())
         return 0 if 'name' in n else (2 if 'uom' in n else 1)
 
-    # Within the spec group, group each specification's pairs together by family.
+    def spec_sort_keys(spec_indices):
+        """Map each spec column index to (family, name<value<uom, split index).
+
+        Which specification a column belongs to is read from its name when the
+        name says so, and from its position when it does not:
+
+          Specification_Name_2   internal slot  -> family ('slot', 2)
+          Specification name.1   pandas rename  -> family ('dup', 1)
+          Specification name     plain label    -> family opens at this column
+
+        Deciding that per column matters because one header list can carry both
+        styles at once — an uploaded template repeats the plain label while the
+        session also holds the internal slots — and a single all-or-nothing flag
+        then read the plain labels as one family, emitting three names, then
+        three values, then three UOMs instead of three name/value/UOM triplets.
+
+        Families are ordered by where they first appear, so the block still reads
+        in sheet order. Within a family: the single name first, then all of its
+        values (value #1, #2, #3 …), then UOM — FactWise reads a spec's values
+        from its name column up to the next name, so one name owns many values.
+        """
+        keys = {}
+        first_seen = {}
+        current = None
+        opened = 0
+        for position, j in enumerate(spec_indices):
+            n = re.sub(r'\s+', ' ', str(headers[j] or '').strip().lower())
+            kind = spec_kind(headers[j])
+            m_slot = re.match(r'^specification_(name|value|uom)_(\d+)$', n)
+            if m_slot:
+                family, split = ('slot', int(m_slot.group(2))), 0
+            else:
+                # "_2, _3…" is a split sibling of the column before it (Designator,
+                # Designator_2…), not a specification of its own.
+                m_split = re.search(r'_(\d+)$', n)
+                split = int(m_split.group(1)) if m_split else 0
+                core = n[:m_split.start()] if m_split else n
+                m_dup = re.search(r'\.(\d+)$', core)
+                if m_dup:
+                    family = ('dup', int(m_dup.group(1)))
+                else:
+                    if current is None or (kind == 0 and split == 0):
+                        opened += 1
+                        current = ('pos', opened)
+                    family = current
+            first_seen.setdefault(family, position)
+            keys[j] = (family, kind, split)
+        return {j: (first_seen[family], kind, split)
+                for j, (family, kind, split) in keys.items()}
+
+    # Within the spec group, group each specification's columns together by family.
     if 'spec' in groups:
-        spec_indices = groups['spec']
-        # A template that repeats the plain label — "Specification name" three
-        # times, as the FactWise sheet does — gives every column the same sort
-        # key, so a stable sort left all the names together, then all the values,
-        # then all the UOMs. Three specifications came out as one malformed one.
-        # With nothing in the name to tell them apart, the family is positional:
-        # a name column opens a specification and the value/UOM after it belong
-        # to that one, which is how the importer reads them anyway.
-        distinguishable = any(
-            re.search(r'(_\d+|\.\d+)$', re.sub(r'\s+', ' ', str(headers[j] or '').strip().lower()))
-            for j in spec_indices
-        )
-        if distinguishable:
-            groups['spec'] = sorted(spec_indices, key=lambda j: spec_sort_key(headers[j]))
-        else:
-            family_of = {}
-            family = 0
-            for j in spec_indices:
-                if spec_kind(headers[j]) == 0 and family_of:
-                    family += 1
-                family_of[j] = family
-            groups['spec'] = sorted(
-                spec_indices, key=lambda j: (family_of[j], spec_kind(headers[j]))
-            )
+        sort_keys = spec_sort_keys(groups['spec'])
+        groups['spec'] = sorted(groups['spec'], key=lambda j: sort_keys[j])
 
     consumed = set()
     order = []
