@@ -1932,7 +1932,37 @@ def upload_files(request):
                         SESSION_STORE[session_id]["bom_structure"] = template_bom_structure
                         logger.info(f"Applied BOM structure from template {use_template_id}")
                     logger.info(f"🔄 Converted {len(applied_mappings)} unique mappings from template application")
-                    
+
+                    # Restore defaults before building the mapped grid. The normal
+                    # processing-template flow applies its mapping during upload,
+                    # whereas the manual template endpoint applies it later. This
+                    # path used to store defaults only after mapping, leaving the
+                    # editor full of blanks even though the template contained the
+                    # values selected in the import-warning dialog.
+                    template_default_values = getattr(template, 'default_values', {}) or {}
+                    if template_default_values:
+                        SESSION_STORE[session_id]["default_values"] = template_default_values
+
+                    template_factwise_rules = getattr(template, 'factwise_rules', []) or []
+                    if template_factwise_rules:
+                        SESSION_STORE[session_id]["factwise_rules"] = template_factwise_rules
+
+                    # Materialize the mapped grid for every upload-time template
+                    # application. Formula-free templates previously deferred this
+                    # until the editor loaded, which also meant saved Fill/Create
+                    # Column rules had no grid on which to run.
+                    mapping_result = apply_column_mappings(
+                        client_file=client_path,
+                        mappings=new_format_mappings,
+                        sheet_name=sheet_name,
+                        header_row=header_row - 1 if header_row > 0 else 0,
+                        session_id=session_id
+                    )
+                    SESSION_STORE[session_id]["mapped_data"] = mapping_result['data']
+                    SESSION_STORE[session_id]["mapped_headers"] = mapping_result['headers']
+                    SESSION_STORE[session_id]["formula_enhanced_data"] = mapping_result['data']
+                    SESSION_STORE[session_id]["enhanced_headers"] = mapping_result['headers']
+
                     # Apply formula rules if they exist (from template or Step 3)
                     template_formula_rules = getattr(template, 'formula_rules', []) or []
                     
@@ -1965,16 +1995,7 @@ def upload_files(request):
                     
                     if combined_formula_rules:
                         SESSION_STORE[session_id]["formula_rules"] = combined_formula_rules
-                        
-                        # Apply formulas to create enhanced data
-                        mapping_result = apply_column_mappings(
-                            client_file=client_path,
-                            mappings=new_format_mappings,
-                            sheet_name=sheet_name,
-                            header_row=header_row - 1 if header_row > 0 else 0,
-                            session_id=session_id
-                        )
-                        
+
                         # Convert to dict format for formula processing
                         dict_rows = []
                         for row_list in mapping_result['data']:
@@ -1998,12 +2019,46 @@ def upload_files(request):
                         SESSION_STORE[session_id]["formula_enhanced_data"] = formula_result['data']
                         SESSION_STORE[session_id]["enhanced_headers"] = formula_result['headers']
                         applied_formulas = True
-                    
+
                     # Apply factwise rules if they exist
-                    template_factwise_rules = getattr(template, 'factwise_rules', []) or []
                     if template_factwise_rules:
-                        SESSION_STORE[session_id]["factwise_rules"] = template_factwise_rules
-                        
+                        # Fill/Create Column rules are what the warning dialog's
+                        # "Use Fill Column" route saves. The upload-time template
+                        # path previously handled only legacy factwise_id rules, so
+                        # these rules were present in the template but never ran.
+                        column_rules = [
+                            rule for rule in template_factwise_rules
+                            if rule.get("type") == "column_value"
+                        ]
+                        if column_rules:
+                            current_data = (
+                                SESSION_STORE[session_id].get("formula_enhanced_data")
+                                or SESSION_STORE[session_id].get("mapped_data")
+                                or []
+                            )
+                            current_headers = list(
+                                SESSION_STORE[session_id].get("enhanced_headers")
+                                or SESSION_STORE[session_id].get("mapped_headers")
+                                or []
+                            )
+                            positional_rows = []
+                            for row in current_data:
+                                if isinstance(row, dict):
+                                    positional_rows.append([row.get(header, '') for header in current_headers])
+                                else:
+                                    positional_rows.append(list(row))
+
+                            for column_rule in column_rules:
+                                current_headers, positional_rows, _changed = apply_column_value_rule(
+                                    current_headers,
+                                    positional_rows,
+                                    column_rule
+                                )
+
+                            SESSION_STORE[session_id]["formula_enhanced_data"] = positional_rows
+                            SESSION_STORE[session_id]["enhanced_headers"] = current_headers
+                            SESSION_STORE[session_id]["current_template_headers"] = current_headers
+
                         # Apply each factwise rule with error handling
                         for rule in template_factwise_rules:
                             try:
@@ -2088,11 +2143,6 @@ def upload_files(request):
                             except Exception as factwise_error:
                                 logger.warning(f"🆔 Failed to apply Factwise ID rule during upload: {factwise_error}")
                                 # Continue with other rules even if this one fails
-                    
-                    # Apply default values if they exist
-                    template_default_values = getattr(template, 'default_values', {}) or {}
-                    if template_default_values:
-                        SESSION_STORE[session_id]["default_values"] = template_default_values
                     
                     # Increment template usage
                     template.increment_usage()
@@ -3617,6 +3667,12 @@ def calculate_data_quality_metrics(data_rows, headers, header_confidence_scores,
         }
 
 
+# Upper bound on rows the data endpoint will return in one response. The editor
+# loads the whole sheet so that search and column filters cover every row, so this
+# has to clear any realistic BOM rather than the old 5000-row page ceiling.
+MAX_DATA_PAGE_SIZE = 200000
+
+
 @api_view(['GET'])
 @never_cache
 def data_view(request):
@@ -3626,9 +3682,12 @@ def data_view(request):
         page = int(request.GET.get('page', 1))
         page_size = int(request.GET.get('page_size', 20))
         
-        # Validate page parameters and set reasonable limits for large datasets
+        # Validate page parameters and set reasonable limits for large datasets.
+        # The editor asks for the whole sheet in one call so that search, column
+        # filters and paging all operate over the full dataset rather than over
+        # whichever page happened to be loaded — hence the high ceiling.
         page = max(1, page)
-        page_size = max(1, min(5000, page_size))  # Allow up to 5000 rows per page
+        page_size = max(1, min(MAX_DATA_PAGE_SIZE, page_size))
         start_idx = (page - 1) * page_size
         end_idx = start_idx + page_size
         

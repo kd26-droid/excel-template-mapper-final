@@ -76,6 +76,8 @@ import {
   AccountTree as AccountTreeIcon,
   Search as SearchIcon,
   FilterList as FilterListIcon,
+  FilterAlt as FilterAltIcon,
+  Clear as ClearIcon,
   KeyboardArrowDown as KeyboardArrowDownIcon,
   MoreVert as MoreVertIcon,
   Build as BuildIcon,
@@ -380,6 +382,15 @@ const getMpnRowStatus = (row, mpnField) => {
   return 'unknown';
 };
 
+// The editor pulls the entire sheet in one request so that search, the column
+// filters and paging all work against every row. Mirrors MAX_DATA_PAGE_SIZE in
+// the backend's data_view, which clamps anything larger.
+const ALL_ROWS_PAGE_SIZE = 200000;
+
+// Header cells are pinned to a fixed height so the column-filter row underneath
+// can stick at a known offset instead of guessing at the header's rendered size.
+const HEADER_ROW_HEIGHT = 44;
+
 const EnhancedDataEditor = () => {
   const { sessionId } = useParams();
   const navigate = useNavigate();
@@ -475,11 +486,14 @@ const EnhancedDataEditor = () => {
 
   // Unknown values state
   const [unknownCellsCount, setUnknownCellsCount] = useState(0);
-  // Pagination state
+  // Pagination state. Paging is client-side over the full dataset, so totalPages
+  // is derived from the filtered row count further down rather than stored.
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(100);
-  const [totalPages, setTotalPages] = useState(1);
   const [pageLoading, setPageLoading] = useState(false);
+  // Per-column filter text, keyed by column field. Empty/absent means no filter.
+  const [columnFilters, setColumnFilters] = useState({});
+  const [showColumnFilters, setShowColumnFilters] = useState(false);
 
   // Formula Builder state
   const [formulaBuilderOpen, setFormulaBuilderOpen] = useState(false);
@@ -1373,23 +1387,25 @@ const EnhancedDataEditor = () => {
     }
   }, [isCellEmpty]);
 
-  // Fetch a specific page from backend (server-side pagination)
+  // Load the whole sheet, then page/search/filter over it in the browser.
+  //
+  // This used to fetch one server page at a time, which quietly broke three
+  // things: search and the row filters only ever saw the loaded page, and the
+  // autosave below posts rowData as the complete dataset — so editing a cell on
+  // page 2 wrote back only those rows and dropped the rest. `targetPage` now
+  // just selects which slice to show once everything is in memory.
   const fetchPageData = useCallback(async (targetPage = page, size = pageSize) => {
     if (!sessionId) return;
     try {
       setPageLoading(true);
-      // Give server-side mapping enough time to finish instead of canceling page loads.
-      const timeoutMs = size >= 5000 ? 180000 : (size > 1000 ? 120000 : 90000);
-      if (size > 1000) {
-        showSnackbar(`Loading ${size} rows, this may take a moment...`, 'info');
-      }
-      
-      const resp = await api.getMappedDataWithSpecs(sessionId, targetPage, size, true, { 
-        force_fresh: true, 
+      const timeoutMs = 180000;
+
+      const resp = await api.getMappedDataWithSpecs(sessionId, 1, ALL_ROWS_PAGE_SIZE, true, {
+        force_fresh: true,
         _fresh: Date.now(),
         timeoutMs
       });
-      
+
       const payload = resp?.data || {};
       const headers = payload.headers || [];
       const displayHeaders = Array.isArray(payload.display_headers) && payload.display_headers.length === headers.length
@@ -1464,13 +1480,24 @@ const EnhancedDataEditor = () => {
       setRowData(rows);
       const nextTotalRows = Number(pg.total_rows ?? payload.total_rows ?? rows.length) || rows.length;
       setTotalRows(nextTotalRows);
-      setTotalPages(Math.max(1, Math.ceil(nextTotalRows / size)));
-      setPage(pg.page || targetPage);
+      // Page count is derived from the filtered row set, not set here — a search
+      // or column filter changes how many pages there are.
+      const lastPage = Math.max(1, Math.ceil((rows.length || 1) / (size || 1)));
+      setPage(Math.min(Math.max(1, targetPage), lastPage));
 
       // Reset virtualization window to the full page
       setVisibleRange({ start: 0, end: rows.length });
 
-      // Recompute unknowns for this page quickly
+      if (nextTotalRows > rows.length) {
+        // The server capped the response. Say so rather than letting search and
+        // the filters look like they cover rows that were never delivered.
+        showSnackbar(
+          `Loaded ${rows.length.toLocaleString()} of ${nextTotalRows.toLocaleString()} rows. Search and filters cover the loaded rows only.`,
+          'warning'
+        );
+      }
+
+      // Recompute unknowns across the dataset
       let unknownCount = 0;
       for (const r of rows) {
         for (const v of Object.values(r)) {
@@ -1479,11 +1506,11 @@ const EnhancedDataEditor = () => {
       }
       setUnknownCellsCount(unknownCount);
     } catch (e) {
-      console.error('Page fetch failed:', e);
+      console.error('Data fetch failed:', e);
       if (e.name === 'AbortError' || e.name === 'CanceledError' || e.code === 'ERR_CANCELED') {
-        showSnackbar(`Loading timed out for ${size} rows. Try a smaller page size.`, 'error');
+        showSnackbar('Loading the sheet timed out. Reload to try again.', 'error');
       } else {
-        showSnackbar(`Failed to load page ${targetPage}: ${e.message}`, 'error');
+        showSnackbar(`Failed to load rows: ${e.message}`, 'error');
       }
     } finally {
       setPageLoading(false);
@@ -1923,20 +1950,33 @@ const EnhancedDataEditor = () => {
           );
           if (!resp.data?.success) throw new Error(resp.data?.error || 'Fill missing values failed');
           changed = true;
-        } else if (action.type === 'delete_rows') {
+        } else if (action.type === 'delete_rows' || action.type === 'delete_rows_conditional') {
           if (!action.column || !action.operator) continue;
+          // New templates store one canonical delete_rows action per value.
+          // Older BOM-validation templates grouped several values under
+          // delete_rows_conditional, so keep replay support for those too.
+          const compareValues = action.type === 'delete_rows_conditional'
+            ? (Array.isArray(action.values) ? action.values : [])
+            : [action.compare ?? ''];
+          if (compareValues.length === 0) continue;
           // Replaying a deletion removes rows rather than overwriting cells, so
           // it is reported rather than applied silently: on a different file the
           // same condition can match a different number of rows, or none.
-          const resp = await api.deleteRowsConditional(
-            sessionId,
-            action.column,
-            action.operator,
-            action.compare || ''
-          );
-          if (!resp.data?.success) throw new Error(resp.data?.error || 'Delete rows failed');
+          let removed = 0;
+          let remaining = null;
+          for (const compare of compareValues) {
+            const resp = await api.deleteRowsConditional(
+              sessionId,
+              action.column,
+              action.operator,
+              compare ?? ''
+            );
+            if (!resp.data?.success) throw new Error(resp.data?.error || 'Delete rows failed');
+            removed += Number(resp.data.removed || 0);
+            remaining = resp.data.remaining;
+          }
           replayNotes.push(
-            `${action.label || 'Delete rows'}: removed ${resp.data.removed || 0}, ${resp.data.remaining} left`
+            `${action.label || 'Delete rows'}: removed ${removed}, ${remaining} left`
           );
           changed = true;
         }
@@ -3225,19 +3265,19 @@ const EnhancedDataEditor = () => {
   );
 
   // The floor for every BOM issue: even when no button can fix it, the user is
-  // told which row to look at. The grid is server-paginated, so reaching a row
-  // means loading its page first.
+  // told which row to look at. Row numbers index the unfiltered sheet, so any
+  // active search or column filter has to come off first or the target row is
+  // not on the page we send them to.
   const jumpToGridRow = useCallback((gridRow) => {
     const target = Number(gridRow);
     if (!target || target < 1) return;
     const targetPage = Math.floor((target - 1) / pageSize) + 1;
     setBomValidationOpen(false);
-    if (targetPage !== page) {
-      setPage(targetPage);
-      fetchPageData(targetPage, pageSize);
-    }
+    setRowSearchTerm('');
+    setColumnFilters({});
+    setPage(targetPage);
     showSnackbar(`Row ${target} is on page ${targetPage}.`, 'info');
-  }, [page, pageSize, fetchPageData, showSnackbar]);
+  }, [pageSize, showSnackbar]);
 
   // The two ways out of a bad-value issue, offered side by side because only the
   // user knows which is right: a row whose quantity is 0 is either a real part
@@ -3287,13 +3327,16 @@ const EnhancedDataEditor = () => {
         if (!resp.data?.success) throw new Error(resp.data?.error || 'Could not delete the rows');
         removed += Number(resp.data?.deleted || resp.data?.removed || 0);
       }
-      recordPostMappingAction({
-        type: 'delete_rows_conditional',
-        label: `Delete rows where ${field} is ${group.values.join(' or ')}`,
+      // Store the same canonical action shape used by Tools > Delete Rows.
+      // One action per value mirrors the one API call per value above and lets
+      // the template runner replay the rule without a second action schema.
+      group.values.forEach(value => recordPostMappingAction({
+        type: 'delete_rows',
+        label: `Delete rows where ${field} equals "${value}"`,
         column: field,
         operator: 'equals',
-        values: group.values,
-      });
+        compare: value,
+      }));
       await fetchDataSynchronized();
       showSnackbar(`Deleted ${removed} row${removed === 1 ? '' : 's'}.`, 'success');
       setBomValidationOpen(false);
@@ -5099,6 +5142,74 @@ const EnhancedDataEditor = () => {
     handleBackToMapping();
   }, [hasUnsavedChanges, dynamicColumnCounts, sessionId, location.state, processingTemplateContext, navigate, handleBackToMapping]);
 
+  // ─── ROW FILTERING, SEARCH AND PAGING ───────────────────────────────────────
+  // All of this runs over rowData, which holds the entire sheet — searching or
+  // filtering only what the current page happened to contain was the old
+  // behaviour and it made both features quietly useless past row 100.
+  const rowSearchQuery = rowSearchTerm.trim().toLowerCase();
+
+  // Only the columns the user actually typed into, lowercased once here rather
+  // than once per row: this re-runs across every row on each keystroke.
+  const activeColumnFilters = useMemo(() => (
+    Object.entries(columnFilters || {})
+      .map(([field, value]) => [field, String(value ?? '').trim().toLowerCase()])
+      .filter(([, value]) => value !== '')
+  ), [columnFilters]);
+
+  // rowIndex stays the index into rowData, not into the filtered list, so cell
+  // edits and autosave keep addressing the right row whatever is filtered away.
+  const filteredRows = useMemo(() => ((rowData || [])
+    .map((row, rowIndex) => ({ row, rowIndex }))
+    .filter(({ row }) => {
+      const wantsInvalid = mpnFilterInvalidOnly || rowFilterMode === 'invalid_mpn';
+      if (!wantsInvalid && !MPN_ROW_FILTER_STATUS[rowFilterMode]) return true;
+      const status = getMpnRowStatus(row, mpnSourceField);
+      if (wantsInvalid) return status === 'invalid';
+      return status === MPN_ROW_FILTER_STATUS[rowFilterMode];
+    })
+    .filter(({ row }) => {
+      if (!rowSearchQuery) return true;
+      return Object.values(row || {}).some(value =>
+        String(value ?? '').toLowerCase().includes(rowSearchQuery)
+      );
+    })
+    .filter(({ row }) => activeColumnFilters.every(([field, needle]) =>
+      String(row?.[field] ?? '').toLowerCase().includes(needle)
+    ))
+  ), [rowData, rowFilterMode, mpnFilterInvalidOnly, mpnSourceField, rowSearchQuery, activeColumnFilters]);
+
+  const activeColumnFilterCount = activeColumnFilters.length;
+  const isFiltering = Boolean(rowSearchQuery) || activeColumnFilterCount > 0
+    || rowFilterMode !== 'all' || mpnFilterInvalidOnly;
+  const filteredRowCount = filteredRows.length;
+  const totalPages = Math.max(1, Math.ceil(filteredRowCount / Math.max(1, pageSize)));
+  const safePage = Math.min(Math.max(1, page), totalPages);
+  const displayedRows = useMemo(() => {
+    const start = (safePage - 1) * pageSize;
+    return filteredRows.slice(start, start + pageSize);
+  }, [filteredRows, safePage, pageSize]);
+
+  // Narrowing the result set can strand the user on a page that no longer
+  // exists; snap back rather than showing an empty grid.
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
+
+  const clearColumnFilters = useCallback(() => {
+    setColumnFilters({});
+    setPage(1);
+  }, []);
+
+  const handleColumnFilterChange = useCallback((field, value) => {
+    setColumnFilters(prev => {
+      const next = { ...prev };
+      if (String(value ?? '').trim() === '') delete next[field];
+      else next[field] = value;
+      return next;
+    });
+    setPage(1);
+  }, []);
+
   // ─── RENDER CONDITIONS ──────────────────────────────────────────────────────
   if (loading) {
     return (
@@ -5395,22 +5506,6 @@ const EnhancedDataEditor = () => {
     border: `1px solid ${tableTone.outerLine}`,
     backgroundColor: tableTone.scroll
   };
-  const rowSearchQuery = rowSearchTerm.trim().toLowerCase();
-  const displayedRows = (rowData || [])
-    .map((row, rowIndex) => ({ row, rowIndex }))
-    .filter(({ row }) => {
-      const wantsInvalid = mpnFilterInvalidOnly || rowFilterMode === 'invalid_mpn';
-      if (!wantsInvalid && !MPN_ROW_FILTER_STATUS[rowFilterMode]) return true;
-      const status = getMpnRowStatus(row, mpnSourceField);
-      if (wantsInvalid) return status === 'invalid';
-      return status === MPN_ROW_FILTER_STATUS[rowFilterMode];
-    })
-    .filter(({ row }) => {
-      if (!rowSearchQuery) return true;
-      return Object.values(row || {}).some(value =>
-        String(value ?? '').toLowerCase().includes(rowSearchQuery)
-      );
-    });
   // The session id is a UUID that means nothing to the user; the row count
   // is the part worth showing.
   const editorSubtitle = `${totalRows.toLocaleString()} rows`;
@@ -6288,10 +6383,6 @@ const EnhancedDataEditor = () => {
                 onClose={() => setToolsMenuAnchor(null)}
                 PaperProps={{ sx: { borderRadius: '8px', mt: 1, minWidth: 220, border: `1px solid ${t.border.default}`, boxShadow: t.shadow.card } }}
               >
-                <MenuItem onClick={() => { setToolsMenuAnchor(null); handleBackToMapping(); }} disabled={syncStatus.inProgress}>
-                  <ListItemIcon><EditNoteIcon sx={{ color: '#2563eb' }} /></ListItemIcon>
-                  <ListItemText>Modify Mappings</ListItemText>
-                </MenuItem>
                 <MenuItem onClick={() => { setToolsMenuAnchor(null); handleOpenCreateColumnDialog(); }} disabled={syncStatus.inProgress}>
                   <ListItemIcon><AddIcon sx={{ color: '#2e7d32' }} /></ListItemIcon>
                   <ListItemText>Fill / Create Column</ListItemText>
@@ -6299,6 +6390,10 @@ const EnhancedDataEditor = () => {
                 <MenuItem onClick={() => openFillMissingDialog()} disabled={syncStatus.inProgress}>
                   <ListItemIcon><EditNoteIcon sx={{ color: '#0284c7' }} /></ListItemIcon>
                   <ListItemText>Fill / replace values</ListItemText>
+                </MenuItem>
+                <MenuItem onClick={() => { setToolsMenuAnchor(null); handleBackToMapping(); }} disabled={syncStatus.inProgress}>
+                  <ListItemIcon><EditNoteIcon sx={{ color: '#2563eb' }} /></ListItemIcon>
+                  <ListItemText>Modify Mappings</ListItemText>
                 </MenuItem>
                 <MenuItem onClick={handleOpenSplitColsDialog} disabled={syncStatus.inProgress || splitColsRunning}>
                   <ListItemIcon>
@@ -6350,15 +6445,15 @@ const EnhancedDataEditor = () => {
                 sx={{
                   ...outlinedActionSx,
                   ml: { xs: 0, md: 'auto' },
-                  borderColor: (rowFilterMode !== 'all' || mpnFilterInvalidOnly) ? t.color.primary : t.border.default,
-                  backgroundColor: (rowFilterMode !== 'all' || mpnFilterInvalidOnly) ? t.state.infoBg : t.surface.controlSoft,
+                  borderColor: (rowFilterMode !== 'all' || mpnFilterInvalidOnly || activeColumnFilterCount > 0) ? t.color.primary : t.border.default,
+                  backgroundColor: (rowFilterMode !== 'all' || mpnFilterInvalidOnly || activeColumnFilterCount > 0) ? t.state.infoBg : t.surface.controlSoft,
                   '&:hover': {
-                    backgroundColor: (rowFilterMode !== 'all' || mpnFilterInvalidOnly) ? t.state.infoBg : t.action.hover,
-                    borderColor: (rowFilterMode !== 'all' || mpnFilterInvalidOnly) ? t.color.primary : t.border.hover
+                    backgroundColor: (rowFilterMode !== 'all' || mpnFilterInvalidOnly || activeColumnFilterCount > 0) ? t.state.infoBg : t.action.hover,
+                    borderColor: (rowFilterMode !== 'all' || mpnFilterInvalidOnly || activeColumnFilterCount > 0) ? t.color.primary : t.border.hover
                   }
                 }}
               >
-                Filter
+                {activeColumnFilterCount > 0 ? `Filter (${activeColumnFilterCount})` : 'Filter'}
               </Button>
               <Menu
                 anchorEl={rowFilterMenuAnchor}
@@ -6366,26 +6461,41 @@ const EnhancedDataEditor = () => {
                 onClose={() => setRowFilterMenuAnchor(null)}
                 PaperProps={{ sx: { borderRadius: '8px', mt: 1, minWidth: 210, border: `1px solid ${t.border.default}`, boxShadow: t.shadow.card } }}
               >
-                <MenuItem onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('all'); setMpnFilterInvalidOnly(false); }}>
+                {/* Column filters sit in a row under the headers; this just shows
+                    or hides that row. */}
+                <MenuItem onClick={() => { setRowFilterMenuAnchor(null); setShowColumnFilters(v => !v); }}>
+                  <ListItemIcon>
+                    <FilterAltIcon sx={{ color: showColumnFilters ? t.color.primary : t.text.secondary }} />
+                  </ListItemIcon>
+                  <ListItemText>{showColumnFilters ? 'Hide column filters' : 'Filter by column'}</ListItemText>
+                </MenuItem>
+                {activeColumnFilterCount > 0 && (
+                  <MenuItem onClick={() => { setRowFilterMenuAnchor(null); clearColumnFilters(); }}>
+                    <ListItemIcon><ClearIcon sx={{ color: t.text.secondary }} /></ListItemIcon>
+                    <ListItemText>{`Clear ${activeColumnFilterCount} column filter${activeColumnFilterCount === 1 ? '' : 's'}`}</ListItemText>
+                  </MenuItem>
+                )}
+                <Divider />
+                <MenuItem onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('all'); setMpnFilterInvalidOnly(false); setPage(1); }}>
                   <ListItemIcon>{rowFilterMode === 'all' && !mpnFilterInvalidOnly ? <CheckIcon sx={{ color: t.color.primary }} /> : null}</ListItemIcon>
                   <ListItemText>All rows</ListItemText>
                 </MenuItem>
                 <MenuItem
-                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('valid_mpn'); setMpnFilterInvalidOnly(false); }}
+                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('valid_mpn'); setMpnFilterInvalidOnly(false); setPage(1); }}
                   disabled={!hasMpnValidationColumns}
                 >
                   <ListItemIcon>{rowFilterMode === 'valid_mpn' ? <CheckIcon sx={{ color: t.color.success }} /> : <VerifiedUserIcon sx={{ color: t.color.success }} />}</ListItemIcon>
                   <ListItemText>Valid MPN rows</ListItemText>
                 </MenuItem>
                 <MenuItem
-                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('invalid_mpn'); setMpnFilterInvalidOnly(false); }}
+                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('invalid_mpn'); setMpnFilterInvalidOnly(false); setPage(1); }}
                   disabled={!hasMpnValidationColumns}
                 >
                   <ListItemIcon>{(rowFilterMode === 'invalid_mpn' || mpnFilterInvalidOnly) ? <CheckIcon sx={{ color: t.color.danger }} /> : <VerifiedUserIcon sx={{ color: t.color.danger }} />}</ListItemIcon>
                   <ListItemText>Invalid MPN rows</ListItemText>
                 </MenuItem>
                 <MenuItem
-                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('unknown'); setMpnFilterInvalidOnly(false); }}
+                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('unknown'); setMpnFilterInvalidOnly(false); setPage(1); }}
                   disabled={!hasMpnValidationColumns}
                 >
                   <ListItemIcon>{rowFilterMode === 'unknown' ? <CheckIcon sx={{ color: t.color.warningText }} /> : <ErrorIcon sx={{ color: t.color.warningText }} />}</ListItemIcon>
@@ -6396,7 +6506,7 @@ const EnhancedDataEditor = () => {
                     has to go source a part number for. It does need to know
                     which column holds the MPN. */}
                 <MenuItem
-                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('missing_mpn'); setMpnFilterInvalidOnly(false); }}
+                  onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('missing_mpn'); setMpnFilterInvalidOnly(false); setPage(1); }}
                   disabled={!mpnSourceField}
                 >
                   <ListItemIcon>{rowFilterMode === 'missing_mpn' ? <CheckIcon sx={{ color: t.text.secondary }} /> : <HelpOutlineIcon sx={{ color: t.text.secondary }} />}</ListItemIcon>
@@ -6405,8 +6515,8 @@ const EnhancedDataEditor = () => {
               </Menu>
               <TextField
                 value={rowSearchTerm}
-                onChange={(e) => setRowSearchTerm(e.target.value)}
-                placeholder="Search rows..."
+                onChange={(e) => { setRowSearchTerm(e.target.value); setPage(1); }}
+                placeholder={`Search all ${totalRows.toLocaleString()} rows...`}
                 size="small"
                 sx={{
                   width: { xs: '100%', sm: 260, lg: 320 },
@@ -6618,7 +6728,7 @@ const EnhancedDataEditor = () => {
                 )}
                 <Divider sx={{ my: 0.5 }} />
                 <MenuItem
-                  onClick={() => { setMpnMenuAnchor(null); setMpnFilterInvalidOnly(v => !v); }}
+                  onClick={() => { setMpnMenuAnchor(null); setMpnFilterInvalidOnly(v => !v); setPage(1); }}
                   disabled={!hasMpnValidationColumns}
                 >
                   <ListItemIcon>{mpnFilterInvalidOnly ? <CheckIcon sx={{ color: '#2e7d32' }} /> : <ErrorIcon sx={{ color: '#f44336' }} />}</ListItemIcon>
@@ -6848,6 +6958,9 @@ const EnhancedDataEditor = () => {
                           top: 0,
                           zIndex: 3,
                           userSelect: 'none',
+                          // Fixed so the filter row below can stick at a known offset.
+                          height: `${HEADER_ROW_HEIGHT}px`,
+                          boxSizing: 'border-box',
                           width: `${columnWidths[col.field] || (col.field === '__row_number__' ? 80 : 180)}px`
                         }}
                         title="Tip: Drag edge to resize. Shift+Drag anywhere to resize. Double‑click to auto‑fit."
@@ -6911,6 +7024,68 @@ const EnhancedDataEditor = () => {
                       </th>
                     ))}
                   </tr>
+                  {/* Per-column filters. Every column gets one; they combine with
+                      each other and with the global search, and all of them run
+                      over the whole sheet rather than the visible page. */}
+                  {showColumnFilters && (
+                    <tr>
+                      {getVisibleColumnDefs().map(col => {
+                        const isRowNumber = col.field === '__row_number__';
+                        const value = columnFilters[col.field] || '';
+                        return (
+                          <th
+                            key={`filter-${col.field}`}
+                            style={{
+                              padding: isRowNumber ? '4px 6px' : '4px 8px',
+                              borderRight: `1px solid ${tableTone.line}`,
+                              borderBottom: `1px solid ${tableTone.outerLine}`,
+                              background: tableTone.header,
+                              position: 'sticky',
+                              top: `${HEADER_ROW_HEIGHT}px`,
+                              zIndex: 3,
+                              boxSizing: 'border-box'
+                            }}
+                          >
+                            {isRowNumber ? (
+                              <Tooltip title="Clear all column filters">
+                                <span>
+                                  <IconButton
+                                    size="small"
+                                    onClick={clearColumnFilters}
+                                    disabled={activeColumnFilterCount === 0}
+                                    sx={{ p: 0.25 }}
+                                  >
+                                    <ClearIcon sx={{ fontSize: 16 }} />
+                                  </IconButton>
+                                </span>
+                              </Tooltip>
+                            ) : (
+                              <input
+                                type="text"
+                                value={value}
+                                onChange={(e) => handleColumnFilterChange(col.field, e.target.value)}
+                                placeholder="Filter..."
+                                aria-label={`Filter ${col.headerName}`}
+                                style={{
+                                  width: '100%',
+                                  boxSizing: 'border-box',
+                                  padding: '4px 8px',
+                                  borderRadius: '6px',
+                                  border: `1px solid ${value ? t.color.primary : tableTone.line}`,
+                                  background: t.surface.controlSoft,
+                                  color: t.text.primary,
+                                  fontSize: '12px',
+                                  fontFamily: 'inherit',
+                                  fontWeight: 400,
+                                  outline: 'none'
+                                }}
+                              />
+                            )}
+                          </th>
+                        );
+                      })}
+                    </tr>
+                  )}
                 </thead>
                 <tbody>
                   {displayedRows
@@ -6983,18 +7158,21 @@ const EnhancedDataEditor = () => {
                 </tbody>
               </table>
             </div>
-            {/* Bottom pagination controls */}
+            {/* Bottom pagination controls. Paging is a slice of the in-memory
+                dataset now, so none of these refetch. */}
             <Box sx={paginationBarSx}>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
                 <Typography variant="body2" color="text.secondary">Rows per page</Typography>
-                <Select size="small" value={pageSize} onChange={(e) => { const v = parseInt(e.target.value, 10); setPage(1); setPageSize(v); fetchPageData(1, v); }}>
+                <Select size="small" value={pageSize} onChange={(e) => { setPage(1); setPageSize(parseInt(e.target.value, 10)); }}>
                   {[50,100,200,500,1000,2000,3000].map(sz => <MenuItem key={sz} value={sz}>{sz}</MenuItem>)}
                 </Select>
                 <Typography variant="body2" color="text.secondary">
-                  Page {page} of {Math.max(1, totalPages)} | Total: {totalRows.toLocaleString()}
+                  Page {safePage} of {totalPages} | {isFiltering
+                    ? `${filteredRowCount.toLocaleString()} of ${totalRows.toLocaleString()} rows match`
+                    : `Total: ${totalRows.toLocaleString()}`}
                 </Typography>
               </Box>
-              <Pagination count={Math.max(1, totalPages)} page={page} onChange={(_, p) => { setPage(p); fetchPageData(p, pageSize); }} color="primary" size="small" shape="rounded" />
+              <Pagination count={totalPages} page={safePage} onChange={(_, p) => setPage(p)} color="primary" size="small" shape="rounded" />
             </Box>
           </Box>
         </Paper>
