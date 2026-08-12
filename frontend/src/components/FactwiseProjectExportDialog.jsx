@@ -64,6 +64,7 @@ function phaseToStepIndex(phase) {
   ) return 1;
   if (
     phase === PHASES.BOM_DONE
+    || phase === PHASES.BOM_SETTLING
     || phase === PHASES.PROJECT_CREATING
     || phase === PHASES.PROJECT_ERROR
     || phase === PHASES.ATTACH_BOM
@@ -100,6 +101,7 @@ function phaseLabel(phase, isRevising) {
     case PHASES.BOM_PROCESSING: return 'Validating BOM structure…';
     case PHASES.BOM_ERROR: return 'BOM import failed — items were saved. See errors below.';
     case PHASES.BOM_DONE: return 'BOM imported. Moving to project step…';
+    case PHASES.BOM_SETTLING: return 'Waiting for Factwise to finish building the BOM before attaching it to the project…';
     case PHASES.PROJECT_CREATING: return 'Creating project in Factwise…';
     case PHASES.PROJECT_ERROR: return 'Project creation failed — items and BOM were saved. See error below.';
     case PHASES.ATTACH_BOM: return isRevising

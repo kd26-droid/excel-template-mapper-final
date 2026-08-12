@@ -166,19 +166,65 @@ export const PHASES = {
   ITEMS_PROCESSING: 'ITEMS_PROCESSING',
   ITEMS_ERROR: 'ITEMS_ERROR',
   ITEMS_DONE: 'ITEMS_DONE',
-  // Short pause between item-create success and BOM upload so FactWise BE
-  // finishes indexing the new items before BOMRevisionImport looks them up.
+  // Pause between item-create success and BOM upload so FactWise's Celery
+  // worker finishes indexing the new items before BOMRevisionImport looks
+  // them up.
   ITEMS_SETTLING: 'ITEMS_SETTLING',
   BOM_UPLOADING: 'BOM_UPLOADING',
   BOM_PROCESSING: 'BOM_PROCESSING',
   BOM_ERROR: 'BOM_ERROR',
   BOM_DONE: 'BOM_DONE',
+  // Pause between BOM creation and BOM attach — the BOM record + its
+  // bom_items are populated by an async pipeline; hitting attach before
+  // /bom/{id}/admin/ returns the full item tree causes create_bom_module
+  // to crash on empty alternates or missing IDs.
+  BOM_SETTLING: 'BOM_SETTLING',
   PROJECT_CREATING: 'PROJECT_CREATING',
   PROJECT_ERROR: 'PROJECT_ERROR',
   ATTACH_BOM: 'ATTACH_BOM',
   ATTACH_BOM_ERROR: 'ATTACH_BOM_ERROR',
   DONE: 'DONE',
 };
+
+// Longer settle for larger imports — items/BOM Celery jobs can take 10-30s
+// on production DBs when the file has 500+ rows. Poll actively where we
+// can and fall back to sleep otherwise.
+const ITEMS_SETTLE_MS = 5000;
+const BOM_ATTACH_MAX_ATTEMPTS = 6;
+const BOM_ATTACH_RETRY_BASE_MS = 4000;
+
+// Transient FW-server messages that indicate "resource not fully persisted
+// yet" — safe to retry. Anything else is treated as terminal.
+const TRANSIENT_ATTACH_ERRORS = [
+  'noneType',                          // create_bom_module hitting a null lookup
+  "'NoneType' object has no attribute",
+  'does not exist',
+  'DoesNotExist',
+  'not found',
+  'IntegrityError',
+];
+function isTransientAttachError(msg) {
+  const s = String(msg || '').toLowerCase();
+  return TRANSIENT_ATTACH_ERRORS.some((t) => s.includes(t.toLowerCase()));
+}
+
+// Wait until FactWise's /bom/{id}/admin/ returns a non-empty bom_items list.
+// Guards against attaching a freshly-created BOM whose Celery pipeline
+// hasn't hydrated the item rows yet.
+async function waitForBomReady({ enterpriseBomId, timeoutMs = 45000, intervalMs = 2500 }) {
+  const deadline = Date.now() + timeoutMs;
+  let attempt = 0;
+  while (Date.now() < deadline) {
+    attempt++;
+    const resp = await fetchEnterpriseBomDetail(enterpriseBomId);
+    if (resp?.success) {
+      const items = Array.isArray(resp.bom?.bom_items) ? resp.bom.bom_items : [];
+      if (items.length > 0) return { ok: true, items, attempts: attempt };
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return { ok: false, error: `BOM ${enterpriseBomId} not hydrated after ${timeoutMs}ms` };
+}
 
 // New vs existing project target.
 export const PROJECT_MODES = {
@@ -699,38 +745,62 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
       const attached = [];
       const revisedModules = [];
       for (const bomId of bomIds) {
-        if (reviseBomModuleId) {
-          const res = await reviseProjectBom({
-            projectId,
-            bomModuleId: reviseBomModuleId,
-            enterpriseBomId: bomId,
+        // Poll the BOM until its item tree is hydrated by FactWise's async
+        // Celery pipeline. Attaching before hydration returns NoneType /
+        // missing-id errors from create_bom_module (bom_service.py:2490).
+        patch({ phase: PHASES.BOM_SETTLING });
+        const ready = await waitForBomReady({ enterpriseBomId: bomId });
+        if (!ready.ok) {
+          patch({
+            phase: PHASES.ATTACH_BOM_ERROR,
+            lastError: ready.error,
+            attachedBomIds: attached,
+            revisedProjectBomModules: revisedModules,
           });
-          if (!res?.success) {
-            patch({
-              phase: PHASES.ATTACH_BOM_ERROR,
-              lastError: res?.error || `Revise failed for BOM ${bomId}`,
-              attachedBomIds: attached,
-              revisedProjectBomModules: revisedModules,
-            });
-            return { ok: false };
+          return { ok: false };
+        }
+        patch({ phase: PHASES.ATTACH_BOM });
+
+        // Retry the attach on transient race errors — FW's create_project_boms
+        // touches multiple tables and occasionally races with the BOM Celery
+        // worker. Exponential backoff (~4s, 8s, 12s, ...) up to
+        // BOM_ATTACH_MAX_ATTEMPTS. Terminal errors (KeyError on section name,
+        // ValidationError etc.) fail fast.
+        let lastError = null;
+        let ok = false;
+        for (let attempt = 1; attempt <= BOM_ATTACH_MAX_ATTEMPTS; attempt++) {
+          const res = reviseBomModuleId
+            ? await reviseProjectBom({
+                projectId,
+                bomModuleId: reviseBomModuleId,
+                enterpriseBomId: bomId,
+              })
+            : await attachBomToProject({
+                projectId,
+                enterpriseBomId: bomId,
+                currencyId,
+              });
+          if (res?.success) {
+            ok = true;
+            if (reviseBomModuleId) revisedModules.push(reviseBomModuleId);
+            else attached.push(bomId);
+            break;
           }
-          revisedModules.push(reviseBomModuleId);
-        } else {
-          const res = await attachBomToProject({
-            projectId,
-            enterpriseBomId: bomId,
-            currencyId,
+          lastError = res?.error || (reviseBomModuleId ? 'Revise failed' : 'Attach failed');
+          if (!isTransientAttachError(lastError) || attempt === BOM_ATTACH_MAX_ATTEMPTS) {
+            break;
+          }
+          const wait = BOM_ATTACH_RETRY_BASE_MS * attempt;
+          await new Promise((r) => setTimeout(r, wait));
+        }
+        if (!ok) {
+          patch({
+            phase: PHASES.ATTACH_BOM_ERROR,
+            lastError: `${reviseBomModuleId ? 'Revise' : 'Attach'} failed for BOM ${bomId}: ${lastError}`,
+            attachedBomIds: attached,
+            revisedProjectBomModules: revisedModules,
           });
-          if (!res?.success) {
-            patch({
-              phase: PHASES.ATTACH_BOM_ERROR,
-              lastError: res?.error || `Attach failed for BOM ${bomId}`,
-              attachedBomIds: attached,
-              revisedProjectBomModules: revisedModules,
-            });
-            return { ok: false };
-          }
-          attached.push(bomId);
+          return { ok: false };
         }
       }
       patch({
@@ -829,11 +899,13 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
     if (!itemDone) {
       const res = await runItemStep();
       if (!res.ok) return;
-      // Give FactWise a moment to index the newly-created items before BOM
-      // validation runs — without this the BOM sheet occasionally reports
-      // "item does not exist" for items we just POSTed.
+      // Give FactWise's Celery worker time to index the newly-created items
+      // before BOMRevisionImport looks them up. 2.5s was fine for tiny
+      // uploads but 500+ row imports need noticeably longer — hitting BOM
+      // upload too early makes the BOM sheet report "item does not exist"
+      // for items we just POSTed.
       patch({ phase: PHASES.ITEMS_SETTLING });
-      await new Promise((resolve) => setTimeout(resolve, 2500));
+      await new Promise((resolve) => setTimeout(resolve, ITEMS_SETTLE_MS));
     }
 
     // BOM step

@@ -72,6 +72,7 @@ function phaseLabel(phase) {
     case PHASES.ITEMS_ERROR: return 'Item import failed — see errors below.';
     case PHASES.ITEMS_DONE: return 'Items imported. Starting BOM upload…';
     case PHASES.ITEMS_SETTLING: return 'Waiting for Factwise to index the new items before uploading BOM…';
+    case PHASES.BOM_SETTLING: return 'Waiting for Factwise to finish building the BOM…';
     case PHASES.BOM_UPLOADING: return 'Uploading BOM file to Factwise…';
     case PHASES.BOM_PROCESSING: return 'Validating BOM structure…';
     case PHASES.BOM_ERROR: return 'BOM import failed — items were saved. See errors below.';
