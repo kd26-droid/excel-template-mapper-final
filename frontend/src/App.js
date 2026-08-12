@@ -1,6 +1,6 @@
 import React from 'react';
 import { Routes, Route, useLocation } from 'react-router-dom';
-import { Container, Box } from '@mui/material';
+import { Box } from '@mui/material';
 import Header from './components/Header';
 import Dashboard from './pages/Dashboard';
 import UploadFiles from './pages/UploadFiles';
@@ -52,11 +52,17 @@ function App() {
   return (
     <div className="App" style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
       <Header />
-      <Container maxWidth="xl" sx={{ flexGrow: 1 }}>
-        <Box sx={{ mt: 4, mb: 4 }}>
-          <AppRoutes />
-        </Box>
-      </Container>
+      <Box
+        component="main"
+        sx={{
+          flexGrow: 1,
+          minWidth: 0,
+          bgcolor: 'var(--color-background)',
+          color: 'var(--color-foreground)'
+        }}
+      >
+        <AppRoutes />
+      </Box>
     </div>
   );
 }

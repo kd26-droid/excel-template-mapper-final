@@ -47,6 +47,8 @@ import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import DownloadIcon from '@mui/icons-material/Download';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
+import TuneIcon from '@mui/icons-material/Tune';
+import VisibilityIcon from '@mui/icons-material/Visibility';
 import api from '../services/api';
 import BomStructureDialog, { reconcileSavedBomStructure } from '../components/BomStructureDialog';
 import ColumnParser from '../components/ColumnParser/ColumnParser';
@@ -3462,6 +3464,40 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
     focusBg: themeTokens.surface?.elevatedSoft || (isDarkMode ? '#0f172a' : '#ffffff'),
     warningBg: themeTokens.state?.warningBg || (isDarkMode ? 'rgba(245, 158, 11, 0.14)' : '#fff8e5'),
   };
+  const buttonSx = {
+    borderRadius: '999px',
+    minHeight: 32,
+    px: 1.6,
+    fontSize: 12,
+    fontWeight: 800,
+    textTransform: 'none',
+    transition: 'transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease',
+    '&:hover': {
+      transform: 'translateY(-1px)',
+    },
+  };
+  const outlineButtonSx = {
+    ...buttonSx,
+    color: isDarkMode ? '#dbeafe' : '#1d4ed8',
+    borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.32)' : 'rgba(37, 99, 235, 0.32)',
+    background: isDarkMode ? 'rgba(15, 23, 42, 0.52)' : 'rgba(255, 255, 255, 0.82)',
+    '&:hover': {
+      ...buttonSx['&:hover'],
+      borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.7)' : 'rgba(37, 99, 235, 0.72)',
+      background: isDarkMode ? 'rgba(37, 99, 235, 0.14)' : 'rgba(239, 246, 255, 0.96)',
+      boxShadow: isDarkMode ? '0 12px 26px -18px rgba(37, 99, 235, 0.9)' : '0 12px 24px -18px rgba(37, 99, 235, 0.42)',
+    },
+  };
+  const containedButtonSx = {
+    ...buttonSx,
+    background: 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
+    boxShadow: '0 12px 24px -14px rgba(37, 99, 235, 0.82), inset 0 1px 0 rgba(255, 255, 255, 0.28)',
+    '&:hover': {
+      ...buttonSx['&:hover'],
+      background: 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
+      boxShadow: '0 16px 30px -16px rgba(37, 99, 235, 0.95), inset 0 1px 0 rgba(255, 255, 255, 0.38)',
+    },
+  };
   const columns = useMemo(() => {
     const knownKeys = new Set(NORMALIZED_TABLE_BASE_COLUMNS.map((column) => column.key));
     const dynamicColumns = getNormalizedExportColumns(rows)
@@ -3565,7 +3601,14 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
           )}
         </Stack>
         <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap" justifyContent="flex-end">
-          <Button size="small" variant="outlined" onClick={() => setAllRowsOpen(true)} disabled={!filteredRows.length}>
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={<VisibilityIcon />}
+            onClick={() => setAllRowsOpen(true)}
+            disabled={!filteredRows.length}
+            sx={outlineButtonSx}
+          >
             View all rows
           </Button>
           <TextField
@@ -3767,6 +3810,7 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
               variant="outlined"
               disabled={allRowsPage === 0}
               onClick={() => setAllRowsPage((page) => Math.max(0, page - 1))}
+              sx={outlineButtonSx}
             >
               Previous
             </Button>
@@ -3774,10 +3818,11 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
               variant="outlined"
               disabled={allRowsPage >= allRowsTotalPages - 1}
               onClick={() => setAllRowsPage((page) => Math.min(allRowsTotalPages - 1, page + 1))}
+              sx={outlineButtonSx}
             >
               Next
             </Button>
-            <Button variant="contained" onClick={() => setAllRowsOpen(false)}>Done</Button>
+            <Button variant="contained" onClick={() => setAllRowsOpen(false)} sx={containedButtonSx}>Done</Button>
           </Stack>
         </DialogActions>
       </Dialog>
@@ -3825,7 +3870,14 @@ const BomNormalizer = () => {
     border: themeTokens.border?.default || (isDarkMode ? 'rgba(255,255,255,0.14)' : 'rgba(226, 232, 240, 0.8)'),
     borderStrong: themeTokens.border?.strong || (isDarkMode ? 'rgba(255,255,255,0.2)' : 'rgba(203, 213, 225, 0.8)'),
     warningBg: themeTokens.state?.warningBg || (isDarkMode ? 'rgba(245, 158, 11, 0.14)' : '#fff8e5'),
+    panelGradient: isDarkMode
+      ? 'linear-gradient(145deg, rgba(20, 27, 44, 0.94) 0%, rgba(11, 16, 26, 0.98) 100%)'
+      : 'linear-gradient(145deg, rgba(255, 255, 255, 0.96) 0%, rgba(248, 250, 252, 0.92) 100%)',
+    panelSoftGradient: isDarkMode
+      ? 'linear-gradient(145deg, rgba(15, 23, 42, 0.76) 0%, rgba(8, 13, 24, 0.86) 100%)'
+      : 'linear-gradient(145deg, rgba(255, 255, 255, 0.9) 0%, rgba(241, 245, 249, 0.82) 100%)',
   }), [isDarkMode, themeTokens]);
+  const [mousePos, setMousePos] = useState({ x: 72, y: 22 });
   // BOM structure gate. Asked here rather than at upload so the user answers
   // after seeing the normalized rows, when "does this have levels" is a
   // question about real output instead of raw headers.
@@ -3956,6 +4008,17 @@ const BomNormalizer = () => {
   const restoredReturnSnapshotRef = useRef('');
   const autoReplayTemplateRef = useRef('');
   const restoreInFlightRef = useRef(false);
+
+  useEffect(() => {
+    const handleMouseMove = (event) => {
+      setMousePos({
+        x: (event.clientX / window.innerWidth) * 100,
+        y: (event.clientY / window.innerHeight) * 100,
+      });
+    };
+    window.addEventListener('mousemove', handleMouseMove);
+    return () => window.removeEventListener('mousemove', handleMouseMove);
+  }, []);
 
   const headers = useMemo(
     () => preparedHeaders.length ? preparedHeaders : makeUniqueHeaders(sheetRows[headerRowIndex] || []),
@@ -6478,16 +6541,24 @@ const BomNormalizer = () => {
     <Box
       sx={{
         minHeight: '100vh',
+        position: 'relative',
+        isolation: 'isolate',
+        overflow: 'hidden',
         bgcolor: normalizerTheme.page,
         color: normalizerTheme.text,
         '& .MuiPaper-root, & .MuiCard-root': {
-          bgcolor: `${normalizerTheme.paper} !important`,
+          background: `${normalizerTheme.panelGradient} !important`,
           color: `${normalizerTheme.text} !important`,
           borderColor: `${normalizerTheme.border} !important`,
+          borderRadius: '8px',
+          boxShadow: isDarkMode
+            ? '0 18px 48px -34px rgba(0, 0, 0, 0.9), inset 0 1px 0 rgba(255, 255, 255, 0.04)'
+            : '0 18px 44px -34px rgba(15, 23, 42, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.84)',
         },
         '& .MuiTableContainer-root': {
           bgcolor: `${normalizerTheme.table} !important`,
           borderColor: `${normalizerTheme.border} !important`,
+          borderRadius: '8px',
         },
         '& .MuiTableCell-root': {
           color: `${normalizerTheme.text} !important`,
@@ -6517,6 +6588,8 @@ const BomNormalizer = () => {
         },
         '& .MuiInputBase-root': {
           color: normalizerTheme.text,
+          borderRadius: '8px',
+          backgroundColor: isDarkMode ? 'rgba(15, 23, 42, 0.42)' : 'rgba(255, 255, 255, 0.8)',
         },
         '& .MuiInputLabel-root, & .MuiFormHelperText-root, & .MuiStepLabel-label': {
           color: `${normalizerTheme.muted} !important`,
@@ -6524,9 +6597,69 @@ const BomNormalizer = () => {
         '& .MuiOutlinedInput-notchedOutline': {
           borderColor: `${normalizerTheme.borderStrong} !important`,
         },
+        '& .MuiButton-root': {
+          borderRadius: '999px',
+          minHeight: 34,
+          px: 1.8,
+          fontSize: 12,
+          fontWeight: 800,
+          textTransform: 'none',
+          transition: 'transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease',
+        },
+        '& .MuiButton-root:hover': {
+          transform: 'translateY(-1px)',
+        },
+        '& .MuiButton-contained': {
+          background: 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%) !important',
+          boxShadow: '0 12px 24px -14px rgba(37, 99, 235, 0.82), inset 0 1px 0 rgba(255, 255, 255, 0.28)',
+        },
+        '& .MuiButton-contained:hover': {
+          background: 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%) !important',
+          boxShadow: '0 16px 30px -16px rgba(37, 99, 235, 0.95), inset 0 1px 0 rgba(255, 255, 255, 0.38)',
+        },
+        '& .MuiButton-outlined': {
+          color: `${isDarkMode ? '#dbeafe' : '#1d4ed8'} !important`,
+          borderColor: `${isDarkMode ? 'rgba(96, 165, 250, 0.32)' : 'rgba(37, 99, 235, 0.32)'} !important`,
+          background: `${isDarkMode ? 'rgba(15, 23, 42, 0.52)' : 'rgba(255, 255, 255, 0.82)'} !important`,
+        },
+        '& .MuiButton-outlined:hover': {
+          borderColor: `${isDarkMode ? 'rgba(96, 165, 250, 0.7)' : 'rgba(37, 99, 235, 0.72)'} !important`,
+          background: `${isDarkMode ? 'rgba(37, 99, 235, 0.14)' : 'rgba(239, 246, 255, 0.96)'} !important`,
+          boxShadow: isDarkMode ? '0 12px 26px -18px rgba(37, 99, 235, 0.9)' : '0 12px 24px -18px rgba(37, 99, 235, 0.42)',
+        },
+        '& .MuiButton-root.Mui-disabled': {
+          transform: 'none',
+          opacity: 0.56,
+          boxShadow: 'none',
+        },
+        '& .MuiChip-root': {
+          borderRadius: '999px',
+          fontWeight: 800,
+        },
       }}
     >
-      <Box sx={{ px: { xs: 2, lg: 4 }, py: 2.5, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.header }}>
+      <Box
+        sx={{
+          pointerEvents: 'none',
+          position: 'fixed',
+          width: '62vw',
+          height: '62vw',
+          minWidth: 520,
+          minHeight: 520,
+          left: `${mousePos.x}%`,
+          top: `${mousePos.y}%`,
+          transform: 'translate(-50%, -50%)',
+          borderRadius: '50%',
+          filter: 'blur(90px)',
+          opacity: isDarkMode ? 0.26 : 0.18,
+          background: 'radial-gradient(circle, var(--color-brand, #2383e2) 0%, transparent 70%)',
+          transition: 'left 0.7s cubic-bezier(0.16, 1, 0.3, 1), top 0.7s cubic-bezier(0.16, 1, 0.3, 1)',
+          zIndex: 0,
+        }}
+      />
+      <Box className="auth-grid-pattern" sx={{ position: 'fixed', inset: 0, pointerEvents: 'none', opacity: isDarkMode ? 0.36 : 0.28, zIndex: 0 }} />
+
+      <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, py: 2.5, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.header, backdropFilter: 'blur(18px) saturate(170%)' }}>
         <Stack direction={{ xs: 'column', md: 'row' }} alignItems={{ xs: 'flex-start', md: 'center' }} justifyContent="space-between" gap={2}>
           <Box>
             <Typography sx={{ fontSize: 24, fontWeight: 800, color: normalizerTheme.text }}>BOM Normalizer</Typography>
@@ -6537,7 +6670,7 @@ const BomNormalizer = () => {
         </Stack>
       </Box>
 
-      <Box sx={{ px: { xs: 2, lg: 4 }, py: 3, bgcolor: normalizerTheme.page }}>
+      <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, py: 3 }}>
         <Stepper activeStep={displayedStep} alternativeLabel sx={{ mb: 3 }}>
           {['Upload', 'Source', 'Configure', 'Results'].map((label) => (
             <Step key={label}>
@@ -7056,7 +7189,7 @@ const BomNormalizer = () => {
                 <Box sx={{ mt: 2 }}>
                   <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1} flexWrap="wrap">
                     <Typography sx={{ fontWeight: 800 }}>Source preview</Typography>
-                    <Button size="small" variant="outlined" onClick={() => setSourceGridOpen(true)} disabled={!sourceDataRows.length}>
+                    <Button size="small" variant="outlined" startIcon={<VisibilityIcon />} onClick={() => setSourceGridOpen(true)} disabled={!sourceDataRows.length}>
                       View all rows
                     </Button>
                   </Stack>
@@ -7087,6 +7220,7 @@ const BomNormalizer = () => {
                     <Button
                       size="small"
                       variant="outlined"
+                      startIcon={<VisibilityIcon />}
                       onClick={() => setSourceGridOpen(true)}
                       disabled={!sourceDataRows.length}
                     >
@@ -7441,6 +7575,7 @@ const BomNormalizer = () => {
                     <Button
                       size="small"
                       variant="outlined"
+                      startIcon={<TuneIcon />}
                       disabled={!normalizedRows.length}
                       onClick={(event) => setToolsMenuAnchor(event.currentTarget)}
                     >

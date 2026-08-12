@@ -1,10 +1,5 @@
 import React from 'react';
 import { Box, Typography, Chip, IconButton, Avatar, Tooltip } from '@mui/material';
-
-// Shown next to the logo so you can tell at a glance which build is live.
-// REACT_APP_BUILD_STAMP is set by the deploy script (deploy-fresh.sh) and baked
-// into the bundle at build time; "dev" is what you get running locally.
-const BUILD_STAMP = process.env.REACT_APP_BUILD_STAMP || 'dev';
 import { Link as RouterLink, useLocation } from 'react-router-dom';
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import CloudUploadIcon from '@mui/icons-material/CloudUpload';
@@ -12,6 +7,11 @@ import SettingsIcon from '@mui/icons-material/Settings';
 import NotificationsNoneIcon from '@mui/icons-material/NotificationsNone';
 import WbSunnyIcon from '@mui/icons-material/WbSunny';
 import { useThemeContext } from '../utils/ThemeContext';
+
+// Shown next to the logo so you can tell at a glance which build is live.
+// REACT_APP_BUILD_STAMP is set by the deploy script (deploy-fresh.sh) and baked
+// into the bundle at build time; "dev" is what you get running locally.
+const BUILD_STAMP = process.env.REACT_APP_BUILD_STAMP || 'dev';
 
 const MoonIcon = ({ sx }) => (
   <Box
