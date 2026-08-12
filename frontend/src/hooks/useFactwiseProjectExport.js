@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import * as XLSX from 'xlsx';
 import { useFactwise } from '../contexts/FactwiseContext';
 import {
@@ -12,6 +12,7 @@ import {
   reviseEnterpriseBom,
   fetchEnterpriseBomCodes,
   fetchEnterpriseBomDetail,
+  submitEnterpriseBom,
 } from '../services/factwiseApi';
 import api from '../services/api';
 
@@ -280,17 +281,33 @@ async function buildFile(sessionId, columnOrder, exportType, prefix, refreshHost
 export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHost } = {}) {
   const { isEmbedded, entityId } = useFactwise();
   const [state, setState] = useState(emptyState);
+  // Ref mirror of state — used by runFromCheckpoint so it can read the
+  // freshest phase / checkpoint EVEN when called immediately after a patch
+  // in the same event handler (before React flushes the re-render). Without
+  // this, markRetrySucceeded → runFromCheckpoint fires with the closure's
+  // stale state.phase = 'ITEMS_ERROR' and re-runs the just-succeeded step
+  // from scratch — dropping the new_tags / ignore_duplicate_tags flags.
+  const stateRef = useRef(state);
+  useEffect(() => { stateRef.current = state; }, [state]);
 
   // Rehydrate from localStorage on mount (so refresh doesn't lose progress).
   useEffect(() => {
     const saved = loadCheckpoint(sessionId);
-    if (saved) setState({ ...emptyState, ...saved });
+    if (saved) {
+      const rehydrated = { ...emptyState, ...saved };
+      setState(rehydrated);
+      stateRef.current = rehydrated;
+    }
   }, [sessionId]);
 
   const patch = useCallback((delta) => {
     setState((prev) => {
       const next = { ...prev, ...delta };
       saveCheckpoint(sessionId, next);
+      // Sync the ref immediately so callers that patch() then read from
+      // stateRef in the SAME microtask (e.g. handleGridRetrySuccess) get
+      // the updated value without waiting for React's next render.
+      stateRef.current = next;
       return next;
     });
   }, [sessionId]);
@@ -298,6 +315,7 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
   const reset = useCallback(() => {
     clearCheckpoint(sessionId);
     setState(emptyState);
+    stateRef.current = emptyState;
   }, [sessionId]);
 
   // -------- Item step --------
@@ -495,6 +513,22 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
         const bomIds = (resp?.bom_ids && resp.bom_ids.length)
           ? resp.bom_ids
           : [newDraftId];
+        // Submit each DRAFT BOM to ONGOING — without this, the project's
+        // Add Item tab stays empty, "Submit BOM" doesn't work in the project,
+        // and future revisions fail because admin_revise_bom only accepts
+        // ONGOING targets. Same PATCH FactWise's admin edit page uses.
+        for (const id of bomIds) {
+          const submitted = await submitEnterpriseBom(id);
+          if (!submitted?.success) {
+            patch({
+              phase: PHASES.BOM_ERROR,
+              lastError:
+                submitted?.error
+                || `BOM ${id} imported but could not be submitted to ONGOING.`,
+            });
+            return { ok: false };
+          }
+        }
         patch({ phase: PHASES.BOM_DONE, bomIds });
         return { ok: true };
       }
@@ -546,6 +580,22 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
       }
 
       const bomIds = resp?.bom_ids || [];
+      // Publish DRAFT → ONGOING so the project can actually use it. FactWise's
+      // BOM_DASHBOARD import leaves new BOMs in DRAFT status; without this
+      // submit, attaching the BOM to a project shows an empty Add Item tab
+      // and the project's own Submit BOM button silently fails.
+      for (const id of bomIds) {
+        const submitted = await submitEnterpriseBom(id);
+        if (!submitted?.success) {
+          patch({
+            phase: PHASES.BOM_ERROR,
+            lastError:
+              submitted?.error
+              || `BOM ${id} imported but could not be submitted to ONGOING.`,
+          });
+          return { ok: false };
+        }
+      }
       patch({ phase: PHASES.BOM_DONE, bomIds });
       return { ok: true };
     } catch (error) {
@@ -717,15 +767,19 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
       patch({ lastError: 'Factwise session not available' });
       return;
     }
-    const effectiveMode = mode || state.mode || PROJECT_MODES.NEW;
+    // Read from ref, not state, so a patch() that ran earlier in this same
+    // event handler (e.g. markRetrySucceeded before handleGridRetrySuccess
+    // calls runFromCheckpoint) is visible immediately.
+    const cur = stateRef.current;
+    const effectiveMode = mode || cur.mode || PROJECT_MODES.NEW;
 
     // Project-related validations only when we're actually going to touch a project.
     if (!stopAfterBom) {
-      if (effectiveMode === PROJECT_MODES.EXISTING && !(existingProjectId || state.existingProjectId)) {
+      if (effectiveMode === PROJECT_MODES.EXISTING && !(existingProjectId || cur.existingProjectId)) {
         patch({ lastError: 'Please pick a project to export into.' });
         return;
       }
-      if (effectiveMode === PROJECT_MODES.NEW && !(projectName || state.projectName)) {
+      if (effectiveMode === PROJECT_MODES.NEW && !(projectName || cur.projectName)) {
         patch({ lastError: 'Please enter a project name.' });
         return;
       }
@@ -734,30 +788,33 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
     // Persist config first so later steps can read from checkpoint.
     patch({
       mode: effectiveMode,
-      projectName: projectName || state.projectName,
-      templateId: templateId || state.templateId,
-      templateName: templateName || state.templateName,
-      existingProjectId: existingProjectId || state.existingProjectId,
-      existingProjectName: existingProjectName || state.existingProjectName,
+      projectName: projectName || cur.projectName,
+      templateId: templateId || cur.templateId,
+      templateName: templateName || cur.templateName,
+      existingProjectId: existingProjectId || cur.existingProjectId,
+      existingProjectName: existingProjectName || cur.existingProjectName,
       // Revision selection is per-run — allow explicit undefined to CLEAR.
       reviseEnterpriseBomId: reviseEnterpriseBomId === undefined
-        ? state.reviseEnterpriseBomId
+        ? cur.reviseEnterpriseBomId
         : reviseEnterpriseBomId,
       reviseBomModuleId: reviseBomModuleId === undefined
-        ? state.reviseBomModuleId
+        ? cur.reviseBomModuleId
         : reviseBomModuleId,
       reviseBomCode: reviseBomCode === undefined
-        ? state.reviseBomCode
+        ? cur.reviseBomCode
         : reviseBomCode,
       // Seed projectId directly when targeting an existing project so we skip
       // the project-creation phase.
       projectId:
         effectiveMode === PROJECT_MODES.EXISTING
-          ? (existingProjectId || state.existingProjectId || state.projectId)
-          : state.projectId,
+          ? (existingProjectId || cur.existingProjectId || cur.projectId)
+          : cur.projectId,
     });
 
-    const startPhase = state.phase;
+    // Re-read from ref AFTER the patch so startPhase reflects any advance
+    // that just happened via markRetrySucceeded → patch (which sync-writes
+    // stateRef.current).
+    const startPhase = stateRef.current.phase;
 
     // Item step
     const itemDone =
@@ -804,7 +861,7 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
         || startPhase === PHASES.ATTACH_BOM_ERROR
         || startPhase === PHASES.DONE;
       if (!projectDone) {
-        const res = await runProjectStep(projectName || state.projectName);
+        const res = await runProjectStep(projectName || stateRef.current.projectName);
         if (!res.ok) return;
       }
     }
@@ -813,7 +870,36 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
     if (startPhase !== PHASES.DONE) {
       await runAttachBomStep();
     }
-  }, [isEmbedded, entityId, state.phase, state.projectName, state.templateId, state.templateName, state.mode, state.existingProjectId, state.existingProjectName, state.projectId, state.reviseEnterpriseBomId, state.reviseBomModuleId, state.reviseBomCode, patch, runItemStep, runBomStep, runProjectStep, runAttachBomStep]);
+  }, [isEmbedded, entityId, patch, runItemStep, runBomStep, runProjectStep, runAttachBomStep]);
+
+  // Called by the error grid after a Save & retry (inline OR via New Tags
+  // popup) succeeds. Without this the orchestrator's phase stays on
+  // ITEMS_ERROR / BOM_ERROR, so the next runFromCheckpoint() re-runs the
+  // failed step from scratch with EMPTY additional_information and the same
+  // error surfaces again (mand → new tag not created → mand still flagged,
+  // etc.). This action advances the checkpoint to the next successful phase
+  // so runFromCheckpoint skips the item/bom step and moves on.
+  const markRetrySucceeded = useCallback((kind, resp, bulkImportId) => {
+    const cur = stateRef.current;
+    if (kind === 'ITEM') {
+      patch({
+        phase: PHASES.ITEMS_DONE,
+        itemBulkImportId: bulkImportId || cur.itemBulkImportId,
+        itemCreated: resp?.created_identifiers || cur.itemCreated,
+        itemUpdated: resp?.updated_identifiers || cur.itemUpdated,
+        lastError: null,
+        lastResponseType: 'Success',
+      });
+    } else if (kind === 'BOM') {
+      const respBomIds = Array.isArray(resp?.bom_ids) ? resp.bom_ids : [];
+      patch({
+        phase: PHASES.BOM_DONE,
+        bomIds: respBomIds.length ? respBomIds : cur.bomIds,
+        lastError: null,
+        lastResponseType: 'Success',
+      });
+    }
+  }, [patch]);
 
   return {
     ...state,
@@ -828,6 +914,7 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
     runBomStep,
     runProjectStep,
     runAttachBomStep,
+    markRetrySucceeded,
     reset,
   };
 }

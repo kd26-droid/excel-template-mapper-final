@@ -33,6 +33,66 @@ export function isFactwiseSessionAvailable() {
   return Boolean(token && apiUrl);
 }
 
+// Look up existing Factwise tags that are similar (by name) to the ones the
+// mapper is about to introduce. Powers the "mark as synonym vs create new"
+// dropdown per tag in the NewTagsConfirmationPopup.
+// Response shape (from FactWise): { [tagName]: [{ tag_id, name, synonyms, ... }] }
+export async function fetchSimilarTags(tags = []) {
+  const client = buildClient();
+  if (!client || !Array.isArray(tags) || !tags.length) {
+    return { success: false, similar: {} };
+  }
+  try {
+    const { data } = await client.post(`/organization/tags/similar/`, {
+      tag_type: 'ITEM',
+      similar_to: tags,
+    });
+    return { success: true, similar: data || {} };
+  } catch (error) {
+    return {
+      success: false,
+      similar: {},
+      error: error?.response?.data?.error || error?.message || 'Similar-tags lookup failed',
+    };
+  }
+}
+
+// Search FactWise's full tag list (paginated). Used by the "Mark as
+// synonym" autocomplete in the New Tags popup so users can pick ANY
+// existing tag as the synonym target — not just tags returned by the
+// suggestion API (which only returns tags with a name similarity match).
+// Ports FactWise admin's `useListTagsViaDashboardMutation` — POST /dashboard/
+// with dashboard_view='tags', query_data.tag_type='ITEM'.
+export async function listAllItemTags({ searchText = '', pageNumber = 1, itemsPerPage = 10 } = {}) {
+  const client = buildClient();
+  if (!client) return { success: false, tags: [], hasNext: false };
+  try {
+    const { data } = await client.post(`/dashboard/`, {
+      dashboard_view: 'tags',
+      tab: 'all',
+      search_text: searchText,
+      sort_fields: [],
+      page_number: pageNumber,
+      items_per_page: itemsPerPage,
+      query_data: { tag_type: 'ITEM' },
+    });
+    const rows = Array.isArray(data?.data) ? data.data : [];
+    return {
+      success: true,
+      tags: rows,
+      hasNext: Boolean(data?.metadata?.has_next),
+      totalPages: data?.metadata?.total_pages || 1,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      tags: [],
+      hasNext: false,
+      error: error?.response?.data?.error || error?.message || 'Tag search failed',
+    };
+  }
+}
+
 export async function fetchDistributorStatus() {
   const client = buildClient();
   const { entityId } = readCredentials();
@@ -260,6 +320,28 @@ export async function fetchEnterpriseBomCodes() {
   }
 }
 
+// Publishes a DRAFT enterprise BOM by transitioning bom_status to ONGOING.
+// Required after a fresh bulk-import create (BOM_DASHBOARD) or revision
+// upload — DRAFT BOMs don't populate the project's Add Item tab correctly
+// and can't be revised again until submitted. Uses the exact same endpoint
+// FactWise's admin BOM edit page uses when you click "Submit".
+export async function submitEnterpriseBom(enterpriseBomId) {
+  const client = buildClient();
+  if (!client) return { success: false, error: 'No Factwise session' };
+  try {
+    await client.patch(
+      `/organization/bom/admin/${enterpriseBomId}/status/`,
+      { bom_status: 'ONGOING' }
+    );
+    return { success: true };
+  } catch (error) {
+    return {
+      success: false,
+      error: error?.response?.data?.error || error?.message || 'BOM submit failed',
+    };
+  }
+}
+
 // Creates a revision of an enterprise BOM. Returns { success, enterprise_bom_id }
 // where the new id is the freshly-created revision that we can now write to.
 export async function reviseEnterpriseBom(enterpriseBomId) {
@@ -397,25 +479,214 @@ export async function fetchEnterpriseBomDetail(enterpriseBomId) {
 // Attach an enterprise BOM into a project. Minimal payload — the FW service
 // pulls the actual item list from the enterprise BOM, so project_bom_items can
 // be empty (no overrides).
+// Recursively flatten an enterprise BOM's bom_items tree into the flat
+// project_bom_items list FactWise's POST /project/{id}/boms/{bomId}/create/
+// expects. Sub-BOMs contribute both their own entry AND all their descendants.
+// Alternates ride alongside their parent. This mirrors what FW UI's
+// convertToProjectBOMCreatePayload does internally when a user clicks "Add"
+// on the BOM configuration popup — see ProjectGlCostCenter/helpers/projectBOMHelpers.ts
+function flattenBomItemsForProject(bomItems, prevBomItems) {
+  const out = [];
+  const list = Array.isArray(bomItems) ? bomItems : [];
+  // Skip any entry that doesn't carry both bom_item_id AND measurement_unit —
+  // mapper-created BOMs occasionally include placeholder rows (finished-good
+  // stubs, unresolved sub-BOM refs) whose IDs are null. Sending those makes
+  // FactWise reject the whole attach with
+  //   {'bom_item_id': [ErrorDetail(string='This field is required.')]}
+  //   {'measurement_unit_id': [ErrorDetail(string='This field is required.')]}
+  // per bad row. Silently drop them so the good rows still land.
+  const validEntry = (o) => Boolean(o?.bom_item_id) && Boolean(o?.measurement_unit);
+  for (const item of list) {
+    const subItems = Array.isArray(item?.sub_bom_items) ? item.sub_bom_items : [];
+    const alternates = Array.isArray(item?.alternates) ? item.alternates : [];
+    // Leaf (raw material) — no sub-BOM. Push the item + each alternate.
+    if (subItems.length === 0) {
+      if (validEntry(item)) {
+        out.push({
+          bom_item_id: item.bom_item_id,
+          quantity: Number(item.quantity ?? 0),
+          cost_per_unit: Number(item.cost_per_unit ?? 0),
+          measurement_unit_id: item.measurement_unit,
+          delivery_schedule: [
+            {
+              delivery_schedule_item_id: null,
+              quantity: Number(item.quantity ?? 0),
+              delivery_date: null,
+            },
+          ],
+          selected: item.selected !== false,
+          bom_item_valid: null,
+        });
+      }
+      for (const altWrap of alternates) {
+        // `alternates` from /bom/{id}/admin/ wraps the real bom_item inside
+        //   { alternate_bom_item_linkage_id, bom_item: <parent_id>,
+        //     alternate_bom_item: { bom_item_id, quantity, cost_per_unit,
+        //                           measurement_unit, ... } }
+        // — the flat fields at the top of the wrapper are NULL for the
+        // alternate itself; we have to reach into alternate_bom_item.
+        const alt = altWrap?.alternate_bom_item || altWrap;
+        if (!validEntry(alt)) continue;
+        out.push({
+          bom_item_id: alt.bom_item_id,
+          quantity: Number(alt.quantity ?? 0),
+          cost_per_unit: Number(alt.cost_per_unit ?? 0),
+          measurement_unit_id: alt.measurement_unit,
+          delivery_schedule: [
+            {
+              delivery_schedule_item_id: null,
+              quantity: Number(alt.quantity ?? 0),
+              delivery_date: null,
+            },
+          ],
+          selected: alt.selected !== false,
+          bom_item_valid: null,
+        });
+      }
+      continue;
+    }
+    // Sub-BOM branch — flatten children first, then push the parent (matches
+    // FW helper order so IDs referenced in delivery_schedules etc. are known).
+    const prevSubs = prevBomItems?.find((p) => p.bom_item_id === item.bom_item_id)?.sub_bom_items;
+    out.push(...flattenBomItemsForProject(subItems, prevSubs));
+    if (validEntry(item)) {
+      out.push({
+        bom_item_id: item.bom_item_id,
+        quantity: Number(item.quantity ?? 0),
+        cost_per_unit: Number(item.cost_per_unit ?? 0),
+        measurement_unit_id: item.measurement_unit,
+        selected: item.selected !== false,
+        custom_sections: item.custom_sections || [],
+        bom_item_valid: null,
+      });
+    }
+    for (const alt of alternates) {
+      if (!validEntry(alt)) continue;
+      out.push({
+        bom_item_id: alt.bom_item_id,
+        quantity: Number(alt.quantity ?? 0),
+        cost_per_unit: Number(alt.cost_per_unit ?? 0),
+        measurement_unit_id: alt.measurement_unit,
+        delivery_schedule: [
+          {
+            delivery_schedule_item_id: null,
+            quantity: Number(alt.quantity ?? 0),
+            delivery_date: null,
+          },
+        ],
+        selected: alt.selected !== false,
+        bom_item_valid: null,
+      });
+    }
+  }
+  return out;
+}
+
+// Attach an enterprise BOM to a project via the SAME flow FactWise UI uses
+// when a user clicks the "Add BOM" icon and picks a BOM. Verified against
+// FW's own network trace on 2026-08-12:
+//   1. GET  /organization/bom/{bomId}/admin/        → BOM detail (items, currency, total)
+//   2. POST /organization/project/{pid}/boms/{bomId}/create/
+//        body: { boms: [{quantity, total}], currency_id,
+//                project_bom_items: [...flattened items...],
+//                custom_sections: [{name:'BOM', section_type:'BOM', custom_fields:[]}],
+//                bom_valid: true }
+//
+// Historical bug: we were POSTing to the SINGULAR endpoint
+// (`/project/{pid}/bom/{bomId}/create/`) with empty project_bom_items and
+// empty custom_sections. That created a project-BOM linkage with NO child
+// items and NO project-side custom_section rows, so:
+//   - the project's "Add Items" tab was empty (no items linked),
+//   - and Submit BOM later failed with
+//     `{'custom_section_id': [ErrorDetail(string='Must be a valid UUID.')]}`
+//     because there was no custom_section UUID to update.
+// The FW UI uses the PLURAL endpoint (`/boms/{bomId}/create/`) that expects
+// `boms: [{quantity, total}]` for multi-slab support; we always send one slab.
 export async function attachBomToProject({
   projectId,
   enterpriseBomId,
   currencyId,
-  quantity = 1,
-  total = 1,
+  quantity,
+  total,
 }) {
   const client = buildClient();
   if (!client) return { success: false, error: 'No Factwise session' };
   try {
+    // Step 1a: fetch BOM detail (items + currency + defaults).
+    // Step 1b: fetch project detail to discover the ACTUAL name of the
+    //   project's BOM-terms custom_section. FactWise's create_project_boms
+    //   crashes with `KeyError: 'BOM'` at custom_service.add_section_id_via_name
+    //   if the name we send doesn't exist in the project template's
+    //   `bom_custom_section_name_map`. Different project templates use
+    //   different labels (e.g. "BOM", "BOM Details", "BOM Terms"), so we
+    //   read the label from the just-created project's own custom_sections
+    //   list rather than hardcoding it.
+    const [detailResp, projectResp] = await Promise.all([
+      client.get(`/organization/bom/${enterpriseBomId}/admin/`),
+      client.get(`/organization/project/${projectId}/`),
+    ]);
+    const bom = detailResp?.data || {};
+    const project = projectResp?.data || {};
+    const bomItems = Array.isArray(bom.bom_items) ? bom.bom_items : [];
+    const projectBomItems = flattenBomItemsForProject(bomItems);
+
+    // Pull the project's BOM-typed custom_section(s) — if none exist, we
+    // send an empty list and let FW use its own defaults. If one exists,
+    // we mirror it into the payload with the exact name FW is expecting.
+    const projectCustomSections = Array.isArray(project.custom_sections)
+      ? project.custom_sections
+      : [];
+    const bomSectionMatches = projectCustomSections.filter(
+      (s) => String(s?.section_type || '').toUpperCase() === 'BOM'
+    );
+    const outgoingCustomSections = bomSectionMatches.length
+      ? bomSectionMatches.map((s) => ({
+          name: s.name,
+          section_type: 'BOM',
+          // Leave every field with a null value so FW just stores the
+          // section shell without any user-facing content.
+          custom_fields: (Array.isArray(s.custom_fields) ? s.custom_fields : []).map(
+            (f) => ({
+              name: f.name,
+              type: f.type,
+              value: null,
+              is_locked: !!f.is_locked,
+              is_visible: f.is_visible !== false,
+              description: f.description || null,
+              is_required: !!f.is_required,
+              is_negotiable: !!f.is_negotiable,
+            })
+          ),
+        }))
+      : [];
+
+    // Prefer the BOM's own currency/quantity/total when caller didn't pass
+    // one — the "Add BOM" popup does the same.
+    const effectiveCurrencyId = currencyId
+      || bom.currency?.currency_id
+      || bom.currency
+      || null;
+    const effectiveQuantity = Number(quantity ?? bom.quantity ?? 1);
+    const effectiveTotal = Number(total ?? bom.total ?? 0);
+
+    if (!effectiveCurrencyId) {
+      return {
+        success: false,
+        error: 'No currency available to attach the BOM.',
+      };
+    }
+
+    // Step 2: POST to the plural /boms/ endpoint with the fully-populated
+    // payload. Matches the byte-for-byte shape captured from FW UI, with
+    // custom_sections named after the project's actual template sections.
     const { data } = await client.post(
-      `/organization/project/${projectId}/bom/${enterpriseBomId}/create/`,
+      `/organization/project/${projectId}/boms/${enterpriseBomId}/create/`,
       {
-        quantity,
-        total,
-        currency_id: currencyId,
-        project_bom_items: [],
-        custom_sections: [],
-        bom_valid: false,
+        boms: [{ quantity: effectiveQuantity, total: effectiveTotal }],
+        currency_id: effectiveCurrencyId,
+        project_bom_items: projectBomItems,
+        custom_sections: outgoingCustomSections,
+        bom_valid: true,
       }
     );
     return { success: true, ...data };
