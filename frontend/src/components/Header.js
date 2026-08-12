@@ -8,6 +8,11 @@ import NotificationsNoneIcon from '@mui/icons-material/NotificationsNone';
 import WbSunnyIcon from '@mui/icons-material/WbSunny';
 import { useThemeContext } from '../utils/ThemeContext';
 
+// Shown next to the logo so you can tell at a glance which build is live.
+// REACT_APP_BUILD_STAMP is set by the deploy script (deploy-fresh.sh) and baked
+// into the bundle at build time; "dev" is what you get running locally.
+const BUILD_STAMP = process.env.REACT_APP_BUILD_STAMP || 'dev';
+
 const MoonIcon = ({ sx }) => (
   <Box
     component="svg"
@@ -105,6 +110,24 @@ const Header = () => {
             >
               FactWise
             </Typography>
+            {/* Build stamp. Baked in at build time, so it tells you which build
+                is actually being served — the point of it is to confirm a deploy
+                landed without having to hunt for a behaviour change. */}
+            <Tooltip title={`Build ${BUILD_STAMP}`}>
+              <Chip
+                label={BUILD_STAMP}
+                size="small"
+                sx={{
+                  height: 18,
+                  fontSize: '10px',
+                  fontWeight: 600,
+                  letterSpacing: '0.02em',
+                  color: r.text.secondary,
+                  bgcolor: r.action.primarySoft,
+                  '& .MuiChip-label': { px: 0.75 },
+                }}
+              />
+            </Tooltip>
           </Box>
         </Box>
 
