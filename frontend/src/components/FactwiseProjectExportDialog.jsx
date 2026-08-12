@@ -10,11 +10,11 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  Checkbox,
   FormControl,
   FormControlLabel,
+  FormGroup,
   IconButton,
-  Radio,
-  RadioGroup,
   Stack,
   Step,
   StepLabel,
@@ -42,6 +42,7 @@ import {
   fetchModuleTemplates,
 } from '../services/factwiseApi';
 import FactwiseBulkImportErrorGrid from './FactwiseBulkImportErrorGrid';
+import { readBomRevisionIntent, saveBomRevisionIntent } from '../utils/bomRevisionIntent';
 
 const STEP_ORDER = [
   { key: 'items', label: 'Import items into Factwise' },
@@ -183,7 +184,11 @@ export default function FactwiseProjectExportDialog({
   // Revision-target picker (only shown after project pick in EXISTING mode).
   // '' → "create new BOM" (default). Otherwise a value of shape
   // `${bom_module_id}::${enterprise_bom_id}::${bom_code}`.
-  const [reviseTargetKey, setReviseTargetKey] = useState('');
+  // Empty → "create a new BOM in this project". Otherwise one key per slot to
+  // move, each `${bom_module_id}::${enterprise_bom_id}::${bom_code}`. A list
+  // because the same BOM can occupy several slots in one project and a
+  // revision that reached only one would leave the rest on the old version.
+  const [reviseTargetKeys, setReviseTargetKeys] = useState([]);
   const [projectBoms, setProjectBoms] = useState([]);
   const [projectBomsLoading, setProjectBomsLoading] = useState(false);
   const [projectBomsError, setProjectBomsError] = useState(null);
@@ -278,11 +283,11 @@ export default function FactwiseProjectExportDialog({
   }, [projectSearchText, modeDraft]);
 
   // Whenever the picked project changes, refresh its BOM list (for the
-  // "create new vs revise which" radio group).
+  // "create new vs revise which" checkboxes).
   useEffect(() => {
     if (modeDraft !== PROJECT_MODES.EXISTING || !pickedProject?.project_id) {
       setProjectBoms([]);
-      setReviseTargetKey('');
+      setReviseTargetKeys([]);
       return;
     }
     let cancelled = false;
@@ -308,10 +313,79 @@ export default function FactwiseProjectExportDialog({
   // had one selected and the browser was refreshed).
   useEffect(() => {
     if (!reviseBomModuleId || !reviseEnterpriseBomId) return;
-    setReviseTargetKey(
-      `${reviseBomModuleId}::${reviseEnterpriseBomId}::${reviseBomCode || ''}`
+    setReviseTargetKeys(
+      [`${reviseBomModuleId}::${reviseEnterpriseBomId}::${reviseBomCode || ''}`]
     );
   }, [reviseBomModuleId, reviseEnterpriseBomId, reviseBomCode]);
+
+  // ---------------------------------------------------------------------------
+  // Carry-over from BomStructureDialog.
+  //
+  // That dialog asked "is this a revision, of what BOM, on which project?" back
+  // at upload, before the file was even parsed. Re-asking here with NEW PROJECT
+  // and "Create new BOM" preselected is how a file the user declared a revision
+  // of BOM X leaves as a second BOM sitting next to X.
+  //
+  // Applied at most once per opening, and never over a checkpoint: an export
+  // already in flight has a real answer, and this is a guess about a fresh one.
+  // Keyed on `open` rather than mount so the checkpoint rehydrate above has
+  // settled long before this reads `phase`.
+  //
+  // The intent is read ONCE and held until consumed, not re-read where it is
+  // used. The write-back further down fires the moment the project lands —
+  // before the project's BOM list has even been requested — and it would
+  // rewrite the stored intent with a null BOM, so a second read here would find
+  // the very thing it came for already erased. Held in state rather than a ref
+  // because the write-back has to wait on it, and a ref would not re-run it.
+  const [pendingIntent, setPendingIntent] = useState(null);
+  const intentAppliedRef = useRef(false);
+  useEffect(() => {
+    if (!open) {
+      intentAppliedRef.current = false;
+      setPendingIntent(null);
+      return;
+    }
+    if (intentAppliedRef.current) return;
+    intentAppliedRef.current = true;
+    if (phase !== PHASES.IDLE || existingProjectId || pickedProject) return;
+    const intent = readBomRevisionIntent();
+    if (!intent?.projectId) return;
+    setPendingIntent(intent.enterpriseBomId ? intent : null);
+    setModeDraft(PROJECT_MODES.EXISTING);
+    setPickedProject({
+      project_id: intent.projectId,
+      project_code: intent.projectCode || '',
+      project_name: intent.projectName || '',
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  // The revise radio can only be set once the project's BOM list is in, and the
+  // effect above resets it to '' on every project change — so this runs after
+  // the fetch lands. Matching on enterprise_bom_id is what supplies the
+  // bom_module_id: the upload dialog reads the org-wide BOM list, which does not
+  // carry one.
+  useEffect(() => {
+    if (!open || !pendingIntent?.enterpriseBomId || reviseTargetKeys.length || !projectBoms.length) return;
+    // Consumed either way — if the BOM is not on this project, retrying on the
+    // next project the user picks would apply a target they did not ask for.
+    setPendingIntent(null);
+    // Matched on the base BOM when the upload dialog resolved one, so every
+    // slot holding that BOM is selected regardless of which revision each sits
+    // at. Falling back to the exact revision finds only slots that happen to be
+    // on the same one.
+    const matches = pendingIntent.baseBomId
+      ? projectBoms.filter(b => String(b.base_bom_id) === String(pendingIntent.baseBomId))
+      : projectBoms.filter(b => String(b.enterprise_bom_id) === String(pendingIntent.enterpriseBomId));
+    // No match means that BOM is not on this project. Leaving it on "create
+    // new" is correct — revising it here is not something FactWise offers, and
+    // silently picking a different BOM would be worse than asking.
+    const usable = matches.filter(b => b.bom_module_id && b.enterprise_bom_id);
+    if (!usable.length) return;
+    setReviseTargetKeys(
+      usable.map(b => `${b.bom_module_id}::${b.enterprise_bom_id}::${b.bom_code || ''}`)
+    );
+  }, [open, pendingIntent, projectBoms, reviseTargetKeys]);
 
   const activeStep = phaseToStepIndex(phase);
   const isDone = phase === PHASES.DONE;
@@ -328,13 +402,85 @@ export default function FactwiseProjectExportDialog({
         : !!pickedProject?.project_id
     );
 
-  const parsedReviseTarget = useMemo(() => {
-    if (!reviseTargetKey) {
-      return { bomModuleId: null, enterpriseBomId: null, bomCode: null };
-    }
-    const [bomModuleId, enterpriseBomId, bomCode] = reviseTargetKey.split('::');
+  // A project restored from a checkpoint or carried over from the upload dialog
+  // is not in the search results until a search happens to return it. MUI drops
+  // a value it cannot find in `options` and warns, so it is spliced in until the
+  // real row arrives.
+  const projectChoices = useMemo(() => {
+    if (!pickedProject?.project_id) return projectOptions;
+    if (projectOptions.some(p => p.project_id === pickedProject.project_id)) return projectOptions;
+    return [pickedProject, ...projectOptions];
+  }, [projectOptions, pickedProject]);
+
+  const parsedReviseTargets = useMemo(() => reviseTargetKeys.map((key) => {
+    const [bomModuleId, enterpriseBomId, bomCode] = key.split('::');
     return { bomModuleId, enterpriseBomId, bomCode };
-  }, [reviseTargetKey]);
+  }), [reviseTargetKeys]);
+
+  // The single-target fields the checkpoint and the summary still speak in.
+  // Only the first — they are display and rehydrate aids; the run itself reads
+  // the full list. Memoised because the write-back effect below depends on it,
+  // and a fresh object each render would have it saving on every render.
+  const primaryReviseTarget = useMemo(
+    () => parsedReviseTargets[0] || { bomModuleId: null, enterpriseBomId: null, bomCode: null },
+    [parsedReviseTargets]
+  );
+
+  // A revise call is rejected outright unless the target shares a base BOM with
+  // what the slot currently holds, so offering slots from a different BOM is
+  // offering a guaranteed 400. The base comes from the upload dialog when it
+  // carried one, and otherwise from whatever the user picks first — after which
+  // the rest of the list narrows to match.
+  const lockedBaseBomId = useMemo(() => {
+    if (pendingIntent?.baseBomId) return String(pendingIntent.baseBomId);
+    const firstId = parsedReviseTargets[0]?.enterpriseBomId;
+    if (!firstId) return null;
+    const row = projectBoms.find(b => String(b.enterprise_bom_id) === String(firstId));
+    return row?.base_bom_id ? String(row.base_bom_id) : null;
+  }, [pendingIntent, parsedReviseTargets, projectBoms]);
+
+  // Rows with no base_bom_id cannot be shown to share one, so they drop out
+  // once a base is locked rather than being offered on the strength of a null.
+  const revisableBoms = useMemo(() => {
+    if (!lockedBaseBomId) return projectBoms;
+    return projectBoms.filter(b => String(b.base_bom_id) === lockedBaseBomId);
+  }, [projectBoms, lockedBaseBomId]);
+
+  const toggleReviseTarget = useCallback((key) => {
+    setReviseTargetKeys(prev => (prev.includes(key)
+      ? prev.filter(k => k !== key)
+      : [...prev, key]));
+  }, []);
+
+  // Write back, so the answer given here prefills the next upload's structure
+  // dialog. Only in EXISTING mode — NEW PROJECT says nothing about a revision
+  // either way, and treating it as "no revision" would wipe an answer the user
+  // gave at upload just because they glanced at the other tab.
+  //
+  // Below parsedReviseTarget rather than beside the read effects above: the dep
+  // array is evaluated during render, so referencing it any earlier is a TDZ
+  // error, not merely untidy.
+  useEffect(() => {
+    if (!open || modeDraft !== PROJECT_MODES.EXISTING || !pickedProject?.project_id) return;
+    // A carried BOM that has not been matched to this project's BOM list yet is
+    // still the best answer we have. Writing over it with the empty radio would
+    // lose it if the dialog were closed before the list arrived.
+    if (pendingIntent) return;
+    saveBomRevisionIntent({
+      enterpriseBomId: primaryReviseTarget.enterpriseBomId || null,
+      bomCode: primaryReviseTarget.bomCode || '',
+      baseBomId: lockedBaseBomId,
+      // Only when unambiguous — several slots have no single module id, and the
+      // upload dialog re-derives them from the base BOM anyway.
+      bomModuleId: parsedReviseTargets.length === 1
+        ? primaryReviseTarget.bomModuleId
+        : null,
+      projectId: pickedProject.project_id,
+      projectCode: pickedProject.project_code || '',
+      projectName: pickedProject.project_name || '',
+    });
+  }, [open, modeDraft, pickedProject, parsedReviseTargets, primaryReviseTarget,
+      lockedBaseBomId, pendingIntent]);
 
   const buildRunPayload = useCallback(() => ({
     mode: modeDraft,
@@ -343,10 +489,13 @@ export default function FactwiseProjectExportDialog({
     templateName: pickedTemplate?.name || null,
     existingProjectId: pickedProject?.project_id || null,
     existingProjectName: pickedProject?.project_name || null,
-    reviseEnterpriseBomId: parsedReviseTarget.enterpriseBomId || null,
-    reviseBomModuleId: parsedReviseTarget.bomModuleId || null,
-    reviseBomCode: parsedReviseTarget.bomCode || null,
-  }), [modeDraft, nameDraft, pickedTemplate, pickedProject, parsedReviseTarget]);
+    reviseEnterpriseBomId: primaryReviseTarget.enterpriseBomId || null,
+    reviseBomModuleId: primaryReviseTarget.bomModuleId || null,
+    // What the run actually iterates. One sequential PUT per entry.
+    reviseBomModuleIds: parsedReviseTargets.map(t => t.bomModuleId).filter(Boolean),
+    reviseBomCode: primaryReviseTarget.bomCode || null,
+  }), [modeDraft, nameDraft, pickedTemplate, pickedProject, parsedReviseTargets,
+       primaryReviseTarget]);
 
   const handleStart = useCallback(() => {
     runFromCheckpoint(buildRunPayload());
@@ -519,7 +668,7 @@ export default function FactwiseProjectExportDialog({
           <Box sx={{ mb: 2 }}>
             <Autocomplete
               size="small"
-              options={projectOptions}
+              options={projectChoices}
               value={pickedProject}
               onChange={(_, v) => setPickedProject(v)}
               onInputChange={(_, value, reason) => {
@@ -568,26 +717,33 @@ export default function FactwiseProjectExportDialog({
                     {projectBomsError}
                   </Typography>
                 ) : (
-                  <FormControl disabled={configFrozen}>
-                    <RadioGroup
-                      value={reviseTargetKey}
-                      onChange={(_, v) => setReviseTargetKey(v)}
-                    >
+                  <FormControl disabled={configFrozen} component="fieldset" variant="standard">
+                    <FormGroup>
                       <FormControlLabel
-                        value=""
-                        control={<Radio size="small" />}
+                        control={
+                          <Checkbox
+                            size="small"
+                            checked={reviseTargetKeys.length === 0}
+                            // Only ever turned ON here. Unticking it would have
+                            // to mean "revise something" without saying what,
+                            // so it clears when a slot below is ticked instead.
+                            onChange={() => setReviseTargetKeys([])}
+                          />
+                        }
                         label={
                           <Typography variant="body2">
                             <strong>Create new BOM</strong> in this project
                           </Typography>
                         }
                       />
-                      {projectBoms.length === 0 ? (
+                      {revisableBoms.length === 0 ? (
                         <Typography variant="caption" sx={{ color: 'text.secondary', ml: 4 }}>
-                          Project has no BOMs yet.
+                          {projectBoms.length
+                            ? 'No BOM in this project shares a base BOM with the one being revised.'
+                            : 'Project has no BOMs yet.'}
                         </Typography>
                       ) : (
-                        projectBoms.map((b) => {
+                        revisableBoms.map((b) => {
                           const bomModuleId = b.bom_module_id || b.module_id || b.id;
                           const enterpriseBomId = b.enterprise_bom_id || b.base_bom_id;
                           const label = [b.bom_code, b.bom_name].filter(Boolean).join(' — ') || bomModuleId;
@@ -595,9 +751,14 @@ export default function FactwiseProjectExportDialog({
                           return (
                             <FormControlLabel
                               key={key}
-                              value={key}
                               disabled={!bomModuleId || !enterpriseBomId}
-                              control={<Radio size="small" />}
+                              control={
+                                <Checkbox
+                                  size="small"
+                                  checked={reviseTargetKeys.includes(key)}
+                                  onChange={() => toggleReviseTarget(key)}
+                                />
+                              }
                               label={
                                 <Typography variant="body2">
                                   Revise: <strong>{label}</strong>
@@ -610,11 +771,16 @@ export default function FactwiseProjectExportDialog({
                           );
                         })
                       )}
-                    </RadioGroup>
+                    </FormGroup>
                   </FormControl>
                 )}
                 <Typography variant="caption" sx={{ display: 'block', mt: 0.75, color: 'text.secondary' }}>
-                  Revising creates a new revision in the BOM directory and repoints this project's BOM to it. Both places are updated.
+                  {reviseTargetKeys.length > 1
+                    ? `Revising creates one new revision in the BOM directory and repoints all ${reviseTargetKeys.length} selected slots to it, one at a time. A failure partway leaves the earlier ones moved.`
+                    : 'Revising creates a new revision in the BOM directory and repoints this project\'s BOM to it. Both places are updated.'}
+                  {lockedBaseBomId && projectBoms.length > revisableBoms.length
+                    ? ' Only BOMs that are revisions of the same BOM are listed — FactWise rejects anything else.'
+                    : ''}
                 </Typography>
               </Box>
             )}
@@ -625,8 +791,8 @@ export default function FactwiseProjectExportDialog({
           {phaseLabel(phase, Boolean(reviseEnterpriseBomId))
             || (modeDraft === PROJECT_MODES.NEW
               ? 'Click "Start export" to send items, BOM, and create the project.'
-              : reviseTargetKey
-                ? 'Click "Start export" to send items and revise the picked BOM inside this project.'
+              : reviseTargetKeys.length
+                ? `Click "Start export" to send items and revise ${reviseTargetKeys.length === 1 ? 'the picked BOM' : `the ${reviseTargetKeys.length} picked BOMs`} inside this project.`
                 : 'Click "Start export" to send items and attach the BOM as a new module in this project.')}
         </Typography>
 

@@ -3,6 +3,8 @@
  * Ensures consistent state updates after mutations without refresh
  */
 
+import { displayHeaderName } from './columnHeaderNames';
+
 /**
  * Apply returned snapshot to editor state immediately
  * @param {Object} snapshot - Snapshot from backend
@@ -65,25 +67,26 @@ function applySnapshotToEditor(snapshot, stateFunctions) {
         let displayName = h;
         let columnType = 'regular';
         
-        // Apply display name mappings and track column types
+        // Repeated groups keep their slot number in the label (Tag (1), Tag (2));
+        // exports strip it back to the shared name via canonicalHeaderName.
         if (h.startsWith('Tag_') || h === 'Tag') {
-          displayName = 'Tag';
+          displayName = displayHeaderName(h, headers);
           columnType = 'tag';
           tagColumns++;
         } else if (h.startsWith('Specification_Name_') || h === 'Specification name') {
-          displayName = 'Specification name';
+          displayName = displayHeaderName(h, headers);
           columnType = 'spec';
           specColumns++;
         } else if (h.startsWith('Specification_Value_') || h === 'Specification value') {
-          displayName = 'Specification value';
+          displayName = displayHeaderName(h, headers);
           columnType = 'spec';
           specColumns++;
         } else if (h.startsWith('Customer_Identification_Name_') || h === 'Customer identification name' || h === 'Custom identification name') {
-          displayName = 'Customer identification name';
+          displayName = displayHeaderName(h, headers);
           columnType = 'customer';
           customerColumns++;
         } else if (h.startsWith('Customer_Identification_Value_') || h === 'Customer identification value' || h === 'Custom identification value') {
-          displayName = 'Customer identification value';
+          displayName = displayHeaderName(h, headers);
           columnType = 'customer';
           customerColumns++;
         } else if (h === 'Factwise ID' || h === 'Item code') {
@@ -243,23 +246,24 @@ function createColumnDefsFromHeaders(headers) {
     let isFormulaColumn = false;
     let isSpecificationColumn = false;
     
-    // Determine display name and column type
+    // Determine display name and column type. Repeated groups keep their slot
+    // number in the label; exports strip it via canonicalHeaderName.
     if (header.startsWith('Tag_') || header === 'Tag') {
-      displayName = 'Tag';
+      displayName = displayHeaderName(header, headers);
       isFormulaColumn = true;
     } else if (header.startsWith('Specification_Name_') || header === 'Specification name') {
-      displayName = 'Specification name';
+      displayName = displayHeaderName(header, headers);
       isFormulaColumn = true;
       isSpecificationColumn = true;
     } else if (header.startsWith('Specification_Value_') || header === 'Specification value') {
-      displayName = 'Specification value';
+      displayName = displayHeaderName(header, headers);
       isFormulaColumn = true;
       isSpecificationColumn = true;
     } else if (header.startsWith('Customer_Identification_Name_') || header.includes('Customer identification name')) {
-      displayName = 'Customer identification name';
+      displayName = displayHeaderName(header, headers);
       isFormulaColumn = true;
     } else if (header.startsWith('Customer_Identification_Value_') || header.includes('Customer identification value')) {
-      displayName = 'Customer identification value';
+      displayName = displayHeaderName(header, headers);
       isFormulaColumn = true;
     } else if (header === 'Factwise ID' || header === 'Item code') {
       isFormulaColumn = true;

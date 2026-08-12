@@ -5573,6 +5573,51 @@ IMPORT_HEADER_ALIASES = {
 
 
 
+# Internal prefix -> the exact header text FactWise expects in an exported file.
+# Mirrors frontend/src/utils/columnHeaderNames.js — keep the two in step.
+_TEMPLATE_GROUP_PREFIXES = (
+    ('Tag_', 'Tag'),
+    ('Specification_Name_', 'Specification name'),
+    ('Specification_Value_', 'Specification value'),
+    ('Specification_UOM_', 'Specification UOM'),
+    ('Customer_Identification_Name_', 'Customer identification name'),
+    ('Customer_Identification_Value_', 'Customer identification value'),
+)
+
+_DISPLAY_SUFFIX_RE = re.compile(r'\s*\(\d+\)\s*$')
+
+
+def canonical_export_header(column):
+    """The header text to write to a file for one column.
+
+    Repeated template columns are shown in the app with their slot number
+    (``Tag (2)``) so the user can tell three otherwise identical columns apart.
+    FactWise groups repeats by EXACT header text, so every export has to put
+    that number back: ``Tag_2`` and ``Tag (2)`` both go out as ``Tag``, and the
+    importer sees one three-slot Tag group instead of three unknown columns.
+    """
+    name = str(column or '').strip()
+    if not name:
+        return name
+
+    for prefix, canonical in _TEMPLATE_GROUP_PREFIXES:
+        if name.startswith(prefix) and name[len(prefix):].isdigit():
+            return canonical
+
+    # Display label form: 'Tag (2)' -> 'Tag'. A trailing bare number is part of
+    # the real name ('DigiKey Canonical MPN 2'), so only the bracketed form goes.
+    stripped = _DISPLAY_SUFFIX_RE.sub('', name)
+    if stripped != name:
+        return stripped
+
+    # Generic split-generated run: 'Reference Designator_7' -> 'Reference Designator'.
+    match = re.match(r'^(.+)_(\d+)$', name)
+    if match:
+        return match.group(1).replace('_', ' ')
+
+    return name
+
+
 def _positional_row_keys(headers):
     """Unique dict keys for headers that legitimately repeat.
 
@@ -6511,16 +6556,13 @@ def download_grid_excel(request):
         if headers:
             df.columns = headers[:len(df.columns)]
         
-        # Prune _numbers from column names for download only (Tag_1, Tag_2 → Tag)
+        # Strip the display-only slot number so repeats go out under the shared
+        # header FactWise groups on. This used to prune '_2' but leave the
+        # underscores ('Specification_Name'), and did not recognise the 'Tag (2)'
+        # label form at all — it only produced valid headers because the caller
+        # happened to pre-clean them.
         if not df.empty and len(df.columns) > 0:
-            import re
-            final_columns = []
-            for col in df.columns:
-                # Remove _number suffix from column names (e.g., Tag_1 → Tag, Specification_Name_2 → Specification_Name)
-                pruned_col = re.sub(r'_\d+$', '', str(col))
-                final_columns.append(pruned_col)
-            
-            df.columns = final_columns
+            df.columns = [canonical_export_header(col) for col in df.columns]
         
         # Generate filename with YYMMDD_HHMMSS
         from datetime import datetime

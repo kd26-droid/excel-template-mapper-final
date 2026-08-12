@@ -45,6 +45,7 @@ import api, { setGlobalLoaderCallback } from '../services/api';
 import FormulaBuilder from '../components/FormulaBuilder';
 import ColumnParser from '../components/ColumnParser/ColumnParser';
 import TestComponent from '../components/TestComponent';
+import { canonicalHeaderName } from '../utils/columnHeaderNames';
 
 // Force include ColumnParser in bundle - DATAEDITOR_MARKER_UNIQUE_12345
 console.log('ColumnParser component:', typeof ColumnParser);
@@ -1091,15 +1092,11 @@ const DataEditor = () => {
       // Get headers from column definitions (exclude row number column)
       const dataColumnDefs = columnDefs.filter(col => col.field && col.field !== '__row_number__');
       
-      // For download: prune _number suffixes (Tag_1 → Tag, Tag_2 → Tag)
-      const originalHeaders = dataColumnDefs.map(col => col.headerName || col.field);
-      const gridHeaders = originalHeaders.map(header => {
-        // 1) Remove trailing numeric suffix: Tag_1 -> Tag, Specification_Value_2 -> Specification_Value
-        let cleaned = header.replace(/_\d+$/, '');
-        // 2) Replace underscores with spaces: Specification_Value -> Specification Value
-        cleaned = cleaned.replace(/_/g, ' ');
-        return cleaned;
-      });
+      // Export headers come from the FIELD, never from headerName: the label
+      // carries a display-only slot number ("Tag (2)") and FactWise groups
+      // repeated columns by exact header text, so shipping the label would make
+      // every slot after the first an unrecognised column.
+      const gridHeaders = dataColumnDefs.map(col => canonicalHeaderName(col.field));
       const columnKeys = dataColumnDefs.map(col => col.field);
       
       // Convert row data to array format matching headers

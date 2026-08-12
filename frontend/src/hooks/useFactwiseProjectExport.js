@@ -8,12 +8,12 @@ import {
   fetchModuleTemplates,
   fetchCurrencies,
   attachBomToProject,
-  reviseProjectBom,
   reviseEnterpriseBom,
   fetchEnterpriseBomCodes,
   fetchEnterpriseBomDetail,
   submitEnterpriseBom,
 } from '../services/factwiseApi';
+import { reviseSlots, summariseSlotResults, SLOT_OUTCOMES } from '../services/bomSlotReviseRunner';
 import api from '../services/api';
 
 // Rewrites the mapper's BOM Excel so every occurrence of the sheet's main
@@ -254,6 +254,11 @@ const emptyState = {
   // User-chosen revision target (the ONGOING BOM they picked in the dialog).
   reviseEnterpriseBomId: null,
   reviseBomModuleId: null,
+  // Every slot to move, as linkage ids. A project can hold the same BOM in
+  // several slots at once and the user picks which of them follow the new
+  // revision, so this is a list; `reviseBomModuleId` above stays for older
+  // checkpoints written before it was one.
+  reviseBomModuleIds: [],
   reviseBomCode: null,      // just for display
   // Set once we've called /bom/admin/<id>/revise/ — this is the new DRAFT id
   // we upload the bulk import against. Cached so retries don't re-revise.
@@ -738,9 +743,12 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
         return { ok: false };
       }
 
-      // User's explicit revision target — if set, revise the matching project
-      // BOM module in-place; otherwise attach as a new project BOM.
-      const reviseBomModuleId = saved.reviseBomModuleId || null;
+      // User's explicit revision targets — if any, move those project BOM slots
+      // in place; otherwise attach as a new project BOM. Falls back to the
+      // single-id field so a checkpoint written before multi-select still runs.
+      const reviseBomModuleIds = saved.reviseBomModuleIds?.length
+        ? saved.reviseBomModuleIds
+        : (saved.reviseBomModuleId ? [saved.reviseBomModuleId] : []);
 
       const attached = [];
       const revisedModules = [];
@@ -748,6 +756,11 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
         // Poll the BOM until its item tree is hydrated by FactWise's async
         // Celery pipeline. Attaching before hydration returns NoneType /
         // missing-id errors from create_bom_module (bom_service.py:2490).
+        //
+        // This guards the revise path too, not just attach. A slot moved onto a
+        // revision whose items have not landed yet has nothing to copy, and the
+        // revise runs as one transaction — so it would commit an empty slot
+        // rather than fail loudly.
         patch({ phase: PHASES.BOM_SETTLING });
         const ready = await waitForBomReady({ enterpriseBomId: bomId });
         if (!ready.ok) {
@@ -761,46 +774,78 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
         }
         patch({ phase: PHASES.ATTACH_BOM });
 
-        // Retry the attach on transient race errors — FW's create_project_boms
-        // touches multiple tables and occasionally races with the BOM Celery
-        // worker. Exponential backoff (~4s, 8s, 12s, ...) up to
-        // BOM_ATTACH_MAX_ATTEMPTS. Terminal errors (KeyError on section name,
-        // ValidationError etc.) fail fast.
-        let lastError = null;
-        let ok = false;
-        for (let attempt = 1; attempt <= BOM_ATTACH_MAX_ATTEMPTS; attempt++) {
-          const res = reviseBomModuleId
-            ? await reviseProjectBom({
-                projectId,
-                bomModuleId: reviseBomModuleId,
-                enterpriseBomId: bomId,
-              })
-            : await attachBomToProject({
-                projectId,
-                enterpriseBomId: bomId,
-                currencyId,
-              });
-          if (res?.success) {
-            ok = true;
-            if (reviseBomModuleId) revisedModules.push(reviseBomModuleId);
-            else attached.push(bomId);
-            break;
-          }
-          lastError = res?.error || (reviseBomModuleId ? 'Revise failed' : 'Attach failed');
-          if (!isTransientAttachError(lastError) || attempt === BOM_ATTACH_MAX_ATTEMPTS) {
-            break;
-          }
-          const wait = BOM_ATTACH_RETRY_BASE_MS * attempt;
-          await new Promise((r) => setTimeout(r, wait));
-        }
-        if (!ok) {
-          patch({
-            phase: PHASES.ATTACH_BOM_ERROR,
-            lastError: `${reviseBomModuleId ? 'Revise' : 'Attach'} failed for BOM ${bomId}: ${lastError}`,
-            attachedBomIds: attached,
-            revisedProjectBomModules: revisedModules,
+        if (reviseBomModuleIds.length) {
+          // Sequencing, a fresh process_id per attempt, 409 replay handling and
+          // the timed-out-means-rolled-back rule all live in the runner. It
+          // reports PER SLOT, which is the point: each slot is its own
+          // transaction, so a failure partway leaves the earlier ones already
+          // moved and the user has to be told which.
+          //
+          // Deliberately NOT wrapped in the transient-error backoff below. That
+          // loop retries by repeating the call, which for a revise is the one
+          // thing you must not do blindly — the first attempt may have
+          // committed. The runner decides by reading the process record
+          // instead, which is the only safe way to know.
+          const { ok, results } = await reviseSlots({
+            projectId,
+            targetEnterpriseBomId: bomId,
+            slots: reviseBomModuleIds.map(bomModuleId => ({ bomModuleId })),
+            onSlotResult: (result) => {
+              if (result.outcome !== SLOT_OUTCOMES.REVISED) return;
+              revisedModules.push(result.slot.bomModuleId);
+              // Published as each one lands rather than at the end — a run over
+              // several large slots can take minutes, and a checkpoint written
+              // only on completion would lose the record of what moved if the
+              // tab were closed midway.
+              patch({ revisedProjectBomModules: [...revisedModules] });
+            },
           });
-          return { ok: false };
+          if (!ok) {
+            patch({
+              phase: PHASES.ATTACH_BOM_ERROR,
+              lastError: [
+                `Revise did not finish for BOM ${bomId}.`,
+                ...summariseSlotResults(results),
+              ].join('\n'),
+              attachedBomIds: attached,
+              revisedProjectBomModules: revisedModules,
+            });
+            return { ok: false };
+          }
+        } else {
+          // Retry the attach on transient race errors — FW's
+          // create_project_boms touches multiple tables and occasionally races
+          // with the BOM Celery worker. Exponential backoff (~4s, 8s, 12s …)
+          // up to BOM_ATTACH_MAX_ATTEMPTS. Terminal errors (KeyError on section
+          // name, ValidationError etc.) fail fast.
+          let lastError = null;
+          let ok = false;
+          for (let attempt = 1; attempt <= BOM_ATTACH_MAX_ATTEMPTS; attempt++) {
+            const res = await attachBomToProject({
+              projectId,
+              enterpriseBomId: bomId,
+              currencyId,
+            });
+            if (res?.success) {
+              ok = true;
+              attached.push(bomId);
+              break;
+            }
+            lastError = res?.error || 'Attach failed';
+            if (!isTransientAttachError(lastError) || attempt === BOM_ATTACH_MAX_ATTEMPTS) {
+              break;
+            }
+            await new Promise((r) => setTimeout(r, BOM_ATTACH_RETRY_BASE_MS * attempt));
+          }
+          if (!ok) {
+            patch({
+              phase: PHASES.ATTACH_BOM_ERROR,
+              lastError: `Attach failed for BOM ${bomId}: ${lastError}`,
+              attachedBomIds: attached,
+              revisedProjectBomModules: revisedModules,
+            });
+            return { ok: false };
+          }
         }
       }
       patch({
@@ -828,6 +873,7 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
     existingProjectName,
     reviseEnterpriseBomId,
     reviseBomModuleId,
+    reviseBomModuleIds,
     reviseBomCode,
     // When true, orchestrator stops after BOM_DONE and marks DONE. Used by the
     // Export-to-BOM-Directory dialog which only needs items + BOM, no project.
@@ -870,6 +916,9 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
       reviseBomModuleId: reviseBomModuleId === undefined
         ? cur.reviseBomModuleId
         : reviseBomModuleId,
+      reviseBomModuleIds: reviseBomModuleIds === undefined
+        ? cur.reviseBomModuleIds
+        : reviseBomModuleIds,
       reviseBomCode: reviseBomCode === undefined
         ? cur.reviseBomCode
         : reviseBomCode,

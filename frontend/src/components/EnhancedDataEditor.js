@@ -101,6 +101,7 @@ import { LoaderCard } from './LoaderOverlay';
 import { getDataSynchronizer, cleanupSynchronizer } from '../utils/DataSynchronizer';
 import { useThemeContext } from '../utils/ThemeContext';
 import { readItemDirectoryDefaults } from '../utils/itemDirectoryDefaults';
+import { displayHeaderName } from '../utils/columnHeaderNames';
 
 // Keep the arrangement-specific row expansion implementation dormant while a
 // generic, user-configured row expansion model is designed.
@@ -323,25 +324,11 @@ const deriveDisplayName = (col, allHeaders = []) => {
   if (legacyDigikeyNames[col]) return legacyDigikeyNames[col];
   const legacyCanonical = String(col).match(/^Canonical MPN (\d+)$/);
   if (legacyCanonical) return `DigiKey Canonical MPN ${legacyCanonical[1]}`;
-  if (col.startsWith('Tag_') || col === 'Tag') return 'Tag';
-  if (col.startsWith('Specification_Name_') || col === 'Specification name') return 'Specification name';
-  if (col.startsWith('Specification_Value_') || col === 'Specification value') return 'Specification value';
-  if (col.startsWith('Customer_Identification_Name_') || col === 'Customer identification name' || col === 'Custom identification name') return 'Customer identification name';
-  if (col.startsWith('Customer_Identification_Value_') || col === 'Customer identification value' || col === 'Custom identification value') return 'Customer identification value';
-
-  // General fallback: a "<base>_<n>" column that has 2+ siblings sharing the
-  // same base is a split-generated run — show them all under "<base>".
-  const m = String(col).match(/^(.+)_(\d+)$/);
-  if (m) {
-    const base = m[1];
-    let siblings = 0;
-    for (const h of allHeaders) {
-      const hm = String(h).match(/^(.+)_(\d+)$/);
-      if (hm && hm[1] === base) siblings += 1;
-    }
-    if (siblings >= 2) return base;
-  }
-  return col;
+  // Repeated template groups (Tag, Specification, Customer identification) and
+  // generic split runs keep their slot number in the label — three columns all
+  // reading "Tag" gave the user no way to tell which one they were editing.
+  // The number is display-only: exports go out under canonicalHeaderName.
+  return displayHeaderName(col, allHeaders);
 };
 
 // A part is checked against three sources (DigiKey, Mouser, Element14), each
@@ -4425,10 +4412,12 @@ const EnhancedDataEditor = () => {
     } catch (_) { /* non-fatal */ }
   }, [sessionId]);
 
-  // "Tag_1" → "Tag  (← Manufacturer)" or "(= default)". No annotation if neither.
+  // "Tag_1" → "Tag (1)  (← Manufacturer)" or "(= default)". No annotation if neither.
+  // Numbering used to be applied to Tag only, so duplicate Specification and
+  // Customer identification columns were indistinguishable in these dropdowns.
   const columnLabel = useCallback((field, headerName) => {
-    const tagMatch = String(field || '').match(/^Tag_(\d+)$/);
-    const base = tagMatch ? `Tag (${tagMatch[1]})` : (headerName || field);
+    const numbered = displayHeaderName(field);
+    const base = numbered !== String(field ?? '') ? numbered : (headerName || field);
     const src = columnSourceMap.sources?.[field];
     if (src) return `${base}  (← ${src})`;
     const def = columnSourceMap.defaults?.[field];

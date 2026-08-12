@@ -4,6 +4,8 @@
  * Prevents ANY column disappearing/appearing issues on refresh
  */
 
+import { displayHeaderName } from './columnHeaderNames';
+
 /**
  * Critical columns that MUST ALWAYS be present and visible
  */
@@ -162,9 +164,10 @@ function createEnforcedColumnDefs(headers) {
     let cellStyle = {};
     let headerClass = 'ag-header-cell-excel';
     
-    // Apply special styling for critical columns
+    // Apply special styling for critical columns. Repeated groups keep their
+    // slot number in the label; exports strip it via canonicalHeaderName.
     if (isTag) {
-      displayName = 'Tag';
+      displayName = displayHeaderName(header, enforcedHeaders);
       cellStyle = {
         backgroundColor: '#e8f5e8',
         borderLeft: '4px solid #4caf50',
@@ -181,7 +184,7 @@ function createEnforcedColumnDefs(headers) {
       };
       headerClass = 'ag-header-factwise';
     } else if (isSpec) {
-      displayName = header.includes('Name') ? 'Specification name' : 'Specification value';
+      displayName = displayHeaderName(header, enforcedHeaders);
       cellStyle = {
         backgroundColor: '#f0f8ff',
         borderLeft: '4px solid #2196f3',

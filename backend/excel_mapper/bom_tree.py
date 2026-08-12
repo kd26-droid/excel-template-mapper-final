@@ -466,11 +466,24 @@ def derive_tree(records, level_column, code_column,
             for deeper in [key for key in open_at if key > level]:
                 del open_at[deeper]
 
-    # Leaf classification. A row is an assembly when the row immediately after it
-    # sits deeper; anything else terminates the branch.
-    for position, row in enumerate(rows):
-        following = rows[position + 1] if position + 1 < len(rows) else None
-        row['is_leaf'] = not (following and following['level'] > row['level'])
+    # Leaf classification. A row is an assembly when something names it as a
+    # parent, not when the row after it happens to sit deeper.
+    #
+    # The two agree on a sheet listed in tree order, which is why reading the
+    # neighbouring row worked for as long as it did. But an explicit parent
+    # column is order-free by design - that is the whole reason it outranks level
+    # inference - and there a child may sit anywhere in the sheet. Judging by the
+    # neighbour then calls an assembly a leaf, which routes it to 'Raw material
+    # code' instead of 'Sub BOM ID' and silently drops its entire sub-BOM from
+    # the export, while a real leaf gets sent to 'Sub BOM ID' and points at a BOM
+    # that was never written.
+    #
+    # Under level inference the parent links were themselves derived from row
+    # order, so this reads the same answer from the resolved structure instead of
+    # re-deriving it from the sheet.
+    named_as_parent = {row['parent'] for row in rows if row['parent']}
+    for row in rows:
+        row['is_leaf'] = row['code'] not in named_as_parent
 
     _detect_level_jumps(rows, errors)
 

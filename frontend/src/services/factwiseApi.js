@@ -303,7 +303,10 @@ export async function fetchProjects({
 
 // Fetches enterprise BOM codes so we can detect whether the mapper's BOM
 // already exists (→ trigger a revision instead of creating a duplicate).
-// Response items look like { enterprise_bom_id, bom_code }.
+//
+// Response items are { enterprise_bom_id, bom_code, base_bom_id, version } —
+// ONE ROW PER REVISION, so this is a list of revisions, not of BOMs. Collapse
+// by base_bom_id (see collapseBomRevisions) when the caller wants BOMs.
 export async function fetchEnterpriseBomCodes() {
   const client = buildClient();
   if (!client) return { success: false, boms: [] };
@@ -424,20 +427,176 @@ export async function fetchProjectBomVersions(projectId, projectBomsFromPicker =
   }
 }
 
+// A fresh id per revise attempt. Reusing one is the server's replay guard and
+// returns 409, so a retry must never send the id its predecessor used.
+export function newProcessId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  // Non-secure contexts have no randomUUID. Shape matters more than entropy
+  // here — the id only has to be unique across this tab's attempts.
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (ch) => {
+    const rand = (Math.random() * 16) | 0;
+    return (ch === 'x' ? rand : ((rand & 0x3) | 0x8)).toString(16);
+  });
+}
+
 // Replaces an existing project BOM module with a new enterprise BOM revision.
-export async function reviseProjectBom({ projectId, bomModuleId, enterpriseBomId }) {
+//
+// `bomModuleId` is a LINKAGE id (bom_module_id from the bom-groups endpoint),
+// not an enterprise_bom_id — sibling routes name the same parameter after the
+// wrong thing, but this one is honest. `enterpriseBomId` in the body is the
+// target revision being moved to, and must share a base BOM with what the slot
+// currently holds or the server rejects it with 400.
+//
+// Synchronous and slow: cost scales as (rows in the slot) × (items in the
+// revision), against a 60s worker timeout. A timeout rolls back cleanly — the
+// whole thing is one transaction — but leaves the process record stuck on
+// RUNNING, so treat RUNNING past ~90s as a failure and retry with a NEW
+// processId rather than polling forever.
+export async function reviseProjectBom({ projectId, bomModuleId, enterpriseBomId, processId }) {
   const client = buildClient();
   if (!client) return { success: false, error: 'No Factwise session' };
   try {
     const { data } = await client.put(
       `/organization/project/${projectId}/boms/${bomModuleId}/revise/`,
-      { enterprise_bom_id: enterpriseBomId }
+      { enterprise_bom_id: enterpriseBomId, process_id: processId || newProcessId() },
+      // buildClient's 15s default is shorter than the work takes. Giving up at
+      // 15s does not stop the server — it commits anyway — so the client would
+      // report a failure on a revise that actually landed. This sits past the
+      // server's own 60s worker limit so the server is always the one to give
+      // up first, and a client-side abort means something else went wrong.
+      { timeout: 120000 }
     );
     return { success: true, ...data };
   } catch (error) {
+    const status = error?.response?.status;
     return {
       success: false,
-      error: error?.response?.data?.error || error?.message || 'Project BOM revise failed',
+      // 409 is the replay guard: that process_id was already consumed, so the
+      // work may well have succeeded. It is a signal to go and look, not a
+      // failure to retry through.
+      conflict: status === 409,
+      // No response at all — the outcome is genuinely unknown from here and
+      // has to be resolved against the process record.
+      timedOut: error?.code === 'ECONNABORTED' || (!error?.response && Boolean(error?.request)),
+      status: status || null,
+      error: error?.response?.data?.error
+        || error?.response?.data?.ErrorCode
+        || error?.message
+        || 'Project BOM revise failed',
+    };
+  }
+}
+
+// The truth about an attempt whose HTTP response never arrived or came back
+// 409. See §7 of BOM_MAPPER_PROJECT_REVISE_API.md: the record is written
+// RUNNING before the work starts, and the FAILED write lives in an exception
+// handler that a SIGKILL'd worker never reaches — so RUNNING is not proof of
+// progress, only of having started.
+export async function fetchProcessStatus(processId) {
+  const client = buildClient();
+  if (!client || !processId) return { success: false, status: null };
+  try {
+    const { data } = await client.get(`/organization/process/${processId}/status/`);
+    return { success: true, status: data?.status || null, error: data?.error || null };
+  } catch (error) {
+    return {
+      success: false,
+      status: null,
+      error: error?.response?.data?.error || error?.message || 'Process status lookup failed',
+    };
+  }
+}
+
+// --- Revising a BOM on its projects ------------------------------------------
+//
+// Everything below keys off `base_bom_id`, never `enterprise_bom_id`. The two
+// are easy to mix up and the failure is silent: `enterprise_bom_id` names ONE
+// revision and changes every time a BOM is revised, while `base_bom_id` names
+// the BOM across all of them and never changes. A project stays linked to
+// whichever revision it was added with, so asking "which projects have this
+// BOM" with a fresh revision's id returns zero projects — precisely the
+// projects you were about to update. See BOM_MAPPER_PROJECT_REVISE_API.md in
+// the backend repo.
+
+// One entry per BOM from a list of revisions, each carrying the highest-version
+// row as the current one and its full revision history.
+//
+// Keyed on base_bom_id and ranked on `version`. Never on the `_Rn` suffix in
+// bom_code: seven BOMs in mainV2 disagree with their own name — QAB1_R24 is
+// actually v1, AMAAN-BUG-6-2 is v2 with no suffix at all — so a name-derived
+// ordering picks the wrong current revision for those.
+//
+// Rows with no base_bom_id cannot be grouped and are passed through as
+// standalone entries rather than dropped or lumped together under null.
+export function collapseBomRevisions(rows = []) {
+  const byBase = new Map();
+  const ungrouped = [];
+  rows.forEach((row) => {
+    if (!row?.base_bom_id) {
+      if (row) ungrouped.push({ ...row, revisions: [row] });
+      return;
+    }
+    const key = String(row.base_bom_id);
+    if (!byBase.has(key)) byBase.set(key, []);
+    byBase.get(key).push(row);
+  });
+
+  const collapsed = [...byBase.values()].map((revisions) => {
+    const ordered = [...revisions].sort((a, b) => (b.version ?? 0) - (a.version ?? 0));
+    return { ...ordered[0], revisions: ordered };
+  });
+  return [...collapsed, ...ungrouped];
+}
+
+// Projects carrying a BOM, at any revision. Replaces the org-wide project
+// search for the revision flow — a revision can only land somewhere the BOM
+// already is.
+//
+// No status filtering server-side: closed projects come back too, with
+// `project_status` so the caller decides what is eligible.
+export async function fetchProjectsWithBom({ baseBomId } = {}) {
+  const client = buildClient();
+  if (!client || !baseBomId) return { success: false, projects: [] };
+  try {
+    const { data } = await client.get(`/organization/project/bom/${baseBomId}/`);
+    return { success: true, projects: Array.isArray(data) ? data : [] };
+  } catch (error) {
+    return {
+      success: false,
+      projects: [],
+      error: error?.response?.data?.error || error?.message || 'Project lookup failed',
+    };
+  }
+}
+
+// The slots a BOM occupies in one project.
+//
+// A slot is one "add BOM to project" action, identified by
+// base_bom_module_linkage_id, and may hold several rows (one per quantity added
+// in that action) — all of which move together in a single revise call. Because
+// each add is independent, the same BOM can sit in several slots at DIFFERENT
+// revisions at once, which is why this returns a list to choose from rather
+// than one answer.
+//
+// `bom_module_id` is the slot's representative linkage row and is what the
+// revise URL takes — not an enterprise_bom_id, despite what sibling endpoints
+// name their parameters.
+export async function fetchProjectBomSlots({ projectId, baseBomId } = {}) {
+  const client = buildClient();
+  if (!client || !projectId || !baseBomId) return { success: false, slots: [] };
+  try {
+    const { data } = await client.get(
+      `/organization/project/${projectId}/bom-groups/`,
+      { params: { base_bom_id: baseBomId } }
+    );
+    return { success: true, slots: Array.isArray(data) ? data : [] };
+  } catch (error) {
+    return {
+      success: false,
+      slots: [],
+      error: error?.response?.data?.error || error?.message || 'Project BOM slot lookup failed',
     };
   }
 }

@@ -58,12 +58,21 @@ async function loadErrorWorkbook(bulkImportId) {
       ? rawHeaders.slice(0, errorColIdx)
       : rawHeaders;
     // Deduplicate + fill blank headers so DataGrid column ids are stable.
-    const seen = new Map();
+    // IMPORTANT: these are DISPLAY/field keys only. FactWise groups repeated
+    // columns by exact header text (column_index_map['Tag'] -> [i, j, k]), so
+    // writing "Tag (2)" back into the retry file would make FW read only the
+    // first Tag column. `dataHeaders` is kept verbatim for that write-back.
+    const seen = new Set();
     const headers = dataHeaders.map((h, i) => {
       const base = h || `Column ${i + 1}`;
-      const count = seen.get(base) || 0;
-      seen.set(base, count + 1);
-      return count ? `${base} (${count + 1})` : base;
+      let candidate = base;
+      let n = 1;
+      while (seen.has(candidate)) {
+        n += 1;
+        candidate = `${base} (${n})`;
+      }
+      seen.add(candidate);
+      return candidate;
     });
 
     // Build the per-row per-column error map.
@@ -95,6 +104,9 @@ async function loadErrorWorkbook(bulkImportId) {
     return {
       ok: true,
       headers,
+      // Raw header text exactly as FactWise emitted it (duplicates intact) —
+      // this is what must go back on the wire.
+      originalHeaders: dataHeaders,
       dataRows,
       errorMap,
       sheetName: firstSheetName,
@@ -106,26 +118,24 @@ async function loadErrorWorkbook(bulkImportId) {
 
 // Build the retry xlsx from the grid's current state.
 //
-// CRITICAL: strip the "(N)" dedupe suffix from headers before writing the
-// file. The grid uses "Tag", "Tag (2)", "Tag (3)" internally so MUI
-// DataGrid columns have unique field names — but FactWise's item importer
-// looks up columns by NAME and buckets duplicates by exact match:
+// The two header lists are NOT interchangeable and must stay index-aligned.
+// `fieldKeys` are the deduped keys the grid uses on its row objects — "Tag",
+// "Tag (2)", "Tag (3)" — because MUI DataGrid needs unique field names.
+// `outHeaders` are the names actually written to the sheet, which have to be
+// FactWise's own originals, duplicates and all.
+//
+// That distinction is the whole point. FactWise's item importer looks columns
+// up by NAME and buckets duplicates by exact match:
 //   column_index_map["Tag"] = [indexes of every column literally named "Tag"]
-// If we ship the file with "Tag (2)" / "Tag (3)" as header labels FW
-// only sees ONE "Tag" column (the first) and drops the rest of the tag
-// values — that's why lodu/kaalu never reached the DB even though our
-// grid had all three distinct values. The row values still map correctly
-// because we iterate the grid headers (deduped) to look up values in the
-// row object; we just publish the CANONICAL (deduped-suffix-stripped)
-// header names to the sheet.
-function rowsToXlsxFile(headers, gridRows, fileName, sheetName = 'Sheet1') {
-  const stripDedup = (h) => String(h || '').replace(/\s*\(\d+\)\s*$/, '').trim();
-  const outgoingHeaders = headers.map(stripDedup);
+// Ship "Tag (2)" / "Tag (3)" as labels and FW sees a single "Tag" column and
+// drops the rest of the values — which is why lodu/kaalu never reached the DB
+// while the grid held all three. So cell i of every row is read by
+// fieldKeys[i] and written under outHeaders[i].
+function rowsToXlsxFile(fieldKeys, outHeaders, gridRows, fileName, sheetName = 'Sheet1') {
+  const headerRow = fieldKeys.map((_, i) => outHeaders?.[i] ?? fieldKeys[i]);
   const aoa = [
-    outgoingHeaders,
-    // Values still keyed by the ORIGINAL (deduped) grid header so we read
-    // the right cell for each column position.
-    ...gridRows.map((r) => headers.map((h) => r[h] ?? '')),
+    headerRow,
+    ...gridRows.map((r) => fieldKeys.map((k) => r[k] ?? '')),
   ];
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   const wb = XLSX.utils.book_new();
@@ -161,7 +171,8 @@ export default function FactwiseBulkImportErrorGrid({
 }) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
-  const [headers, setHeaders] = useState([]);
+  const [headers, setHeaders] = useState([]); // deduped field keys (grid)
+  const [originalHeaders, setOriginalHeaders] = useState([]); // raw FW headers (file)
   const [rows, setRows] = useState([]); // {id, __hasErrors, [h]: v}[]
   const [errorMap, setErrorMap] = useState({}); // {rowId: {header: string[]}}
   const [sheetName, setSheetName] = useState('Sheet1');
@@ -198,6 +209,7 @@ export default function FactwiseBulkImportErrorGrid({
         return obj;
       });
       setHeaders(result.headers);
+      setOriginalHeaders(result.originalHeaders || result.headers);
       setRows(objRows);
       setErrorMap(result.errorMap);
       setSheetName(result.sheetName);
@@ -521,7 +533,7 @@ export default function FactwiseBulkImportErrorGrid({
         }
       } catch { /* best-effort */ }
 
-      const file = rowsToXlsxFile(headers, liveRows, fileName, sheetName);
+      const file = rowsToXlsxFile(headers, originalHeaders, liveRows, fileName, sheetName);
       const uploaded = await uploadFileToFactwiseBulkImport(file, resourceType);
       if (!uploaded?.success) {
         setRetryMessage(uploaded?.error || 'Reupload failed');
@@ -553,7 +565,7 @@ export default function FactwiseBulkImportErrorGrid({
       setRetrying(false);
     }
   }, [
-    bulkImportId, headers, rows, sheetName, resourceType, apiRef,
+    bulkImportId, headers, originalHeaders, rows, sheetName, resourceType, apiRef,
     additionalInformation, onRetryFailure, onRetrySuccess,
   ]);
 
