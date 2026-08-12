@@ -128,6 +128,19 @@ export default function FactwiseProjectExportDialog({
   defaultProjectName = '',
 }) {
   const orchestration = useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHost });
+  // If the user made edits to the main data editor between opens, the
+  // checkpoint's item_bulk_import_id / bom_bulk_import_id / project_id from
+  // an earlier attempt is stale. Reset every time the dialog transitions
+  // closed → open so we always start from a fresh state that reflects
+  // whatever's currently in the mapper's session.
+  const wasOpenRef = useRef(false);
+  useEffect(() => {
+    if (open && !wasOpenRef.current) {
+      orchestration.reset();
+    }
+    wasOpenRef.current = open;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
   const {
     phase,
     mode,
@@ -150,6 +163,7 @@ export default function FactwiseProjectExportDialog({
     lastBulkImportId,
     isRunning,
     runFromCheckpoint,
+    markRetrySucceeded,
     reset,
   } = orchestration;
 
@@ -336,9 +350,16 @@ export default function FactwiseProjectExportDialog({
     runFromCheckpoint(buildRunPayload());
   }, [runFromCheckpoint, buildRunPayload]);
 
-  const handleGridRetrySuccess = useCallback(() => {
+  // Advance the orchestrator's phase to reflect the retry that just
+  // succeeded (item or bom) BEFORE resuming — otherwise runFromCheckpoint
+  // sees state.phase === ITEMS_ERROR / BOM_ERROR and re-runs the failed
+  // step from scratch with empty additional_information, undoing the
+  // Save-side new_tags / ignore_duplicate_tags flags.
+  const handleGridRetrySuccess = useCallback((resp, bulkImportId) => {
+    const kind = phase === PHASES.BOM_ERROR ? 'BOM' : 'ITEM';
+    markRetrySucceeded(kind, resp, bulkImportId);
     runFromCheckpoint(buildRunPayload());
-  }, [runFromCheckpoint, buildRunPayload]);
+  }, [phase, markRetrySucceeded, runFromCheckpoint, buildRunPayload]);
 
   const { fwOrigin } = useFactwise();
   const openTarget = projectId || existingProjectId;
@@ -700,6 +721,8 @@ export default function FactwiseProjectExportDialog({
             }
             onRetrySuccess={handleGridRetrySuccess}
             disabled={isRunning}
+            sessionId={sessionId}
+            onHostRowsUpdated={refreshHost}
           />
         )}
 

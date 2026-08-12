@@ -21,6 +21,9 @@ import {
   uploadFileToFactwiseBulkImport,
   processFactwiseBulkImport,
 } from '../services/factwiseApi';
+import api from '../services/api';
+import FactwiseNewTagsPopup from './FactwiseNewTagsPopup';
+import FactwiseDuplicateTagsPopup from './FactwiseDuplicateTagsPopup';
 
 // Reads the FactWise-generated error file for a failed bulk_import_id and
 // splits it into (headers, rows, per-row per-column error map).
@@ -101,9 +104,27 @@ async function loadErrorWorkbook(bulkImportId) {
   }
 }
 
+// Build the retry xlsx from the grid's current state.
+//
+// CRITICAL: strip the "(N)" dedupe suffix from headers before writing the
+// file. The grid uses "Tag", "Tag (2)", "Tag (3)" internally so MUI
+// DataGrid columns have unique field names — but FactWise's item importer
+// looks up columns by NAME and buckets duplicates by exact match:
+//   column_index_map["Tag"] = [indexes of every column literally named "Tag"]
+// If we ship the file with "Tag (2)" / "Tag (3)" as header labels FW
+// only sees ONE "Tag" column (the first) and drops the rest of the tag
+// values — that's why lodu/kaalu never reached the DB even though our
+// grid had all three distinct values. The row values still map correctly
+// because we iterate the grid headers (deduped) to look up values in the
+// row object; we just publish the CANONICAL (deduped-suffix-stripped)
+// header names to the sheet.
 function rowsToXlsxFile(headers, gridRows, fileName, sheetName = 'Sheet1') {
+  const stripDedup = (h) => String(h || '').replace(/\s*\(\d+\)\s*$/, '').trim();
+  const outgoingHeaders = headers.map(stripDedup);
   const aoa = [
-    headers,
+    outgoingHeaders,
+    // Values still keyed by the ORIGINAL (deduped) grid header so we read
+    // the right cell for each column position.
     ...gridRows.map((r) => headers.map((h) => r[h] ?? '')),
   ];
   const ws = XLSX.utils.aoa_to_sheet(aoa);
@@ -131,6 +152,12 @@ export default function FactwiseBulkImportErrorGrid({
   onRetrySuccess,
   onRetryFailure,
   disabled = false,
+  // When set + resource is ITEM, we mirror inline cell edits back into the
+  // mapper's own session (debounced) via api.updateSessionData so the main
+  // data editor behind the popup reflects the fixes too. Only meaningful for
+  // 'ITEM' since only that grid maps 1:1 to the mapper's session rows.
+  sessionId,
+  onHostRowsUpdated,
 }) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -142,6 +169,16 @@ export default function FactwiseBulkImportErrorGrid({
   const [retryMessage, setRetryMessage] = useState(null);
   const [showOnlyErrors, setShowOnlyErrors] = useState(true);
   const apiRef = useGridApiRef();
+
+  // We keep the freshest row snapshot in a ref because React batches
+  // setState within a single event, and MUI DataGrid's async
+  // processRowUpdate → setRows call happens INSIDE the same event as the
+  // Save & retry button click. Reading `rows` (the state) in the click
+  // handler therefore returns the pre-edit values. rowsRef is written
+  // synchronously in processRowUpdate BEFORE the batched setState, so
+  // runRetry always sees the latest inline edits.
+  const rowsRef = useRef(rows);
+  useEffect(() => { rowsRef.current = rows; }, [rows]);
 
   useEffect(() => {
     let cancelled = false;
@@ -173,6 +210,48 @@ export default function FactwiseBulkImportErrorGrid({
     () => rows.filter((r) => r.__hasErrors).length,
     [rows]
   );
+
+  // FactWise emits DuplicateTag when the same tag is repeated on one item
+  // (e.g. Tag_1='X', Tag_2='X'). FW's admin BulkImportPage shows a specific
+  // popup with a "Continue" button that reuploads with
+  // `ignore_duplicate_tags: true` so the BE silently dedupes and imports.
+  // Mirror that behaviour here.
+  const DUPLICATE_TAG_ERROR = 'DuplicateTag';
+  const hasDuplicateTagErrors = useMemo(() => {
+    for (const rowId of Object.keys(errorMap)) {
+      const perRow = errorMap[rowId] || {};
+      for (const header of Object.keys(perRow)) {
+        if ((perRow[header] || []).includes(DUPLICATE_TAG_ERROR)) return true;
+      }
+    }
+    return false;
+  }, [errorMap]);
+
+  // Copies FW's exact 3-state pattern from BulkImportPage.tsx:
+  //   const [showDuplicateTagPopup, setShowDuplicateTagPopup] = useState<
+  //       boolean | null
+  //   >(null);
+  //   if (hasDuplicateTagError && showDuplicateTagPopup === null) {
+  //       setShowDuplicateTagPopup(true);
+  //   }
+  // The `null` initial state is what stops the popup from re-opening after
+  // the user has already responded (Fix Errors OR Continue). Once it's set
+  // to true/false, it stays non-null — the auto-open guard never fires
+  // again. Our previous ref-based version reset itself whenever the error
+  // set briefly transitioned false→true (e.g. between error-file loads
+  // after a retry), which caused the popup to keep re-appearing in a loop.
+  const [showDuplicateTagPopup, setShowDuplicateTagPopup] = useState(null);
+  // A brand-new bulk_import_id means a fresh error state — reset to null so
+  // the popup gets exactly one auto-open per new failure, same as FW's page
+  // remount behaviour.
+  useEffect(() => {
+    setShowDuplicateTagPopup(null);
+  }, [bulkImportId]);
+  useEffect(() => {
+    if (hasDuplicateTagErrors && showDuplicateTagPopup === null) {
+      setShowDuplicateTagPopup(true);
+    }
+  }, [hasDuplicateTagErrors, showDuplicateTagPopup]);
 
   // FactWise emits ItemTagDoesNotExist per-cell when the sheet references a
   // tag that isn't in the Item Directory yet. Instead of forcing the user to
@@ -254,10 +333,126 @@ export default function FactwiseBulkImportErrorGrid({
     },
   })), [headers, errorMap, disabled, retrying]);
 
-  const handleCellEdit = useCallback((newRow) => {
-    setRows((prev) => prev.map((r) => (r.id === newRow.id ? newRow : r)));
-    return newRow;
+  // Debounced push of the entire grid back into the mapper's own session so
+  // the main data editor behind the popup shows the same fixes.
+  //
+  // For ITEM: the error grid's headers are the mapper's item headers (Item
+  // code, Item name, Tag_N, Specification_*, …) so pushing them back to
+  // /update-session-data is a 1:1 sync.
+  //
+  // For BOM: the error grid contains BOM-structure columns (parent_item_code,
+  // sub_bom_code, quantity, …) which have no canonical mapping in the
+  // mapper's session model. Calling /update-session-data with them would
+  // 400 with "No matching headers found." We still surface an inline
+  // message so users don't wonder why their BOM cell edits didn't reach
+  // the main editor — the fixes DO count for the retry that this dialog
+  // sends to FactWise, they just don't rewrite the mapper's local grid.
+  const [syncMessage, setSyncMessage] = useState(null);
+  const syncTimerRef = useRef(null);
+  const scheduleHostSync = useCallback((nextRows) => {
+    if (!sessionId) return;
+    if (resourceType !== 'ITEM') {
+      setSyncMessage(
+        'Edit saved for the retry only — BOM cells can\'t be written back into the mapper\'s main editor (edit them there directly if you want the change persisted).'
+      );
+      return;
+    }
+    if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+    syncTimerRef.current = setTimeout(async () => {
+      setSyncMessage('Saving to editor…');
+      try {
+        // Rename dedupe suffixes (Tag, "Tag (2)", "Tag (3)") into canonical
+        // per-column names (Tag_1, Tag_2, Tag_3) so every repeated column's
+        // edits reach the session — the mapper stores them under Tag_N
+        // internally. Same trick for Specification_* / Customer_Identification_*.
+        //
+        // Old bug: we stripped the "(N)" suffix and used an OBJECT dict keyed
+        // by the base name, so the second and third Tag columns collapsed
+        // into the first. Any edit in the 2nd/3rd Tag cell was silently
+        // dropped when syncing back to the main editor.
+        const stripDedup = (h) => String(h || '').replace(/\s*\(\d+\)\s*$/, '').trim();
+        const REPEATABLE_PATTERNS = [
+          { base: 'Tag', canonical: (n) => `Tag_${n}` },
+          { base: 'Specification Name', canonical: (n) => `Specification_Name_${n}` },
+          { base: 'Specification Value', canonical: (n) => `Specification_Value_${n}` },
+          { base: 'Customer Identification Name', canonical: (n) => `Customer_Identification_Name_${n}` },
+          { base: 'Customer Identification Value', canonical: (n) => `Customer_Identification_Value_${n}` },
+        ];
+        const norm = (s) => String(s || '').trim().toLowerCase().replace(/[_\s]+/g, ' ');
+        const counters = new Map(); // base -> next index (1-based)
+        const canonicalHeaderFor = (h) => {
+          const original = stripDedup(h);
+          const key = norm(original);
+          const pat = REPEATABLE_PATTERNS.find((p) => norm(p.base) === key);
+          if (!pat) return original;
+          const n = (counters.get(key) || 0) + 1;
+          counters.set(key, n);
+          return pat.canonical(n);
+        };
+
+        const outgoingHeaders = [];
+        const seen = new Set();
+        const headerMap = []; // index-parallel: gridHeader -> outgoing canonical
+        headers.forEach((h) => {
+          const canonical = canonicalHeaderFor(h);
+          if (!canonical || seen.has(canonical)) {
+            headerMap.push(null);
+            return;
+          }
+          seen.add(canonical);
+          outgoingHeaders.push(canonical);
+          headerMap.push(canonical);
+        });
+        const clean = nextRows.map((r) => {
+          const out = {};
+          headers.forEach((gridHeader, i) => {
+            const canonical = headerMap[i];
+            if (!canonical) return;
+            out[canonical] = r[gridHeader] ?? '';
+          });
+          return out;
+        });
+        const resp = await api.updateSessionData(sessionId, {
+          headers: outgoingHeaders,
+          data: clean,
+        });
+        if (resp?.data?.success === false) {
+          setSyncMessage(
+            `Editor sync failed: ${resp?.data?.error || 'unknown error'}`
+          );
+          return;
+        }
+        // Refresh the mapper's local rowData so the grid behind the popup
+        // renders the fix when the user closes this dialog.
+        await onHostRowsUpdated?.();
+        setSyncMessage('Editor updated.');
+        setTimeout(() => setSyncMessage(null), 1500);
+      } catch (err) {
+        const msg =
+          err?.response?.data?.error
+          || err?.message
+          || 'Editor sync failed';
+        setSyncMessage(`Editor sync failed: ${msg}`);
+      }
+    }, 400);
+  }, [resourceType, sessionId, headers, onHostRowsUpdated]);
+
+  useEffect(() => () => {
+    if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
   }, []);
+
+  const handleCellEdit = useCallback((newRow) => {
+    // Compute next from the ref (not `rows`) so that if multiple edits
+    // fire in the same microtask we don't clobber each other. Write the
+    // ref BEFORE queuing setRows — the ref update is what makes the
+    // subsequent Save & retry click see the latest value even though
+    // React hasn't re-rendered yet.
+    const next = rowsRef.current.map((r) => (r.id === newRow.id ? newRow : r));
+    rowsRef.current = next;
+    setRows(next);
+    scheduleHostSync(next);
+    return newRow;
+  }, [scheduleHostSync]);
 
   const runRetry = useCallback(async (extraAdditionalInformation = {}) => {
     setRetrying(true);
@@ -265,29 +460,66 @@ export default function FactwiseBulkImportErrorGrid({
     try {
       const fileName = `bom-mapper-fixed-${bulkImportId}.xlsx`;
 
-      // Commit any cell that's still in edit mode (user typed then clicked
-      // Save without pressing Tab/Enter first). Without this, DataGrid's
-      // processRowUpdate never fires and the pending edit gets discarded,
-      // so we'd upload the pre-edit data. Belt-and-suspenders: also pull
-      // the freshest row values from the grid's internal store instead of
-      // our React state, in case setState hasn't re-rendered yet.
-      const cellMode = apiRef?.current?.getCellMode;
-      const stopEdit = apiRef?.current?.stopCellEditMode;
-      if (cellMode && stopEdit) {
-        try {
-          const editingCell = apiRef.current.state?.editRows;
-          if (editingCell && typeof editingCell === 'object') {
-            Object.entries(editingCell).forEach(([rowId, fields]) => {
-              Object.keys(fields || {}).forEach((field) => {
-                stopEdit({ id: rowId, field, ignoreModifications: false });
-              });
+      // Force-commit any cell that's still in edit mode BEFORE serializing.
+      //
+      // Why we can't rely on MUI DataGrid v6's own commit flow: a click on
+      // "Save & retry" fires input.blur → cell's onBlur → processRowUpdate
+      // (async) → setState(rows). That setState is batched by React AND
+      // the callback returns a promise MUI awaits internally. By the time
+      // our onClick runs, `rows` state is stale AND getRowModels() reflects
+      // the last RENDERED rows (which is also stale). Even setTimeout(0)
+      // isn't enough because React 18 defers renders to microtask flushes.
+      //
+      // Deterministic fix: read the editing input's raw value straight
+      // from the DOM (data-id + data-field are set by MUI on the cell
+      // wrapper), merge it into our local rows snapshot, and serialize
+      // THAT snapshot. Also push the correction into React state + host
+      // sync so subsequent renders and the main editor see the fix too.
+      // Path A (fast path — no cell in edit mode): rowsRef already reflects
+      //   every committed edit (see handleCellEdit + effect wiring above).
+      //
+      // Path B (a cell IS still in edit mode when Save & retry is clicked):
+      //   this happens when the user typed a value then clicked Save without
+      //   first pressing Tab/Enter AND MUI's blur-commit hasn't fired yet.
+      //   Scrape the input value directly, merge into a local snapshot, and
+      //   also fire the standard commit path so React/main editor stay in
+      //   sync.
+      let liveRows = rowsRef.current;
+      try {
+        const editingCells = Array.from(
+          document.querySelectorAll('.MuiDataGrid-cell--editing')
+        );
+        if (editingCells.length) {
+          const overrides = {};
+          editingCells.forEach((cellEl) => {
+            const input = cellEl.querySelector('input, textarea');
+            if (!input) return;
+            const value = input.value;
+            const rowEl = cellEl.closest('[role="row"]');
+            const rowId = rowEl?.getAttribute('data-id');
+            const field = cellEl.getAttribute('data-field');
+            if (rowId == null || !field) return;
+            if (!overrides[rowId]) overrides[rowId] = {};
+            overrides[rowId][field] = value;
+          });
+          if (Object.keys(overrides).length) {
+            liveRows = liveRows.map((r) => {
+              const patch = overrides[String(r.id)];
+              return patch ? { ...r, ...patch } : r;
             });
+            rowsRef.current = liveRows;
+            setRows(liveRows);
+            scheduleHostSync(liveRows);
           }
-        } catch { /* best-effort */ }
-      }
-      const liveRows = apiRef?.current?.getRowModels
-        ? Array.from(apiRef.current.getRowModels().values())
-        : rows;
+        }
+      } catch { /* best-effort — fall back to rowsRef.current */ }
+
+      // Cosmetic blur so the cell visually exits edit mode.
+      try {
+        if (document.activeElement instanceof HTMLElement) {
+          document.activeElement.blur();
+        }
+      } catch { /* best-effort */ }
 
       const file = rowsToXlsxFile(headers, liveRows, fileName, sheetName);
       const uploaded = await uploadFileToFactwiseBulkImport(file, resourceType);
@@ -327,21 +559,47 @@ export default function FactwiseBulkImportErrorGrid({
 
   const handleSaveAndRetry = useCallback(() => runRetry({}), [runRetry]);
 
-  // "Create these tags and retry" — sends new_tags + ignore_new_tag_validation
-  // in additional_information, matching what FactWise's NewTagsConfirmationPopup
-  // does. Server creates the tags before validating item rows, so the
-  // ItemTagDoesNotExist errors disappear.
-  const handleCreateTagsAndRetry = useCallback(() => {
+  // Open the same NewTagsConfirmationPopup FactWise's admin bulk-import page
+  // uses so users can mark tags as synonyms of existing tags (not just
+  // "create all as new"). The popup handles synonym lookup + selection and
+  // hands back a {tag: {synonym: string}} payload.
+  //
+  // Auto-open behaviour mirrors FW's admin: whenever a fresh bulk_import_id
+  // surfaces ItemTagDoesNotExist errors, the popup pops up on its own so
+  // partial-create loops (Save creates tag A but tag B still fails, retry
+  // shows tag B as new) don't require re-clicking "Review new tags" every
+  // cycle. Same null|boolean pattern as the duplicate-tag popup.
+  const [tagsPopupOpen, setTagsPopupOpen] = useState(null);
+  useEffect(() => {
+    setTagsPopupOpen(null);
+  }, [bulkImportId]);
+  useEffect(() => {
+    if (newTagsFromErrors.length > 0 && tagsPopupOpen === null) {
+      setTagsPopupOpen(true);
+    }
+  }, [newTagsFromErrors, tagsPopupOpen]);
+  const handleOpenTagsPopup = useCallback(() => {
     if (!newTagsFromErrors.length) return;
-    const newTags = newTagsFromErrors.reduce((acc, tag) => {
-      acc[tag] = { synonym: '' };
-      return acc;
-    }, {});
+    setTagsPopupOpen(true);
+  }, [newTagsFromErrors]);
+
+  const handleTagsPopupConfirm = useCallback((tagsPayload) => {
+    setTagsPopupOpen(false);
+    if (!tagsPayload || !Object.keys(tagsPayload).length) return;
     runRetry({
       ignore_new_tag_validation: true,
-      new_tags: newTags,
+      new_tags: tagsPayload,
     });
-  }, [runRetry, newTagsFromErrors]);
+  }, [runRetry]);
+
+  const handleDuplicateTagsFix = useCallback(() => {
+    setShowDuplicateTagPopup(false);
+  }, []);
+
+  const handleDuplicateTagsContinue = useCallback(() => {
+    setShowDuplicateTagPopup(false);
+    runRetry({ ignore_duplicate_tags: true });
+  }, [runRetry]);
 
   if (loading) {
     return (
@@ -412,6 +670,16 @@ export default function FactwiseBulkImportErrorGrid({
             label={<Typography variant="caption">Show only error rows</Typography>}
             sx={{ mr: 0.5 }}
           />
+          {hasDuplicateTagErrors && (
+            <Button
+              size="small"
+              variant="outlined"
+              onClick={() => setShowDuplicateTagPopup(true)}
+              disabled={disabled || retrying}
+            >
+              Duplicate tags…
+            </Button>
+          )}
           <Button
             variant="contained"
             size="small"
@@ -433,10 +701,10 @@ export default function FactwiseBulkImportErrorGrid({
               size="small"
               variant="contained"
               startIcon={retrying ? <CircularProgress size={14} /> : <LocalOfferIcon />}
-              onClick={handleCreateTagsAndRetry}
+              onClick={handleOpenTagsPopup}
               disabled={disabled || retrying}
             >
-              Create tags &amp; retry
+              Review new tags
             </Button>
           }
         >
@@ -457,6 +725,20 @@ export default function FactwiseBulkImportErrorGrid({
           {retryMessage}
         </Typography>
       )}
+      {syncMessage && (
+        <Typography
+          variant="caption"
+          sx={{
+            display: 'block',
+            mb: 1,
+            color: syncMessage.startsWith('Editor sync failed')
+              ? 'error.main'
+              : 'text.secondary',
+          }}
+        >
+          {syncMessage}
+        </Typography>
+      )}
       <Box sx={{ height: 460, width: '100%' }}>
         <DataGrid
           apiRef={apiRef}
@@ -474,6 +756,21 @@ export default function FactwiseBulkImportErrorGrid({
           getRowClassName={(params) => (params.row.__hasErrors ? 'fw-error-row' : '')}
         />
       </Box>
+
+      <FactwiseNewTagsPopup
+        open={tagsPopupOpen === true}
+        onClose={() => setTagsPopupOpen(false)}
+        tags={newTagsFromErrors}
+        onConfirm={handleTagsPopupConfirm}
+        submitting={retrying}
+      />
+
+      <FactwiseDuplicateTagsPopup
+        open={showDuplicateTagPopup === true}
+        onFix={handleDuplicateTagsFix}
+        onContinue={handleDuplicateTagsContinue}
+        submitting={retrying}
+      />
     </Box>
   );
 }

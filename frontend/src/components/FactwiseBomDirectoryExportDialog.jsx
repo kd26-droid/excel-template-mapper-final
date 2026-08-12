@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Box,
@@ -94,6 +94,17 @@ export default function FactwiseBomDirectoryExportDialog({
   refreshHost,
 }) {
   const orchestration = useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHost });
+  // Reset checkpoint every time the dialog transitions closed → open so a
+  // stale bulk_import_id from a previous run can't get reused after the
+  // user has edited the main data editor between opens.
+  const wasOpenRef = useRef(false);
+  useEffect(() => {
+    if (open && !wasOpenRef.current) {
+      orchestration.reset();
+    }
+    wasOpenRef.current = open;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
   const {
     phase,
     itemCreated,
@@ -104,6 +115,7 @@ export default function FactwiseBomDirectoryExportDialog({
     lastBulkImportId,
     isRunning,
     runFromCheckpoint,
+    markRetrySucceeded,
     reset,
   } = orchestration;
 
@@ -118,9 +130,15 @@ export default function FactwiseBomDirectoryExportDialog({
     runFromCheckpoint({ stopAfterBom: true });
   }, [runFromCheckpoint]);
 
-  const handleGridRetrySuccess = useCallback(() => {
+  // Advance phase before resuming so runFromCheckpoint skips the
+  // just-succeeded step (see FactwiseProjectExportDialog for the full
+  // rationale — same bug where a Save on the retry cleared new_tags on
+  // the follow-up cycle).
+  const handleGridRetrySuccess = useCallback((resp, bulkImportId) => {
+    const kind = phase === PHASES.BOM_ERROR ? 'BOM' : 'ITEM';
+    markRetrySucceeded(kind, resp, bulkImportId);
     runFromCheckpoint({ stopAfterBom: true });
-  }, [runFromCheckpoint]);
+  }, [phase, markRetrySucceeded, runFromCheckpoint]);
 
   const handleOpenBomDirectory = useCallback(() => {
     openInFactwise('/admin/BOM/');
@@ -243,6 +261,8 @@ export default function FactwiseBomDirectoryExportDialog({
             }
             onRetrySuccess={handleGridRetrySuccess}
             disabled={isRunning}
+            sessionId={sessionId}
+            onHostRowsUpdated={refreshHost}
           />
         )}
 

@@ -6312,7 +6312,7 @@ def download_file(request, session_id=None):
                 final_columns.append(cleaned_col or col)  # Fallback to original if cleaning fails
             
             df.columns = final_columns
-        
+
         # Get format preference (default to Excel)
         if request.method == 'POST':
             format_type = (request.data.get('format') or request.POST.get('format', 'excel')).lower()
