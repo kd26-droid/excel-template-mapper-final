@@ -3803,20 +3803,11 @@ const EnhancedDataEditor = () => {
       handleExportToProject();
       return;
     }
-    if (destination === 'bom' && isFactwiseEmbedded) {
-      // BOM Directory export in embedded mode runs the 2-step orchestrator
-      // (items → BOM). Chain BOTH guards (item required fields + BOM
-      // validation) up front so any fixable issues surface BEFORE we upload
-      // — same as the Project export.
-      runGuardedExport(
-        () => runGuardedExport(
-          () => setBomDirectoryExportDialogOpen(true),
-          'bom'
-        ),
-        'item'
-      );
-      return;
-    }
+    // BOM Directory (embedded or not) keeps its original shape: BOM validation
+    // popup first, then the preview. From the preview the user picks
+    // "Export Sheet" (download) or "Export to FactWise" (the 2-step items → BOM
+    // orchestrator, gated by the item required-field guard in
+    // handleDirectoryExport).
     runGuardedExport(() => openFactwisePreview(destination), destination);
   }, [handleExportToProject, runGuardedExport, openFactwisePreview, isFactwiseEmbedded]);
 
@@ -3939,7 +3930,10 @@ const EnhancedDataEditor = () => {
     // error grid the Project export uses, minus project creation / attach.
     if (exportType === 'bom') {
       setDirectoryExportStatus({ open: false, type: exportType, phase: 'success' });
-      setBomDirectoryExportDialogOpen(true);
+      // The BOM validation guard already ran before the preview; the ITEM
+      // required-field guard still has to run here because step 1 of the
+      // orchestrator uploads the item sheet.
+      runGuardedExport(() => setBomDirectoryExportDialogOpen(true), 'item');
       return;
     }
 
@@ -3990,7 +3984,7 @@ const EnhancedDataEditor = () => {
       setDirectoryExportStatus({ open: false, type: exportType, phase: 'success' });
       showSnackbar(error?.message || 'Failed to hand off to Factwise', 'error');
     }
-  }, [factwisePreviewType, isFactwiseEmbedded, sessionId, getCurrentExportColumnOrder, showSnackbar]);
+  }, [factwisePreviewType, isFactwiseEmbedded, sessionId, getCurrentExportColumnOrder, showSnackbar, runGuardedExport]);
 
   const handleExportProjectConfirm = useCallback(() => {
     // Every column is exported — the per-field picker was removed, so there is no
@@ -9563,7 +9557,9 @@ const EnhancedDataEditor = () => {
           >
             {factwisePreviewDownloading === 'excel' ? 'Preparing…' : 'Export Sheet'}
           </Button>
-          {/* Mock, like Export to Project — no file is produced. */}
+          {/* Hands off to Factwise: BOM → the 2-step (items → BOM) orchestrator
+              dialog; Item → Factwise's own bulk-import page. Mock when the tool
+              runs standalone. */}
           <Button
             variant="contained"
             onClick={() => handleDirectoryExport(factwisePreviewType)}
