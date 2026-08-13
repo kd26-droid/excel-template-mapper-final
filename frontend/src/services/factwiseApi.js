@@ -2,23 +2,161 @@ import axios from 'axios';
 
 const STORAGE_KEYS = {
   token: 'fw_embedded_token',
+  refreshToken: 'fw_embedded_refresh_token',
   apiUrl: 'fw_api_url',
   entityId: 'fw_entity_id',
 };
 
+// Custom DOM event fired the first time a FactWise request fails with an
+// expired-token symptom (401/403 from FW's API Management, or JWT `exp`
+// already in the past). Consumers (FactwiseContext, the session-expired
+// banner) listen for it and show the reconnect UX. Fired at most once per
+// session — see markSessionExpired below.
+export const FW_SESSION_EXPIRED_EVENT = 'fw:session-expired';
+let sessionExpiredEmitted = false;
+export function markSessionExpired(reason = 'unknown') {
+  if (sessionExpiredEmitted) return;
+  sessionExpiredEmitted = true;
+  try {
+    window.dispatchEvent(
+      new CustomEvent(FW_SESSION_EXPIRED_EVENT, { detail: { reason } })
+    );
+  } catch { /* best-effort */ }
+}
+// Reset the guard so a fresh token (after reconnect) can flag expiry again.
+export function clearSessionExpired() {
+  sessionExpiredEmitted = false;
+}
+
+// Decode a JWT payload safely — returns null on any parse error.
+function decodeJwtPayload(token) {
+  try {
+    const payload = String(token || '').split('.')[1];
+    if (!payload) return null;
+    const normalized = payload.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized.padEnd(
+      normalized.length + ((4 - (normalized.length % 4)) % 4),
+      '='
+    );
+    return JSON.parse(window.atob(padded));
+  } catch {
+    return null;
+  }
+}
+
+// True when the token's `exp` claim is already past (or missing).
+// A 30-second skew guard prevents a token that expires mid-request from
+// slipping through — treat it as expired ~30s early so we don't fire off
+// a doomed call that comes back CORS'd.
+export function isTokenExpired(token) {
+  const payload = decodeJwtPayload(token);
+  if (!payload || typeof payload.exp !== 'number') return false;
+  const nowSec = Math.floor(Date.now() / 1000);
+  return payload.exp <= nowSec + 30;
+}
+
 function readCredentials() {
   return {
     token: window.localStorage.getItem(STORAGE_KEYS.token),
+    refreshToken: window.localStorage.getItem(STORAGE_KEYS.refreshToken),
     apiUrl: window.localStorage.getItem(STORAGE_KEYS.apiUrl),
     entityId: window.localStorage.getItem(STORAGE_KEYS.entityId),
   };
 }
 
-function buildClient() {
-  const { token, apiUrl } = readCredentials();
-  if (!token || !apiUrl) return null;
+// Custom event fired whenever we successfully rotate the id_token silently.
+// FactwiseContext listens for this to update its state (and mirror the new
+// token into React), and to reset its expiry-tracker interval.
+export const FW_TOKEN_REFRESHED_EVENT = 'fw:token-refreshed';
 
-  return axios.create({
+// Silent refresh via FactWise's own /authentication/refresh/ endpoint — the
+// SAME endpoint FW's SPA uses (see Contexts/helperFunctions.ts::refreshAccessToken).
+// FW's launch URL now passes both id_token AND refresh_token so the mapper
+// can rotate the id_token every ~55min without any user interaction.
+//
+// Only ONE refresh flight in flight at a time — callers await the shared
+// promise so concurrent requests don't burn through refresh_tokens or race
+// with each other's writes.
+let refreshInFlight = null;
+export async function silentRefreshToken() {
+  if (refreshInFlight) return refreshInFlight;
+  const { token, refreshToken, apiUrl } = readCredentials();
+  if (!token || !refreshToken || !apiUrl) {
+    return { success: false, error: 'missing token/refresh_token/api_url' };
+  }
+  refreshInFlight = (async () => {
+    try {
+      // Use a plain axios call — NOT buildClient — because buildClient's
+      // pre-flight isTokenExpired check would loop back into a refresh.
+      const url = `${apiUrl.replace(/\/+$/, '')}/authentication/refresh/`;
+      const { data } = await axios.post(
+        url,
+        { id_token: token, refresh_token: refreshToken },
+        { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
+      );
+      const newIdToken = data?.id_token;
+      const newRefreshToken = data?.refresh_token || refreshToken;
+      if (!newIdToken) {
+        return { success: false, error: 'no id_token in refresh response' };
+      }
+      window.localStorage.setItem(STORAGE_KEYS.token, newIdToken);
+      if (newRefreshToken !== refreshToken) {
+        window.localStorage.setItem(STORAGE_KEYS.refreshToken, newRefreshToken);
+      }
+      // Clear any prior expiry flag so the banner tears down.
+      clearSessionExpired();
+      try {
+        window.dispatchEvent(
+          new CustomEvent(FW_TOKEN_REFRESHED_EVENT, {
+            detail: { token: newIdToken, refreshToken: newRefreshToken },
+          })
+        );
+      } catch { /* best-effort */ }
+      return { success: true, token: newIdToken };
+    } catch (error) {
+      const status = error?.response?.status;
+      // 401 on the refresh endpoint means the refresh_token itself has
+      // expired (~14 days idle) — user must actually re-launch from FW.
+      // Flag the session as expired so the reconnect banner shows.
+      if (status === 401 || status === 403) {
+        markSessionExpired('refresh-token-expired');
+      }
+      return {
+        success: false,
+        error: error?.response?.data?.error || error?.message || 'refresh failed',
+      };
+    } finally {
+      refreshInFlight = null;
+    }
+  })();
+  return refreshInFlight;
+}
+
+function buildClient() {
+  const { token, refreshToken, apiUrl } = readCredentials();
+  if (!token || !apiUrl) return null;
+  // Proactive: don't even try FW when the token has clearly expired — the
+  // request would return a 401 wrapped in a CORS failure (FactWise's
+  // Azure API Management strips CORS headers off error responses) which
+  // shows up in the console as a confusing "No Access-Control-Allow-Origin"
+  // instead of a clean "session expired". When we HAVE a refresh_token
+  // we can fire off a silent refresh in the background (callers get null
+  // for this attempt but the next call sees the fresh token); without one
+  // the only option is the Reconnect banner.
+  if (isTokenExpired(token)) {
+    if (refreshToken) {
+      // Kick off silent refresh — we don't await here so this call still
+      // fails fast, but the very next call (or the caller's retry) will
+      // use the new token. Also arms the FactwiseContext scheduler for the
+      // next refresh cycle via the FW_TOKEN_REFRESHED_EVENT.
+      silentRefreshToken();
+    } else {
+      markSessionExpired('token-expired-no-refresh');
+    }
+    return null;
+  }
+
+  const client = axios.create({
     baseURL: apiUrl.replace(/\/+$/, ''),
     headers: {
       Authorization: `Bearer ${token}`,
@@ -26,11 +164,59 @@ function buildClient() {
     },
     timeout: 15000,
   });
+  // Reactive: any 401/403 or CORS-flavoured network error is treated as an
+  // expired session. FW's APIM returns 401 for expired JWTs; browsers see
+  // the missing CORS headers and surface it as ERR_FAILED / message
+  // "Network Error" rather than a status. We can't distinguish reliably
+  // from the error object, so treat anything that isn't a normal HTTP
+  // response as expired when the token would have been ~1h old.
+  client.interceptors.response.use(
+    (r) => r,
+    async (error) => {
+      const status = error?.response?.status;
+      const looksLikeExpiry =
+        status === 401
+        || status === 403
+        || (!error?.response && error?.message === 'Network Error');
+
+      // Silent-recovery: if we have a refresh_token and this looks like
+      // expiry AND we haven't already retried this specific config, rotate
+      // the id_token and REPLAY the original request under the new token.
+      // The user sees a brief spinner, not a broken UI.
+      const cfg = error?.config;
+      if (looksLikeExpiry && cfg && !cfg.__fwRetryDone) {
+        const { refreshToken: rt } = readCredentials();
+        if (rt) {
+          const refreshed = await silentRefreshToken();
+          if (refreshed?.success) {
+            cfg.__fwRetryDone = true;
+            cfg.headers = {
+              ...(cfg.headers || {}),
+              Authorization: `Bearer ${refreshed.token}`,
+            };
+            return axios.request(cfg);
+          }
+        }
+      }
+
+      if (status === 401 || status === 403) {
+        markSessionExpired(`http-${status}`);
+      } else if (!error?.response && error?.message === 'Network Error') {
+        const { token: tok } = readCredentials();
+        const payload = decodeJwtPayload(tok);
+        if (payload?.exp && (payload.exp - Math.floor(Date.now() / 1000)) < 60) {
+          markSessionExpired('cors-likely-expired');
+        }
+      }
+      return Promise.reject(error);
+    }
+  );
+  return client;
 }
 
 export function isFactwiseSessionAvailable() {
   const { token, apiUrl } = readCredentials();
-  return Boolean(token && apiUrl);
+  return Boolean(token && apiUrl && !isTokenExpired(token));
 }
 
 // Look up existing Factwise tags that are similar (by name) to the ones the
@@ -217,16 +403,115 @@ export async function getBulkImportErrorFileUrl(bulkImportId) {
   }
 }
 
+// Build the custom_sections array FW's create_project endpoint expects.
+// FW's server iterates the caller's `custom_sections` and creates one
+// project_custom_section row per entry — if we send [], the project ends
+// up with NO custom_sections at all, breaking downstream Submit calls
+// which need a valid custom_section_id.
+//
+// The template response's raw shape is `section_list: [{name, alternate_name,
+// section_type, parent_sub_section, ...}]`. Each entry becomes a project
+// custom_section. FW's own createProjectApi flow eventually walks this same
+// list to build the payload; we do it directly.
+//
+// section_type in the template uses backend enum names (BOM_TERMS,
+// ITEM_TERMS, ...). FW's project schema uses BOM/ITEM/OTHER for
+// custom_sections.section_type — map accordingly.
+function buildProjectCustomSectionsFromTemplate(template) {
+  const list = Array.isArray(template?.section_list) ? template.section_list : [];
+  if (!list.length) return [];
+  const out = [];
+  const nowIso = new Date().toISOString();
+  const mapSectionType = (raw) => {
+    const s = String(raw || '').toUpperCase();
+    if (s.includes('BOM')) return 'BOM';
+    if (s.includes('ITEM')) return 'ITEM';
+    return 'OTHER';
+  };
+  const seenNames = new Set();
+  for (const section of list) {
+    if (!section || typeof section !== 'object') continue;
+    // Prefer alternate_name (the user-facing label) over name (the backend
+    // key). FW's project custom_sections are keyed on this exact string —
+    // it's what shows in the UI and what BOM Submit looks up.
+    const label = String(section.alternate_name || section.name || '').trim();
+    if (!label) continue;
+    if (seenNames.has(label)) continue;
+    seenNames.add(label);
+    out.push({
+      name: label,
+      status: 'DRAFT',
+      section_type: mapSectionType(section.section_type),
+      created_datetime: null,
+      custom_section_id: null,
+      custom_fields: [],
+      assigned_users: [],
+      last_modified_time: nowIso,
+      start_time: null,
+      submission_time: null,
+      target_duration: null,
+      target_duration_period: null,
+      rejectable_custom_sections: [],
+    });
+  }
+  return out;
+}
+
 // Creates a new Factwise project. Requires template_id (a project template UUID)
 // and buyer_entity_id. Returns { success, project_id, ... }.
+//
+// Critical: we MUST post `custom_sections` derived from the project template.
+// FW's create_project loop at services/project_service.py:360 only creates
+// project_custom_section rows for entries in OUR payload — sending an empty
+// list means the project has no BOM/ITEM/OTHER sections, and FW's UI later
+// can't find the BOM_TERMS section to Submit against ("custom_section_id:
+// Must be a valid UUID" from the state PUT endpoint).
 export async function createFactwiseProject(payload) {
   const client = buildClient();
   const { entityId } = readCredentials();
   if (!client || !entityId) return { success: false, error: 'No Factwise session' };
   try {
+    // Fetch the project template first so we can populate custom_sections
+    // exactly like FW UI does (matches buildCustomSectionsForCreate in
+    // ProjectGlCostCenter/hooks/useProjectCreationHook.ts).
+    let customSections = Array.isArray(payload?.custom_sections)
+      ? payload.custom_sections
+      : [];
+    if (!customSections.length && payload?.template_id) {
+      try {
+        const tplUrl = `/module_templates/${entityId}/${payload.template_id}/`;
+        // eslint-disable-next-line no-console
+        console.warn('[FW] fetching template for custom_sections:', tplUrl);
+        const tplResp = await client.get(tplUrl);
+        // eslint-disable-next-line no-console
+        console.warn('[FW] template response keys:', Object.keys(tplResp?.data || {}));
+        // eslint-disable-next-line no-console
+        console.warn('[FW] template section_list:', tplResp?.data?.section_list);
+        // eslint-disable-next-line no-console
+        console.warn('[FW] template items sample:', (tplResp?.data?.items || []).slice(0, 3));
+        // eslint-disable-next-line no-console
+        console.warn('[FW] template items count:', (tplResp?.data?.items || []).length);
+        customSections = buildProjectCustomSectionsFromTemplate(tplResp?.data);
+        // eslint-disable-next-line no-console
+        console.warn('[FW] built custom_sections:', customSections);
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('[FW] template fetch failed:', err?.response?.status, err?.message);
+      }
+    } else if (customSections.length) {
+      // eslint-disable-next-line no-console
+      console.warn('[FW] using caller-supplied custom_sections:', customSections.length);
+    } else {
+      // eslint-disable-next-line no-console
+      console.warn('[FW] no template_id in payload, skipping custom_sections build');
+    }
     const { data } = await client.post(
       `/organization/project/create/`,
-      { buyer_entity_id: entityId, ...payload }
+      {
+        buyer_entity_id: entityId,
+        ...payload,
+        custom_sections: customSections,
+      }
     );
     return { success: true, ...data };
   } catch (error) {
@@ -772,14 +1057,8 @@ export async function attachBomToProject({
   if (!client) return { success: false, error: 'No Factwise session' };
   try {
     // Step 1a: fetch BOM detail (items + currency + defaults).
-    // Step 1b: fetch project detail to discover the ACTUAL name of the
-    //   project's BOM-terms custom_section. FactWise's create_project_boms
-    //   crashes with `KeyError: 'BOM'` at custom_service.add_section_id_via_name
-    //   if the name we send doesn't exist in the project template's
-    //   `bom_custom_section_name_map`. Different project templates use
-    //   different labels (e.g. "BOM", "BOM Details", "BOM Terms"), so we
-    //   read the label from the just-created project's own custom_sections
-    //   list rather than hardcoding it.
+    // Step 1b: fetch project detail to discover its template_id and existing
+    //   custom_sections.
     const [detailResp, projectResp] = await Promise.all([
       client.get(`/organization/bom/${enterpriseBomId}/admin/`),
       client.get(`/organization/project/${projectId}/`),
@@ -789,33 +1068,85 @@ export async function attachBomToProject({
     const bomItems = Array.isArray(bom.bom_items) ? bom.bom_items : [];
     const projectBomItems = flattenBomItemsForProject(bomItems);
 
-    // Pull the project's BOM-typed custom_section(s) — if none exist, we
-    // send an empty list and let FW use its own defaults. If one exists,
-    // we mirror it into the payload with the exact name FW is expecting.
+    // Step 1c: fetch the project template so we can look up the ACTUAL name
+    // FW's UI expects for the BOM_TERMS custom_section. FW UI's Submit
+    // button reads `templateDetails.sections[X].subSections.BOM_TERMS.label`
+    // and finds the matching project.custom_sections[].name. If we send an
+    // attach with a section named something else (or matching by name
+    // pattern that doesn't hit the template's actual label), the FW UI's
+    // find returns null → Submit passes empty custom_section_id → 400
+    // "custom_section_id: Must be a valid UUID."
+    //
+    // Same template, same UI: manual attach via FW works because FW UI
+    // uses this same label lookup. Our attach must use it too.
+    const { entityId } = readCredentials();
+    const templateId =
+      project?.template_id
+      || project?.project_template?.template_id
+      || project?.additional_details?.template_id
+      || null;
+
+    let bomTermsLabel = null;
+    if (templateId && entityId) {
+      try {
+        const tplResp = await client.get(
+          `/module_templates/${entityId}/${templateId}/`
+        );
+        const template = tplResp?.data || {};
+        const sectionsRoot = template?.sections || {};
+        // sectionsRoot is a dict keyed by section type. Each value has
+        // .subSections which may contain a BOM_TERMS entry with .label.
+        // Fallback: if BOM_TERMS isn't nested, some templates put the label
+        // at section.label directly when section is BOM-typed.
+        for (const section of Object.values(sectionsRoot)) {
+          if (!section || typeof section !== 'object') continue;
+          const bomTerms = section?.subSections?.BOM_TERMS;
+          if (bomTerms?.label) { bomTermsLabel = bomTerms.label; break; }
+          if (section?.type === 'BOM_TERMS' && section?.label) {
+            bomTermsLabel = section.label; break;
+          }
+        }
+      } catch {
+        // Template fetch failed — fall back to pattern matching below.
+      }
+    }
+
+    // Pull the project's BOM custom_section from the project detail. If we
+    // found the exact template label, use it verbatim (matches FW UI's
+    // Submit-time lookup byte-for-byte). Otherwise fall back to a name
+    // pattern (`^bom(\s|$)`) for older templates or fetch failures.
     const projectCustomSections = Array.isArray(project.custom_sections)
       ? project.custom_sections
       : [];
-    const bomSectionMatches = projectCustomSections.filter(
-      (s) => String(s?.section_type || '').toUpperCase() === 'BOM'
-    );
+    let bomSectionMatches;
+    if (bomTermsLabel) {
+      const exact = projectCustomSections.filter(
+        (s) => String(s?.name || '').trim() === String(bomTermsLabel).trim()
+      );
+      bomSectionMatches = exact.length ? exact : [];
+      // If the project template says the label is X but no project section
+      // named X exists yet (rare), we still send it with that exact name so
+      // FW's add_section_id_via_name maps to whatever it can. If the map
+      // doesn't have that key FW crashes — but if the template says so, the
+      // map SHOULD have it because project creation initializes sections
+      // from the template.
+      if (!bomSectionMatches.length) {
+        bomSectionMatches = [{ name: bomTermsLabel }];
+      }
+    } else {
+      bomSectionMatches = projectCustomSections
+        .filter((s) => /^bom(\s|$)/i.test(String(s?.name || '').trim()))
+        .sort((a, b) => String(b?.name || '').length - String(a?.name || '').length);
+    }
     const outgoingCustomSections = bomSectionMatches.length
       ? bomSectionMatches.map((s) => ({
           name: s.name,
           section_type: 'BOM',
-          // Leave every field with a null value so FW just stores the
-          // section shell without any user-facing content.
-          custom_fields: (Array.isArray(s.custom_fields) ? s.custom_fields : []).map(
-            (f) => ({
-              name: f.name,
-              type: f.type,
-              value: null,
-              is_locked: !!f.is_locked,
-              is_visible: f.is_visible !== false,
-              description: f.description || null,
-              is_required: !!f.is_required,
-              is_negotiable: !!f.is_negotiable,
-            })
-          ),
+          // Empty fields — matches what FW's own UI sends when the BOM
+          // template has no custom fields. FW's server iterates our list
+          // and creates the linkage row keyed by name; per-field values
+          // are set to their defaults from the template.
+          custom_fields: [],
         }))
       : [];
 

@@ -352,15 +352,18 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
   }, [sessionId]);
 
   const patch = useCallback((delta) => {
-    setState((prev) => {
-      const next = { ...prev, ...delta };
-      saveCheckpoint(sessionId, next);
-      // Sync the ref immediately so callers that patch() then read from
-      // stateRef in the SAME microtask (e.g. handleGridRetrySuccess) get
-      // the updated value without waiting for React's next render.
-      stateRef.current = next;
-      return next;
-    });
+    // Write to the ref + localStorage BEFORE calling setState. React 18
+    // defers the setState functional updater until the commit phase — if
+    // we do saveCheckpoint inside the updater and the next await tick
+    // fires before commit, the very next read (loadCheckpoint or
+    // stateRef.current) sees stale data. Symptom: runProjectStep patches
+    // projectId, runAttachBomStep immediately reads localStorage, gets
+    // undefined → "Missing project or BOM identifiers to attach."
+    // Retry works only because commit has fired by then.
+    const next = { ...stateRef.current, ...delta };
+    stateRef.current = next;
+    saveCheckpoint(sessionId, next);
+    setState(next);
   }, [sessionId]);
 
   const reset = useCallback(() => {
@@ -1022,6 +1025,27 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
     }
   }, [patch]);
 
+  // Called when a Save & retry (or any error-grid retry) fails with a NEW
+  // error state. Without this, the parent dialog's `lastBulkImportId` stayed
+  // pinned to the FIRST failure — so the error grid kept rendering that
+  // old error file even after the user fixed some cells and the retry
+  // produced a fresh error file listing the REMAINING errors (e.g. an
+  // `EntityDoesNotExist` on a different row). Symptom: user fixes cell A,
+  // clicks Save & retry, retry fails on cell B, but the grid still shows
+  // only cell A's row. Now patches lastBulkImportId + lastError so the
+  // grid re-mounts on the new bulk_import_id.
+  const markRetryFailed = useCallback((kind, error, bulkImportId, resp) => {
+    const cur = stateRef.current;
+    const rtype = resp?.response_type || cur.lastResponseType;
+    const phase = kind === 'BOM' ? PHASES.BOM_ERROR : PHASES.ITEMS_ERROR;
+    patch({
+      phase,
+      lastError: error || cur.lastError || 'Retry failed',
+      lastResponseType: rtype,
+      lastBulkImportId: bulkImportId || cur.lastBulkImportId,
+    });
+  }, [patch]);
+
   return {
     ...state,
     isEmbedded,
@@ -1036,6 +1060,7 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
     runProjectStep,
     runAttachBomStep,
     markRetrySucceeded,
+    markRetryFailed,
     reset,
   };
 }

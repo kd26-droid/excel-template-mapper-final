@@ -5506,11 +5506,24 @@ def _append_authored_finished_good(info, rows, headers):
 
 
 def _constant_column_values(rows, headers):
-    """Columns holding the same non-blank value on every row, as {index: value}.
+    """Columns whose value we can safely inherit onto a synthesised row, as
+    {index: value}.
 
-    Used to carry enterprise-wide settings onto a synthesised row. Anything that
-    varies between items — codes, descriptions, MPNs — is deliberately excluded,
-    so only genuinely sheet-wide values propagate.
+    Enterprise-wide settings (Procurement entity name, currency, buyer/seller
+    flags, etc.) are the same across every real row, so a synthesised
+    finished-good row should carry them too. But we can NOT be strict about
+    100% match — as soon as the user edits one row's Procurement entity name
+    to something else (say, `ffg`), the column stops being "constant" and the
+    synthesised row ends up blank, which then trips a RequiredField error on
+    Factwise's item importer.
+
+    Instead we accept the MAJORITY non-blank value across the sheet:
+      - collect all non-blank values in the column
+      - pick the most common one
+      - if it appears in at least 60% of the non-blank rows, treat it as the
+        column's enterprise value
+
+    Codes / descriptions / MPNs still never inherit — see never_inherit below.
     """
     if not rows or not headers:
         return {}
@@ -5523,27 +5536,28 @@ def _constant_column_values(rows, headers):
          'MPN Code', 'CPN Code', 'ERP Code', 'SAP Item ID', 'HSN Code')
     }
 
+    from collections import Counter
+
     constants = {}
     for position, header in enumerate(headers):
         if _template_label_key(header) in never_inherit:
             continue
-        seen = None
-        consistent = True
+        values = []
         for row in rows:
             if not isinstance(row, list) or position >= len(row):
-                consistent = False
-                break
-            value = str(row[position] or '').strip()
-            if not value:
-                consistent = False
-                break
-            if seen is None:
-                seen = value
-            elif value != seen:
-                consistent = False
-                break
-        if consistent and seen:
-            constants[position] = seen
+                continue
+            v = str(row[position] or '').strip()
+            if v:
+                values.append(v)
+        if not values:
+            continue
+        counter = Counter(values)
+        majority_value, majority_count = counter.most_common(1)[0]
+        # 60% threshold: on a sheet of ~100 items, this happily inherits when
+        # 1-40 rows have been individually edited to a different value. Below
+        # that we assume the column is genuinely variable (per-row) and skip.
+        if majority_count / len(values) >= 0.6:
+            constants[position] = majority_value
     return constants
 
 

@@ -1,7 +1,15 @@
-import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  FW_SESSION_EXPIRED_EVENT,
+  FW_TOKEN_REFRESHED_EVENT,
+  clearSessionExpired,
+  isTokenExpired,
+  silentRefreshToken,
+} from '../services/factwiseApi';
 
 const STORAGE_KEYS = {
   token: 'fw_embedded_token',
+  refreshToken: 'fw_embedded_refresh_token',
   apiEnv: 'fw_api_env',
   apiUrl: 'fw_api_url',
   sessionId: 'fw_session_id',
@@ -121,6 +129,7 @@ function readInitialContext() {
 
   const captured = {
     token: params.get('token'),
+    refreshToken: params.get('refresh_token'),
     apiEnv: params.get('api_env'),
     apiUrl: params.get('api_url'),
     sessionId: params.get('session_id'),
@@ -151,6 +160,8 @@ function readInitialContext() {
   return {
     isEmbedded,
     token: captured.token || window.localStorage.getItem(STORAGE_KEYS.token),
+    refreshToken:
+      captured.refreshToken || window.localStorage.getItem(STORAGE_KEYS.refreshToken),
     apiEnv: captured.apiEnv || window.localStorage.getItem(STORAGE_KEYS.apiEnv),
     apiUrl: captured.apiUrl || window.localStorage.getItem(STORAGE_KEYS.apiUrl),
     sessionId:
@@ -173,10 +184,96 @@ const FactwiseContext = createContext({
   entityId: null,
   entityName: null,
   fwOrigin: null,
+  sessionExpired: false,
+  reconnect: () => {},
 });
 
 export function FactwiseProvider({ children }) {
   const [contextValue, setContextValue] = useState(() => readInitialContext());
+  const [sessionExpired, setSessionExpired] = useState(() =>
+    Boolean(contextValue.token) && isTokenExpired(contextValue.token)
+  );
+
+  // Listen for the api layer's expiry signal (fired on 401/403 or on a
+  // preflight token check). Once true, the reconnect banner unmounts the
+  // rest of the UX until the user re-launches from Factwise.
+  useEffect(() => {
+    const onExpired = () => setSessionExpired(true);
+    window.addEventListener(FW_SESSION_EXPIRED_EVENT, onExpired);
+    return () => window.removeEventListener(FW_SESSION_EXPIRED_EVENT, onExpired);
+  }, []);
+
+  // Poll the JWT `exp` claim so we notice expiry EVEN when the user is
+  // idle (no requests fire, so the interceptor never sees a 401). Runs
+  // every 30s. When the token is within 5 minutes of expiry AND we have
+  // a refresh_token, silently rotate — the user never sees the banner.
+  // Only flip the expired flag if the silent refresh fails (or we don't
+  // have a refresh_token at all, i.e. an old FW build that didn't pass it).
+  const expiredRef = useRef(sessionExpired);
+  useEffect(() => { expiredRef.current = sessionExpired; }, [sessionExpired]);
+  useEffect(() => {
+    if (!contextValue.token) return undefined;
+    const tick = async () => {
+      if (expiredRef.current) return;
+      const token = window.localStorage.getItem(STORAGE_KEYS.token);
+      const refreshToken = window.localStorage.getItem(STORAGE_KEYS.refreshToken);
+      if (!token) return;
+      // Refresh window: token expires within 5 min → rotate now.
+      const payload = (() => {
+        try {
+          const body = String(token).split('.')[1];
+          const padded = body.replace(/-/g, '+').replace(/_/g, '/')
+            .padEnd(body.length + ((4 - (body.length % 4)) % 4), '=');
+          return JSON.parse(window.atob(padded));
+        } catch { return null; }
+      })();
+      const secondsToExpiry = payload?.exp
+        ? payload.exp - Math.floor(Date.now() / 1000)
+        : Infinity;
+      if (secondsToExpiry < 300 && refreshToken) {
+        const res = await silentRefreshToken();
+        if (!res?.success) setSessionExpired(true);
+        return;
+      }
+      if (isTokenExpired(token)) {
+        if (refreshToken) {
+          const res = await silentRefreshToken();
+          if (!res?.success) setSessionExpired(true);
+        } else {
+          setSessionExpired(true);
+        }
+      }
+    };
+    tick();
+    const id = window.setInterval(tick, 30000);
+    return () => window.clearInterval(id);
+  }, [contextValue.token]);
+
+  // Whenever silentRefreshToken succeeds, sync the fresh id_token back
+  // into React state so consumers observing `token` see the new value on
+  // the next render.
+  useEffect(() => {
+    const onRefreshed = (e) => {
+      const newToken = e?.detail?.token;
+      if (!newToken) return;
+      setContextValue((prev) => ({ ...prev, token: newToken }));
+      setSessionExpired(false);
+    };
+    window.addEventListener(FW_TOKEN_REFRESHED_EVENT, onRefreshed);
+    return () => window.removeEventListener(FW_TOKEN_REFRESHED_EVENT, onRefreshed);
+  }, []);
+
+  // Open FW in a new tab so the user can re-launch the mapper with a
+  // fresh token. We use the fw_origin captured at initial launch — the
+  // BOM Directory page is the canonical relaunch point since that's where
+  // FW opens the mapper from.
+  const reconnect = useCallback(() => {
+    const origin = contextValue.fwOrigin
+      || window.localStorage.getItem(STORAGE_KEYS.fwOrigin);
+    if (origin) {
+      window.open(`${origin}/admin/BOM/`, '_blank', 'noopener,noreferrer');
+    }
+  }, [contextValue.fwOrigin]);
 
   useEffect(() => {
     if (cleanString(contextValue.entityName)) return undefined;
@@ -203,7 +300,25 @@ export function FactwiseProvider({ children }) {
     };
   }, [contextValue]);
 
-  const value = useMemo(() => contextValue, [contextValue]);
+  // Cross-tab reconnect: if the user re-launches the mapper in another
+  // tab, that tab writes a fresh token to localStorage → this tab picks
+  // it up via the storage event and clears the expired flag.
+  useEffect(() => {
+    const onStorage = (e) => {
+      if (e.key !== STORAGE_KEYS.token || !e.newValue) return;
+      if (isTokenExpired(e.newValue)) return;
+      clearSessionExpired();
+      setContextValue((prev) => ({ ...prev, token: e.newValue }));
+      setSessionExpired(false);
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
+
+  const value = useMemo(
+    () => ({ ...contextValue, sessionExpired, reconnect }),
+    [contextValue, sessionExpired, reconnect]
+  );
   return (
     <FactwiseContext.Provider value={value}>
       {children}

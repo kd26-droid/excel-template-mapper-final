@@ -167,6 +167,7 @@ export default function FactwiseProjectExportDialog({
     isRunning,
     runFromCheckpoint,
     markRetrySucceeded,
+    markRetryFailed,
     reset,
   } = orchestration;
 
@@ -511,6 +512,18 @@ export default function FactwiseProjectExportDialog({
     markRetrySucceeded(kind, resp, bulkImportId);
     runFromCheckpoint(buildRunPayload());
   }, [phase, markRetrySucceeded, runFromCheckpoint, buildRunPayload]);
+
+  // When Save & retry FAILS with a new bulk_import_id (fresh error state,
+  // e.g. the user fixed Capacitor's blank but a different row still has
+  // an invalid value), we need to swap the grid over to the new file so
+  // the user can see the remaining errors. Without this handler the
+  // dialog kept lastBulkImportId pinned to the original failure and the
+  // grid stayed stuck on the first error file forever.
+  const handleGridRetryFailure = useCallback((error, bulkImportId, resp) => {
+    if (!bulkImportId) return;
+    const kind = phase === PHASES.BOM_ERROR ? 'BOM' : 'ITEM';
+    markRetryFailed(kind, error, bulkImportId, resp);
+  }, [phase, markRetryFailed]);
 
   const { fwOrigin } = useFactwise();
   const openTarget = projectId || existingProjectId;
@@ -888,6 +901,7 @@ export default function FactwiseProjectExportDialog({
               phase === PHASES.BOM_ERROR ? { import_type: 'BOM_DASHBOARD' } : {}
             }
             onRetrySuccess={handleGridRetrySuccess}
+            onRetryFailure={handleGridRetryFailure}
             disabled={isRunning}
             sessionId={sessionId}
             onHostRowsUpdated={refreshHost}

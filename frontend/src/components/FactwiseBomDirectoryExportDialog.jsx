@@ -117,6 +117,7 @@ export default function FactwiseBomDirectoryExportDialog({
     isRunning,
     runFromCheckpoint,
     markRetrySucceeded,
+    markRetryFailed,
     reset,
   } = orchestration;
 
@@ -140,6 +141,15 @@ export default function FactwiseBomDirectoryExportDialog({
     markRetrySucceeded(kind, resp, bulkImportId);
     runFromCheckpoint({ stopAfterBom: true });
   }, [phase, markRetrySucceeded, runFromCheckpoint]);
+
+  // Swap the error grid over to the retry's new bulk_import_id when a
+  // Save & retry produces a fresh error state — otherwise the grid stays
+  // stuck on the original file even after the user has fixed some cells.
+  const handleGridRetryFailure = useCallback((error, bulkImportId, resp) => {
+    if (!bulkImportId) return;
+    const kind = phase === PHASES.BOM_ERROR ? 'BOM' : 'ITEM';
+    markRetryFailed(kind, error, bulkImportId, resp);
+  }, [phase, markRetryFailed]);
 
   const handleOpenBomDirectory = useCallback(() => {
     openInFactwise('/admin/BOM/');
@@ -261,6 +271,7 @@ export default function FactwiseBomDirectoryExportDialog({
               phase === PHASES.BOM_ERROR ? { import_type: 'BOM_DASHBOARD' } : {}
             }
             onRetrySuccess={handleGridRetrySuccess}
+            onRetryFailure={handleGridRetryFailure}
             disabled={isRunning}
             sessionId={sessionId}
             onHostRowsUpdated={refreshHost}
