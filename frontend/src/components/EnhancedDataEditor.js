@@ -100,7 +100,7 @@ import ColumnParser from './ColumnParser/ColumnParser';
 import { LoaderCard } from './LoaderOverlay';
 import { getDataSynchronizer, cleanupSynchronizer } from '../utils/DataSynchronizer';
 import { useThemeContext } from '../utils/ThemeContext';
-import { readItemDirectoryDefaults } from '../utils/itemDirectoryDefaults';
+import { readItemDirectoryDefaults, writeItemDirectoryColumnOptions } from '../utils/itemDirectoryDefaults';
 import { displayHeaderName } from '../utils/columnHeaderNames';
 
 // Keep the arrangement-specific row expansion implementation dormant while a
@@ -379,6 +379,16 @@ const ALL_ROWS_PAGE_SIZE = 200000;
 // Header cells are pinned to a fixed height so the column-filter row underneath
 // can stick at a known offset instead of guessing at the header's rendered size.
 const HEADER_ROW_HEIGHT = 44;
+const ITEM_CODE_SEPARATOR_FROM_MODE = {
+  none: '',
+  space: ' ',
+  hyphen: '-',
+  spaced_hyphen: ' - ',
+  underscore: '_',
+  slash: '/',
+  pipe: '|',
+  comma: ',',
+};
 
 const EnhancedDataEditor = () => {
   const { sessionId } = useParams();
@@ -1398,6 +1408,9 @@ const EnhancedDataEditor = () => {
       addDefault('Procurement item', savedDefaults.procurementItem);
       addDefault('Sales item', savedDefaults.salesItem);
       addDefault('Measurement unit', savedDefaults.measurementUnit);
+      if (savedDefaults.itemCodeContentType === 'fixed') {
+        addDefault('Item code', savedDefaults.itemCodeDefaultValue);
+      }
 
       let changed = false;
       if (Object.keys(defaults).length > 0) {
@@ -1411,7 +1424,7 @@ const EnhancedDataEditor = () => {
 
       const itemCodePrefix = String(savedDefaults.itemCodePrefix || '').trim();
       const itemCodeColumn = headerSet.has('Item code') ? 'Item code' : '';
-      if (itemCodeColumn) {
+      if (itemCodeColumn && (savedDefaults.itemCodeContentType || 'serial') === 'serial') {
         const blankStrategy = (
           savedDefaults.itemCodeBlankStrategy === 'prefix_sequence' && itemCodePrefix
         ) ? 'prefix_sequence' : 'leave';
@@ -2516,6 +2529,12 @@ const EnhancedDataEditor = () => {
       .map(col => col.field)
   ), [columnDefs]);
 
+  useEffect(() => {
+    if (dataColumnFields.length > 0) {
+      writeItemDirectoryColumnOptions(dataColumnFields);
+    }
+  }, [dataColumnFields]);
+
   const createColumnTargetExists = useMemo(() => {
     const target = String(createColumnTarget || '').trim();
     return Boolean(target && dataColumnFields.includes(target));
@@ -2530,8 +2549,83 @@ const EnhancedDataEditor = () => {
     });
   }, [createColumnTarget, rowData]);
 
+  const getMatchingDataColumnField = useCallback((columnName) => {
+    const wanted = String(columnName || '').trim().toLowerCase();
+    if (!wanted) return '';
+    return dataColumnFields.find(field => String(field).trim().toLowerCase() === wanted) || '';
+  }, [dataColumnFields]);
+
+  const applySavedItemCodeFillSettings = useCallback(() => {
+    const itemCodeField = getMatchingDataColumnField('Item code');
+    if (!itemCodeField) return false;
+
+    const saved = readItemDirectoryDefaults();
+    const mode = ['fixed', 'copy', 'concat', 'conditional', 'serial'].includes(saved.itemCodeContentType)
+      ? saved.itemCodeContentType
+      : 'serial';
+    const rowsMode = ['fill_empty', 'overwrite', 'duplicates'].includes(saved.itemCodeRowsToUpdate)
+      ? saved.itemCodeRowsToUpdate
+      : 'fill_empty';
+    const matchSavedColumn = (name) => getMatchingDataColumnField(name);
+    const firstColumn = matchSavedColumn(saved.itemCodeCopyFromColumn || saved.itemCodeJoinFirstColumn);
+    const secondColumn = matchSavedColumn(saved.itemCodeJoinSecondColumn);
+    const separatorMode = saved.itemCodeJoinSeparatorMode || 'space';
+    const separator = separatorMode === 'custom'
+      ? (saved.itemCodeJoinCustomSeparator || '')
+      : (ITEM_CODE_SEPARATOR_FROM_MODE[separatorMode] ?? ' ');
+    const thenSource = ['default', 'column', 'empty'].includes(saved.itemCodeConditionValueSource)
+      ? saved.itemCodeConditionValueSource
+      : 'default';
+    const elseSource = ['default', 'column', 'empty'].includes(saved.itemCodeElseValueSource)
+      ? saved.itemCodeElseValueSource
+      : 'default';
+    const savedConditionalBranches = Array.isArray(saved.itemCodeConditionalBranches) && saved.itemCodeConditionalBranches.length
+      ? saved.itemCodeConditionalBranches
+      : [{
+        column: saved.itemCodeConditionSourceColumn,
+        operator: saved.itemCodeConditionOperator,
+        compare: saved.itemCodeConditionText,
+        outputType: saved.itemCodeConditionValueSource,
+        outputValue: saved.itemCodeConditionDefaultValue,
+        outputColumn: saved.itemCodeConditionValueColumn,
+      }];
+
+    setCreateColumnTab(0);
+    setCreateColumnTarget(itemCodeField);
+    setCreateColumnNewName('');
+    setCreateColumnContentType(mode);
+    setCreateColumnMode(rowsMode);
+    setDefaultValue(saved.itemCodeDefaultValue || '');
+    setCreateColumnFirst(firstColumn || (dataColumnFields.find(field => field !== itemCodeField) || ''));
+    setCreateColumnSecond(secondColumn || dataColumnFields.find(field => field !== itemCodeField && field !== firstColumn) || '');
+    setCreateColumnSeparatorMode(separatorMode);
+    setCreateColumnCustomSeparator(saved.itemCodeJoinCustomSeparator || '');
+    setCreateColumnSeparator(separator);
+    setFactwiseSerialPrefix(saved.itemCodePrefix || 'ITEM');
+    setFactwiseSerialStart(saved.itemCodeStart || 1);
+    setFactwiseSerialPadding(saved.itemCodePadding || 2);
+    setFactwiseSerialIncrement(saved.itemCodeIncrement !== false);
+    setConditionalBranches(savedConditionalBranches.map(branch => ({
+      ...createConditionalBranch(),
+      column: matchSavedColumn(branch?.column),
+      operator: branch?.operator || 'contains',
+      compare: branch?.compare || '',
+      outputType: ['default', 'column', 'empty'].includes(branch?.outputType) ? branch.outputType : thenSource,
+      outputValue: branch?.outputValue || '',
+      outputColumn: matchSavedColumn(branch?.outputColumn),
+    })));
+    setCondElseSourceType(elseSource);
+    setCondElse(saved.itemCodeElseDefaultValue || '');
+    setCondElseColumn(matchSavedColumn(saved.itemCodeElseValueColumn));
+    return true;
+  }, [dataColumnFields, getMatchingDataColumnField]);
+
   const handleOpenCreateColumnDialog = useCallback((tab = 0) => {
     const fields = dataColumnFields;
+    if (tab === 0 && applySavedItemCodeFillSettings()) {
+      setCreateColumnDialogOpen(true);
+      return;
+    }
     setCreateColumnTab(tab);
     setCreateColumnTarget(prev => prev || (fields.includes('Item name') ? 'Item name' : ''));
     if (!createColumnFirst && fields.length > 0) {
@@ -2542,7 +2636,7 @@ const EnhancedDataEditor = () => {
       setCreateColumnSecond(fields.find(field => field !== first) || fields[1]);
     }
     setCreateColumnDialogOpen(true);
-  }, [dataColumnFields, createColumnFirst, createColumnSecond]);
+  }, [dataColumnFields, createColumnFirst, createColumnSecond, applySavedItemCodeFillSettings]);
 
   const handleCloseCreateColumnDialog = useCallback(() => {
     setCreateColumnDialogOpen(false);
@@ -3286,12 +3380,25 @@ const EnhancedDataEditor = () => {
       const itemCodeStart = Math.max(1, Number.parseInt(savedDefaults.itemCodeStart || '1', 10) || 1);
       const itemCodePadding = Math.max(0, Number.parseInt(savedDefaults.itemCodePadding || '3', 10) || 0);
       const itemCodeIncrement = savedDefaults.itemCodeIncrement !== false;
+      const itemCodeContentType = savedDefaults.itemCodeContentType || 'serial';
       const requestedBlankStrategy = savedDefaults.itemCodeBlankStrategy || 'prefix_sequence';
       const requestedDuplicateStrategy = savedDefaults.itemCodeDuplicateStrategy || 'prefix_sequence';
       let appliedSavedDefault = false;
 
       try {
-        if (itemCodeField && icIssue) {
+        if (itemCodeField && icIssue && itemCodeContentType === 'fixed' && String(savedDefaults.itemCodeDefaultValue || '').trim() && (icIssue.blanks || 0) > 0) {
+          const resp = await api.setColumnDefault(sessionId, itemCodeField, String(savedDefaults.itemCodeDefaultValue || '').trim(), true, null);
+          if (!resp.data?.success) throw new Error(resp.data?.error || 'Could not fill item code defaults');
+          recordPostMappingAction({
+            type: 'set_column_default',
+            label: 'Fill Item code from settings',
+            column: itemCodeField,
+            value: String(savedDefaults.itemCodeDefaultValue || '').trim(),
+            only_empty: true,
+            condition: null,
+          });
+          appliedSavedDefault = true;
+        } else if (itemCodeField && icIssue && itemCodeContentType === 'serial') {
           const blankStrategy = (
             (icIssue.blanks || 0) > 0 &&
             requestedBlankStrategy === 'prefix_sequence' &&
