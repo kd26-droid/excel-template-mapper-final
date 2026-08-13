@@ -46,6 +46,7 @@ import {
   ListItemButton,
   ListItemIcon,
   ListItemText,
+  ListSubheader,
   Menu,
   Tabs,
   Tab
@@ -508,6 +509,10 @@ const EnhancedDataEditor = () => {
   const [createColumnCustomSeparator, setCreateColumnCustomSeparator] = useState('');
   const [createColumnMode, setCreateColumnMode] = useState('fill_empty');
   const [createColumnSaving, setCreateColumnSaving] = useState(false);
+  // Saved rule sets, for the "Apply a saved rule set" value mode.
+  const [ruleSets, setRuleSets] = useState([]);
+  const [ruleSetsLoading, setRuleSetsLoading] = useState(false);
+  const [selectedRuleSetId, setSelectedRuleSetId] = useState('');
   const [hasFormulas, setHasFormulas] = useState(false);
   const [formulaColumns, setFormulaColumns] = useState([]);
   // Column examples and fill stats for FormulaBuilder dropdowns
@@ -2638,6 +2643,46 @@ const EnhancedDataEditor = () => {
     setCreateColumnDialogOpen(true);
   }, [dataColumnFields, createColumnFirst, createColumnSecond, applySavedItemCodeFillSettings]);
 
+  // ─── SAVED RULE SETS ────────────────────────────────────────────────────────
+  // A rule set carries the destination each of its rules was authored for, so
+  // the picker can put the ones meant for the column being filled first.
+  useEffect(() => {
+    if (!createColumnDialogOpen) return;
+    let cancelled = false;
+    setRuleSetsLoading(true);
+    api.getTagTemplates()
+      .then(res => { if (!cancelled) setRuleSets(res?.data?.templates || []); })
+      .catch(() => { if (!cancelled) setRuleSets([]); })
+      .finally(() => { if (!cancelled) setRuleSetsLoading(false); });
+    return () => { cancelled = true; };
+  }, [createColumnDialogOpen]);
+
+  const ruleSetTargets = useCallback((ruleSet) => {
+    const rules = ruleSet?.formula_rules || ruleSet?.rules || [];
+    return rules.map(r => String(r?.target_column || '').trim()).filter(Boolean);
+  }, []);
+
+  // Rule sets authored for the column being filled, then everything else.
+  const { preferredRuleSets, otherRuleSets } = useMemo(() => {
+    const target = String(createColumnTab === 0 ? createColumnTarget : createColumnNewName).trim();
+    const preferred = [];
+    const others = [];
+    (ruleSets || []).forEach(set => {
+      if (target && ruleSetTargets(set).includes(target)) preferred.push(set);
+      else others.push(set);
+    });
+    return { preferredRuleSets: preferred, otherRuleSets: others };
+  }, [ruleSets, createColumnTarget, createColumnNewName, createColumnTab, ruleSetTargets]);
+
+  // One obvious candidate for this destination — pick it rather than making the
+  // user choose from a list of one.
+  useEffect(() => {
+    if (createColumnContentType !== 'rules') return;
+    if (preferredRuleSets.length === 1) {
+      setSelectedRuleSetId(preferredRuleSets[0].id);
+    }
+  }, [createColumnContentType, preferredRuleSets]);
+
   const handleCloseCreateColumnDialog = useCallback(() => {
     setCreateColumnDialogOpen(false);
     if (returnToRequiredGuardRef.current && pendingExportRef.current) {
@@ -2674,6 +2719,42 @@ const EnhancedDataEditor = () => {
     }
     if (createColumnContentType === 'conditional' && condElseSourceType === 'column' && !condElseColumn) {
       showSnackbar('Select the column used when the condition does not match', 'warning');
+      return;
+    }
+
+    // Rule sets go through the formula engine, not fillOrCreateColumn — they
+    // are keyword→value rules, and the destination chosen here wins over the
+    // one they were saved with.
+    if (createColumnContentType === 'rules') {
+      const ruleSet = (ruleSets || []).find(set => String(set.id) === String(selectedRuleSetId));
+      if (!ruleSet) {
+        showSnackbar('Select a rule set to apply', 'warning');
+        return;
+      }
+      const rules = (ruleSet.formula_rules || ruleSet.rules || []).map(rule => ({
+        ...rule,
+        target_column: target,
+        // The column was chosen here, so write into it rather than letting the
+        // engine allocate a fresh Tag column around it.
+        target_locked: true,
+        column_type: target.startsWith('Specification_Value_') ? 'Specification Value' : 'Tag',
+      }));
+      if (rules.length === 0) {
+        showSnackbar('That rule set has no rules', 'warning');
+        return;
+      }
+      try {
+        setCreateColumnSaving(true);
+        const response = await api.applyFormulas(sessionId, rules);
+        if (!response.data?.success) throw new Error(response.data?.error || 'Could not apply the rule set');
+        setCreateColumnDialogOpen(false);
+        await fetchDataSynchronized();
+        showSnackbar(`Applied "${ruleSet.name}" to ${target}.`, 'success');
+      } catch (error) {
+        showSnackbar(getFriendlyErrorMessage(error, 'Failed to apply the rule set'), 'error');
+      } finally {
+        setCreateColumnSaving(false);
+      }
       return;
     }
 
@@ -2756,7 +2837,10 @@ const EnhancedDataEditor = () => {
     sessionId,
     showSnackbar,
     fetchDataSynchronized,
-    recordPostMappingAction
+    recordPostMappingAction,
+    ruleSets,
+    selectedRuleSetId,
+    getFriendlyErrorMessage
   ]);
 
   const handleOpenFactwiseIdDialog = useCallback(() => {
@@ -5935,12 +6019,15 @@ const EnhancedDataEditor = () => {
                   <MenuItem value="concat">Join two columns</MenuItem>
                   <MenuItem value="conditional">Use an if / else condition</MenuItem>
                   <MenuItem value="serial">Generate a serial sequence</MenuItem>
+                  <MenuItem value="rules">Apply a saved rule set</MenuItem>
                   {createColumnTab === 1 && <MenuItem value="blank">Leave the new column blank</MenuItem>}
                 </Select>
               </FormControl>
             </Grid>
 
-            {createColumnTab === 0 && (
+            {/* A rule set decides per row whether it matches, so "rows to
+                update" has nothing to act on. */}
+            {createColumnTab === 0 && createColumnContentType !== 'rules' && (
               <Grid item xs={12} sm={6}>
                 <FormControl fullWidth size="small">
                   <InputLabel>Rows to update</InputLabel>
@@ -5958,6 +6045,43 @@ const EnhancedDataEditor = () => {
             {createColumnContentType === 'fixed' && (
               <Grid item xs={12}>
                 <TextField fullWidth size="small" label="Value" value={defaultValue} onChange={(e) => setDefaultValue(e.target.value)} />
+              </Grid>
+            )}
+
+            {createColumnContentType === 'rules' && (
+              <Grid item xs={12}>
+                <FormControl fullWidth size="small" disabled={ruleSetsLoading}>
+                  <InputLabel>Rule set</InputLabel>
+                  <Select
+                    label="Rule set"
+                    value={selectedRuleSetId}
+                    onChange={(e) => setSelectedRuleSetId(e.target.value)}
+                  >
+                    {preferredRuleSets.length > 0 && (
+                      <ListSubheader>
+                        Saved for {columnLabel(createColumnTarget, createColumnTarget)}
+                      </ListSubheader>
+                    )}
+                    {preferredRuleSets.map(set => (
+                      <MenuItem key={set.id} value={set.id}>
+                        {set.name} · {(set.formula_rules || set.rules || []).length} rules
+                      </MenuItem>
+                    ))}
+                    {otherRuleSets.length > 0 && <ListSubheader>Other rule sets</ListSubheader>}
+                    {otherRuleSets.map(set => (
+                      <MenuItem key={set.id} value={set.id}>
+                        {set.name} · {(set.formula_rules || set.rules || []).length} rules
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: t.text.secondary }}>
+                  {ruleSetsLoading
+                    ? 'Loading rule sets…'
+                    : (ruleSets.length === 0
+                      ? 'No rule sets saved yet — create one from the dashboard\'s Rule Sets tab.'
+                      : 'Every rule in the set writes into the column selected above, whatever destination it was saved with.')}
+                </Typography>
               </Grid>
             )}
 
@@ -6221,7 +6345,15 @@ const EnhancedDataEditor = () => {
             (conditionalBranches.some(branch => branch.outputType === 'empty') || condElseSourceType === 'empty') && (
               <Alert severity="info" sx={{ mt: 2 }}>Leave empty will not clear populated cells in this mode. Choose All rows if matching rows should be cleared.</Alert>
             )}
-          <Alert severity="info" sx={{ mt: 2 }}>This operation is saved with the mapping template and runs again when the template is reused.</Alert>
+          {/* Rule sets run through the formula engine, which is not part of the
+              mapping template's saved operations. */}
+          {createColumnContentType === 'rules' ? (
+            <Alert severity="info" sx={{ mt: 2 }}>
+              Runs once now. Reapply the rule set on a future sheet from this same dialog.
+            </Alert>
+          ) : (
+            <Alert severity="info" sx={{ mt: 2 }}>This operation is saved with the mapping template and runs again when the template is reused.</Alert>
+          )}
         </DialogContent>
         <DialogActions sx={{
           px: 3,
@@ -6240,7 +6372,8 @@ const EnhancedDataEditor = () => {
               createColumnSaving ||
               !(createColumnTab === 0 ? createColumnTarget : createColumnNewName.trim()) ||
               (createColumnTab === 1 && dataColumnFields.includes(createColumnNewName.trim())) ||
-              (createColumnContentType === 'concat' && (!createColumnFirst || !createColumnSecond))
+              (createColumnContentType === 'concat' && (!createColumnFirst || !createColumnSecond)) ||
+              (createColumnContentType === 'rules' && !selectedRuleSetId)
             }
             startIcon={createColumnSaving ? <CircularProgress size={16} /> : <AutoAwesomeIcon />}
           >

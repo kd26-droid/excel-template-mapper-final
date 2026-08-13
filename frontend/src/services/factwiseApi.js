@@ -134,10 +134,15 @@ export async function uploadFileToFactwiseBulkImport(file, resourceType) {
       { file_name: file.name, resource_type: resourceType },
       { headers: { ...authHeaders, 'Content-Type': 'application/json' }, timeout: 30000 }
     );
-    const { bulk_import_id, url } = generateResp.data;
+    const { bulk_import_id, url, fields } = generateResp.data;
     if (!bulk_import_id || !url) {
       return { success: false, error: 'Factwise did not return an upload URL' };
     }
+    // The stable blob path the file landed on. The SAS `url` is deliberately
+    // not returned: it is write-only (sp=w) and expires within the hour, so it
+    // cannot read the sheet back and is worthless to anyone downstream.
+    // bulk_import_id is the handle that matters — it is what process/ takes.
+    const blobKey = fields?.key || '';
 
     // Step 2: PUT raw file bytes to the Azure Blob SAS URL
     // (Same headers Factwise's own uploadFileToGeneratedUrl uses)
@@ -146,7 +151,7 @@ export async function uploadFileToFactwiseBulkImport(file, resourceType) {
       timeout: 120000,
     });
 
-    return { success: true, bulk_import_id, file_name: file.name };
+    return { success: true, bulk_import_id, file_name: file.name, blob_key: blobKey };
   } catch (error) {
     return {
       success: false,
@@ -548,6 +553,35 @@ export function collapseBomRevisions(rows = []) {
     return { ...ordered[0], revisions: ordered };
   });
   return [...collapsed, ...ungrouped];
+}
+
+// The bom_code FactWise will give the next revision of this BOM.
+//
+// A mirror of bom_service.admin_revise_bom, deliberately kept identical:
+//   v1  BOM_A     -> BOM_A_R2      (unsuffixed IS v1, so the first revision is 2)
+//   v4  BOM_A_R4  -> BOM_A_R5      (drops the digits of the old version, appends the new)
+//
+// Derived from `version`, never by parsing the _Rn suffix — seven BOMs in
+// mainV2 disagree with their own name (QAB1_R24 is v1, AMAAN-BUG-6-2 is v2
+// with no suffix), and reading the name would produce a code FactWise never
+// creates.
+//
+// This is a PREVIEW, not the decision. The server names the revision when
+// admin_revise_bom runs, and the export path re-reads that name and retargets
+// the sheet to it. Showing it early only matters so the user sees the same code
+// that will ship.
+export function nextRevisionCode(bomCode, version) {
+  const code = String(bomCode || '');
+  const current = Number(version);
+  if (!code || !Number.isFinite(current) || current < 1) return code;
+  const next = current + 1;
+  if (current === 1) return `${code}_R${next}`;
+  // Only strip when the code really does end in the current version, so a
+  // mislabelled code loses nothing.
+  if (code.endsWith(String(current))) {
+    return `${code.slice(0, -String(current).length)}${next}`;
+  }
+  return `${code}_R${next}`;
 }
 
 // Projects carrying a BOM, at any revision. Replaces the org-wide project

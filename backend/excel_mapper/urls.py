@@ -46,6 +46,7 @@ from .views import (
     download_demo_bom_sheet,
     generate_bom_sheet,
     bom_tree,
+    bom_revision_handoff,
     download_bom_sheet,
     validate_bom_sheet,
     demo_bom_tree,
@@ -69,6 +70,7 @@ from .views import (
     # Tag Template views
     save_tag_template,
     get_tag_templates,
+    get_default_template_headers,
     delete_tag_template,
     apply_tag_template,
 
@@ -221,6 +223,10 @@ urlpatterns = [
     path('import/<str:session_id>/', import_edited_sheet, name='import-edited-sheet'),
     path('bom/generate/<str:session_id>/', generate_bom_sheet, name='generate-bom-sheet'),
     path('bom/tree/<str:session_id>/', bom_tree, name='bom-tree'),
+    # GET: what a caller needs to finish a revision this session started.
+    # POST: the browser handing back the bulk-import result.
+    path('bom/revision-handoff/<str:session_id>/', bom_revision_handoff,
+         name='bom-revision-handoff'),
     path('bom/download/<str:session_id>/', download_bom_sheet, name='download-bom-sheet'),
     path('bom/validate/<str:session_id>/', validate_bom_sheet, name='validate-bom-sheet'),
 
@@ -245,6 +251,9 @@ urlpatterns = [
     path('formulas/conflicts/', check_column_conflicts, name='check-column-conflicts'),
     path('formulas/clear/', clear_formulas, name='clear-formulas'),
     
+    # Built-in Factwise sheet columns (no session needed)
+    path('default-template/headers/', get_default_template_headers, name='default-template-headers'),
+
     # Tag Templates (Smart Tag Rules Templates)
     path('tag-templates/save/', save_tag_template, name='save-tag-template'),
     path('tag-templates/', get_tag_templates, name='get-tag-templates'),

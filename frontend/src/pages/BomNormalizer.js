@@ -6104,9 +6104,17 @@ const BomNormalizer = () => {
     // second time for the same workbook would just be noise.
     let answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
 
-    // A reused mapping template may already answer the gate. Its format answers
-    // always apply; its identity answers only while they still describe this
-    // file. All surviving means the gate never opens.
+    // A reused mapping template pre-answers the gate but never replaces it. Its
+    // format answers always apply and its identity answers only while they
+    // still describe this file, so reconciling still earns its keep — it just
+    // seeds the dialog now instead of skipping it.
+    //
+    // The gate opens even when every saved answer survives, because it no
+    // longer only describes the workbook: it also asks whether this upload is a
+    // NEW BOM or a revision of an existing one. That is a property of the
+    // upload, not of the customer's export format, so a template cannot know
+    // it — and defaulting it to "new" without asking is how a file meant to
+    // revise a BOM silently becomes a second BOM beside it.
     if (!answers) {
       const saved = location.state?.savedBomStructure;
       if (saved) {
@@ -6115,8 +6123,7 @@ const BomNormalizer = () => {
           getSheetHeaders: bomStructureHeaderReader,
           getSheetRecords: bomStructureRecordReader,
         });
-        if (reconciled.complete) answers = saved;
-        else setBomStructureSeed(reconciled.answers);
+        setBomStructureSeed(reconciled.answers);
       }
     }
 
@@ -6272,9 +6279,17 @@ const BomNormalizer = () => {
     // second time for the same workbook would just be noise.
     let answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
 
-    // A reused mapping template may already answer the gate. Its format answers
-    // always apply; its identity answers only while they still describe this
-    // file. All surviving means the gate never opens.
+    // A reused mapping template pre-answers the gate but never replaces it. Its
+    // format answers always apply and its identity answers only while they
+    // still describe this file, so reconciling still earns its keep — it just
+    // seeds the dialog now instead of skipping it.
+    //
+    // The gate opens even when every saved answer survives, because it no
+    // longer only describes the workbook: it also asks whether this upload is a
+    // NEW BOM or a revision of an existing one. That is a property of the
+    // upload, not of the customer's export format, so a template cannot know
+    // it — and defaulting it to "new" without asking is how a file meant to
+    // revise a BOM silently becomes a second BOM beside it.
     if (!answers) {
       const saved = location.state?.savedBomStructure;
       if (saved) {
@@ -6283,8 +6298,7 @@ const BomNormalizer = () => {
           getSheetHeaders: bomStructureHeaderReader,
           getSheetRecords: bomStructureRecordReader,
         });
-        if (reconciled.complete) answers = saved;
-        else setBomStructureSeed(reconciled.answers);
+        setBomStructureSeed(reconciled.answers);
       }
     }
 

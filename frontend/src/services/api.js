@@ -982,6 +982,13 @@ const api = {
     axios.get(`${API_URL}/tag-templates/`),
 
   /**
+   * Columns of the built-in Factwise sheet — for screens that need the
+   * Factwise column list with no session open (tag rule builder, etc.).
+   */
+  getDefaultTemplateHeaders: () =>
+    axios.get(`${API_URL}/default-template/headers/`),
+
+  /**
    * Save tag template from formula rules
    * @param {string} templateName - Name for the template
    * @param {string} description - Optional description
@@ -1527,6 +1534,21 @@ const api = {
   /** Generated BOM as JSON: headers, rows, item rows, stats, warnings. */
   generateBomSheet: (sessionId) =>
     axios.get(`${API_URL}/bom/generate/${sessionId}/`, { timeout: 120000 }),
+
+  /**
+   * Hand the bulk-import result back so the revision can be finished elsewhere.
+   *
+   * The revision half (which BOM, which project, which slots) is already on the
+   * session from the BOM structure gate; only what the browser learned from
+   * FactWise has to come back. Read it all out again with
+   * GET /bom/revision-handoff/<sessionId>/.
+   */
+  saveBomRevisionHandoff: (sessionId, handoff) =>
+    axios.post(`${API_URL}/bom/revision-handoff/${sessionId}/`, handoff, { timeout: 30000 }),
+
+  /** Everything a caller needs to finish a revision this session started. */
+  getBomRevisionHandoff: (sessionId) =>
+    axios.get(`${API_URL}/bom/revision-handoff/${sessionId}/`, { timeout: 30000 }),
 
   /** Import an edited export back into the SAME session (keeps mappings/tags/MPN). */
   importEditedSheet: (sessionId, file) => {

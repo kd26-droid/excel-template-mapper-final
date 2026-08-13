@@ -535,53 +535,52 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
           bomBulkImportId: uploaded.bulk_import_id,
         });
 
-        const processed = await processFactwiseBulkImport(uploaded.bulk_import_id, {
-          import_type: 'BOM_UPDATE',
-          enterprise_bom_id: newDraftId,
-          template_id: templateId,
-          finished_good_id: finishedGoodId,
-          entity_ids: entityIds,
-        });
-        if (!processed?.success) {
+        // Record the upload against the session so it can be read back with
+        // GET /bom/revision-handoff/<sessionId>/ — the editor's uuid is the only
+        // handle an outside caller has on this flow. Written BEFORE processing,
+        // because the point of exposing it is to let something else do the
+        // processing; if that ever becomes the only path, the record is already
+        // where it needs to be. Best effort: failing to record must not fail an
+        // import that is otherwise fine.
+        const handoffSaved = await api.saveBomRevisionHandoff(sessionId, {
+          bulkImportId: uploaded.bulk_import_id,
+          fileName: uploaded.file_name,
+          blobKey: uploaded.blob_key || '',
+          enterpriseBomId: newDraftId,
+          bomCode: targetBomCode,
+          templateId,
+          finishedGoodId,
+          // process/ wants these three alongside the bulk_import_id, and all of
+          // them come off the draft's detail — which only this flow fetched.
+          entityIds,
+        }).catch(err => ({ error: err }));
+        if (handoffSaved?.error) {
+          // Not best-effort any more. The handoff IS the output of this flow —
+          // the revision draft exists and the sheet is uploaded, and if nobody
+          // can read back which BOM and which project they belong to, the run
+          // has produced an orphan draft and nothing else.
           patch({
             phase: PHASES.BOM_ERROR,
-            lastError: processed?.error || 'BOM revision process call failed',
+            lastError: 'The BOM was uploaded but the revision handoff could not be '
+                       + 'recorded, so nothing can finish it. Retry the export.',
             lastBulkImportId: uploaded.bulk_import_id,
           });
           return { ok: false };
         }
-        const resp = processed?.response || processed;
-        const rtype = resp?.response_type;
-        if (rtype && rtype !== 'Success') {
-          patch({
-            phase: PHASES.BOM_ERROR,
-            lastError: resp?.error || `BOM revision validation failed (${rtype})`,
-            lastResponseType: rtype,
-            lastBulkImportId: uploaded.bulk_import_id,
-          });
-          return { ok: false };
-        }
-        const bomIds = (resp?.bom_ids && resp.bom_ids.length)
-          ? resp.bom_ids
-          : [newDraftId];
-        // Submit each DRAFT BOM to ONGOING — without this, the project's
-        // Add Item tab stays empty, "Submit BOM" doesn't work in the project,
-        // and future revisions fail because admin_revise_bom only accepts
-        // ONGOING targets. Same PATCH FactWise's admin edit page uses.
-        for (const id of bomIds) {
-          const submitted = await submitEnterpriseBom(id);
-          if (!submitted?.success) {
-            patch({
-              phase: PHASES.BOM_ERROR,
-              lastError:
-                submitted?.error
-                || `BOM ${id} imported but could not be submitted to ONGOING.`,
-            });
-            return { ok: false };
-          }
-        }
-        patch({ phase: PHASES.BOM_DONE, bomIds });
-        return { ok: true };
+
+        // STOP. A revision is handed over, not completed here.
+        //
+        // Everything needed to finish it is now readable from
+        // GET /bom/revision-handoff/<sessionId>/ : the bulk_import_id and its
+        // process arguments, the draft being imported into, and the project
+        // slots to move once that import lands.
+        //
+        // Neither of the remaining calls can be made from here. `process/` is
+        // the importer's to run, and the slot moves cannot happen until it has:
+        // until then the draft has no items, and a slot pointed at it would be
+        // pointed at an empty BOM.
+        patch({ phase: PHASES.DONE, bomIds: [newDraftId] });
+        return { ok: true, handedOff: true };
       }
 
       // -------- Path B: fresh create --------

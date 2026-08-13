@@ -42,7 +42,8 @@ import {
 } from '@mui/material';
 import { AccountTree as AccountTreeIcon } from '@mui/icons-material';
 import {
-  fetchEnterpriseBomCodes, collapseBomRevisions, fetchProjectsWithBom, fetchProjectBomSlots,
+  fetchEnterpriseBomCodes, collapseBomRevisions, nextRevisionCode,
+  fetchProjectsWithBom, fetchProjectBomSlots,
 } from '../services/factwiseApi';
 import {
   readBomRevisionIntent, saveBomRevisionIntent, clearBomRevisionIntent,
@@ -364,12 +365,19 @@ const analyzeLevels = (records, levelColumn, headers) => {
 // finished good code, the sub-BOM part numbers — describes one specific
 // assembly, and next month's BOM from the same customer is a different assembly.
 //
-// Replaying the format silently is right. Replaying the identity silently would
-// stamp last month's finished good onto this month's BOM with nothing to catch
-// it, so it is only reused when it still matches the sheet.
+// Carrying the format forward is right. Carrying the identity forward silently
+// would stamp last month's finished good onto this month's BOM with nothing to
+// catch it, so it is only reused when it still matches the sheet.
 //
-// Returns { answers, complete }. `complete` false means the gate must be shown,
-// seeded with whatever survived.
+// Returns { answers, complete }. `answers` seeds the gate, which is now shown
+// EVERY time — the dialog also asks whether this upload is a new BOM or a
+// revision, and that belongs to the upload rather than to the customer's export
+// format, so no saved template can answer it.
+//
+// `complete` says whether every saved answer survived the check. No caller
+// branches on it any more; it is kept because it is the honest result of the
+// comparison this function exists to make, and it is what a caller would need
+// if the gate ever became skippable again.
 export const reconcileSavedBomStructure = (saved, { sheetNames = [], getSheetHeaders, getSheetRecords } = {}) => {
   const savedSheets = (saved || {}).sheets || {};
   if (!Object.keys(savedSheets).length) return { answers: null, complete: false };
@@ -884,6 +892,21 @@ const BomStructureDialog = ({
     return [reviseBom, ...bomOptions];
   }, [bomOptions, reviseBom]);
 
+  // When this upload revises a BOM, the root of every BOM built from it IS that
+  // BOM's next revision — not a finished good detected from the workbook.
+  //
+  // Detection exists because a new BOM has no root in its data. A revision does:
+  // the user named it two steps ago. Letting the preamble scan or the
+  // shallowest-row inference win here would build the new revision under a
+  // finished good belonging to the sheet, so it would not be a revision of the
+  // chosen BOM at all — it would be a different assembly wearing its id.
+  //
+  // Null in create mode, which leaves every existing detection path untouched.
+  const revisionTargetCode = useMemo(() => {
+    if (mode !== MODE_REVISE || !reviseBom?.bom_code) return null;
+    return nextRevisionCode(reviseBom.bom_code, reviseBom.version);
+  }, [mode, reviseBom]);
+
   // A position in the list, so the user has something short to refer to. Stable
   // because the endpoint returns slots sorted by version ascending.
   const slotOrdinal = useCallback((slot) => {
@@ -973,7 +996,8 @@ const BomStructureDialog = ({
     if (currentKey === 'finishedGood') {
       for (const name of sheetsNeedingRoot) {
         const header = answers[name]?.bomHeader || {};
-        if (!String(header.finishedGoodCode || '').trim()) {
+        // Supplied by the revision, so there is nothing for the user to enter.
+        if (!revisionTargetCode && !String(header.finishedGoodCode || '').trim()) {
           setError(`Enter a finished good code for "${name}".`);
           return false;
         }
@@ -1012,7 +1036,7 @@ const BomStructureDialog = ({
     return true;
   }, [currentKey, leveledSheets, sheetsNeedingRoot, answers, structureFor, subBomValue,
       reviseBom, reviseOnProject, reviseProject, reviseSlots, slotOptions,
-      baseBomId, baseBomError]);
+      baseBomId, baseBomError, revisionTargetCode]);
 
   const handleNext = () => {
     if (!validateStep()) return;
@@ -1097,7 +1121,11 @@ const BomStructureDialog = ({
       let bomHeader = null;
       if (needsHeader) {
         const raw = answer.bomHeader || blankBomHeader(name);
-        const code = String(raw.finishedGoodCode || '').trim();
+        // The revision target wins over anything detected from or typed into
+        // the sheet — see revisionTargetCode. It lands here rather than only in
+        // the field so the confirmed answer carries it even if the user never
+        // reached the finished-good step.
+        const code = revisionTargetCode || String(raw.finishedGoodCode || '').trim();
         bomHeader = {
           finishedGoodCode: code,
           itemName: String(raw.itemName || '').trim() || code,
@@ -1672,8 +1700,15 @@ const BomStructureDialog = ({
                 size="small"
                 required
                 label="Finished good code"
-                value={header.finishedGoodCode}
+                // Fixed to the revision when revising. Editable would invite a
+                // code that is not the BOM being revised, which is the one
+                // thing this upload has already been told.
+                value={revisionTargetCode || header.finishedGoodCode}
+                disabled={Boolean(revisionTargetCode)}
                 onChange={e => patchHeader(name, { finishedGoodCode: e.target.value })}
+                helperText={revisionTargetCode
+                  ? `Next revision of ${reviseBom?.bom_code}`
+                  : ''}
                 sx={{ width: 240 }}
               />
               <TextField
