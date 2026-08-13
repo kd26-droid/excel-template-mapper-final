@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Box,
@@ -31,6 +31,7 @@ import {
   Error as ErrorIcon,
   Info as InfoIcon,
   Save as SaveIcon,
+  Add as AddIcon,
   Delete as DeleteIcon,
   TableChart as TableChartIcon,
   Visibility,
@@ -45,6 +46,7 @@ import api from '../services/api';
 import { useFactwise } from '../contexts/FactwiseContext';
 import {
   ITEM_DIRECTORY_DEFAULTS,
+  readItemDirectoryColumnOptions,
   readItemDirectoryDefaults,
   writeItemDirectoryDefaults,
 } from '../utils/itemDirectoryDefaults';
@@ -86,6 +88,29 @@ const ITEM_CODE_ROWS_TO_UPDATE_OPTIONS = [
   { value: 'overwrite', label: 'All rows' },
   { value: 'duplicates', label: 'Only rows with a duplicate value' },
 ];
+const ITEM_CODE_SEPARATOR_OPTIONS = [
+  { value: 'none', label: 'No separator', text: '' },
+  { value: 'space', label: 'Space', text: ' ' },
+  { value: 'hyphen', label: 'Hyphen -', text: '-' },
+  { value: 'spaced_hyphen', label: 'Spaced hyphen -', text: ' - ' },
+  { value: 'underscore', label: 'Underscore _', text: '_' },
+  { value: 'slash', label: 'Slash /', text: '/' },
+  { value: 'pipe', label: 'Pipe |', text: '|' },
+  { value: 'comma', label: 'Comma ,', text: ',' },
+  { value: 'custom', label: 'Custom...', text: '' },
+];
+const ITEM_CODE_CONDITION_OPTIONS = [
+  { value: 'contains', label: 'contains' },
+  { value: 'equals', label: 'equals' },
+  { value: 'not_equals', label: 'does not equal' },
+  { value: 'is_empty', label: 'is empty' },
+  { value: 'not_empty', label: 'is not empty' },
+];
+const ITEM_CODE_VALUE_SOURCE_OPTIONS = [
+  { value: 'default', label: 'Default value' },
+  { value: 'column', label: 'Value from a column' },
+  { value: 'empty', label: 'Leave empty' },
+];
 const ITEM_TYPE_OPTIONS = ['Raw material', 'Finished good'];
 
 const cleanText = (value) => String(value ?? '').trim();
@@ -104,6 +129,9 @@ const serverSettingsToItemDirectoryDefaults = (settings, currentDefaults = {}) =
       : (settings.sales_item ? 'TRUE' : 'FALSE'),
     measurementUnit: cleanText(settings?.measurement_unit),
     itemCodePrefix: cleanText(rule.prefix),
+    itemCodeContentType: rule.mode === 'fixed' ? 'fixed' : (currentDefaults.itemCodeContentType || 'serial'),
+    itemCodeRowsToUpdate: currentDefaults.itemCodeRowsToUpdate || 'fill_empty',
+    itemCodeDefaultValue: cleanText(rule.value) || currentDefaults.itemCodeDefaultValue || '',
     itemCodeBlankStrategy: rule.prefix || rule.value ? 'prefix_sequence' : (currentDefaults.itemCodeBlankStrategy || 'prefix_sequence'),
     itemCodeDuplicateStrategy: currentDefaults.itemCodeDuplicateStrategy || 'leave',
     itemCodeSeparator: currentDefaults.itemCodeSeparator ?? '-',
@@ -115,12 +143,19 @@ const serverSettingsToItemDirectoryDefaults = (settings, currentDefaults = {}) =
 
 const itemDirectoryDefaultsToServerSettings = (defaults) => {
   const prefix = cleanText(defaults.itemCodePrefix);
+  const contentType = cleanText(defaults.itemCodeContentType) || 'serial';
+  const fixedValue = cleanText(defaults.itemCodeDefaultValue);
   return {
     item_type: cleanText(defaults.itemType),
     procurement_item: cleanText(defaults.procurementItem) || null,
     sales_item: cleanText(defaults.salesItem) || null,
     measurement_unit: cleanText(defaults.measurementUnit),
-    item_code_rule: prefix
+    item_code_rule: contentType === 'fixed' && fixedValue
+      ? {
+        mode: 'fixed',
+        value: fixedValue,
+      }
+      : (contentType === 'serial' && prefix
       ? {
         mode: 'prefix_sequence',
         prefix,
@@ -128,15 +163,19 @@ const itemDirectoryDefaultsToServerSettings = (defaults) => {
         padding: Math.max(0, Number.parseInt(defaults.itemCodePadding || '3', 10) || 0),
         increment: defaults.itemCodeIncrement !== false,
       }
-      : {},
+      : {}),
   };
 };
 
 const normalizeItemDirectoryDefaultsForSave = (defaults) => ({
   ...defaults,
-  itemCodeBlankStrategy: 'prefix_sequence',
-  itemCodeDuplicateStrategy: 'leave',
-  itemCodeSeparator: '-',
+  itemCodeContentType: defaults.itemCodeContentType || 'serial',
+  itemCodeRowsToUpdate: defaults.itemCodeRowsToUpdate || 'fill_empty',
+  itemCodeBlankStrategy: defaults.itemCodeContentType === 'serial' ? 'prefix_sequence' : 'leave',
+  itemCodeDuplicateStrategy: defaults.itemCodeRowsToUpdate === 'duplicates' ? 'prefix_sequence' : 'leave',
+  itemCodeSeparator: defaults.itemCodeJoinSeparatorMode === 'custom'
+    ? (defaults.itemCodeJoinCustomSeparator ?? '')
+    : (ITEM_CODE_SEPARATOR_OPTIONS.find(option => option.value === defaults.itemCodeJoinSeparatorMode)?.text ?? ' '),
   itemCodeIncrement: defaults.itemCodeIncrement !== false,
 });
 
@@ -185,6 +224,37 @@ const getInitialColumnMappings = () => {
   }
 };
 
+const createItemCodeConditionalBranch = () => ({
+  column: '',
+  operator: 'contains',
+  compare: '',
+  outputType: 'default',
+  outputValue: '',
+  outputColumn: '',
+});
+
+const normalizeItemCodeConditionalBranches = (defaults = {}) => {
+  const rawBranches = Array.isArray(defaults.itemCodeConditionalBranches)
+    ? defaults.itemCodeConditionalBranches
+    : [];
+  if (rawBranches.length > 0) {
+    return rawBranches.map(branch => ({
+      ...createItemCodeConditionalBranch(),
+      ...(branch && typeof branch === 'object' ? branch : {}),
+    }));
+  }
+
+  return [{
+    ...createItemCodeConditionalBranch(),
+    column: defaults.itemCodeConditionSourceColumn || '',
+    operator: defaults.itemCodeConditionOperator || 'contains',
+    compare: defaults.itemCodeConditionText || '',
+    outputType: defaults.itemCodeConditionValueSource || 'default',
+    outputValue: defaults.itemCodeConditionDefaultValue || '',
+    outputColumn: defaults.itemCodeConditionValueColumn || '',
+  }];
+};
+
 const Settings = () => {
   const { tokens: t, isDarkMode } = useThemeContext();
   const [digikeyClientId, setDigikeyClientId] = useState('');
@@ -197,6 +267,7 @@ const Settings = () => {
   const [showElement14Key, setShowElement14Key] = useState(false);
   const [columnMappings, setColumnMappings] = useState(getInitialColumnMappings);
   const [itemDirectoryDefaults, setItemDirectoryDefaults] = useState(readItemDirectoryDefaults);
+  const [itemDirectoryColumnOptions, setItemDirectoryColumnOptions] = useState(readItemDirectoryColumnOptions);
   const [credentialScopeId] = useState(getCredentialScopeId);
   const [providerStatus, setProviderStatus] = useState(emptyProviderStatus);
   const [loadingCredentials, setLoadingCredentials] = useState(false);
@@ -206,8 +277,31 @@ const Settings = () => {
   const [providerMessages, setProviderMessages] = useState({ digikey: null, mouser: null, element14: null });
   const [toast, setToast] = useState({ open: false, severity: 'success', message: '' });
   const [mousePos, setMousePos] = useState({ x: 50, y: 36 });
-  const [itemCodeContentType, setItemCodeContentType] = useState('serial');
-  const [itemCodeRowsToUpdate, setItemCodeRowsToUpdate] = useState('fill_empty');
+  const itemCodeContentType = itemDirectoryDefaults.itemCodeContentType || 'serial';
+  const itemCodeRowsToUpdate = itemDirectoryDefaults.itemCodeRowsToUpdate || 'fill_empty';
+  const itemCodeConditionalBranches = useMemo(
+    () => normalizeItemCodeConditionalBranches(itemDirectoryDefaults),
+    [itemDirectoryDefaults]
+  );
+  const itemCodeSourceColumnOptions = useMemo(() => {
+    const savedColumns = [
+      itemDirectoryDefaults.itemCodeCopyFromColumn,
+      itemDirectoryDefaults.itemCodeJoinFirstColumn,
+      itemDirectoryDefaults.itemCodeJoinSecondColumn,
+      itemDirectoryDefaults.itemCodeConditionSourceColumn,
+      itemDirectoryDefaults.itemCodeConditionValueColumn,
+      itemDirectoryDefaults.itemCodeElseValueColumn,
+      ...itemCodeConditionalBranches.flatMap(branch => [branch.column, branch.outputColumn]),
+    ];
+    const seen = new Set();
+    return [...itemDirectoryColumnOptions, ...savedColumns]
+      .map(value => String(value || '').trim())
+      .filter(value => {
+        if (!value || seen.has(value.toLowerCase())) return false;
+        seen.add(value.toLowerCase());
+        return true;
+      });
+  }, [itemDirectoryColumnOptions, itemDirectoryDefaults, itemCodeConditionalBranches]);
 
   const hasDigikey = Boolean(providerStatus.digikey?.configured);
   const hasMouser = Boolean(providerStatus.mouser?.configured);
@@ -217,7 +311,7 @@ const Settings = () => {
   // When embedded inside Factwise, distributor credentials are managed in
   // Factwise Admin and silently synced into this app's own store. Hide the
   // "API Providers" panel — the rest of Settings still works as normal.
-  const { isEmbedded: isFactwiseEmbedded, entityId: factwiseEntityId, entityName: factwiseEntityName } = useFactwise();
+  const { isEmbedded: isFactwiseEmbedded, entityName: factwiseEntityName } = useFactwise();
 
   const readyCount = useMemo(
     () => columnMappings.filter(mapping => normalizeProviders(mapping.providers || mapping.provider).every(provider => Boolean(providerStatus[provider]?.configured))).length,
@@ -225,7 +319,23 @@ const Settings = () => {
   );
 
   const hasItemDirectoryDefaults = useMemo(() => (
-    ['procurementEntityName', 'itemType', 'procurementItem', 'salesItem', 'itemCodePrefix', 'measurementUnit']
+    [
+      'procurementEntityName',
+      'itemType',
+      'procurementItem',
+      'salesItem',
+      'itemCodePrefix',
+      'itemCodeDefaultValue',
+      'itemCodeCopyFromColumn',
+      'itemCodeJoinFirstColumn',
+      'itemCodeJoinSecondColumn',
+      'itemCodeConditionSourceColumn',
+      'itemCodeConditionDefaultValue',
+      'itemCodeConditionValueColumn',
+      'itemCodeElseDefaultValue',
+      'itemCodeElseValueColumn',
+      'measurementUnit',
+    ]
       .some(key => String(itemDirectoryDefaults[key] || '').trim())
   ), [itemDirectoryDefaults]);
 
@@ -264,6 +374,12 @@ const Settings = () => {
       cancelled = true;
     };
   }, [factwiseEntityName]);
+
+  useEffect(() => {
+    const refreshColumnOptions = () => setItemDirectoryColumnOptions(readItemDirectoryColumnOptions());
+    window.addEventListener('focus', refreshColumnOptions);
+    return () => window.removeEventListener('focus', refreshColumnOptions);
+  }, []);
 
   useEffect(() => {
     const handleMouseMove = (event) => {
@@ -445,6 +561,46 @@ const Settings = () => {
 
   const handleItemDirectoryDefaultChange = (key, value) => {
     setItemDirectoryDefaults(prev => ({ ...prev, [key]: value }));
+  };
+
+  const syncFirstConditionalBranchFields = (branches, extra = {}) => {
+    const first = branches[0] || createItemCodeConditionalBranch();
+    return {
+      itemCodeConditionalBranches: branches,
+      itemCodeConditionSourceColumn: first.column || '',
+      itemCodeConditionOperator: first.operator || 'contains',
+      itemCodeConditionText: first.compare || '',
+      itemCodeConditionValueSource: first.outputType || 'default',
+      itemCodeConditionDefaultValue: first.outputValue || '',
+      itemCodeConditionValueColumn: first.outputColumn || '',
+      ...extra,
+    };
+  };
+
+  const updateItemCodeConditionalBranch = (branchIndex, patch) => {
+    const nextBranches = itemCodeConditionalBranches.map((branch, index) => (
+      index === branchIndex ? { ...branch, ...patch } : branch
+    ));
+    setItemDirectoryDefaults(prev => ({
+      ...prev,
+      ...syncFirstConditionalBranchFields(nextBranches),
+    }));
+  };
+
+  const addItemCodeConditionalBranch = () => {
+    const nextBranches = [...itemCodeConditionalBranches, createItemCodeConditionalBranch()];
+    setItemDirectoryDefaults(prev => ({
+      ...prev,
+      ...syncFirstConditionalBranchFields(nextBranches),
+    }));
+  };
+
+  const removeItemCodeConditionalBranch = (branchIndex) => {
+    const nextBranches = itemCodeConditionalBranches.filter((_, index) => index !== branchIndex);
+    setItemDirectoryDefaults(prev => ({
+      ...prev,
+      ...syncFirstConditionalBranchFields(nextBranches.length ? nextBranches : [createItemCodeConditionalBranch()]),
+    }));
   };
 
   const handleClearItemDirectoryDefaults = () => {
@@ -975,7 +1131,7 @@ const Settings = () => {
                             size="small"
                             label="How to set the value"
                             value={itemCodeContentType}
-                            onChange={(event) => setItemCodeContentType(event.target.value)}
+                            onChange={(event) => handleItemDirectoryDefaultChange('itemCodeContentType', event.target.value)}
                             sx={fieldSx}
                           >
                             {ITEM_CODE_CONTENT_TYPE_OPTIONS.map(option => (
@@ -990,7 +1146,7 @@ const Settings = () => {
                             size="small"
                             label="Rows to update"
                             value={itemCodeRowsToUpdate}
-                            onChange={(event) => setItemCodeRowsToUpdate(event.target.value)}
+                            onChange={(event) => handleItemDirectoryDefaultChange('itemCodeRowsToUpdate', event.target.value)}
                             sx={fieldSx}
                           >
                             {ITEM_CODE_ROWS_TO_UPDATE_OPTIONS.map(option => (
@@ -998,6 +1154,280 @@ const Settings = () => {
                             ))}
                           </TextField>
                         </Grid>
+                        {itemCodeContentType === 'fixed' && (
+                          <Grid item xs={12}>
+                            <TextField
+                              fullWidth
+                              size="small"
+                              label="Value"
+                              value={itemDirectoryDefaults.itemCodeDefaultValue || ''}
+                              onChange={(event) => handleItemDirectoryDefaultChange('itemCodeDefaultValue', event.target.value)}
+                              sx={fieldSx}
+                            />
+                          </Grid>
+                        )}
+                        {itemCodeContentType === 'copy' && (
+                          <Grid item xs={12}>
+                            <TextField
+                              select
+                              fullWidth
+                              size="small"
+                              label="Copy from"
+                              value={itemDirectoryDefaults.itemCodeCopyFromColumn || ''}
+                              onChange={(event) => handleItemDirectoryDefaultChange('itemCodeCopyFromColumn', event.target.value)}
+                              sx={fieldSx}
+                            >
+                              <MenuItem value="">Select source column</MenuItem>
+                              {itemCodeSourceColumnOptions.map(option => (
+                                <MenuItem key={option} value={option}>{option}</MenuItem>
+                              ))}
+                            </TextField>
+                          </Grid>
+                        )}
+                        {itemCodeContentType === 'concat' && (
+                          <>
+                            <Grid item xs={12} sm={4}>
+                              <TextField
+                                select
+                                fullWidth
+                                size="small"
+                                label="First column"
+                                value={itemDirectoryDefaults.itemCodeJoinFirstColumn || ''}
+                                onChange={(event) => handleItemDirectoryDefaultChange('itemCodeJoinFirstColumn', event.target.value)}
+                                sx={fieldSx}
+                              >
+                                <MenuItem value="">Select first column</MenuItem>
+                                {itemCodeSourceColumnOptions.map(option => (
+                                  <MenuItem key={option} value={option}>{option}</MenuItem>
+                                ))}
+                              </TextField>
+                            </Grid>
+                            <Grid item xs={12} sm={4}>
+                              <TextField
+                                select
+                                fullWidth
+                                size="small"
+                                label="Second column"
+                                value={itemDirectoryDefaults.itemCodeJoinSecondColumn || ''}
+                                onChange={(event) => handleItemDirectoryDefaultChange('itemCodeJoinSecondColumn', event.target.value)}
+                                sx={fieldSx}
+                              >
+                                <MenuItem value="">Select second column</MenuItem>
+                                {itemCodeSourceColumnOptions.map(option => (
+                                  <MenuItem key={option} value={option}>{option}</MenuItem>
+                                ))}
+                              </TextField>
+                            </Grid>
+                            <Grid item xs={12} sm={4}>
+                              <TextField
+                                select
+                                fullWidth
+                                size="small"
+                                label="Separator"
+                                value={itemDirectoryDefaults.itemCodeJoinSeparatorMode || 'space'}
+                                onChange={(event) => handleItemDirectoryDefaultChange('itemCodeJoinSeparatorMode', event.target.value)}
+                                sx={fieldSx}
+                              >
+                                {ITEM_CODE_SEPARATOR_OPTIONS.map(option => (
+                                  <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                                ))}
+                              </TextField>
+                            </Grid>
+                            {(itemDirectoryDefaults.itemCodeJoinSeparatorMode || 'space') === 'custom' && (
+                              <Grid item xs={12}>
+                                <TextField
+                                  fullWidth
+                                  size="small"
+                                  label="Custom separator"
+                                  value={itemDirectoryDefaults.itemCodeJoinCustomSeparator || ''}
+                                  onChange={(event) => handleItemDirectoryDefaultChange('itemCodeJoinCustomSeparator', event.target.value)}
+                                  sx={fieldSx}
+                                />
+                              </Grid>
+                            )}
+                          </>
+                        )}
+                        {itemCodeContentType === 'conditional' && (
+                          <Grid item xs={12}>
+                            <Box sx={{ p: 2, borderRadius: '12px', border: `1px solid ${t.border.subtle}`, bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.26)' : '#ffffff' }}>
+                              {itemCodeConditionalBranches.map((branch, branchIndex) => (
+                                <Box
+                                  key={branchIndex}
+                                  sx={{
+                                    pb: 1.75,
+                                    mb: 1.75,
+                                    borderBottom: `1px solid ${t.border.subtle}`,
+                                  }}
+                                >
+                                  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1.5 }}>
+                                    <Typography sx={{ fontSize: 14, fontWeight: 700, color: t.text.heading }}>
+                                      {branchIndex === 0 ? 'If' : 'Else if'} condition {branchIndex + 1}
+                                    </Typography>
+                                    {itemCodeConditionalBranches.length > 1 && (
+                                      <IconButton size="small" onClick={() => removeItemCodeConditionalBranch(branchIndex)}>
+                                        <DeleteIcon fontSize="small" />
+                                      </IconButton>
+                                    )}
+                                  </Box>
+                                  <Grid container spacing={1.5}>
+                                    <Grid item xs={12} sm={5}>
+                                      <TextField
+                                        select
+                                        fullWidth
+                                        size="small"
+                                        label="Source column"
+                                        value={branch.column || ''}
+                                        onChange={(event) => updateItemCodeConditionalBranch(branchIndex, { column: event.target.value })}
+                                        sx={fieldSx}
+                                      >
+                                        <MenuItem value="">Source column</MenuItem>
+                                        {itemCodeSourceColumnOptions.map(option => (
+                                          <MenuItem key={option} value={option}>{option}</MenuItem>
+                                        ))}
+                                      </TextField>
+                                    </Grid>
+                                    <Grid item xs={12} sm={3}>
+                                      <TextField
+                                        select
+                                        fullWidth
+                                        size="small"
+                                        label="Condition"
+                                        value={branch.operator || 'contains'}
+                                        onChange={(event) => updateItemCodeConditionalBranch(branchIndex, { operator: event.target.value })}
+                                        sx={fieldSx}
+                                      >
+                                        {ITEM_CODE_CONDITION_OPTIONS.map(option => (
+                                          <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                                        ))}
+                                      </TextField>
+                                    </Grid>
+                                    {['equals', 'not_equals', 'contains'].includes(branch.operator || 'contains') && (
+                                      <Grid item xs={12} sm={4}>
+                                        <TextField
+                                          fullWidth
+                                          size="small"
+                                          label="Text"
+                                          value={branch.compare || ''}
+                                          onChange={(event) => updateItemCodeConditionalBranch(branchIndex, { compare: event.target.value })}
+                                          sx={fieldSx}
+                                        />
+                                      </Grid>
+                                    )}
+                                    <Grid item xs={12} sm={2}>
+                                      <Typography sx={{ pt: 1.25, fontSize: 14, fontWeight: 700, color: t.text.heading }}>
+                                        Then use
+                                      </Typography>
+                                    </Grid>
+                                    <Grid item xs={12} sm={3}>
+                                      <TextField
+                                        select
+                                        fullWidth
+                                        size="small"
+                                        label="Value source"
+                                        value={branch.outputType || 'default'}
+                                        onChange={(event) => updateItemCodeConditionalBranch(branchIndex, { outputType: event.target.value })}
+                                        sx={fieldSx}
+                                      >
+                                        {ITEM_CODE_VALUE_SOURCE_OPTIONS.map(option => (
+                                          <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                                        ))}
+                                      </TextField>
+                                    </Grid>
+                                    {(branch.outputType || 'default') === 'column' ? (
+                                      <Grid item xs={12} sm={7}>
+                                        <TextField
+                                          select
+                                          fullWidth
+                                          size="small"
+                                          label="Column to copy from"
+                                          value={branch.outputColumn || ''}
+                                          onChange={(event) => updateItemCodeConditionalBranch(branchIndex, { outputColumn: event.target.value })}
+                                          sx={fieldSx}
+                                        >
+                                          <MenuItem value="">Column to copy from</MenuItem>
+                                          {itemCodeSourceColumnOptions.map(option => (
+                                            <MenuItem key={option} value={option}>{option}</MenuItem>
+                                          ))}
+                                        </TextField>
+                                      </Grid>
+                                    ) : (branch.outputType || 'default') === 'default' ? (
+                                      <Grid item xs={12} sm={7}>
+                                        <TextField
+                                          fullWidth
+                                          size="small"
+                                          label="Default value"
+                                          value={branch.outputValue || ''}
+                                          onChange={(event) => updateItemCodeConditionalBranch(branchIndex, { outputValue: event.target.value })}
+                                          sx={fieldSx}
+                                        />
+                                      </Grid>
+                                    ) : null}
+                                  </Grid>
+                                </Box>
+                              ))}
+                              <Button
+                                size="small"
+                                startIcon={<AddIcon />}
+                                onClick={addItemCodeConditionalBranch}
+                                sx={{ mb: 1.75, fontWeight: 700, textTransform: 'none' }}
+                              >
+                                Add another condition
+                              </Button>
+                              <Grid container spacing={1.5} alignItems="center">
+                                <Grid item xs={12} sm={2}>
+                                  <Typography sx={{ fontSize: 14, fontWeight: 700, color: t.text.heading }}>
+                                    Otherwise
+                                  </Typography>
+                                </Grid>
+                                <Grid item xs={12} sm={3}>
+                                  <TextField
+                                    select
+                                    fullWidth
+                                    size="small"
+                                    label="Value source"
+                                    value={itemDirectoryDefaults.itemCodeElseValueSource || 'default'}
+                                    onChange={(event) => handleItemDirectoryDefaultChange('itemCodeElseValueSource', event.target.value)}
+                                    sx={fieldSx}
+                                  >
+                                    {ITEM_CODE_VALUE_SOURCE_OPTIONS.map(option => (
+                                      <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                                    ))}
+                                  </TextField>
+                                </Grid>
+                                {(itemDirectoryDefaults.itemCodeElseValueSource || 'default') === 'column' ? (
+                                  <Grid item xs={12} sm={7}>
+                                    <TextField
+                                      select
+                                      fullWidth
+                                      size="small"
+                                      label="Column to copy from"
+                                      value={itemDirectoryDefaults.itemCodeElseValueColumn || ''}
+                                      onChange={(event) => handleItemDirectoryDefaultChange('itemCodeElseValueColumn', event.target.value)}
+                                      sx={fieldSx}
+                                    >
+                                      <MenuItem value="">Column to copy from</MenuItem>
+                                      {itemCodeSourceColumnOptions.map(option => (
+                                        <MenuItem key={option} value={option}>{option}</MenuItem>
+                                      ))}
+                                    </TextField>
+                                  </Grid>
+                                ) : (itemDirectoryDefaults.itemCodeElseValueSource || 'default') === 'default' ? (
+                                  <Grid item xs={12} sm={7}>
+                                    <TextField
+                                      fullWidth
+                                      size="small"
+                                      label="Default value"
+                                      placeholder="Leave blank to keep the current value"
+                                      value={itemDirectoryDefaults.itemCodeElseDefaultValue || ''}
+                                      onChange={(event) => handleItemDirectoryDefaultChange('itemCodeElseDefaultValue', event.target.value)}
+                                      sx={fieldSx}
+                                    />
+                                  </Grid>
+                                ) : null}
+                              </Grid>
+                            </Box>
+                          </Grid>
+                        )}
                         {itemCodeContentType === 'serial' && (
                           <>
                             <Grid item xs={12} sm={4}>
