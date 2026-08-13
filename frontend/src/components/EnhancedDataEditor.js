@@ -46,6 +46,7 @@ import {
   ListItemButton,
   ListItemIcon,
   ListItemText,
+  ListSubheader,
   Menu,
   Tabs,
   Tab
@@ -100,7 +101,7 @@ import ColumnParser from './ColumnParser/ColumnParser';
 import { LoaderCard } from './LoaderOverlay';
 import { getDataSynchronizer, cleanupSynchronizer } from '../utils/DataSynchronizer';
 import { useThemeContext } from '../utils/ThemeContext';
-import { readItemDirectoryDefaults } from '../utils/itemDirectoryDefaults';
+import { readItemDirectoryDefaults, writeItemDirectoryColumnOptions } from '../utils/itemDirectoryDefaults';
 import { displayHeaderName } from '../utils/columnHeaderNames';
 
 // Keep the arrangement-specific row expansion implementation dormant while a
@@ -379,6 +380,16 @@ const ALL_ROWS_PAGE_SIZE = 200000;
 // Header cells are pinned to a fixed height so the column-filter row underneath
 // can stick at a known offset instead of guessing at the header's rendered size.
 const HEADER_ROW_HEIGHT = 44;
+const ITEM_CODE_SEPARATOR_FROM_MODE = {
+  none: '',
+  space: ' ',
+  hyphen: '-',
+  spaced_hyphen: ' - ',
+  underscore: '_',
+  slash: '/',
+  pipe: '|',
+  comma: ',',
+};
 
 const EnhancedDataEditor = () => {
   const { sessionId } = useParams();
@@ -498,6 +509,10 @@ const EnhancedDataEditor = () => {
   const [createColumnCustomSeparator, setCreateColumnCustomSeparator] = useState('');
   const [createColumnMode, setCreateColumnMode] = useState('fill_empty');
   const [createColumnSaving, setCreateColumnSaving] = useState(false);
+  // Saved rule sets, for the "Apply a saved rule set" value mode.
+  const [ruleSets, setRuleSets] = useState([]);
+  const [ruleSetsLoading, setRuleSetsLoading] = useState(false);
+  const [selectedRuleSetId, setSelectedRuleSetId] = useState('');
   const [hasFormulas, setHasFormulas] = useState(false);
   const [formulaColumns, setFormulaColumns] = useState([]);
   // Column examples and fill stats for FormulaBuilder dropdowns
@@ -1398,6 +1413,9 @@ const EnhancedDataEditor = () => {
       addDefault('Procurement item', savedDefaults.procurementItem);
       addDefault('Sales item', savedDefaults.salesItem);
       addDefault('Measurement unit', savedDefaults.measurementUnit);
+      if (savedDefaults.itemCodeContentType === 'fixed') {
+        addDefault('Item code', savedDefaults.itemCodeDefaultValue);
+      }
 
       let changed = false;
       if (Object.keys(defaults).length > 0) {
@@ -1411,7 +1429,7 @@ const EnhancedDataEditor = () => {
 
       const itemCodePrefix = String(savedDefaults.itemCodePrefix || '').trim();
       const itemCodeColumn = headerSet.has('Item code') ? 'Item code' : '';
-      if (itemCodeColumn) {
+      if (itemCodeColumn && (savedDefaults.itemCodeContentType || 'serial') === 'serial') {
         const blankStrategy = (
           savedDefaults.itemCodeBlankStrategy === 'prefix_sequence' && itemCodePrefix
         ) ? 'prefix_sequence' : 'leave';
@@ -2516,6 +2534,12 @@ const EnhancedDataEditor = () => {
       .map(col => col.field)
   ), [columnDefs]);
 
+  useEffect(() => {
+    if (dataColumnFields.length > 0) {
+      writeItemDirectoryColumnOptions(dataColumnFields);
+    }
+  }, [dataColumnFields]);
+
   const createColumnTargetExists = useMemo(() => {
     const target = String(createColumnTarget || '').trim();
     return Boolean(target && dataColumnFields.includes(target));
@@ -2530,8 +2554,83 @@ const EnhancedDataEditor = () => {
     });
   }, [createColumnTarget, rowData]);
 
+  const getMatchingDataColumnField = useCallback((columnName) => {
+    const wanted = String(columnName || '').trim().toLowerCase();
+    if (!wanted) return '';
+    return dataColumnFields.find(field => String(field).trim().toLowerCase() === wanted) || '';
+  }, [dataColumnFields]);
+
+  const applySavedItemCodeFillSettings = useCallback(() => {
+    const itemCodeField = getMatchingDataColumnField('Item code');
+    if (!itemCodeField) return false;
+
+    const saved = readItemDirectoryDefaults();
+    const mode = ['fixed', 'copy', 'concat', 'conditional', 'serial'].includes(saved.itemCodeContentType)
+      ? saved.itemCodeContentType
+      : 'serial';
+    const rowsMode = ['fill_empty', 'overwrite', 'duplicates'].includes(saved.itemCodeRowsToUpdate)
+      ? saved.itemCodeRowsToUpdate
+      : 'fill_empty';
+    const matchSavedColumn = (name) => getMatchingDataColumnField(name);
+    const firstColumn = matchSavedColumn(saved.itemCodeCopyFromColumn || saved.itemCodeJoinFirstColumn);
+    const secondColumn = matchSavedColumn(saved.itemCodeJoinSecondColumn);
+    const separatorMode = saved.itemCodeJoinSeparatorMode || 'space';
+    const separator = separatorMode === 'custom'
+      ? (saved.itemCodeJoinCustomSeparator || '')
+      : (ITEM_CODE_SEPARATOR_FROM_MODE[separatorMode] ?? ' ');
+    const thenSource = ['default', 'column', 'empty'].includes(saved.itemCodeConditionValueSource)
+      ? saved.itemCodeConditionValueSource
+      : 'default';
+    const elseSource = ['default', 'column', 'empty'].includes(saved.itemCodeElseValueSource)
+      ? saved.itemCodeElseValueSource
+      : 'default';
+    const savedConditionalBranches = Array.isArray(saved.itemCodeConditionalBranches) && saved.itemCodeConditionalBranches.length
+      ? saved.itemCodeConditionalBranches
+      : [{
+        column: saved.itemCodeConditionSourceColumn,
+        operator: saved.itemCodeConditionOperator,
+        compare: saved.itemCodeConditionText,
+        outputType: saved.itemCodeConditionValueSource,
+        outputValue: saved.itemCodeConditionDefaultValue,
+        outputColumn: saved.itemCodeConditionValueColumn,
+      }];
+
+    setCreateColumnTab(0);
+    setCreateColumnTarget(itemCodeField);
+    setCreateColumnNewName('');
+    setCreateColumnContentType(mode);
+    setCreateColumnMode(rowsMode);
+    setDefaultValue(saved.itemCodeDefaultValue || '');
+    setCreateColumnFirst(firstColumn || (dataColumnFields.find(field => field !== itemCodeField) || ''));
+    setCreateColumnSecond(secondColumn || dataColumnFields.find(field => field !== itemCodeField && field !== firstColumn) || '');
+    setCreateColumnSeparatorMode(separatorMode);
+    setCreateColumnCustomSeparator(saved.itemCodeJoinCustomSeparator || '');
+    setCreateColumnSeparator(separator);
+    setFactwiseSerialPrefix(saved.itemCodePrefix || 'ITEM');
+    setFactwiseSerialStart(saved.itemCodeStart || 1);
+    setFactwiseSerialPadding(saved.itemCodePadding || 2);
+    setFactwiseSerialIncrement(saved.itemCodeIncrement !== false);
+    setConditionalBranches(savedConditionalBranches.map(branch => ({
+      ...createConditionalBranch(),
+      column: matchSavedColumn(branch?.column),
+      operator: branch?.operator || 'contains',
+      compare: branch?.compare || '',
+      outputType: ['default', 'column', 'empty'].includes(branch?.outputType) ? branch.outputType : thenSource,
+      outputValue: branch?.outputValue || '',
+      outputColumn: matchSavedColumn(branch?.outputColumn),
+    })));
+    setCondElseSourceType(elseSource);
+    setCondElse(saved.itemCodeElseDefaultValue || '');
+    setCondElseColumn(matchSavedColumn(saved.itemCodeElseValueColumn));
+    return true;
+  }, [dataColumnFields, getMatchingDataColumnField]);
+
   const handleOpenCreateColumnDialog = useCallback((tab = 0) => {
     const fields = dataColumnFields;
+    if (tab === 0 && applySavedItemCodeFillSettings()) {
+      setCreateColumnDialogOpen(true);
+      return;
+    }
     setCreateColumnTab(tab);
     setCreateColumnTarget(prev => prev || (fields.includes('Item name') ? 'Item name' : ''));
     if (!createColumnFirst && fields.length > 0) {
@@ -2542,7 +2641,47 @@ const EnhancedDataEditor = () => {
       setCreateColumnSecond(fields.find(field => field !== first) || fields[1]);
     }
     setCreateColumnDialogOpen(true);
-  }, [dataColumnFields, createColumnFirst, createColumnSecond]);
+  }, [dataColumnFields, createColumnFirst, createColumnSecond, applySavedItemCodeFillSettings]);
+
+  // ─── SAVED RULE SETS ────────────────────────────────────────────────────────
+  // A rule set carries the destination each of its rules was authored for, so
+  // the picker can put the ones meant for the column being filled first.
+  useEffect(() => {
+    if (!createColumnDialogOpen) return;
+    let cancelled = false;
+    setRuleSetsLoading(true);
+    api.getTagTemplates()
+      .then(res => { if (!cancelled) setRuleSets(res?.data?.templates || []); })
+      .catch(() => { if (!cancelled) setRuleSets([]); })
+      .finally(() => { if (!cancelled) setRuleSetsLoading(false); });
+    return () => { cancelled = true; };
+  }, [createColumnDialogOpen]);
+
+  const ruleSetTargets = useCallback((ruleSet) => {
+    const rules = ruleSet?.formula_rules || ruleSet?.rules || [];
+    return rules.map(r => String(r?.target_column || '').trim()).filter(Boolean);
+  }, []);
+
+  // Rule sets authored for the column being filled, then everything else.
+  const { preferredRuleSets, otherRuleSets } = useMemo(() => {
+    const target = String(createColumnTab === 0 ? createColumnTarget : createColumnNewName).trim();
+    const preferred = [];
+    const others = [];
+    (ruleSets || []).forEach(set => {
+      if (target && ruleSetTargets(set).includes(target)) preferred.push(set);
+      else others.push(set);
+    });
+    return { preferredRuleSets: preferred, otherRuleSets: others };
+  }, [ruleSets, createColumnTarget, createColumnNewName, createColumnTab, ruleSetTargets]);
+
+  // One obvious candidate for this destination — pick it rather than making the
+  // user choose from a list of one.
+  useEffect(() => {
+    if (createColumnContentType !== 'rules') return;
+    if (preferredRuleSets.length === 1) {
+      setSelectedRuleSetId(preferredRuleSets[0].id);
+    }
+  }, [createColumnContentType, preferredRuleSets]);
 
   const handleCloseCreateColumnDialog = useCallback(() => {
     setCreateColumnDialogOpen(false);
@@ -2580,6 +2719,42 @@ const EnhancedDataEditor = () => {
     }
     if (createColumnContentType === 'conditional' && condElseSourceType === 'column' && !condElseColumn) {
       showSnackbar('Select the column used when the condition does not match', 'warning');
+      return;
+    }
+
+    // Rule sets go through the formula engine, not fillOrCreateColumn — they
+    // are keyword→value rules, and the destination chosen here wins over the
+    // one they were saved with.
+    if (createColumnContentType === 'rules') {
+      const ruleSet = (ruleSets || []).find(set => String(set.id) === String(selectedRuleSetId));
+      if (!ruleSet) {
+        showSnackbar('Select a rule set to apply', 'warning');
+        return;
+      }
+      const rules = (ruleSet.formula_rules || ruleSet.rules || []).map(rule => ({
+        ...rule,
+        target_column: target,
+        // The column was chosen here, so write into it rather than letting the
+        // engine allocate a fresh Tag column around it.
+        target_locked: true,
+        column_type: target.startsWith('Specification_Value_') ? 'Specification Value' : 'Tag',
+      }));
+      if (rules.length === 0) {
+        showSnackbar('That rule set has no rules', 'warning');
+        return;
+      }
+      try {
+        setCreateColumnSaving(true);
+        const response = await api.applyFormulas(sessionId, rules);
+        if (!response.data?.success) throw new Error(response.data?.error || 'Could not apply the rule set');
+        setCreateColumnDialogOpen(false);
+        await fetchDataSynchronized();
+        showSnackbar(`Applied "${ruleSet.name}" to ${target}.`, 'success');
+      } catch (error) {
+        showSnackbar(getFriendlyErrorMessage(error, 'Failed to apply the rule set'), 'error');
+      } finally {
+        setCreateColumnSaving(false);
+      }
       return;
     }
 
@@ -2662,7 +2837,10 @@ const EnhancedDataEditor = () => {
     sessionId,
     showSnackbar,
     fetchDataSynchronized,
-    recordPostMappingAction
+    recordPostMappingAction,
+    ruleSets,
+    selectedRuleSetId,
+    getFriendlyErrorMessage
   ]);
 
   const handleOpenFactwiseIdDialog = useCallback(() => {
@@ -3286,12 +3464,25 @@ const EnhancedDataEditor = () => {
       const itemCodeStart = Math.max(1, Number.parseInt(savedDefaults.itemCodeStart || '1', 10) || 1);
       const itemCodePadding = Math.max(0, Number.parseInt(savedDefaults.itemCodePadding || '3', 10) || 0);
       const itemCodeIncrement = savedDefaults.itemCodeIncrement !== false;
+      const itemCodeContentType = savedDefaults.itemCodeContentType || 'serial';
       const requestedBlankStrategy = savedDefaults.itemCodeBlankStrategy || 'prefix_sequence';
       const requestedDuplicateStrategy = savedDefaults.itemCodeDuplicateStrategy || 'prefix_sequence';
       let appliedSavedDefault = false;
 
       try {
-        if (itemCodeField && icIssue) {
+        if (itemCodeField && icIssue && itemCodeContentType === 'fixed' && String(savedDefaults.itemCodeDefaultValue || '').trim() && (icIssue.blanks || 0) > 0) {
+          const resp = await api.setColumnDefault(sessionId, itemCodeField, String(savedDefaults.itemCodeDefaultValue || '').trim(), true, null);
+          if (!resp.data?.success) throw new Error(resp.data?.error || 'Could not fill item code defaults');
+          recordPostMappingAction({
+            type: 'set_column_default',
+            label: 'Fill Item code from settings',
+            column: itemCodeField,
+            value: String(savedDefaults.itemCodeDefaultValue || '').trim(),
+            only_empty: true,
+            condition: null,
+          });
+          appliedSavedDefault = true;
+        } else if (itemCodeField && icIssue && itemCodeContentType === 'serial') {
           const blankStrategy = (
             (icIssue.blanks || 0) > 0 &&
             requestedBlankStrategy === 'prefix_sequence' &&
@@ -3803,20 +3994,11 @@ const EnhancedDataEditor = () => {
       handleExportToProject();
       return;
     }
-    if (destination === 'bom' && isFactwiseEmbedded) {
-      // BOM Directory export in embedded mode runs the 2-step orchestrator
-      // (items → BOM). Chain BOTH guards (item required fields + BOM
-      // validation) up front so any fixable issues surface BEFORE we upload
-      // — same as the Project export.
-      runGuardedExport(
-        () => runGuardedExport(
-          () => setBomDirectoryExportDialogOpen(true),
-          'bom'
-        ),
-        'item'
-      );
-      return;
-    }
+    // BOM Directory (embedded or not) keeps its original shape: BOM validation
+    // popup first, then the preview. From the preview the user picks
+    // "Export Sheet" (download) or "Export to FactWise" (the 2-step items → BOM
+    // orchestrator, gated by the item required-field guard in
+    // handleDirectoryExport).
     runGuardedExport(() => openFactwisePreview(destination), destination);
   }, [handleExportToProject, runGuardedExport, openFactwisePreview, isFactwiseEmbedded]);
 
@@ -3939,7 +4121,10 @@ const EnhancedDataEditor = () => {
     // error grid the Project export uses, minus project creation / attach.
     if (exportType === 'bom') {
       setDirectoryExportStatus({ open: false, type: exportType, phase: 'success' });
-      setBomDirectoryExportDialogOpen(true);
+      // The BOM validation guard already ran before the preview; the ITEM
+      // required-field guard still has to run here because step 1 of the
+      // orchestrator uploads the item sheet.
+      runGuardedExport(() => setBomDirectoryExportDialogOpen(true), 'item');
       return;
     }
 
@@ -3990,7 +4175,7 @@ const EnhancedDataEditor = () => {
       setDirectoryExportStatus({ open: false, type: exportType, phase: 'success' });
       showSnackbar(error?.message || 'Failed to hand off to Factwise', 'error');
     }
-  }, [factwisePreviewType, isFactwiseEmbedded, sessionId, getCurrentExportColumnOrder, showSnackbar]);
+  }, [factwisePreviewType, isFactwiseEmbedded, sessionId, getCurrentExportColumnOrder, showSnackbar, runGuardedExport]);
 
   const handleExportProjectConfirm = useCallback(() => {
     // Every column is exported — the per-field picker was removed, so there is no
@@ -5834,12 +6019,15 @@ const EnhancedDataEditor = () => {
                   <MenuItem value="concat">Join two columns</MenuItem>
                   <MenuItem value="conditional">Use an if / else condition</MenuItem>
                   <MenuItem value="serial">Generate a serial sequence</MenuItem>
+                  <MenuItem value="rules">Apply a saved rule set</MenuItem>
                   {createColumnTab === 1 && <MenuItem value="blank">Leave the new column blank</MenuItem>}
                 </Select>
               </FormControl>
             </Grid>
 
-            {createColumnTab === 0 && (
+            {/* A rule set decides per row whether it matches, so "rows to
+                update" has nothing to act on. */}
+            {createColumnTab === 0 && createColumnContentType !== 'rules' && (
               <Grid item xs={12} sm={6}>
                 <FormControl fullWidth size="small">
                   <InputLabel>Rows to update</InputLabel>
@@ -5857,6 +6045,43 @@ const EnhancedDataEditor = () => {
             {createColumnContentType === 'fixed' && (
               <Grid item xs={12}>
                 <TextField fullWidth size="small" label="Value" value={defaultValue} onChange={(e) => setDefaultValue(e.target.value)} />
+              </Grid>
+            )}
+
+            {createColumnContentType === 'rules' && (
+              <Grid item xs={12}>
+                <FormControl fullWidth size="small" disabled={ruleSetsLoading}>
+                  <InputLabel>Rule set</InputLabel>
+                  <Select
+                    label="Rule set"
+                    value={selectedRuleSetId}
+                    onChange={(e) => setSelectedRuleSetId(e.target.value)}
+                  >
+                    {preferredRuleSets.length > 0 && (
+                      <ListSubheader>
+                        Saved for {columnLabel(createColumnTarget, createColumnTarget)}
+                      </ListSubheader>
+                    )}
+                    {preferredRuleSets.map(set => (
+                      <MenuItem key={set.id} value={set.id}>
+                        {set.name} · {(set.formula_rules || set.rules || []).length} rules
+                      </MenuItem>
+                    ))}
+                    {otherRuleSets.length > 0 && <ListSubheader>Other rule sets</ListSubheader>}
+                    {otherRuleSets.map(set => (
+                      <MenuItem key={set.id} value={set.id}>
+                        {set.name} · {(set.formula_rules || set.rules || []).length} rules
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: t.text.secondary }}>
+                  {ruleSetsLoading
+                    ? 'Loading rule sets…'
+                    : (ruleSets.length === 0
+                      ? 'No rule sets saved yet — create one from the dashboard\'s Rule Sets tab.'
+                      : 'Every rule in the set writes into the column selected above, whatever destination it was saved with.')}
+                </Typography>
               </Grid>
             )}
 
@@ -6120,7 +6345,15 @@ const EnhancedDataEditor = () => {
             (conditionalBranches.some(branch => branch.outputType === 'empty') || condElseSourceType === 'empty') && (
               <Alert severity="info" sx={{ mt: 2 }}>Leave empty will not clear populated cells in this mode. Choose All rows if matching rows should be cleared.</Alert>
             )}
-          <Alert severity="info" sx={{ mt: 2 }}>This operation is saved with the mapping template and runs again when the template is reused.</Alert>
+          {/* Rule sets run through the formula engine, which is not part of the
+              mapping template's saved operations. */}
+          {createColumnContentType === 'rules' ? (
+            <Alert severity="info" sx={{ mt: 2 }}>
+              Runs once now. Reapply the rule set on a future sheet from this same dialog.
+            </Alert>
+          ) : (
+            <Alert severity="info" sx={{ mt: 2 }}>This operation is saved with the mapping template and runs again when the template is reused.</Alert>
+          )}
         </DialogContent>
         <DialogActions sx={{
           px: 3,
@@ -6139,7 +6372,8 @@ const EnhancedDataEditor = () => {
               createColumnSaving ||
               !(createColumnTab === 0 ? createColumnTarget : createColumnNewName.trim()) ||
               (createColumnTab === 1 && dataColumnFields.includes(createColumnNewName.trim())) ||
-              (createColumnContentType === 'concat' && (!createColumnFirst || !createColumnSecond))
+              (createColumnContentType === 'concat' && (!createColumnFirst || !createColumnSecond)) ||
+              (createColumnContentType === 'rules' && !selectedRuleSetId)
             }
             startIcon={createColumnSaving ? <CircularProgress size={16} /> : <AutoAwesomeIcon />}
           >
@@ -9563,7 +9797,9 @@ const EnhancedDataEditor = () => {
           >
             {factwisePreviewDownloading === 'excel' ? 'Preparing…' : 'Export Sheet'}
           </Button>
-          {/* Mock, like Export to Project — no file is produced. */}
+          {/* Hands off to Factwise: BOM → the 2-step (items → BOM) orchestrator
+              dialog; Item → Factwise's own bulk-import page. Mock when the tool
+              runs standalone. */}
           <Button
             variant="contained"
             onClick={() => handleDirectoryExport(factwisePreviewType)}

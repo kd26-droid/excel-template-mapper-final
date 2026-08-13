@@ -797,7 +797,7 @@ const Dashboard = () => {
   };
 
   const handleDeleteTagTemplate = async (templateId) => {
-    if (!window.confirm('Are you sure you want to delete this tag template?')) return;
+    if (!window.confirm('Are you sure you want to delete this rule set?')) return;
     try {
       await api.deleteTagTemplate(templateId);
       fetchData();
@@ -893,7 +893,7 @@ const Dashboard = () => {
                   <Grid item xs={4}>
                     <Box sx={{ p: 1.25, bgcolor: isDarkMode ? 'rgba(168, 85, 247, 0.08)' : 'rgba(124, 58, 237, 0.06)', borderRadius: '10px', border: isDarkMode ? '1px solid rgba(168, 85, 247, 0.2)' : '1px solid rgba(124, 58, 237, 0.2)' }}>
                       <Typography variant="caption" fontWeight="600" sx={{ color: isDarkMode ? '#e9d5ff' : '#6d28d9', fontSize: '10px', display: 'block', mb: 0.25 }}>
-                        Tag Rules
+                        Rule Sets
                       </Typography>
                       <Typography variant="h6" fontWeight="700" sx={{ color: Ze.text, fontFamily: '"JetBrains Mono", monospace' }}>
                         {tagTemplates.length}
@@ -1074,7 +1074,7 @@ const Dashboard = () => {
                 {[
                   { id: 0, label: 'Recent Sessions', count: uploads.length, icon: HistoryIcon },
                   { id: 1, label: 'Mapping Templates', count: templateStats.totalTemplates, icon: LibraryBooksIcon },
-                  { id: 2, label: 'Tag Rules', count: tagTemplates.length, icon: ScienceIcon }
+                  { id: 2, label: 'Rule Sets', count: tagTemplates.length, icon: ScienceIcon }
                 ].map((tab) => {
                   const isActive = activeTab === tab.id;
                   const Icon = tab.icon;
@@ -1615,7 +1615,7 @@ const Dashboard = () => {
                 <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ mb: 2 }}>
                   <TextField
                     size="small"
-                    placeholder="Search tag rule templates..."
+                    placeholder="Search rule sets..."
                     value={tagSearch}
                     onChange={(e) => { setTagSearch(e.target.value); setTagPage(0); }}
                     InputProps={{
@@ -1667,7 +1667,7 @@ const Dashboard = () => {
                 {filteredTags.length === 0 ? (
                   <Box sx={{ textAlign: 'center', py: 5, color: Ze.muted }}>
                     <ScienceIcon sx={{ fontSize: 40, mb: 1, opacity: 0.4 }} />
-                    <Typography variant="body2">No tag rule templates found.</Typography>
+                    <Typography variant="body2">No rule sets found.</Typography>
                   </Box>
                 ) : (
                   <>
@@ -1733,12 +1733,12 @@ const Dashboard = () => {
                               color="linear-gradient(135deg, #10b981 0%, #059669 100%)"
                               hoverColor="linear-gradient(135deg, #059669 0%, #047857 100%)"
                               glowColor="rgba(16, 185, 129, 0.45)"
-                              title="Use Tag Template"
+                              title="Use Rule Set"
                             />
                             <DeleteActionButton
                               onClick={() => handleDeleteTagTemplate(tmpl.id)}
                               size={30}
-                              title="Delete Tag Template"
+                              title="Delete Rule Set"
                             />
                           </Box>
                         </Box>
@@ -1766,7 +1766,7 @@ const Dashboard = () => {
       {showFormulaModal && (
         <StandaloneFormulaBuilder
           open={showFormulaModal}
-          onClose={() => setShowFormulaModal(false)}
+          onClose={() => { setShowFormulaModal(false); fetchData(); }}
         />
       )}
     </Box>

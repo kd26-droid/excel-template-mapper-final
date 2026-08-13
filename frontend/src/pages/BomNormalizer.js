@@ -241,6 +241,7 @@ const HEADER_KEYWORDS = [
   /\boperation\b/, /\bsequence\b/, /\bcomponent\b/, /\bitem\b/, /\bpart\b/,
   /\bdescription\b/, /\btype\b/, /\buom\b/, /\bqty\b/, /\bqnty\b/, /\bquantity\b/,
   /\bmanufacturer\b/, /\bmanufacture\b/, /\bmpn\b/, /\bmfr\b/, /\bdesignator/,
+  /\breference\b/, /\bvendor\b/, /\bsupplier\b/, /\bmfg\b/,
   /\brelease\b/, /\bstatus\b/, /\brevision\b/, /\bclassification\b/,
 ];
 const METADATA_PATTERNS = [
@@ -267,6 +268,17 @@ const scoreHeaderCandidate = (rows, rowIndex) => {
   const numericCells = filled.filter(isNumericLike).length;
   const keywordHits = normalized.filter((cell) => HEADER_KEYWORDS.some((pattern) => pattern.test(cell))).length;
   const metadataHits = normalized.filter((cell) => METADATA_PATTERNS.some((pattern) => pattern.test(cell))).length;
+  const compactFilled = filled.map((cell) => cell.replace(/[^A-Za-z0-9]/g, ''));
+  const longNumericIdentifiers = compactFilled.filter((cell) => /^\d{5,}$/.test(cell)).length;
+  const dataRowSignals = filled.filter((cell, cellIndex) => {
+    const compact = compactFilled[cellIndex] || '';
+    const key = normalized[cellIndex] || '';
+    if (/^\d{5,}$/.test(compact)) return true;
+    if (isNumericLike(cell) && Number(String(cell).replace(/,/g, '')) <= 999 && count >= 4) return true;
+    if (cell.length > 12 && /\s/.test(cell) && !HEADER_KEYWORDS.some((pattern) => pattern.test(key))) return true;
+    return false;
+  }).length;
+  const headerKeywordRatio = keywordHits / count;
   const indexes = cells.map((cell, index) => (cell ? index : -1)).filter((index) => index >= 0);
   const nextRows = rows.slice(rowIndex + 1, rowIndex + 9).map((nextRow) => nextRow.map(fmt));
   const supportedColumns = indexes.filter((index) => nextRows.some((nextRow) => nextRow[index])).length;
@@ -278,13 +290,17 @@ const scoreHeaderCandidate = (rows, rowIndex) => {
 
   return (
     count * 2.4
-    + keywordHits * 5
+    + keywordHits * 8
+    + (keywordHits >= 3 ? 18 : 0)
+    + headerKeywordRatio * 14
     + supportedColumns * 1.4
     + dataRowsBelow * 1.2
     + shortLabelRatio * 8
     - (longCells / count) * 40
     - (proseCells / count) * 30
     - (numericCells / count) * numericPenalty
+    - longNumericIdentifiers * 18
+    - Math.max(0, dataRowSignals - keywordHits) * 6
     - metadataHits * 18
     - (count <= 2 ? 20 : 0)
     - Math.max(0, avgLength - 30) * 0.6
@@ -844,11 +860,14 @@ const inferRoles = (headers, dataRows = [], options = {}) => {
     : '';
   const manufacturerHeader = namedManufacturerSafe || learnedManufacturerSafe || scoredManufacturerHeader ||
     (structuredMpnMfrHeader && structuredMpnMfrHeader === mpnHeader ? structuredMpnMfrHeader : '');
+  const followingMfgPartsLayout = detectFollowingRowMfgPartsLayout(headers, dataRows.slice(0, 120), {
+    description: findLearnedHeader('description') || findHeader([/description/, /item name/, /\bname\b/]),
+  });
 
   return {
     cpn: cpnHeader,
-    mpn: mpnHeader,
-    manufacturer: manufacturerHeader,
+    mpn: followingMfgPartsLayout ? followingMfgPartsLayout.mfgPartsHeader : mpnHeader,
+    manufacturer: followingMfgPartsLayout ? followingMfgPartsLayout.mfgPartsHeader : manufacturerHeader,
     description: findLearnedHeader('description') || findHeader([/description/, /item name/, /\bname\b/]),
     quantity: findLearnedHeader('quantity') || findHeader([/quantity/, /\bqty\b/, /\bqnty\b/, /^count$/, /\bcount\b/]),
     uom: findLearnedHeader('uom') || findHeader([/\buom\b/, /measurement unit/, /\bunit\b/]),
@@ -1325,6 +1344,59 @@ const parsePackedMpnManufacturerPairs = (value, config = {}) => {
   return parsed.length >= 1 && parsed.length === parts.length ? parsed : [];
 };
 
+const isManufacturerPartsBlockHeader = (value) => {
+  const key = normalizeKey(value);
+  if (!key) return false;
+  if (/^-+$/.test(fmt(value).replace(/\s+/g, ''))) return true;
+  return (
+    /manufacturer(?:s)?\s+manufacturer/.test(key) ||
+    /manufacturer part number\s+manufacturer name/.test(key) ||
+    /part numbers?\s+name\s+description/.test(key)
+  );
+};
+
+const looksLikeManufacturerPartsMpn = (value) => {
+  const text = fmt(value);
+  const compact = text.replace(/[^A-Za-z0-9]/g, '');
+  if (compact.length < 3 || compact.length > 40) return false;
+  if (!/[A-Za-z0-9]/.test(compact)) return false;
+  return /^[A-Za-z0-9._/#,+:-]+$/.test(text);
+};
+
+const parseManufacturerPartsBlockLine = (value) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ').replace(/\s+/g, ' ');
+  const originalText = fmt(value).replace(/\u00a0/g, ' ');
+  if (!text || isManufacturerPartsBlockHeader(text)) return [];
+
+  if (originalText.includes('||')) {
+    const [left, ...rightParts] = originalText.split('||');
+    const mpn = stripVendorPrefix(fmt(left));
+    const manufacturer = fmt(rightParts.join('||'));
+    if (!mpn || !manufacturer) return [];
+    if (!looksLikeMpnToken(mpn) && !looksLikeParenthesizedMpn(mpn) && !looksLikeManufacturerPartsMpn(mpn)) return [];
+    return [{ mpn, manufacturer, metadata: {} }];
+  }
+
+  const fixedParts = originalText
+    .split(/\s{2,}/)
+    .map(fmt)
+    .filter(Boolean);
+  if (fixedParts.length >= 2) {
+    const [rawMpn, rawManufacturer, ...descriptionParts] = fixedParts;
+    const mpn = stripVendorPrefix(rawMpn);
+    const manufacturer = fmt(rawManufacturer);
+    if (!mpn || !manufacturer) return [];
+    if (!looksLikeMpnToken(mpn) && !looksLikeParenthesizedMpn(mpn) && !looksLikeManufacturerPartsMpn(mpn)) return [];
+    return [{
+      mpn,
+      manufacturer,
+      metadata: descriptionParts.length ? { manufacturerPartDescription: descriptionParts.join(' ') } : {},
+    }];
+  }
+
+  return [];
+};
+
 const splitParserJoinedValues = (value) => {
   const text = fmt(value);
   if (!text) return [];
@@ -1458,6 +1530,8 @@ const isPlaceholderCell = (value) => {
   const text = fmt(value).replace(/\u00a0/g, ' ').trim().toLowerCase();
   return !text || /^[-–—]+$/.test(text) || ['n/a', 'na', 'null', 'none'].includes(text);
 };
+
+const isGeneratedColumnHeader = (header) => /^column\s+\d+(?:\.\d+)?$/i.test(fmt(header));
 
 const rowValues = (row, headers) => headers
   .map((header) => getCell(row, header))
@@ -1943,6 +2017,45 @@ const cleanAlternateColumnGroups = (groups = [], headers = []) => groups
   }))
   .filter((group) => group.mpn);
 
+const findMfgPartsHeader = (headers = []) => headers.find((header) => {
+  const key = normalizeKey(header);
+  return key === 'mfg parts' || key === 'mfg part' || key === 'manufacturer parts' || key === 'manufacturer part';
+}) || '';
+
+const detectLeadingLevelColumns = (headers = [], rows = [], roles = {}) => {
+  const descriptionHeader = roles.description || headers.find((header) => normalizeKey(header) === 'description') || '';
+  const descriptionIndex = headers.indexOf(descriptionHeader);
+  if (descriptionIndex <= 0) return [];
+
+  const candidates = headers.slice(0, descriptionIndex).filter(isGeneratedColumnHeader);
+  if (candidates.length < 2) return [];
+
+  const active = candidates.filter((header) => (
+    rows.some((row) => {
+      const value = getCell(row, header);
+      return value && /[A-Za-z0-9]/.test(value) && !isPlaceholderCell(value);
+    })
+  ));
+  return active.length >= 2 ? active : [];
+};
+
+const detectFollowingRowMfgPartsLayout = (headers = [], rows = [], roles = {}) => {
+  const mfgPartsHeader = findMfgPartsHeader(headers);
+  const levelColumns = detectLeadingLevelColumns(headers, rows, roles);
+  if (!mfgPartsHeader || levelColumns.length < 2) return null;
+
+  const markerCount = rows.slice(0, 120).filter((row) => (
+    isManufacturerPartsBlockHeader(getCell(row, mfgPartsHeader))
+  )).length;
+  const parsedContinuationCount = rows.slice(0, 120).filter((row) => (
+    !levelColumns.some((header) => getCell(row, header)) &&
+    parseManufacturerPartsBlockLine(getCell(row, mfgPartsHeader)).length > 0
+  )).length;
+
+  if (markerCount < 1 && parsedContinuationCount < 1) return null;
+  return { mfgPartsHeader, levelColumns };
+};
+
 const getConsumedSourceHeaders = (roles = {}, config = {}, headers = []) => {
   const consumed = new Set();
   Object.values(roles || {}).forEach((header) => {
@@ -1966,7 +2079,19 @@ const getConsumedSourceHeaders = (roles = {}, config = {}, headers = []) => {
 const normalizeFollowingRows = (rows, roles, config = {}) => {
   const output = [];
   const alternateColumn = config.followingRowAlternateColumn || '';
+  const followingMfgPartsLayout = detectFollowingRowMfgPartsLayout(config.sourceHeaders || [], rows, roles);
+  const levelColumns = followingMfgPartsLayout?.levelColumns || [];
+  const hierarchyStack = [];
   let currentGroup = null;
+  const configuredMfgPartsColumn = alternateColumn && findMfgPartsHeader([alternateColumn]) === alternateColumn;
+  const useMfgPartsAsFollowingSource = Boolean(
+    alternateColumn &&
+    (
+      followingMfgPartsLayout?.mfgPartsHeader === alternateColumn ||
+      configuredMfgPartsColumn ||
+      (roles.mpn === alternateColumn && roles.manufacturer === alternateColumn)
+    )
+  );
 
   const looksLikeHierarchyPath = (value) => {
     const text = fmt(value);
@@ -1975,6 +2100,8 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
 
   const parseAlternateText = (row, value) => {
     if (looksLikeHierarchyPath(value)) return [];
+    const mfgPartsPairs = parseManufacturerPartsBlockLine(value);
+    if (mfgPartsPairs.length) return mfgPartsPairs;
     const manualParse = getManualPatternParse(row, alternateColumn, config);
     if (manualParse) return manualParse.pairs;
     const packedPairs = getPatternAwarePackedPairs(row, alternateColumn, value, config);
@@ -1997,6 +2124,8 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
   };
 
   const parsePrimaryPairs = (row, rawMpn, rawManufacturer) => {
+    const mfgPartsPairs = parseManufacturerPartsBlockLine(rawMpn || rawManufacturer);
+    if (mfgPartsPairs.length) return { packedPairs: mfgPartsPairs, mpns: [], manufacturers: [] };
     const manufacturerManualParse = getManualPatternParse(row, roles.manufacturer, config);
     const mpnManualParse = getManualPatternParse(row, roles.mpn, config);
     const manufacturerPackedPairs = getPatternAwarePackedPairs(row, roles.manufacturer, rawManufacturer, config);
@@ -2012,7 +2141,48 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
     return { packedPairs: [], mpns, manufacturers };
   };
 
+  const getLevelItemInfo = (row) => {
+    if (!levelColumns.length) return null;
+    const levelIndex = levelColumns.findIndex((header) => getCell(row, header));
+    if (levelIndex < 0) return null;
+    const cpn = getCell(row, levelColumns[levelIndex]);
+    const levelNumber = levelIndex + 1;
+    const parent = levelNumber > 1 ? hierarchyStack[levelNumber - 2]?.cpn || '' : '';
+    return { cpn, level: String(levelNumber), parent };
+  };
+
+  const syncHierarchy = (info) => {
+    if (!info?.cpn) return;
+    const levelIndex = Math.max(0, Number(info.level || 1) - 1);
+    hierarchyStack[levelIndex] = { cpn: info.cpn };
+    hierarchyStack.length = levelIndex + 1;
+  };
+
+  const groupValuesFromContext = (row, rowIndex) => {
+    const sourceRow = row.__sourceRow || rowIndex + 1;
+    const levelInfo = getLevelItemInfo(row);
+    if (levelInfo) syncHierarchy(levelInfo);
+    const cpn = levelInfo?.cpn || getCell(row, roles.cpn);
+    const level = levelInfo?.level || getCell(row, roles.level) || '1';
+    const parent = levelInfo?.parent || hierarchyParent(row, roles);
+    const description = getCell(row, roles.description);
+    const identity = cpn || description || `Source row ${sourceRow}`;
+    const parentKey = parent ? `${parent}␟${identity}` : `L${level}␟${identity}`;
+    return {
+      sourceRow,
+      parentKey,
+      parent,
+      level,
+      cpn,
+      description,
+      quantity: getCell(row, roles.quantity),
+      uom: getCell(row, roles.uom),
+      relationCount: 0,
+    };
+  };
+
   const hasPrimaryContextWithoutPart = (row) => {
+    if (getLevelItemInfo(row)) return true;
     if (
       getCell(row, roles.parent) ||
       getCell(row, roles.cpn) ||
@@ -2033,18 +2203,13 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
   };
 
   const emitContextPrimary = (row, rowIndex) => {
-    const sourceRow = row.__sourceRow || rowIndex + 1;
-    const group = {
-      sourceRow,
-      parentKey: alternatesKey(row, roles, sourceRow),
-      parent: hierarchyParent(row, roles),
-      level: getCell(row, roles.level) || '1',
-      cpn: getCell(row, roles.cpn),
-      description: getCell(row, roles.description),
-      quantity: getCell(row, roles.quantity),
-      uom: getCell(row, roles.uom),
-      relationCount: 1,
-    };
+    const group = groupValuesFromContext(row, rowIndex);
+    const shouldDeferPrimaryToMfgParts = useMfgPartsAsFollowingSource &&
+      isManufacturerPartsBlockHeader(getCell(row, alternateColumn));
+
+    if (shouldDeferPrimaryToMfgParts) {
+      return { ...group, relationCount: 0 };
+    }
 
     output.push(withSourceColumns({
       ...group,
@@ -2056,7 +2221,7 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
       discardedText: '',
     }, row, config));
 
-    return group;
+    return { ...group, relationCount: 1 };
   };
 
   const emitPrimaryParts = (row, rowIndex) => {
@@ -2065,16 +2230,10 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
     const rawManufacturer = getCell(row, roles.manufacturer);
     const { packedPairs, mpns, manufacturers } = parsePrimaryPairs(row, rawMpn, rawManufacturer);
     const primaryManufacturer = manufacturers[0] || '';
-    const parentKey = alternatesKey(row, roles, sourceRow);
+    const context = groupValuesFromContext(row, rowIndex);
     const group = {
+      ...context,
       sourceRow,
-      parentKey,
-      parent: hierarchyParent(row, roles),
-      level: getCell(row, roles.level) || '1',
-      cpn: getCell(row, roles.cpn),
-      description: getCell(row, roles.description),
-      quantity: getCell(row, roles.quantity),
-      uom: getCell(row, roles.uom),
       relationCount: 0,
     };
 
@@ -2119,8 +2278,12 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
   rows.forEach((row, rowIndex) => {
     const sourceRow = row.__sourceRow || rowIndex + 1;
     const alternateText = getCell(row, alternateColumn);
-    const rawMpn = getCell(row, roles.mpn);
-    const rawManufacturer = getCell(row, roles.manufacturer);
+    const rawMpn = useMfgPartsAsFollowingSource && roles.mpn === alternateColumn
+      ? ''
+      : getCell(row, roles.mpn);
+    const rawManufacturer = useMfgPartsAsFollowingSource && roles.manufacturer === alternateColumn
+      ? ''
+      : getCell(row, roles.manufacturer);
     const primaryParts = parsePrimaryPairs(row, rawMpn, rawManufacturer);
     const rowHasNormalPart = Boolean(
       primaryParts.packedPairs.length ||
@@ -2133,12 +2296,14 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
 
     if (rowLooksLikeFollowingAlternate) {
       followingAlternatePairs.forEach((pair) => {
-        const relationIndex = currentGroup.relationCount || 1;
+        const relationIndex = Number.isFinite(Number(currentGroup.relationCount))
+          ? Number(currentGroup.relationCount)
+          : 1;
         output.push(withSourceColumns({
           sourceRow,
           parentKey: currentGroup.parentKey,
           parent: currentGroup.parent,
-          relation: `Alternate ${relationIndex}`,
+          relation: relationIndex === 0 ? 'Primary' : `Alternate ${relationIndex}`,
           level: currentGroup.level,
           cpn: currentGroup.cpn,
           description: currentGroup.description,
@@ -2498,13 +2663,13 @@ const normalizeRows = (rows, headers, roles, config) => {
     sourceHeaders: headers,
     consumedSourceHeaders: getConsumedSourceHeaders(roles, config, headers),
   };
+  if (config.alternateLayout === 'following_rows') return normalizeFollowingRows(rows, roles, configWithSourceHeaders);
   // Every structure option describes how MPN/MFR pairs are laid out. With
   // neither column present they are all meaningless, and the default would emit
   // nothing — so pass rows through, keeping level, code, quantity, description.
   if (!roles.mpn && !roles.manufacturer) {
     return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
   }
-  if (config.alternateLayout === 'following_rows') return normalizeFollowingRows(rows, roles, configWithSourceHeaders);
   if (config.structure === 'grouped_rows') return normalizeGroupedRows(rows, roles, configWithSourceHeaders);
   if (config.alternateLayout === 'separate_columns') return normalizeAlternateColumns(rows, headers, roles, configWithSourceHeaders);
   if (config.structure === 'mpn_only_same_cell') return normalizeSeparateCells(rows, roles, configWithSourceHeaders);
@@ -3023,6 +3188,7 @@ const rebalanceRelations = (rows) => {
 };
 
 const detectBestStructure = (headers, roles, sampleRows) => {
+  if (detectFollowingRowMfgPartsLayout(headers, sampleRows, roles)) return 'grouped_rows';
   if (roles.mpn && roles.manufacturer && roles.mpn === roles.manufacturer) return 'same_cell';
   const groupedSignals = sampleRows.reduce((score, row, index) => {
     const hasGroupContext = Boolean(
@@ -3071,7 +3237,13 @@ const detectBestStructure = (headers, roles, sampleRows) => {
   return 'one_per_row';
 };
 
-const nextConfigForDetectedStructure = (previousConfig, detectedStructure) => {
+const nextConfigForDetectedStructure = (previousConfig, detectedStructure, detectionContext = {}) => {
+  const followingMfgPartsLayout = detectFollowingRowMfgPartsLayout(
+    detectionContext.headers || [],
+    detectionContext.rows || [],
+    detectionContext.roles || {}
+  );
+
   if (detectedStructure === 'alternate_columns') {
     return {
       ...previousConfig,
@@ -3084,7 +3256,11 @@ const nextConfigForDetectedStructure = (previousConfig, detectedStructure) => {
     return {
       ...previousConfig,
       structure: 'grouped_rows',
-      alternateLayout: 'already_separate_rows',
+      alternateLayout: followingMfgPartsLayout ? 'following_rows' : 'already_separate_rows',
+      followingRowAlternateColumn: followingMfgPartsLayout?.mfgPartsHeader || previousConfig.followingRowAlternateColumn,
+      manufacturerMode: followingMfgPartsLayout ? 'never' : previousConfig.manufacturerMode,
+      quantityMode: followingMfgPartsLayout ? 'inherit_primary' : previousConfig.quantityMode,
+      delimiterMode: followingMfgPartsLayout ? 'auto' : previousConfig.delimiterMode,
     };
   }
 
@@ -3118,7 +3294,17 @@ const guessDelimiter = (rows, roles) => {
   return best.score >= 2 ? best.delimiter : 'auto';
 };
 
-const getStructureOptionsForRoles = (roles) => {
+const getStructureOptionsForRoles = (roles, config = {}) => {
+  const sameColumnFollowingBlock = roles.mpn &&
+    roles.manufacturer &&
+    roles.mpn === roles.manufacturer &&
+    config.alternateLayout === 'following_rows' &&
+    config.followingRowAlternateColumn === roles.mpn;
+
+  if (sameColumnFollowingBlock) {
+    return STRUCTURE_OPTIONS.filter((option) => ['grouped_rows', 'same_cell'].includes(option.value));
+  }
+
   if (roles.mpn && roles.manufacturer && roles.mpn === roles.manufacturer) {
     return STRUCTURE_OPTIONS.filter((option) => option.value === 'same_cell');
   }
@@ -3142,14 +3328,15 @@ const findStrongMpnHeader = (headers = []) => {
   const patterns = [
     /\bmpn\b/,
     /manufacturer equivalent/,
-    /manufacturer part/,
-    /manufacturing part/,
-    /\bmfr part/,
-    /\bmfg part/,
+    /\bmanufacturer part\b/,
+    /\bmanufacturing part\b/,
+    /\bmfr part\b/,
+    /\bmfg part\b/,
     /producer/,
   ];
   return headers.find((header) => {
     const normalized = normalizeKey(header);
+    if (/(?:^|\s)(?:mfg|manufacturer)\s+parts(?:\s|$)/.test(normalized)) return false;
     return patterns.some((pattern) => pattern.test(normalized));
   }) || '';
 };
@@ -5068,8 +5255,8 @@ const BomNormalizer = () => {
   }, [location.pathname, location.state, navigate]);
 
   const availableStructureOptions = useMemo(
-    () => getStructureOptionsForRoles(roles),
-    [roles]
+    () => getStructureOptionsForRoles(roles, config),
+    [config, roles]
   );
 
   const delimiterLabel = useMemo(() => {
@@ -5101,6 +5288,14 @@ const BomNormalizer = () => {
   );
 
   const roleCombinationHint = useMemo(() => {
+    if (
+      config.alternateLayout === 'following_rows' &&
+      config.followingRowAlternateColumn &&
+      roles.mpn === config.followingRowAlternateColumn &&
+      roles.manufacturer === config.followingRowAlternateColumn
+    ) {
+      return `${config.followingRowAlternateColumn} is detected as a following-row MPN/MFR block. Values will attach to the nearest previous item row.`;
+    }
     if (roles.mpn && roles.manufacturer && roles.mpn === roles.manufacturer) {
       return 'Same source column selected for MPN and MFR. The parser will treat each cell as combined MPN/MFR text.';
     }
@@ -5204,7 +5399,11 @@ const BomNormalizer = () => {
     setPatternParserOverrides([]);
     setSourceEndRow('');
     setRoles(nextRoles);
-    setConfig((prev) => nextConfigForDetectedStructure(prev, nextStructure));
+    setConfig((prev) => nextConfigForDetectedStructure(prev, nextStructure, {
+      headers: nextHeaders,
+      rows: prepared.dataRows.slice(0, 120),
+      roles: nextRoles,
+    }));
     setNormalizedRows([]);
     setCurrentStep(1);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
@@ -5905,9 +6104,17 @@ const BomNormalizer = () => {
     // second time for the same workbook would just be noise.
     let answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
 
-    // A reused mapping template may already answer the gate. Its format answers
-    // always apply; its identity answers only while they still describe this
-    // file. All surviving means the gate never opens.
+    // A reused mapping template pre-answers the gate but never replaces it. Its
+    // format answers always apply and its identity answers only while they
+    // still describe this file, so reconciling still earns its keep — it just
+    // seeds the dialog now instead of skipping it.
+    //
+    // The gate opens even when every saved answer survives, because it no
+    // longer only describes the workbook: it also asks whether this upload is a
+    // NEW BOM or a revision of an existing one. That is a property of the
+    // upload, not of the customer's export format, so a template cannot know
+    // it — and defaulting it to "new" without asking is how a file meant to
+    // revise a BOM silently becomes a second BOM beside it.
     if (!answers) {
       const saved = location.state?.savedBomStructure;
       if (saved) {
@@ -5916,8 +6123,7 @@ const BomNormalizer = () => {
           getSheetHeaders: bomStructureHeaderReader,
           getSheetRecords: bomStructureRecordReader,
         });
-        if (reconciled.complete) answers = saved;
-        else setBomStructureSeed(reconciled.answers);
+        setBomStructureSeed(reconciled.answers);
       }
     }
 
@@ -6073,9 +6279,17 @@ const BomNormalizer = () => {
     // second time for the same workbook would just be noise.
     let answers = passed || bomStructureAnswers || location.state?.bomStructure || null;
 
-    // A reused mapping template may already answer the gate. Its format answers
-    // always apply; its identity answers only while they still describe this
-    // file. All surviving means the gate never opens.
+    // A reused mapping template pre-answers the gate but never replaces it. Its
+    // format answers always apply and its identity answers only while they
+    // still describe this file, so reconciling still earns its keep — it just
+    // seeds the dialog now instead of skipping it.
+    //
+    // The gate opens even when every saved answer survives, because it no
+    // longer only describes the workbook: it also asks whether this upload is a
+    // NEW BOM or a revision of an existing one. That is a property of the
+    // upload, not of the customer's export format, so a template cannot know
+    // it — and defaulting it to "new" without asking is how a file meant to
+    // revise a BOM silently becomes a second BOM beside it.
     if (!answers) {
       const saved = location.state?.savedBomStructure;
       if (saved) {
@@ -6084,8 +6298,7 @@ const BomNormalizer = () => {
           getSheetHeaders: bomStructureHeaderReader,
           getSheetRecords: bomStructureRecordReader,
         });
-        if (reconciled.complete) answers = saved;
-        else setBomStructureSeed(reconciled.answers);
+        setBomStructureSeed(reconciled.answers);
       }
     }
 
@@ -6242,7 +6455,11 @@ const BomNormalizer = () => {
     setPatternParserOverrides([]);
     setSourceEndRow('');
     setRoles(nextRoles);
-    setConfig((prev) => nextConfigForDetectedStructure(prev, detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40))));
+    setConfig((prev) => nextConfigForDetectedStructure(prev, detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40)), {
+      headers: nextHeaders,
+      rows: prepared.dataRows.slice(0, 120),
+      roles: nextRoles,
+    }));
     setNormalizedRows([]);
     setCurrentStep(1);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
@@ -6274,7 +6491,11 @@ const BomNormalizer = () => {
     setPatternParserOverrides([]);
     setSourceEndRow('');
     setRoles(nextRoles);
-    setConfig((prev) => nextConfigForDetectedStructure(prev, detectBestStructure(prepared.headers, nextRoles, prepared.dataRows.slice(0, 40))));
+    setConfig((prev) => nextConfigForDetectedStructure(prev, detectBestStructure(prepared.headers, nextRoles, prepared.dataRows.slice(0, 40)), {
+      headers: prepared.headers,
+      rows: prepared.dataRows.slice(0, 120),
+      roles: nextRoles,
+    }));
     setNormalizedRows([]);
     setCurrentStep(1);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
@@ -7087,8 +7308,19 @@ const BomNormalizer = () => {
     if (parserTouched) return;
     setConfig((prev) => {
       const nextStructure = detectBestStructure(headers, roles, dataRows.slice(0, 40));
-      if (nextStructure === prev.structure) return prev;
-      return nextConfigForDetectedStructure(prev, nextStructure);
+      const followingMfgPartsLayout = detectFollowingRowMfgPartsLayout(headers, dataRows.slice(0, 120), roles);
+      if (
+        nextStructure === prev.structure &&
+        (!followingMfgPartsLayout ||
+          (prev.alternateLayout === 'following_rows' && prev.followingRowAlternateColumn === followingMfgPartsLayout.mfgPartsHeader))
+      ) {
+        return prev;
+      }
+      return nextConfigForDetectedStructure(prev, nextStructure, {
+        headers,
+        rows: dataRows.slice(0, 120),
+        roles,
+      });
     });
   }, [currentStep, dataRows, headers, parserTouched, roles]);
 
@@ -7100,6 +7332,35 @@ const BomNormalizer = () => {
   }, [availableStructureOptions, config.structure, currentStep]);
 
   useEffect(() => {
+    if (currentStep === 4 || parserTouched) return;
+    const followingMfgPartsLayout = detectFollowingRowMfgPartsLayout(headers, dataRows.slice(0, 120), roles);
+    if (!followingMfgPartsLayout) return;
+    if (
+      roles.mpn === followingMfgPartsLayout.mfgPartsHeader &&
+      roles.manufacturer === followingMfgPartsLayout.mfgPartsHeader &&
+      config.structure === 'grouped_rows' &&
+      config.alternateLayout === 'following_rows' &&
+      config.followingRowAlternateColumn === followingMfgPartsLayout.mfgPartsHeader
+    ) {
+      return;
+    }
+    setRoles((prev) => ({
+      ...prev,
+      mpn: followingMfgPartsLayout.mfgPartsHeader,
+      manufacturer: followingMfgPartsLayout.mfgPartsHeader,
+    }));
+    setConfig((prev) => ({
+      ...prev,
+      structure: 'grouped_rows',
+      alternateLayout: 'following_rows',
+      followingRowAlternateColumn: followingMfgPartsLayout.mfgPartsHeader,
+      manufacturerMode: 'never',
+      quantityMode: 'inherit_primary',
+      delimiterMode: 'auto',
+    }));
+  }, [config.alternateLayout, config.followingRowAlternateColumn, config.structure, currentStep, dataRows, headers, parserTouched, roles]);
+
+  useEffect(() => {
     if (combineError.includes('two') && !canPrepareMerge) {
       setCombineError('');
     }
@@ -7107,6 +7368,7 @@ const BomNormalizer = () => {
 
   useEffect(() => {
     if (currentStep === 4) return;
+    if (detectFollowingRowMfgPartsLayout(headers, dataRows.slice(0, 120), roles)) return;
     const strongMpnHeader = findStrongMpnHeader(headers);
     if (!strongMpnHeader || roles.mpn === strongMpnHeader) return;
     if (!roles.mpn || isGenericPartHeader(roles.mpn) || roles.mpn === roles.cpn) {
@@ -7117,17 +7379,19 @@ const BomNormalizer = () => {
 
   useEffect(() => {
     if (currentStep === 4) return;
+    if (detectFollowingRowMfgPartsLayout(headers, dataRows.slice(0, 120), roles)) return;
     if (delimiterTouched || (!roles.mpn && !roles.manufacturer)) return;
     const guessedDelimiter = guessDelimiter(dataRows, roles);
     setConfig((prev) => (
       prev.delimiterMode === guessedDelimiter ? prev : { ...prev, delimiterMode: guessedDelimiter }
     ));
-  }, [currentStep, dataRows, delimiterTouched, roles]);
+  }, [currentStep, dataRows, delimiterTouched, headers, roles]);
 
   useEffect(() => {
     if (currentStep === 4) return;
     if (parserTouched) return;
     if (!roles.mpn || !dataRows.length) return;
+    if (detectFollowingRowMfgPartsLayout(headers, dataRows.slice(0, 120), roles)) return;
     const sampleValues = dataRows.slice(0, 80).map((row) => getCell(row, roles.mpn)).filter(Boolean);
     const multiMpnCount = sampleValues.filter((value) => splitMpnCell(value, config).length > 1).length;
     if (!multiMpnCount) return;
@@ -7140,7 +7404,7 @@ const BomNormalizer = () => {
         alternateLayout: 'inside_selected_mpn_columns',
       };
     });
-  }, [config, currentStep, dataRows, parserTouched, roles.mpn]);
+  }, [config, currentStep, dataRows, headers, parserTouched, roles]);
 
   const autoReplayTemplate = location.state?.autoReplayProcessingTemplate || null;
   if (autoReplayTemplate) {
