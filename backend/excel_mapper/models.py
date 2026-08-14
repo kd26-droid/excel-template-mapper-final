@@ -274,6 +274,46 @@ class MappingTemplate(models.Model):
         }
 
 
+class ColumnRule(models.Model):
+    """A named, reusable fill/create-column operation.
+
+    `rule` holds exactly the payload `fill_or_create_column` already accepts
+    (value_mode, source_columns, condition, serial_*, ...) — the same shape a
+    mapping template stores in its operation sequence. Saving one here just
+    makes it reusable by name instead of only as part of a template.
+    """
+    name = models.CharField(max_length=200, unique=True)
+    description = models.TextField(blank=True, null=True)
+    rule = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    usage_count = models.IntegerField(default=0)
+
+    class Meta:
+        ordering = ['-created_at']
+        db_table = 'excel_mapper_column_rule'
+
+    def __str__(self):
+        return self.name
+
+    def increment_usage(self):
+        self.usage_count += 1
+        self.save(update_fields=['usage_count'])
+
+    def get_summary(self):
+        rule = self.rule or {}
+        return {
+            'id': self.id,
+            'name': self.name,
+            'description': self.description,
+            'rule': rule,
+            'value_mode': rule.get('value_mode'),
+            'target_column': rule.get('target_column'),
+            'created_at': self.created_at.isoformat(),
+            'usage_count': self.usage_count,
+        }
+
+
 class TagTemplate(models.Model):
     """
     Model for storing reusable smart tag formula rule templates

@@ -976,17 +976,23 @@ const api = {
   // ==========================================
 
   /**
+   * Saved column rules — named fill/create-column operations, authored in
+   * Settings and replayed from the editor.
+   */
+  getColumnRules: () =>
+    axios.get(`${API_URL}/column-rules/`),
+
+  saveColumnRule: (name, description, rule) =>
+    axios.post(`${API_URL}/column-rules/`, { name, description, rule }),
+
+  deleteColumnRule: (ruleId) =>
+    axios.delete(`${API_URL}/column-rules/${ruleId}/`),
+
+  /**
    * Get all saved tag templates
    */
   getTagTemplates: () =>
     axios.get(`${API_URL}/tag-templates/`),
-
-  /**
-   * Columns of the built-in Factwise sheet — for screens that need the
-   * Factwise column list with no session open (tag rule builder, etc.).
-   */
-  getDefaultTemplateHeaders: () =>
-    axios.get(`${API_URL}/default-template/headers/`),
 
   /**
    * Save tag template from formula rules

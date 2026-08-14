@@ -229,7 +229,17 @@ def validate_bom(bom_headers, bom_rows, item_rows=None, bom_row_grid_rows=None):
             # below only when no blank item code explains it.
             rows_without_child.append(line)
 
-        # 6 - quantity must be a positive number
+        # 6 - quantity must be a number, and not a negative one.
+        #
+        # Zero is allowed. A sheet legitimately carries a zero-quantity line -
+        # a DNP part, an optional fitment, a placeholder the assembly does not
+        # currently consume - and blocking the whole export over it forces the
+        # user to invent a quantity that is not true. What cannot be read as a
+        # quantity at all, or is below zero, is still an error.
+        #
+        # Fractions are quantities too and must pass: real sheets consume 0.010
+        # of a reel or 0.25 m of wire, so "must be a whole number" would reject
+        # correct data.
         if not quantity:
             errors.append({
                 'rule': 'quantity_missing', 'row': line, 'field': 'Quantity',
@@ -237,7 +247,7 @@ def validate_bom(bom_headers, bom_rows, item_rows=None, bom_row_grid_rows=None):
             })
         else:
             try:
-                if float(quantity) <= 0:
+                if float(quantity) < 0:
                     raise ValueError
             except (TypeError, ValueError):
                 errors.append({
@@ -246,7 +256,7 @@ def validate_bom(bom_headers, bom_rows, item_rows=None, bom_row_grid_rows=None):
                     # can act on exactly these values - replace just them, or
                     # delete just their rows - instead of the whole column.
                     'value': quantity,
-                    'message': 'Row %d has Quantity "%s"; it must be a number greater than zero.'
+                    'message': 'Row %d has Quantity "%s"; it must be a number that is not negative.'
                                % (line, quantity),
                 })
 
@@ -282,16 +292,18 @@ def validate_bom(bom_headers, bom_rows, item_rows=None, bom_row_grid_rows=None):
             else:
                 seen_alternates[alternate] = slot
 
+            # Same rule as the primary's Quantity above, for the same reasons:
+            # zero and fractions pass, negatives and non-numbers do not.
             alternate_quantity = _cell(row, group['quantity'])
             if alternate_quantity:
                 try:
-                    if float(alternate_quantity) <= 0:
+                    if float(alternate_quantity) < 0:
                         raise ValueError
                 except (TypeError, ValueError):
                     errors.append({
                         'rule': 'alternate_quantity_invalid', 'row': line,
                         'message': ('Row %d has Alternate quantity "%s" for "%s"; it must be a '
-                                    'number greater than zero.'
+                                    'number that is not negative.'
                                     % (line, alternate_quantity, alternate)),
                     })
 
