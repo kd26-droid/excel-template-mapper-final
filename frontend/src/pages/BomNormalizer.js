@@ -5540,6 +5540,114 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
   );
 };
 
+// Fold one Parse Fields result onto a sheet: the parsed columns land on the
+// rows the edit was scoped to, and a pattern-scoped edit also yields the manual
+// MPN/MFR override that replaces the auto-detected parse for those rows.
+//
+// Pure and sequential so several staged edits can be replayed in order at
+// normalization time, rather than each one mutating the sheet as it is made.
+const applyParserResultToSheet = ({ result, scope, headers, sourceRows, headerRowIndex }) => {
+  const parserHeaders = Array.isArray(result?.new_headers) ? result.new_headers : [];
+  const parserData = Array.isArray(result?.new_data) ? result.new_data : [];
+  if (!parserHeaders.length || !parserData.length) return null;
+
+  const nextHeaders = [...headers];
+  const parserHeaderMap = parserHeaders.map((header) => {
+    if (nextHeaders.includes(header)) return header;
+    const safeHeader = uniqueHeaderName(header, nextHeaders);
+    nextHeaders.push(safeHeader);
+    return safeHeader;
+  });
+
+  const scopedSourceRows = scope?.mode === 'pattern' && Array.isArray(scope.sourceRows)
+    ? scope.sourceRows
+    : null;
+  const scopedDataBySourceRow = scopedSourceRows
+    ? new Map(scopedSourceRows.map((sourceRow, scopedIndex) => [sourceRow, parserData[scopedIndex] || []]))
+    : null;
+
+  const nextRows = sourceRows.map((source, index) => {
+    const nextRow = {
+      ...source,
+      __sourceRow: source.__sourceRow || index + headerRowIndex + 2,
+    };
+    const parserRow = scopedDataBySourceRow
+      ? scopedDataBySourceRow.get(nextRow.__sourceRow)
+      : (parserData[index] || []);
+    // Rows outside this pattern keep whatever an earlier edit gave them.
+    if (scopedDataBySourceRow && !scopedDataBySourceRow.has(nextRow.__sourceRow)) return nextRow;
+    parserHeaderMap.forEach((header, columnIndex) => {
+      nextRow[header] = Array.isArray(parserRow)
+        ? (parserRow[columnIndex] ?? '')
+        : (parserRow?.[parserHeaders[columnIndex]] ?? '');
+    });
+    return nextRow;
+  });
+
+  const sourceHeader = scope?.sourceHeader || '';
+  const patternShape = scope?.patternShape || '';
+  let override = null;
+
+  if (scopedSourceRows && sourceHeader && patternShape) {
+    const findParserIndex = (aliases) => parserHeaders.findIndex((header) => (
+      aliases.some((alias) => normalizeKey(header) === normalizeKey(alias))
+    ));
+    const mpnIndex = findParserIndex(['MPN', 'Mfr Part Number', 'Manufacturer Part Number', 'Part Number']);
+    const mfrIndex = findParserIndex(['MFR', 'Manufacturer', 'Manufacturer Name']);
+    const extraIndex = findParserIndex(['Extra', 'Discard', 'Discarded Text', 'Ignore']);
+
+    const rowsBySourceRow = {};
+    scopedSourceRows.forEach((sourceRow, scopedIndex) => {
+      const parserRow = parserData[scopedIndex] || [];
+      const valueAt = (columnIndex) => {
+        if (columnIndex < 0) return '';
+        return Array.isArray(parserRow)
+          ? (parserRow[columnIndex] ?? '')
+          : (parserRow?.[parserHeaders[columnIndex]] ?? '');
+      };
+      rowsBySourceRow[sourceRow] = {
+        pairs: buildManualPairList(valueAt(mpnIndex), valueAt(mfrIndex), valueAt(extraIndex)),
+      };
+    });
+
+    const configuredOutputs = (result?.parser_preview?.items || [])
+      .map((item) => String(item?.label || '').split(':')[0])
+      .filter(Boolean);
+    const configuredOutputSummary = configuredOutputs.length
+      ? [...new Set(configuredOutputs)].join(' / ')
+      : 'manual parser outputs';
+
+    override = {
+      sourceHeader,
+      patternShape,
+      rows: rowsBySourceRow,
+      displayExample: result?.parser_preview || null,
+      rules: [
+        'Manual parser override applied.',
+        `Configured outputs: ${configuredOutputSummary}.`,
+      ],
+      summary: configuredOutputSummary,
+    };
+  }
+
+  return {
+    nextHeaders,
+    nextRows,
+    override,
+    scopedCount: scopedSourceRows?.length || 0,
+  };
+};
+
+// Replace any edit already staged for the same pattern — re-editing a shape
+// supersedes the previous attempt rather than stacking on it.
+const withStagedPatternEdit = (staged, edit) => ([
+  ...staged.filter((entry) => !(
+    normalizeKey(entry.sourceHeader) === normalizeKey(edit.sourceHeader) &&
+    entry.patternShape === edit.patternShape
+  )),
+  edit,
+]);
+
 const BomNormalizer = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -5669,6 +5777,11 @@ const BomNormalizer = () => {
   const [configureParserTitle, setConfigureParserTitle] = useState('Split into Columns');
   const [configureParserScope, setConfigureParserScope] = useState(null);
   const [patternParserOverrides, setPatternParserOverrides] = useState([]);
+  // Parse Fields edits wait here until Run normalization. Applying them the
+  // moment Apply is clicked rewrote the sheet before the user had walked the
+  // remaining patterns, which made a review step that changes nothing on its own
+  // into an edit that already happened.
+  const [stagedPatternEdits, setStagedPatternEdits] = useState([]);
   const [patternApplyNotice, setPatternApplyNotice] = useState('');
   const [roleColumnLabelModes, setRoleColumnLabelModes] = useState({});
   const [combineItems, setCombineItems] = useState([]);
@@ -6097,6 +6210,18 @@ const BomNormalizer = () => {
         discarded: pair.metadata?.discardedText || getDiscardedPackedText(source, pair),
       }));
   }, [normalizerConfig]);
+
+  const stagedEditForPattern = useCallback((option) => (
+    stagedPatternEdits.find((edit) => (
+      normalizeKey(edit.sourceHeader) === normalizeKey(option?.section?.sourceHeader) &&
+      edit.patternShape === option?.pattern?.shape
+    )) || null
+  ), [stagedPatternEdits]);
+
+  const selectedPatternStagedEdit = useMemo(
+    () => stagedEditForPattern(selectedParsingPattern),
+    [selectedParsingPattern, stagedEditForPattern]
+  );
 
   const selectedParsingPatternIndex = useMemo(() => {
     if (!selectedParsingPattern) return -1;
@@ -7729,6 +7854,7 @@ const BomNormalizer = () => {
       setPreparedHeaders([]);
       setPreparedDataRows([]);
       setPatternParserOverrides([]);
+      setStagedPatternEdits([]);
       setRoles(emptyRoles);
       setNormalizedRows([]);
       setCurrentStep(0);
@@ -8131,6 +8257,50 @@ const BomNormalizer = () => {
     commitNormalizedResult(reviewedRows, pairingCheck);
   }, [commitNormalizedResult, pairingReviewRows, pendingNormalization]);
 
+  const commitStagedPatternEdits = useCallback(() => {
+    const baseRows = sourceDataRows.length ? sourceDataRows : dataRows;
+    if (!stagedPatternEdits.length) {
+      return { headers, rows: baseRows, overrides: patternParserOverrides };
+    }
+
+    let nextHeaders = headers;
+    let nextRows = baseRows;
+    let nextOverrides = patternParserOverrides;
+
+    stagedPatternEdits.forEach((edit) => {
+      const applied = applyParserResultToSheet({
+        result: edit.result,
+        scope: edit.scope,
+        headers: nextHeaders,
+        sourceRows: nextRows,
+        headerRowIndex,
+      });
+      if (!applied) return;
+      nextHeaders = applied.nextHeaders;
+      nextRows = applied.nextRows;
+      if (applied.override) {
+        nextOverrides = [
+          ...nextOverrides.filter((override) => !(
+            normalizeKey(override.sourceHeader) === normalizeKey(applied.override.sourceHeader) &&
+            override.patternShape === applied.override.patternShape
+          )),
+          applied.override,
+        ];
+      }
+    });
+
+    const headerSet = new Set(nextHeaders);
+    setPreparedHeaders(nextHeaders);
+    setPreparedDataRows(nextRows);
+    setPatternParserOverrides(nextOverrides);
+    setStagedPatternEdits([]);
+    setRoles((prev) => Object.fromEntries(
+      Object.entries(prev).map(([key, value]) => [key, headerSet.has(value) ? value : ''])
+    ));
+
+    return { headers: nextHeaders, rows: nextRows, overrides: nextOverrides };
+  }, [dataRows, headerRowIndex, headers, patternParserOverrides, sourceDataRows, stagedPatternEdits]);
+
   const runNormalization = useCallback(async () => {
     if (!dataRows.length) {
       setError('No data rows found below the selected header row.');
@@ -8145,14 +8315,21 @@ const BomNormalizer = () => {
       setError('Select at least an MPN, Manufacturer, or BOM level column before running normalization.');
       return;
     }
+    // Pattern edits are committed here, so a run always reflects every edit the
+    // user staged plus the auto-detected parse for the patterns they left alone.
+    const committed = commitStagedPatternEdits();
+    const runHeaders = committed.headers;
+    const runRows = filterRowsByEndRow(committed.rows, sourceEndRow);
+    const runConfig = { ...normalizerConfig, patternParserOverrides: committed.overrides };
+
     setBusy(true);
-    setProgress({ processed: 0, total: dataRows.length, outputRows: 0, skippedRows: 0 });
+    setProgress({ processed: 0, total: runRows.length, outputRows: 0, skippedRows: 0 });
     await new Promise((resolve) => setTimeout(resolve, 0));
     try {
-      const result = await normalizeRowsChunked(dataRows, headers, roles, normalizerConfig, setProgress);
+      const result = await normalizeRowsChunked(runRows, runHeaders, roles, runConfig, setProgress);
       const pairingCheck = layoutStructure === 'assembly_quantity_matrix' || layoutStructure === 'multi_block_assembly'
         ? { checkedRows: 0, matchedRows: 0, issueRows: [] }
-        : analyzeMpnManufacturerPairing(dataRows, headers, roles, normalizerConfig);
+        : analyzeMpnManufacturerPairing(runRows, runHeaders, roles, runConfig);
       if (pairingCheck.issueRows.length) {
         setPendingNormalization({ rows: result, pairingCheck });
         setPairingReviewRows(pairingCheck.issueRows);
@@ -8166,7 +8343,7 @@ const BomNormalizer = () => {
     } finally {
       setBusy(false);
     }
-  }, [commitNormalizedResult, dataRows, headers, normalizerConfig, roles]);
+  }, [commitNormalizedResult, commitStagedPatternEdits, dataRows, headers, normalizerConfig, roles, sourceEndRow]);
 
   const handleNormalize = useCallback(async () => {
     setParsingLogicOpen(true);
@@ -8220,125 +8397,77 @@ const BomNormalizer = () => {
   }, [dataRows, headers]);
 
   const handleApplyConfigureSplitColumns = useCallback((result) => {
-    const parserHeaders = Array.isArray(result?.new_headers) ? result.new_headers : [];
-    const parserData = Array.isArray(result?.new_data) ? result.new_data : [];
-    if (!parserHeaders.length || !parserData.length) {
-      setError('Split into Columns applied, but no parsed data was returned.');
+    const scope = configureParserScope;
+    const closeParser = () => {
+      setConfigureSplitColsOpen(false);
+      setConfigureParserSessionId('');
+      setConfigureParserInitialColumn('');
+      setConfigureParserTitle('Split into Columns');
+      setConfigureParserScope(null);
+      setParserTouched(true);
+    };
+
+    // A pattern edit is staged against its pattern, not written to the sheet.
+    // It replaces the auto-detected parse for those rows when normalization
+    // runs; every pattern the user did not edit still parses normally.
+    if (scope?.mode === 'pattern') {
+      const preview = applyParserResultToSheet({
+        result,
+        scope,
+        headers,
+        sourceRows: sourceDataRows.length ? sourceDataRows : dataRows,
+        headerRowIndex,
+      });
+      if (!preview) {
+        setError('Split into Columns applied, but no parsed data was returned.');
+        return;
+      }
+      setStagedPatternEdits((prev) => withStagedPatternEdit(prev, {
+        patternKey: scope.patternKey || '',
+        sourceHeader: scope.sourceHeader || '',
+        patternShape: scope.patternShape || '',
+        scopedCount: preview.scopedCount,
+        summary: preview.override?.summary || 'manual parser outputs',
+        result,
+        scope,
+      }));
+      closeParser();
+      if (scope.patternKey) {
+        setSelectedParsingPatternKey(scope.patternKey);
+        setParsingLogicOpen(true);
+      }
+      const message = `Pattern updated for ${preview.scopedCount} row${preview.scopedCount === 1 ? '' : 's'}. It runs when you start normalization.`;
+      setPatternApplyNotice(message);
+      setSuccessMessage(message);
       return;
     }
 
-    const nextHeaders = [...headers];
-    const parserHeaderMap = parserHeaders.map((header) => {
-      if (nextHeaders.includes(header)) return header;
-      const safeHeader = uniqueHeaderName(header, nextHeaders);
-      nextHeaders.push(safeHeader);
-      return safeHeader;
+    // Plain Split into Columns has no pattern to stage against, so it still
+    // writes straight to the sheet.
+    const applied = applyParserResultToSheet({
+      result,
+      scope,
+      headers,
+      sourceRows: sourceDataRows.length ? sourceDataRows : dataRows,
+      headerRowIndex,
     });
-
-    const sourceRows = sourceDataRows.length ? sourceDataRows : dataRows;
-    const scopedSourceRows = configureParserScope?.mode === 'pattern' && Array.isArray(configureParserScope.sourceRows)
-      ? configureParserScope.sourceRows
-      : null;
-    const sourceHeader = configureParserScope?.sourceHeader || '';
-    const patternShape = configureParserScope?.patternShape || '';
-    const patternKey = configureParserScope?.patternKey || '';
-    const scopedDataBySourceRow = scopedSourceRows
-      ? new Map(scopedSourceRows.map((sourceRow, scopedIndex) => [sourceRow, parserData[scopedIndex] || []]))
-      : null;
-    const nextRows = sourceRows.map((source, index) => {
-      const nextRow = {
-        ...source,
-        __sourceRow: source.__sourceRow || index + headerRowIndex + 2,
-      };
-      const parserRow = scopedDataBySourceRow
-        ? scopedDataBySourceRow.get(nextRow.__sourceRow)
-        : (parserData[index] || []);
-      if (scopedDataBySourceRow && !scopedDataBySourceRow.has(nextRow.__sourceRow)) {
-        return nextRow;
-      }
-      parserHeaderMap.forEach((header, columnIndex) => {
-        nextRow[header] = Array.isArray(parserRow)
-          ? (parserRow[columnIndex] ?? '')
-          : (parserRow?.[parserHeaders[columnIndex]] ?? '');
-      });
-      return nextRow;
-    });
-
-    if (scopedSourceRows && sourceHeader && patternShape) {
-      const parserHeaderKey = (header) => normalizeKey(header);
-      const findParserIndex = (aliases) => parserHeaders.findIndex((header) => (
-        aliases.some((alias) => parserHeaderKey(header) === normalizeKey(alias))
-      ));
-      const mpnIndex = findParserIndex(['MPN', 'Mfr Part Number', 'Manufacturer Part Number', 'Part Number']);
-      const mfrIndex = findParserIndex(['MFR', 'Manufacturer', 'Manufacturer Name']);
-      const extraIndex = findParserIndex(['Extra', 'Discard', 'Discarded Text', 'Ignore']);
-
-      const rowsBySourceRow = {};
-      scopedSourceRows.forEach((sourceRow, scopedIndex) => {
-        const parserRow = parserData[scopedIndex] || [];
-        const valueAt = (columnIndex) => {
-          if (columnIndex < 0) return '';
-          return Array.isArray(parserRow)
-            ? (parserRow[columnIndex] ?? '')
-            : (parserRow?.[parserHeaders[columnIndex]] ?? '');
-        };
-        rowsBySourceRow[sourceRow] = {
-          pairs: buildManualPairList(
-            valueAt(mpnIndex),
-            valueAt(mfrIndex),
-            valueAt(extraIndex)
-          ),
-        };
-      });
-
-      const configuredOutputs = (result?.parser_preview?.items || [])
-        .map((item) => String(item?.label || '').split(':')[0])
-        .filter(Boolean);
-      const configuredOutputSummary = configuredOutputs.length
-        ? [...new Set(configuredOutputs)].join(' / ')
-        : 'manual parser outputs';
-
-      setPatternParserOverrides((prev) => [
-        ...prev.filter((override) => !(
-          normalizeKey(override.sourceHeader) === normalizeKey(sourceHeader) &&
-          override.patternShape === patternShape
-        )),
-        {
-          sourceHeader,
-          patternShape,
-          rows: rowsBySourceRow,
-          displayExample: result?.parser_preview || null,
-          rules: [
-            'Manual parser override applied.',
-            `Configured outputs: ${configuredOutputSummary}.`,
-          ],
-        },
-      ]);
+    if (!applied) {
+      setError('Split into Columns applied, but no parsed data was returned.');
+      return;
     }
-
-    const headerSet = new Set(nextHeaders);
-    setPreparedHeaders(nextHeaders);
-    setPreparedDataRows(nextRows);
+    const headerSet = new Set(applied.nextHeaders);
+    setPreparedHeaders(applied.nextHeaders);
+    setPreparedDataRows(applied.nextRows);
     setRoles((prev) => Object.fromEntries(
       Object.entries(prev).map(([key, value]) => [key, headerSet.has(value) ? value : ''])
     ));
-    setConfigureSplitColsOpen(false);
-    setConfigureParserSessionId('');
-    setConfigureParserInitialColumn('');
-    setConfigureParserTitle('Split into Columns');
-    setConfigureParserScope(null);
-    setParserTouched(true);
-    if (patternKey) {
-      setSelectedParsingPatternKey(patternKey);
-      setParsingLogicOpen(true);
-    }
-    const scopedCount = scopedSourceRows?.length || 0;
-    const message = scopedCount
-      ? `Structured split applied to ${scopedCount} row${scopedCount === 1 ? '' : 's'} in the selected pattern.`
-      : `Structured split applied. Added ${result.new_headers_count || 0} columns.`;
-    if (scopedCount) setPatternApplyNotice(message);
-    setSuccessMessage(message);
+    closeParser();
+    setSuccessMessage(`Structured split applied. Added ${result.new_headers_count || 0} columns.`);
   }, [configureParserScope, dataRows, headerRowIndex, headers, sourceDataRows]);
+
+  // Replay every staged pattern edit onto the sheet, in the order they were
+  // made. Returns the committed sheet so normalization can use it immediately
+  // instead of waiting for state to settle.
 
   const handleOpenFactwiseDialog = useCallback(() => {
     setFactwiseConfig((prev) => ({
@@ -11188,9 +11317,20 @@ const BomNormalizer = () => {
           <Paper elevation={0} sx={{ p: 1.35, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
             <Grid container spacing={1.5} alignItems="center">
               <Grid item xs={12} md={8}>
-                <Typography sx={{ fontSize: 12, color: normalizerTheme.muted }}>
-                  {selectedParsingPattern ? 'Detected pattern' : 'Selected setup'}
-                </Typography>
+                <Stack direction="row" alignItems="center" gap={0.75}>
+                  <Typography sx={{ fontSize: 12, color: normalizerTheme.muted }}>
+                    {selectedParsingPattern
+                      ? (selectedPatternStagedEdit ? 'Edited pattern' : 'Detected pattern')
+                      : 'Selected setup'}
+                  </Typography>
+                  {selectedPatternStagedEdit && (
+                    <Chip
+                      size="small"
+                      label="Edited"
+                      sx={{ height: 19, fontSize: 10.5, fontWeight: 800, bgcolor: '#f5f3ff', color: '#5b21b6', border: '1px solid #ddd6fe' }}
+                    />
+                  )}
+                </Stack>
                 <Typography sx={{ mt: 0.2, fontSize: 15, fontWeight: 760, lineHeight: 1.35, color: normalizerTheme.text }} noWrap>
                   {selectedParsingPattern
                     ? `${selectedParsingPatternNumber}. ${selectedParsingPattern.pattern?.shape || 'No pattern detected'}`
@@ -11199,6 +11339,7 @@ const BomNormalizer = () => {
                 {selectedParsingPattern && (
                   <Typography sx={{ mt: 0.25, fontSize: 11.5, color: normalizerTheme.muted }} noWrap>
                     {selectedParsingPattern.section.sourceHeader} - {selectedParsingPattern.pattern.count} row{selectedParsingPattern.pattern.count === 1 ? '' : 's'}
+                    {selectedPatternStagedEdit ? ` - your split (${selectedPatternStagedEdit.summary}) runs at normalization` : ''}
                   </Typography>
                 )}
               </Grid>

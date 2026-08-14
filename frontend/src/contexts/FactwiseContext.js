@@ -149,6 +149,7 @@ function readInitialContext() {
 const FactwiseContext = createContext({
   entities: [],
   chooseEntity: () => {},
+  loadEntities: () => {},
   isEmbedded: false,
   token: null,
   apiEnv: null,
@@ -248,50 +249,56 @@ export function FactwiseProvider({ children }) {
     }
   }, [contextValue.fwOrigin]);
 
-  useEffect(() => {
-    let cancelled = false;
-    const resolveEntityName = async () => {
-      // Always load the list: even when a name is already known, the UI needs
-      // it to offer a switch when the account has more than one entity.
-      const { entities: list } = await fetchFactwiseEntities();
-      if (cancelled) return;
-      if (list.length > 0) setContextValue(prev => ({ ...prev, entities: list }));
-
-      if (cleanString(contextValue.entityName)) return;
-
-      // An entity_id on the launch URL names exactly one of them.
-      const byId = cleanString(contextValue.entityId)
-        ? list.find(entity => entity.id === cleanString(contextValue.entityId))
+  // The entity list is NOT fetched on load. Only the Settings page needs it —
+  // it is the only screen that lets you see or change which entity you are
+  // filing under — so it asks for it once when it opens, via loadEntities().
+  const entityListLoadedRef = useRef(false);
+  const loadEntities = useCallback(async () => {
+    if (entityListLoadedRef.current) return;
+    entityListLoadedRef.current = true;
+    const { entities: list } = await fetchFactwiseEntities();
+    if (list.length === 0) {
+      // Let a later visit retry: an expired token here is not a permanent no.
+      entityListLoadedRef.current = false;
+      return;
+    }
+    setContextValue((prev) => {
+      const next = { ...prev, entities: list };
+      if (cleanString(prev.entityName)) return next;
+      // An entity_id from the launch URL names one of them; a single entity
+      // needs no choice. Anything else is left for the user to pick.
+      const byId = cleanString(prev.entityId)
+        ? list.find(entity => entity.id === cleanString(prev.entityId))
         : null;
-      // One entity means there is nothing to ask about.
-      const only = list.length === 1 ? list[0] : null;
-      const chosen = byId || only;
-      if (chosen) {
-        window.localStorage.setItem(STORAGE_KEYS.entityName, chosen.name);
-        if (chosen.id) window.localStorage.setItem(STORAGE_KEYS.entityId, chosen.id);
-        if (!cancelled) {
-          setContextValue(prev => ({ ...prev, entityName: chosen.name, entityId: chosen.id || prev.entityId }));
-        }
-        return;
-      }
-      // Several entities and no hint which: leave it unset so the user picks.
-      // Deliberately NOT falling back to the token here — its `name` claim is
-      // the signed-in user ("amaan_test"), which silently became the
-      // "Procurement entity name" on every export.
-      if (list.length > 1) return;
+      const chosen = byId || (list.length === 1 ? list[0] : null);
+      if (!chosen) return next;
+      window.localStorage.setItem(STORAGE_KEYS.entityName, chosen.name);
+      if (chosen.id) window.localStorage.setItem(STORAGE_KEYS.entityId, chosen.id);
+      return { ...next, entityName: chosen.name, entityId: chosen.id || prev.entityId };
+    });
+  }, []);
 
+  // On load, resolve a name only from what the launch already carried — no
+  // list call. The token is deliberately not consulted: its `name` claim is the
+  // signed-in user ("amaan_test"), which silently became the "Procurement
+  // entity name" on every export.
+  useEffect(() => {
+    if (cleanString(contextValue.entityName)) return undefined;
+    if (!contextValue.token || !cleanString(contextValue.entityId)) return undefined;
+
+    let cancelled = false;
+    (async () => {
       const fromApi = await fetchEntityNameFromFactwise(contextValue);
       if (fromApi && !cancelled) {
         window.localStorage.setItem(STORAGE_KEYS.entityName, fromApi);
         setContextValue(prev => ({ ...prev, entityName: fromApi }));
       }
-    };
-
-    resolveEntityName();
+    })();
     return () => {
       cancelled = true;
     };
-  }, [contextValue]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contextValue.token, contextValue.entityId, contextValue.entityName]);
 
   // Cross-tab reconnect: if the user re-launches the mapper in another
   // tab, that tab writes a fresh token to localStorage → this tab picks
@@ -318,8 +325,8 @@ export function FactwiseProvider({ children }) {
   }, []);
 
   const value = useMemo(
-    () => ({ ...contextValue, sessionExpired, reconnect, chooseEntity }),
-    [contextValue, sessionExpired, reconnect, chooseEntity]
+    () => ({ ...contextValue, sessionExpired, reconnect, chooseEntity, loadEntities }),
+    [contextValue, sessionExpired, reconnect, chooseEntity, loadEntities]
   );
   return (
     <FactwiseContext.Provider value={value}>

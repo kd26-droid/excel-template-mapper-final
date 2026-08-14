@@ -379,7 +379,12 @@ const Settings = () => {
     entityName: factwiseEntityName,
     entities: factwiseEntities = [],
     chooseEntity,
+    loadEntities,
   } = useFactwise();
+
+  // The only screen that needs the entity list, so it is the only one that
+  // asks for it — once, when it opens.
+  useEffect(() => { loadEntities?.(); }, [loadEntities]);
 
   const readyCount = useMemo(
     () => columnMappings.filter(mapping => normalizeProviders(mapping.providers || mapping.provider).every(provider => Boolean(providerStatus[provider]?.configured))).length,
