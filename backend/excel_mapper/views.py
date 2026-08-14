@@ -565,6 +565,33 @@ def _template_label_key(header: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
 
 
+# The internal field behind each repeated template label. The grid stores these
+# ('Tag_2'); the template workbook and the mapping canvas show the numbered
+# label ('Tag (2)'). A mapping saved against the label alone never reaches a
+# column, because no grid column is called that.
+_INTERNAL_PREFIX_BY_SLOT_LABEL = {
+    "tag": "Tag_",
+    "specification name": "Specification_Name_",
+    "specification value": "Specification_Value_",
+    "specification uom": "Specification_UOM_",
+    "customer identification name": "Customer_Identification_Name_",
+    "customer identification value": "Customer_Identification_Value_",
+    "custom identification name": "Customer_Identification_Name_",
+    "custom identification value": "Customer_Identification_Value_",
+    "item identifications name": "Customer_Identification_Name_",
+    "item identifications value": "Customer_Identification_Value_",
+}
+
+
+def internal_name_for_slot_label(header: str) -> str:
+    """'Tag (2)' -> 'Tag_2'. Empty string when the header is not a numbered slot."""
+    index = slot_number(header)
+    if not index:
+        return ""
+    prefix = _INTERNAL_PREFIX_BY_SLOT_LABEL.get(_template_label_key(header))
+    return f"{prefix}{index}" if prefix else ""
+
+
 def derive_sfo_column_counts(headers: list) -> dict:
     """Derive dynamic group counts from SFO-style repeated destination headers."""
     return {
@@ -3331,6 +3358,18 @@ def save_mappings(request):
                 if target.startswith(('Tag_', 'Specification_Name_', 'Specification_Value_', 'Customer_Identification_Name_', 'Customer_Identification_Value_')):
                     # Target is already an internal name, just track it
                     used_columns.add(target)
+                elif internal_name_for_slot_label(target):
+                    # A numbered slot LABEL ('Tag (2)'), which is what both the
+                    # mapping canvas and the template workbook show. It is also
+                    # present in template_headers, so without this branch the
+                    # next one preserved it verbatim and the mapping pointed at
+                    # a column name the grid does not have - the values silently
+                    # never arrived. Unnumbered labels ('Tag') keep their own
+                    # branch below, which allocates the next free slot.
+                    internal_name = internal_name_for_slot_label(target)
+                    converted_mapping['target'] = internal_name
+                    used_columns.add(internal_name)
+                    logger.info(f"📊 SAVE_MAPPINGS: Converted slot label '{target}' -> '{internal_name}'")
                 elif target in all_headers:
                     # Target exists as-is in the template headers - DO NOT CONVERT
                     # This preserves user's original column names like "Specification value", "Tag", etc.

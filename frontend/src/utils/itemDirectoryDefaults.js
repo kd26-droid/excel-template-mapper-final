@@ -1,4 +1,9 @@
-export const ITEM_DIRECTORY_DEFAULTS_KEY = 'factwise.itemDirectoryDefaults.v1';
+// v2 drops every browser copy written by the old built-in defaults, which
+// stored itemCodeContentType:'serial' + blankStrategy:'prefix_sequence' without
+// anyone choosing them — indistinguishable from a real choice, and the reason
+// blank item codes kept filling with 1, 2, 3. Starting from a clean key means a
+// value exists only if the user saved it.
+export const ITEM_DIRECTORY_DEFAULTS_KEY = 'factwise.itemDirectoryDefaults.v2';
 export const ITEM_DIRECTORY_COLUMN_OPTIONS_KEY = 'factwise.itemDirectoryColumnOptions.v1';
 
 export const DEFAULT_ITEM_DIRECTORY_COLUMN_OPTIONS = [

@@ -96,11 +96,19 @@ def get_editor_defaults_for_entity(entity_name):
 
 
 def _sanitize_item_code_rule(raw_rule):
-    if not isinstance(raw_rule, dict):
+    """Store only a rule the caller actually asked for.
+
+    An empty dict means "no server-side item code rule" — the client sends that
+    for the modes this table cannot express (join, copy, if/else) and when the
+    user has chosen nothing. Defaulting the mode to `prefix_sequence` here turned
+    every one of those into a prefix-less serial, which is what silently numbered
+    blank item codes 1, 2, 3 for anyone under that entity, on any machine.
+    """
+    if not isinstance(raw_rule, dict) or not raw_rule:
         return {}
-    mode = _clean(raw_rule.get('mode') or 'prefix_sequence')
+    mode = _clean(raw_rule.get('mode'))
     if mode not in {'prefix_sequence', 'fixed'}:
-        mode = 'prefix_sequence'
+        return {}
     rule = {
         'mode': mode,
         'prefix': _clean(raw_rule.get('prefix')),

@@ -1529,6 +1529,12 @@ const EnhancedDataEditor = () => {
       if (changed) {
         setDefaultValues(prev => ({ ...prev, ...defaults }));
         showSnackbar('Applied saved Item Directory defaults to blank editor cells.', 'success');
+      } else {
+        // Nothing was written, so nothing has been "used up". Coming from the
+        // BOM Normalizer the sheet can reach the editor before MPN/manufacturer
+        // are populated, and a join over two empty columns fills nothing —
+        // keeping the guard would leave Item code blank until a page reload.
+        delete itemDirectoryDefaultsAppliedRef.current[sessionId];
       }
       return changed;
     } catch (error) {
@@ -1536,6 +1542,45 @@ const EnhancedDataEditor = () => {
       throw error;
     }
   }, [sessionId, showSnackbar]);
+
+  // The defaults run during the load below, which is right when the sheet
+  // already has its values. Coming from the BOM Normalizer it may not: MPN and
+  // manufacturer can land after that first pass, and a join over two empty
+  // columns fills nothing. This watches the loaded grid and tries again once
+  // the source data is actually there.
+  //
+  // The fingerprint is what stops it looping: an attempt only repeats when the
+  // grid's shape or its filled-cell count has changed since the last one.
+  const defaultsAttemptRef = useRef('');
+  useEffect(() => {
+    if (!sessionId || pageLoading) return;
+    if (!Array.isArray(rowData) || rowData.length === 0) return;
+    if (itemDirectoryDefaultsAppliedRef.current[sessionId]) return;
+
+    const fields = columnDefs
+      .filter(col => col.field && col.field !== '__row_number__')
+      .map(col => col.field);
+    if (fields.length === 0) return;
+
+    let filled = 0;
+    rowData.forEach(row => fields.forEach(field => {
+      if (String(row?.[field] ?? '').trim()) filled += 1;
+    }));
+    const fingerprint = `${sessionId}|${rowData.length}|${fields.length}|${filled}`;
+    if (defaultsAttemptRef.current === fingerprint) return;
+    defaultsAttemptRef.current = fingerprint;
+
+    let cancelled = false;
+    applySavedItemDirectoryDefaultsOnLoad(fields)
+      .then(applied => {
+        if (applied && !cancelled) fetchDataSynchronized();
+      })
+      .catch(error => {
+        console.warn('Could not apply saved Item Directory defaults:', error);
+      });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId, rowData, columnDefs, pageLoading]);
 
   // Load the whole sheet, then page/search/filter over it in the browser.
   //

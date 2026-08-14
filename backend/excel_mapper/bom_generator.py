@@ -475,6 +475,23 @@ def generate_multi_level_bom(tree, bom_header, alternates_of=None, records=None,
 
     sub_boms = sub_boms or {}
 
+    # A sub-assembly's BOM code, when the user renamed it.
+    #
+    # Applied into `resolved` rather than at the point of use, because that map
+    # is what BOTH `BOM ID` and the parent's `Sub BOM ID` are read through. Set
+    # it here and the two cannot disagree; set it anywhere else and a renamed
+    # sub-BOM would be referenced by its old code one block up, which imports as
+    # a sub-BOM pointing at nothing.
+    #
+    # The root is excluded: its code is the finished good, authored in the
+    # popup's own form, not in the per-assembly rows.
+    for code, override in sub_boms.items():
+        if code == root_code:
+            continue
+        renamed = _text((override or {}).get('bomCode'))
+        if renamed:
+            resolved[code] = renamed
+
     for block in tree.blocks:
         parent_code = resolved.get(block['bom_id'], block['bom_id'])
         is_root_block = block['bom_id'] == root_code

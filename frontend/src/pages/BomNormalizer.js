@@ -5066,8 +5066,32 @@ const buildBomMappingRowsFromNormalizedRows = (rows = [], baseColumns = getNorma
   return { columns, rows: outputRows };
 };
 
+// The repeated template slots a parse can fill. Their internal names match the
+// template's own columns once punctuation is ignored, which is exactly how
+// ColumnMapping's findHeaderByCandidates compares - so 'Tag_2' finds 'Tag (2)'.
+const DYNAMIC_TEMPLATE_COLUMN_RE = /^(Tag|Specification_Name|Specification_Value|Specification_UOM|Customer_Identification_Name|Customer_Identification_Value)_\d+$/i;
+
 const buildNormalizerSuggestedMappings = (columns = [], rows = []) => {
   const available = new Set(columns);
+
+  // Anything the parser routed into a template slot maps to that same slot.
+  // Without this the column reaches the mapping page unconnected, and an
+  // unconnected column never makes it as far as the editor.
+  const dynamicCandidates = columns
+    .filter((column) => DYNAMIC_TEMPLATE_COLUMN_RE.test(String(column || '')))
+    .map((column) => ({ source: column, targets: [column] }));
+
+  // Manufacturers ride along as a tag, so they must not claim a slot the parse
+  // already filled - the mapping page drops the loser of a contested target.
+  const filledTagSlots = new Set(
+    columns
+      .map((column) => String(column || '').match(/^Tag_(\d+)$/i))
+      .filter(Boolean)
+      .map((match) => Number(match[1]))
+  );
+  let manufacturerTagSlot = 1;
+  while (filledTagSlots.has(manufacturerTagSlot)) manufacturerTagSlot += 1;
+
   const candidates = [
     { source: 'cpn', targets: ['CPN Code', 'Customer part number', 'Customer Part Number'] },
     { source: 'mpn', targets: ['MPN Code', 'Manufacturer part number', 'Manufacturer Part Number'] },
@@ -5075,9 +5099,11 @@ const buildNormalizerSuggestedMappings = (columns = [], rows = []) => {
     { source: 'quantity', targets: ['Quantity', 'Qty'] },
     { source: 'uom', targets: ['Measurement unit', 'UOM', 'Unit of measure'] },
     { source: 'level', targets: ['Level', 'BOM level'] },
+    { source: 'Item code', targets: ['Item code'] },
     { source: 'parentKey', targets: ['Parent / group key', 'Parent group key', 'Sub BOM ID', 'BOM ID'] },
+    ...dynamicCandidates,
     ...(hasManufacturerValues(rows)
-      ? [{ source: 'manufacturer', targets: ['Tag', 'Tag_1'] }]
+      ? [{ source: 'manufacturer', targets: [`Tag_${manufacturerTagSlot}`, 'Tag'] }]
       : []),
   ];
 
@@ -8350,42 +8376,36 @@ const BomNormalizer = () => {
       return { headers, rows: baseRows, overrides: patternParserOverrides };
     }
 
-    let nextHeaders = headers;
-    let nextRows = baseRows;
+    // Only the overrides are committed. The parsed COLUMNS are deliberately not
+    // written onto the source sheet: they hold one ' | '-joined string per cell,
+    // and normalization carries source columns onto the output, so a 'Description'
+    // column of "[2225412] | [2225668" shadowed the per-entry `description` that
+    // applyPatternOutputsToNormalizedRows fills. The override already carries
+    // every parsed value, split per entry, so the sheet copy was pure noise.
     let nextOverrides = patternParserOverrides;
 
     stagedPatternEdits.forEach((edit) => {
       const applied = applyParserResultToSheet({
         result: edit.result,
         scope: edit.scope,
-        headers: nextHeaders,
-        sourceRows: nextRows,
+        headers,
+        sourceRows: baseRows,
         headerRowIndex,
       });
-      if (!applied) return;
-      nextHeaders = applied.nextHeaders;
-      nextRows = applied.nextRows;
-      if (applied.override) {
-        nextOverrides = [
-          ...nextOverrides.filter((override) => !(
-            normalizeKey(override.sourceHeader) === normalizeKey(applied.override.sourceHeader) &&
-            override.patternShape === applied.override.patternShape
-          )),
-          applied.override,
-        ];
-      }
+      if (!applied?.override) return;
+      nextOverrides = [
+        ...nextOverrides.filter((override) => !(
+          normalizeKey(override.sourceHeader) === normalizeKey(applied.override.sourceHeader) &&
+          override.patternShape === applied.override.patternShape
+        )),
+        applied.override,
+      ];
     });
 
-    const headerSet = new Set(nextHeaders);
-    setPreparedHeaders(nextHeaders);
-    setPreparedDataRows(nextRows);
     setPatternParserOverrides(nextOverrides);
     setStagedPatternEdits([]);
-    setRoles((prev) => Object.fromEntries(
-      Object.entries(prev).map(([key, value]) => [key, headerSet.has(value) ? value : ''])
-    ));
 
-    return { headers: nextHeaders, rows: nextRows, overrides: nextOverrides };
+    return { headers, rows: baseRows, overrides: nextOverrides };
   }, [dataRows, headerRowIndex, headers, patternParserOverrides, sourceDataRows, stagedPatternEdits]);
 
   const runNormalization = useCallback(async () => {
