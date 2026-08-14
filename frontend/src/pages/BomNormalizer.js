@@ -9063,20 +9063,55 @@ const BomNormalizer = () => {
 
             {currentStep === 4 && (
               <Paper elevation={0} sx={{ p: 2.5, border: '1px solid #dce2e8' }}>
-                <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1}>
+                <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" gap={1.5}>
                   <Box>
-                    <Typography sx={{ fontSize: 18, fontWeight: 800 }}>Normalized editable sheet</Typography>
+                    <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap">
+                      <Typography sx={{ fontSize: 18, fontWeight: 800 }}>Normalized editable sheet</Typography>
+                      {quality.lowConfidence > 0 && (
+                        <Chip
+                          size="small"
+                          clickable
+                          color="warning"
+                          variant={lowConfidenceOnly ? 'filled' : 'outlined'}
+                          label={`${quality.lowConfidence} low confidence`}
+                          onClick={() => setLowConfidenceOnly((prev) => !prev)}
+                          sx={{
+                            height: 28,
+                            px: 0.5,
+                            fontSize: 13,
+                            fontWeight: 800,
+                            borderColor: lowConfidenceOnly ? 'transparent' : '#f59e0b',
+                            bgcolor: lowConfidenceOnly ? '#f59e0b' : (isDarkMode ? 'rgba(245, 158, 11, 0.16)' : '#fff7ed'),
+                            color: lowConfidenceOnly ? '#111827' : (isDarkMode ? '#fbbf24' : '#92400e'),
+                            '&:hover': {
+                              bgcolor: lowConfidenceOnly ? '#fbbf24' : (isDarkMode ? 'rgba(245, 158, 11, 0.24)' : '#ffedd5'),
+                            },
+                          }}
+                        />
+                      )}
+                    </Stack>
                     <Typography sx={{ mt: 0.5, fontSize: 13, color: '#66717f' }}>
                       Review the parsed output, edit cells directly, or delete rows before downloading.
                     </Typography>
                   </Box>
-                  <Stack direction="row" gap={1} flexWrap="wrap" justifyContent={{ xs: 'flex-start', md: 'flex-end' }}>
+                  <Stack direction="row" gap={1} flexWrap="wrap" justifyContent={{ xs: 'flex-start', md: 'flex-end' }} alignItems="flex-start">
                     <Button
-                      size="small"
+                      size="medium"
                       variant="outlined"
                       startIcon={<TuneIcon />}
+                      endIcon={<KeyboardArrowDownIcon />}
                       disabled={!normalizedRows.length}
                       onClick={(event) => setToolsMenuAnchor(event.currentTarget)}
+                      sx={{
+                        minHeight: 40,
+                        px: 2.2,
+                        borderRadius: '999px',
+                        fontSize: 13,
+                        fontWeight: 850,
+                        bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.68)' : '#ffffff',
+                        borderColor: isDarkMode ? 'rgba(96, 165, 250, 0.38)' : '#bfdbfe',
+                        boxShadow: isDarkMode ? 'none' : '0 10px 22px -18px rgba(37, 99, 235, 0.52)',
+                      }}
                     >
                       Tools
                     </Button>
@@ -9132,11 +9167,25 @@ const BomNormalizer = () => {
                       </MenuItem>
                     </Menu>
                     <Button
-                      size="small"
+                      size="medium"
                       variant="contained"
                       startIcon={<DownloadIcon />}
+                      endIcon={<KeyboardArrowDownIcon />}
                       disabled={!normalizedRows.length}
                       onClick={(event) => setDownloadMenuAnchor(event.currentTarget)}
+                      sx={{
+                        minHeight: 40,
+                        px: 2.4,
+                        borderRadius: '999px',
+                        fontSize: 13,
+                        fontWeight: 850,
+                        background: 'linear-gradient(135deg, #2563eb 0%, #0284c7 100%)',
+                        boxShadow: '0 18px 30px -18px rgba(37, 99, 235, 0.9), inset 0 1px 0 rgba(255, 255, 255, 0.32)',
+                        '&:hover': {
+                          background: 'linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)',
+                          boxShadow: '0 22px 36px -20px rgba(37, 99, 235, 1), inset 0 1px 0 rgba(255, 255, 255, 0.4)',
+                        },
+                      }}
                     >
                       Download
                     </Button>
@@ -9162,16 +9211,6 @@ const BomNormalizer = () => {
                         Comma-separated values (.csv)
                       </MenuItem>
                     </Menu>
-                    {quality.lowConfidence > 0 && (
-                      <Chip
-                        size="small"
-                        clickable
-                        color="warning"
-                        variant={lowConfidenceOnly ? 'filled' : 'outlined'}
-                        label={`${quality.lowConfidence} low confidence`}
-                        onClick={() => setLowConfidenceOnly((prev) => !prev)}
-                      />
-                    )}
                   </Stack>
                 </Stack>
                 {normalizedRows.length > 0 && (
