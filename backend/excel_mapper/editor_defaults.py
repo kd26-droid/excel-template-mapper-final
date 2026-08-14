@@ -163,13 +163,32 @@ def _item_code_value(rule, sequence_index):
     return f"{rule.get('prefix') or ''}{suffix}"
 
 
-def apply_editor_defaults_to_rows(headers, rows, settings_obj, sequence_offset=0):
+LOCKED_IDENTITY_COLUMNS = {
+    'procurement_entity_name': False,
+    'item_type': True,
+    'procurement_item': False,
+    'sales_item': False,
+    'measurement_unit': True,
+}
+
+
+def apply_editor_defaults_to_rows(headers, rows, settings_obj, sequence_offset=0, locked_codes=None):
     if not settings_obj or not headers or rows is None:
         return rows, {'applied': {}, 'skipped_missing_columns': []}
 
     output_rows = [dict(row) if isinstance(row, dict) else list(row) for row in rows]
     applied = {}
     skipped = []
+    # A finished good or sub-assembly keeps its identity: the code other rows
+    # point at, and the Item type that makes it an assembly. The caller resolves
+    # the set once (views.locked_identity_codes) and passes it here.
+    locked = {str(code).strip() for code in (locked_codes or []) if str(code).strip()}
+    item_code_index = _column_index(headers, 'Item code') if locked else None
+
+    def _is_locked_row(row):
+        if item_code_index is None:
+            return False
+        return _clean(_row_get(row, item_code_index, headers[item_code_index])) in locked
 
     value_defaults = {
         'procurement_entity_name': settings_obj.entity_name,
@@ -188,7 +207,10 @@ def apply_editor_defaults_to_rows(headers, rows, settings_obj, sequence_offset=0
             skipped.append(target_header)
             continue
         changed = 0
+        column_is_locked = LOCKED_IDENTITY_COLUMNS.get(field_key, False)
         for row in output_rows:
+            if column_is_locked and _is_locked_row(row):
+                continue
             current = _row_get(row, index, headers[index])
             if _clean(current) == '':
                 _row_set(row, index, headers[index], str(value))
@@ -204,7 +226,11 @@ def apply_editor_defaults_to_rows(headers, rows, settings_obj, sequence_offset=0
         else:
             changed = 0
             sequence_index = max(0, int(sequence_offset or 0))
+            # Item code is the strongest lock of all: it is the reference the
+            # rest of the BOM resolves against.
             for row in output_rows:
+                if _is_locked_row(row):
+                    continue
                 current = _row_get(row, index, headers[index])
                 if _clean(current) == '':
                     value = _item_code_value(item_rule, sequence_index)

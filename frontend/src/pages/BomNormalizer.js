@@ -67,6 +67,7 @@ import {
 } from '../lib/bomNormalizerAlgorithms';
 import {
   ALTERNATE_LAYOUT_OPTIONS,
+  BOM_LAYOUT_OPTIONS,
   CLEANUP_OPTIONS,
   DELIMITER_OPTIONS,
   GROUP_HEADER_OPTIONS,
@@ -366,11 +367,42 @@ const colorLooksRed = (color = {}) => {
   return red >= 180 && green <= 100 && blue <= 100;
 };
 
+const valueLooksStruck = (value) => {
+  if (value === true || value === 1) return true;
+  if (typeof value !== 'string') return false;
+  return /^(?:1|true|yes)$/i.test(value.trim());
+};
+
+const objectHasStrikeStyle = (value, depth = 0) => {
+  if (!value || depth > 4) return false;
+  if (typeof value !== 'object') return false;
+  return Object.entries(value).some(([key, nestedValue]) => {
+    const normalizedKey = normalizeKey(key);
+    if (/(^| )strike(?: |$)|strikethrough|strikeout/.test(normalizedKey) && valueLooksStruck(nestedValue)) {
+      return true;
+    }
+    return objectHasStrikeStyle(nestedValue, depth + 1);
+  });
+};
+
+const htmlLooksStruck = (value) => /<(?:s|strike)\b|text-decoration(?:-line)?\s*:\s*line-through/i.test(fmt(value));
+
 const getCellStyleInfo = (cell = {}) => {
   const style = cell?.s || {};
   const font = style.font || {};
   const red = colorLooksRed(font.color) || colorLooksRed(style.fgColor) || colorLooksRed(style.color);
-  const strike = Boolean(font.strike || font.strikethrough);
+  const strike = Boolean(
+    cell.__styleInfo?.strike ||
+    font.strike ||
+    font.strikethrough ||
+    font.strikeThrough ||
+    font.strikeout ||
+    font.strikeOut ||
+    objectHasStrikeStyle(font) ||
+    objectHasStrikeStyle(style) ||
+    htmlLooksStruck(cell?.h) ||
+    htmlLooksStruck(cell?.r)
+  );
   return { red, strike };
 };
 
@@ -1539,6 +1571,89 @@ const getPatternAwarePackedPairs = (row, sourceHeader, value, config = {}) => {
   return parsePackedMpnManufacturerPairs(value, config);
 };
 
+const MANUFACTURER_SUFFIX_ONLY_WORDS = new Set([
+  'AG',
+  'BV',
+  'CO',
+  'CORP',
+  'CORPORATION',
+  'GMBH',
+  'INC',
+  'INCORPORATED',
+  'KG',
+  'LIMITED',
+  'LLC',
+  'LLP',
+  'LTD',
+  'NV',
+  'PLC',
+  'PTE',
+  'PTY',
+  'PVT',
+  'SA',
+  'SAS',
+  'SDN',
+]);
+
+const normalizeManufacturerSuffixToken = (value) => fmt(value).replace(/[^A-Za-z]/g, '').toUpperCase();
+
+const isManufacturerSuffixOnlyPart = (value) => {
+  const tokens = fmt(value)
+    .split(/\s+/)
+    .map(normalizeManufacturerSuffixToken)
+    .filter(Boolean);
+  return Boolean(tokens.length) && tokens.length <= 3 && tokens.every((token) => MANUFACTURER_SUFFIX_ONLY_WORDS.has(token));
+};
+
+const mergeManufacturerSuffixParts = (parts) => {
+  const merged = [];
+  parts.forEach((part) => {
+    const cleanPart = fmt(part);
+    if (!cleanPart) return;
+    if (merged.length && isManufacturerSuffixOnlyPart(cleanPart)) {
+      merged[merged.length - 1] = `${merged[merged.length - 1]}, ${cleanPart}`;
+      return;
+    }
+    merged.push(cleanPart);
+  });
+  return merged;
+};
+
+const findKnownManufacturerMatches = (text, phrases, canonicalForManufacturer) => {
+  const normalizedText = normalizeKey(text).toUpperCase();
+  if (!normalizedText) return [];
+  const paddedText = ` ${normalizedText} `;
+  const candidates = [];
+  const seenKeys = new Set();
+
+  phrases.forEach((name) => {
+    const key = normalizeKey(name).toUpperCase();
+    if (!key || key.length < 2 || seenKeys.has(key)) return;
+    seenKeys.add(key);
+    const paddedKey = ` ${key} `;
+    const paddedIndex = paddedText.indexOf(paddedKey);
+    if (paddedIndex === -1) return;
+    candidates.push({
+      name,
+      key,
+      start: paddedIndex,
+      end: paddedIndex + paddedKey.length,
+    });
+  });
+
+  const selected = [];
+  candidates
+    .sort((a, b) => a.start - b.start || b.key.length - a.key.length)
+    .forEach((candidate) => {
+      if (selected.some((match) => candidate.start < match.end && candidate.end > match.start)) return;
+      selected.push(candidate);
+    });
+
+  return [...new Set(selected
+    .sort((a, b) => a.start - b.start)
+    .map((match) => canonicalForManufacturer(match.name)))];
+};
+
 const splitManufacturerCell = (value, expectedCount, config = {}) => {
   const text = fmt(value).replace(/\u00a0/g, ' ');
   if (!text) return [];
@@ -1561,31 +1676,21 @@ const splitManufacturerCell = (value, expectedCount, config = {}) => {
 
   const delimiter = selectedDelimiter(config);
   const explicitParts = splitByExplicitDelimiter(text, delimiter);
-  if (explicitParts.length > 1) return explicitParts.map(canonicalForManufacturer);
+  if (explicitParts.length > 1) return mergeManufacturerSuffixParts(explicitParts).map(canonicalForManufacturer);
 
-  const colonSegments = parseColonSegments(text);
-  if (colonSegments.length > 1) return colonSegments.map((segment) => canonicalForManufacturer(segment.label));
-
-  const delimited = splitDelimited(text);
-  if (delimited.length > 1) return delimited.map(canonicalForManufacturer);
-
-  const normalizedText = normalizeKey(text).toUpperCase();
   const knownPhrases = [
     ...directoryNames,
     ...Object.keys(directoryAliases),
     ...KNOWN_MANUFACTURERS,
   ];
-  const seenPhrases = new Set();
-  const knownMatches = [...new Set(knownPhrases
-    .filter((name) => {
-      const key = normalizeKey(name).toUpperCase();
-      if (!key || seenPhrases.has(key) || !normalizedText.includes(key)) return false;
-      seenPhrases.add(key);
-      return true;
-    })
-    .sort((a, b) => normalizedText.indexOf(normalizeKey(a).toUpperCase()) - normalizedText.indexOf(normalizeKey(b).toUpperCase()))
-    .map(canonicalForManufacturer))];
+  const knownMatches = findKnownManufacturerMatches(text, knownPhrases, canonicalForManufacturer);
   if (knownMatches.length >= Math.min(expectedCount || 1, 2)) return knownMatches;
+
+  const colonSegments = parseColonSegments(text);
+  if (colonSegments.length > 1) return colonSegments.map((segment) => canonicalForManufacturer(segment.label));
+
+  const delimited = mergeManufacturerSuffixParts(splitDelimited(text));
+  if (delimited.length > 1) return delimited.map(canonicalForManufacturer);
 
   if (!expectedCount || expectedCount <= 1) return [text];
 
@@ -1754,7 +1859,9 @@ const shouldSkipSourceRow = (row, headers, roles, config) => {
   if (config.skipRepeatedHeaders && rowLooksLikeRepeatedHeader(row, headers)) return true;
   if (config.skipDoNotPopulate && rowLooksLikeDoNotPopulate(row, headers)) return true;
   if (config.skipDeletedRows && rowLooksLikeDeleted(row, headers)) return true;
-  if (config.structure === 'assembly_quantity_matrix') return false;
+  const layoutStructure = effectiveStructure(config);
+  if (layoutStructure === 'assembly_quantity_matrix') return false;
+  if (layoutStructure === 'multi_block_assembly') return false;
   if (config.structure === 'grouped_rows' && hasGroupedRowContext(row, roles)) return false;
   if (config.skipTitleRows && rowLooksLikeSectionTitle(row, headers, roles)) return true;
   return false;
@@ -1894,8 +2001,10 @@ const normalizeSeparateCells = (rows, roles, config) => {
       return;
     }
 
-    mpns.forEach((mpn, partIndex) => {
+    const partCount = Math.max(mpns.length, manufacturers.length || 0);
+    Array.from({ length: partCount }).forEach((_, partIndex) => {
       const isPrimary = partIndex === 0;
+      const mpn = mpns[partIndex] || mpns[0] || '';
       const manufacturer = manufacturers[partIndex] || (!isPrimary && config.manufacturerMode === 'inherit_blank' ? primaryManufacturer : '');
       output.push(withSourceColumns({
         sourceRow,
@@ -2168,7 +2277,7 @@ const isAssemblyMatrixFindHeader = (header) => {
 
 const isAssemblyMatrixHeaderCandidate = (header) => {
   const text = fmt(header);
-  return /^0*\d{1,4}$/.test(text) || /^(?:ass(?:y|embly)?|bom)\s*[-_ ]*0*\d{1,4}$/i.test(text);
+  return /^0*\d{1,4}$/.test(text) || /^(?:a|ass(?:y|embly)?|bom)\s*[-_ ]*0*\d{1,4}$/i.test(text);
 };
 
 const isMatrixQuantityLikeValue = (value) => {
@@ -2176,6 +2285,7 @@ const isMatrixQuantityLikeValue = (value) => {
   if (!text) return true;
   if (/^[-–—]$/.test(text)) return true;
   if (/^(?:ar|a\/r|as\s*req(?:uired)?|ref|x)$/i.test(text)) return true;
+  if (/^[A-Za-z0-9./_-]{1,12}$/.test(text)) return true;
   return /^-?\d+(?:[.,]\d+)?$/.test(text);
 };
 
@@ -2183,7 +2293,7 @@ const isMatrixQuantityPresent = (value) => {
   const text = fmt(value).replace(/\u00a0/g, ' ').trim();
   if (!text || /^[-–—]$/.test(text)) return false;
   if (/^0+(?:[.,]0+)?$/.test(text)) return false;
-  return isMatrixQuantityLikeValue(text);
+  return true;
 };
 
 const isNumericMatrixQuantity = (value) => /^-?\d+(?:[.,]\d+)?$/.test(fmt(value).replace(/\u00a0/g, ' ').trim());
@@ -2216,7 +2326,7 @@ const detectAssemblyQuantityMatrix = (headers = [], rows = [], roles = {}) => {
     const nonBlankValues = sampleValues.filter((value) => fmt(value));
     if (!nonBlankValues.length) return false;
     const quantityLikeCount = nonBlankValues.filter(isMatrixQuantityLikeValue).length;
-    const longTextCount = nonBlankValues.filter((value) => fmt(value).length > 12 || /[A-Za-z]{4,}/.test(fmt(value))).length;
+    const longTextCount = nonBlankValues.filter((value) => fmt(value).length > 12).length;
     return quantityLikeCount / nonBlankValues.length >= 0.75 && longTextCount <= Math.max(1, Math.floor(nonBlankValues.length * 0.15));
   });
 
@@ -2250,8 +2360,8 @@ const getConsumedSourceHeaders = (roles = {}, config = {}, headers = []) => {
   if (config.alternateLayout === 'following_rows' && config.followingRowAlternateColumn) {
     consumed.add(normalizeKey(config.followingRowAlternateColumn));
   }
-  if (config.structure === 'assembly_quantity_matrix') {
-    const matrix = config.assemblyMatrix || detectAssemblyQuantityMatrix(headers, [], roles);
+  if (effectiveStructure(config) === 'assembly_quantity_matrix') {
+    const matrix = detectAssemblyQuantityMatrix(headers, [], roles) || config.assemblyMatrix;
     (matrix?.assemblyColumns || []).forEach((header) => consumed.add(normalizeKey(header)));
     [matrix?.partNumberColumn, matrix?.descriptionColumn, matrix?.findNumberColumn]
       .filter(Boolean)
@@ -2552,7 +2662,9 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
       const manufacturerParts = useManufacturerColumns
         ? splitManufacturerCell(manufacturerValue, partsToEmit.length, config)
         : [];
-      partsToEmit.forEach((mpn, partIndex) => {
+      const partCount = Math.max(partsToEmit.length, manufacturerParts.length || 0);
+      Array.from({ length: partCount }).forEach((_, partIndex) => {
+        const mpn = partsToEmit[partIndex] || partsToEmit[0] || '';
         const manufacturer = manufacturerParts[partIndex] ||
           manufacturerParts[0] ||
           stripCircledNumberMarkers(manufacturerValue);
@@ -2647,7 +2759,7 @@ const normalizeOnePerRow = (rows, roles, config = {}) => rows.map((row, rowIndex
 }).filter((row) => row.mpn || row.manufacturer || row.description);
 
 const normalizeAssemblyQuantityMatrix = (rows, headers, roles, config = {}) => {
-  const matrix = config.assemblyMatrix || detectAssemblyQuantityMatrix(headers, rows, roles);
+  const matrix = detectAssemblyQuantityMatrix(headers, rows, roles) || config.assemblyMatrix;
   if (!matrix?.assemblyColumns?.length) return [];
 
   const output = [];
@@ -2687,6 +2799,178 @@ const normalizeAssemblyQuantityMatrix = (rows, headers, roles, config = {}) => {
     });
   });
 
+  return output;
+};
+
+const rowsLookLikeMultiBlockAssembly = (headers = [], rows = []) => (
+  headers.includes('__multiBlockMode') &&
+  rows.some((row) => row?.__multiBlockMode === '1' && row?.__blockId)
+);
+
+const selectedBomLayout = (config = {}) => (
+  config.bomLayout && config.bomLayout !== 'none' ? config.bomLayout : ''
+);
+
+const effectiveStructure = (config = {}) => selectedBomLayout(config) || config.structure;
+
+const rolesForMultiBlockAssembly = (headers = [], fallbackRoles = emptyRoles) => {
+  if (!headers.includes('__multiBlockMode')) return fallbackRoles;
+  return {
+    ...fallbackRoles,
+    cpn: headers.includes('Reference D/N') ? 'Reference D/N' : fallbackRoles.cpn,
+    mpn: headers.includes('Parts Name') ? 'Parts Name' : fallbackRoles.mpn,
+    manufacturer: headers.includes('Parts Maker') ? 'Parts Maker' : fallbackRoles.manufacturer,
+    description: headers.includes('Description') ? 'Description' : fallbackRoles.description,
+    quantity: headers.includes('Quantity') ? 'Quantity' : fallbackRoles.quantity,
+    parent: headers.includes('BOM block') ? 'BOM block' : fallbackRoles.parent,
+  };
+};
+
+const multiplyQuantities = (parentQuantity, childQuantity) => {
+  const parent = fmt(parentQuantity);
+  const child = fmt(childQuantity);
+  const parse = (value) => {
+    const normalized = value.replace(',', '.');
+    return /^-?\d+(?:\.\d+)?$/.test(normalized) ? Number(normalized) : null;
+  };
+  const parentNumber = parse(parent);
+  const childNumber = parse(child);
+  if (parentNumber === null || childNumber === null) return child || parent;
+  const result = parentNumber * childNumber;
+  return Number.isInteger(result) ? String(result) : String(Number(result.toFixed(6)));
+};
+
+const buildMultiBlockAssemblyIndex = (rows = []) => {
+  const blocks = new Map();
+  rows.forEach((row) => {
+    const blockId = row.__blockId;
+    if (!blockId) return;
+    if (!blocks.has(blockId)) {
+      blocks.set(blockId, {
+        id: blockId,
+        title: row.__blockTitle || row['BOM block'] || blockId,
+        name: row.__blockName || row['BOM block'] || row.__blockTitle || blockId,
+        codes: fmt(row.__blockCodes).split('|').map(fmt).filter(Boolean),
+        rows: [],
+      });
+    }
+    blocks.get(blockId).rows.push(row);
+  });
+
+  const blocksByCode = new Map();
+  blocks.forEach((block) => {
+    block.codes.forEach((code) => {
+      const key = normalizeKey(code);
+      if (!key) return;
+      if (!blocksByCode.has(key)) blocksByCode.set(key, []);
+      blocksByCode.get(key).push(block);
+    });
+  });
+
+  const references = new Map();
+  const findLinkedBlock = (row, currentBlockId = '') => {
+    const rowCodes = extractAssemblyCodes([
+      row['Reference D/N'],
+      row.Description,
+      row['Parts Name'],
+      row.Remarks,
+    ].join(' '));
+    const candidates = [];
+    rowCodes.forEach((code) => {
+      (blocksByCode.get(normalizeKey(code)) || []).forEach((block) => {
+        if (block.id !== currentBlockId && !candidates.includes(block)) candidates.push(block);
+      });
+    });
+    if (!candidates.length) return null;
+    const descriptionKey = normalizeKey(row.Description);
+    const best = candidates.find((block) => {
+      const nameKey = normalizeKey(block.name);
+      return nameKey && descriptionKey && (descriptionKey.includes(nameKey) || nameKey.includes(descriptionKey));
+    });
+    return best || candidates[0];
+  };
+
+  blocks.forEach((block) => {
+    block.rows.forEach((row) => {
+      const linked = findLinkedBlock(row, block.id);
+      if (linked) references.set(linked.id, true);
+    });
+  });
+
+  const rootBlocks = [...blocks.values()].filter((block) => !references.has(block.id));
+  return {
+    blocks,
+    rootBlocks: rootBlocks.length ? rootBlocks : [...blocks.values()].slice(0, 1),
+    findLinkedBlock,
+  };
+};
+
+const normalizeMultiBlockAssembly = (rows, roles, config = {}) => {
+  const index = buildMultiBlockAssemblyIndex(rows);
+  const output = [];
+  const emittedSubtreeKeys = new Set();
+
+  const emitMaterialRow = (row, block, level, parentName, quantityOverride = '') => {
+    const sourceRow = row.__sourceRow || '';
+    const rawMpn = getCell(row, roles.mpn) || row['Parts Name'];
+    const rawManufacturer = getCell(row, roles.manufacturer) || row['Parts Maker'];
+    const mpns = splitMpnCell(rawMpn, config);
+    const manufacturers = splitManufacturerCell(rawManufacturer, mpns.length || null, config);
+    const partsToEmit = mpns.length ? mpns : [''];
+    const cpn = getCell(row, roles.cpn) || row['Reference D/N'];
+    const description = getCell(row, roles.description) || row.Description;
+    const quantity = quantityOverride || getCell(row, roles.quantity) || row.Quantity;
+    const parentKey = `${block.id}::${row['Quantity variant'] || ''}::${cpn || description || sourceRow}`;
+
+    partsToEmit.forEach((mpn, partIndex) => {
+      output.push(withSourceColumns({
+        sourceRow,
+        parentKey,
+        parent: parentName,
+        relation: partIndex === 0 ? 'Primary' : `Alternate ${partIndex}`,
+        level: String(level),
+        cpn,
+        description,
+        mpn: stripVendorPrefix(mpn),
+        manufacturer: manufacturers[partIndex] || manufacturers[0] || rawManufacturer,
+        quantity,
+        uom: getCell(row, roles.uom),
+        rule: 'multi_block_assembly',
+        confidence: Math.min(confidenceForRow(mpn, manufacturers[partIndex] || rawManufacturer, 'multi_block_assembly') + 15, 98),
+        discardedText: [
+          row['Part number'] ? `Ref designator: ${row['Part number']}` : '',
+          row['Quantity variant'] ? `Variant: ${row['Quantity variant']}` : '',
+        ].filter(Boolean).join(' | '),
+      }, row, config));
+    });
+  };
+
+  const visitBlock = (block, level, parentName, inheritedQuantity = '', path = []) => {
+    if (!block || path.includes(block.id)) return;
+    const nextPath = [...path, block.id];
+    block.rows.forEach((row) => {
+      const cpn = getCell(row, roles.cpn) || row['Reference D/N'];
+      const description = getCell(row, roles.description) || row.Description;
+      const rawQuantity = getCell(row, roles.quantity) || row.Quantity;
+      if (!cpn && !description && !getCell(row, roles.mpn) && !getCell(row, roles.manufacturer)) return;
+      const quantity = inheritedQuantity
+        ? multiplyQuantities(inheritedQuantity, rawQuantity)
+        : rawQuantity;
+      const linkedBlock = index.findLinkedBlock(row, block.id);
+
+      emitMaterialRow(row, block, level, parentName || block.name, quantity);
+
+      if (linkedBlock) {
+        const subtreeKey = `${block.id}::${row.__sourceRow}::${row['Quantity variant'] || ''}::${linkedBlock.id}`;
+        if (!emittedSubtreeKeys.has(subtreeKey)) {
+          emittedSubtreeKeys.add(subtreeKey);
+          visitBlock(linkedBlock, level + 1, description || cpn || linkedBlock.name, quantity, nextPath);
+        }
+      }
+    });
+  };
+
+  index.rootBlocks.forEach((block) => visitBlock(block, 1, block.name));
   return output;
 };
 
@@ -2905,8 +3189,9 @@ const normalizeGroupedRows = (rows, roles, config) => {
 };
 
 const normalizeRows = (rows, headers, roles, config) => {
-  const assemblyMatrix = config.structure === 'assembly_quantity_matrix'
-    ? (config.assemblyMatrix || detectAssemblyQuantityMatrix(headers, rows, roles))
+  const layoutStructure = effectiveStructure(config);
+  const assemblyMatrix = layoutStructure === 'assembly_quantity_matrix'
+    ? (detectAssemblyQuantityMatrix(headers, rows, roles) || config.assemblyMatrix)
     : config.assemblyMatrix;
   const configWithSourceHeaders = {
     ...config,
@@ -2914,8 +3199,11 @@ const normalizeRows = (rows, headers, roles, config) => {
     sourceHeaders: headers,
     consumedSourceHeaders: getConsumedSourceHeaders(roles, { ...config, assemblyMatrix }, headers),
   };
-  if (config.structure === 'assembly_quantity_matrix') {
+  if (layoutStructure === 'assembly_quantity_matrix') {
     return normalizeAssemblyQuantityMatrix(rows, headers, roles, configWithSourceHeaders);
+  }
+  if (layoutStructure === 'multi_block_assembly') {
+    return normalizeMultiBlockAssembly(rows, roles, configWithSourceHeaders);
   }
   if (config.alternateLayout === 'following_rows') return normalizeFollowingRows(rows, roles, configWithSourceHeaders);
   // Every structure option describes how MPN/MFR pairs are laid out. With
@@ -2938,7 +3226,8 @@ const normalizeRows = (rows, headers, roles, config) => {
 };
 
 const normalizeRowsChunked = async (rows, headers, roles, config, onProgress) => {
-  if (config.structure === 'grouped_rows') {
+  const layoutStructure = effectiveStructure(config);
+  if (config.structure === 'grouped_rows' || layoutStructure === 'multi_block_assembly') {
     const dataRows = [];
     let skippedRows = 0;
     rows.forEach((row) => {
@@ -3011,6 +3300,7 @@ const analyzeMpnManufacturerPairing = (rows, headers, roles, config) => {
     const mpns = mpnParts.length
       ? mpnParts
       : [stripVendorPrefix(mpnValue)].filter(Boolean);
+    if (!mpns.length) return { mpns: [], manufacturers: [] };
     const manufacturers = splitManufacturerCell(manufacturerValue, mpns.length || null, config).filter(Boolean);
     return { mpns, manufacturers };
   };
@@ -3041,10 +3331,14 @@ const analyzeMpnManufacturerPairing = (rows, headers, roles, config) => {
       mpns.push(...primaryParts.mpns);
       manufacturers.push(...primaryParts.manufacturers);
       alternateGroups.forEach((group) => {
+        const groupMpnIsPrimary = normalizeKey(group.mpn) === normalizeKey(roles.mpn);
+        const groupMfrIsPrimary = group.mfr && normalizeKey(group.mfr) === normalizeKey(roles.manufacturer);
+        if (groupMpnIsPrimary || (groupMfrIsPrimary && !getCell(row, group.mpn))) return;
         const part = collectPairingParts(
           getCell(row, group.mpn),
           getCell(row, group.mfr) || (config.manufacturerMode === 'inherit_blank' ? primaryManufacturer : '')
         );
+        if (!part.mpns.length) return;
         mpns.push(...part.mpns);
         manufacturers.push(...part.manufacturers);
       });
@@ -3100,7 +3394,11 @@ const splitManualManufacturers = (value) => (
 
 const applyPairingReviewDecisions = (rows, reviewRows) => {
   if (!reviewRows.length) return rows;
-  const decisions = reviewRows.filter((issue) => issue.action !== 'keep');
+  const decisions = reviewRows.filter((issue) => (
+    issue.action !== 'keep' ||
+    (issue.mpns?.length === 1 && issue.manufacturers?.length > 1) ||
+    (issue.manufacturers?.length === 1 && issue.mpns?.length > 1)
+  ));
   if (!decisions.length) return rows;
 
   let nextRows = rows.map((row) => ({ ...row }));
@@ -3125,7 +3423,7 @@ const applyPairingReviewDecisions = (rows, reviewRows) => {
       : [];
     const firstManufacturer = issue.manufacturers[0] || manualValues[0] || '';
 
-    if (issue.action === 'manual' || issue.action === 'remove_extra') {
+    if (issue.action === 'keep' || issue.action === 'manual' || issue.action === 'remove_extra') {
       const affectedRows = nextRows.filter((row) => rowBelongsToIssue(row) && mpnKeys.includes(normalizeKey(row.mpn)));
       if (!affectedRows.length) return;
       const templateRow = affectedRows[0];
@@ -3134,12 +3432,21 @@ const applyPairingReviewDecisions = (rows, reviewRows) => {
         .filter((decision) => decision.keep !== false)
         .map((decision) => decision.manufacturer)
         .filter(Boolean);
-      decisionRows.forEach((decision, index) => {
+      const rowsToEmit = issue.action === 'keep'
+        ? Array.from({ length: Math.max(issue.mpns.length, keptManufacturers.length || issue.manufacturers.length || 1) }).map((_, index) => ({
+            mpn: issue.mpns[index] || issue.mpns[0] || '',
+            manufacturer: issue.manufacturers[index] || issue.manufacturers[0] || '',
+            keep: true,
+          }))
+        : decisionRows;
+      rowsToEmit.forEach((decision, index) => {
         if (issue.action === 'remove_extra' && decision.keep === false) return;
         const relationIndex = replacementRows.length;
         const manualValue = manualValues[index] || '';
         const manufacturer = issue.action === 'manual'
           ? (manualValue || decision.manufacturer || manualValues[0] || '')
+          : issue.action === 'keep'
+            ? (decision.manufacturer || keptManufacturers[relationIndex] || keptManufacturers[0] || firstManufacturer || '')
           : (keptManufacturers[relationIndex] || keptManufacturers[0] || firstManufacturer || decision.manufacturer || '');
         replacementRows.push({
           ...templateRow,
@@ -3222,22 +3529,124 @@ const arrayBufferToBinaryString = (buffer) => {
   return binary;
 };
 
+const getWorkbookFileText = (workbook, path) => {
+  const file = workbook?.files?.[path] || workbook?.files?.[`/${path}`];
+  const content = file?.content ?? file;
+  if (typeof content === 'string') return content;
+  if (content instanceof Uint8Array) {
+    return new TextDecoder('utf-8').decode(content);
+  }
+  if (Array.isArray(content)) {
+    return new TextDecoder('utf-8').decode(new Uint8Array(content));
+  }
+  return '';
+};
+
+const parseXmlAttributes = (raw = '') => {
+  const attrs = {};
+  String(raw).replace(/([\w:.-]+)\s*=\s*"([^"]*)"/g, (_, key, value) => {
+    attrs[key] = value;
+    return '';
+  });
+  return attrs;
+};
+
+const normalizeWorkbookTargetPath = (target = '') => {
+  const cleanTarget = fmt(target).replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!cleanTarget) return '';
+  return cleanTarget.startsWith('xl/') ? cleanTarget : `xl/${cleanTarget}`;
+};
+
+const parseStrikeStyleIndexes = (stylesXml = '') => {
+  if (!stylesXml) return new Set();
+  const strikeFontIds = new Set();
+  const fontsMatch = stylesXml.match(/<fonts\b[^>]*>([\s\S]*?)<\/fonts>/i);
+  const fontsXml = fontsMatch?.[1] || '';
+  const fontMatches = [...fontsXml.matchAll(/<font\b[^>]*>[\s\S]*?<\/font>|<font\b[^/]*\/>/gi)];
+  fontMatches.forEach((fontMatch, fontIndex) => {
+    const fontXml = fontMatch[0];
+    const strikeMatch = fontXml.match(/<strike\b([^>]*)\/?>/i);
+    if (!strikeMatch) return;
+    const attrs = parseXmlAttributes(strikeMatch[1] || '');
+    if (!/^(?:0|false)$/i.test(fmt(attrs.val))) strikeFontIds.add(fontIndex);
+  });
+
+  if (!strikeFontIds.size) return new Set();
+  const strikeStyleIndexes = new Set();
+  const cellXfsMatch = stylesXml.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/i);
+  const cellXfsXml = cellXfsMatch?.[1] || '';
+  const xfMatches = [...cellXfsXml.matchAll(/<xf\b([^>]*)\/>|<xf\b([^>]*)>[\s\S]*?<\/xf>/gi)];
+  xfMatches.forEach((xfMatch, xfIndex) => {
+    const attrs = parseXmlAttributes(xfMatch[1] || xfMatch[2] || '');
+    const fontId = Number(attrs.fontId || 0);
+    if (strikeFontIds.has(fontId)) strikeStyleIndexes.add(xfIndex);
+  });
+  return strikeStyleIndexes;
+};
+
+const worksheetPathByName = (workbook) => {
+  const workbookXml = getWorkbookFileText(workbook, 'xl/workbook.xml');
+  const relsXml = getWorkbookFileText(workbook, 'xl/_rels/workbook.xml.rels');
+  if (!workbookXml || !relsXml) return {};
+
+  const targetByRelId = {};
+  [...relsXml.matchAll(/<Relationship\b([^>]*)\/?>/gi)].forEach((match) => {
+    const attrs = parseXmlAttributes(match[1]);
+    if (!attrs.Id || !/\/worksheet$/i.test(attrs.Type || '')) return;
+    targetByRelId[attrs.Id] = normalizeWorkbookTargetPath(attrs.Target);
+  });
+
+  const pathBySheet = {};
+  [...workbookXml.matchAll(/<sheet\b([^>]*)\/?>/gi)].forEach((match) => {
+    const attrs = parseXmlAttributes(match[1]);
+    const sheetName = attrs.name;
+    const relId = attrs['r:id'];
+    if (!sheetName || !relId || !targetByRelId[relId]) return;
+    pathBySheet[sheetName] = targetByRelId[relId];
+  });
+  return pathBySheet;
+};
+
+const attachWorkbookStrikeMetadata = (workbook) => {
+  const strikeStyleIndexes = parseStrikeStyleIndexes(getWorkbookFileText(workbook, 'xl/styles.xml'));
+  if (!strikeStyleIndexes.size) return workbook;
+  const paths = worksheetPathByName(workbook);
+
+  Object.entries(paths).forEach(([sheetName, path]) => {
+    const worksheet = workbook?.Sheets?.[sheetName];
+    const worksheetXml = getWorkbookFileText(workbook, path);
+    if (!worksheet || !worksheetXml) return;
+    [...worksheetXml.matchAll(/<c\b([^>]*)>/gi)].forEach((match) => {
+      const attrs = parseXmlAttributes(match[1]);
+      if (!attrs.r || !strikeStyleIndexes.has(Number(attrs.s || 0))) return;
+      const cell = worksheet[attrs.r];
+      if (!cell) return;
+      cell.__styleInfo = {
+        ...(cell.__styleInfo || {}),
+        strike: true,
+      };
+    });
+  });
+
+  return workbook;
+};
+
 const readWorkbookSafely = (buffer, fileName = 'workbook') => {
   if (!XLSX || !XLSX.read || !XLSX.utils) {
     throw new Error('Spreadsheet parser is not ready. Please refresh the page and try uploading again.');
   }
 
   const attempts = [
-    () => XLSX.read(buffer, { type: 'array', cellDates: true, raw: false, cellStyles: true, WTF: false }),
-    () => XLSX.read(new Uint8Array(buffer), { type: 'array', cellDates: true, raw: false, cellStyles: true, WTF: false }),
-    () => XLSX.read(arrayBufferToBinaryString(buffer), { type: 'binary', cellDates: true, raw: false, cellStyles: true, WTF: false }),
+    () => XLSX.read(buffer, { type: 'array', cellDates: true, raw: false, cellStyles: true, bookFiles: true, WTF: false }),
+    () => XLSX.read(new Uint8Array(buffer), { type: 'array', cellDates: true, raw: false, cellStyles: true, bookFiles: true, WTF: false }),
+    () => XLSX.read(arrayBufferToBinaryString(buffer), { type: 'binary', cellDates: true, raw: false, cellStyles: true, bookFiles: true, WTF: false }),
   ];
   let lastError = null;
 
   for (const attempt of attempts) {
     try {
       const workbook = attempt();
-      if (workbook?.SheetNames?.length) return workbook;
+      if (workbook?.SheetNames?.length) return attachWorkbookStrikeMetadata(workbook);
     } catch (err) {
       lastError = err;
     }
@@ -3370,34 +3779,66 @@ const workbookLooksColumnCollapsed = (rows) => {
   return multiCellRows < Math.max(3, body.length * 0.15);
 };
 
+const decodeDelimitedTextBuffer = (buffer) => {
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length >= 2) {
+    if (bytes[0] === 0xff && bytes[1] === 0xfe) {
+      return new TextDecoder('utf-16le').decode(buffer);
+    }
+    if (bytes[0] === 0xfe && bytes[1] === 0xff) {
+      return new TextDecoder('utf-16be').decode(buffer);
+    }
+  }
+
+  const sampleLength = Math.min(bytes.length, 2000);
+  let evenNulls = 0;
+  let oddNulls = 0;
+  for (let index = 0; index < sampleLength; index += 1) {
+    if (bytes[index] !== 0) continue;
+    if (index % 2 === 0) evenNulls += 1;
+    else oddNulls += 1;
+  }
+  const nullThreshold = Math.max(8, sampleLength * 0.1);
+  if (oddNulls > nullThreshold && oddNulls > evenNulls * 3) {
+    return new TextDecoder('utf-16le').decode(buffer);
+  }
+  if (evenNulls > nullThreshold && evenNulls > oddNulls * 3) {
+    return new TextDecoder('utf-16be').decode(buffer);
+  }
+
+  const utf8 = new TextDecoder('utf-8').decode(buffer);
+  // A replacement char means the bytes were not UTF-8. These files are usually
+  // latin-1, and decoding them as UTF-8 mangles accented characters.
+  return /�/.test(utf8)
+    ? new TextDecoder('iso-8859-1').decode(buffer)
+    : utf8;
+};
+
 const readCsvWorkbookSafely = async (file) => {
   if (!XLSX || !XLSX.read || !XLSX.utils) {
     throw new Error('Spreadsheet parser is not ready. Please refresh the page and try uploading again.');
   }
 
   const buffer = await file.arrayBuffer();
-  const utf8 = new TextDecoder('utf-8').decode(buffer);
-  // A replacement char means the bytes were not UTF-8. These files are usually
-  // latin-1, and decoding them as UTF-8 mangles accented characters.
-  const text = /�/.test(utf8)
-    ? new TextDecoder('iso-8859-1').decode(buffer)
-    : utf8;
+  const text = decodeDelimitedTextBuffer(buffer);
 
   const attempts = [
-    () => XLSX.read(text, { type: 'string', raw: false, codepage: 65001 }),
-    () => {
-      const rows = text
-        .split(/\r?\n/)
-        .map((line) => splitDelimitedLine(line, ','));
-      return workbookFromRows(rows);
-    },
-    // Non-comma separators, with wrapped rows stitched back together.
+    // Delimiter-sniffed parsing comes first because many client files are named
+    // .csv but are actually UTF-16 tab-separated exports. SheetJS can accept
+    // those as generic text while still leaving formatting artifacts in values.
     () => {
       const delimiter = detectDelimiter(text);
       const lines = text.split(/\r?\n/).filter((line) => line.trim());
       const rows = rejoinWrappedLines(lines, delimiter)
         .map((line) => splitDelimitedLine(line, delimiter));
       if (rows.length < 2 || rows[0].length < 2) return null;
+      return workbookFromRows(rows);
+    },
+    () => XLSX.read(text, { type: 'string', raw: false, codepage: 65001 }),
+    () => {
+      const rows = text
+        .split(/\r?\n/)
+        .map((line) => splitDelimitedLine(line, ','));
       return workbookFromRows(rows);
     },
   ];
@@ -3459,7 +3900,6 @@ const rebalanceRelations = (rows) => {
 };
 
 const detectBestStructure = (headers, roles, sampleRows) => {
-  if (detectAssemblyQuantityMatrix(headers, sampleRows, roles)) return 'assembly_quantity_matrix';
   if (detectFollowingRowMfgPartsLayout(headers, sampleRows, roles)) return 'grouped_rows';
   if (roles.mpn && roles.manufacturer && roles.mpn === roles.manufacturer) return 'same_cell';
   const groupedSignals = sampleRows.reduce((score, row, index) => {
@@ -3546,10 +3986,23 @@ const nextConfigForDetectedStructure = (previousConfig, detectedStructure, detec
   if (detectedStructure === 'assembly_quantity_matrix') {
     return {
       ...previousConfig,
-      structure: 'assembly_quantity_matrix',
+      structure: previousConfig.structure || 'separate_cells',
+      bomLayout: 'assembly_quantity_matrix',
       alternateLayout: 'already_separate_rows',
       quantityMode: 'every_row',
       assemblyMatrix: assemblyMatrix || previousConfig.assemblyMatrix,
+    };
+  }
+
+  if (detectedStructure === 'multi_block_assembly') {
+    return {
+      ...previousConfig,
+      structure: previousConfig.structure || 'separate_cells',
+      bomLayout: 'multi_block_assembly',
+      alternateLayout: 'inside_selected_mpn_columns',
+      quantityMode: 'every_row',
+      delimiterMode: 'auto',
+      manufacturerMode: 'inherit_blank',
     };
   }
 
@@ -3591,23 +4044,23 @@ const getStructureOptionsForRoles = (roles, config = {}) => {
     config.followingRowAlternateColumn === roles.mpn;
 
   if (sameColumnFollowingBlock) {
-    return STRUCTURE_OPTIONS.filter((option) => ['grouped_rows', 'same_cell', 'assembly_quantity_matrix'].includes(option.value));
+    return STRUCTURE_OPTIONS.filter((option) => ['grouped_rows', 'same_cell'].includes(option.value));
   }
 
   if (roles.mpn && roles.manufacturer && roles.mpn === roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => ['same_cell', 'assembly_quantity_matrix'].includes(option.value));
+    return STRUCTURE_OPTIONS.filter((option) => ['same_cell'].includes(option.value));
   }
 
   if (roles.mpn && !roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => ['mpn_only_same_cell', 'mpn_only_rows', 'grouped_rows', 'assembly_quantity_matrix'].includes(option.value));
+    return STRUCTURE_OPTIONS.filter((option) => ['mpn_only_same_cell', 'mpn_only_rows', 'grouped_rows'].includes(option.value));
   }
 
   if (!roles.mpn && roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => ['mfr_only_same_cell', 'mfr_only_rows', 'grouped_rows', 'assembly_quantity_matrix'].includes(option.value));
+    return STRUCTURE_OPTIONS.filter((option) => ['mfr_only_same_cell', 'mfr_only_rows', 'grouped_rows'].includes(option.value));
   }
 
   if (roles.mpn && roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => ['separate_cells', 'same_cell', 'one_per_row', 'grouped_rows', 'assembly_quantity_matrix'].includes(option.value));
+    return STRUCTURE_OPTIONS.filter((option) => ['separate_cells', 'same_cell', 'one_per_row', 'grouped_rows'].includes(option.value));
   }
 
   return STRUCTURE_OPTIONS;
@@ -3632,6 +4085,238 @@ const findStrongMpnHeader = (headers = []) => {
 
 const isGenericPartHeader = (header) => /^part( number| no)?$/.test(normalizeKey(header));
 
+const MULTI_BLOCK_META_HEADERS = [
+  'Source sheet',
+  'BOM block',
+  'Block codes',
+  'Quantity variant',
+  'Item',
+  'Reference D/N',
+  'Description',
+  'Specification',
+  'Other specification:HKK Request',
+  'Part number',
+  'Parts Maker',
+  'Parts Name',
+  'Quantity',
+  'Remarks',
+  '__multiBlockMode',
+  '__blockId',
+  '__blockTitle',
+  '__blockCodes',
+  '__blockName',
+  '__quantityColumn',
+];
+
+const isMultiBlockMetaHeader = (header = '') => MULTI_BLOCK_META_HEADERS.includes(header);
+
+const extractAssemblyCodes = (value) => {
+  const text = fmt(value).toUpperCase().replace(/\u00a0/g, ' ');
+  const matches = text.match(/\b[A-Z]{1,4}\d{4,}[A-Z]?\b/g) || [];
+  return [...new Set(matches.filter((code) => !/^C?X{4,}[A-Z]?$/.test(code)))];
+};
+
+const extractBlockName = (title = '') => {
+  const text = fmt(title).replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  return text
+    .replace(/\s*\((?:DWG|DRAWING)\s*:.*$/i, '')
+    .replace(/\s*\bDWG\s*:.*$/i, '')
+    .trim();
+};
+
+const rowTextFromArray = (row = []) => row
+  .map(fmt)
+  .filter(Boolean)
+  .join(' ')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const rowLooksLikeMultiBlockHeader = (row = []) => {
+  const normalizedCells = row.map((cell) => normalizeKey(cell));
+  const rowText = normalizedCells.join(' ');
+  const hasItem = normalizedCells.some((cell) => cell === 'item' || cell === 'item no');
+  const hasReference = rowText.includes('reference') || rowText.includes('ref d n') || rowText.includes('ref dn');
+  const hasDescription = rowText.includes('description') || rowText.includes('desc');
+  const hasMfr = rowText.includes('parts maker') || rowText.includes('part maker') || rowText.includes('manufacturer') || rowText.includes('mfr');
+  const hasMpn = rowText.includes('parts name') || rowText.includes('part name') || rowText.includes('mpn');
+  return hasItem && hasReference && hasDescription && (hasMfr || hasMpn);
+};
+
+const findMultiBlockHeaderRows = (rows = []) => rows
+  .map((row, index) => (rowLooksLikeMultiBlockHeader(row) ? index : -1))
+  .filter((index) => index >= 0);
+
+const findPreviousBlockTitle = (rows = [], headerIndex = 0) => {
+  for (let index = headerIndex - 1; index >= Math.max(0, headerIndex - 4); index -= 1) {
+    const text = rowTextFromArray(rows[index]);
+    if (!text) continue;
+    if (/\b(?:dwg|drawing|assy|ass'?y|assembly|qty)\b/i.test(text) || extractAssemblyCodes(text).length) {
+      return { text, rowIndex: index };
+    }
+  }
+  return { text: '', rowIndex: Math.max(0, headerIndex - 1) };
+};
+
+const findHeaderColumn = (headerRow = [], patterns = []) => {
+  const index = headerRow.findIndex((header) => {
+    const key = normalizeKey(header);
+    return patterns.some((pattern) => pattern.test(key));
+  });
+  return index >= 0 ? index : -1;
+};
+
+const getBlockColumnMap = (headerRow = []) => {
+  const item = findHeaderColumn(headerRow, [/^item(?:\s+no)?$/]);
+  const reference = findHeaderColumn(headerRow, [/reference/, /\bref\s*d\s*n\b/, /\bref\s*dn\b/]);
+  const description = findHeaderColumn(headerRow, [/description/, /^desc$/]);
+  const specification = findHeaderColumn(headerRow, [/^specification$/, /^spec$/]);
+  const otherSpecification = findHeaderColumn(headerRow, [/other\s+specification/, /hkk\s+request/]);
+  const partNumber = findHeaderColumn(headerRow, [/^part\s*(number|no)?$/]);
+  const manufacturer = findHeaderColumn(headerRow, [/parts?\s+maker/, /manufacturer/, /\bmfr\b/]);
+  const mpn = findHeaderColumn(headerRow, [/parts?\s+name/, /\bmpn\b/, /manufacturer\s+part/]);
+  const remarks = findHeaderColumn(headerRow, [/remarks?/, /^note?s?$/, /comment/]);
+  const firstQuantityIndex = Math.max(manufacturer, mpn, partNumber, otherSpecification, specification, description, reference, item) + 1;
+  const quantityColumns = headerRow
+    .map((header, index) => ({ header: fmt(header), index }))
+    .filter(({ header, index }) => {
+      if (!header || index < firstQuantityIndex) return false;
+      if (index === remarks) return false;
+      if (/^(?:remarks?|new\s+parts?|note?s?|comment)$/i.test(header.trim())) return false;
+      return true;
+    });
+  return {
+    item,
+    reference,
+    description,
+    specification,
+    otherSpecification,
+    partNumber,
+    manufacturer,
+    mpn,
+    remarks,
+    quantityColumns,
+  };
+};
+
+const cellAtIndex = (row = [], index = -1) => (index >= 0 ? fmt(row[index]) : '');
+
+const buildMultiBlockRowsForSheet = (currentWorkbook, currentSheetName) => {
+  const worksheet = currentWorkbook.Sheets[currentSheetName];
+  const rows = worksheetToCompactRows(worksheet);
+  const headerRows = findMultiBlockHeaderRows(rows);
+  if (!headerRows.length) return { rows, blocks: [], dataRows: [] };
+
+  const blocks = [];
+  const dataRows = [];
+  headerRows.forEach((headerIndex, blockIndex) => {
+    const headerRow = rows[headerIndex] || [];
+    const columnMap = getBlockColumnMap(headerRow);
+    if (columnMap.reference < 0 || columnMap.description < 0) return;
+    const titleInfo = findPreviousBlockTitle(rows, headerIndex);
+    const nextHeaderIndex = headerRows[blockIndex + 1];
+    const endIndex = Number.isFinite(nextHeaderIndex) ? Math.max(headerIndex + 1, nextHeaderIndex - 2) : rows.length - 1;
+    const title = titleInfo.text || `${currentSheetName} block ${blockIndex + 1}`;
+    const quantityHeaderText = columnMap.quantityColumns.map((column) => column.header).join(' ');
+    const blockCodes = [...new Set([
+      ...extractAssemblyCodes(currentSheetName),
+      ...extractAssemblyCodes(title),
+      ...extractAssemblyCodes(quantityHeaderText),
+    ])];
+    const blockId = `${currentSheetName}::${headerIndex + 1}::${blockIndex + 1}`;
+    const block = {
+      id: blockId,
+      sheetName: currentSheetName,
+      title,
+      name: extractBlockName(title) || currentSheetName,
+      codes: blockCodes,
+      headerRow: headerIndex + 1,
+      startRow: headerIndex + 2,
+      endRow: endIndex + 1,
+    };
+    blocks.push(block);
+
+    for (let rowIndex = headerIndex + 1; rowIndex <= endIndex; rowIndex += 1) {
+      const row = rows[rowIndex] || [];
+      if (!row.some((cell) => fmt(cell))) continue;
+      if (rowLooksLikeMultiBlockHeader(row)) continue;
+
+      const baseValues = {
+        'Source sheet': currentSheetName,
+        'BOM block': block.name,
+        'Block codes': block.codes.join(', '),
+        Item: cellAtIndex(row, columnMap.item),
+        'Reference D/N': cellAtIndex(row, columnMap.reference),
+        Description: cellAtIndex(row, columnMap.description),
+        Specification: cellAtIndex(row, columnMap.specification),
+        'Other specification:HKK Request': cellAtIndex(row, columnMap.otherSpecification),
+        'Part number': cellAtIndex(row, columnMap.partNumber),
+        'Parts Maker': cellAtIndex(row, columnMap.manufacturer),
+        'Parts Name': cellAtIndex(row, columnMap.mpn),
+        Remarks: cellAtIndex(row, columnMap.remarks),
+        __multiBlockMode: '1',
+        __blockId: block.id,
+        __blockTitle: block.title,
+        __blockCodes: block.codes.join('|'),
+        __blockName: block.name,
+      };
+
+      const quantityColumns = columnMap.quantityColumns.length
+        ? columnMap.quantityColumns
+        : [{ header: 'Quantity', index: -1 }];
+      quantityColumns.forEach((quantityColumn) => {
+        const quantityValue = quantityColumn.index >= 0 ? cellAtIndex(row, quantityColumn.index) : '';
+        if (quantityColumn.index >= 0 && !isMatrixQuantityPresent(quantityValue)) return;
+        dataRows.push({
+          ...baseValues,
+          'Quantity variant': quantityColumn.header,
+          Quantity: quantityColumn.index >= 0 ? normalizeAssemblyMatrixQuantity(quantityValue).quantity : '',
+          __quantityColumn: quantityColumn.header,
+          __sourceRow: rowIndex + 1,
+        });
+      });
+    }
+  });
+
+  return { rows, blocks, dataRows };
+};
+
+const prepareMultiBlockSheets = (currentWorkbook, sheetNames) => {
+  const allBlocks = [];
+  const allRows = [];
+  const previewRows = [];
+
+  sheetNames.forEach((currentSheetName) => {
+    const prepared = buildMultiBlockRowsForSheet(currentWorkbook, currentSheetName);
+    if (prepared.blocks.length) {
+      allBlocks.push(...prepared.blocks);
+      allRows.push(...prepared.dataRows);
+    }
+    if (!previewRows.length && prepared.rows.length) previewRows.push(...prepared.rows);
+  });
+
+  if (!allBlocks.length || !allRows.length) return null;
+
+  const headers = MULTI_BLOCK_META_HEADERS.filter((header) => (
+    !header.startsWith('__') || allRows.some((row) => row[header])
+  ));
+  const visiblePreviewHeaders = headers.filter((header) => !header.startsWith('__'));
+  return {
+    sheetRows: [
+      visiblePreviewHeaders,
+      ...allRows.slice(0, 12).map((row) => visiblePreviewHeaders.map((header) => row[header] || '')),
+    ],
+    headerRowIndex: 0,
+    headers,
+    dataRows: allRows,
+    multiBlockSummary: {
+      blockCount: allBlocks.length,
+      sheetCount: new Set(allBlocks.map((block) => block.sheetName)).size,
+      blocks: allBlocks,
+    },
+  };
+};
+
 const prepareSingleSheet = (currentWorkbook, currentSheetName, options = {}) => {
   const worksheet = currentWorkbook.Sheets[currentSheetName];
   const rows = worksheetToCompactRows(worksheet);
@@ -3640,7 +4325,7 @@ const prepareSingleSheet = (currentWorkbook, currentSheetName, options = {}) => 
   const headerIndex = Number.isFinite(requestedHeaderIndex) && requestedHeaderIndex > 0
     ? requestedHeaderIndex - 1
     : detectHeaderRow(rawRowsForHeaderDetection);
-  const columns = getUsableColumnDescriptors(rows, headerIndex);
+  const columns = getUsableColumnDescriptors(rawRowsForHeaderDetection, headerIndex);
   const currentHeaders = columns.map((column) => column.header);
   const dataSheetRows = rows.slice(headerIndex + 1).filter((row) => row.some((cell) => fmt(cell)));
   const hasOutlineLevels = dataSheetRows.some((row) => Number(row.__rowMeta?.outlineLevel || 0) > 1);
@@ -3675,6 +4360,11 @@ const prepareSingleSheet = (currentWorkbook, currentSheetName, options = {}) => 
 };
 
 const prepareMultipleSheets = (currentWorkbook, sheetNames) => {
+  const multiBlockPrepared = prepareMultiBlockSheets(currentWorkbook, sheetNames);
+  if (multiBlockPrepared?.multiBlockSummary?.blockCount > 1) {
+    return multiBlockPrepared;
+  }
+
   const unionHeaders = ['Source sheet'];
   const combinedRows = [];
 
@@ -3732,6 +4422,74 @@ const joinOcrFragments = (values = []) => values
   .replace(/\s+([,.;:])/g, '$1')
   .replace(/\s+/g, ' ')
   .trim();
+
+const isLikelyPdfGeneratedHeader = (header) => {
+  const text = fmt(header);
+  return !text || /^column(?:[_\s]*\d+|\.\d+)?$/i.test(text) || /^\d{1,3}$/.test(text);
+};
+
+const scorePdfHeaderRowCandidate = (row = []) => {
+  const cells = row.map(fmt);
+  const nonBlank = cells.filter(Boolean);
+  if (nonBlank.length < 3) return 0;
+
+  const structuralHits = cells.filter((cell) => (
+    isAssemblyMatrixFindHeader(cell) ||
+    isAssemblyMatrixPartHeader(cell) ||
+    isAssemblyMatrixDescriptionHeader(cell)
+  )).length;
+  const assemblyHits = cells.filter((cell) => isAssemblyMatrixHeaderCandidate(canonicalAssemblyMatrixHeader(cell))).length;
+  const labelHits = nonBlank.filter((cell) => /[A-Za-z]/.test(cell)).length;
+  const quantityHits = nonBlank.filter(isMatrixQuantityLikeValue).length;
+  const longTextHits = nonBlank.filter((cell) => cell.length > 40).length;
+
+  if (structuralHits < 2 || assemblyHits < 1) return 0;
+
+  return (
+    structuralHits * 35 +
+    assemblyHits * 18 +
+    labelHits * 6 -
+    quantityHits * 8 -
+    longTextHits * 15
+  );
+};
+
+const promotePdfHeaderRowFromData = (headers = [], rawRows = []) => {
+  const sourceHeaders = headers.map(fmt);
+  if (!Array.isArray(rawRows) || rawRows.length < 2) {
+    return { headers: sourceHeaders, rows: rawRows };
+  }
+
+  const rowArrays = rawRows.map((row) => (
+    Array.isArray(row)
+      ? row.map(fmt)
+      : sourceHeaders.map((header) => fmt(row?.[header]))
+  ));
+  const currentHeaderLooksWeak = sourceHeaders.length
+    ? sourceHeaders.filter(isLikelyPdfGeneratedHeader).length / sourceHeaders.length >= 0.6
+    : true;
+  const currentHeaderScore = scorePdfHeaderRowCandidate(sourceHeaders);
+
+  let best = { index: -1, score: 0 };
+  rowArrays.slice(0, 80).forEach((row, index) => {
+    const score = scorePdfHeaderRowCandidate(row);
+    if (score > best.score) best = { index, score };
+  });
+
+  if (best.index < 0 || best.score < 80) {
+    return { headers: sourceHeaders, rows: rawRows };
+  }
+  if (!currentHeaderLooksWeak && currentHeaderScore >= best.score * 0.8) {
+    return { headers: sourceHeaders, rows: rawRows };
+  }
+
+  const promotedHeaders = makeUniqueHeaders(rowArrays[best.index]);
+  const promotedRows = rowArrays.filter((_, index) => index !== best.index);
+  return {
+    headers: promotedHeaders,
+    rows: promotedRows,
+  };
+};
 
 const repairAssemblyMatrixPdfExtraction = (headers = [], rawRows = []) => {
   const sourceHeaders = headers.map(fmt);
@@ -3826,7 +4584,8 @@ const getFileType = (fileName = '') => {
 
 const normalizePdfRows = (payload, sourceFile) => {
   const rawRows = Array.isArray(payload?.data) ? payload.data : [];
-  const repaired = repairAssemblyMatrixPdfExtraction(payload?.headers || [], rawRows);
+  const promoted = promotePdfHeaderRowFromData(payload?.headers || [], rawRows);
+  const repaired = repairAssemblyMatrixPdfExtraction(promoted.headers || [], promoted.rows || rawRows);
   const pdfHeaders = makeUniqueHeaders(repaired.headers || []);
   const repairedRows = Array.isArray(repaired.rows) ? repaired.rows : rawRows;
   const decision = payload?.decision;
@@ -4216,7 +4975,7 @@ const SourcePreview = ({ headers, rows, getHeaderLabel = (header) => header, ass
     text: themeTokens.text?.primary || (isDarkMode ? '#f8fafc' : '#0f172a'),
     border: themeTokens.table?.line || (isDarkMode ? 'rgba(255,255,255,0.08)' : '#e1e6ec'),
   };
-  const previewHeaders = headers || [];
+  const previewHeaders = (headers || []).filter((header) => !fmt(header).startsWith('__'));
   return (
     <TableContainer
       sx={{
@@ -4781,6 +5540,181 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
   );
 };
 
+// Fold one Parse Fields result onto a sheet: the parsed columns land on the
+// rows the edit was scoped to, and a pattern-scoped edit also yields the manual
+// MPN/MFR override that replaces the auto-detected parse for those rows.
+//
+// Pure and sequential so several staged edits can be replayed in order at
+// normalization time, rather than each one mutating the sheet as it is made.
+const applyParserResultToSheet = ({ result, scope, headers, sourceRows, headerRowIndex }) => {
+  const parserHeaders = Array.isArray(result?.new_headers) ? result.new_headers : [];
+  const parserData = Array.isArray(result?.new_data) ? result.new_data : [];
+  if (!parserHeaders.length || !parserData.length) return null;
+
+  const nextHeaders = [...headers];
+  const parserHeaderMap = parserHeaders.map((header) => {
+    if (nextHeaders.includes(header)) return header;
+    const safeHeader = uniqueHeaderName(header, nextHeaders);
+    nextHeaders.push(safeHeader);
+    return safeHeader;
+  });
+
+  const scopedSourceRows = scope?.mode === 'pattern' && Array.isArray(scope.sourceRows)
+    ? scope.sourceRows
+    : null;
+  const scopedDataBySourceRow = scopedSourceRows
+    ? new Map(scopedSourceRows.map((sourceRow, scopedIndex) => [sourceRow, parserData[scopedIndex] || []]))
+    : null;
+
+  const nextRows = sourceRows.map((source, index) => {
+    const nextRow = {
+      ...source,
+      __sourceRow: source.__sourceRow || index + headerRowIndex + 2,
+    };
+    const parserRow = scopedDataBySourceRow
+      ? scopedDataBySourceRow.get(nextRow.__sourceRow)
+      : (parserData[index] || []);
+    // Rows outside this pattern keep whatever an earlier edit gave them.
+    if (scopedDataBySourceRow && !scopedDataBySourceRow.has(nextRow.__sourceRow)) return nextRow;
+    parserHeaderMap.forEach((header, columnIndex) => {
+      nextRow[header] = Array.isArray(parserRow)
+        ? (parserRow[columnIndex] ?? '')
+        : (parserRow?.[parserHeaders[columnIndex]] ?? '');
+    });
+    return nextRow;
+  });
+
+  const sourceHeader = scope?.sourceHeader || '';
+  const patternShape = scope?.patternShape || '';
+  let override = null;
+
+  if (scopedSourceRows && sourceHeader && patternShape) {
+    const findParserIndex = (aliases) => parserHeaders.findIndex((header) => (
+      aliases.some((alias) => normalizeKey(header) === normalizeKey(alias))
+    ));
+    const mpnIndex = findParserIndex(['MPN', 'Mfr Part Number', 'Manufacturer Part Number', 'Part Number']);
+    const mfrIndex = findParserIndex(['MFR', 'Manufacturer', 'Manufacturer Name']);
+    const extraIndex = findParserIndex(['Extra', 'Discard', 'Discarded Text', 'Ignore']);
+
+    const rowsBySourceRow = {};
+    scopedSourceRows.forEach((sourceRow, scopedIndex) => {
+      const parserRow = parserData[scopedIndex] || [];
+      const valueAt = (columnIndex) => {
+        if (columnIndex < 0) return '';
+        return Array.isArray(parserRow)
+          ? (parserRow[columnIndex] ?? '')
+          : (parserRow?.[parserHeaders[columnIndex]] ?? '');
+      };
+      // Every configured output, split back into one value per entry, so a
+      // packed cell's 2nd entry can fill the 2nd normalized row. MPN/MFR/Extra
+      // are excluded: the pair list above already owns those.
+      const fields = {};
+      parserHeaders.forEach((header, columnIndex) => {
+        if (columnIndex === mpnIndex || columnIndex === mfrIndex || columnIndex === extraIndex) return;
+        const values = splitParserJoinedValues(valueAt(columnIndex));
+        if (values.length) fields[header] = values;
+      });
+
+      rowsBySourceRow[sourceRow] = {
+        pairs: buildManualPairList(valueAt(mpnIndex), valueAt(mfrIndex), valueAt(extraIndex)),
+        fields,
+      };
+    });
+
+    const configuredOutputs = (result?.parser_preview?.items || [])
+      .map((item) => String(item?.label || '').split(':')[0])
+      .filter(Boolean);
+    const configuredOutputSummary = configuredOutputs.length
+      ? [...new Set(configuredOutputs)].join(' / ')
+      : 'manual parser outputs';
+
+    override = {
+      sourceHeader,
+      patternShape,
+      rows: rowsBySourceRow,
+      displayExample: result?.parser_preview || null,
+      rules: [
+        'Manual parser override applied.',
+        `Configured outputs: ${configuredOutputSummary}.`,
+      ],
+      summary: configuredOutputSummary,
+    };
+  }
+
+  return {
+    nextHeaders,
+    nextRows,
+    override,
+    scopedCount: scopedSourceRows?.length || 0,
+  };
+};
+
+// Parser target column -> the normalized output field it fills. Anything not
+// listed here keeps its own name and simply becomes an extra output column,
+// which getNormalizedExportColumns already picks up.
+const NORMALIZED_FIELD_BY_PARSER_TARGET = {
+  cpn: 'cpn',
+  description: 'description',
+  quantity: 'quantity',
+  uom: 'uom',
+  'item code': 'Item code',
+};
+
+// Fields the normalizer owns outright. MPN/MFR/discarded text reach the output
+// through the pair list, which also drives alternates, vendor-prefix stripping
+// and manufacturer inheritance - overwriting them here would undo all of that.
+const PARSER_PROTECTED_NORMALIZED_FIELDS = new Set([
+  'mpn', 'manufacturer', 'discardedText',
+  'sourceRow', 'parentKey', 'parent', 'relation', 'level', 'rule', 'confidence',
+]);
+
+// Write the parsed values onto the rows normalization produced. A source row
+// expands into one output row per entry, in order, so entry N fills output N -
+// that is what makes "the MPN column shows the parsed MPN" true for alternates
+// as well as the primary.
+const applyPatternOutputsToNormalizedRows = (rows, overrides = []) => {
+  const fieldsBySourceRow = new Map();
+  overrides.forEach((override) => {
+    Object.entries(override?.rows || {}).forEach(([sourceRow, entry]) => {
+      if (entry?.fields && Object.keys(entry.fields).length) {
+        fieldsBySourceRow.set(String(sourceRow), entry.fields);
+      }
+    });
+  });
+  if (!fieldsBySourceRow.size) return rows;
+
+  const positionBySourceRow = new Map();
+  return rows.map((row) => {
+    const key = String(row?.sourceRow ?? '');
+    const fields = fieldsBySourceRow.get(key);
+    if (!fields) return row;
+
+    const position = positionBySourceRow.get(key) || 0;
+    positionBySourceRow.set(key, position + 1);
+
+    const next = { ...row };
+    Object.entries(fields).forEach(([column, values]) => {
+      const target = NORMALIZED_FIELD_BY_PARSER_TARGET[normalizeKey(column)] || column;
+      if (PARSER_PROTECTED_NORMALIZED_FIELDS.has(target)) return;
+      // Fall back to the first entry so a single-valued output (one item code
+      // for the whole cell) still reaches every row it belongs to.
+      const value = fmt(values[position] ?? values[0] ?? '');
+      if (value) next[target] = value;
+    });
+    return next;
+  });
+};
+
+// Replace any edit already staged for the same pattern — re-editing a shape
+// supersedes the previous attempt rather than stacking on it.
+const withStagedPatternEdit = (staged, edit) => ([
+  ...staged.filter((entry) => !(
+    normalizeKey(entry.sourceHeader) === normalizeKey(edit.sourceHeader) &&
+    entry.patternShape === edit.patternShape
+  )),
+  edit,
+]);
+
 const BomNormalizer = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -4831,6 +5765,7 @@ const BomNormalizer = () => {
   const [roles, setRoles] = useState(emptyRoles);
   const [config, setConfig] = useState({
     structure: 'separate_cells',
+    bomLayout: 'none',
     alternateLayout: 'inside_selected_mpn_columns',
     delimiterMode: 'auto',
     customDelimiter: '',
@@ -4909,6 +5844,11 @@ const BomNormalizer = () => {
   const [configureParserTitle, setConfigureParserTitle] = useState('Split into Columns');
   const [configureParserScope, setConfigureParserScope] = useState(null);
   const [patternParserOverrides, setPatternParserOverrides] = useState([]);
+  // Parse Fields edits wait here until Run normalization. Applying them the
+  // moment Apply is clicked rewrote the sheet before the user had walked the
+  // remaining patterns, which made a review step that changes nothing on its own
+  // into an edit that already happened.
+  const [stagedPatternEdits, setStagedPatternEdits] = useState([]);
   const [patternApplyNotice, setPatternApplyNotice] = useState('');
   const [roleColumnLabelModes, setRoleColumnLabelModes] = useState({});
   const [combineItems, setCombineItems] = useState([]);
@@ -4965,6 +5905,10 @@ const BomNormalizer = () => {
     () => preparedHeaders.length ? preparedHeaders : makeUniqueHeaders(sheetRows[headerRowIndex] || []),
     [preparedHeaders, sheetRows, headerRowIndex]
   );
+  const visibleSourceHeaders = useMemo(
+    () => headers.filter((header) => !fmt(header).startsWith('__')),
+    [headers]
+  );
 
   const sourceDataRows = useMemo(() => (
     preparedDataRows.length ? preparedDataRows : rowsToObjects(sheetRows.slice(headerRowIndex + 1), headers, headerRowIndex + 2)
@@ -4996,17 +5940,61 @@ const BomNormalizer = () => {
     Boolean(sourceEndRow) && Number(row?.__sourceRow || 0) > Number(sourceEndRow)
   ), [sourceEndRow]);
 
+  // Staged edits read as already-applied everywhere the app only LOOKS at the
+  // parse — the review dialog's example, the pattern rules, the source preview.
+  // Committing them to the sheet is still deferred to Run normalization; this
+  // just stops the review step from describing the parse the edit replaced.
+  const previewPatternOverrides = useMemo(() => {
+    if (!stagedPatternEdits.length) return patternParserOverrides;
+    let merged = patternParserOverrides;
+    stagedPatternEdits.forEach((edit) => {
+      if (!edit.override) return;
+      merged = [
+        ...merged.filter((override) => !(
+          normalizeKey(override.sourceHeader) === normalizeKey(edit.override.sourceHeader) &&
+          override.patternShape === edit.override.patternShape
+        )),
+        edit.override,
+      ];
+    });
+    return merged;
+  }, [patternParserOverrides, stagedPatternEdits]);
+
   const normalizerConfig = useMemo(() => ({
     ...config,
-    patternParserOverrides,
-  }), [config, patternParserOverrides]);
+    patternParserOverrides: previewPatternOverrides,
+  }), [config, previewPatternOverrides]);
 
   const sourcePreviewAssemblyMatrix = useMemo(() => {
     if (!headers.length || !dataRows.length) return null;
-    return normalizerConfig.structure === 'assembly_quantity_matrix'
-      ? (normalizerConfig.assemblyMatrix || detectAssemblyQuantityMatrix(headers, dataRows, roles))
-      : detectAssemblyQuantityMatrix(headers, dataRows, roles);
-  }, [dataRows, headers, normalizerConfig.assemblyMatrix, normalizerConfig.structure, roles]);
+    return effectiveStructure(normalizerConfig) === 'assembly_quantity_matrix'
+      ? (detectAssemblyQuantityMatrix(headers, dataRows, roles) || normalizerConfig.assemblyMatrix)
+      : null;
+  }, [dataRows, headers, normalizerConfig.assemblyMatrix, normalizerConfig.bomLayout, normalizerConfig.structure, roles]);
+
+  const multiBlockSummary = useMemo(() => {
+    if (!rowsLookLikeMultiBlockAssembly(headers, dataRows)) return null;
+    const blockMap = new Map();
+    dataRows.forEach((row) => {
+      if (!row.__blockId) return;
+      if (!blockMap.has(row.__blockId)) {
+        blockMap.set(row.__blockId, {
+          id: row.__blockId,
+          sheet: row['Source sheet'] || '',
+          title: row.__blockTitle || row['BOM block'] || '',
+          name: row.__blockName || row['BOM block'] || '',
+          rowCount: 0,
+        });
+      }
+      blockMap.get(row.__blockId).rowCount += 1;
+    });
+    const blocks = [...blockMap.values()];
+    return {
+      blockCount: blocks.length,
+      sheetCount: new Set(blocks.map((block) => block.sheet).filter(Boolean)).size,
+      blocks,
+    };
+  }, [dataRows, headers]);
 
   useEffect(() => {
     setSourceGridPage(0);
@@ -5040,10 +6028,31 @@ const BomNormalizer = () => {
     () => QTY_OPTIONS.find((option) => option.value === config.quantityMode),
     [config.quantityMode]
   );
+  const selectedBomLayoutOption = useMemo(
+    () => BOM_LAYOUT_OPTIONS.find((option) => option.value === (config.bomLayout || 'none')),
+    [config.bomLayout]
+  );
+  const activeBomLayout = selectedBomLayout(config);
+  const bomLayoutActive = Boolean(activeBomLayout);
 
   const parserLogicRules = useMemo(() => {
     const sourceHeader = roles.mpn || roles.manufacturer || 'selected source column';
     const rules = [];
+    const layout = selectedBomLayout(config);
+
+    if (layout === 'assembly_quantity_matrix') {
+      rules.push('1. Expand assembly quantity columns into BOM rows');
+      rules.push('2. Use non-empty quantity cells to decide which assembly variant contains each item');
+      rules.push('3. Keep selected MPN/MFR parser rules for part details where available');
+      return rules;
+    }
+
+    if (layout === 'multi_block_assembly') {
+      rules.push('1. Detect BOM tables from repeated header rows across selected sheets');
+      rules.push('2. Link child assemblies by matching part codes between rows and block titles');
+      rules.push('3. Parse Parts Name and Parts Maker as MPN/MFR values');
+      return rules;
+    }
 
     if (normalizeKey(sourceHeader) === 'approved manufacturer') {
       rules.push('1. Read Approved Manufacturer as packed MPN/MFR text');
@@ -5063,10 +6072,21 @@ const BomNormalizer = () => {
 
     rules.push('3. Remove status notes from MFR names, keep only clean MPN/MFR output');
     return rules;
-  }, [config.alternateLayout, config.followingRowAlternateColumn, config.structure, roles.manufacturer, roles.mpn]);
+  }, [config, roles.manufacturer, roles.mpn]);
 
   const detectedParsingLogic = useMemo(() => {
     const rowSourceNumber = (row, index) => row?.__sourceRow || index + headerRowIndex + 2;
+    const activeLayout = selectedBomLayout(config);
+
+    if (activeLayout) {
+      return {
+        isLayoutDriven: true,
+        sourceHeader: '',
+        sections: [],
+        matchingRows: 0,
+        rules: parserLogicRules,
+      };
+    }
 
     const buildSourceSection = ({
       id,
@@ -5233,7 +6253,7 @@ const BomNormalizer = () => {
         'Apply the matching pattern per row, then send clean MPN/MFR values into normalization.',
       ],
     };
-  }, [config, dataRows, headerRowIndex, headers, normalizerConfig, roles.manufacturer, roles.mpn]);
+  }, [config, dataRows, headerRowIndex, headers, normalizerConfig, parserLogicRules, roles.manufacturer, roles.mpn]);
 
   const parsingPatternOptions = useMemo(() => (
     (detectedParsingLogic?.sections || []).flatMap((section) => (
@@ -5263,6 +6283,32 @@ const BomNormalizer = () => {
       pairs: example.pairs || [],
     };
   }, [configureParserScope, parsingPatternOptions, selectedParsingPattern]);
+
+  // Parse Fields shows one entry at a time, so it needs the detected MPN/MFR for
+  // whichever entry is on screen — not just the one example the review dialog carried.
+  const describeParserSample = useCallback((text) => {
+    const source = String(text || '');
+    if (!source) return [];
+    return parsePackedMpnManufacturerPairs(source, normalizerConfig)
+      .filter((pair) => pair?.mpn && pair?.manufacturer)
+      .map((pair) => ({
+        mpn: pair.mpn,
+        manufacturer: pair.manufacturer,
+        discarded: pair.metadata?.discardedText || getDiscardedPackedText(source, pair),
+      }));
+  }, [normalizerConfig]);
+
+  const stagedEditForPattern = useCallback((option) => (
+    stagedPatternEdits.find((edit) => (
+      normalizeKey(edit.sourceHeader) === normalizeKey(option?.section?.sourceHeader) &&
+      edit.patternShape === option?.pattern?.shape
+    )) || null
+  ), [stagedPatternEdits]);
+
+  const selectedPatternStagedEdit = useMemo(
+    () => stagedEditForPattern(selectedParsingPattern),
+    [selectedParsingPattern, stagedEditForPattern]
+  );
 
   const selectedParsingPatternIndex = useMemo(() => {
     if (!selectedParsingPattern) return -1;
@@ -5746,6 +6792,13 @@ const BomNormalizer = () => {
   );
 
   const roleCombinationHint = useMemo(() => {
+    const layout = selectedBomLayout(config);
+    if (layout === 'multi_block_assembly') {
+      return 'Multi-block assembly BOM layout selected. Row expansion is driven by detected BOM blocks and linked assembly codes, not by the MPN/MFR arrangement dropdown.';
+    }
+    if (layout === 'assembly_quantity_matrix') {
+      return 'Assembly quantity matrix layout selected. Row expansion is driven by quantity matrix columns, not by the MPN/MFR arrangement dropdown.';
+    }
     if (
       config.alternateLayout === 'following_rows' &&
       config.followingRowAlternateColumn &&
@@ -5770,7 +6823,7 @@ const BomNormalizer = () => {
       return 'Level column selected. Rows pass through with their level, code, quantity and description.';
     }
     return 'Select at least an MPN or BOM level column to run normalization.';
-  }, [roles.manufacturer, roles.mpn]);
+  }, [config, roles.level, roles.manufacturer, roles.mpn]);
 
   const alternateColumnGroups = useMemo(
     () => cleanAlternateColumnGroups(config.alternateColumnGroups || [], headers),
@@ -5840,16 +6893,23 @@ const BomNormalizer = () => {
     const preferredSheet = options.sheetName && nextWorkbook.SheetNames.includes(options.sheetName)
       ? options.sheetName
       : nextWorkbook.SheetNames[0];
-    const prepared = prepareSingleSheet(nextWorkbook, preferredSheet, { headerRow: options.headerRow });
+    const autoMultiBlock = !options.sheetName && !options.headerRow
+      ? prepareMultiBlockSheets(nextWorkbook, nextWorkbook.SheetNames)
+      : null;
+    const prepared = autoMultiBlock?.multiBlockSummary?.blockCount > 1
+      ? autoMultiBlock
+      : prepareSingleSheet(nextWorkbook, preferredSheet, { headerRow: options.headerRow });
     const nextHeaders = prepared.headers;
-    const nextRoles = inferRoles(nextHeaders, prepared.dataRows, { manufacturerDirectory });
+    const nextRoles = rolesForMultiBlockAssembly(nextHeaders, inferRoles(nextHeaders, prepared.dataRows, { manufacturerDirectory }));
     const nextStructure = detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40));
+    const nextSheetScope = autoMultiBlock?.multiBlockSummary?.blockCount > 1 && nextWorkbook.SheetNames.length > 1 ? 'all' : 'single';
+    const nextSelectedSheets = nextSheetScope === 'all' ? nextWorkbook.SheetNames : [preferredSheet];
 
     setWorkbook(nextWorkbook);
     setFileName(nextFileName);
     setSheetName(preferredSheet);
-    setSheetScope('single');
-    setSelectedSheetNames([preferredSheet]);
+    setSheetScope(nextSheetScope);
+    setSelectedSheetNames(nextSelectedSheets);
     setSheetRows(prepared.sheetRows);
     setHeaderRowIndex(prepared.headerRowIndex);
     setPreparedHeaders(prepared.headers);
@@ -5857,7 +6917,7 @@ const BomNormalizer = () => {
     setPatternParserOverrides([]);
     setSourceEndRow('');
     setRoles(nextRoles);
-    setConfig((prev) => nextConfigForDetectedStructure(prev, nextStructure, {
+    setConfig((prev) => nextConfigForDetectedStructure({ ...prev, bomLayout: 'none' }, nextStructure, {
       headers: nextHeaders,
       rows: prepared.dataRows.slice(0, 120),
       roles: nextRoles,
@@ -6881,6 +7941,7 @@ const BomNormalizer = () => {
       setPreparedHeaders([]);
       setPreparedDataRows([]);
       setPatternParserOverrides([]);
+      setStagedPatternEdits([]);
       setRoles(emptyRoles);
       setNormalizedRows([]);
       setCurrentStep(0);
@@ -6902,7 +7963,7 @@ const BomNormalizer = () => {
     if (!workbook) return;
     const prepared = prepareSingleSheet(workbook, nextSheetName);
     const nextHeaders = prepared.headers;
-    const nextRoles = inferRoles(nextHeaders, prepared.dataRows, { manufacturerDirectory });
+    const nextRoles = rolesForMultiBlockAssembly(nextHeaders, inferRoles(nextHeaders, prepared.dataRows, { manufacturerDirectory }));
 
     setSheetName(nextSheetName);
     setSelectedSheetNames([nextSheetName]);
@@ -6913,7 +7974,7 @@ const BomNormalizer = () => {
     setPatternParserOverrides([]);
     setSourceEndRow('');
     setRoles(nextRoles);
-    setConfig((prev) => nextConfigForDetectedStructure(prev, detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40)), {
+    setConfig((prev) => nextConfigForDetectedStructure({ ...prev, bomLayout: 'none' }, detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40)), {
       headers: nextHeaders,
       rows: prepared.dataRows.slice(0, 120),
       roles: nextRoles,
@@ -6937,7 +7998,7 @@ const BomNormalizer = () => {
     const prepared = scope === 'single'
       ? prepareSingleSheet(workbook, nextNames[0])
       : prepareMultipleSheets(workbook, nextNames);
-    const nextRoles = inferRoles(prepared.headers, prepared.dataRows, { manufacturerDirectory });
+    const nextRoles = rolesForMultiBlockAssembly(prepared.headers, inferRoles(prepared.headers, prepared.dataRows, { manufacturerDirectory }));
 
     setSheetScope(scope);
     setSelectedSheetNames(nextNames);
@@ -6949,7 +8010,7 @@ const BomNormalizer = () => {
     setPatternParserOverrides([]);
     setSourceEndRow('');
     setRoles(nextRoles);
-    setConfig((prev) => nextConfigForDetectedStructure(prev, detectBestStructure(prepared.headers, nextRoles, prepared.dataRows.slice(0, 40)), {
+    setConfig((prev) => nextConfigForDetectedStructure({ ...prev, bomLayout: 'none' }, detectBestStructure(prepared.headers, nextRoles, prepared.dataRows.slice(0, 40)), {
       headers: prepared.headers,
       rows: prepared.dataRows.slice(0, 120),
       roles: nextRoles,
@@ -6983,6 +8044,26 @@ const BomNormalizer = () => {
 
   const handleHeaderRowChange = useCallback((value) => {
     const nextIndex = Math.max(0, Number(value) - 1);
+    const activeSheetName = sheetName || workbook?.SheetNames?.[0] || '';
+    if (workbook && sheetScope === 'single' && activeSheetName) {
+      const prepared = prepareSingleSheet(workbook, activeSheetName, { headerRow: nextIndex + 1 });
+      const nextRoles = inferRoles(prepared.headers, prepared.dataRows, { manufacturerDirectory });
+      setSheetRows(prepared.sheetRows);
+      setHeaderRowIndex(prepared.headerRowIndex);
+      setPreparedHeaders(prepared.headers);
+      setPreparedDataRows(prepared.dataRows);
+      setPatternParserOverrides([]);
+      setSourceEndRow('');
+      setRoles(nextRoles);
+      setNormalizedRows([]);
+      setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
+      setNormalizationSummary(null);
+      setParserTouched(false);
+      setSkipSourceSetupForMerge(false);
+      setConfirmOpen(false);
+      return;
+    }
+
     const columns = getUsableColumnDescriptors(sheetRows, nextIndex);
     const nextHeaders = columns.length
       ? columns.map((column) => column.header)
@@ -7009,7 +8090,7 @@ const BomNormalizer = () => {
     setParserTouched(false);
     setSkipSourceSetupForMerge(false);
     setConfirmOpen(false);
-  }, [manufacturerDirectory, sheetRows]);
+  }, [manufacturerDirectory, sheetName, sheetRows, sheetScope, workbook]);
 
   const handleRoleChange = useCallback((role, header) => {
     setRoles((prev) => ({ ...prev, [role]: header }));
@@ -7253,10 +8334,59 @@ const BomNormalizer = () => {
       setPairingReviewOpen(false);
       return;
     }
+    const reviewedRows = applyPairingReviewDecisions(pendingNormalization.rows, pairingReviewRows);
+    const pairingCheck = {
+      ...(pendingNormalization.pairingCheck || {}),
+      issueRows: pairingReviewRows,
+    };
     setPairingReviewOpen(false);
     setPendingNormalization(null);
-    commitNormalizedResult(pendingNormalization.rows, pendingNormalization.pairingCheck);
-  }, [commitNormalizedResult, pendingNormalization]);
+    commitNormalizedResult(reviewedRows, pairingCheck);
+  }, [commitNormalizedResult, pairingReviewRows, pendingNormalization]);
+
+  const commitStagedPatternEdits = useCallback(() => {
+    const baseRows = sourceDataRows.length ? sourceDataRows : dataRows;
+    if (!stagedPatternEdits.length) {
+      return { headers, rows: baseRows, overrides: patternParserOverrides };
+    }
+
+    let nextHeaders = headers;
+    let nextRows = baseRows;
+    let nextOverrides = patternParserOverrides;
+
+    stagedPatternEdits.forEach((edit) => {
+      const applied = applyParserResultToSheet({
+        result: edit.result,
+        scope: edit.scope,
+        headers: nextHeaders,
+        sourceRows: nextRows,
+        headerRowIndex,
+      });
+      if (!applied) return;
+      nextHeaders = applied.nextHeaders;
+      nextRows = applied.nextRows;
+      if (applied.override) {
+        nextOverrides = [
+          ...nextOverrides.filter((override) => !(
+            normalizeKey(override.sourceHeader) === normalizeKey(applied.override.sourceHeader) &&
+            override.patternShape === applied.override.patternShape
+          )),
+          applied.override,
+        ];
+      }
+    });
+
+    const headerSet = new Set(nextHeaders);
+    setPreparedHeaders(nextHeaders);
+    setPreparedDataRows(nextRows);
+    setPatternParserOverrides(nextOverrides);
+    setStagedPatternEdits([]);
+    setRoles((prev) => Object.fromEntries(
+      Object.entries(prev).map(([key, value]) => [key, headerSet.has(value) ? value : ''])
+    ));
+
+    return { headers: nextHeaders, rows: nextRows, overrides: nextOverrides };
+  }, [dataRows, headerRowIndex, headers, patternParserOverrides, sourceDataRows, stagedPatternEdits]);
 
   const runNormalization = useCallback(async () => {
     if (!dataRows.length) {
@@ -7267,18 +8397,27 @@ const BomNormalizer = () => {
     // all: SAFRAN-style sheets carry internal part codes and keep manufacturers
     // in a separate AVL sheet. Requiring MPN/MFR here blocked every multi-level
     // BOM from being normalized, so nothing downstream was ever reachable.
-    if (!roles.mpn && !roles.manufacturer && !roles.level && normalizerConfig.structure !== 'assembly_quantity_matrix') {
+    const layoutStructure = effectiveStructure(normalizerConfig);
+    if (!roles.mpn && !roles.manufacturer && !roles.level && layoutStructure !== 'assembly_quantity_matrix' && layoutStructure !== 'multi_block_assembly') {
       setError('Select at least an MPN, Manufacturer, or BOM level column before running normalization.');
       return;
     }
+    // Pattern edits are committed here, so a run always reflects every edit the
+    // user staged plus the auto-detected parse for the patterns they left alone.
+    const committed = commitStagedPatternEdits();
+    const runHeaders = committed.headers;
+    const runRows = filterRowsByEndRow(committed.rows, sourceEndRow);
+    const runConfig = { ...normalizerConfig, patternParserOverrides: committed.overrides };
+
     setBusy(true);
-    setProgress({ processed: 0, total: dataRows.length, outputRows: 0, skippedRows: 0 });
+    setProgress({ processed: 0, total: runRows.length, outputRows: 0, skippedRows: 0 });
     await new Promise((resolve) => setTimeout(resolve, 0));
     try {
-      const result = await normalizeRowsChunked(dataRows, headers, roles, normalizerConfig, setProgress);
-      const pairingCheck = normalizerConfig.structure === 'assembly_quantity_matrix'
+      const normalized = await normalizeRowsChunked(runRows, runHeaders, roles, runConfig, setProgress);
+      const result = applyPatternOutputsToNormalizedRows(normalized, committed.overrides);
+      const pairingCheck = layoutStructure === 'assembly_quantity_matrix' || layoutStructure === 'multi_block_assembly'
         ? { checkedRows: 0, matchedRows: 0, issueRows: [] }
-        : analyzeMpnManufacturerPairing(dataRows, headers, roles, normalizerConfig);
+        : analyzeMpnManufacturerPairing(runRows, runHeaders, roles, runConfig);
       if (pairingCheck.issueRows.length) {
         setPendingNormalization({ rows: result, pairingCheck });
         setPairingReviewRows(pairingCheck.issueRows);
@@ -7292,7 +8431,7 @@ const BomNormalizer = () => {
     } finally {
       setBusy(false);
     }
-  }, [commitNormalizedResult, dataRows, headers, normalizerConfig, roles]);
+  }, [commitNormalizedResult, commitStagedPatternEdits, dataRows, headers, normalizerConfig, roles, sourceEndRow]);
 
   const handleNormalize = useCallback(async () => {
     setParsingLogicOpen(true);
@@ -7346,125 +8485,79 @@ const BomNormalizer = () => {
   }, [dataRows, headers]);
 
   const handleApplyConfigureSplitColumns = useCallback((result) => {
-    const parserHeaders = Array.isArray(result?.new_headers) ? result.new_headers : [];
-    const parserData = Array.isArray(result?.new_data) ? result.new_data : [];
-    if (!parserHeaders.length || !parserData.length) {
-      setError('Split into Columns applied, but no parsed data was returned.');
+    const scope = configureParserScope;
+    const closeParser = () => {
+      setConfigureSplitColsOpen(false);
+      setConfigureParserSessionId('');
+      setConfigureParserInitialColumn('');
+      setConfigureParserTitle('Split into Columns');
+      setConfigureParserScope(null);
+      setParserTouched(true);
+    };
+
+    // A pattern edit is staged against its pattern, not written to the sheet.
+    // It replaces the auto-detected parse for those rows when normalization
+    // runs; every pattern the user did not edit still parses normally.
+    if (scope?.mode === 'pattern') {
+      const preview = applyParserResultToSheet({
+        result,
+        scope,
+        headers,
+        sourceRows: sourceDataRows.length ? sourceDataRows : dataRows,
+        headerRowIndex,
+      });
+      if (!preview) {
+        setError('Split into Columns applied, but no parsed data was returned.');
+        return;
+      }
+      setStagedPatternEdits((prev) => withStagedPatternEdit(prev, {
+        patternKey: scope.patternKey || '',
+        sourceHeader: scope.sourceHeader || '',
+        patternShape: scope.patternShape || '',
+        scopedCount: preview.scopedCount,
+        summary: preview.override?.summary || 'manual parser outputs',
+        // Kept so the review dialog can preview the edit without committing it.
+        override: preview.override,
+        result,
+        scope,
+      }));
+      closeParser();
+      if (scope.patternKey) {
+        setSelectedParsingPatternKey(scope.patternKey);
+        setParsingLogicOpen(true);
+      }
+      const message = `Pattern updated for ${preview.scopedCount} row${preview.scopedCount === 1 ? '' : 's'}. It runs when you start normalization.`;
+      setPatternApplyNotice(message);
+      setSuccessMessage(message);
       return;
     }
 
-    const nextHeaders = [...headers];
-    const parserHeaderMap = parserHeaders.map((header) => {
-      if (nextHeaders.includes(header)) return header;
-      const safeHeader = uniqueHeaderName(header, nextHeaders);
-      nextHeaders.push(safeHeader);
-      return safeHeader;
+    // Plain Split into Columns has no pattern to stage against, so it still
+    // writes straight to the sheet.
+    const applied = applyParserResultToSheet({
+      result,
+      scope,
+      headers,
+      sourceRows: sourceDataRows.length ? sourceDataRows : dataRows,
+      headerRowIndex,
     });
-
-    const sourceRows = sourceDataRows.length ? sourceDataRows : dataRows;
-    const scopedSourceRows = configureParserScope?.mode === 'pattern' && Array.isArray(configureParserScope.sourceRows)
-      ? configureParserScope.sourceRows
-      : null;
-    const sourceHeader = configureParserScope?.sourceHeader || '';
-    const patternShape = configureParserScope?.patternShape || '';
-    const patternKey = configureParserScope?.patternKey || '';
-    const scopedDataBySourceRow = scopedSourceRows
-      ? new Map(scopedSourceRows.map((sourceRow, scopedIndex) => [sourceRow, parserData[scopedIndex] || []]))
-      : null;
-    const nextRows = sourceRows.map((source, index) => {
-      const nextRow = {
-        ...source,
-        __sourceRow: source.__sourceRow || index + headerRowIndex + 2,
-      };
-      const parserRow = scopedDataBySourceRow
-        ? scopedDataBySourceRow.get(nextRow.__sourceRow)
-        : (parserData[index] || []);
-      if (scopedDataBySourceRow && !scopedDataBySourceRow.has(nextRow.__sourceRow)) {
-        return nextRow;
-      }
-      parserHeaderMap.forEach((header, columnIndex) => {
-        nextRow[header] = Array.isArray(parserRow)
-          ? (parserRow[columnIndex] ?? '')
-          : (parserRow?.[parserHeaders[columnIndex]] ?? '');
-      });
-      return nextRow;
-    });
-
-    if (scopedSourceRows && sourceHeader && patternShape) {
-      const parserHeaderKey = (header) => normalizeKey(header);
-      const findParserIndex = (aliases) => parserHeaders.findIndex((header) => (
-        aliases.some((alias) => parserHeaderKey(header) === normalizeKey(alias))
-      ));
-      const mpnIndex = findParserIndex(['MPN', 'Mfr Part Number', 'Manufacturer Part Number', 'Part Number']);
-      const mfrIndex = findParserIndex(['MFR', 'Manufacturer', 'Manufacturer Name']);
-      const extraIndex = findParserIndex(['Extra', 'Discard', 'Discarded Text', 'Ignore']);
-
-      const rowsBySourceRow = {};
-      scopedSourceRows.forEach((sourceRow, scopedIndex) => {
-        const parserRow = parserData[scopedIndex] || [];
-        const valueAt = (columnIndex) => {
-          if (columnIndex < 0) return '';
-          return Array.isArray(parserRow)
-            ? (parserRow[columnIndex] ?? '')
-            : (parserRow?.[parserHeaders[columnIndex]] ?? '');
-        };
-        rowsBySourceRow[sourceRow] = {
-          pairs: buildManualPairList(
-            valueAt(mpnIndex),
-            valueAt(mfrIndex),
-            valueAt(extraIndex)
-          ),
-        };
-      });
-
-      const configuredOutputs = (result?.parser_preview?.items || [])
-        .map((item) => String(item?.label || '').split(':')[0])
-        .filter(Boolean);
-      const configuredOutputSummary = configuredOutputs.length
-        ? [...new Set(configuredOutputs)].join(' / ')
-        : 'manual parser outputs';
-
-      setPatternParserOverrides((prev) => [
-        ...prev.filter((override) => !(
-          normalizeKey(override.sourceHeader) === normalizeKey(sourceHeader) &&
-          override.patternShape === patternShape
-        )),
-        {
-          sourceHeader,
-          patternShape,
-          rows: rowsBySourceRow,
-          displayExample: result?.parser_preview || null,
-          rules: [
-            'Manual parser override applied.',
-            `Configured outputs: ${configuredOutputSummary}.`,
-          ],
-        },
-      ]);
+    if (!applied) {
+      setError('Split into Columns applied, but no parsed data was returned.');
+      return;
     }
-
-    const headerSet = new Set(nextHeaders);
-    setPreparedHeaders(nextHeaders);
-    setPreparedDataRows(nextRows);
+    const headerSet = new Set(applied.nextHeaders);
+    setPreparedHeaders(applied.nextHeaders);
+    setPreparedDataRows(applied.nextRows);
     setRoles((prev) => Object.fromEntries(
       Object.entries(prev).map(([key, value]) => [key, headerSet.has(value) ? value : ''])
     ));
-    setConfigureSplitColsOpen(false);
-    setConfigureParserSessionId('');
-    setConfigureParserInitialColumn('');
-    setConfigureParserTitle('Split into Columns');
-    setConfigureParserScope(null);
-    setParserTouched(true);
-    if (patternKey) {
-      setSelectedParsingPatternKey(patternKey);
-      setParsingLogicOpen(true);
-    }
-    const scopedCount = scopedSourceRows?.length || 0;
-    const message = scopedCount
-      ? `Structured split applied to ${scopedCount} row${scopedCount === 1 ? '' : 's'} in the selected pattern.`
-      : `Structured split applied. Added ${result.new_headers_count || 0} columns.`;
-    if (scopedCount) setPatternApplyNotice(message);
-    setSuccessMessage(message);
+    closeParser();
+    setSuccessMessage(`Structured split applied. Added ${result.new_headers_count || 0} columns.`);
   }, [configureParserScope, dataRows, headerRowIndex, headers, sourceDataRows]);
+
+  // Replay every staged pattern edit onto the sheet, in the order they were
+  // made. Returns the committed sheet so normalization can use it immediately
+  // instead of waiting for state to settle.
 
   const handleOpenFactwiseDialog = useCallback(() => {
     setFactwiseConfig((prev) => ({
@@ -7597,7 +8690,7 @@ const BomNormalizer = () => {
 
   useEffect(() => {
     if (!manufacturerDirectory.loaded || currentStep > 2 || !headers.length || !dataRows.length) return;
-    const nextRoles = inferRoles(headers, dataRows, { manufacturerDirectory });
+    const nextRoles = rolesForMultiBlockAssembly(headers, inferRoles(headers, dataRows, { manufacturerDirectory }));
     setRoles((prev) => {
       const updates = {};
       const shouldReplaceManufacturer = !prev.manufacturer ||
@@ -7645,6 +8738,7 @@ const BomNormalizer = () => {
     setRoles(emptyRoles);
     setConfig({
       structure: 'separate_cells',
+      bomLayout: 'none',
       alternateLayout: 'inside_selected_mpn_columns',
       delimiterMode: 'auto',
       customDelimiter: '',
@@ -7738,6 +8832,7 @@ const BomNormalizer = () => {
     setRoles(emptyRoles);
     setConfig({
       structure: 'separate_cells',
+      bomLayout: 'none',
       alternateLayout: 'inside_selected_mpn_columns',
       delimiterMode: 'auto',
       customDelimiter: '',
@@ -8514,6 +9609,13 @@ const BomNormalizer = () => {
                     This workbook has {workbook.SheetNames.length} sheets. Choose one sheet, selected sheets, or all sheets before continuing.
                   </Alert>
                 )}
+                {multiBlockSummary && (
+                  <Alert severity="success" sx={{ mt: 1.5 }}>
+                    Detected {multiBlockSummary.blockCount} linked BOM table{multiBlockSummary.blockCount === 1 ? '' : 's'}
+                    {multiBlockSummary.sheetCount ? ` across ${multiBlockSummary.sheetCount} sheet${multiBlockSummary.sheetCount === 1 ? '' : 's'}` : ''}.
+                    The normalizer will connect same-sheet and cross-sheet assembly blocks by matching part codes.
+                  </Alert>
+                )}
                 <Grid container spacing={1.5} sx={{ mt: 1 }}>
                   <Grid item xs={12} md={6}>
                     <FormControl fullWidth size="small">
@@ -8605,11 +9707,12 @@ const BomNormalizer = () => {
                   </Grid>
                 </Grid>
                 <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 1.5 }}>
-                  <Chip size="small" label={`${headers.length} columns`} />
+                  <Chip size="small" label={`${visibleSourceHeaders.length} columns`} />
                   <Chip
                     size="small"
                     label={sourceEndRow ? `${dataRows.length} included / ${sourceDataRows.length} detected rows` : `${dataRows.length} data rows`}
                   />
+                  {multiBlockSummary && <Chip size="small" color="success" variant="outlined" label={`${multiBlockSummary.blockCount} BOM tables`} />}
                   {sourceEndRow && <Chip size="small" color="info" variant="outlined" label={`Using rows through ${sourceEndRow}`} />}
                   {sourceLimitActive && <Chip size="small" color="warning" variant="outlined" label={`${sourceRowsExcludedByLimit} rows excluded`} />}
                   <Chip size="small" label={sheetScope === 'single' ? `Header row ${headerRowIndex + 1}` : `${selectedSheetNames.length} sheets merged`} />
@@ -8657,15 +9760,23 @@ const BomNormalizer = () => {
                   </Box>
                 </Stack>
                 <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 1.2 }}>
-                  <Chip size="small" label={`${headers.length} columns`} />
+                  <Chip size="small" label={`${visibleSourceHeaders.length} columns`} />
                   <Chip
                     size="small"
                     label={sourceEndRow ? `${dataRows.length} included / ${sourceDataRows.length} detected rows` : `${dataRows.length} data rows`}
                   />
+                  {multiBlockSummary && <Chip size="small" color="success" variant="outlined" label={`${multiBlockSummary.blockCount} linked BOM tables`} />}
                   {sourceEndRow && <Chip size="small" color="info" variant="outlined" label={`Using rows through ${sourceEndRow}`} />}
                   {sourceLimitActive && <Chip size="small" color="warning" variant="outlined" label={`${sourceRowsExcludedByLimit} rows excluded`} />}
                   <Chip size="small" label={sheetScope === 'single' ? `Header row ${headerRowIndex + 1}` : `${selectedSheetNames.length} sheets merged`} />
                 </Stack>
+                {multiBlockSummary && (
+                  <Alert severity="info" sx={{ mt: 1.25 }}>
+                    {config.bomLayout === 'multi_block_assembly'
+                      ? 'Multi-block assembly layout is selected. Column mapping is applied to the grouped headers, while each detected table keeps its own source row and sheet context.'
+                      : 'Linked BOM tables were detected. Select Multi-block assembly BOM in BOM layout if this workbook should be expanded through those links.'}
+                  </Alert>
+                )}
                 <Box sx={{ mt: 2 }}>
                   <Typography sx={{ fontWeight: 800 }}>Source preview</Typography>
                   <SourcePreview headers={headers} rows={dataRows.slice(0, 8)} getHeaderLabel={getPreviewHeaderLabel} assemblyMatrix={sourcePreviewAssemblyMatrix} />
@@ -8684,7 +9795,7 @@ const BomNormalizer = () => {
                             onChange={(event) => handleRoleChange(field.key, event.target.value)}
                           >
                             <MenuItem value="">None</MenuItem>
-                            {headers.map((header, columnIndex) => {
+                            {visibleSourceHeaders.map((header, columnIndex) => {
                               const isSelected = selectedHeader === header;
                               const columnName = getSourceColumnName(header, columnIndex);
                               const showColumnLabel = Boolean(roleColumnLabelModes[field.key] && columnName);
@@ -8763,6 +9874,7 @@ const BomNormalizer = () => {
                       <FormControl fullWidth size="small">
                         <InputLabel>Where are MPN and MFR?</InputLabel>
                         <Select
+                          disabled={bomLayoutActive}
                           value={config.structure}
                           label="Where are MPN and MFR?"
                           onChange={(event) => {
@@ -8802,6 +9914,7 @@ const BomNormalizer = () => {
                       <FormControl fullWidth size="small">
                         <InputLabel>Where are alternates?</InputLabel>
                         <Select
+                          disabled={bomLayoutActive}
                           value={config.alternateLayout}
                           label="Where are alternates?"
                           onChange={(event) => {
@@ -8825,7 +9938,7 @@ const BomNormalizer = () => {
                         </Select>
                       </FormControl>
                     </Grid>
-                    {config.alternateLayout === 'following_rows' && (
+                    {config.alternateLayout === 'following_rows' && !bomLayoutActive && (
                       <Grid item xs={12} md={3}>
                         <FormControl fullWidth size="small">
                           <InputLabel>Following-row alternate column</InputLabel>
@@ -8841,7 +9954,7 @@ const BomNormalizer = () => {
                             }}
                           >
                             <MenuItem value="">Select column</MenuItem>
-                            {headers.map((header) => (
+                            {visibleSourceHeaders.map((header) => (
                               <MenuItem key={header} value={header}>{header}</MenuItem>
                             ))}
                           </Select>
@@ -8852,6 +9965,7 @@ const BomNormalizer = () => {
                       <FormControl fullWidth size="small">
                         <InputLabel>Quantity/UOM handling</InputLabel>
                         <Select
+                          disabled={bomLayoutActive}
                           value={config.quantityMode}
                           label="Quantity/UOM handling"
                           onChange={(event) => setConfig((prev) => ({ ...prev, quantityMode: event.target.value }))}
@@ -8862,11 +9976,39 @@ const BomNormalizer = () => {
                         </Select>
                       </FormControl>
                     </Grid>
+                    <Grid item xs={12} md={3}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel>BOM layout</InputLabel>
+                        <Select
+                          value={config.bomLayout || 'none'}
+                          label="BOM layout"
+                          onChange={(event) => {
+                            const nextLayout = event.target.value;
+                            setParserTouched(true);
+                            setConfig((prev) => ({
+                              ...prev,
+                              bomLayout: nextLayout,
+                              assemblyMatrix: nextLayout === 'assembly_quantity_matrix'
+                                ? detectAssemblyQuantityMatrix(headers, dataRows, roles)
+                                : prev.assemblyMatrix,
+                              quantityMode: ['assembly_quantity_matrix', 'multi_block_assembly'].includes(nextLayout)
+                                ? 'every_row'
+                                : prev.quantityMode,
+                            }));
+                          }}
+                        >
+                          {BOM_LAYOUT_OPTIONS.map((option) => (
+                            <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    </Grid>
                     {showManufacturerInheritanceOption && (
                       <Grid item xs={12} md={3}>
                         <FormControl fullWidth size="small">
                           <InputLabel>Alternate manufacturer</InputLabel>
                           <Select
+                            disabled={bomLayoutActive}
                             value={config.manufacturerMode || 'inherit_blank'}
                             label="Alternate manufacturer"
                             onChange={(event) => setConfig((prev) => ({ ...prev, manufacturerMode: event.target.value }))}
@@ -8889,7 +10031,7 @@ const BomNormalizer = () => {
                         />
                       </Grid>
                     )}
-                    {config.structure === 'grouped_rows' && (
+                    {config.structure === 'grouped_rows' && !bomLayoutActive && (
                       <Grid item xs={12} md={3}>
                         <FormControl fullWidth size="small">
                           <InputLabel>Group header handling</InputLabel>
@@ -8906,7 +10048,12 @@ const BomNormalizer = () => {
                       </Grid>
                     )}
                   </Grid>
-                  {config.alternateLayout === 'separate_columns' && config.structure !== 'grouped_rows' && (
+                  {bomLayoutActive && (
+                    <Alert severity="info" sx={{ mt: 1.25 }}>
+                      BOM layout is controlling row expansion. MPN/MFR arrangement, alternate layout, and quantity handling are locked because changing them would not affect this layout.
+                    </Alert>
+                  )}
+                  {config.alternateLayout === 'separate_columns' && config.structure !== 'grouped_rows' && !bomLayoutActive && (
                     <Paper elevation={0} sx={{ mt: 1.5, p: 1.25, border: '1px solid #e1e6ec', bgcolor: '#fff' }}>
                       <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'flex-start', sm: 'center' }} justifyContent="space-between" gap={1}>
                         <Box>
@@ -8934,7 +10081,7 @@ const BomNormalizer = () => {
                                     onChange={(event) => updateAlternateColumnGroup(groupIndex, 'mpn', event.target.value)}
                                   >
                                     <MenuItem value="">None</MenuItem>
-                                    {headers.map((header) => (
+                                    {visibleSourceHeaders.map((header) => (
                                       <MenuItem key={header} value={header}>{header}</MenuItem>
                                     ))}
                                   </Select>
@@ -8950,7 +10097,7 @@ const BomNormalizer = () => {
                                       onChange={(event) => updateAlternateColumnGroup(groupIndex, 'mfr', event.target.value)}
                                     >
                                       <MenuItem value="">None</MenuItem>
-                                      {headers.map((header) => (
+                                      {visibleSourceHeaders.map((header) => (
                                         <MenuItem key={header} value={header}>{header}</MenuItem>
                                       ))}
                                     </Select>
@@ -8966,7 +10113,7 @@ const BomNormalizer = () => {
                                     onChange={(event) => updateAlternateColumnGroup(groupIndex, 'qty', event.target.value)}
                                   >
                                     <MenuItem value="">Use primary</MenuItem>
-                                    {headers.map((header) => (
+                                    {visibleSourceHeaders.map((header) => (
                                       <MenuItem key={header} value={header}>{header}</MenuItem>
                                     ))}
                                   </Select>
@@ -8981,7 +10128,7 @@ const BomNormalizer = () => {
                                     onChange={(event) => updateAlternateColumnGroup(groupIndex, 'uom', event.target.value)}
                                   >
                                     <MenuItem value="">Use primary</MenuItem>
-                                    {headers.map((header) => (
+                                    {visibleSourceHeaders.map((header) => (
                                       <MenuItem key={header} value={header}>{header}</MenuItem>
                                     ))}
                                   </Select>
@@ -9011,18 +10158,18 @@ const BomNormalizer = () => {
                     </Paper>
                   )}
                   <Typography sx={{ mt: 1, fontSize: 13, color: '#536171', lineHeight: 1.45 }}>
-                    <strong>Detected rule:</strong> {selectedStructureOption?.description || '-'}
-                    {selectedAlternateOption?.description ? ` ${selectedAlternateOption.description}` : ''}
-                    {config.structure === 'grouped_rows' && selectedGroupHeaderOption ? ` ${selectedGroupHeaderOption.description}` : ''}
+                    <strong>Detected rule:</strong> {bomLayoutActive ? selectedBomLayoutOption?.description : selectedStructureOption?.description || '-'}
+                    {!bomLayoutActive && selectedAlternateOption?.description ? ` ${selectedAlternateOption.description}` : ''}
+                    {!bomLayoutActive && config.structure === 'grouped_rows' && selectedGroupHeaderOption ? ` ${selectedGroupHeaderOption.description}` : ''}
                     {' '}<strong>Delimiter:</strong> {delimiterLabel}.
                     {' '}Blank BOM levels will be treated as level 1.
                   </Typography>
-                  {config.alternateLayout === 'same_group_rows' && !roles.parent && (
+                  {config.alternateLayout === 'same_group_rows' && !roles.parent && !bomLayoutActive && (
                     <Alert severity="info" sx={{ mt: 1 }}>
                       Select a Parent / group key such as Ref Designator for best results. Without it, grouping falls back to description, quantity, UOM, and level.
                     </Alert>
                   )}
-                  {config.alternateLayout === 'following_rows' && !config.followingRowAlternateColumn && (
+                  {config.alternateLayout === 'following_rows' && !config.followingRowAlternateColumn && !bomLayoutActive && (
                     <Alert severity="warning" sx={{ mt: 1 }}>
                       Select the column where alternate values appear in the rows below the main BOM line.
                     </Alert>
@@ -9288,7 +10435,7 @@ const BomNormalizer = () => {
                       Status
                     </TableCell>
                   )}
-                  {headers.map((header) => (
+                  {visibleSourceHeaders.map((header) => (
                     <TableCell
                       key={header}
                       sx={{
@@ -9334,7 +10481,7 @@ const BomNormalizer = () => {
                           />
                         </TableCell>
                       )}
-                      {headers.map((header) => (
+                      {visibleSourceHeaders.map((header) => (
                         <TableCell
                           key={header}
                           sx={{
@@ -10207,21 +11354,73 @@ const BomNormalizer = () => {
               {patternApplyNotice}
             </Alert>
           )}
-          <Stack direction="row" gap={0.8} flexWrap="wrap" sx={{ mb: 2 }}>
-            <Chip size="small" variant="outlined" label={`${detectedParsingLogic?.sections?.length || 0} source${detectedParsingLogic?.sections?.length === 1 ? '' : 's'}`} sx={{ fontWeight: 650, color: normalizerTheme.text, bgcolor: 'rgba(148, 163, 184, 0.08)' }} />
-            <Chip size="small" variant="outlined" label={`${parsingPatternOptions.length} pattern${parsingPatternOptions.length === 1 ? '' : 's'}`} sx={{ fontWeight: 650, color: normalizerTheme.text, bgcolor: 'rgba(148, 163, 184, 0.08)' }} />
-            <Chip size="small" color="success" variant="outlined" label={`${detectedParsingLogic?.matchingRows || 0} matching values`} sx={{ fontWeight: 650 }} />
+          <Stack direction="row" gap={0.9} flexWrap="wrap" sx={{ mb: 2 }}>
+            <Chip
+              size="small"
+              variant="outlined"
+              label={`${detectedParsingLogic?.sections?.length || 0} source column${detectedParsingLogic?.sections?.length === 1 ? '' : 's'}`}
+              sx={{
+                height: 28,
+                px: 0.35,
+                fontSize: 12.5,
+                fontWeight: 800,
+                color: '#1e3a8a',
+                bgcolor: '#eff6ff',
+                borderColor: '#bfdbfe',
+                '& .MuiChip-label': { px: 1.1 },
+              }}
+            />
+            <Chip
+              size="small"
+              variant="outlined"
+              label={`${parsingPatternOptions.length} MPN/MFR format${parsingPatternOptions.length === 1 ? '' : 's'}`}
+              sx={{
+                height: 28,
+                px: 0.35,
+                fontSize: 12.5,
+                fontWeight: 800,
+                color: '#5b21b6',
+                bgcolor: '#f5f3ff',
+                borderColor: '#ddd6fe',
+                '& .MuiChip-label': { px: 1.1 },
+              }}
+            />
+            <Chip
+              size="small"
+              variant="outlined"
+              label={`${detectedParsingLogic?.matchingRows || 0} matching values`}
+              sx={{
+                height: 28,
+                px: 0.35,
+                fontSize: 12.5,
+                fontWeight: 800,
+                color: '#166534',
+                bgcolor: '#f0fdf4',
+                borderColor: '#bbf7d0',
+                '& .MuiChip-label': { px: 1.1 },
+              }}
+            />
             {selectedParsingPattern?.section?.unmatched?.count > 0 && (
               <Chip size="small" color="warning" variant="outlined" label={`${selectedParsingPattern.section.unmatched.count} unmatched`} sx={{ fontWeight: 650 }} />
             )}
           </Stack>
-
           <Paper elevation={0} sx={{ p: 1.35, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
             <Grid container spacing={1.5} alignItems="center">
               <Grid item xs={12} md={8}>
-                <Typography sx={{ fontSize: 12, color: normalizerTheme.muted }}>
-                  {selectedParsingPattern ? 'Detected pattern' : 'Selected setup'}
-                </Typography>
+                <Stack direction="row" alignItems="center" gap={0.75}>
+                  <Typography sx={{ fontSize: 12, color: normalizerTheme.muted }}>
+                    {selectedParsingPattern
+                      ? (selectedPatternStagedEdit ? 'Edited pattern' : 'Detected pattern')
+                      : 'Selected setup'}
+                  </Typography>
+                  {selectedPatternStagedEdit && (
+                    <Chip
+                      size="small"
+                      label="Edited"
+                      sx={{ height: 19, fontSize: 10.5, fontWeight: 800, bgcolor: '#f5f3ff', color: '#5b21b6', border: '1px solid #ddd6fe' }}
+                    />
+                  )}
+                </Stack>
                 <Typography sx={{ mt: 0.2, fontSize: 15, fontWeight: 760, lineHeight: 1.35, color: normalizerTheme.text }} noWrap>
                   {selectedParsingPattern
                     ? `${selectedParsingPatternNumber}. ${selectedParsingPattern.pattern?.shape || 'No pattern detected'}`
@@ -10230,33 +11429,33 @@ const BomNormalizer = () => {
                 {selectedParsingPattern && (
                   <Typography sx={{ mt: 0.25, fontSize: 11.5, color: normalizerTheme.muted }} noWrap>
                     {selectedParsingPattern.section.sourceHeader} - {selectedParsingPattern.pattern.count} row{selectedParsingPattern.pattern.count === 1 ? '' : 's'}
+                    {selectedPatternStagedEdit ? ` - your split (${selectedPatternStagedEdit.summary}) runs at normalization` : ''}
                   </Typography>
                 )}
               </Grid>
               <Grid item xs={12} md={4}>
                 <Stack spacing={1} alignItems="flex-end" sx={{ maxWidth: 300, ml: 'auto' }}>
-                  <Stack direction="row" spacing={0.75} alignItems="center" justifyContent="flex-end">
-                    <IconButton
-                      size="small"
-                      disabled={selectedParsingPatternIndex <= 0}
-                      onClick={() => handleStepParsingPattern(-1)}
-                      sx={{ border: `1px solid ${normalizerTheme.border}` }}
-                    >
-                      <ChevronLeftIcon fontSize="small" />
-                    </IconButton>
-                    <IconButton
-                      size="small"
-                      disabled={selectedParsingPatternIndex < 0 || selectedParsingPatternIndex >= parsingPatternOptions.length - 1}
-                      onClick={() => handleStepParsingPattern(1)}
-                      sx={{ border: `1px solid ${normalizerTheme.border}` }}
-                    >
-                      <ChevronRightIcon fontSize="small" />
-                    </IconButton>
-                  </Stack>
                   <Button
-                    variant="outlined"
+                    variant="contained"
                     disabled={!selectedParsingPattern || configureParserPreparing}
-                    sx={{ width: { xs: '100%', sm: 150 }, minWidth: 0, px: 2, fontWeight: 700 }}
+                    sx={{
+                      width: { xs: '77%', sm: 119 },
+                      minWidth: 0,
+                      px: 2,
+                      fontWeight: 700,
+                      bgcolor: '#2563eb',
+                      color: '#ffffff',
+                      boxShadow: 'none',
+                      '&:hover': {
+                        bgcolor: '#1d4ed8',
+                        boxShadow: 'none',
+                      },
+                      '&.Mui-disabled': {
+                        bgcolor: '#2563eb',
+                        color: '#ffffff',
+                        opacity: 0.55,
+                      },
+                    }}
                     onClick={() => {
                       if (!selectedParsingPattern) return;
                       setParsingLogicOpen(false);
@@ -10294,6 +11493,7 @@ const BomNormalizer = () => {
               </Stack>
               <Stack direction="row" gap={0.75} flexWrap="wrap" sx={{ mt: 1.4 }}>
                 <Chip size="small" variant="outlined" label={`Structure: ${selectedStructureOption?.label || config.structure}`} sx={{ fontWeight: 650 }} />
+                <Chip size="small" variant="outlined" label={`BOM layout: ${selectedBomLayoutOption?.label || 'None'}`} sx={{ fontWeight: 650 }} />
                 <Chip size="small" variant="outlined" label={`Alternates: ${selectedAlternateOption?.label || config.alternateLayout}`} sx={{ fontWeight: 650 }} />
                 <Chip size="small" variant="outlined" label={`Delimiter: ${selectedDelimiterOption?.label || config.delimiterMode}`} sx={{ fontWeight: 650 }} />
                 <Chip size="small" variant="outlined" label={`Quantity: ${selectedQuantityOption?.label || config.quantityMode}`} sx={{ fontWeight: 650 }} />
@@ -10385,16 +11585,28 @@ const BomNormalizer = () => {
             </Paper>
           )}
         </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'flex-end', gap: 1, flexWrap: 'wrap' }}>
+        <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'space-between', gap: 1, flexWrap: 'wrap' }}>
+          <Button
+            variant="outlined"
+            disabled={selectedParsingPatternIndex <= 0}
+            onClick={() => handleStepParsingPattern(-1)}
+          >
+            Back
+          </Button>
           <Button
             variant="contained"
             onClick={() => {
+              const hasNextPattern = selectedParsingPatternIndex >= 0 && selectedParsingPatternIndex < parsingPatternOptions.length - 1;
+              if (hasNextPattern) {
+                handleStepParsingPattern(1);
+                return;
+              }
               setParsingLogicOpen(false);
               setPatternApplyNotice('');
               runNormalization();
             }}
           >
-            Continue
+            {selectedParsingPatternIndex >= 0 && selectedParsingPatternIndex < parsingPatternOptions.length - 1 ? 'Next' : 'Continue'}
           </Button>
         </DialogActions>
       </Dialog>
@@ -10506,6 +11718,8 @@ const BomNormalizer = () => {
               availableColumns={headers}
               initialColumn={configureParserInitialColumn}
               parseReference={configureParserReference}
+              sampleUnit={configureParserScope?.mode === 'pattern' ? 'group' : 'row'}
+              describeSample={describeParserSample}
               onApply={handleApplyConfigureSplitColumns}
             />
           ) : (

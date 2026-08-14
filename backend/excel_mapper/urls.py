@@ -67,10 +67,13 @@ from .views import (
     check_column_conflicts,
     clear_formulas,
 
+    # Saved column rules
+    column_rules,
+    column_rule_detail,
+
     # Tag Template views
     save_tag_template,
     get_tag_templates,
-    get_default_template_headers,
     delete_tag_template,
     apply_tag_template,
 
@@ -251,8 +254,9 @@ urlpatterns = [
     path('formulas/conflicts/', check_column_conflicts, name='check-column-conflicts'),
     path('formulas/clear/', clear_formulas, name='clear-formulas'),
     
-    # Built-in Factwise sheet columns (no session needed)
-    path('default-template/headers/', get_default_template_headers, name='default-template-headers'),
+    # Saved column rules (named fill/create-column operations)
+    path('column-rules/', column_rules, name='column-rules'),
+    path('column-rules/<int:rule_id>/', column_rule_detail, name='column-rule-detail'),
 
     # Tag Templates (Smart Tag Rules Templates)
     path('tag-templates/save/', save_tag_template, name='save-tag-template'),

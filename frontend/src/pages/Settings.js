@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Box,
@@ -43,6 +43,8 @@ import {
 } from '@mui/icons-material';
 import { useThemeContext } from '../utils/ThemeContext';
 import api from '../services/api';
+import { useLocation } from 'react-router-dom';
+import ColumnRuleBuilder, { createEmptyColumnRule } from '../components/ColumnRuleBuilder';
 import { useFactwise } from '../contexts/FactwiseContext';
 import {
   ITEM_DIRECTORY_DEFAULTS,
@@ -143,7 +145,7 @@ const serverSettingsToItemDirectoryDefaults = (settings, currentDefaults = {}) =
 
 const itemDirectoryDefaultsToServerSettings = (defaults) => {
   const prefix = cleanText(defaults.itemCodePrefix);
-  const contentType = cleanText(defaults.itemCodeContentType) || 'serial';
+  const contentType = cleanText(defaults.itemCodeContentType);
   const fixedValue = cleanText(defaults.itemCodeDefaultValue);
   return {
     item_type: cleanText(defaults.itemType),
@@ -161,7 +163,10 @@ const itemDirectoryDefaultsToServerSettings = (defaults) => {
         prefix,
         start: Math.max(1, Number.parseInt(defaults.itemCodeStart || '1', 10) || 1),
         padding: Math.max(0, Number.parseInt(defaults.itemCodePadding || '3', 10) || 0),
-        increment: defaults.itemCodeIncrement !== false,
+        // Not configurable: a non-advancing serial writes one code to every row,
+        // and Item code must be unique. Forced rather than read back so a `false`
+        // saved before the control was locked cannot still take effect.
+        increment: true,
       }
       : {}),
   };
@@ -169,14 +174,16 @@ const itemDirectoryDefaultsToServerSettings = (defaults) => {
 
 const normalizeItemDirectoryDefaultsForSave = (defaults) => ({
   ...defaults,
-  itemCodeContentType: defaults.itemCodeContentType || 'serial',
+  // Saved as chosen. Defaulting to 'serial' here is what made an untouched
+  // install generate item codes.
+  itemCodeContentType: defaults.itemCodeContentType || '',
   itemCodeRowsToUpdate: defaults.itemCodeRowsToUpdate || 'fill_empty',
   itemCodeBlankStrategy: defaults.itemCodeContentType === 'serial' ? 'prefix_sequence' : 'leave',
   itemCodeDuplicateStrategy: defaults.itemCodeRowsToUpdate === 'duplicates' ? 'prefix_sequence' : 'leave',
   itemCodeSeparator: defaults.itemCodeJoinSeparatorMode === 'custom'
     ? (defaults.itemCodeJoinCustomSeparator ?? '')
     : (ITEM_CODE_SEPARATOR_OPTIONS.find(option => option.value === defaults.itemCodeJoinSeparatorMode)?.text ?? ' '),
-  itemCodeIncrement: defaults.itemCodeIncrement !== false,
+  itemCodeIncrement: true,
 });
 
 const emptyProviderStatus = {
@@ -303,6 +310,64 @@ const Settings = () => {
       });
   }, [itemDirectoryColumnOptions, itemDirectoryDefaults, itemCodeConditionalBranches]);
 
+  // ─── SAVED COLUMN RULES ───────────────────────────────────────────────────
+  // Same builder the editor's Fill / Create Column dialog uses; saving one
+  // stores the rule payload so any session can replay it by name.
+  const [columnRules, setColumnRules] = useState([]);
+  const [columnRuleName, setColumnRuleName] = useState('');
+  const [columnRuleDraft, setColumnRuleDraft] = useState(() => createEmptyColumnRule());
+  const [columnRuleSaving, setColumnRuleSaving] = useState(false);
+
+  const loadColumnRules = useCallback(async () => {
+    try {
+      const response = await api.getColumnRules();
+      setColumnRules(response?.data?.rules || []);
+    } catch (error) {
+      console.error('Failed to load column rules:', error);
+    }
+  }, []);
+
+  useEffect(() => { loadColumnRules(); }, [loadColumnRules]);
+
+  // Arriving from the dashboard's Edit button — load that rule into the
+  // builder and scroll to it, so Edit lands somewhere useful.
+  const settingsLocation = useLocation();
+  const requestedRuleId = settingsLocation.state?.editColumnRuleId;
+  useEffect(() => {
+    if (!requestedRuleId || columnRules.length === 0) return;
+    const match = columnRules.find(r => String(r.id) === String(requestedRuleId));
+    if (!match) return;
+    setColumnRuleName(match.name);
+    setColumnRuleDraft({ ...createEmptyColumnRule(), ...(match.rule || {}) });
+    document.getElementById('column-rules-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [requestedRuleId, columnRules]);
+
+  const handleSaveColumnRule = useCallback(async () => {
+    const name = columnRuleName.trim();
+    if (!name) return;
+    setColumnRuleSaving(true);
+    try {
+      await api.saveColumnRule(name, '', columnRuleDraft);
+      setColumnRuleName('');
+      setColumnRuleDraft(createEmptyColumnRule());
+      await loadColumnRules();
+    } catch (error) {
+      console.error('Failed to save column rule:', error);
+      window.alert(error?.response?.data?.error || 'Could not save the rule.');
+    } finally {
+      setColumnRuleSaving(false);
+    }
+  }, [columnRuleName, columnRuleDraft, loadColumnRules]);
+
+  const handleDeleteColumnRule = useCallback(async (ruleId) => {
+    try {
+      await api.deleteColumnRule(ruleId);
+      await loadColumnRules();
+    } catch (error) {
+      console.error('Failed to delete column rule:', error);
+    }
+  }, [loadColumnRules]);
+
   const hasDigikey = Boolean(providerStatus.digikey?.configured);
   const hasMouser = Boolean(providerStatus.mouser?.configured);
   const hasElement14 = Boolean(providerStatus.element14?.configured);
@@ -311,7 +376,17 @@ const Settings = () => {
   // When embedded inside Factwise, distributor credentials are managed in
   // Factwise Admin and silently synced into this app's own store. Hide the
   // "API Providers" panel — the rest of Settings still works as normal.
-  const { isEmbedded: isFactwiseEmbedded, entityName: factwiseEntityName } = useFactwise();
+  const {
+    isEmbedded: isFactwiseEmbedded,
+    entityName: factwiseEntityName,
+    entities: factwiseEntities = [],
+    chooseEntity,
+    loadEntities,
+  } = useFactwise();
+
+  // The only screen that needs the entity list, so it is the only one that
+  // asks for it — once, when it opens.
+  useEffect(() => { loadEntities?.(); }, [loadEntities]);
 
   const readyCount = useMemo(
     () => columnMappings.filter(mapping => normalizeProviders(mapping.providers || mapping.provider).every(provider => Boolean(providerStatus[provider]?.configured))).length,
@@ -354,11 +429,30 @@ const Settings = () => {
         const response = await api.getEditorDefaultSettings(cleanEntityName);
         if (cancelled || !response.data?.success) return;
         const existingDefaults = readItemDirectoryDefaults();
-        const next = response.data.settings?.updated_at
+        const hasServerSettings = Boolean(response.data.settings?.updated_at);
+        const next = hasServerSettings
           ? serverSettingsToItemDirectoryDefaults(response.data.settings, existingDefaults)
           : { ...existingDefaults, procurementEntityName: cleanEntityName };
         setItemDirectoryDefaults(next);
         writeItemDirectoryDefaults(next);
+
+        // Defaults are stored per entity name. When the resolved entity changes
+        // — which it does the moment a wrong name is corrected — the old row is
+        // stranded under the old key and the settings look lost. Re-save what
+        // is still in the browser under the entity now in force.
+        const carriedOver = !hasServerSettings && [
+          'itemType', 'procurementItem', 'salesItem', 'measurementUnit', 'itemCodeContentType',
+        ].some(key => String(existingDefaults[key] || '').trim());
+        if (carriedOver) {
+          try {
+            await api.saveEditorDefaultSettings(
+              cleanEntityName,
+              itemDirectoryDefaultsToServerSettings(normalizeItemDirectoryDefaultsForSave(next)),
+            );
+          } catch (_) {
+            // Non-fatal: the browser copy still drives the editor.
+          }
+        }
       } catch (error) {
         if (!cancelled) {
           setToast({
@@ -1056,20 +1150,46 @@ const Settings = () => {
               <Box sx={{ p: 2.5 }}>
                 <Grid container spacing={2}>
                   <Grid item xs={12} sm={6} md={2.4}>
-                    <TextField
-                      fullWidth
-                      size="small"
-                      label="Procurement entity name"
-                      value={itemDirectoryDefaults.procurementEntityName || ''}
-                      onChange={(event) => {
-                        if (!factwiseEntityName) {
+                    {/* One entity needs no choice and stays read-only. Two or
+                        more has to be asked: the name goes on every exported
+                        row, and FactWise rejects one it does not own. */}
+                    {factwiseEntities.length > 1 ? (
+                      <TextField
+                        select
+                        fullWidth
+                        size="small"
+                        label="Procurement entity"
+                        value={factwiseEntities.some(e => e.name === itemDirectoryDefaults.procurementEntityName)
+                          ? itemDirectoryDefaults.procurementEntityName
+                          : ''}
+                        onChange={(event) => {
+                          const picked = factwiseEntities.find(e => e.name === event.target.value);
+                          if (picked) chooseEntity(picked);
                           handleItemDirectoryDefaultChange('procurementEntityName', event.target.value);
-                        }
-                      }}
-                      placeholder={factwiseEntityName ? '' : 'Waiting for FactWise entity name'}
-                      InputProps={{ readOnly: Boolean(factwiseEntityName) }}
-                      sx={fieldSx}
-                    />
+                        }}
+                        helperText={`${factwiseEntities.length} entities on this account`}
+                        sx={fieldSx}
+                      >
+                        {factwiseEntities.map(entity => (
+                          <MenuItem key={entity.id || entity.name} value={entity.name}>{entity.name}</MenuItem>
+                        ))}
+                      </TextField>
+                    ) : (
+                      <TextField
+                        fullWidth
+                        size="small"
+                        label="Procurement entity name"
+                        value={itemDirectoryDefaults.procurementEntityName || ''}
+                        onChange={(event) => {
+                          if (!factwiseEntityName) {
+                            handleItemDirectoryDefaultChange('procurementEntityName', event.target.value);
+                          }
+                        }}
+                        placeholder={factwiseEntityName ? '' : 'Waiting for FactWise entity name'}
+                        InputProps={{ readOnly: Boolean(factwiseEntityName) }}
+                        sx={fieldSx}
+                      />
+                    )}
                   </Grid>
                   <Grid item xs={12} sm={6} md={2.4}>
                     <TextField
@@ -1468,7 +1588,8 @@ const Settings = () => {
                                 control={(
                                   <Checkbox
                                     size="small"
-                                    checked={itemDirectoryDefaults.itemCodeIncrement !== false}
+                                    checked
+                                    disabled
                                     onChange={(event) => handleItemDirectoryDefaultChange('itemCodeIncrement', event.target.checked)}
                                   />
                                 )}
@@ -1480,6 +1601,9 @@ const Settings = () => {
                                   },
                                 }}
                               />
+                              <Typography variant="caption" sx={{ display: 'block', color: t.text.secondary, mt: -0.5, ml: 3.75 }}>
+                                Always on — Item code must be unique, so every row needs its own number.
+                              </Typography>
                             </Grid>
                           </>
                         )}
@@ -1488,6 +1612,106 @@ const Settings = () => {
                   </Grid>
 
                 </Grid>
+              </Box>
+            </Paper>
+          </Grid>
+
+          <Grid item xs={12}>
+            <Paper elevation={0} sx={panelSx}>
+              <Box sx={sectionHeaderSx}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
+                  <Box sx={{ width: 36, height: 36, borderRadius: '12px', display: 'grid', placeItems: 'center', bgcolor: t.state.infoBg, color: t.color.info }}>
+                    <TableChartIcon fontSize="small" />
+                  </Box>
+                  <Box>
+                    <Typography id="column-rules-panel" sx={{ fontSize: 16, fontWeight: 700, color: t.text.heading }}>Column Rules</Typography>
+                    <Typography sx={{ fontSize: 12.5, color: t.text.secondary }}>
+                      Save a fill rule once, then apply it to any sheet from the editor's Fill / Create Column dialog.
+                    </Typography>
+                  </Box>
+                </Box>
+                <Chip label={`${columnRules.length} saved`} size="small" sx={{ height: 23, fontWeight: 650, fontSize: 11.5, bgcolor: t.state.infoBg, color: t.color.infoText }} />
+              </Box>
+
+              <Box sx={{ p: 2.5 }}>
+                <Grid container spacing={1.5}>
+                  <Grid item xs={12} sm={6}>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      label="Rule name"
+                      value={columnRuleName}
+                      onChange={(event) => setColumnRuleName(event.target.value)}
+                      sx={fieldSx}
+                    />
+                  </Grid>
+                  <Grid item xs={12}>
+                    <ColumnRuleBuilder
+                      value={columnRuleDraft}
+                      onChange={setColumnRuleDraft}
+                      columnOptions={itemCodeSourceColumnOptions}
+                    />
+                  </Grid>
+                  <Grid item xs={12}>
+                    <Button
+                      variant="contained"
+                      onClick={handleSaveColumnRule}
+                      disabled={!columnRuleName.trim() || columnRuleSaving}
+                      sx={{ textTransform: 'none', borderRadius: '8px' }}
+                    >
+                      {columnRuleSaving ? 'Saving...' : 'Save rule'}
+                    </Button>
+                  </Grid>
+                </Grid>
+
+                {columnRules.length > 0 && (
+                  <Box sx={{ mt: 2.5, display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    {columnRules.map(saved => (
+                      <Box
+                        key={saved.id}
+                        sx={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: 1,
+                          p: 1.25,
+                          borderRadius: '10px',
+                          border: `1px solid ${t.border.subtle}`,
+                          bgcolor: t.surface.panel,
+                        }}
+                      >
+                        <Box sx={{ minWidth: 0 }}>
+                          <Typography sx={{ fontSize: 13.5, fontWeight: 650, color: t.text.primary }} noWrap>
+                            {saved.name}
+                          </Typography>
+                          <Typography sx={{ fontSize: 11.5, color: t.text.secondary }} noWrap>
+                            {saved.target_column ? `${saved.target_column} · ` : ''}{saved.value_mode} · used {saved.usage_count}x
+                          </Typography>
+                        </Box>
+                        <Box sx={{ display: 'flex', gap: 0.5 }}>
+                          <Button
+                            size="small"
+                            onClick={() => {
+                              setColumnRuleName(saved.name);
+                              setColumnRuleDraft({ ...createEmptyColumnRule(), ...(saved.rule || {}) });
+                            }}
+                            sx={{ textTransform: 'none' }}
+                          >
+                            Edit
+                          </Button>
+                          <Button
+                            size="small"
+                            color="error"
+                            onClick={() => handleDeleteColumnRule(saved.id)}
+                            sx={{ textTransform: 'none' }}
+                          >
+                            Delete
+                          </Button>
+                        </Box>
+                      </Box>
+                    ))}
+                  </Box>
+                )}
               </Box>
             </Paper>
           </Grid>

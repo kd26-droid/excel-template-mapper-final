@@ -279,6 +279,30 @@ export async function listAllItemTags({ searchText = '', pageNumber = 1, itemsPe
   }
 }
 
+// Every entity the signed-in account can act for. One entity is the normal
+// case and needs no choice; more than one has to be asked about, because
+// "Procurement entity name" ends up on every exported row and FactWise rejects
+// a name that is not one of these.
+//
+// Note the token cannot answer this: its `name` claim is the signed-in USER.
+export async function fetchFactwiseEntities() {
+  const client = buildClient();
+  if (!client) return { success: false, entities: [] };
+  try {
+    const { data } = await client.get('/organization/entity/');
+    const rows = Array.isArray(data) ? data : (data?.results || data?.data || []);
+    const entities = rows
+      .map(row => ({
+        id: String(row?.entity_id || row?.entityId || row?.id || '').trim(),
+        name: String(row?.entity_name || row?.entityName || row?.name || '').trim(),
+      }))
+      .filter(entity => entity.name);
+    return { success: true, entities };
+  } catch (error) {
+    return { success: false, entities: [], error: error?.response?.data?.error || error.message };
+  }
+}
+
 export async function fetchDistributorStatus() {
   const client = buildClient();
   const { entityId } = readCredentials();

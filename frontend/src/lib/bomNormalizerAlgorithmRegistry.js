@@ -50,10 +50,23 @@ export const STRUCTURE_OPTIONS = [
     label: 'Grouped rows with alternates below',
     description: 'Use this when a group row carries item details/quantity and the rows below carry primary and alternate MPN/MFR pairs.',
   },
+];
+
+export const BOM_LAYOUT_OPTIONS = [
+  {
+    value: 'none',
+    label: 'None',
+    description: 'Use the selected MPN/MFR parser without a workbook-level BOM layout transform.',
+  },
   {
     value: 'assembly_quantity_matrix',
     label: 'Assembly quantity matrix',
     description: 'Use this when assembly columns such as 001, 002, 003 contain quantities for each part row.',
+  },
+  {
+    value: 'multi_block_assembly',
+    label: 'Multi-block assembly BOM',
+    description: 'Use this when one workbook contains several linked BOM tables across sheets or repeated blocks.',
   },
 ];
 
@@ -216,6 +229,7 @@ export const BOM_NORMALIZER_ALGORITHM_REGISTRY = {
   version: 1,
   roles: ROLE_FIELDS,
   parserScenarios: STRUCTURE_OPTIONS,
+  bomLayouts: BOM_LAYOUT_OPTIONS,
   alternateLayouts: ALTERNATE_LAYOUT_OPTIONS,
   quantityModes: QTY_OPTIONS,
   delimiters: DELIMITER_OPTIONS,

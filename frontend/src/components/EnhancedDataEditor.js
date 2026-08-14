@@ -493,6 +493,10 @@ const EnhancedDataEditor = () => {
   const [pageLoading, setPageLoading] = useState(false);
   // Per-column filter text, keyed by column field. Empty/absent means no filter.
   const [columnFilters, setColumnFilters] = useState({});
+  // Rows a BOM issue actually points at. A column filter cannot express "any of
+  // these ten codes", and a duplicate-code issue carries no row numbers at all,
+  // so the grid needs its own value-set filter to show them together.
+  const [issueRowFilter, setIssueRowFilter] = useState(null);
   const [showColumnFilters, setShowColumnFilters] = useState(false);
 
   // Formula Builder state
@@ -509,10 +513,9 @@ const EnhancedDataEditor = () => {
   const [createColumnCustomSeparator, setCreateColumnCustomSeparator] = useState('');
   const [createColumnMode, setCreateColumnMode] = useState('fill_empty');
   const [createColumnSaving, setCreateColumnSaving] = useState(false);
-  // Saved rule sets, for the "Apply a saved rule set" value mode.
-  const [ruleSets, setRuleSets] = useState([]);
-  const [ruleSetsLoading, setRuleSetsLoading] = useState(false);
-  const [selectedRuleSetId, setSelectedRuleSetId] = useState('');
+  // Rules saved in Settings, replayable against this sheet.
+  const [savedColumnRules, setSavedColumnRules] = useState([]);
+  const [selectedColumnRuleId, setSelectedColumnRuleId] = useState('');
   const [hasFormulas, setHasFormulas] = useState(false);
   const [formulaColumns, setFormulaColumns] = useState([]);
   // Column examples and fill stats for FormulaBuilder dropdowns
@@ -824,7 +827,10 @@ const EnhancedDataEditor = () => {
   const [groupWarnings, setGroupWarnings] = useState([]);
   // "Highlight duplicates so I can edit them" — the column + the set of repeated
   // values whose cells the grid should mark. Cleared with the banner's Clear button.
-  const [dupHighlight, setDupHighlight] = useState(null); // { field, values: Set<string> }
+  // { field, values: Set<string>, rows?: Set<number>, label?: string }
+  // Values highlight duplicate cells; rows highlight the lines a BOM issue
+  // names, which is the only thing that works when the offending cell is blank.
+  const [dupHighlight, setDupHighlight] = useState(null);
 
   // Helper function to identify MPN validation columns
   const isMpnValidationColumn = useCallback((columnName) => {
@@ -1429,14 +1435,74 @@ const EnhancedDataEditor = () => {
 
       const itemCodePrefix = String(savedDefaults.itemCodePrefix || '').trim();
       const itemCodeColumn = headerSet.has('Item code') ? 'Item code' : '';
-      if (itemCodeColumn && (savedDefaults.itemCodeContentType || 'serial') === 'serial') {
-        const blankStrategy = (
-          savedDefaults.itemCodeBlankStrategy === 'prefix_sequence' && itemCodePrefix
-        ) ? 'prefix_sequence' : 'leave';
+      // No mode saved means no item code rule at all — the tool does not pick
+      // one on the user's behalf.
+      const itemCodeMode = String(savedDefaults.itemCodeContentType || '').trim();
+
+      // Settings offers five ways to set Item code; only 'fixed' (above) and
+      // 'serial' (below) were ever applied, so copy / join / if-else were saved
+      // and silently ignored. They are exactly what fill_or_create_column
+      // already does, so hand them to it.
+      if (itemCodeColumn && ['copy', 'concat', 'conditional'].includes(itemCodeMode)) {
+        const writeMode = savedDefaults.itemCodeRowsToUpdate || 'fill_empty';
+        const branches = (savedDefaults.itemCodeConditionalBranches || []).map(branch => ({
+          column: branch.column,
+          operator: branch.operator || 'contains',
+          compare: branch.compare,
+          output_value: branch.outputType === 'empty' ? '' : branch.outputValue,
+          ...(branch.outputType === 'column' ? { output_source_column: branch.outputColumn } : {}),
+        })).filter(branch => branch.column);
+        const elseSource = savedDefaults.itemCodeElseValueSource || 'default';
+        const rule = {
+          type: 'column_value',
+          target_mode: 'existing',
+          target_column: itemCodeColumn,
+          value_mode: itemCodeMode,
+          source_columns: itemCodeMode === 'copy'
+            ? [savedDefaults.itemCodeCopyFromColumn]
+            : (itemCodeMode === 'concat'
+              ? [savedDefaults.itemCodeJoinFirstColumn, savedDefaults.itemCodeJoinSecondColumn]
+              : []),
+          separator: savedDefaults.itemCodeSeparator ?? ' ',
+          write_mode: writeMode,
+          condition: itemCodeMode === 'conditional'
+            ? {
+                branches,
+                ...(elseSource === 'column'
+                  ? { else_source_column: savedDefaults.itemCodeElseValueColumn }
+                  : (elseSource === 'empty'
+                    ? { else: '' }
+                    : (String(savedDefaults.itemCodeElseDefaultValue || '').trim()
+                      ? { else: savedDefaults.itemCodeElseDefaultValue }
+                      : {}))),
+              }
+            : null,
+        };
+        const hasInputs = itemCodeMode === 'conditional'
+          ? branches.length > 0
+          : rule.source_columns.every(column => String(column || '').trim());
+        if (hasInputs) {
+          const resp = await api.fillOrCreateColumn(sessionId, rule);
+          if (!resp.data?.success) {
+            throw new Error(resp.data?.error || 'Could not apply saved item code settings');
+          }
+          changed = changed || Number(resp.data?.changed || 0) > 0;
+        }
+      }
+
+      if (itemCodeColumn && itemCodeMode === 'serial') {
+        // A prefix is optional: "001, 002, ..." is a perfectly good sequence.
+        // Requiring one here meant a serial rule saved without a prefix did
+        // nothing at all, silently.
+        const blankStrategy = savedDefaults.itemCodeBlankStrategy === 'prefix_sequence'
+          ? 'prefix_sequence'
+          : 'leave';
+        // Only what was saved. An unset duplicate strategy leaves duplicates
+        // alone rather than quietly renaming rows.
         const duplicateStrategy = (() => {
-          const requested = savedDefaults.itemCodeDuplicateStrategy || 'prefix_sequence';
+          const requested = String(savedDefaults.itemCodeDuplicateStrategy || '').trim();
           if (requested === 'suffix') return 'suffix';
-          if (requested === 'prefix_sequence' && itemCodePrefix) return 'prefix_sequence';
+          if (requested === 'prefix_sequence') return 'prefix_sequence';
           return 'leave';
         })();
 
@@ -1448,7 +1514,7 @@ const EnhancedDataEditor = () => {
             prefix: itemCodePrefix,
             separator: savedDefaults.itemCodeSeparator ?? '-',
             start: Math.max(1, Number.parseInt(savedDefaults.itemCodeStart || '1', 10) || 1),
-            padding: Math.max(0, Number.parseInt(savedDefaults.itemCodePadding || '3', 10) || 0),
+            padding: Math.max(0, Number.parseInt(savedDefaults.itemCodePadding, 10) || 0),
             increment: savedDefaults.itemCodeIncrement !== false,
           });
           if (!resp.data?.success) {
@@ -2279,7 +2345,9 @@ const EnhancedDataEditor = () => {
           serialPrefix: factwiseSerialPrefix,
           serialStart,
           serialPadding,
-          serialIncrement: factwiseSerialIncrement
+          // This path writes Item code, which must be unique — a serial that
+          // does not advance gives every row the same code.
+          serialIncrement: true
         }
       );
 
@@ -2293,7 +2361,9 @@ const EnhancedDataEditor = () => {
           serialPrefix: factwiseSerialPrefix,
           serialStart,
           serialPadding,
-          serialIncrement: factwiseSerialIncrement
+          // This path writes Item code, which must be unique — a serial that
+          // does not advance gives every row the same code.
+          serialIncrement: true
         });
         recordPostMappingAction({
           type: 'factwise_id',
@@ -2307,7 +2377,7 @@ const EnhancedDataEditor = () => {
             serial_prefix: factwiseSerialPrefix,
             serial_start: serialStart,
             serial_padding: serialPadding,
-            serial_increment: factwiseSerialIncrement,
+            serial_increment: true,
           },
         });
         const responseVersion = syncResult?.result?.data?.template_version;
@@ -2554,6 +2624,15 @@ const EnhancedDataEditor = () => {
     });
   }, [createColumnTarget, rowData]);
 
+  // Item code has to be unique, so a serial that does not advance writes the
+  // same code to every row — a sheet FactWise rejects outright. The choice is
+  // offered for other columns, where repeating a value is legitimate.
+  const serialMustIncrement = useMemo(() => {
+    const target = String(createColumnTarget || '').trim().toLowerCase();
+    return target === 'item code';
+  }, [createColumnTarget]);
+  const effectiveSerialIncrement = serialMustIncrement ? true : factwiseSerialIncrement;
+
   const getMatchingDataColumnField = useCallback((columnName) => {
     const wanted = String(columnName || '').trim().toLowerCase();
     if (!wanted) return '';
@@ -2606,9 +2685,14 @@ const EnhancedDataEditor = () => {
     setCreateColumnSeparatorMode(separatorMode);
     setCreateColumnCustomSeparator(saved.itemCodeJoinCustomSeparator || '');
     setCreateColumnSeparator(separator);
-    setFactwiseSerialPrefix(saved.itemCodePrefix || 'ITEM');
-    setFactwiseSerialStart(saved.itemCodeStart || 1);
-    setFactwiseSerialPadding(saved.itemCodePadding || 2);
+    // `??`, not `||`: an empty prefix and a padding of 0 are both meaningful
+    // answers, and `||` treated them as "unset". A user who cleared the Prefix
+    // box in Settings still got codes reading ITEM001, and "no padding" was
+    // unreachable because 0 became 2. The fallbacks also have to be the ones
+    // Settings itself shows, or the preview and the result disagree.
+    setFactwiseSerialPrefix(saved.itemCodePrefix ?? '');
+    setFactwiseSerialStart(saved.itemCodeStart ?? 1);
+    setFactwiseSerialPadding(saved.itemCodePadding ?? 3);
     setFactwiseSerialIncrement(saved.itemCodeIncrement !== false);
     setConditionalBranches(savedConditionalBranches.map(branch => ({
       ...createConditionalBranch(),
@@ -2643,45 +2727,32 @@ const EnhancedDataEditor = () => {
     setCreateColumnDialogOpen(true);
   }, [dataColumnFields, createColumnFirst, createColumnSecond, applySavedItemCodeFillSettings]);
 
-  // ─── SAVED RULE SETS ────────────────────────────────────────────────────────
-  // A rule set carries the destination each of its rules was authored for, so
-  // the picker can put the ones meant for the column being filled first.
   useEffect(() => {
     if (!createColumnDialogOpen) return;
     let cancelled = false;
-    setRuleSetsLoading(true);
-    api.getTagTemplates()
-      .then(res => { if (!cancelled) setRuleSets(res?.data?.templates || []); })
-      .catch(() => { if (!cancelled) setRuleSets([]); })
-      .finally(() => { if (!cancelled) setRuleSetsLoading(false); });
+    api.getColumnRules()
+      .then(res => { if (!cancelled) setSavedColumnRules(res?.data?.rules || []); })
+      .catch(() => { if (!cancelled) setSavedColumnRules([]); });
     return () => { cancelled = true; };
   }, [createColumnDialogOpen]);
 
-  const ruleSetTargets = useCallback((ruleSet) => {
-    const rules = ruleSet?.formula_rules || ruleSet?.rules || [];
-    return rules.map(r => String(r?.target_column || '').trim()).filter(Boolean);
-  }, []);
-
-  // Rule sets authored for the column being filled, then everything else.
-  const { preferredRuleSets, otherRuleSets } = useMemo(() => {
+  // Rules saved for the column being filled come first; one match is picked
+  // automatically so the common case is two clicks.
+  const { preferredColumnRules, otherColumnRules } = useMemo(() => {
     const target = String(createColumnTab === 0 ? createColumnTarget : createColumnNewName).trim();
     const preferred = [];
     const others = [];
-    (ruleSets || []).forEach(set => {
-      if (target && ruleSetTargets(set).includes(target)) preferred.push(set);
-      else others.push(set);
+    (savedColumnRules || []).forEach(saved => {
+      if (target && String(saved.target_column || '').trim() === target) preferred.push(saved);
+      else others.push(saved);
     });
-    return { preferredRuleSets: preferred, otherRuleSets: others };
-  }, [ruleSets, createColumnTarget, createColumnNewName, createColumnTab, ruleSetTargets]);
+    return { preferredColumnRules: preferred, otherColumnRules: others };
+  }, [savedColumnRules, createColumnTarget, createColumnNewName, createColumnTab]);
 
-  // One obvious candidate for this destination — pick it rather than making the
-  // user choose from a list of one.
   useEffect(() => {
-    if (createColumnContentType !== 'rules') return;
-    if (preferredRuleSets.length === 1) {
-      setSelectedRuleSetId(preferredRuleSets[0].id);
-    }
-  }, [createColumnContentType, preferredRuleSets]);
+    if (createColumnContentType !== 'saved_rule') return;
+    if (preferredColumnRules.length === 1) setSelectedColumnRuleId(preferredColumnRules[0].id);
+  }, [createColumnContentType, preferredColumnRules]);
 
   const handleCloseCreateColumnDialog = useCallback(() => {
     setCreateColumnDialogOpen(false);
@@ -2722,36 +2793,34 @@ const EnhancedDataEditor = () => {
       return;
     }
 
-    // Rule sets go through the formula engine, not fillOrCreateColumn — they
-    // are keyword→value rules, and the destination chosen here wins over the
-    // one they were saved with.
-    if (createColumnContentType === 'rules') {
-      const ruleSet = (ruleSets || []).find(set => String(set.id) === String(selectedRuleSetId));
-      if (!ruleSet) {
-        showSnackbar('Select a rule set to apply', 'warning');
-        return;
-      }
-      const rules = (ruleSet.formula_rules || ruleSet.rules || []).map(rule => ({
-        ...rule,
-        target_column: target,
-        // The column was chosen here, so write into it rather than letting the
-        // engine allocate a fresh Tag column around it.
-        target_locked: true,
-        column_type: target.startsWith('Specification_Value_') ? 'Specification Value' : 'Tag',
-      }));
-      if (rules.length === 0) {
-        showSnackbar('That rule set has no rules', 'warning');
+    // A saved rule already carries how to compute the value; only where it
+    // lands and which rows it touches come from this dialog.
+    if (createColumnContentType === 'saved_rule') {
+      const saved = (savedColumnRules || []).find(r => String(r.id) === String(selectedColumnRuleId));
+      if (!saved) {
+        showSnackbar('Select a saved rule', 'warning');
         return;
       }
       try {
         setCreateColumnSaving(true);
-        const response = await api.applyFormulas(sessionId, rules);
-        if (!response.data?.success) throw new Error(response.data?.error || 'Could not apply the rule set');
+        const rule = {
+          ...(saved.rule || {}),
+          target_mode: createColumnTab === 0 ? 'existing' : 'new',
+          target_column: target,
+          write_mode: createColumnTab === 0 ? createColumnMode : 'overwrite',
+        };
+        const response = await api.fillOrCreateColumn(sessionId, rule);
+        if (!response.data?.success) throw new Error(response.data?.error || 'Column update failed');
+        recordPostMappingAction({
+          type: 'fill_or_create_column',
+          label: `${target} — ${saved.name}`,
+          rule: response.data.rule || rule,
+        });
         setCreateColumnDialogOpen(false);
         await fetchDataSynchronized();
-        showSnackbar(`Applied "${ruleSet.name}" to ${target}.`, 'success');
+        showSnackbar(`Applied "${saved.name}" to ${target} across ${response.data.changed || 0} cells.`, 'success');
       } catch (error) {
-        showSnackbar(getFriendlyErrorMessage(error, 'Failed to apply the rule set'), 'error');
+        showSnackbar(error.response?.data?.error || error.message || 'Failed to apply the rule', 'error');
       } finally {
         setCreateColumnSaving(false);
       }
@@ -2792,7 +2861,7 @@ const EnhancedDataEditor = () => {
         serial_prefix: factwiseSerialPrefix,
         serial_start: factwiseSerialStart,
         serial_padding: factwiseSerialPadding,
-        serial_increment: factwiseSerialIncrement,
+        serial_increment: effectiveSerialIncrement,
       };
       const response = await api.fillOrCreateColumn(sessionId, rule);
       if (!response.data?.success) throw new Error(response.data?.error || 'Column update failed');
@@ -2838,9 +2907,8 @@ const EnhancedDataEditor = () => {
     showSnackbar,
     fetchDataSynchronized,
     recordPostMappingAction,
-    ruleSets,
-    selectedRuleSetId,
-    getFriendlyErrorMessage
+    savedColumnRules,
+    selectedColumnRuleId
   ]);
 
   const handleOpenFactwiseIdDialog = useCallback(() => {
@@ -3221,8 +3289,8 @@ const EnhancedDataEditor = () => {
       column: 'Quantity',
     },
     quantity_invalid: {
-      title: 'Quantity is not a positive number',
-      rule: 'Quantity must be a number greater than zero.',
+      title: 'Quantity is not a valid number',
+      rule: 'Quantity must be a number that is not negative. Zero and fractions are fine.',
       action: 'Replace the offending values — Fill Column can target them specifically.',
       column: 'Quantity',
     },
@@ -3233,9 +3301,13 @@ const EnhancedDataEditor = () => {
       generateIds: true,
     },
     item_code_duplicate: {
-      title: 'Item codes are not unique',
-      rule: 'Two parts sharing a code make every BOM reference to it ambiguous.',
-      action: 'Make the duplicated codes unique before exporting.',
+      column: 'Item code',
+      title: 'One item code, two different parts',
+      rule: 'A code shared by rows that describe different parts makes every BOM '
+           + 'reference to it ambiguous. The same part listed on several lines is '
+           + 'fine — those rows are merged automatically in the item file.',
+      action: 'Give the rows different item codes, or make them match exactly if they '
+             + 'are the same part. Do not delete the row: that removes it from the BOM too.',
     },
     raw_or_sub_missing: {
       title: 'Rows reference nothing',
@@ -3669,6 +3741,47 @@ const EnhancedDataEditor = () => {
   // told which row to look at. Row numbers index the unfiltered sheet, so any
   // active search or column filter has to come off first or the target row is
   // not on the page we send them to.
+  // The BOM popup lists row numbers; this paints those rows amber in the grid,
+  // the same way duplicate item codes are already highlighted. Values are used
+  // when the issue names them (duplicates carry codes but no rows), rows
+  // otherwise.
+  const highlightBomIssue = useCallback((group, field, label) => {
+    const values = (group.codes?.length ? group.codes : group.values) || [];
+    const rows = group.rows || [];
+    if (values.length === 0 && rows.length === 0) return;
+    setDupHighlight({
+      field: field || '',
+      values: new Set(values.map(value => String(value).trim()).filter(Boolean)),
+      rows: new Set(rows.map(Number).filter(Boolean)),
+      label,
+    });
+    setBomValidationOpen(false);
+    setPage(1);
+    showSnackbar(
+      rows.length
+        ? `Highlighted ${rows.length} row${rows.length === 1 ? '' : 's'} in amber.`
+        : `Highlighted rows matching ${values.length} value${values.length === 1 ? '' : 's'} in amber.`,
+      'info',
+    );
+  }, [showSnackbar]);
+
+  // Show every row an issue names, together, instead of paging to them one at
+  // a time. Duplicates only make sense side by side.
+  const showIssueRows = useCallback((field, values, label) => {
+    const wanted = (values || [])
+      .map(value => String(value ?? '').trim().toLowerCase())
+      .filter(Boolean);
+    if (!field || wanted.length === 0) return;
+    setBomValidationOpen(false);
+    setRowSearchTerm('');
+    setColumnFilters({});
+    setRowFilterMode('all');
+    setIssueRowFilter({ field, values: wanted, label });
+    setPage(1);
+  }, []);
+
+  const clearIssueRowFilter = useCallback(() => setIssueRowFilter(null), []);
+
   const jumpToGridRow = useCallback((gridRow) => {
     const target = Number(gridRow);
     if (!target || target < 1) return;
@@ -3676,6 +3789,7 @@ const EnhancedDataEditor = () => {
     setBomValidationOpen(false);
     setRowSearchTerm('');
     setColumnFilters({});
+    setIssueRowFilter(null);
     setPage(targetPage);
     showSnackbar(`Row ${target} is on page ${targetPage}.`, 'info');
   }, [pageSize, showSnackbar]);
@@ -5585,6 +5699,31 @@ const EnhancedDataEditor = () => {
 
   // rowIndex stays the index into rowData, not into the filtered list, so cell
   // edits and autosave keep addressing the right row whatever is filtered away.
+  const duplicateItemCodeInfo = useMemo(() => {
+    const field = itemCodeIssue?.field || getMatchingDataColumnField('Item code');
+    if (!field || !Array.isArray(rowData)) return { field: '', values: new Set(), rowCount: 0 };
+
+    const counts = new Map();
+    rowData.forEach(row => {
+      const value = String(row?.[field] ?? '').trim();
+      if (!value) return;
+      counts.set(value, (counts.get(value) || 0) + 1);
+    });
+
+    const values = new Set();
+    let rowCount = 0;
+    counts.forEach((count, value) => {
+      if (count > 1) {
+        values.add(value);
+        rowCount += count;
+      }
+    });
+
+    return { field, values, rowCount };
+  }, [getMatchingDataColumnField, itemCodeIssue?.field, rowData]);
+  const duplicateItemCodeValues = duplicateItemCodeInfo.values;
+  const hasDuplicateItemCodeRows = Boolean(duplicateItemCodeInfo.field && duplicateItemCodeInfo.rowCount > 0 && duplicateItemCodeValues.size > 0);
+
   const filteredRows = useMemo(() => ((rowData || [])
     .map((row, rowIndex) => ({ row, rowIndex }))
     .filter(({ row }) => {
@@ -5600,14 +5739,19 @@ const EnhancedDataEditor = () => {
         String(value ?? '').toLowerCase().includes(rowSearchQuery)
       );
     })
+    .filter(({ row }) => {
+      if (!issueRowFilter) return true;
+      const cell = String(row[issueRowFilter.field] ?? '').trim().toLowerCase();
+      return issueRowFilter.values.includes(cell);
+    })
     .filter(({ row }) => activeColumnFilters.every(([field, needle]) =>
       String(row?.[field] ?? '').toLowerCase().includes(needle)
     ))
-  ), [rowData, rowFilterMode, mpnFilterInvalidOnly, mpnSourceField, rowSearchQuery, activeColumnFilters]);
+  ), [rowData, rowFilterMode, mpnFilterInvalidOnly, mpnSourceField, rowSearchQuery, activeColumnFilters, issueRowFilter]);
 
   const activeColumnFilterCount = activeColumnFilters.length;
   const isFiltering = Boolean(rowSearchQuery) || activeColumnFilterCount > 0
-    || rowFilterMode !== 'all' || mpnFilterInvalidOnly;
+    || rowFilterMode !== 'all' || mpnFilterInvalidOnly || Boolean(issueRowFilter);
   const filteredRowCount = filteredRows.length;
   const totalPages = Math.max(1, Math.ceil(filteredRowCount / Math.max(1, pageSize)));
   const safePage = Math.min(Math.max(1, page), totalPages);
@@ -6019,15 +6163,13 @@ const EnhancedDataEditor = () => {
                   <MenuItem value="concat">Join two columns</MenuItem>
                   <MenuItem value="conditional">Use an if / else condition</MenuItem>
                   <MenuItem value="serial">Generate a serial sequence</MenuItem>
-                  <MenuItem value="rules">Apply a saved rule set</MenuItem>
+                  <MenuItem value="saved_rule">Apply a saved rule</MenuItem>
                   {createColumnTab === 1 && <MenuItem value="blank">Leave the new column blank</MenuItem>}
                 </Select>
               </FormControl>
             </Grid>
 
-            {/* A rule set decides per row whether it matches, so "rows to
-                update" has nothing to act on. */}
-            {createColumnTab === 0 && createColumnContentType !== 'rules' && (
+            {createColumnTab === 0 && (
               <Grid item xs={12} sm={6}>
                 <FormControl fullWidth size="small">
                   <InputLabel>Rows to update</InputLabel>
@@ -6042,46 +6184,38 @@ const EnhancedDataEditor = () => {
               </Grid>
             )}
 
-            {createColumnContentType === 'fixed' && (
+            {createColumnContentType === 'saved_rule' && (
               <Grid item xs={12}>
-                <TextField fullWidth size="small" label="Value" value={defaultValue} onChange={(e) => setDefaultValue(e.target.value)} />
-              </Grid>
-            )}
-
-            {createColumnContentType === 'rules' && (
-              <Grid item xs={12}>
-                <FormControl fullWidth size="small" disabled={ruleSetsLoading}>
-                  <InputLabel>Rule set</InputLabel>
+                <FormControl fullWidth size="small">
+                  <InputLabel>Saved rule</InputLabel>
                   <Select
-                    label="Rule set"
-                    value={selectedRuleSetId}
-                    onChange={(e) => setSelectedRuleSetId(e.target.value)}
+                    label="Saved rule"
+                    value={selectedColumnRuleId}
+                    onChange={(e) => setSelectedColumnRuleId(e.target.value)}
                   >
-                    {preferredRuleSets.length > 0 && (
-                      <ListSubheader>
-                        Saved for {columnLabel(createColumnTarget, createColumnTarget)}
-                      </ListSubheader>
+                    {preferredColumnRules.length > 0 && (
+                      <ListSubheader>Saved for {columnLabel(createColumnTarget, createColumnTarget)}</ListSubheader>
                     )}
-                    {preferredRuleSets.map(set => (
-                      <MenuItem key={set.id} value={set.id}>
-                        {set.name} · {(set.formula_rules || set.rules || []).length} rules
-                      </MenuItem>
+                    {preferredColumnRules.map(saved => (
+                      <MenuItem key={saved.id} value={saved.id}>{saved.name}</MenuItem>
                     ))}
-                    {otherRuleSets.length > 0 && <ListSubheader>Other rule sets</ListSubheader>}
-                    {otherRuleSets.map(set => (
-                      <MenuItem key={set.id} value={set.id}>
-                        {set.name} · {(set.formula_rules || set.rules || []).length} rules
-                      </MenuItem>
+                    {otherColumnRules.length > 0 && <ListSubheader>Other rules</ListSubheader>}
+                    {otherColumnRules.map(saved => (
+                      <MenuItem key={saved.id} value={saved.id}>{saved.name}</MenuItem>
                     ))}
                   </Select>
                 </FormControl>
                 <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: t.text.secondary }}>
-                  {ruleSetsLoading
-                    ? 'Loading rule sets…'
-                    : (ruleSets.length === 0
-                      ? 'No rule sets saved yet — create one from the dashboard\'s Rule Sets tab.'
-                      : 'Every rule in the set writes into the column selected above, whatever destination it was saved with.')}
+                  {savedColumnRules.length === 0
+                    ? 'No rules saved yet — create one under Settings → Column Rules.'
+                    : 'The rule decides the value; the column and rows above decide where it lands.'}
                 </Typography>
+              </Grid>
+            )}
+
+            {createColumnContentType === 'fixed' && (
+              <Grid item xs={12}>
+                <TextField fullWidth size="small" label="Value" value={defaultValue} onChange={(e) => setDefaultValue(e.target.value)} />
               </Grid>
             )}
 
@@ -6326,7 +6460,21 @@ const EnhancedDataEditor = () => {
                   <TextField fullWidth size="small" type="number" label="Number padding" value={factwiseSerialPadding} onChange={(e) => setFactwiseSerialPadding(e.target.value)} />
                 </Grid>
                 <Grid item xs={12}>
-                  <FormControlLabel control={<Checkbox checked={factwiseSerialIncrement} onChange={(e) => setFactwiseSerialIncrement(e.target.checked)} />} label="Increment for each row" />
+                  <FormControlLabel
+                    control={(
+                      <Checkbox
+                        checked={effectiveSerialIncrement}
+                        disabled={serialMustIncrement}
+                        onChange={(e) => setFactwiseSerialIncrement(e.target.checked)}
+                      />
+                    )}
+                    label="Increment for each row"
+                  />
+                  {serialMustIncrement && (
+                    <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mt: -0.5, ml: 4 }}>
+                      Always on for Item code — it must be unique, so every row needs its own number.
+                    </Typography>
+                  )}
                 </Grid>
               </>
             )}
@@ -6345,15 +6493,7 @@ const EnhancedDataEditor = () => {
             (conditionalBranches.some(branch => branch.outputType === 'empty') || condElseSourceType === 'empty') && (
               <Alert severity="info" sx={{ mt: 2 }}>Leave empty will not clear populated cells in this mode. Choose All rows if matching rows should be cleared.</Alert>
             )}
-          {/* Rule sets run through the formula engine, which is not part of the
-              mapping template's saved operations. */}
-          {createColumnContentType === 'rules' ? (
-            <Alert severity="info" sx={{ mt: 2 }}>
-              Runs once now. Reapply the rule set on a future sheet from this same dialog.
-            </Alert>
-          ) : (
-            <Alert severity="info" sx={{ mt: 2 }}>This operation is saved with the mapping template and runs again when the template is reused.</Alert>
-          )}
+          <Alert severity="info" sx={{ mt: 2 }}>This operation is saved with the mapping template and runs again when the template is reused.</Alert>
         </DialogContent>
         <DialogActions sx={{
           px: 3,
@@ -6373,7 +6513,7 @@ const EnhancedDataEditor = () => {
               !(createColumnTab === 0 ? createColumnTarget : createColumnNewName.trim()) ||
               (createColumnTab === 1 && dataColumnFields.includes(createColumnNewName.trim())) ||
               (createColumnContentType === 'concat' && (!createColumnFirst || !createColumnSecond)) ||
-              (createColumnContentType === 'rules' && !selectedRuleSetId)
+              (createColumnContentType === 'saved_rule' && !selectedColumnRuleId)
             }
             startIcon={createColumnSaving ? <CircularProgress size={16} /> : <AutoAwesomeIcon />}
           >
@@ -6913,6 +7053,18 @@ const EnhancedDataEditor = () => {
                   ? (mpnProgress && mpnProgress.total ? `MPN unique ${mpnProgress.done}/${mpnProgress.total}` : 'MPN...')
                   : 'MPN'}
               </Button>
+              {/* A value-set filter is invisible in the Filter menu, so it says
+                  so here and can be cleared in one click. */}
+              {issueRowFilter && (
+                <Chip
+                  size="small"
+                  color="warning"
+                  variant="outlined"
+                  label={`Showing rows: ${issueRowFilter.label}`}
+                  onDelete={clearIssueRowFilter}
+                  sx={{ fontWeight: 700, borderRadius: '8px' }}
+                />
+              )}
               <Button
                 onClick={(e) => setRowFilterMenuAnchor(e.currentTarget)}
                 variant="outlined"
@@ -6955,6 +7107,21 @@ const EnhancedDataEditor = () => {
                 <MenuItem onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('all'); setMpnFilterInvalidOnly(false); setPage(1); }}>
                   <ListItemIcon>{rowFilterMode === 'all' && !mpnFilterInvalidOnly ? <CheckIcon sx={{ color: t.color.primary }} /> : null}</ListItemIcon>
                   <ListItemText>All rows</ListItemText>
+                </MenuItem>
+                <MenuItem
+                  onClick={() => {
+                    setRowFilterMenuAnchor(null);
+                    if (hasDuplicateItemCodeRows) {
+                      setDupHighlight({
+                        field: duplicateItemCodeInfo.field,
+                        values: duplicateItemCodeValues,
+                      });
+                    }
+                  }}
+                  disabled={!hasDuplicateItemCodeRows}
+                >
+                  <ListItemIcon>{dupHighlight?.field === duplicateItemCodeInfo.field ? <CheckIcon sx={{ color: t.color.warningText }} /> : <ContentCopyIcon sx={{ color: t.color.warningText }} />}</ListItemIcon>
+                  <ListItemText>Highlight duplicate Item codes</ListItemText>
                 </MenuItem>
                 <MenuItem
                   onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('valid_mpn'); setMpnFilterInvalidOnly(false); setPage(1); }}
@@ -7366,9 +7533,19 @@ const EnhancedDataEditor = () => {
               <Alert
                 severity="warning"
                 sx={{ mb: 1 }}
-                action={<Button color="inherit" size="small" onClick={() => setDupHighlight(null)}>Clear highlight</Button>}
+                action={(
+                  <Button
+                    color="inherit"
+                    size="small"
+                    onClick={() => setDupHighlight(null)}
+                  >
+                    Clear highlight
+                  </Button>
+                )}
               >
-                Duplicate <strong>{columnLabel(dupHighlight.field, dupHighlight.field)}</strong> values are highlighted in amber ({dupHighlight.values.size} value{dupHighlight.values.size === 1 ? '' : 's'}). Edit them so each is unique, then export again.
+                {dupHighlight.rows?.size
+                  ? <>The {dupHighlight.rows.size} row{dupHighlight.rows.size === 1 ? '' : 's'} flagged by <strong>{dupHighlight.label || 'the BOM check'}</strong> are highlighted in amber. Fix them, then export again.</>
+                  : <>Duplicate <strong>{columnLabel(dupHighlight.field, dupHighlight.field)}</strong> values are highlighted in amber ({dupHighlight.values.size} value{dupHighlight.values.size === 1 ? '' : 's'}). Edit them so each is unique, then export again.</>}
               </Alert>
             )}
             {pageLoading && <LinearProgress sx={{ mb: 1 }} />}
@@ -7593,7 +7770,16 @@ const EnhancedDataEditor = () => {
                             col.field === mpnColumn &&
                             providerValidValues.some(value => String(value || '').toLowerCase() === 'no')
                           );
-                          const isDupHighlighted = !!(dupHighlight && col.field === dupHighlight.field && cellValue.trim() && dupHighlight.values.has(cellValue.trim()));
+                          const matchesDupValue = !!(dupHighlight && col.field === dupHighlight.field
+                            && cellValue.trim() && dupHighlight.values?.has(cellValue.trim()));
+                          // One cell, never the whole line: the issue is in a
+                          // specific column. When the rule names no column
+                          // (a cycle, a row referencing nothing) the row number
+                          // itself is marked, so the row is still findable
+                          // without washing every cell in amber.
+                          const matchesDupRow = !!(dupHighlight?.rows?.has(rowIndex + 1)
+                            && col.field === (dupHighlight.field || '__row_number__'));
+                          const isDupHighlighted = matchesDupValue || matchesDupRow;
                           return (
                             <td key={`${col.field}-${rowIndex}`} style={{
                               padding: '10px 14px',
@@ -9387,12 +9573,16 @@ const EnhancedDataEditor = () => {
                   <FormControlLabel
                     control={
                       <Checkbox
-                        checked={factwiseSerialIncrement}
+                        checked
+                        disabled
                         onChange={(event) => setFactwiseSerialIncrement(event.target.checked)}
                       />
                     }
                     label="Increase number for each row"
                   />
+                  <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mt: -0.5, ml: 4 }}>
+                    Always on — this dialog writes Item code, which must be unique.
+                  </Typography>
                 </Grid>
               </Grid>
             )}
@@ -9425,7 +9615,7 @@ const EnhancedDataEditor = () => {
             }}>
               <Typography variant="body2" sx={{ color: isDarkMode ? '#cbd5e1' : '#64748b' }}>
                 Preview: {(factwiseSerialPrefix || '')}{String(Number(factwiseSerialStart) || 1).padStart(Math.max(0, Number(factwiseSerialPadding) || 0), '0')}
-                {factwiseSerialIncrement ? `, ${(factwiseSerialPrefix || '')}${String((Number(factwiseSerialStart) || 1) + 1).padStart(Math.max(0, Number(factwiseSerialPadding) || 0), '0')}` : ' for every row'}
+                {`, ${(factwiseSerialPrefix || '')}${String((Number(factwiseSerialStart) || 1) + 1).padStart(Math.max(0, Number(factwiseSerialPadding) || 0), '0')}`}
               </Typography>
             </Box>
           )}
@@ -10612,6 +10802,35 @@ const EnhancedDataEditor = () => {
                         Codes: {group.codes.slice(0, 8).join(', ')}
                         {group.codes.length > 8 ? ` +${group.codes.length - 8} more` : ''}
                       </Typography>
+                    )}
+                    {/* Duplicates carry codes but no row numbers, so the chips
+                        below never render for them — this is the only way to
+                        see the offending rows, and it shows them together. */}
+                    {(group.rows.length > 0 || group.codes.length > 0 || group.values.length > 0) && (
+                      <Box sx={{ display: 'flex', gap: 1.5, flexWrap: 'wrap', alignItems: 'center' }}>
+                        <Button
+                          size="small"
+                          variant="text"
+                          onClick={() => highlightBomIssue(group, fillField, guidance.title || group.rule)}
+                          sx={{ textTransform: 'none', fontWeight: 700, px: 0 }}
+                        >
+                          Highlight in grid
+                        </Button>
+                        {fillField && (group.codes.length > 0 || group.values.length > 0) && (
+                          <Button
+                            size="small"
+                            variant="text"
+                            onClick={() => showIssueRows(
+                              fillField,
+                              group.codes.length > 0 ? group.codes : group.values,
+                              guidance.title || group.rule,
+                            )}
+                            sx={{ textTransform: 'none', fontWeight: 700, px: 0 }}
+                          >
+                            Show only these rows
+                          </Button>
+                        )}
+                      </Box>
                     )}
                   </Box>
 

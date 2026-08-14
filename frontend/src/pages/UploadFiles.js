@@ -498,19 +498,114 @@ const createWorkbookFileFromWorkbook = (workbook, fileName) => {
   return new File([blob], fileName, { type: blob.type });
 };
 
+const isPdfAssemblyMatrixPartHeader = (header) => {
+  const key = normalizeHeaderKey(header);
+  if (!key || /\b(mfr|mfg|manufacturer|maker|vendor|supplier)\b/.test(key)) return false;
+  return /\bpart\s*(no|num|number|nbr)\b/.test(key) || /^part$/.test(key);
+};
+
+const isPdfAssemblyMatrixDescriptionHeader = (header) => (
+  /\b(desc|description|designation|item\s*name|name)\b/.test(normalizeHeaderKey(header))
+);
+
+const isPdfAssemblyMatrixFindHeader = (header) => (
+  /\b(find\s*(no|num|number|nbr)|find|serial\s*(no|number)?|item\s*no)\b/.test(normalizeHeaderKey(header))
+);
+
+const isPdfAssemblyMatrixHeaderCandidate = (header) => {
+  const text = asText(header);
+  return /^0*\d{1,4}$/.test(text) || /^(?:ass(?:y|embly)?|bom)\s*[-_ ]*0*\d{1,4}$/i.test(text);
+};
+
+const canonicalPdfAssemblyMatrixHeader = (header) => {
+  const text = asText(header).toUpperCase().replace(/\s+/g, '');
+  if (/^[0ODQ]{1,3}\d{1,3}$/.test(text) && /[ODQ]/.test(text)) {
+    const fixed = text.replace(/[ODQ]/g, '0');
+    return fixed.length <= 3 ? fixed.padStart(3, '0') : fixed;
+  }
+  return asText(header);
+};
+
+const isPdfMatrixQuantityLikeValue = (value) => {
+  const text = asText(value).replace(/\u00a0/g, ' ').trim();
+  if (!text) return true;
+  if (/^[-–—]$/.test(text)) return true;
+  if (/^(?:ar|a\/r|as\s*req(?:uired)?|ref|x)$/i.test(text)) return true;
+  return /^-?\d+(?:[.,]\d+)?$/.test(text);
+};
+
+const scorePdfHeaderRowCandidate = (row = []) => {
+  const cells = row.map(asText);
+  const nonBlank = cells.filter(Boolean);
+  if (nonBlank.length < 3) return 0;
+
+  const structuralHits = cells.filter((cell) => (
+    isPdfAssemblyMatrixFindHeader(cell) ||
+    isPdfAssemblyMatrixPartHeader(cell) ||
+    isPdfAssemblyMatrixDescriptionHeader(cell)
+  )).length;
+  const assemblyHits = cells.filter((cell) => isPdfAssemblyMatrixHeaderCandidate(canonicalPdfAssemblyMatrixHeader(cell))).length;
+  const labelHits = nonBlank.filter((cell) => /[A-Za-z]/.test(cell)).length;
+  const quantityHits = nonBlank.filter(isPdfMatrixQuantityLikeValue).length;
+  const longTextHits = nonBlank.filter((cell) => cell.length > 40).length;
+
+  if (structuralHits < 2 || assemblyHits < 1) return 0;
+  return structuralHits * 35 + assemblyHits * 18 + labelHits * 6 - quantityHits * 8 - longTextHits * 15;
+};
+
+const isLikelyGeneratedPdfHeader = (header) => {
+  const text = asText(header);
+  return !text || /^column(?:[_\s]*\d+|\.\d+)?$/i.test(text) || /^\d{1,3}$/.test(text);
+};
+
+const promotePdfHeaderRowFromData = (headers = [], rawRows = []) => {
+  const sourceHeaders = headers.map(asText);
+  if (!Array.isArray(rawRows) || rawRows.length < 2) {
+    return { headers: sourceHeaders, rows: rawRows };
+  }
+
+  const rowArrays = rawRows.map((row) => (
+    Array.isArray(row)
+      ? row.map(asText)
+      : sourceHeaders.map((header) => asText(row?.[header]))
+  ));
+  const currentHeaderLooksWeak = sourceHeaders.length
+    ? sourceHeaders.filter(isLikelyGeneratedPdfHeader).length / sourceHeaders.length >= 0.6
+    : true;
+  const currentHeaderScore = scorePdfHeaderRowCandidate(sourceHeaders);
+
+  let best = { index: -1, score: 0 };
+  rowArrays.slice(0, 80).forEach((row, index) => {
+    const score = scorePdfHeaderRowCandidate(row);
+    if (score > best.score) best = { index, score };
+  });
+
+  if (best.index < 0 || best.score < 80) return { headers: sourceHeaders, rows: rawRows };
+  if (!currentHeaderLooksWeak && currentHeaderScore >= best.score * 0.8) {
+    return { headers: sourceHeaders, rows: rawRows };
+  }
+
+  return {
+    headers: makeUniqueHeaders(rowArrays[best.index]),
+    rows: rowArrays.filter((_, index) => index !== best.index),
+  };
+};
+
 const normalizePdfRowsForWorkbook = (payload, sourceFile) => {
-  const pdfHeaders = makeUniqueHeaders(payload?.headers || []);
   const rawRows = Array.isArray(payload?.data) ? payload.data : [];
+  const promoted = promotePdfHeaderRowFromData(payload?.headers || [], rawRows);
+  const pdfHeaders = makeUniqueHeaders(promoted.headers || []);
+  const pdfRows = Array.isArray(promoted.rows) ? promoted.rows : rawRows;
   const decision = payload?.decision;
   const decisionLabel = typeof decision === 'string'
     ? decision
     : (decision?.winner || decision?.method || 'best extraction');
 
-  if (!pdfHeaders.length || !rawRows.length) {
+  if (!pdfHeaders.length || !pdfRows.length) {
     return { headers: [], rows: [] };
   }
 
-  const rows = rawRows
+  const rows = pdfRows
     .map((row, index) => {
       const mapped = {
         'Source file': sourceFile,
@@ -1011,6 +1106,12 @@ const UploadFiles = () => {
 
   // Check if template or smart tag rules were pre-selected from dashboard
   useEffect(() => {
+    // Dashboard "Use" on a processing template lands here; it is applied at the
+    // Select Template step once a file is in, so just preselect it.
+    if (location.state?.selectedProcessingTemplateId) {
+      setSelectedProcessingTemplateId(String(location.state.selectedProcessingTemplateId));
+      setProcessingTemplateMode('use');
+    }
     if (location.state?.selectedTemplate) {
       setSelectedTemplate(location.state.selectedTemplate);
     }
@@ -3122,8 +3223,8 @@ const UploadFiles = () => {
 
     if (!isPDF && clientSheetNames.length > 0) {
       if (combineSheetsMode) {
-        if (selectedClientSheets.length < 1) {
-          setError('Select at least one sheet to combine');
+        if (selectedClientSheets.length < 2) {
+          setError('Select at least two sheets to combine');
           return;
         }
       } else if (!selectedClientSheet) {
@@ -4014,18 +4115,50 @@ const UploadFiles = () => {
                         <Grid container spacing={1.5} sx={{ mb: 1.5 }}>
                           <Grid item xs={7}>
                             <FormControl fullWidth size="small">
-                              <InputLabel sx={{ color: Nn.muted }}>Sheet Name</InputLabel>
-                              <Select
-                                value={selectedClientSheet}
-                                label="Sheet Name"
-                                onChange={(e) => handleClientSheetChange(e.target.value)}
-                                MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
-                                sx={{ borderRadius: '8px' }}
-                              >
-                                {clientSheetNames.map(s => (
-                                  <MenuItem key={s} value={s}>{s}</MenuItem>
-                                ))}
-                              </Select>
+                              <InputLabel sx={{ color: Nn.muted }}>
+                                {combineSheetsMode ? 'Sheets to combine' : 'Sheet Name'}
+                              </InputLabel>
+                              {/* Combining stacks several sheets into one, so the
+                                  picker has to accept several. */}
+                              {combineSheetsMode ? (
+                                <Select
+                                  multiple
+                                  value={selectedClientSheets}
+                                  label="Sheets to combine"
+                                  onChange={(e) => {
+                                    const picked = typeof e.target.value === 'string'
+                                      ? e.target.value.split(',')
+                                      : e.target.value;
+                                    setSelectedClientSheets(picked);
+                                  }}
+                                  renderValue={(picked) => `${picked.length} of ${clientSheetNames.length} selected`}
+                                  MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
+                                  sx={{ borderRadius: '8px' }}
+                                >
+                                  {clientSheetNames.map(s => (
+                                    <MenuItem key={s} value={s}>
+                                      <Checkbox
+                                        checked={selectedClientSheets.indexOf(s) > -1}
+                                        size="small"
+                                        sx={{ p: 0.5, mr: 1 }}
+                                      />
+                                      {s}
+                                    </MenuItem>
+                                  ))}
+                                </Select>
+                              ) : (
+                                <Select
+                                  value={selectedClientSheet}
+                                  label="Sheet Name"
+                                  onChange={(e) => handleClientSheetChange(e.target.value)}
+                                  MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
+                                  sx={{ borderRadius: '8px' }}
+                                >
+                                  {clientSheetNames.map(s => (
+                                    <MenuItem key={s} value={s}>{s}</MenuItem>
+                                  ))}
+                                </Select>
+                              )}
                             </FormControl>
                           </Grid>
                           <Grid item xs={5}>
@@ -4048,7 +4181,13 @@ const UploadFiles = () => {
                               control={
                                 <Checkbox
                                   checked={combineSheetsMode}
-                                  onChange={(e) => setCombineSheetsMode(e.target.checked)}
+                                  onChange={(e) => {
+                                    const on = e.target.checked;
+                                    setCombineSheetsMode(on);
+                                    // Start from every sheet; unticking any is
+                                    // easier than picking them all one by one.
+                                    setSelectedClientSheets(on ? [...clientSheetNames] : []);
+                                  }}
                                   size="small"
                                   sx={{ color: '#60a5fa', '&.Mui-checked': { color: '#3b82f6' } }}
                                 />
@@ -4059,6 +4198,13 @@ const UploadFiles = () => {
                                 </Typography>
                               }
                             />
+                            {combineSheetsMode && (
+                              <Typography variant="caption" sx={{ display: 'block', color: Nn.muted, fontSize: 12, mt: 0.25 }}>
+                                {selectedClientSheets.length > 1
+                                  ? `Rows from ${selectedClientSheets.length} sheets are stacked into one sheet, using the header row above.`
+                                  : 'Pick at least two sheets to combine.'}
+                              </Typography>
+                            )}
                           </Box>
                         )}
 

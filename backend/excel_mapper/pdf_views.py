@@ -3,6 +3,7 @@ PDF processing views for handling PDF upload and OCR
 """
 import os
 import json
+import re
 import tempfile
 import logging
 import threading
@@ -46,6 +47,178 @@ def _page_render_lock(session_id, page_number):
 
 
 ALLOWED_TEMPLATE_EXTENSIONS = {'.xlsx', '.xls', '.xlsm', '.csv'}
+
+
+def _pdf_text(value) -> str:
+    if value is None:
+        return ''
+    try:
+        if pd.isna(value):
+            return ''
+    except Exception:
+        pass
+    return re.sub(r'\s+', ' ', str(value).replace('\u00a0', ' ')).strip()
+
+
+def _pdf_header_key(value) -> str:
+    return re.sub(r'[^a-z0-9]+', ' ', _pdf_text(value).lower()).strip()
+
+
+def _pdf_make_unique_headers(headers):
+    used = {}
+    output = []
+    for index, header in enumerate(headers):
+        base = _pdf_text(header) or f'Column_{index + 1}'
+        count = used.get(base, 0)
+        used[base] = count + 1
+        output.append(base if count == 0 else f'{base}.{count}')
+    return output
+
+
+def _pdf_generated_or_weak_header(header) -> bool:
+    text = _pdf_text(header)
+    key = _pdf_header_key(text)
+    if not text:
+        return True
+    if re.fullmatch(r'(?:column[_\s]*)?\d{1,3}', text, flags=re.IGNORECASE):
+        return True
+    if re.fullmatch(r'\d{1,3}', text):
+        return True
+    return key in {'source file', 'source sheet', 'pdf best extraction'}
+
+
+def _pdf_assembly_header_like(value) -> bool:
+    text = _pdf_text(value)
+    return bool(
+        re.fullmatch(r'0*\d{1,4}', text) or
+        re.fullmatch(r'(?:a|ass|assy|assembly|bom)\s*[-_ ]*0*\d{1,4}', text, flags=re.IGNORECASE)
+    )
+
+
+def _pdf_header_row_score(values) -> int:
+    cells = [_pdf_text(value) for value in list(values or [])]
+    non_blank = [cell for cell in cells if cell]
+    if len(non_blank) < 2:
+        return 0
+
+    joined = ' '.join(non_blank).lower()
+    keyword_hits = sum(
+        1 for pattern in (
+            r'\bfind\s*(?:no|num|number|nbr)?\.?\b',
+            r'\bpart\s*(?:no|num|number|nbr)?\.?\b',
+            r'\bdescription\b',
+            r'\bdesc\b',
+            r'\bassy\b',
+            r'\bassembly\b',
+            r'\bbom\b',
+        )
+        if re.search(pattern, joined)
+    )
+    assembly_hits = sum(1 for cell in non_blank if _pdf_assembly_header_like(cell))
+    label_hits = sum(1 for cell in non_blank if re.search(r'[A-Za-z]', cell))
+    part_number_hits = sum(
+        1 for cell in non_blank
+        if re.search(r'[A-Z]?\d{4,}[-/][A-Z0-9-]+', cell, flags=re.IGNORECASE)
+    )
+    long_data_hits = sum(
+        1 for cell in non_blank
+        if len(cell) > 24 and not re.search(r'\b(description|part|find|assy|assembly|bom)\b', cell, flags=re.IGNORECASE)
+    )
+
+    # At least one semantic column label is required. Assembly labels alone
+    # can also be real data, so they should not trigger header promotion.
+    if keyword_hits < 1:
+        return 0
+
+    return (
+        keyword_hits * 30
+        + min(assembly_hits, 8) * 8
+        + min(label_hits, 8) * 3
+        - part_number_hits * 20
+        - long_data_hits * 10
+    )
+
+
+def _pdf_values_look_like_data_row(values) -> bool:
+    cells = [_pdf_text(value) for value in list(values or [])]
+    non_blank = [cell for cell in cells if cell]
+    if len(non_blank) < 2:
+        return False
+    if _pdf_header_row_score(cells) >= 35:
+        return False
+
+    has_part_number = any(
+        re.search(r'[A-Z]?\d{4,}[-/][A-Z0-9-]+', cell, flags=re.IGNORECASE)
+        for cell in non_blank
+    )
+    has_description = any(
+        len(cell) >= 8 and re.search(r'[A-Za-z]{3,}', cell) and not _pdf_assembly_header_like(cell)
+        for cell in non_blank
+    )
+    quantity_like_count = sum(
+        1 for cell in non_blank
+        if re.fullmatch(r'-?\d+(?:[.,]\d+)?', cell) or re.fullmatch(r'(?:bulk|ar|a/r|ref|x)', cell, flags=re.IGNORECASE)
+    )
+    return has_part_number or (has_description and quantity_like_count >= 1)
+
+
+def repair_pdf_dataframe_headers(df: pd.DataFrame, context: str = '') -> pd.DataFrame:
+    """Promote a real table header row from data when PDF extraction shifts it.
+
+    Native/Azure PDF extraction can return weak headers such as "1", "2", or a
+    partial first row, while the real BOM header row is inside the data. Repair
+    this once at the backend boundary so every downstream page sees the same
+    corrected shape.
+    """
+    if df is None or df.empty or len(df.columns) < 2:
+        return df
+
+    current_headers = [_pdf_text(col) for col in df.columns]
+    current_score = _pdf_header_row_score(current_headers)
+    weak_count = sum(1 for header in current_headers if _pdf_generated_or_weak_header(header))
+    weak_ratio = weak_count / max(len(current_headers), 1)
+
+    best_index = None
+    best_score = 0
+    for idx, row in df.head(80).iterrows():
+        score = _pdf_header_row_score(row.tolist())
+        if score > best_score:
+            best_index = idx
+            best_score = score
+
+    if best_index is None or best_score < 55:
+        return df
+    if weak_ratio < 0.25 and best_score <= current_score + 20:
+        return df
+
+    header_values = [_pdf_text(value) for value in df.loc[best_index].tolist()]
+    width = max(len(header_values), len(current_headers))
+    header_values = (header_values + [''] * (width - len(header_values)))[:width]
+    new_headers = _pdf_make_unique_headers(header_values)
+
+    repaired_rows = []
+    if _pdf_values_look_like_data_row(current_headers):
+        repaired_rows.append((current_headers + [''] * (width - len(current_headers)))[:width])
+
+    for idx, row in df.iterrows():
+        if idx == best_index:
+            continue
+        values = [_pdf_text(value) for value in row.tolist()]
+        values = (values + [''] * (width - len(values)))[:width]
+        if any(values):
+            repaired_rows.append(values)
+
+    if not repaired_rows:
+        return df
+
+    logger.info(
+        "PDF header repair applied%s: promoted data row %s as header | old_headers=%s | new_headers=%s",
+        f" ({context})" if context else "",
+        best_index,
+        current_headers[:12],
+        new_headers[:12],
+    )
+    return pd.DataFrame(repaired_rows, columns=new_headers)
 
 
 def _parse_positive_int(value, default=1):
@@ -649,6 +822,7 @@ def process_pdf_ocr(request):
 
             # Convert to DataFrame format using requested alignment
             df = ocr_service.convert_to_dataframe(extraction_result, alignment_mode=alignment_mode)
+            df = repair_pdf_dataframe_headers(df, context='ocr')
 
             # Derive header-level confidence scores aligned to DataFrame headers
             # Fall back to overall/header confidence metric if detailed per-header scores are unavailable
@@ -861,6 +1035,7 @@ def process_pdf_compare(request):
 
         chosen_result = native_result if winner == 'native' else azure_result
         chosen_df = native_df if winner == 'native' else azure_df
+        chosen_df = repair_pdf_dataframe_headers(chosen_df, context=f'compare_{winner}')
 
         header_confidence_scores = {}
         try:

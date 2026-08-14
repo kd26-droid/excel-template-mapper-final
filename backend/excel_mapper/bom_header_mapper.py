@@ -368,12 +368,23 @@ class BOMHeaderMapper:
                 )
         return 0.0, ""
     
-    def map_headers_to_template(self, client_file: str, template_file: str, 
+    def map_headers_to_template(self, client_file: str, template_file: str,
                                client_sheet_name: str = None, template_sheet_name: str = None,
-                               client_header_row: int = 0, template_header_row: int = 0) -> List[Dict]:
-        """Map client headers to template headers."""
+                               client_header_row: int = 0, template_header_row: int = 0,
+                               extra_template_headers: List[str] = None) -> List[Dict]:
+        """Map client headers to template headers.
+
+        ``extra_template_headers`` are destination columns the app adds on top of
+        the template workbook. Without them the matcher scores against the file
+        alone, so a column the mapping page offers but the file does not contain
+        can never be suggested - the user sees the column, sees it empty, and has
+        no way to know it was never a candidate.
+        """
         try:
             template_headers = self.read_excel_headers(template_file, template_sheet_name, template_header_row)
+            for header in (extra_template_headers or []):
+                if header and header not in template_headers:
+                    template_headers.append(header)
             client_headers = self.read_excel_headers(client_file, client_sheet_name, client_header_row)
             
             try:
