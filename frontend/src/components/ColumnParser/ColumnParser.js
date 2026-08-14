@@ -32,6 +32,7 @@ import {
   ChevronLeft as ChevronLeftIcon,
   ChevronRight as ChevronRightIcon,
   ContentCut as ContentCutIcon,
+  DeleteOutline as DeleteOutlineIcon,
 } from '@mui/icons-material';
 
 const API_BASE = process.env.REACT_APP_API_BASE_URL || '/api';
@@ -357,6 +358,22 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
     setParts(current => current.map(part => part.id === id ? { ...part, [field]: value } : part));
   };
 
+  const discardPartOutput = (id) => {
+    setParts(current => current.map(part => (
+      part.id === id
+        ? {
+            ...part,
+            outputType: 'discard',
+            specName: '',
+            customName: '',
+            targetColumn: '',
+          }
+        : part
+    )));
+    setError('');
+    setPreviewData(null);
+  };
+
   const outputPreviewItems = useMemo(() => {
     if (step === 0 || !parts.length) {
       return (parseReference?.pairs || []).flatMap((pair) => ([
@@ -524,7 +541,7 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
           key={part.id}
           sx={{
             display: 'grid',
-            gridTemplateColumns: { xs: '1fr', md: 'minmax(140px, 1fr) 190px minmax(200px, 1fr)' },
+            gridTemplateColumns: { xs: '1fr', md: 'minmax(140px, 1fr) 190px minmax(200px, 1fr) 96px' },
             gap: 1.5,
             alignItems: 'center',
             py: 1.25,
@@ -538,7 +555,18 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
             <InputLabel>Output</InputLabel>
             <Select
               label="Output"
-              value={part.outputType}
+              value={part.outputType === 'discard' ? '' : part.outputType}
+              displayEmpty
+              renderValue={(selected) => {
+                if (!selected) return '';
+                const labels = {
+                  direct: 'FactWise column',
+                  spec: 'Specification',
+                  tag: 'Tag',
+                  custom: 'Custom column',
+                };
+                return labels[selected] || selected;
+              }}
               onChange={event => {
                 updatePart(part.id, 'outputType', event.target.value);
                 setError('');
@@ -549,7 +577,6 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
               <MenuItem value="spec">Specification</MenuItem>
               <MenuItem value="tag">Tag</MenuItem>
               <MenuItem value="custom">Custom column</MenuItem>
-              <MenuItem value="discard">Discard text</MenuItem>
             </Select>
           </FormControl>
           {part.outputType === 'direct' ? (
@@ -600,6 +627,29 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
               This value will not be added to the output.
             </Typography>
           )}
+          <Tooltip title="Discard this text">
+            <span style={{ justifySelf: 'end' }}>
+              <IconButton
+                size="small"
+                color="error"
+                onClick={() => discardPartOutput(part.id)}
+                disabled={part.outputType === 'discard'}
+                aria-label="Discard this text"
+                sx={{
+                  width: 34,
+                  height: 34,
+                  border: '1px solid',
+                  borderColor: part.outputType === 'discard' ? '#e5e7eb' : '#fecaca',
+                  bgcolor: part.outputType === 'discard' ? '#f8fafc' : '#fff5f5',
+                  '&:hover': {
+                    bgcolor: '#fee2e2',
+                  },
+                }}
+              >
+                <DeleteOutlineIcon fontSize="small" />
+              </IconButton>
+            </span>
+          </Tooltip>
         </Box>
       ))}
     </Box>

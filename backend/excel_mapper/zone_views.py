@@ -159,6 +159,13 @@ def process_zones(request, session_id):
                     'width': int(round(c.get('width', 0) * oc['sx'])),
                     'height': int(round(c.get('height', 0) * oc['sy'])),
                 }
+                crop_pad = 8
+                scaled_coords = {
+                    'x': max(0, scaled_coords['x'] - crop_pad),
+                    'y': max(0, scaled_coords['y'] - crop_pad),
+                    'width': scaled_coords['width'] + (crop_pad * 2),
+                    'height': scaled_coords['height'] + (crop_pad * 2),
+                }
 
                 # Crop zone from the high-DPI OCR image
                 zone_image = pdf_processor.crop_zone_from_image(
@@ -426,6 +433,21 @@ def process_zones(request, session_id):
 
         # Build comprehensive confidence scores with per-header data
         # Handle both continuous and flatten modes
+        try:
+            import pandas as pd
+            from .pdf_views import repair_pdf_dataframe_headers
+            repaired_df = repair_pdf_dataframe_headers(
+                pd.DataFrame(all_data_rows, columns=headers),
+                context='zone_ocr',
+            )
+            if not repaired_df.empty:
+                headers = list(repaired_df.columns)
+                all_data_rows = repaired_df.values.tolist()
+        except Exception as repair_error:
+            logger.warning(f"PDF zone header repair skipped: {repair_error}")
+
+        # Build comprehensive confidence scores with per-header data
+        # Handle both continuous and flatten modes
         if len(header_groups) == 1:
             # Continuous mode - all headers have same confidence
             header_confidence_scores = {h: 0.85 for h in headers}
@@ -517,6 +539,48 @@ def _rows_look_equal(a, b):
         return False
     width = min(len(left), len(right))
     return width > 0 and left[:width] == right[:width]
+
+
+def _zone_table_header_score(row):
+    """Score whether a table-zone row looks like a column header.
+
+    PDF zone extraction can start on a data row when the user marks only the
+    body or when the provider misses the top ruled line. Dropping row 0 blindly
+    then loses a real BOM line, so table mode only promotes a row to headers
+    when it has header-like labels.
+    """
+    cells = [re.sub(r'\s+', ' ', str(cell or '')).strip() for cell in (row or [])]
+    non_blank = [cell for cell in cells if cell]
+    if len(non_blank) < 2:
+        return 0
+
+    joined = ' '.join(non_blank).lower()
+    keyword_hits = sum(
+        1 for pattern in (
+            r'\bfind\s*(?:no|num|number|nbr)?\.?\b',
+            r'\bpart\s*(?:no|num|number|nbr)?\.?\b',
+            r'\bdescription\b',
+            r'\bdesc\b',
+            r'\bassy\b',
+            r'\bassembly\b',
+            r'\bbom\b',
+        )
+        if re.search(pattern, joined)
+    )
+    assembly_hits = sum(
+        1 for cell in non_blank
+        if re.fullmatch(r'(?:ass(?:y|embly)?\s*)?\d{1,4}', cell, flags=re.IGNORECASE)
+    )
+    long_data_hits = sum(
+        1 for cell in non_blank
+        if len(cell) > 18 and not re.search(r'\b(description|part|find|assy|assembly|bom)\b', cell, flags=re.IGNORECASE)
+    )
+    part_number_hits = sum(
+        1 for cell in non_blank
+        if re.search(r'[A-Z]?\d{4,}[-/][A-Z0-9-]+', cell, flags=re.IGNORECASE)
+    )
+
+    return keyword_hits * 25 + min(assembly_hits, 8) * 4 - long_data_hits * 8 - part_number_hits * 15
 
 
 @api_view(['POST'])
@@ -644,19 +708,38 @@ def process_column_zones(request, session_id):
         # Use the name the user typed for each slot, falling back to a generic
         # name where none was given.
         if zone_mode == 'table' and rows:
-            # The marked area includes the table's own header row, so use it
-            # instead of asking the user to name every column.
-            first = rows[0]
-            headers = [
-                (str(first[i]).strip() if i < len(first) and str(first[i]).strip() else f'Column_{i + 1}')
-                for i in range(n_cols)
-            ]
-            rows = rows[1:]
+            # Prefer the table's own header row, but do not blindly drop row 0:
+            # if the marked/cropped area starts at the first item row, row 0 is
+            # real BOM data and must be preserved.
+            scored_rows = [(_zone_table_header_score(row), index, row) for index, row in enumerate(rows[:12])]
+            best_score, header_index, header_row = max(scored_rows, key=lambda item: item[0])
+            if best_score >= 35:
+                headers = [
+                    (str(header_row[i]).strip() if i < len(header_row) and str(header_row[i]).strip() else f'Column_{i + 1}')
+                    for i in range(n_cols)
+                ]
+                rows = rows[:header_index] + rows[header_index + 1:]
+            else:
+                headers = [f'Column_{i + 1}' for i in range(n_cols)]
         else:
             headers = [
                 (column_labels[i] if i < len(column_labels) and column_labels[i] else f'Column_{i + 1}')
                 for i in range(n_cols)
             ]
+
+        try:
+            import pandas as pd
+            from .pdf_views import repair_pdf_dataframe_headers
+            repaired_df = repair_pdf_dataframe_headers(
+                pd.DataFrame(rows, columns=headers),
+                context='zone_text',
+            )
+            if not repaired_df.empty:
+                headers = list(repaired_df.columns)
+                rows = repaired_df.values.tolist()
+                n_cols = len(headers)
+        except Exception as repair_error:
+            logger.warning(f"PDF text-zone header repair skipped: {repair_error}")
 
         quality_metrics = {
             'total_rows': len(rows),

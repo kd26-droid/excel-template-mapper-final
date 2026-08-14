@@ -67,6 +67,7 @@ import {
 } from '../lib/bomNormalizerAlgorithms';
 import {
   ALTERNATE_LAYOUT_OPTIONS,
+  BOM_LAYOUT_OPTIONS,
   CLEANUP_OPTIONS,
   DELIMITER_OPTIONS,
   GROUP_HEADER_OPTIONS,
@@ -1754,7 +1755,9 @@ const shouldSkipSourceRow = (row, headers, roles, config) => {
   if (config.skipRepeatedHeaders && rowLooksLikeRepeatedHeader(row, headers)) return true;
   if (config.skipDoNotPopulate && rowLooksLikeDoNotPopulate(row, headers)) return true;
   if (config.skipDeletedRows && rowLooksLikeDeleted(row, headers)) return true;
-  if (config.structure === 'assembly_quantity_matrix') return false;
+  const layoutStructure = effectiveStructure(config);
+  if (layoutStructure === 'assembly_quantity_matrix') return false;
+  if (layoutStructure === 'multi_block_assembly') return false;
   if (config.structure === 'grouped_rows' && hasGroupedRowContext(row, roles)) return false;
   if (config.skipTitleRows && rowLooksLikeSectionTitle(row, headers, roles)) return true;
   return false;
@@ -2168,7 +2171,7 @@ const isAssemblyMatrixFindHeader = (header) => {
 
 const isAssemblyMatrixHeaderCandidate = (header) => {
   const text = fmt(header);
-  return /^0*\d{1,4}$/.test(text) || /^(?:ass(?:y|embly)?|bom)\s*[-_ ]*0*\d{1,4}$/i.test(text);
+  return /^0*\d{1,4}$/.test(text) || /^(?:a|ass(?:y|embly)?|bom)\s*[-_ ]*0*\d{1,4}$/i.test(text);
 };
 
 const isMatrixQuantityLikeValue = (value) => {
@@ -2176,6 +2179,7 @@ const isMatrixQuantityLikeValue = (value) => {
   if (!text) return true;
   if (/^[-–—]$/.test(text)) return true;
   if (/^(?:ar|a\/r|as\s*req(?:uired)?|ref|x)$/i.test(text)) return true;
+  if (/^[A-Za-z0-9./_-]{1,12}$/.test(text)) return true;
   return /^-?\d+(?:[.,]\d+)?$/.test(text);
 };
 
@@ -2183,7 +2187,7 @@ const isMatrixQuantityPresent = (value) => {
   const text = fmt(value).replace(/\u00a0/g, ' ').trim();
   if (!text || /^[-–—]$/.test(text)) return false;
   if (/^0+(?:[.,]0+)?$/.test(text)) return false;
-  return isMatrixQuantityLikeValue(text);
+  return true;
 };
 
 const isNumericMatrixQuantity = (value) => /^-?\d+(?:[.,]\d+)?$/.test(fmt(value).replace(/\u00a0/g, ' ').trim());
@@ -2216,7 +2220,7 @@ const detectAssemblyQuantityMatrix = (headers = [], rows = [], roles = {}) => {
     const nonBlankValues = sampleValues.filter((value) => fmt(value));
     if (!nonBlankValues.length) return false;
     const quantityLikeCount = nonBlankValues.filter(isMatrixQuantityLikeValue).length;
-    const longTextCount = nonBlankValues.filter((value) => fmt(value).length > 12 || /[A-Za-z]{4,}/.test(fmt(value))).length;
+    const longTextCount = nonBlankValues.filter((value) => fmt(value).length > 12).length;
     return quantityLikeCount / nonBlankValues.length >= 0.75 && longTextCount <= Math.max(1, Math.floor(nonBlankValues.length * 0.15));
   });
 
@@ -2250,8 +2254,8 @@ const getConsumedSourceHeaders = (roles = {}, config = {}, headers = []) => {
   if (config.alternateLayout === 'following_rows' && config.followingRowAlternateColumn) {
     consumed.add(normalizeKey(config.followingRowAlternateColumn));
   }
-  if (config.structure === 'assembly_quantity_matrix') {
-    const matrix = config.assemblyMatrix || detectAssemblyQuantityMatrix(headers, [], roles);
+  if (effectiveStructure(config) === 'assembly_quantity_matrix') {
+    const matrix = detectAssemblyQuantityMatrix(headers, [], roles) || config.assemblyMatrix;
     (matrix?.assemblyColumns || []).forEach((header) => consumed.add(normalizeKey(header)));
     [matrix?.partNumberColumn, matrix?.descriptionColumn, matrix?.findNumberColumn]
       .filter(Boolean)
@@ -2647,7 +2651,7 @@ const normalizeOnePerRow = (rows, roles, config = {}) => rows.map((row, rowIndex
 }).filter((row) => row.mpn || row.manufacturer || row.description);
 
 const normalizeAssemblyQuantityMatrix = (rows, headers, roles, config = {}) => {
-  const matrix = config.assemblyMatrix || detectAssemblyQuantityMatrix(headers, rows, roles);
+  const matrix = detectAssemblyQuantityMatrix(headers, rows, roles) || config.assemblyMatrix;
   if (!matrix?.assemblyColumns?.length) return [];
 
   const output = [];
@@ -2687,6 +2691,178 @@ const normalizeAssemblyQuantityMatrix = (rows, headers, roles, config = {}) => {
     });
   });
 
+  return output;
+};
+
+const rowsLookLikeMultiBlockAssembly = (headers = [], rows = []) => (
+  headers.includes('__multiBlockMode') &&
+  rows.some((row) => row?.__multiBlockMode === '1' && row?.__blockId)
+);
+
+const selectedBomLayout = (config = {}) => (
+  config.bomLayout && config.bomLayout !== 'none' ? config.bomLayout : ''
+);
+
+const effectiveStructure = (config = {}) => selectedBomLayout(config) || config.structure;
+
+const rolesForMultiBlockAssembly = (headers = [], fallbackRoles = emptyRoles) => {
+  if (!headers.includes('__multiBlockMode')) return fallbackRoles;
+  return {
+    ...fallbackRoles,
+    cpn: headers.includes('Reference D/N') ? 'Reference D/N' : fallbackRoles.cpn,
+    mpn: headers.includes('Parts Name') ? 'Parts Name' : fallbackRoles.mpn,
+    manufacturer: headers.includes('Parts Maker') ? 'Parts Maker' : fallbackRoles.manufacturer,
+    description: headers.includes('Description') ? 'Description' : fallbackRoles.description,
+    quantity: headers.includes('Quantity') ? 'Quantity' : fallbackRoles.quantity,
+    parent: headers.includes('BOM block') ? 'BOM block' : fallbackRoles.parent,
+  };
+};
+
+const multiplyQuantities = (parentQuantity, childQuantity) => {
+  const parent = fmt(parentQuantity);
+  const child = fmt(childQuantity);
+  const parse = (value) => {
+    const normalized = value.replace(',', '.');
+    return /^-?\d+(?:\.\d+)?$/.test(normalized) ? Number(normalized) : null;
+  };
+  const parentNumber = parse(parent);
+  const childNumber = parse(child);
+  if (parentNumber === null || childNumber === null) return child || parent;
+  const result = parentNumber * childNumber;
+  return Number.isInteger(result) ? String(result) : String(Number(result.toFixed(6)));
+};
+
+const buildMultiBlockAssemblyIndex = (rows = []) => {
+  const blocks = new Map();
+  rows.forEach((row) => {
+    const blockId = row.__blockId;
+    if (!blockId) return;
+    if (!blocks.has(blockId)) {
+      blocks.set(blockId, {
+        id: blockId,
+        title: row.__blockTitle || row['BOM block'] || blockId,
+        name: row.__blockName || row['BOM block'] || row.__blockTitle || blockId,
+        codes: fmt(row.__blockCodes).split('|').map(fmt).filter(Boolean),
+        rows: [],
+      });
+    }
+    blocks.get(blockId).rows.push(row);
+  });
+
+  const blocksByCode = new Map();
+  blocks.forEach((block) => {
+    block.codes.forEach((code) => {
+      const key = normalizeKey(code);
+      if (!key) return;
+      if (!blocksByCode.has(key)) blocksByCode.set(key, []);
+      blocksByCode.get(key).push(block);
+    });
+  });
+
+  const references = new Map();
+  const findLinkedBlock = (row, currentBlockId = '') => {
+    const rowCodes = extractAssemblyCodes([
+      row['Reference D/N'],
+      row.Description,
+      row['Parts Name'],
+      row.Remarks,
+    ].join(' '));
+    const candidates = [];
+    rowCodes.forEach((code) => {
+      (blocksByCode.get(normalizeKey(code)) || []).forEach((block) => {
+        if (block.id !== currentBlockId && !candidates.includes(block)) candidates.push(block);
+      });
+    });
+    if (!candidates.length) return null;
+    const descriptionKey = normalizeKey(row.Description);
+    const best = candidates.find((block) => {
+      const nameKey = normalizeKey(block.name);
+      return nameKey && descriptionKey && (descriptionKey.includes(nameKey) || nameKey.includes(descriptionKey));
+    });
+    return best || candidates[0];
+  };
+
+  blocks.forEach((block) => {
+    block.rows.forEach((row) => {
+      const linked = findLinkedBlock(row, block.id);
+      if (linked) references.set(linked.id, true);
+    });
+  });
+
+  const rootBlocks = [...blocks.values()].filter((block) => !references.has(block.id));
+  return {
+    blocks,
+    rootBlocks: rootBlocks.length ? rootBlocks : [...blocks.values()].slice(0, 1),
+    findLinkedBlock,
+  };
+};
+
+const normalizeMultiBlockAssembly = (rows, roles, config = {}) => {
+  const index = buildMultiBlockAssemblyIndex(rows);
+  const output = [];
+  const emittedSubtreeKeys = new Set();
+
+  const emitMaterialRow = (row, block, level, parentName, quantityOverride = '') => {
+    const sourceRow = row.__sourceRow || '';
+    const rawMpn = getCell(row, roles.mpn) || row['Parts Name'];
+    const rawManufacturer = getCell(row, roles.manufacturer) || row['Parts Maker'];
+    const mpns = splitMpnCell(rawMpn, config);
+    const manufacturers = splitManufacturerCell(rawManufacturer, mpns.length || null, config);
+    const partsToEmit = mpns.length ? mpns : [''];
+    const cpn = getCell(row, roles.cpn) || row['Reference D/N'];
+    const description = getCell(row, roles.description) || row.Description;
+    const quantity = quantityOverride || getCell(row, roles.quantity) || row.Quantity;
+    const parentKey = `${block.id}::${row['Quantity variant'] || ''}::${cpn || description || sourceRow}`;
+
+    partsToEmit.forEach((mpn, partIndex) => {
+      output.push(withSourceColumns({
+        sourceRow,
+        parentKey,
+        parent: parentName,
+        relation: partIndex === 0 ? 'Primary' : `Alternate ${partIndex}`,
+        level: String(level),
+        cpn,
+        description,
+        mpn: stripVendorPrefix(mpn),
+        manufacturer: manufacturers[partIndex] || manufacturers[0] || rawManufacturer,
+        quantity,
+        uom: getCell(row, roles.uom),
+        rule: 'multi_block_assembly',
+        confidence: Math.min(confidenceForRow(mpn, manufacturers[partIndex] || rawManufacturer, 'multi_block_assembly') + 15, 98),
+        discardedText: [
+          row['Part number'] ? `Ref designator: ${row['Part number']}` : '',
+          row['Quantity variant'] ? `Variant: ${row['Quantity variant']}` : '',
+        ].filter(Boolean).join(' | '),
+      }, row, config));
+    });
+  };
+
+  const visitBlock = (block, level, parentName, inheritedQuantity = '', path = []) => {
+    if (!block || path.includes(block.id)) return;
+    const nextPath = [...path, block.id];
+    block.rows.forEach((row) => {
+      const cpn = getCell(row, roles.cpn) || row['Reference D/N'];
+      const description = getCell(row, roles.description) || row.Description;
+      const rawQuantity = getCell(row, roles.quantity) || row.Quantity;
+      if (!cpn && !description && !getCell(row, roles.mpn) && !getCell(row, roles.manufacturer)) return;
+      const quantity = inheritedQuantity
+        ? multiplyQuantities(inheritedQuantity, rawQuantity)
+        : rawQuantity;
+      const linkedBlock = index.findLinkedBlock(row, block.id);
+
+      emitMaterialRow(row, block, level, parentName || block.name, quantity);
+
+      if (linkedBlock) {
+        const subtreeKey = `${block.id}::${row.__sourceRow}::${row['Quantity variant'] || ''}::${linkedBlock.id}`;
+        if (!emittedSubtreeKeys.has(subtreeKey)) {
+          emittedSubtreeKeys.add(subtreeKey);
+          visitBlock(linkedBlock, level + 1, description || cpn || linkedBlock.name, quantity, nextPath);
+        }
+      }
+    });
+  };
+
+  index.rootBlocks.forEach((block) => visitBlock(block, 1, block.name));
   return output;
 };
 
@@ -2905,8 +3081,9 @@ const normalizeGroupedRows = (rows, roles, config) => {
 };
 
 const normalizeRows = (rows, headers, roles, config) => {
-  const assemblyMatrix = config.structure === 'assembly_quantity_matrix'
-    ? (config.assemblyMatrix || detectAssemblyQuantityMatrix(headers, rows, roles))
+  const layoutStructure = effectiveStructure(config);
+  const assemblyMatrix = layoutStructure === 'assembly_quantity_matrix'
+    ? (detectAssemblyQuantityMatrix(headers, rows, roles) || config.assemblyMatrix)
     : config.assemblyMatrix;
   const configWithSourceHeaders = {
     ...config,
@@ -2914,8 +3091,11 @@ const normalizeRows = (rows, headers, roles, config) => {
     sourceHeaders: headers,
     consumedSourceHeaders: getConsumedSourceHeaders(roles, { ...config, assemblyMatrix }, headers),
   };
-  if (config.structure === 'assembly_quantity_matrix') {
+  if (layoutStructure === 'assembly_quantity_matrix') {
     return normalizeAssemblyQuantityMatrix(rows, headers, roles, configWithSourceHeaders);
+  }
+  if (layoutStructure === 'multi_block_assembly') {
+    return normalizeMultiBlockAssembly(rows, roles, configWithSourceHeaders);
   }
   if (config.alternateLayout === 'following_rows') return normalizeFollowingRows(rows, roles, configWithSourceHeaders);
   // Every structure option describes how MPN/MFR pairs are laid out. With
@@ -2938,7 +3118,8 @@ const normalizeRows = (rows, headers, roles, config) => {
 };
 
 const normalizeRowsChunked = async (rows, headers, roles, config, onProgress) => {
-  if (config.structure === 'grouped_rows') {
+  const layoutStructure = effectiveStructure(config);
+  if (config.structure === 'grouped_rows' || layoutStructure === 'multi_block_assembly') {
     const dataRows = [];
     let skippedRows = 0;
     rows.forEach((row) => {
@@ -3459,7 +3640,6 @@ const rebalanceRelations = (rows) => {
 };
 
 const detectBestStructure = (headers, roles, sampleRows) => {
-  if (detectAssemblyQuantityMatrix(headers, sampleRows, roles)) return 'assembly_quantity_matrix';
   if (detectFollowingRowMfgPartsLayout(headers, sampleRows, roles)) return 'grouped_rows';
   if (roles.mpn && roles.manufacturer && roles.mpn === roles.manufacturer) return 'same_cell';
   const groupedSignals = sampleRows.reduce((score, row, index) => {
@@ -3546,10 +3726,23 @@ const nextConfigForDetectedStructure = (previousConfig, detectedStructure, detec
   if (detectedStructure === 'assembly_quantity_matrix') {
     return {
       ...previousConfig,
-      structure: 'assembly_quantity_matrix',
+      structure: previousConfig.structure || 'separate_cells',
+      bomLayout: 'assembly_quantity_matrix',
       alternateLayout: 'already_separate_rows',
       quantityMode: 'every_row',
       assemblyMatrix: assemblyMatrix || previousConfig.assemblyMatrix,
+    };
+  }
+
+  if (detectedStructure === 'multi_block_assembly') {
+    return {
+      ...previousConfig,
+      structure: previousConfig.structure || 'separate_cells',
+      bomLayout: 'multi_block_assembly',
+      alternateLayout: 'inside_selected_mpn_columns',
+      quantityMode: 'every_row',
+      delimiterMode: 'auto',
+      manufacturerMode: 'inherit_blank',
     };
   }
 
@@ -3591,23 +3784,23 @@ const getStructureOptionsForRoles = (roles, config = {}) => {
     config.followingRowAlternateColumn === roles.mpn;
 
   if (sameColumnFollowingBlock) {
-    return STRUCTURE_OPTIONS.filter((option) => ['grouped_rows', 'same_cell', 'assembly_quantity_matrix'].includes(option.value));
+    return STRUCTURE_OPTIONS.filter((option) => ['grouped_rows', 'same_cell'].includes(option.value));
   }
 
   if (roles.mpn && roles.manufacturer && roles.mpn === roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => ['same_cell', 'assembly_quantity_matrix'].includes(option.value));
+    return STRUCTURE_OPTIONS.filter((option) => ['same_cell'].includes(option.value));
   }
 
   if (roles.mpn && !roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => ['mpn_only_same_cell', 'mpn_only_rows', 'grouped_rows', 'assembly_quantity_matrix'].includes(option.value));
+    return STRUCTURE_OPTIONS.filter((option) => ['mpn_only_same_cell', 'mpn_only_rows', 'grouped_rows'].includes(option.value));
   }
 
   if (!roles.mpn && roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => ['mfr_only_same_cell', 'mfr_only_rows', 'grouped_rows', 'assembly_quantity_matrix'].includes(option.value));
+    return STRUCTURE_OPTIONS.filter((option) => ['mfr_only_same_cell', 'mfr_only_rows', 'grouped_rows'].includes(option.value));
   }
 
   if (roles.mpn && roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => ['separate_cells', 'same_cell', 'one_per_row', 'grouped_rows', 'assembly_quantity_matrix'].includes(option.value));
+    return STRUCTURE_OPTIONS.filter((option) => ['separate_cells', 'same_cell', 'one_per_row', 'grouped_rows'].includes(option.value));
   }
 
   return STRUCTURE_OPTIONS;
@@ -3631,6 +3824,238 @@ const findStrongMpnHeader = (headers = []) => {
 };
 
 const isGenericPartHeader = (header) => /^part( number| no)?$/.test(normalizeKey(header));
+
+const MULTI_BLOCK_META_HEADERS = [
+  'Source sheet',
+  'BOM block',
+  'Block codes',
+  'Quantity variant',
+  'Item',
+  'Reference D/N',
+  'Description',
+  'Specification',
+  'Other specification:HKK Request',
+  'Part number',
+  'Parts Maker',
+  'Parts Name',
+  'Quantity',
+  'Remarks',
+  '__multiBlockMode',
+  '__blockId',
+  '__blockTitle',
+  '__blockCodes',
+  '__blockName',
+  '__quantityColumn',
+];
+
+const isMultiBlockMetaHeader = (header = '') => MULTI_BLOCK_META_HEADERS.includes(header);
+
+const extractAssemblyCodes = (value) => {
+  const text = fmt(value).toUpperCase().replace(/\u00a0/g, ' ');
+  const matches = text.match(/\b[A-Z]{1,4}\d{4,}[A-Z]?\b/g) || [];
+  return [...new Set(matches.filter((code) => !/^C?X{4,}[A-Z]?$/.test(code)))];
+};
+
+const extractBlockName = (title = '') => {
+  const text = fmt(title).replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  return text
+    .replace(/\s*\((?:DWG|DRAWING)\s*:.*$/i, '')
+    .replace(/\s*\bDWG\s*:.*$/i, '')
+    .trim();
+};
+
+const rowTextFromArray = (row = []) => row
+  .map(fmt)
+  .filter(Boolean)
+  .join(' ')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const rowLooksLikeMultiBlockHeader = (row = []) => {
+  const normalizedCells = row.map((cell) => normalizeKey(cell));
+  const rowText = normalizedCells.join(' ');
+  const hasItem = normalizedCells.some((cell) => cell === 'item' || cell === 'item no');
+  const hasReference = rowText.includes('reference') || rowText.includes('ref d n') || rowText.includes('ref dn');
+  const hasDescription = rowText.includes('description') || rowText.includes('desc');
+  const hasMfr = rowText.includes('parts maker') || rowText.includes('part maker') || rowText.includes('manufacturer') || rowText.includes('mfr');
+  const hasMpn = rowText.includes('parts name') || rowText.includes('part name') || rowText.includes('mpn');
+  return hasItem && hasReference && hasDescription && (hasMfr || hasMpn);
+};
+
+const findMultiBlockHeaderRows = (rows = []) => rows
+  .map((row, index) => (rowLooksLikeMultiBlockHeader(row) ? index : -1))
+  .filter((index) => index >= 0);
+
+const findPreviousBlockTitle = (rows = [], headerIndex = 0) => {
+  for (let index = headerIndex - 1; index >= Math.max(0, headerIndex - 4); index -= 1) {
+    const text = rowTextFromArray(rows[index]);
+    if (!text) continue;
+    if (/\b(?:dwg|drawing|assy|ass'?y|assembly|qty)\b/i.test(text) || extractAssemblyCodes(text).length) {
+      return { text, rowIndex: index };
+    }
+  }
+  return { text: '', rowIndex: Math.max(0, headerIndex - 1) };
+};
+
+const findHeaderColumn = (headerRow = [], patterns = []) => {
+  const index = headerRow.findIndex((header) => {
+    const key = normalizeKey(header);
+    return patterns.some((pattern) => pattern.test(key));
+  });
+  return index >= 0 ? index : -1;
+};
+
+const getBlockColumnMap = (headerRow = []) => {
+  const item = findHeaderColumn(headerRow, [/^item(?:\s+no)?$/]);
+  const reference = findHeaderColumn(headerRow, [/reference/, /\bref\s*d\s*n\b/, /\bref\s*dn\b/]);
+  const description = findHeaderColumn(headerRow, [/description/, /^desc$/]);
+  const specification = findHeaderColumn(headerRow, [/^specification$/, /^spec$/]);
+  const otherSpecification = findHeaderColumn(headerRow, [/other\s+specification/, /hkk\s+request/]);
+  const partNumber = findHeaderColumn(headerRow, [/^part\s*(number|no)?$/]);
+  const manufacturer = findHeaderColumn(headerRow, [/parts?\s+maker/, /manufacturer/, /\bmfr\b/]);
+  const mpn = findHeaderColumn(headerRow, [/parts?\s+name/, /\bmpn\b/, /manufacturer\s+part/]);
+  const remarks = findHeaderColumn(headerRow, [/remarks?/, /^note?s?$/, /comment/]);
+  const firstQuantityIndex = Math.max(manufacturer, mpn, partNumber, otherSpecification, specification, description, reference, item) + 1;
+  const quantityColumns = headerRow
+    .map((header, index) => ({ header: fmt(header), index }))
+    .filter(({ header, index }) => {
+      if (!header || index < firstQuantityIndex) return false;
+      if (index === remarks) return false;
+      if (/^(?:remarks?|new\s+parts?|note?s?|comment)$/i.test(header.trim())) return false;
+      return true;
+    });
+  return {
+    item,
+    reference,
+    description,
+    specification,
+    otherSpecification,
+    partNumber,
+    manufacturer,
+    mpn,
+    remarks,
+    quantityColumns,
+  };
+};
+
+const cellAtIndex = (row = [], index = -1) => (index >= 0 ? fmt(row[index]) : '');
+
+const buildMultiBlockRowsForSheet = (currentWorkbook, currentSheetName) => {
+  const worksheet = currentWorkbook.Sheets[currentSheetName];
+  const rows = worksheetToCompactRows(worksheet);
+  const headerRows = findMultiBlockHeaderRows(rows);
+  if (!headerRows.length) return { rows, blocks: [], dataRows: [] };
+
+  const blocks = [];
+  const dataRows = [];
+  headerRows.forEach((headerIndex, blockIndex) => {
+    const headerRow = rows[headerIndex] || [];
+    const columnMap = getBlockColumnMap(headerRow);
+    if (columnMap.reference < 0 || columnMap.description < 0) return;
+    const titleInfo = findPreviousBlockTitle(rows, headerIndex);
+    const nextHeaderIndex = headerRows[blockIndex + 1];
+    const endIndex = Number.isFinite(nextHeaderIndex) ? Math.max(headerIndex + 1, nextHeaderIndex - 2) : rows.length - 1;
+    const title = titleInfo.text || `${currentSheetName} block ${blockIndex + 1}`;
+    const quantityHeaderText = columnMap.quantityColumns.map((column) => column.header).join(' ');
+    const blockCodes = [...new Set([
+      ...extractAssemblyCodes(currentSheetName),
+      ...extractAssemblyCodes(title),
+      ...extractAssemblyCodes(quantityHeaderText),
+    ])];
+    const blockId = `${currentSheetName}::${headerIndex + 1}::${blockIndex + 1}`;
+    const block = {
+      id: blockId,
+      sheetName: currentSheetName,
+      title,
+      name: extractBlockName(title) || currentSheetName,
+      codes: blockCodes,
+      headerRow: headerIndex + 1,
+      startRow: headerIndex + 2,
+      endRow: endIndex + 1,
+    };
+    blocks.push(block);
+
+    for (let rowIndex = headerIndex + 1; rowIndex <= endIndex; rowIndex += 1) {
+      const row = rows[rowIndex] || [];
+      if (!row.some((cell) => fmt(cell))) continue;
+      if (rowLooksLikeMultiBlockHeader(row)) continue;
+
+      const baseValues = {
+        'Source sheet': currentSheetName,
+        'BOM block': block.name,
+        'Block codes': block.codes.join(', '),
+        Item: cellAtIndex(row, columnMap.item),
+        'Reference D/N': cellAtIndex(row, columnMap.reference),
+        Description: cellAtIndex(row, columnMap.description),
+        Specification: cellAtIndex(row, columnMap.specification),
+        'Other specification:HKK Request': cellAtIndex(row, columnMap.otherSpecification),
+        'Part number': cellAtIndex(row, columnMap.partNumber),
+        'Parts Maker': cellAtIndex(row, columnMap.manufacturer),
+        'Parts Name': cellAtIndex(row, columnMap.mpn),
+        Remarks: cellAtIndex(row, columnMap.remarks),
+        __multiBlockMode: '1',
+        __blockId: block.id,
+        __blockTitle: block.title,
+        __blockCodes: block.codes.join('|'),
+        __blockName: block.name,
+      };
+
+      const quantityColumns = columnMap.quantityColumns.length
+        ? columnMap.quantityColumns
+        : [{ header: 'Quantity', index: -1 }];
+      quantityColumns.forEach((quantityColumn) => {
+        const quantityValue = quantityColumn.index >= 0 ? cellAtIndex(row, quantityColumn.index) : '';
+        if (quantityColumn.index >= 0 && !isMatrixQuantityPresent(quantityValue)) return;
+        dataRows.push({
+          ...baseValues,
+          'Quantity variant': quantityColumn.header,
+          Quantity: quantityColumn.index >= 0 ? normalizeAssemblyMatrixQuantity(quantityValue).quantity : '',
+          __quantityColumn: quantityColumn.header,
+          __sourceRow: rowIndex + 1,
+        });
+      });
+    }
+  });
+
+  return { rows, blocks, dataRows };
+};
+
+const prepareMultiBlockSheets = (currentWorkbook, sheetNames) => {
+  const allBlocks = [];
+  const allRows = [];
+  const previewRows = [];
+
+  sheetNames.forEach((currentSheetName) => {
+    const prepared = buildMultiBlockRowsForSheet(currentWorkbook, currentSheetName);
+    if (prepared.blocks.length) {
+      allBlocks.push(...prepared.blocks);
+      allRows.push(...prepared.dataRows);
+    }
+    if (!previewRows.length && prepared.rows.length) previewRows.push(...prepared.rows);
+  });
+
+  if (!allBlocks.length || !allRows.length) return null;
+
+  const headers = MULTI_BLOCK_META_HEADERS.filter((header) => (
+    !header.startsWith('__') || allRows.some((row) => row[header])
+  ));
+  const visiblePreviewHeaders = headers.filter((header) => !header.startsWith('__'));
+  return {
+    sheetRows: [
+      visiblePreviewHeaders,
+      ...allRows.slice(0, 12).map((row) => visiblePreviewHeaders.map((header) => row[header] || '')),
+    ],
+    headerRowIndex: 0,
+    headers,
+    dataRows: allRows,
+    multiBlockSummary: {
+      blockCount: allBlocks.length,
+      sheetCount: new Set(allBlocks.map((block) => block.sheetName)).size,
+      blocks: allBlocks,
+    },
+  };
+};
 
 const prepareSingleSheet = (currentWorkbook, currentSheetName, options = {}) => {
   const worksheet = currentWorkbook.Sheets[currentSheetName];
@@ -3675,6 +4100,11 @@ const prepareSingleSheet = (currentWorkbook, currentSheetName, options = {}) => 
 };
 
 const prepareMultipleSheets = (currentWorkbook, sheetNames) => {
+  const multiBlockPrepared = prepareMultiBlockSheets(currentWorkbook, sheetNames);
+  if (multiBlockPrepared?.multiBlockSummary?.blockCount > 1) {
+    return multiBlockPrepared;
+  }
+
   const unionHeaders = ['Source sheet'];
   const combinedRows = [];
 
@@ -3732,6 +4162,74 @@ const joinOcrFragments = (values = []) => values
   .replace(/\s+([,.;:])/g, '$1')
   .replace(/\s+/g, ' ')
   .trim();
+
+const isLikelyPdfGeneratedHeader = (header) => {
+  const text = fmt(header);
+  return !text || /^column(?:[_\s]*\d+|\.\d+)?$/i.test(text) || /^\d{1,3}$/.test(text);
+};
+
+const scorePdfHeaderRowCandidate = (row = []) => {
+  const cells = row.map(fmt);
+  const nonBlank = cells.filter(Boolean);
+  if (nonBlank.length < 3) return 0;
+
+  const structuralHits = cells.filter((cell) => (
+    isAssemblyMatrixFindHeader(cell) ||
+    isAssemblyMatrixPartHeader(cell) ||
+    isAssemblyMatrixDescriptionHeader(cell)
+  )).length;
+  const assemblyHits = cells.filter((cell) => isAssemblyMatrixHeaderCandidate(canonicalAssemblyMatrixHeader(cell))).length;
+  const labelHits = nonBlank.filter((cell) => /[A-Za-z]/.test(cell)).length;
+  const quantityHits = nonBlank.filter(isMatrixQuantityLikeValue).length;
+  const longTextHits = nonBlank.filter((cell) => cell.length > 40).length;
+
+  if (structuralHits < 2 || assemblyHits < 1) return 0;
+
+  return (
+    structuralHits * 35 +
+    assemblyHits * 18 +
+    labelHits * 6 -
+    quantityHits * 8 -
+    longTextHits * 15
+  );
+};
+
+const promotePdfHeaderRowFromData = (headers = [], rawRows = []) => {
+  const sourceHeaders = headers.map(fmt);
+  if (!Array.isArray(rawRows) || rawRows.length < 2) {
+    return { headers: sourceHeaders, rows: rawRows };
+  }
+
+  const rowArrays = rawRows.map((row) => (
+    Array.isArray(row)
+      ? row.map(fmt)
+      : sourceHeaders.map((header) => fmt(row?.[header]))
+  ));
+  const currentHeaderLooksWeak = sourceHeaders.length
+    ? sourceHeaders.filter(isLikelyPdfGeneratedHeader).length / sourceHeaders.length >= 0.6
+    : true;
+  const currentHeaderScore = scorePdfHeaderRowCandidate(sourceHeaders);
+
+  let best = { index: -1, score: 0 };
+  rowArrays.slice(0, 80).forEach((row, index) => {
+    const score = scorePdfHeaderRowCandidate(row);
+    if (score > best.score) best = { index, score };
+  });
+
+  if (best.index < 0 || best.score < 80) {
+    return { headers: sourceHeaders, rows: rawRows };
+  }
+  if (!currentHeaderLooksWeak && currentHeaderScore >= best.score * 0.8) {
+    return { headers: sourceHeaders, rows: rawRows };
+  }
+
+  const promotedHeaders = makeUniqueHeaders(rowArrays[best.index]);
+  const promotedRows = rowArrays.filter((_, index) => index !== best.index);
+  return {
+    headers: promotedHeaders,
+    rows: promotedRows,
+  };
+};
 
 const repairAssemblyMatrixPdfExtraction = (headers = [], rawRows = []) => {
   const sourceHeaders = headers.map(fmt);
@@ -3826,7 +4324,8 @@ const getFileType = (fileName = '') => {
 
 const normalizePdfRows = (payload, sourceFile) => {
   const rawRows = Array.isArray(payload?.data) ? payload.data : [];
-  const repaired = repairAssemblyMatrixPdfExtraction(payload?.headers || [], rawRows);
+  const promoted = promotePdfHeaderRowFromData(payload?.headers || [], rawRows);
+  const repaired = repairAssemblyMatrixPdfExtraction(promoted.headers || [], promoted.rows || rawRows);
   const pdfHeaders = makeUniqueHeaders(repaired.headers || []);
   const repairedRows = Array.isArray(repaired.rows) ? repaired.rows : rawRows;
   const decision = payload?.decision;
@@ -4216,7 +4715,7 @@ const SourcePreview = ({ headers, rows, getHeaderLabel = (header) => header, ass
     text: themeTokens.text?.primary || (isDarkMode ? '#f8fafc' : '#0f172a'),
     border: themeTokens.table?.line || (isDarkMode ? 'rgba(255,255,255,0.08)' : '#e1e6ec'),
   };
-  const previewHeaders = headers || [];
+  const previewHeaders = (headers || []).filter((header) => !fmt(header).startsWith('__'));
   return (
     <TableContainer
       sx={{
@@ -4831,6 +5330,7 @@ const BomNormalizer = () => {
   const [roles, setRoles] = useState(emptyRoles);
   const [config, setConfig] = useState({
     structure: 'separate_cells',
+    bomLayout: 'none',
     alternateLayout: 'inside_selected_mpn_columns',
     delimiterMode: 'auto',
     customDelimiter: '',
@@ -4965,6 +5465,10 @@ const BomNormalizer = () => {
     () => preparedHeaders.length ? preparedHeaders : makeUniqueHeaders(sheetRows[headerRowIndex] || []),
     [preparedHeaders, sheetRows, headerRowIndex]
   );
+  const visibleSourceHeaders = useMemo(
+    () => headers.filter((header) => !fmt(header).startsWith('__')),
+    [headers]
+  );
 
   const sourceDataRows = useMemo(() => (
     preparedDataRows.length ? preparedDataRows : rowsToObjects(sheetRows.slice(headerRowIndex + 1), headers, headerRowIndex + 2)
@@ -5003,10 +5507,34 @@ const BomNormalizer = () => {
 
   const sourcePreviewAssemblyMatrix = useMemo(() => {
     if (!headers.length || !dataRows.length) return null;
-    return normalizerConfig.structure === 'assembly_quantity_matrix'
-      ? (normalizerConfig.assemblyMatrix || detectAssemblyQuantityMatrix(headers, dataRows, roles))
-      : detectAssemblyQuantityMatrix(headers, dataRows, roles);
-  }, [dataRows, headers, normalizerConfig.assemblyMatrix, normalizerConfig.structure, roles]);
+    return effectiveStructure(normalizerConfig) === 'assembly_quantity_matrix'
+      ? (detectAssemblyQuantityMatrix(headers, dataRows, roles) || normalizerConfig.assemblyMatrix)
+      : null;
+  }, [dataRows, headers, normalizerConfig.assemblyMatrix, normalizerConfig.bomLayout, normalizerConfig.structure, roles]);
+
+  const multiBlockSummary = useMemo(() => {
+    if (!rowsLookLikeMultiBlockAssembly(headers, dataRows)) return null;
+    const blockMap = new Map();
+    dataRows.forEach((row) => {
+      if (!row.__blockId) return;
+      if (!blockMap.has(row.__blockId)) {
+        blockMap.set(row.__blockId, {
+          id: row.__blockId,
+          sheet: row['Source sheet'] || '',
+          title: row.__blockTitle || row['BOM block'] || '',
+          name: row.__blockName || row['BOM block'] || '',
+          rowCount: 0,
+        });
+      }
+      blockMap.get(row.__blockId).rowCount += 1;
+    });
+    const blocks = [...blockMap.values()];
+    return {
+      blockCount: blocks.length,
+      sheetCount: new Set(blocks.map((block) => block.sheet).filter(Boolean)).size,
+      blocks,
+    };
+  }, [dataRows, headers]);
 
   useEffect(() => {
     setSourceGridPage(0);
@@ -5040,10 +5568,31 @@ const BomNormalizer = () => {
     () => QTY_OPTIONS.find((option) => option.value === config.quantityMode),
     [config.quantityMode]
   );
+  const selectedBomLayoutOption = useMemo(
+    () => BOM_LAYOUT_OPTIONS.find((option) => option.value === (config.bomLayout || 'none')),
+    [config.bomLayout]
+  );
+  const activeBomLayout = selectedBomLayout(config);
+  const bomLayoutActive = Boolean(activeBomLayout);
 
   const parserLogicRules = useMemo(() => {
     const sourceHeader = roles.mpn || roles.manufacturer || 'selected source column';
     const rules = [];
+    const layout = selectedBomLayout(config);
+
+    if (layout === 'assembly_quantity_matrix') {
+      rules.push('1. Expand assembly quantity columns into BOM rows');
+      rules.push('2. Use non-empty quantity cells to decide which assembly variant contains each item');
+      rules.push('3. Keep selected MPN/MFR parser rules for part details where available');
+      return rules;
+    }
+
+    if (layout === 'multi_block_assembly') {
+      rules.push('1. Detect BOM tables from repeated header rows across selected sheets');
+      rules.push('2. Link child assemblies by matching part codes between rows and block titles');
+      rules.push('3. Parse Parts Name and Parts Maker as MPN/MFR values');
+      return rules;
+    }
 
     if (normalizeKey(sourceHeader) === 'approved manufacturer') {
       rules.push('1. Read Approved Manufacturer as packed MPN/MFR text');
@@ -5063,10 +5612,21 @@ const BomNormalizer = () => {
 
     rules.push('3. Remove status notes from MFR names, keep only clean MPN/MFR output');
     return rules;
-  }, [config.alternateLayout, config.followingRowAlternateColumn, config.structure, roles.manufacturer, roles.mpn]);
+  }, [config, roles.manufacturer, roles.mpn]);
 
   const detectedParsingLogic = useMemo(() => {
     const rowSourceNumber = (row, index) => row?.__sourceRow || index + headerRowIndex + 2;
+    const activeLayout = selectedBomLayout(config);
+
+    if (activeLayout) {
+      return {
+        isLayoutDriven: true,
+        sourceHeader: '',
+        sections: [],
+        matchingRows: 0,
+        rules: parserLogicRules,
+      };
+    }
 
     const buildSourceSection = ({
       id,
@@ -5233,7 +5793,7 @@ const BomNormalizer = () => {
         'Apply the matching pattern per row, then send clean MPN/MFR values into normalization.',
       ],
     };
-  }, [config, dataRows, headerRowIndex, headers, normalizerConfig, roles.manufacturer, roles.mpn]);
+  }, [config, dataRows, headerRowIndex, headers, normalizerConfig, parserLogicRules, roles.manufacturer, roles.mpn]);
 
   const parsingPatternOptions = useMemo(() => (
     (detectedParsingLogic?.sections || []).flatMap((section) => (
@@ -5746,6 +6306,13 @@ const BomNormalizer = () => {
   );
 
   const roleCombinationHint = useMemo(() => {
+    const layout = selectedBomLayout(config);
+    if (layout === 'multi_block_assembly') {
+      return 'Multi-block assembly BOM layout selected. Row expansion is driven by detected BOM blocks and linked assembly codes, not by the MPN/MFR arrangement dropdown.';
+    }
+    if (layout === 'assembly_quantity_matrix') {
+      return 'Assembly quantity matrix layout selected. Row expansion is driven by quantity matrix columns, not by the MPN/MFR arrangement dropdown.';
+    }
     if (
       config.alternateLayout === 'following_rows' &&
       config.followingRowAlternateColumn &&
@@ -5770,7 +6337,7 @@ const BomNormalizer = () => {
       return 'Level column selected. Rows pass through with their level, code, quantity and description.';
     }
     return 'Select at least an MPN or BOM level column to run normalization.';
-  }, [roles.manufacturer, roles.mpn]);
+  }, [config, roles.level, roles.manufacturer, roles.mpn]);
 
   const alternateColumnGroups = useMemo(
     () => cleanAlternateColumnGroups(config.alternateColumnGroups || [], headers),
@@ -5840,16 +6407,23 @@ const BomNormalizer = () => {
     const preferredSheet = options.sheetName && nextWorkbook.SheetNames.includes(options.sheetName)
       ? options.sheetName
       : nextWorkbook.SheetNames[0];
-    const prepared = prepareSingleSheet(nextWorkbook, preferredSheet, { headerRow: options.headerRow });
+    const autoMultiBlock = !options.sheetName && !options.headerRow
+      ? prepareMultiBlockSheets(nextWorkbook, nextWorkbook.SheetNames)
+      : null;
+    const prepared = autoMultiBlock?.multiBlockSummary?.blockCount > 1
+      ? autoMultiBlock
+      : prepareSingleSheet(nextWorkbook, preferredSheet, { headerRow: options.headerRow });
     const nextHeaders = prepared.headers;
-    const nextRoles = inferRoles(nextHeaders, prepared.dataRows, { manufacturerDirectory });
+    const nextRoles = rolesForMultiBlockAssembly(nextHeaders, inferRoles(nextHeaders, prepared.dataRows, { manufacturerDirectory }));
     const nextStructure = detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40));
+    const nextSheetScope = autoMultiBlock?.multiBlockSummary?.blockCount > 1 && nextWorkbook.SheetNames.length > 1 ? 'all' : 'single';
+    const nextSelectedSheets = nextSheetScope === 'all' ? nextWorkbook.SheetNames : [preferredSheet];
 
     setWorkbook(nextWorkbook);
     setFileName(nextFileName);
     setSheetName(preferredSheet);
-    setSheetScope('single');
-    setSelectedSheetNames([preferredSheet]);
+    setSheetScope(nextSheetScope);
+    setSelectedSheetNames(nextSelectedSheets);
     setSheetRows(prepared.sheetRows);
     setHeaderRowIndex(prepared.headerRowIndex);
     setPreparedHeaders(prepared.headers);
@@ -5857,7 +6431,7 @@ const BomNormalizer = () => {
     setPatternParserOverrides([]);
     setSourceEndRow('');
     setRoles(nextRoles);
-    setConfig((prev) => nextConfigForDetectedStructure(prev, nextStructure, {
+    setConfig((prev) => nextConfigForDetectedStructure({ ...prev, bomLayout: 'none' }, nextStructure, {
       headers: nextHeaders,
       rows: prepared.dataRows.slice(0, 120),
       roles: nextRoles,
@@ -6902,7 +7476,7 @@ const BomNormalizer = () => {
     if (!workbook) return;
     const prepared = prepareSingleSheet(workbook, nextSheetName);
     const nextHeaders = prepared.headers;
-    const nextRoles = inferRoles(nextHeaders, prepared.dataRows, { manufacturerDirectory });
+    const nextRoles = rolesForMultiBlockAssembly(nextHeaders, inferRoles(nextHeaders, prepared.dataRows, { manufacturerDirectory }));
 
     setSheetName(nextSheetName);
     setSelectedSheetNames([nextSheetName]);
@@ -6913,7 +7487,7 @@ const BomNormalizer = () => {
     setPatternParserOverrides([]);
     setSourceEndRow('');
     setRoles(nextRoles);
-    setConfig((prev) => nextConfigForDetectedStructure(prev, detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40)), {
+    setConfig((prev) => nextConfigForDetectedStructure({ ...prev, bomLayout: 'none' }, detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40)), {
       headers: nextHeaders,
       rows: prepared.dataRows.slice(0, 120),
       roles: nextRoles,
@@ -6937,7 +7511,7 @@ const BomNormalizer = () => {
     const prepared = scope === 'single'
       ? prepareSingleSheet(workbook, nextNames[0])
       : prepareMultipleSheets(workbook, nextNames);
-    const nextRoles = inferRoles(prepared.headers, prepared.dataRows, { manufacturerDirectory });
+    const nextRoles = rolesForMultiBlockAssembly(prepared.headers, inferRoles(prepared.headers, prepared.dataRows, { manufacturerDirectory }));
 
     setSheetScope(scope);
     setSelectedSheetNames(nextNames);
@@ -6949,7 +7523,7 @@ const BomNormalizer = () => {
     setPatternParserOverrides([]);
     setSourceEndRow('');
     setRoles(nextRoles);
-    setConfig((prev) => nextConfigForDetectedStructure(prev, detectBestStructure(prepared.headers, nextRoles, prepared.dataRows.slice(0, 40)), {
+    setConfig((prev) => nextConfigForDetectedStructure({ ...prev, bomLayout: 'none' }, detectBestStructure(prepared.headers, nextRoles, prepared.dataRows.slice(0, 40)), {
       headers: prepared.headers,
       rows: prepared.dataRows.slice(0, 120),
       roles: nextRoles,
@@ -7267,7 +7841,8 @@ const BomNormalizer = () => {
     // all: SAFRAN-style sheets carry internal part codes and keep manufacturers
     // in a separate AVL sheet. Requiring MPN/MFR here blocked every multi-level
     // BOM from being normalized, so nothing downstream was ever reachable.
-    if (!roles.mpn && !roles.manufacturer && !roles.level && normalizerConfig.structure !== 'assembly_quantity_matrix') {
+    const layoutStructure = effectiveStructure(normalizerConfig);
+    if (!roles.mpn && !roles.manufacturer && !roles.level && layoutStructure !== 'assembly_quantity_matrix' && layoutStructure !== 'multi_block_assembly') {
       setError('Select at least an MPN, Manufacturer, or BOM level column before running normalization.');
       return;
     }
@@ -7276,7 +7851,7 @@ const BomNormalizer = () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     try {
       const result = await normalizeRowsChunked(dataRows, headers, roles, normalizerConfig, setProgress);
-      const pairingCheck = normalizerConfig.structure === 'assembly_quantity_matrix'
+      const pairingCheck = layoutStructure === 'assembly_quantity_matrix' || layoutStructure === 'multi_block_assembly'
         ? { checkedRows: 0, matchedRows: 0, issueRows: [] }
         : analyzeMpnManufacturerPairing(dataRows, headers, roles, normalizerConfig);
       if (pairingCheck.issueRows.length) {
@@ -7597,7 +8172,7 @@ const BomNormalizer = () => {
 
   useEffect(() => {
     if (!manufacturerDirectory.loaded || currentStep > 2 || !headers.length || !dataRows.length) return;
-    const nextRoles = inferRoles(headers, dataRows, { manufacturerDirectory });
+    const nextRoles = rolesForMultiBlockAssembly(headers, inferRoles(headers, dataRows, { manufacturerDirectory }));
     setRoles((prev) => {
       const updates = {};
       const shouldReplaceManufacturer = !prev.manufacturer ||
@@ -7645,6 +8220,7 @@ const BomNormalizer = () => {
     setRoles(emptyRoles);
     setConfig({
       structure: 'separate_cells',
+      bomLayout: 'none',
       alternateLayout: 'inside_selected_mpn_columns',
       delimiterMode: 'auto',
       customDelimiter: '',
@@ -7738,6 +8314,7 @@ const BomNormalizer = () => {
     setRoles(emptyRoles);
     setConfig({
       structure: 'separate_cells',
+      bomLayout: 'none',
       alternateLayout: 'inside_selected_mpn_columns',
       delimiterMode: 'auto',
       customDelimiter: '',
@@ -8514,6 +9091,13 @@ const BomNormalizer = () => {
                     This workbook has {workbook.SheetNames.length} sheets. Choose one sheet, selected sheets, or all sheets before continuing.
                   </Alert>
                 )}
+                {multiBlockSummary && (
+                  <Alert severity="success" sx={{ mt: 1.5 }}>
+                    Detected {multiBlockSummary.blockCount} linked BOM table{multiBlockSummary.blockCount === 1 ? '' : 's'}
+                    {multiBlockSummary.sheetCount ? ` across ${multiBlockSummary.sheetCount} sheet${multiBlockSummary.sheetCount === 1 ? '' : 's'}` : ''}.
+                    The normalizer will connect same-sheet and cross-sheet assembly blocks by matching part codes.
+                  </Alert>
+                )}
                 <Grid container spacing={1.5} sx={{ mt: 1 }}>
                   <Grid item xs={12} md={6}>
                     <FormControl fullWidth size="small">
@@ -8605,11 +9189,12 @@ const BomNormalizer = () => {
                   </Grid>
                 </Grid>
                 <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 1.5 }}>
-                  <Chip size="small" label={`${headers.length} columns`} />
+                  <Chip size="small" label={`${visibleSourceHeaders.length} columns`} />
                   <Chip
                     size="small"
                     label={sourceEndRow ? `${dataRows.length} included / ${sourceDataRows.length} detected rows` : `${dataRows.length} data rows`}
                   />
+                  {multiBlockSummary && <Chip size="small" color="success" variant="outlined" label={`${multiBlockSummary.blockCount} BOM tables`} />}
                   {sourceEndRow && <Chip size="small" color="info" variant="outlined" label={`Using rows through ${sourceEndRow}`} />}
                   {sourceLimitActive && <Chip size="small" color="warning" variant="outlined" label={`${sourceRowsExcludedByLimit} rows excluded`} />}
                   <Chip size="small" label={sheetScope === 'single' ? `Header row ${headerRowIndex + 1}` : `${selectedSheetNames.length} sheets merged`} />
@@ -8657,15 +9242,23 @@ const BomNormalizer = () => {
                   </Box>
                 </Stack>
                 <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 1.2 }}>
-                  <Chip size="small" label={`${headers.length} columns`} />
+                  <Chip size="small" label={`${visibleSourceHeaders.length} columns`} />
                   <Chip
                     size="small"
                     label={sourceEndRow ? `${dataRows.length} included / ${sourceDataRows.length} detected rows` : `${dataRows.length} data rows`}
                   />
+                  {multiBlockSummary && <Chip size="small" color="success" variant="outlined" label={`${multiBlockSummary.blockCount} linked BOM tables`} />}
                   {sourceEndRow && <Chip size="small" color="info" variant="outlined" label={`Using rows through ${sourceEndRow}`} />}
                   {sourceLimitActive && <Chip size="small" color="warning" variant="outlined" label={`${sourceRowsExcludedByLimit} rows excluded`} />}
                   <Chip size="small" label={sheetScope === 'single' ? `Header row ${headerRowIndex + 1}` : `${selectedSheetNames.length} sheets merged`} />
                 </Stack>
+                {multiBlockSummary && (
+                  <Alert severity="info" sx={{ mt: 1.25 }}>
+                    {config.bomLayout === 'multi_block_assembly'
+                      ? 'Multi-block assembly layout is selected. Column mapping is applied to the grouped headers, while each detected table keeps its own source row and sheet context.'
+                      : 'Linked BOM tables were detected. Select Multi-block assembly BOM in BOM layout if this workbook should be expanded through those links.'}
+                  </Alert>
+                )}
                 <Box sx={{ mt: 2 }}>
                   <Typography sx={{ fontWeight: 800 }}>Source preview</Typography>
                   <SourcePreview headers={headers} rows={dataRows.slice(0, 8)} getHeaderLabel={getPreviewHeaderLabel} assemblyMatrix={sourcePreviewAssemblyMatrix} />
@@ -8684,7 +9277,7 @@ const BomNormalizer = () => {
                             onChange={(event) => handleRoleChange(field.key, event.target.value)}
                           >
                             <MenuItem value="">None</MenuItem>
-                            {headers.map((header, columnIndex) => {
+                            {visibleSourceHeaders.map((header, columnIndex) => {
                               const isSelected = selectedHeader === header;
                               const columnName = getSourceColumnName(header, columnIndex);
                               const showColumnLabel = Boolean(roleColumnLabelModes[field.key] && columnName);
@@ -8763,6 +9356,7 @@ const BomNormalizer = () => {
                       <FormControl fullWidth size="small">
                         <InputLabel>Where are MPN and MFR?</InputLabel>
                         <Select
+                          disabled={bomLayoutActive}
                           value={config.structure}
                           label="Where are MPN and MFR?"
                           onChange={(event) => {
@@ -8802,6 +9396,7 @@ const BomNormalizer = () => {
                       <FormControl fullWidth size="small">
                         <InputLabel>Where are alternates?</InputLabel>
                         <Select
+                          disabled={bomLayoutActive}
                           value={config.alternateLayout}
                           label="Where are alternates?"
                           onChange={(event) => {
@@ -8825,7 +9420,7 @@ const BomNormalizer = () => {
                         </Select>
                       </FormControl>
                     </Grid>
-                    {config.alternateLayout === 'following_rows' && (
+                    {config.alternateLayout === 'following_rows' && !bomLayoutActive && (
                       <Grid item xs={12} md={3}>
                         <FormControl fullWidth size="small">
                           <InputLabel>Following-row alternate column</InputLabel>
@@ -8841,7 +9436,7 @@ const BomNormalizer = () => {
                             }}
                           >
                             <MenuItem value="">Select column</MenuItem>
-                            {headers.map((header) => (
+                            {visibleSourceHeaders.map((header) => (
                               <MenuItem key={header} value={header}>{header}</MenuItem>
                             ))}
                           </Select>
@@ -8852,6 +9447,7 @@ const BomNormalizer = () => {
                       <FormControl fullWidth size="small">
                         <InputLabel>Quantity/UOM handling</InputLabel>
                         <Select
+                          disabled={bomLayoutActive}
                           value={config.quantityMode}
                           label="Quantity/UOM handling"
                           onChange={(event) => setConfig((prev) => ({ ...prev, quantityMode: event.target.value }))}
@@ -8862,11 +9458,39 @@ const BomNormalizer = () => {
                         </Select>
                       </FormControl>
                     </Grid>
+                    <Grid item xs={12} md={3}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel>BOM layout</InputLabel>
+                        <Select
+                          value={config.bomLayout || 'none'}
+                          label="BOM layout"
+                          onChange={(event) => {
+                            const nextLayout = event.target.value;
+                            setParserTouched(true);
+                            setConfig((prev) => ({
+                              ...prev,
+                              bomLayout: nextLayout,
+                              assemblyMatrix: nextLayout === 'assembly_quantity_matrix'
+                                ? detectAssemblyQuantityMatrix(headers, dataRows, roles)
+                                : prev.assemblyMatrix,
+                              quantityMode: ['assembly_quantity_matrix', 'multi_block_assembly'].includes(nextLayout)
+                                ? 'every_row'
+                                : prev.quantityMode,
+                            }));
+                          }}
+                        >
+                          {BOM_LAYOUT_OPTIONS.map((option) => (
+                            <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    </Grid>
                     {showManufacturerInheritanceOption && (
                       <Grid item xs={12} md={3}>
                         <FormControl fullWidth size="small">
                           <InputLabel>Alternate manufacturer</InputLabel>
                           <Select
+                            disabled={bomLayoutActive}
                             value={config.manufacturerMode || 'inherit_blank'}
                             label="Alternate manufacturer"
                             onChange={(event) => setConfig((prev) => ({ ...prev, manufacturerMode: event.target.value }))}
@@ -8889,7 +9513,7 @@ const BomNormalizer = () => {
                         />
                       </Grid>
                     )}
-                    {config.structure === 'grouped_rows' && (
+                    {config.structure === 'grouped_rows' && !bomLayoutActive && (
                       <Grid item xs={12} md={3}>
                         <FormControl fullWidth size="small">
                           <InputLabel>Group header handling</InputLabel>
@@ -8906,7 +9530,12 @@ const BomNormalizer = () => {
                       </Grid>
                     )}
                   </Grid>
-                  {config.alternateLayout === 'separate_columns' && config.structure !== 'grouped_rows' && (
+                  {bomLayoutActive && (
+                    <Alert severity="info" sx={{ mt: 1.25 }}>
+                      BOM layout is controlling row expansion. MPN/MFR arrangement, alternate layout, and quantity handling are locked because changing them would not affect this layout.
+                    </Alert>
+                  )}
+                  {config.alternateLayout === 'separate_columns' && config.structure !== 'grouped_rows' && !bomLayoutActive && (
                     <Paper elevation={0} sx={{ mt: 1.5, p: 1.25, border: '1px solid #e1e6ec', bgcolor: '#fff' }}>
                       <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'flex-start', sm: 'center' }} justifyContent="space-between" gap={1}>
                         <Box>
@@ -8934,7 +9563,7 @@ const BomNormalizer = () => {
                                     onChange={(event) => updateAlternateColumnGroup(groupIndex, 'mpn', event.target.value)}
                                   >
                                     <MenuItem value="">None</MenuItem>
-                                    {headers.map((header) => (
+                                    {visibleSourceHeaders.map((header) => (
                                       <MenuItem key={header} value={header}>{header}</MenuItem>
                                     ))}
                                   </Select>
@@ -8950,7 +9579,7 @@ const BomNormalizer = () => {
                                       onChange={(event) => updateAlternateColumnGroup(groupIndex, 'mfr', event.target.value)}
                                     >
                                       <MenuItem value="">None</MenuItem>
-                                      {headers.map((header) => (
+                                      {visibleSourceHeaders.map((header) => (
                                         <MenuItem key={header} value={header}>{header}</MenuItem>
                                       ))}
                                     </Select>
@@ -8966,7 +9595,7 @@ const BomNormalizer = () => {
                                     onChange={(event) => updateAlternateColumnGroup(groupIndex, 'qty', event.target.value)}
                                   >
                                     <MenuItem value="">Use primary</MenuItem>
-                                    {headers.map((header) => (
+                                    {visibleSourceHeaders.map((header) => (
                                       <MenuItem key={header} value={header}>{header}</MenuItem>
                                     ))}
                                   </Select>
@@ -8981,7 +9610,7 @@ const BomNormalizer = () => {
                                     onChange={(event) => updateAlternateColumnGroup(groupIndex, 'uom', event.target.value)}
                                   >
                                     <MenuItem value="">Use primary</MenuItem>
-                                    {headers.map((header) => (
+                                    {visibleSourceHeaders.map((header) => (
                                       <MenuItem key={header} value={header}>{header}</MenuItem>
                                     ))}
                                   </Select>
@@ -9011,18 +9640,18 @@ const BomNormalizer = () => {
                     </Paper>
                   )}
                   <Typography sx={{ mt: 1, fontSize: 13, color: '#536171', lineHeight: 1.45 }}>
-                    <strong>Detected rule:</strong> {selectedStructureOption?.description || '-'}
-                    {selectedAlternateOption?.description ? ` ${selectedAlternateOption.description}` : ''}
-                    {config.structure === 'grouped_rows' && selectedGroupHeaderOption ? ` ${selectedGroupHeaderOption.description}` : ''}
+                    <strong>Detected rule:</strong> {bomLayoutActive ? selectedBomLayoutOption?.description : selectedStructureOption?.description || '-'}
+                    {!bomLayoutActive && selectedAlternateOption?.description ? ` ${selectedAlternateOption.description}` : ''}
+                    {!bomLayoutActive && config.structure === 'grouped_rows' && selectedGroupHeaderOption ? ` ${selectedGroupHeaderOption.description}` : ''}
                     {' '}<strong>Delimiter:</strong> {delimiterLabel}.
                     {' '}Blank BOM levels will be treated as level 1.
                   </Typography>
-                  {config.alternateLayout === 'same_group_rows' && !roles.parent && (
+                  {config.alternateLayout === 'same_group_rows' && !roles.parent && !bomLayoutActive && (
                     <Alert severity="info" sx={{ mt: 1 }}>
                       Select a Parent / group key such as Ref Designator for best results. Without it, grouping falls back to description, quantity, UOM, and level.
                     </Alert>
                   )}
-                  {config.alternateLayout === 'following_rows' && !config.followingRowAlternateColumn && (
+                  {config.alternateLayout === 'following_rows' && !config.followingRowAlternateColumn && !bomLayoutActive && (
                     <Alert severity="warning" sx={{ mt: 1 }}>
                       Select the column where alternate values appear in the rows below the main BOM line.
                     </Alert>
@@ -9288,7 +9917,7 @@ const BomNormalizer = () => {
                       Status
                     </TableCell>
                   )}
-                  {headers.map((header) => (
+                  {visibleSourceHeaders.map((header) => (
                     <TableCell
                       key={header}
                       sx={{
@@ -9334,7 +9963,7 @@ const BomNormalizer = () => {
                           />
                         </TableCell>
                       )}
-                      {headers.map((header) => (
+                      {visibleSourceHeaders.map((header) => (
                         <TableCell
                           key={header}
                           sx={{
@@ -10207,15 +10836,56 @@ const BomNormalizer = () => {
               {patternApplyNotice}
             </Alert>
           )}
-          <Stack direction="row" gap={0.8} flexWrap="wrap" sx={{ mb: 2 }}>
-            <Chip size="small" variant="outlined" label={`${detectedParsingLogic?.sections?.length || 0} source${detectedParsingLogic?.sections?.length === 1 ? '' : 's'}`} sx={{ fontWeight: 650, color: normalizerTheme.text, bgcolor: 'rgba(148, 163, 184, 0.08)' }} />
-            <Chip size="small" variant="outlined" label={`${parsingPatternOptions.length} pattern${parsingPatternOptions.length === 1 ? '' : 's'}`} sx={{ fontWeight: 650, color: normalizerTheme.text, bgcolor: 'rgba(148, 163, 184, 0.08)' }} />
-            <Chip size="small" color="success" variant="outlined" label={`${detectedParsingLogic?.matchingRows || 0} matching values`} sx={{ fontWeight: 650 }} />
+          <Stack direction="row" gap={0.9} flexWrap="wrap" sx={{ mb: 2 }}>
+            <Chip
+              size="small"
+              variant="outlined"
+              label={`${detectedParsingLogic?.sections?.length || 0} source column${detectedParsingLogic?.sections?.length === 1 ? '' : 's'}`}
+              sx={{
+                height: 28,
+                px: 0.35,
+                fontSize: 12.5,
+                fontWeight: 800,
+                color: '#1e3a8a',
+                bgcolor: '#eff6ff',
+                borderColor: '#bfdbfe',
+                '& .MuiChip-label': { px: 1.1 },
+              }}
+            />
+            <Chip
+              size="small"
+              variant="outlined"
+              label={`${parsingPatternOptions.length} MPN/MFR format${parsingPatternOptions.length === 1 ? '' : 's'}`}
+              sx={{
+                height: 28,
+                px: 0.35,
+                fontSize: 12.5,
+                fontWeight: 800,
+                color: '#5b21b6',
+                bgcolor: '#f5f3ff',
+                borderColor: '#ddd6fe',
+                '& .MuiChip-label': { px: 1.1 },
+              }}
+            />
+            <Chip
+              size="small"
+              variant="outlined"
+              label={`${detectedParsingLogic?.matchingRows || 0} matching values`}
+              sx={{
+                height: 28,
+                px: 0.35,
+                fontSize: 12.5,
+                fontWeight: 800,
+                color: '#166534',
+                bgcolor: '#f0fdf4',
+                borderColor: '#bbf7d0',
+                '& .MuiChip-label': { px: 1.1 },
+              }}
+            />
             {selectedParsingPattern?.section?.unmatched?.count > 0 && (
               <Chip size="small" color="warning" variant="outlined" label={`${selectedParsingPattern.section.unmatched.count} unmatched`} sx={{ fontWeight: 650 }} />
             )}
           </Stack>
-
           <Paper elevation={0} sx={{ p: 1.35, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
             <Grid container spacing={1.5} alignItems="center">
               <Grid item xs={12} md={8}>
@@ -10235,28 +10905,27 @@ const BomNormalizer = () => {
               </Grid>
               <Grid item xs={12} md={4}>
                 <Stack spacing={1} alignItems="flex-end" sx={{ maxWidth: 300, ml: 'auto' }}>
-                  <Stack direction="row" spacing={0.75} alignItems="center" justifyContent="flex-end">
-                    <IconButton
-                      size="small"
-                      disabled={selectedParsingPatternIndex <= 0}
-                      onClick={() => handleStepParsingPattern(-1)}
-                      sx={{ border: `1px solid ${normalizerTheme.border}` }}
-                    >
-                      <ChevronLeftIcon fontSize="small" />
-                    </IconButton>
-                    <IconButton
-                      size="small"
-                      disabled={selectedParsingPatternIndex < 0 || selectedParsingPatternIndex >= parsingPatternOptions.length - 1}
-                      onClick={() => handleStepParsingPattern(1)}
-                      sx={{ border: `1px solid ${normalizerTheme.border}` }}
-                    >
-                      <ChevronRightIcon fontSize="small" />
-                    </IconButton>
-                  </Stack>
                   <Button
-                    variant="outlined"
+                    variant="contained"
                     disabled={!selectedParsingPattern || configureParserPreparing}
-                    sx={{ width: { xs: '100%', sm: 150 }, minWidth: 0, px: 2, fontWeight: 700 }}
+                    sx={{
+                      width: { xs: '77%', sm: 119 },
+                      minWidth: 0,
+                      px: 2,
+                      fontWeight: 700,
+                      bgcolor: '#2563eb',
+                      color: '#ffffff',
+                      boxShadow: 'none',
+                      '&:hover': {
+                        bgcolor: '#1d4ed8',
+                        boxShadow: 'none',
+                      },
+                      '&.Mui-disabled': {
+                        bgcolor: '#2563eb',
+                        color: '#ffffff',
+                        opacity: 0.55,
+                      },
+                    }}
                     onClick={() => {
                       if (!selectedParsingPattern) return;
                       setParsingLogicOpen(false);
@@ -10294,6 +10963,7 @@ const BomNormalizer = () => {
               </Stack>
               <Stack direction="row" gap={0.75} flexWrap="wrap" sx={{ mt: 1.4 }}>
                 <Chip size="small" variant="outlined" label={`Structure: ${selectedStructureOption?.label || config.structure}`} sx={{ fontWeight: 650 }} />
+                <Chip size="small" variant="outlined" label={`BOM layout: ${selectedBomLayoutOption?.label || 'None'}`} sx={{ fontWeight: 650 }} />
                 <Chip size="small" variant="outlined" label={`Alternates: ${selectedAlternateOption?.label || config.alternateLayout}`} sx={{ fontWeight: 650 }} />
                 <Chip size="small" variant="outlined" label={`Delimiter: ${selectedDelimiterOption?.label || config.delimiterMode}`} sx={{ fontWeight: 650 }} />
                 <Chip size="small" variant="outlined" label={`Quantity: ${selectedQuantityOption?.label || config.quantityMode}`} sx={{ fontWeight: 650 }} />
@@ -10385,16 +11055,28 @@ const BomNormalizer = () => {
             </Paper>
           )}
         </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'flex-end', gap: 1, flexWrap: 'wrap' }}>
+        <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'space-between', gap: 1, flexWrap: 'wrap' }}>
+          <Button
+            variant="outlined"
+            disabled={selectedParsingPatternIndex <= 0}
+            onClick={() => handleStepParsingPattern(-1)}
+          >
+            Back
+          </Button>
           <Button
             variant="contained"
             onClick={() => {
+              const hasNextPattern = selectedParsingPatternIndex >= 0 && selectedParsingPatternIndex < parsingPatternOptions.length - 1;
+              if (hasNextPattern) {
+                handleStepParsingPattern(1);
+                return;
+              }
               setParsingLogicOpen(false);
               setPatternApplyNotice('');
               runNormalization();
             }}
           >
-            Continue
+            {selectedParsingPatternIndex >= 0 && selectedParsingPatternIndex < parsingPatternOptions.length - 1 ? 'Next' : 'Continue'}
           </Button>
         </DialogActions>
       </Dialog>

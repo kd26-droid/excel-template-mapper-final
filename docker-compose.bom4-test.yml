@@ -7,6 +7,17 @@ services:
     ports: !override
       - "8002:8000"
     environment:
+      # Any host, because this stack gets handed to someone else to try and the
+      # host header Django sees is whatever the tester typed — nginx forwards it
+      # verbatim (proxy_set_header Host $host). Pinning the LAN address instead
+      # means every API call starts returning 400 DisallowedHost the moment the
+      # DHCP lease changes, while the page still loads — which reads as "the app
+      # broke", not as a stale IP.
+      #
+      # Safe here and nowhere else: this is a throwaway LAN test stack that
+      # already runs DEBUG=True. Do not copy this line into any deployed
+      # compose file — ALLOWED_HOSTS is the host-header check.
+      - ALLOWED_HOSTS=*
       - CORS_ALLOWED_ORIGINS=http://localhost:3002,http://127.0.0.1:3002
 
   frontend:

@@ -313,7 +313,19 @@ def extract_ruled_table(pdf_page, rect: Dict[str, float]) -> Dict[str, Any]:
     reports which strategy produced the result so the caller can say so rather
     than silently guessing.
     """
-    crop = pdf_page.crop((rect['x0'], rect['top'], rect['x1'], rect['bottom']))
+    # User-drawn boxes often sit exactly on the table border. Expanding by a
+    # tiny PDF-point margin keeps edge rows/cells from being clipped while still
+    # respecting the selected area.
+    margin = 2.0
+    page_width = getattr(pdf_page, 'width', rect['x1'])
+    page_height = getattr(pdf_page, 'height', rect['bottom'])
+    crop_box = (
+        max(0, rect['x0'] - margin),
+        max(0, rect['top'] - margin),
+        min(page_width, rect['x1'] + margin),
+        min(page_height, rect['bottom'] + margin),
+    )
+    crop = pdf_page.crop(crop_box)
 
     # 'lines' vertically keeps real column edges; horizontally it merges a
     # wrapped description into its own cell instead of splitting it across rows.

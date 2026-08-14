@@ -509,10 +509,9 @@ const EnhancedDataEditor = () => {
   const [createColumnCustomSeparator, setCreateColumnCustomSeparator] = useState('');
   const [createColumnMode, setCreateColumnMode] = useState('fill_empty');
   const [createColumnSaving, setCreateColumnSaving] = useState(false);
-  // Saved rule sets, for the "Apply a saved rule set" value mode.
-  const [ruleSets, setRuleSets] = useState([]);
-  const [ruleSetsLoading, setRuleSetsLoading] = useState(false);
-  const [selectedRuleSetId, setSelectedRuleSetId] = useState('');
+  // Rules saved in Settings, replayable against this sheet.
+  const [savedColumnRules, setSavedColumnRules] = useState([]);
+  const [selectedColumnRuleId, setSelectedColumnRuleId] = useState('');
   const [hasFormulas, setHasFormulas] = useState(false);
   const [formulaColumns, setFormulaColumns] = useState([]);
   // Column examples and fill stats for FormulaBuilder dropdowns
@@ -2643,45 +2642,32 @@ const EnhancedDataEditor = () => {
     setCreateColumnDialogOpen(true);
   }, [dataColumnFields, createColumnFirst, createColumnSecond, applySavedItemCodeFillSettings]);
 
-  // ─── SAVED RULE SETS ────────────────────────────────────────────────────────
-  // A rule set carries the destination each of its rules was authored for, so
-  // the picker can put the ones meant for the column being filled first.
   useEffect(() => {
     if (!createColumnDialogOpen) return;
     let cancelled = false;
-    setRuleSetsLoading(true);
-    api.getTagTemplates()
-      .then(res => { if (!cancelled) setRuleSets(res?.data?.templates || []); })
-      .catch(() => { if (!cancelled) setRuleSets([]); })
-      .finally(() => { if (!cancelled) setRuleSetsLoading(false); });
+    api.getColumnRules()
+      .then(res => { if (!cancelled) setSavedColumnRules(res?.data?.rules || []); })
+      .catch(() => { if (!cancelled) setSavedColumnRules([]); });
     return () => { cancelled = true; };
   }, [createColumnDialogOpen]);
 
-  const ruleSetTargets = useCallback((ruleSet) => {
-    const rules = ruleSet?.formula_rules || ruleSet?.rules || [];
-    return rules.map(r => String(r?.target_column || '').trim()).filter(Boolean);
-  }, []);
-
-  // Rule sets authored for the column being filled, then everything else.
-  const { preferredRuleSets, otherRuleSets } = useMemo(() => {
+  // Rules saved for the column being filled come first; one match is picked
+  // automatically so the common case is two clicks.
+  const { preferredColumnRules, otherColumnRules } = useMemo(() => {
     const target = String(createColumnTab === 0 ? createColumnTarget : createColumnNewName).trim();
     const preferred = [];
     const others = [];
-    (ruleSets || []).forEach(set => {
-      if (target && ruleSetTargets(set).includes(target)) preferred.push(set);
-      else others.push(set);
+    (savedColumnRules || []).forEach(saved => {
+      if (target && String(saved.target_column || '').trim() === target) preferred.push(saved);
+      else others.push(saved);
     });
-    return { preferredRuleSets: preferred, otherRuleSets: others };
-  }, [ruleSets, createColumnTarget, createColumnNewName, createColumnTab, ruleSetTargets]);
+    return { preferredColumnRules: preferred, otherColumnRules: others };
+  }, [savedColumnRules, createColumnTarget, createColumnNewName, createColumnTab]);
 
-  // One obvious candidate for this destination — pick it rather than making the
-  // user choose from a list of one.
   useEffect(() => {
-    if (createColumnContentType !== 'rules') return;
-    if (preferredRuleSets.length === 1) {
-      setSelectedRuleSetId(preferredRuleSets[0].id);
-    }
-  }, [createColumnContentType, preferredRuleSets]);
+    if (createColumnContentType !== 'saved_rule') return;
+    if (preferredColumnRules.length === 1) setSelectedColumnRuleId(preferredColumnRules[0].id);
+  }, [createColumnContentType, preferredColumnRules]);
 
   const handleCloseCreateColumnDialog = useCallback(() => {
     setCreateColumnDialogOpen(false);
@@ -2722,36 +2708,34 @@ const EnhancedDataEditor = () => {
       return;
     }
 
-    // Rule sets go through the formula engine, not fillOrCreateColumn — they
-    // are keyword→value rules, and the destination chosen here wins over the
-    // one they were saved with.
-    if (createColumnContentType === 'rules') {
-      const ruleSet = (ruleSets || []).find(set => String(set.id) === String(selectedRuleSetId));
-      if (!ruleSet) {
-        showSnackbar('Select a rule set to apply', 'warning');
-        return;
-      }
-      const rules = (ruleSet.formula_rules || ruleSet.rules || []).map(rule => ({
-        ...rule,
-        target_column: target,
-        // The column was chosen here, so write into it rather than letting the
-        // engine allocate a fresh Tag column around it.
-        target_locked: true,
-        column_type: target.startsWith('Specification_Value_') ? 'Specification Value' : 'Tag',
-      }));
-      if (rules.length === 0) {
-        showSnackbar('That rule set has no rules', 'warning');
+    // A saved rule already carries how to compute the value; only where it
+    // lands and which rows it touches come from this dialog.
+    if (createColumnContentType === 'saved_rule') {
+      const saved = (savedColumnRules || []).find(r => String(r.id) === String(selectedColumnRuleId));
+      if (!saved) {
+        showSnackbar('Select a saved rule', 'warning');
         return;
       }
       try {
         setCreateColumnSaving(true);
-        const response = await api.applyFormulas(sessionId, rules);
-        if (!response.data?.success) throw new Error(response.data?.error || 'Could not apply the rule set');
+        const rule = {
+          ...(saved.rule || {}),
+          target_mode: createColumnTab === 0 ? 'existing' : 'new',
+          target_column: target,
+          write_mode: createColumnTab === 0 ? createColumnMode : 'overwrite',
+        };
+        const response = await api.fillOrCreateColumn(sessionId, rule);
+        if (!response.data?.success) throw new Error(response.data?.error || 'Column update failed');
+        recordPostMappingAction({
+          type: 'fill_or_create_column',
+          label: `${target} — ${saved.name}`,
+          rule: response.data.rule || rule,
+        });
         setCreateColumnDialogOpen(false);
         await fetchDataSynchronized();
-        showSnackbar(`Applied "${ruleSet.name}" to ${target}.`, 'success');
+        showSnackbar(`Applied "${saved.name}" to ${target} across ${response.data.changed || 0} cells.`, 'success');
       } catch (error) {
-        showSnackbar(getFriendlyErrorMessage(error, 'Failed to apply the rule set'), 'error');
+        showSnackbar(error.response?.data?.error || error.message || 'Failed to apply the rule', 'error');
       } finally {
         setCreateColumnSaving(false);
       }
@@ -2838,9 +2822,8 @@ const EnhancedDataEditor = () => {
     showSnackbar,
     fetchDataSynchronized,
     recordPostMappingAction,
-    ruleSets,
-    selectedRuleSetId,
-    getFriendlyErrorMessage
+    savedColumnRules,
+    selectedColumnRuleId
   ]);
 
   const handleOpenFactwiseIdDialog = useCallback(() => {
@@ -3221,8 +3204,8 @@ const EnhancedDataEditor = () => {
       column: 'Quantity',
     },
     quantity_invalid: {
-      title: 'Quantity is not a positive number',
-      rule: 'Quantity must be a number greater than zero.',
+      title: 'Quantity is not a valid number',
+      rule: 'Quantity must be a number that is not negative. Zero and fractions are fine.',
       action: 'Replace the offending values — Fill Column can target them specifically.',
       column: 'Quantity',
     },
@@ -5585,6 +5568,31 @@ const EnhancedDataEditor = () => {
 
   // rowIndex stays the index into rowData, not into the filtered list, so cell
   // edits and autosave keep addressing the right row whatever is filtered away.
+  const duplicateItemCodeInfo = useMemo(() => {
+    const field = itemCodeIssue?.field || getMatchingDataColumnField('Item code');
+    if (!field || !Array.isArray(rowData)) return { field: '', values: new Set(), rowCount: 0 };
+
+    const counts = new Map();
+    rowData.forEach(row => {
+      const value = String(row?.[field] ?? '').trim();
+      if (!value) return;
+      counts.set(value, (counts.get(value) || 0) + 1);
+    });
+
+    const values = new Set();
+    let rowCount = 0;
+    counts.forEach((count, value) => {
+      if (count > 1) {
+        values.add(value);
+        rowCount += count;
+      }
+    });
+
+    return { field, values, rowCount };
+  }, [getMatchingDataColumnField, itemCodeIssue?.field, rowData]);
+  const duplicateItemCodeValues = duplicateItemCodeInfo.values;
+  const hasDuplicateItemCodeRows = Boolean(duplicateItemCodeInfo.field && duplicateItemCodeInfo.rowCount > 0 && duplicateItemCodeValues.size > 0);
+
   const filteredRows = useMemo(() => ((rowData || [])
     .map((row, rowIndex) => ({ row, rowIndex }))
     .filter(({ row }) => {
@@ -6019,15 +6027,13 @@ const EnhancedDataEditor = () => {
                   <MenuItem value="concat">Join two columns</MenuItem>
                   <MenuItem value="conditional">Use an if / else condition</MenuItem>
                   <MenuItem value="serial">Generate a serial sequence</MenuItem>
-                  <MenuItem value="rules">Apply a saved rule set</MenuItem>
+                  <MenuItem value="saved_rule">Apply a saved rule</MenuItem>
                   {createColumnTab === 1 && <MenuItem value="blank">Leave the new column blank</MenuItem>}
                 </Select>
               </FormControl>
             </Grid>
 
-            {/* A rule set decides per row whether it matches, so "rows to
-                update" has nothing to act on. */}
-            {createColumnTab === 0 && createColumnContentType !== 'rules' && (
+            {createColumnTab === 0 && (
               <Grid item xs={12} sm={6}>
                 <FormControl fullWidth size="small">
                   <InputLabel>Rows to update</InputLabel>
@@ -6042,46 +6048,38 @@ const EnhancedDataEditor = () => {
               </Grid>
             )}
 
-            {createColumnContentType === 'fixed' && (
+            {createColumnContentType === 'saved_rule' && (
               <Grid item xs={12}>
-                <TextField fullWidth size="small" label="Value" value={defaultValue} onChange={(e) => setDefaultValue(e.target.value)} />
-              </Grid>
-            )}
-
-            {createColumnContentType === 'rules' && (
-              <Grid item xs={12}>
-                <FormControl fullWidth size="small" disabled={ruleSetsLoading}>
-                  <InputLabel>Rule set</InputLabel>
+                <FormControl fullWidth size="small">
+                  <InputLabel>Saved rule</InputLabel>
                   <Select
-                    label="Rule set"
-                    value={selectedRuleSetId}
-                    onChange={(e) => setSelectedRuleSetId(e.target.value)}
+                    label="Saved rule"
+                    value={selectedColumnRuleId}
+                    onChange={(e) => setSelectedColumnRuleId(e.target.value)}
                   >
-                    {preferredRuleSets.length > 0 && (
-                      <ListSubheader>
-                        Saved for {columnLabel(createColumnTarget, createColumnTarget)}
-                      </ListSubheader>
+                    {preferredColumnRules.length > 0 && (
+                      <ListSubheader>Saved for {columnLabel(createColumnTarget, createColumnTarget)}</ListSubheader>
                     )}
-                    {preferredRuleSets.map(set => (
-                      <MenuItem key={set.id} value={set.id}>
-                        {set.name} · {(set.formula_rules || set.rules || []).length} rules
-                      </MenuItem>
+                    {preferredColumnRules.map(saved => (
+                      <MenuItem key={saved.id} value={saved.id}>{saved.name}</MenuItem>
                     ))}
-                    {otherRuleSets.length > 0 && <ListSubheader>Other rule sets</ListSubheader>}
-                    {otherRuleSets.map(set => (
-                      <MenuItem key={set.id} value={set.id}>
-                        {set.name} · {(set.formula_rules || set.rules || []).length} rules
-                      </MenuItem>
+                    {otherColumnRules.length > 0 && <ListSubheader>Other rules</ListSubheader>}
+                    {otherColumnRules.map(saved => (
+                      <MenuItem key={saved.id} value={saved.id}>{saved.name}</MenuItem>
                     ))}
                   </Select>
                 </FormControl>
                 <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: t.text.secondary }}>
-                  {ruleSetsLoading
-                    ? 'Loading rule sets…'
-                    : (ruleSets.length === 0
-                      ? 'No rule sets saved yet — create one from the dashboard\'s Rule Sets tab.'
-                      : 'Every rule in the set writes into the column selected above, whatever destination it was saved with.')}
+                  {savedColumnRules.length === 0
+                    ? 'No rules saved yet — create one under Settings → Column Rules.'
+                    : 'The rule decides the value; the column and rows above decide where it lands.'}
                 </Typography>
+              </Grid>
+            )}
+
+            {createColumnContentType === 'fixed' && (
+              <Grid item xs={12}>
+                <TextField fullWidth size="small" label="Value" value={defaultValue} onChange={(e) => setDefaultValue(e.target.value)} />
               </Grid>
             )}
 
@@ -6345,15 +6343,7 @@ const EnhancedDataEditor = () => {
             (conditionalBranches.some(branch => branch.outputType === 'empty') || condElseSourceType === 'empty') && (
               <Alert severity="info" sx={{ mt: 2 }}>Leave empty will not clear populated cells in this mode. Choose All rows if matching rows should be cleared.</Alert>
             )}
-          {/* Rule sets run through the formula engine, which is not part of the
-              mapping template's saved operations. */}
-          {createColumnContentType === 'rules' ? (
-            <Alert severity="info" sx={{ mt: 2 }}>
-              Runs once now. Reapply the rule set on a future sheet from this same dialog.
-            </Alert>
-          ) : (
-            <Alert severity="info" sx={{ mt: 2 }}>This operation is saved with the mapping template and runs again when the template is reused.</Alert>
-          )}
+          <Alert severity="info" sx={{ mt: 2 }}>This operation is saved with the mapping template and runs again when the template is reused.</Alert>
         </DialogContent>
         <DialogActions sx={{
           px: 3,
@@ -6373,7 +6363,7 @@ const EnhancedDataEditor = () => {
               !(createColumnTab === 0 ? createColumnTarget : createColumnNewName.trim()) ||
               (createColumnTab === 1 && dataColumnFields.includes(createColumnNewName.trim())) ||
               (createColumnContentType === 'concat' && (!createColumnFirst || !createColumnSecond)) ||
-              (createColumnContentType === 'rules' && !selectedRuleSetId)
+              (createColumnContentType === 'saved_rule' && !selectedColumnRuleId)
             }
             startIcon={createColumnSaving ? <CircularProgress size={16} /> : <AutoAwesomeIcon />}
           >
@@ -6957,6 +6947,21 @@ const EnhancedDataEditor = () => {
                   <ListItemText>All rows</ListItemText>
                 </MenuItem>
                 <MenuItem
+                  onClick={() => {
+                    setRowFilterMenuAnchor(null);
+                    if (hasDuplicateItemCodeRows) {
+                      setDupHighlight({
+                        field: duplicateItemCodeInfo.field,
+                        values: duplicateItemCodeValues,
+                      });
+                    }
+                  }}
+                  disabled={!hasDuplicateItemCodeRows}
+                >
+                  <ListItemIcon>{dupHighlight?.field === duplicateItemCodeInfo.field ? <CheckIcon sx={{ color: t.color.warningText }} /> : <ContentCopyIcon sx={{ color: t.color.warningText }} />}</ListItemIcon>
+                  <ListItemText>Highlight duplicate Item codes</ListItemText>
+                </MenuItem>
+                <MenuItem
                   onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('valid_mpn'); setMpnFilterInvalidOnly(false); setPage(1); }}
                   disabled={!hasMpnValidationColumns}
                 >
@@ -7366,7 +7371,15 @@ const EnhancedDataEditor = () => {
               <Alert
                 severity="warning"
                 sx={{ mb: 1 }}
-                action={<Button color="inherit" size="small" onClick={() => setDupHighlight(null)}>Clear highlight</Button>}
+                action={(
+                  <Button
+                    color="inherit"
+                    size="small"
+                    onClick={() => setDupHighlight(null)}
+                  >
+                    Clear highlight
+                  </Button>
+                )}
               >
                 Duplicate <strong>{columnLabel(dupHighlight.field, dupHighlight.field)}</strong> values are highlighted in amber ({dupHighlight.values.size} value{dupHighlight.values.size === 1 ? '' : 's'}). Edit them so each is unique, then export again.
               </Alert>
