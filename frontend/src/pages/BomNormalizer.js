@@ -367,11 +367,42 @@ const colorLooksRed = (color = {}) => {
   return red >= 180 && green <= 100 && blue <= 100;
 };
 
+const valueLooksStruck = (value) => {
+  if (value === true || value === 1) return true;
+  if (typeof value !== 'string') return false;
+  return /^(?:1|true|yes)$/i.test(value.trim());
+};
+
+const objectHasStrikeStyle = (value, depth = 0) => {
+  if (!value || depth > 4) return false;
+  if (typeof value !== 'object') return false;
+  return Object.entries(value).some(([key, nestedValue]) => {
+    const normalizedKey = normalizeKey(key);
+    if (/(^| )strike(?: |$)|strikethrough|strikeout/.test(normalizedKey) && valueLooksStruck(nestedValue)) {
+      return true;
+    }
+    return objectHasStrikeStyle(nestedValue, depth + 1);
+  });
+};
+
+const htmlLooksStruck = (value) => /<(?:s|strike)\b|text-decoration(?:-line)?\s*:\s*line-through/i.test(fmt(value));
+
 const getCellStyleInfo = (cell = {}) => {
   const style = cell?.s || {};
   const font = style.font || {};
   const red = colorLooksRed(font.color) || colorLooksRed(style.fgColor) || colorLooksRed(style.color);
-  const strike = Boolean(font.strike || font.strikethrough);
+  const strike = Boolean(
+    cell.__styleInfo?.strike ||
+    font.strike ||
+    font.strikethrough ||
+    font.strikeThrough ||
+    font.strikeout ||
+    font.strikeOut ||
+    objectHasStrikeStyle(font) ||
+    objectHasStrikeStyle(style) ||
+    htmlLooksStruck(cell?.h) ||
+    htmlLooksStruck(cell?.r)
+  );
   return { red, strike };
 };
 
@@ -1643,6 +1674,10 @@ const splitManufacturerCell = (value, expectedCount, config = {}) => {
     return [canonicalForManufacturer(circledSegments[0].value)];
   }
 
+  const delimiter = selectedDelimiter(config);
+  const explicitParts = splitByExplicitDelimiter(text, delimiter);
+  if (explicitParts.length > 1) return mergeManufacturerSuffixParts(explicitParts).map(canonicalForManufacturer);
+
   const knownPhrases = [
     ...directoryNames,
     ...Object.keys(directoryAliases),
@@ -1650,10 +1685,6 @@ const splitManufacturerCell = (value, expectedCount, config = {}) => {
   ];
   const knownMatches = findKnownManufacturerMatches(text, knownPhrases, canonicalForManufacturer);
   if (knownMatches.length >= Math.min(expectedCount || 1, 2)) return knownMatches;
-
-  const delimiter = selectedDelimiter(config);
-  const explicitParts = splitByExplicitDelimiter(text, delimiter);
-  if (explicitParts.length > 1) return mergeManufacturerSuffixParts(explicitParts).map(canonicalForManufacturer);
 
   const colonSegments = parseColonSegments(text);
   if (colonSegments.length > 1) return colonSegments.map((segment) => canonicalForManufacturer(segment.label));
@@ -1970,8 +2001,10 @@ const normalizeSeparateCells = (rows, roles, config) => {
       return;
     }
 
-    mpns.forEach((mpn, partIndex) => {
+    const partCount = Math.max(mpns.length, manufacturers.length || 0);
+    Array.from({ length: partCount }).forEach((_, partIndex) => {
       const isPrimary = partIndex === 0;
+      const mpn = mpns[partIndex] || mpns[0] || '';
       const manufacturer = manufacturers[partIndex] || (!isPrimary && config.manufacturerMode === 'inherit_blank' ? primaryManufacturer : '');
       output.push(withSourceColumns({
         sourceRow,
@@ -2629,7 +2662,9 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
       const manufacturerParts = useManufacturerColumns
         ? splitManufacturerCell(manufacturerValue, partsToEmit.length, config)
         : [];
-      partsToEmit.forEach((mpn, partIndex) => {
+      const partCount = Math.max(partsToEmit.length, manufacturerParts.length || 0);
+      Array.from({ length: partCount }).forEach((_, partIndex) => {
+        const mpn = partsToEmit[partIndex] || partsToEmit[0] || '';
         const manufacturer = manufacturerParts[partIndex] ||
           manufacturerParts[0] ||
           stripCircledNumberMarkers(manufacturerValue);
@@ -3359,7 +3394,11 @@ const splitManualManufacturers = (value) => (
 
 const applyPairingReviewDecisions = (rows, reviewRows) => {
   if (!reviewRows.length) return rows;
-  const decisions = reviewRows.filter((issue) => issue.action !== 'keep');
+  const decisions = reviewRows.filter((issue) => (
+    issue.action !== 'keep' ||
+    (issue.mpns?.length === 1 && issue.manufacturers?.length > 1) ||
+    (issue.manufacturers?.length === 1 && issue.mpns?.length > 1)
+  ));
   if (!decisions.length) return rows;
 
   let nextRows = rows.map((row) => ({ ...row }));
@@ -3384,7 +3423,7 @@ const applyPairingReviewDecisions = (rows, reviewRows) => {
       : [];
     const firstManufacturer = issue.manufacturers[0] || manualValues[0] || '';
 
-    if (issue.action === 'manual' || issue.action === 'remove_extra') {
+    if (issue.action === 'keep' || issue.action === 'manual' || issue.action === 'remove_extra') {
       const affectedRows = nextRows.filter((row) => rowBelongsToIssue(row) && mpnKeys.includes(normalizeKey(row.mpn)));
       if (!affectedRows.length) return;
       const templateRow = affectedRows[0];
@@ -3393,12 +3432,21 @@ const applyPairingReviewDecisions = (rows, reviewRows) => {
         .filter((decision) => decision.keep !== false)
         .map((decision) => decision.manufacturer)
         .filter(Boolean);
-      decisionRows.forEach((decision, index) => {
+      const rowsToEmit = issue.action === 'keep'
+        ? Array.from({ length: Math.max(issue.mpns.length, keptManufacturers.length || issue.manufacturers.length || 1) }).map((_, index) => ({
+            mpn: issue.mpns[index] || issue.mpns[0] || '',
+            manufacturer: issue.manufacturers[index] || issue.manufacturers[0] || '',
+            keep: true,
+          }))
+        : decisionRows;
+      rowsToEmit.forEach((decision, index) => {
         if (issue.action === 'remove_extra' && decision.keep === false) return;
         const relationIndex = replacementRows.length;
         const manualValue = manualValues[index] || '';
         const manufacturer = issue.action === 'manual'
           ? (manualValue || decision.manufacturer || manualValues[0] || '')
+          : issue.action === 'keep'
+            ? (decision.manufacturer || keptManufacturers[relationIndex] || keptManufacturers[0] || firstManufacturer || '')
           : (keptManufacturers[relationIndex] || keptManufacturers[0] || firstManufacturer || decision.manufacturer || '');
         replacementRows.push({
           ...templateRow,
@@ -3481,22 +3529,124 @@ const arrayBufferToBinaryString = (buffer) => {
   return binary;
 };
 
+const getWorkbookFileText = (workbook, path) => {
+  const file = workbook?.files?.[path] || workbook?.files?.[`/${path}`];
+  const content = file?.content ?? file;
+  if (typeof content === 'string') return content;
+  if (content instanceof Uint8Array) {
+    return new TextDecoder('utf-8').decode(content);
+  }
+  if (Array.isArray(content)) {
+    return new TextDecoder('utf-8').decode(new Uint8Array(content));
+  }
+  return '';
+};
+
+const parseXmlAttributes = (raw = '') => {
+  const attrs = {};
+  String(raw).replace(/([\w:.-]+)\s*=\s*"([^"]*)"/g, (_, key, value) => {
+    attrs[key] = value;
+    return '';
+  });
+  return attrs;
+};
+
+const normalizeWorkbookTargetPath = (target = '') => {
+  const cleanTarget = fmt(target).replace(/\\/g, '/').replace(/^\/+/, '');
+  if (!cleanTarget) return '';
+  return cleanTarget.startsWith('xl/') ? cleanTarget : `xl/${cleanTarget}`;
+};
+
+const parseStrikeStyleIndexes = (stylesXml = '') => {
+  if (!stylesXml) return new Set();
+  const strikeFontIds = new Set();
+  const fontsMatch = stylesXml.match(/<fonts\b[^>]*>([\s\S]*?)<\/fonts>/i);
+  const fontsXml = fontsMatch?.[1] || '';
+  const fontMatches = [...fontsXml.matchAll(/<font\b[^>]*>[\s\S]*?<\/font>|<font\b[^/]*\/>/gi)];
+  fontMatches.forEach((fontMatch, fontIndex) => {
+    const fontXml = fontMatch[0];
+    const strikeMatch = fontXml.match(/<strike\b([^>]*)\/?>/i);
+    if (!strikeMatch) return;
+    const attrs = parseXmlAttributes(strikeMatch[1] || '');
+    if (!/^(?:0|false)$/i.test(fmt(attrs.val))) strikeFontIds.add(fontIndex);
+  });
+
+  if (!strikeFontIds.size) return new Set();
+  const strikeStyleIndexes = new Set();
+  const cellXfsMatch = stylesXml.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/i);
+  const cellXfsXml = cellXfsMatch?.[1] || '';
+  const xfMatches = [...cellXfsXml.matchAll(/<xf\b([^>]*)\/>|<xf\b([^>]*)>[\s\S]*?<\/xf>/gi)];
+  xfMatches.forEach((xfMatch, xfIndex) => {
+    const attrs = parseXmlAttributes(xfMatch[1] || xfMatch[2] || '');
+    const fontId = Number(attrs.fontId || 0);
+    if (strikeFontIds.has(fontId)) strikeStyleIndexes.add(xfIndex);
+  });
+  return strikeStyleIndexes;
+};
+
+const worksheetPathByName = (workbook) => {
+  const workbookXml = getWorkbookFileText(workbook, 'xl/workbook.xml');
+  const relsXml = getWorkbookFileText(workbook, 'xl/_rels/workbook.xml.rels');
+  if (!workbookXml || !relsXml) return {};
+
+  const targetByRelId = {};
+  [...relsXml.matchAll(/<Relationship\b([^>]*)\/?>/gi)].forEach((match) => {
+    const attrs = parseXmlAttributes(match[1]);
+    if (!attrs.Id || !/\/worksheet$/i.test(attrs.Type || '')) return;
+    targetByRelId[attrs.Id] = normalizeWorkbookTargetPath(attrs.Target);
+  });
+
+  const pathBySheet = {};
+  [...workbookXml.matchAll(/<sheet\b([^>]*)\/?>/gi)].forEach((match) => {
+    const attrs = parseXmlAttributes(match[1]);
+    const sheetName = attrs.name;
+    const relId = attrs['r:id'];
+    if (!sheetName || !relId || !targetByRelId[relId]) return;
+    pathBySheet[sheetName] = targetByRelId[relId];
+  });
+  return pathBySheet;
+};
+
+const attachWorkbookStrikeMetadata = (workbook) => {
+  const strikeStyleIndexes = parseStrikeStyleIndexes(getWorkbookFileText(workbook, 'xl/styles.xml'));
+  if (!strikeStyleIndexes.size) return workbook;
+  const paths = worksheetPathByName(workbook);
+
+  Object.entries(paths).forEach(([sheetName, path]) => {
+    const worksheet = workbook?.Sheets?.[sheetName];
+    const worksheetXml = getWorkbookFileText(workbook, path);
+    if (!worksheet || !worksheetXml) return;
+    [...worksheetXml.matchAll(/<c\b([^>]*)>/gi)].forEach((match) => {
+      const attrs = parseXmlAttributes(match[1]);
+      if (!attrs.r || !strikeStyleIndexes.has(Number(attrs.s || 0))) return;
+      const cell = worksheet[attrs.r];
+      if (!cell) return;
+      cell.__styleInfo = {
+        ...(cell.__styleInfo || {}),
+        strike: true,
+      };
+    });
+  });
+
+  return workbook;
+};
+
 const readWorkbookSafely = (buffer, fileName = 'workbook') => {
   if (!XLSX || !XLSX.read || !XLSX.utils) {
     throw new Error('Spreadsheet parser is not ready. Please refresh the page and try uploading again.');
   }
 
   const attempts = [
-    () => XLSX.read(buffer, { type: 'array', cellDates: true, raw: false, cellStyles: true, WTF: false }),
-    () => XLSX.read(new Uint8Array(buffer), { type: 'array', cellDates: true, raw: false, cellStyles: true, WTF: false }),
-    () => XLSX.read(arrayBufferToBinaryString(buffer), { type: 'binary', cellDates: true, raw: false, cellStyles: true, WTF: false }),
+    () => XLSX.read(buffer, { type: 'array', cellDates: true, raw: false, cellStyles: true, bookFiles: true, WTF: false }),
+    () => XLSX.read(new Uint8Array(buffer), { type: 'array', cellDates: true, raw: false, cellStyles: true, bookFiles: true, WTF: false }),
+    () => XLSX.read(arrayBufferToBinaryString(buffer), { type: 'binary', cellDates: true, raw: false, cellStyles: true, bookFiles: true, WTF: false }),
   ];
   let lastError = null;
 
   for (const attempt of attempts) {
     try {
       const workbook = attempt();
-      if (workbook?.SheetNames?.length) return workbook;
+      if (workbook?.SheetNames?.length) return attachWorkbookStrikeMetadata(workbook);
     } catch (err) {
       lastError = err;
     }
@@ -7971,10 +8121,15 @@ const BomNormalizer = () => {
       setPairingReviewOpen(false);
       return;
     }
+    const reviewedRows = applyPairingReviewDecisions(pendingNormalization.rows, pairingReviewRows);
+    const pairingCheck = {
+      ...(pendingNormalization.pairingCheck || {}),
+      issueRows: pairingReviewRows,
+    };
     setPairingReviewOpen(false);
     setPendingNormalization(null);
-    commitNormalizedResult(pendingNormalization.rows, pendingNormalization.pairingCheck);
-  }, [commitNormalizedResult, pendingNormalization]);
+    commitNormalizedResult(reviewedRows, pairingCheck);
+  }, [commitNormalizedResult, pairingReviewRows, pendingNormalization]);
 
   const runNormalization = useCallback(async () => {
     if (!dataRows.length) {
