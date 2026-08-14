@@ -10211,7 +10211,7 @@ const BomNormalizer = () => {
             <Chip
               size="small"
               variant="outlined"
-              label={`${detectedParsingLogic?.sections?.length || 0} source${detectedParsingLogic?.sections?.length === 1 ? '' : 's'}`}
+              label={`${detectedParsingLogic?.sections?.length || 0} source column${detectedParsingLogic?.sections?.length === 1 ? '' : 's'}`}
               sx={{
                 height: 28,
                 px: 0.35,
@@ -10226,7 +10226,7 @@ const BomNormalizer = () => {
             <Chip
               size="small"
               variant="outlined"
-              label={`${parsingPatternOptions.length} pattern${parsingPatternOptions.length === 1 ? '' : 's'}`}
+              label={`${parsingPatternOptions.length} MPN/MFR format${parsingPatternOptions.length === 1 ? '' : 's'}`}
               sx={{
                 height: 28,
                 px: 0.35,
@@ -10257,7 +10257,6 @@ const BomNormalizer = () => {
               <Chip size="small" color="warning" variant="outlined" label={`${selectedParsingPattern.section.unmatched.count} unmatched`} sx={{ fontWeight: 650 }} />
             )}
           </Stack>
-
           <Paper elevation={0} sx={{ p: 1.35, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
             <Grid container spacing={1.5} alignItems="center">
               <Grid item xs={12} md={8}>
@@ -10426,7 +10425,14 @@ const BomNormalizer = () => {
             </Paper>
           )}
         </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'flex-end', gap: 1, flexWrap: 'wrap' }}>
+        <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'space-between', gap: 1, flexWrap: 'wrap' }}>
+          <Button
+            variant="outlined"
+            disabled={selectedParsingPatternIndex <= 0}
+            onClick={() => handleStepParsingPattern(-1)}
+          >
+            Back
+          </Button>
           <Button
             variant="contained"
             onClick={() => {
