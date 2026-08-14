@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Box,
@@ -43,6 +43,8 @@ import {
 } from '@mui/icons-material';
 import { useThemeContext } from '../utils/ThemeContext';
 import api from '../services/api';
+import { useLocation } from 'react-router-dom';
+import ColumnRuleBuilder, { createEmptyColumnRule } from '../components/ColumnRuleBuilder';
 import { useFactwise } from '../contexts/FactwiseContext';
 import {
   ITEM_DIRECTORY_DEFAULTS,
@@ -302,6 +304,64 @@ const Settings = () => {
         return true;
       });
   }, [itemDirectoryColumnOptions, itemDirectoryDefaults, itemCodeConditionalBranches]);
+
+  // ─── SAVED COLUMN RULES ───────────────────────────────────────────────────
+  // Same builder the editor's Fill / Create Column dialog uses; saving one
+  // stores the rule payload so any session can replay it by name.
+  const [columnRules, setColumnRules] = useState([]);
+  const [columnRuleName, setColumnRuleName] = useState('');
+  const [columnRuleDraft, setColumnRuleDraft] = useState(() => createEmptyColumnRule());
+  const [columnRuleSaving, setColumnRuleSaving] = useState(false);
+
+  const loadColumnRules = useCallback(async () => {
+    try {
+      const response = await api.getColumnRules();
+      setColumnRules(response?.data?.rules || []);
+    } catch (error) {
+      console.error('Failed to load column rules:', error);
+    }
+  }, []);
+
+  useEffect(() => { loadColumnRules(); }, [loadColumnRules]);
+
+  // Arriving from the dashboard's Edit button — load that rule into the
+  // builder and scroll to it, so Edit lands somewhere useful.
+  const settingsLocation = useLocation();
+  const requestedRuleId = settingsLocation.state?.editColumnRuleId;
+  useEffect(() => {
+    if (!requestedRuleId || columnRules.length === 0) return;
+    const match = columnRules.find(r => String(r.id) === String(requestedRuleId));
+    if (!match) return;
+    setColumnRuleName(match.name);
+    setColumnRuleDraft({ ...createEmptyColumnRule(), ...(match.rule || {}) });
+    document.getElementById('column-rules-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [requestedRuleId, columnRules]);
+
+  const handleSaveColumnRule = useCallback(async () => {
+    const name = columnRuleName.trim();
+    if (!name) return;
+    setColumnRuleSaving(true);
+    try {
+      await api.saveColumnRule(name, '', columnRuleDraft);
+      setColumnRuleName('');
+      setColumnRuleDraft(createEmptyColumnRule());
+      await loadColumnRules();
+    } catch (error) {
+      console.error('Failed to save column rule:', error);
+      window.alert(error?.response?.data?.error || 'Could not save the rule.');
+    } finally {
+      setColumnRuleSaving(false);
+    }
+  }, [columnRuleName, columnRuleDraft, loadColumnRules]);
+
+  const handleDeleteColumnRule = useCallback(async (ruleId) => {
+    try {
+      await api.deleteColumnRule(ruleId);
+      await loadColumnRules();
+    } catch (error) {
+      console.error('Failed to delete column rule:', error);
+    }
+  }, [loadColumnRules]);
 
   const hasDigikey = Boolean(providerStatus.digikey?.configured);
   const hasMouser = Boolean(providerStatus.mouser?.configured);
@@ -1488,6 +1548,106 @@ const Settings = () => {
                   </Grid>
 
                 </Grid>
+              </Box>
+            </Paper>
+          </Grid>
+
+          <Grid item xs={12}>
+            <Paper elevation={0} sx={panelSx}>
+              <Box sx={sectionHeaderSx}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
+                  <Box sx={{ width: 36, height: 36, borderRadius: '12px', display: 'grid', placeItems: 'center', bgcolor: t.state.infoBg, color: t.color.info }}>
+                    <TableChartIcon fontSize="small" />
+                  </Box>
+                  <Box>
+                    <Typography id="column-rules-panel" sx={{ fontSize: 16, fontWeight: 700, color: t.text.heading }}>Column Rules</Typography>
+                    <Typography sx={{ fontSize: 12.5, color: t.text.secondary }}>
+                      Save a fill rule once, then apply it to any sheet from the editor's Fill / Create Column dialog.
+                    </Typography>
+                  </Box>
+                </Box>
+                <Chip label={`${columnRules.length} saved`} size="small" sx={{ height: 23, fontWeight: 650, fontSize: 11.5, bgcolor: t.state.infoBg, color: t.color.infoText }} />
+              </Box>
+
+              <Box sx={{ p: 2.5 }}>
+                <Grid container spacing={1.5}>
+                  <Grid item xs={12} sm={6}>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      label="Rule name"
+                      value={columnRuleName}
+                      onChange={(event) => setColumnRuleName(event.target.value)}
+                      sx={fieldSx}
+                    />
+                  </Grid>
+                  <Grid item xs={12}>
+                    <ColumnRuleBuilder
+                      value={columnRuleDraft}
+                      onChange={setColumnRuleDraft}
+                      columnOptions={itemCodeSourceColumnOptions}
+                    />
+                  </Grid>
+                  <Grid item xs={12}>
+                    <Button
+                      variant="contained"
+                      onClick={handleSaveColumnRule}
+                      disabled={!columnRuleName.trim() || columnRuleSaving}
+                      sx={{ textTransform: 'none', borderRadius: '8px' }}
+                    >
+                      {columnRuleSaving ? 'Saving...' : 'Save rule'}
+                    </Button>
+                  </Grid>
+                </Grid>
+
+                {columnRules.length > 0 && (
+                  <Box sx={{ mt: 2.5, display: 'flex', flexDirection: 'column', gap: 1 }}>
+                    {columnRules.map(saved => (
+                      <Box
+                        key={saved.id}
+                        sx={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: 1,
+                          p: 1.25,
+                          borderRadius: '10px',
+                          border: `1px solid ${t.border.subtle}`,
+                          bgcolor: t.surface.panel,
+                        }}
+                      >
+                        <Box sx={{ minWidth: 0 }}>
+                          <Typography sx={{ fontSize: 13.5, fontWeight: 650, color: t.text.primary }} noWrap>
+                            {saved.name}
+                          </Typography>
+                          <Typography sx={{ fontSize: 11.5, color: t.text.secondary }} noWrap>
+                            {saved.target_column ? `${saved.target_column} · ` : ''}{saved.value_mode} · used {saved.usage_count}x
+                          </Typography>
+                        </Box>
+                        <Box sx={{ display: 'flex', gap: 0.5 }}>
+                          <Button
+                            size="small"
+                            onClick={() => {
+                              setColumnRuleName(saved.name);
+                              setColumnRuleDraft({ ...createEmptyColumnRule(), ...(saved.rule || {}) });
+                            }}
+                            sx={{ textTransform: 'none' }}
+                          >
+                            Edit
+                          </Button>
+                          <Button
+                            size="small"
+                            color="error"
+                            onClick={() => handleDeleteColumnRule(saved.id)}
+                            sx={{ textTransform: 'none' }}
+                          >
+                            Delete
+                          </Button>
+                        </Box>
+                      </Box>
+                    ))}
+                  </Box>
+                )}
               </Box>
             </Paper>
           </Grid>

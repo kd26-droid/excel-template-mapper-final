@@ -17,6 +17,7 @@ import {
   Box,
   Chip,
   IconButton,
+  Tooltip,
   TextField,
   InputAdornment,
   FormControl,
@@ -28,7 +29,6 @@ import {
   Collapse
 } from '@mui/material';
 import { useNavigate } from 'react-router-dom';
-import StandaloneFormulaBuilder from '../components/StandaloneFormulaBuilder';
 import {
   UploadFile as UploadFileIcon,
   History as HistoryIcon,
@@ -43,7 +43,8 @@ import {
   Science as ScienceIcon,
   ExpandMore as ExpandMoreIcon,
   ExpandLess as ExpandLessIcon,
-  GetApp as GetAppIcon
+  GetApp as GetAppIcon,
+  Edit as EditIcon
 } from '@mui/icons-material';
 import api, { setGlobalLoaderCallback } from '../services/api';
 import { useThemeContext } from '../utils/ThemeContext';
@@ -544,8 +545,8 @@ const Dashboard = () => {
   const [globalLoading, setGlobalLoading] = useState(false);
   useGlobalBlock(globalLoading);
 
-  const [mappingTemplates, setMappingTemplates] = useState([]);
-  const [tagTemplates, setTagTemplates] = useState([]);
+  const [processingTemplates, setProcessingTemplates] = useState([]);
+  const [columnRules, setColumnRules] = useState([]);
   const [templateStats, setTemplateStats] = useState({
     totalTemplates: 0,
     totalUsage: 0,
@@ -558,7 +559,7 @@ const Dashboard = () => {
   const [, setLoadingTags] = useState(true);
 
   // Tab & Filters
-  const [activeTab, setActiveTab] = useState(0); // 0: Sessions, 1: Templates, 2: Tag Rules
+  const [activeTab, setActiveTab] = useState(0); // 0: Sessions, 1: Processing templates, 2: Column rules
   const [sessionSearch, setSessionSearch] = useState('');
   const [sessionSortBy, setSessionSortBy] = useState('upload_date');
   const [sessionSortOrder, setSessionSortOrder] = useState('desc');
@@ -585,8 +586,6 @@ const Dashboard = () => {
   // Mouse background glow position
   const [mousePos, setMousePos] = useState({ x: 50, y: 50 });
 
-  // Dialog states
-  const [showFormulaModal, setShowFormulaModal] = useState(false);
 
   useEffect(() => {
     setGlobalLoaderCallback(setGlobalLoading);
@@ -618,9 +617,11 @@ const Dashboard = () => {
 
     try {
       setLoadingTemplates(true);
-      const res = await api.getMappingTemplates();
+      // Processing templates are what the upload flow actually replays — the
+      // whole selection made after picking a sheet, not just the mapping.
+      const res = await api.getProcessingTemplates();
       const tmpls = res.data?.templates || [];
-      setMappingTemplates(tmpls);
+      setProcessingTemplates(tmpls);
 
       const sorted = [...tmpls].sort((a, b) => (b.usage_count || 0) - (a.usage_count || 0));
       setTemplateStats({
@@ -637,10 +638,10 @@ const Dashboard = () => {
 
     try {
       setLoadingTags(true);
-      const res = await api.getTagTemplates();
-      setTagTemplates(res.data?.templates || []);
+      const res = await api.getColumnRules();
+      setColumnRules(res.data?.rules || []);
     } catch (err) {
-      console.error('Error fetching tag templates:', err);
+      console.error('Error fetching column rules:', err);
     } finally {
       setLoadingTags(false);
     }
@@ -683,7 +684,7 @@ const Dashboard = () => {
 
   // Filtered + paginated Mapping Templates
   const filteredTemplates = useMemo(() => {
-    let list = mappingTemplates.filter(tmpl =>
+    let list = processingTemplates.filter(tmpl =>
       (tmpl.name || '').toLowerCase().includes(tmplSearch.toLowerCase()) ||
       (tmpl.description || '').toLowerCase().includes(tmplSearch.toLowerCase())
     );
@@ -704,16 +705,16 @@ const Dashboard = () => {
         : (va > vb ? 1 : va < vb ? -1 : 0);
     });
     return list;
-  }, [mappingTemplates, tmplSearch, tmplSortBy, tmplSortOrder]);
+  }, [processingTemplates, tmplSearch, tmplSortBy, tmplSortOrder]);
 
   const pagedTemplates = useMemo(() => {
     const start = tmplPage * tmplRowsPerPage;
     return filteredTemplates.slice(start, start + tmplRowsPerPage);
   }, [filteredTemplates, tmplPage, tmplRowsPerPage]);
 
-  // Filtered + paginated Tag Rules
-  const filteredTags = useMemo(() => {
-    let list = tagTemplates.filter(tmpl =>
+  // Filtered + paginated Column Rules
+  const filteredRules = useMemo(() => {
+    let list = columnRules.filter(tmpl =>
       (tmpl.name || '').toLowerCase().includes(tagSearch.toLowerCase()) ||
       (tmpl.description || '').toLowerCase().includes(tagSearch.toLowerCase())
     );
@@ -734,12 +735,12 @@ const Dashboard = () => {
         : (va > vb ? 1 : va < vb ? -1 : 0);
     });
     return list;
-  }, [tagTemplates, tagSearch, tagSortBy, tagSortOrder]);
+  }, [columnRules, tagSearch, tagSortBy, tagSortOrder]);
 
-  const pagedTags = useMemo(() => {
+  const pagedRules = useMemo(() => {
     const start = tagPage * tagRowsPerPage;
-    return filteredTags.slice(start, start + tagRowsPerPage);
-  }, [filteredTags, tagPage, tagRowsPerPage]);
+    return filteredRules.slice(start, start + tagRowsPerPage);
+  }, [filteredRules, tagPage, tagRowsPerPage]);
 
   // Derived tokens for panel styling
   const Ze = {
@@ -773,7 +774,31 @@ const Dashboard = () => {
   };
 
   const handleApplyTemplate = (tmpl) => {
-    navigate('/upload', { state: { selectedTemplate: tmpl, autoApplyTemplate: true } });
+    // The template is applied at the Select Template step, after the file is
+    // in — so this preselects it rather than applying anything up front.
+    navigate('/upload', { state: { selectedProcessingTemplateId: tmpl.id } });
+  };
+
+  const handleDeleteProcessingTemplate = async (templateId) => {
+    if (!window.confirm('Delete this processing template?')) return;
+    try {
+      await api.deleteProcessingTemplate(templateId);
+      fetchData();
+    } catch (err) {
+      console.error('Error deleting processing template:', err);
+      alert(err.message || 'Failed to delete template');
+    }
+  };
+
+  const handleDeleteColumnRule = async (ruleId) => {
+    if (!window.confirm('Delete this column rule?')) return;
+    try {
+      await api.deleteColumnRule(ruleId);
+      fetchData();
+    } catch (err) {
+      console.error('Error deleting column rule:', err);
+      alert(err.message || 'Failed to delete rule');
+    }
   };
 
   const handleDeleteSession = async (sessionId) => {
@@ -797,7 +822,7 @@ const Dashboard = () => {
   };
 
   const handleDeleteTagTemplate = async (templateId) => {
-    if (!window.confirm('Are you sure you want to delete this rule set?')) return;
+    if (!window.confirm('Are you sure you want to delete this tag template?')) return;
     try {
       await api.deleteTagTemplate(templateId);
       fetchData();
@@ -883,7 +908,7 @@ const Dashboard = () => {
                   <Grid item xs={4}>
                     <Box sx={{ p: 1.25, bgcolor: isDarkMode ? 'rgba(59, 130, 246, 0.08)' : 'rgba(37, 99, 235, 0.06)', borderRadius: '10px', border: isDarkMode ? '1px solid rgba(59, 130, 246, 0.2)' : '1px solid rgba(37, 99, 235, 0.2)' }}>
                       <Typography variant="caption" fontWeight="600" sx={{ color: isDarkMode ? '#93c5fd' : '#1d4ed8', fontSize: '10px', display: 'block', mb: 0.25 }}>
-                        Mapping
+                        Templates
                       </Typography>
                       <Typography variant="h6" fontWeight="700" sx={{ color: Ze.text, fontFamily: '"JetBrains Mono", monospace' }}>
                         {templateStats.totalTemplates}
@@ -893,10 +918,10 @@ const Dashboard = () => {
                   <Grid item xs={4}>
                     <Box sx={{ p: 1.25, bgcolor: isDarkMode ? 'rgba(168, 85, 247, 0.08)' : 'rgba(124, 58, 237, 0.06)', borderRadius: '10px', border: isDarkMode ? '1px solid rgba(168, 85, 247, 0.2)' : '1px solid rgba(124, 58, 237, 0.2)' }}>
                       <Typography variant="caption" fontWeight="600" sx={{ color: isDarkMode ? '#e9d5ff' : '#6d28d9', fontSize: '10px', display: 'block', mb: 0.25 }}>
-                        Rule Sets
+                        Column Rules
                       </Typography>
                       <Typography variant="h6" fontWeight="700" sx={{ color: Ze.text, fontFamily: '"JetBrains Mono", monospace' }}>
-                        {tagTemplates.length}
+                        {columnRules.length}
                       </Typography>
                     </Box>
                   </Grid>
@@ -923,7 +948,7 @@ const Dashboard = () => {
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                     <StarIcon sx={{ fontSize: 16, color: '#fbbf24' }} />
                     <Typography variant="subtitle2" fontWeight="700" sx={{ color: Ze.text, fontSize: '14px' }}>
-                      Top 3 BOM Templates
+                      Top 3 Processing Templates
                     </Typography>
                   </Box>
                   <Chip
@@ -987,7 +1012,7 @@ const Dashboard = () => {
                           </Box>
                           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
                             <Chip
-                              label={`${tmpl.total_mappings || 0} cols`}
+                              label={`${tmpl.stage_count || 0} stages`}
                               size="small"
                               sx={{ height: 16, fontSize: '9px', bgcolor: isDarkMode ? 'rgba(255,255,255,0.06)' : '#eef2f7', color: Ze.muted }}
                             />
@@ -1073,8 +1098,8 @@ const Dashboard = () => {
               >
                 {[
                   { id: 0, label: 'Recent Sessions', count: uploads.length, icon: HistoryIcon },
-                  { id: 1, label: 'Mapping Templates', count: templateStats.totalTemplates, icon: LibraryBooksIcon },
-                  { id: 2, label: 'Rule Sets', count: tagTemplates.length, icon: ScienceIcon }
+                  { id: 1, label: 'Processing Templates', count: processingTemplates.length, icon: LibraryBooksIcon },
+                  { id: 2, label: 'Column Rules', count: columnRules.length, icon: ScienceIcon }
                 ].map((tab) => {
                   const isActive = activeTab === tab.id;
                   const Icon = tab.icon;
@@ -1472,13 +1497,13 @@ const Dashboard = () => {
               </Box>
             )}
 
-            {/* TAB 1: Mapping Templates */}
+            {/* TAB 1: Processing Templates */}
             {activeTab === 1 && (
               <Box>
                 <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ mb: 2 }}>
                   <TextField
                     size="small"
-                    placeholder="Search mapping templates..."
+                    placeholder="Search processing templates..."
                     value={tmplSearch}
                     onChange={(e) => { setTmplSearch(e.target.value); setTmplPage(0); }}
                     InputProps={{
@@ -1514,7 +1539,7 @@ const Dashboard = () => {
                 {filteredTemplates.length === 0 ? (
                   <Box sx={{ textAlign: 'center', py: 5, color: Ze.muted }}>
                     <LibraryBooksIcon sx={{ fontSize: 40, mb: 1, opacity: 0.4 }} />
-                    <Typography variant="body2">No mapping templates saved yet.</Typography>
+                    <Typography variant="body2">No processing templates yet. Save one from the upload flow.</Typography>
                   </Box>
                 ) : (
                   <>
@@ -1523,52 +1548,31 @@ const Dashboard = () => {
                         <Box
                           key={tmpl.id}
                           sx={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'space-between',
-                            p: 1.5,
-                            px: 2,
-                            borderRadius: '12px',
+                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                            p: 1.5, px: 2, borderRadius: '12px',
                             bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.03)' : '#ffffff',
                             border: `1px solid ${Ze.subtleBorder}`,
                             transition: 'all 0.2s ease',
                             '&:hover': {
-                              bgcolor: isDarkMode ? 'rgba(35, 131, 226, 0.12)' : '#eff6ff',
-                              borderColor: '#2383e2',
+                              bgcolor: isDarkMode ? 'rgba(37, 99, 235, 0.12)' : '#eff6ff',
+                              borderColor: '#2563eb',
                               transform: 'translateY(-1px)'
                             }
                           }}
                         >
                           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, minWidth: 0 }}>
-                            <Avatar
-                              sx={{
-                                bgcolor: 'rgba(35, 131, 226, 0.15)',
-                                color: '#60a5fa',
-                                width: 34,
-                                height: 34,
-                                border: '1px solid rgba(35, 131, 226, 0.3)'
-                              }}
-                            >
+                            <Avatar sx={{ bgcolor: 'rgba(37, 99, 235, 0.15)', color: '#60a5fa', width: 34, height: 34, border: '1px solid rgba(37, 99, 235, 0.3)' }}>
                               <LibraryBooksIcon sx={{ fontSize: 18 }} />
                             </Avatar>
                             <Box sx={{ minWidth: 0 }}>
-                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                <Typography variant="subtitle2" fontWeight="600" noWrap sx={{ color: Ze.text, fontSize: '13px' }}>
-                                  {tmpl.name}
-                                </Typography>
-                                {(tmpl.usage_count || 0) >= 5 && <StarIcon sx={{ fontSize: 14, color: '#fbbf24' }} />}
-                              </Box>
+                              <Typography variant="subtitle2" fontWeight="600" noWrap sx={{ color: Ze.text, fontSize: '13px' }}>
+                                {tmpl.name}
+                              </Typography>
                               <Box sx={{ display: 'flex', gap: 1, mt: 0.5, alignItems: 'center', flexWrap: 'wrap' }}>
-                                <Chip
-                                  label={`${tmpl.total_mappings || 0} mappings`}
-                                  size="small"
-                                  sx={{ height: 18, fontSize: '10px', bgcolor: isDarkMode ? 'rgba(255,255,255,0.06)' : '#eef2f7', color: Ze.muted }}
-                                />
-                                <Chip
-                                  label={`Used ${tmpl.usage_count || 0}×`}
-                                  size="small"
-                                  sx={{ height: 18, fontSize: '10px', bgcolor: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8' }}
-                                />
+                                <Chip label={`${tmpl.stage_count || 0} stages`} size="small"
+                                  sx={{ height: 18, fontSize: '10px', bgcolor: 'rgba(37, 99, 235, 0.15)', color: '#60a5fa' }} />
+                                <Chip label={`Used ${tmpl.usage_count || 0}×`} size="small"
+                                  sx={{ height: 18, fontSize: '10px', bgcolor: 'rgba(96, 165, 250, 0.15)', color: '#60a5fa' }} />
                                 <Typography variant="caption" sx={{ color: Ze.muted, fontSize: '10px' }}>
                                   {formatDisplayDate(tmpl.created_at || tmpl.created)}
                                 </Typography>
@@ -1583,12 +1587,12 @@ const Dashboard = () => {
                               color="linear-gradient(135deg, #2563eb 0%, #0284c7 100%)"
                               hoverColor="linear-gradient(135deg, #1d4ed8 0%, #0369a1 100%)"
                               glowColor="rgba(37, 99, 235, 0.45)"
-                              title="Use Mapping Template"
+                              title="Use Processing Template"
                             />
                             <DeleteActionButton
-                              onClick={() => handleDeleteMappingTemplate(tmpl.id)}
+                              onClick={() => handleDeleteProcessingTemplate(tmpl.id)}
                               size={30}
-                              title="Delete Mapping Template"
+                              title="Delete Processing Template"
                             />
                           </Box>
                         </Box>
@@ -1609,13 +1613,13 @@ const Dashboard = () => {
               </Box>
             )}
 
-            {/* TAB 2: Tag Rules */}
+            {/* TAB 2: Column Rules */}
             {activeTab === 2 && (
               <Box>
                 <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} sx={{ mb: 2 }}>
                   <TextField
                     size="small"
-                    placeholder="Search rule sets..."
+                    placeholder="Search column rules..."
                     value={tagSearch}
                     onChange={(e) => { setTagSearch(e.target.value); setTagPage(0); }}
                     InputProps={{
@@ -1630,58 +1634,34 @@ const Dashboard = () => {
                     }}
                     sx={{ flex: 1, '& .MuiOutlinedInput-root': { height: 38, fontSize: '13px', borderRadius: '8px', bgcolor: Ze.searchBg } }}
                   />
-                  <FormControl size="small" sx={{ minWidth: 150 }}>
-                    <Select value={tagSortBy} onChange={(e) => { setTagSortBy(e.target.value); setTagPage(0); }}
-                      MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
-                      sx={{ height: 38, fontSize: '12px', borderRadius: '8px', bgcolor: Ze.searchBg }}>
-                      <MenuItem value="usage_count">Sort by Usage</MenuItem>
-                      <MenuItem value="name">Sort by Name</MenuItem>
-                      <MenuItem value="created_at">Sort by Date</MenuItem>
-                    </Select>
-                  </FormControl>
-                  <FormControl size="small" sx={{ minWidth: 100 }}>
-                    <Select value={tagSortOrder} onChange={(e) => { setTagSortOrder(e.target.value); setTagPage(0); }}
-                      MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
-                      sx={{ height: 38, fontSize: '12px', borderRadius: '8px', bgcolor: Ze.searchBg }}>
-                      <MenuItem value="desc">High → Low</MenuItem>
-                      <MenuItem value="asc">Low → High</MenuItem>
-                    </Select>
-                  </FormControl>
                   <Button
                     size="small"
                     variant="outlined"
                     startIcon={<ScienceIcon sx={{ fontSize: 14 }} />}
-                    onClick={() => setShowFormulaModal(true)}
+                    onClick={() => navigate('/settings')}
                     sx={{
-                      height: 38,
-                      fontSize: '12px',
-                      textTransform: 'none',
-                      borderColor: '#10b981',
-                      color: '#34d399',
+                      height: 38, fontSize: '12px', textTransform: 'none',
+                      borderColor: '#10b981', color: '#34d399',
                       '&:hover': { bgcolor: 'rgba(16, 185, 129, 0.15)' }
                     }}
                   >
-                    New Template
+                    New Rule
                   </Button>
                 </Stack>
-                {filteredTags.length === 0 ? (
+                {filteredRules.length === 0 ? (
                   <Box sx={{ textAlign: 'center', py: 5, color: Ze.muted }}>
                     <ScienceIcon sx={{ fontSize: 40, mb: 1, opacity: 0.4 }} />
-                    <Typography variant="body2">No rule sets found.</Typography>
+                    <Typography variant="body2">No column rules yet. Create one under Settings → Column Rules.</Typography>
                   </Box>
                 ) : (
                   <>
                     <Stack spacing={1.25}>
-                      {pagedTags.map((tmpl) => (
+                      {pagedRules.map((rule) => (
                         <Box
-                          key={tmpl.id}
+                          key={rule.id}
                           sx={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'space-between',
-                            p: 1.5,
-                            px: 2,
-                            borderRadius: '12px',
+                            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                            p: 1.5, px: 2, borderRadius: '12px',
                             bgcolor: isDarkMode ? 'rgba(255, 255, 255, 0.03)' : '#ffffff',
                             border: `1px solid ${Ze.subtleBorder}`,
                             transition: 'all 0.2s ease',
@@ -1693,52 +1673,45 @@ const Dashboard = () => {
                           }}
                         >
                           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, minWidth: 0 }}>
-                            <Avatar
-                              sx={{
-                                bgcolor: 'rgba(16, 185, 129, 0.15)',
-                                color: '#34d399',
-                                width: 34,
-                                height: 34,
-                                border: '1px solid rgba(16, 185, 129, 0.3)'
-                              }}
-                            >
+                            <Avatar sx={{ bgcolor: 'rgba(16, 185, 129, 0.15)', color: '#34d399', width: 34, height: 34, border: '1px solid rgba(16, 185, 129, 0.3)' }}>
                               <ScienceIcon sx={{ fontSize: 18 }} />
                             </Avatar>
                             <Box sx={{ minWidth: 0 }}>
                               <Typography variant="subtitle2" fontWeight="600" noWrap sx={{ color: Ze.text, fontSize: '13px' }}>
-                                {tmpl.name}
+                                {rule.name}
                               </Typography>
                               <Box sx={{ display: 'flex', gap: 1, mt: 0.5, alignItems: 'center', flexWrap: 'wrap' }}>
-                                <Chip
-                                  label={`${(tmpl.formula_rules || tmpl.rules || []).length} rules`}
-                                  size="small"
-                                  sx={{ height: 18, fontSize: '10px', bgcolor: 'rgba(16, 185, 129, 0.15)', color: '#34d399' }}
-                                />
-                                <Chip
-                                  label={`Used ${tmpl.usage_count || 0}×`}
-                                  size="small"
-                                  sx={{ height: 18, fontSize: '10px', bgcolor: 'rgba(52, 211, 153, 0.15)', color: '#34d399' }}
-                                />
+                                {rule.target_column && (
+                                  <Chip label={rule.target_column} size="small"
+                                    sx={{ height: 18, fontSize: '10px', bgcolor: 'rgba(16, 185, 129, 0.15)', color: '#34d399' }} />
+                                )}
+                                <Chip label={rule.value_mode || 'rule'} size="small"
+                                  sx={{ height: 18, fontSize: '10px', bgcolor: 'rgba(52, 211, 153, 0.15)', color: '#34d399' }} />
                                 <Typography variant="caption" sx={{ color: Ze.muted, fontSize: '10px' }}>
-                                  {formatDisplayDate(tmpl.created_at || tmpl.created)}
+                                  Used {rule.usage_count || 0}× · {formatDisplayDate(rule.created_at)}
                                 </Typography>
                               </Box>
                             </Box>
                           </Box>
                           <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
-                            <UseButton
-                              onClick={() => navigate('/upload', { state: { selectedTagTemplate: tmpl, smartTagFormulaRules: tmpl.formula_rules || tmpl.rules || [] } })}
-                              label="Use"
-                              size={30}
-                              color="linear-gradient(135deg, #10b981 0%, #059669 100%)"
-                              hoverColor="linear-gradient(135deg, #059669 0%, #047857 100%)"
-                              glowColor="rgba(16, 185, 129, 0.45)"
-                              title="Use Rule Set"
-                            />
+                            <Tooltip title="Edit in Settings">
+                              <IconButton
+                                size="small"
+                                onClick={() => navigate('/settings', { state: { editColumnRuleId: rule.id } })}
+                                sx={{
+                                  width: 30, height: 30, borderRadius: '8px',
+                                  color: '#34d399',
+                                  border: '1px solid rgba(16, 185, 129, 0.35)',
+                                  '&:hover': { bgcolor: 'rgba(16, 185, 129, 0.15)' }
+                                }}
+                              >
+                                <EditIcon sx={{ fontSize: 15 }} />
+                              </IconButton>
+                            </Tooltip>
                             <DeleteActionButton
-                              onClick={() => handleDeleteTagTemplate(tmpl.id)}
+                              onClick={() => handleDeleteColumnRule(rule.id)}
                               size={30}
-                              title="Delete Rule Set"
+                              title="Delete Column Rule"
                             />
                           </Box>
                         </Box>
@@ -1746,7 +1719,7 @@ const Dashboard = () => {
                     </Stack>
                     <TablePagination
                       component="div"
-                      count={filteredTags.length}
+                      count={filteredRules.length}
                       page={tagPage}
                       onPageChange={(_, p) => setTagPage(p)}
                       rowsPerPage={tagRowsPerPage}
@@ -1762,13 +1735,6 @@ const Dashboard = () => {
         </Card>
       </Box>
 
-      {/* Standalone Formula Builder Modal */}
-      {showFormulaModal && (
-        <StandaloneFormulaBuilder
-          open={showFormulaModal}
-          onClose={() => { setShowFormulaModal(false); fetchData(); }}
-        />
-      )}
     </Box>
   );
 };

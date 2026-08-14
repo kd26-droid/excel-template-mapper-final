@@ -1011,6 +1011,12 @@ const UploadFiles = () => {
 
   // Check if template or smart tag rules were pre-selected from dashboard
   useEffect(() => {
+    // Dashboard "Use" on a processing template lands here; it is applied at the
+    // Select Template step once a file is in, so just preselect it.
+    if (location.state?.selectedProcessingTemplateId) {
+      setSelectedProcessingTemplateId(String(location.state.selectedProcessingTemplateId));
+      setProcessingTemplateMode('use');
+    }
     if (location.state?.selectedTemplate) {
       setSelectedTemplate(location.state.selectedTemplate);
     }
@@ -3122,8 +3128,8 @@ const UploadFiles = () => {
 
     if (!isPDF && clientSheetNames.length > 0) {
       if (combineSheetsMode) {
-        if (selectedClientSheets.length < 1) {
-          setError('Select at least one sheet to combine');
+        if (selectedClientSheets.length < 2) {
+          setError('Select at least two sheets to combine');
           return;
         }
       } else if (!selectedClientSheet) {
@@ -4014,18 +4020,50 @@ const UploadFiles = () => {
                         <Grid container spacing={1.5} sx={{ mb: 1.5 }}>
                           <Grid item xs={7}>
                             <FormControl fullWidth size="small">
-                              <InputLabel sx={{ color: Nn.muted }}>Sheet Name</InputLabel>
-                              <Select
-                                value={selectedClientSheet}
-                                label="Sheet Name"
-                                onChange={(e) => handleClientSheetChange(e.target.value)}
-                                MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
-                                sx={{ borderRadius: '8px' }}
-                              >
-                                {clientSheetNames.map(s => (
-                                  <MenuItem key={s} value={s}>{s}</MenuItem>
-                                ))}
-                              </Select>
+                              <InputLabel sx={{ color: Nn.muted }}>
+                                {combineSheetsMode ? 'Sheets to combine' : 'Sheet Name'}
+                              </InputLabel>
+                              {/* Combining stacks several sheets into one, so the
+                                  picker has to accept several. */}
+                              {combineSheetsMode ? (
+                                <Select
+                                  multiple
+                                  value={selectedClientSheets}
+                                  label="Sheets to combine"
+                                  onChange={(e) => {
+                                    const picked = typeof e.target.value === 'string'
+                                      ? e.target.value.split(',')
+                                      : e.target.value;
+                                    setSelectedClientSheets(picked);
+                                  }}
+                                  renderValue={(picked) => `${picked.length} of ${clientSheetNames.length} selected`}
+                                  MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
+                                  sx={{ borderRadius: '8px' }}
+                                >
+                                  {clientSheetNames.map(s => (
+                                    <MenuItem key={s} value={s}>
+                                      <Checkbox
+                                        checked={selectedClientSheets.indexOf(s) > -1}
+                                        size="small"
+                                        sx={{ p: 0.5, mr: 1 }}
+                                      />
+                                      {s}
+                                    </MenuItem>
+                                  ))}
+                                </Select>
+                              ) : (
+                                <Select
+                                  value={selectedClientSheet}
+                                  label="Sheet Name"
+                                  onChange={(e) => handleClientSheetChange(e.target.value)}
+                                  MenuProps={{ PaperProps: { className: 'fw-select-dropdown' } }}
+                                  sx={{ borderRadius: '8px' }}
+                                >
+                                  {clientSheetNames.map(s => (
+                                    <MenuItem key={s} value={s}>{s}</MenuItem>
+                                  ))}
+                                </Select>
+                              )}
                             </FormControl>
                           </Grid>
                           <Grid item xs={5}>
@@ -4048,7 +4086,13 @@ const UploadFiles = () => {
                               control={
                                 <Checkbox
                                   checked={combineSheetsMode}
-                                  onChange={(e) => setCombineSheetsMode(e.target.checked)}
+                                  onChange={(e) => {
+                                    const on = e.target.checked;
+                                    setCombineSheetsMode(on);
+                                    // Start from every sheet; unticking any is
+                                    // easier than picking them all one by one.
+                                    setSelectedClientSheets(on ? [...clientSheetNames] : []);
+                                  }}
                                   size="small"
                                   sx={{ color: '#60a5fa', '&.Mui-checked': { color: '#3b82f6' } }}
                                 />
@@ -4059,6 +4103,13 @@ const UploadFiles = () => {
                                 </Typography>
                               }
                             />
+                            {combineSheetsMode && (
+                              <Typography variant="caption" sx={{ display: 'block', color: Nn.muted, fontSize: 12, mt: 0.25 }}>
+                                {selectedClientSheets.length > 1
+                                  ? `Rows from ${selectedClientSheets.length} sheets are stacked into one sheet, using the header row above.`
+                                  : 'Pick at least two sheets to combine.'}
+                              </Typography>
+                            )}
                           </Box>
                         )}
 
