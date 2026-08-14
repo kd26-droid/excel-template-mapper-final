@@ -1540,6 +1540,89 @@ const getPatternAwarePackedPairs = (row, sourceHeader, value, config = {}) => {
   return parsePackedMpnManufacturerPairs(value, config);
 };
 
+const MANUFACTURER_SUFFIX_ONLY_WORDS = new Set([
+  'AG',
+  'BV',
+  'CO',
+  'CORP',
+  'CORPORATION',
+  'GMBH',
+  'INC',
+  'INCORPORATED',
+  'KG',
+  'LIMITED',
+  'LLC',
+  'LLP',
+  'LTD',
+  'NV',
+  'PLC',
+  'PTE',
+  'PTY',
+  'PVT',
+  'SA',
+  'SAS',
+  'SDN',
+]);
+
+const normalizeManufacturerSuffixToken = (value) => fmt(value).replace(/[^A-Za-z]/g, '').toUpperCase();
+
+const isManufacturerSuffixOnlyPart = (value) => {
+  const tokens = fmt(value)
+    .split(/\s+/)
+    .map(normalizeManufacturerSuffixToken)
+    .filter(Boolean);
+  return Boolean(tokens.length) && tokens.length <= 3 && tokens.every((token) => MANUFACTURER_SUFFIX_ONLY_WORDS.has(token));
+};
+
+const mergeManufacturerSuffixParts = (parts) => {
+  const merged = [];
+  parts.forEach((part) => {
+    const cleanPart = fmt(part);
+    if (!cleanPart) return;
+    if (merged.length && isManufacturerSuffixOnlyPart(cleanPart)) {
+      merged[merged.length - 1] = `${merged[merged.length - 1]}, ${cleanPart}`;
+      return;
+    }
+    merged.push(cleanPart);
+  });
+  return merged;
+};
+
+const findKnownManufacturerMatches = (text, phrases, canonicalForManufacturer) => {
+  const normalizedText = normalizeKey(text).toUpperCase();
+  if (!normalizedText) return [];
+  const paddedText = ` ${normalizedText} `;
+  const candidates = [];
+  const seenKeys = new Set();
+
+  phrases.forEach((name) => {
+    const key = normalizeKey(name).toUpperCase();
+    if (!key || key.length < 2 || seenKeys.has(key)) return;
+    seenKeys.add(key);
+    const paddedKey = ` ${key} `;
+    const paddedIndex = paddedText.indexOf(paddedKey);
+    if (paddedIndex === -1) return;
+    candidates.push({
+      name,
+      key,
+      start: paddedIndex,
+      end: paddedIndex + paddedKey.length,
+    });
+  });
+
+  const selected = [];
+  candidates
+    .sort((a, b) => a.start - b.start || b.key.length - a.key.length)
+    .forEach((candidate) => {
+      if (selected.some((match) => candidate.start < match.end && candidate.end > match.start)) return;
+      selected.push(candidate);
+    });
+
+  return [...new Set(selected
+    .sort((a, b) => a.start - b.start)
+    .map((match) => canonicalForManufacturer(match.name)))];
+};
+
 const splitManufacturerCell = (value, expectedCount, config = {}) => {
   const text = fmt(value).replace(/\u00a0/g, ' ');
   if (!text) return [];
@@ -1560,33 +1643,23 @@ const splitManufacturerCell = (value, expectedCount, config = {}) => {
     return [canonicalForManufacturer(circledSegments[0].value)];
   }
 
-  const delimiter = selectedDelimiter(config);
-  const explicitParts = splitByExplicitDelimiter(text, delimiter);
-  if (explicitParts.length > 1) return explicitParts.map(canonicalForManufacturer);
-
-  const colonSegments = parseColonSegments(text);
-  if (colonSegments.length > 1) return colonSegments.map((segment) => canonicalForManufacturer(segment.label));
-
-  const delimited = splitDelimited(text);
-  if (delimited.length > 1) return delimited.map(canonicalForManufacturer);
-
-  const normalizedText = normalizeKey(text).toUpperCase();
   const knownPhrases = [
     ...directoryNames,
     ...Object.keys(directoryAliases),
     ...KNOWN_MANUFACTURERS,
   ];
-  const seenPhrases = new Set();
-  const knownMatches = [...new Set(knownPhrases
-    .filter((name) => {
-      const key = normalizeKey(name).toUpperCase();
-      if (!key || seenPhrases.has(key) || !normalizedText.includes(key)) return false;
-      seenPhrases.add(key);
-      return true;
-    })
-    .sort((a, b) => normalizedText.indexOf(normalizeKey(a).toUpperCase()) - normalizedText.indexOf(normalizeKey(b).toUpperCase()))
-    .map(canonicalForManufacturer))];
+  const knownMatches = findKnownManufacturerMatches(text, knownPhrases, canonicalForManufacturer);
   if (knownMatches.length >= Math.min(expectedCount || 1, 2)) return knownMatches;
+
+  const delimiter = selectedDelimiter(config);
+  const explicitParts = splitByExplicitDelimiter(text, delimiter);
+  if (explicitParts.length > 1) return mergeManufacturerSuffixParts(explicitParts).map(canonicalForManufacturer);
+
+  const colonSegments = parseColonSegments(text);
+  if (colonSegments.length > 1) return colonSegments.map((segment) => canonicalForManufacturer(segment.label));
+
+  const delimited = mergeManufacturerSuffixParts(splitDelimited(text));
+  if (delimited.length > 1) return delimited.map(canonicalForManufacturer);
 
   if (!expectedCount || expectedCount <= 1) return [text];
 
@@ -3192,6 +3265,7 @@ const analyzeMpnManufacturerPairing = (rows, headers, roles, config) => {
     const mpns = mpnParts.length
       ? mpnParts
       : [stripVendorPrefix(mpnValue)].filter(Boolean);
+    if (!mpns.length) return { mpns: [], manufacturers: [] };
     const manufacturers = splitManufacturerCell(manufacturerValue, mpns.length || null, config).filter(Boolean);
     return { mpns, manufacturers };
   };
@@ -3222,10 +3296,14 @@ const analyzeMpnManufacturerPairing = (rows, headers, roles, config) => {
       mpns.push(...primaryParts.mpns);
       manufacturers.push(...primaryParts.manufacturers);
       alternateGroups.forEach((group) => {
+        const groupMpnIsPrimary = normalizeKey(group.mpn) === normalizeKey(roles.mpn);
+        const groupMfrIsPrimary = group.mfr && normalizeKey(group.mfr) === normalizeKey(roles.manufacturer);
+        if (groupMpnIsPrimary || (groupMfrIsPrimary && !getCell(row, group.mpn))) return;
         const part = collectPairingParts(
           getCell(row, group.mpn),
           getCell(row, group.mfr) || (config.manufacturerMode === 'inherit_blank' ? primaryManufacturer : '')
         );
+        if (!part.mpns.length) return;
         mpns.push(...part.mpns);
         manufacturers.push(...part.manufacturers);
       });
@@ -3551,34 +3629,66 @@ const workbookLooksColumnCollapsed = (rows) => {
   return multiCellRows < Math.max(3, body.length * 0.15);
 };
 
+const decodeDelimitedTextBuffer = (buffer) => {
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length >= 2) {
+    if (bytes[0] === 0xff && bytes[1] === 0xfe) {
+      return new TextDecoder('utf-16le').decode(buffer);
+    }
+    if (bytes[0] === 0xfe && bytes[1] === 0xff) {
+      return new TextDecoder('utf-16be').decode(buffer);
+    }
+  }
+
+  const sampleLength = Math.min(bytes.length, 2000);
+  let evenNulls = 0;
+  let oddNulls = 0;
+  for (let index = 0; index < sampleLength; index += 1) {
+    if (bytes[index] !== 0) continue;
+    if (index % 2 === 0) evenNulls += 1;
+    else oddNulls += 1;
+  }
+  const nullThreshold = Math.max(8, sampleLength * 0.1);
+  if (oddNulls > nullThreshold && oddNulls > evenNulls * 3) {
+    return new TextDecoder('utf-16le').decode(buffer);
+  }
+  if (evenNulls > nullThreshold && evenNulls > oddNulls * 3) {
+    return new TextDecoder('utf-16be').decode(buffer);
+  }
+
+  const utf8 = new TextDecoder('utf-8').decode(buffer);
+  // A replacement char means the bytes were not UTF-8. These files are usually
+  // latin-1, and decoding them as UTF-8 mangles accented characters.
+  return /�/.test(utf8)
+    ? new TextDecoder('iso-8859-1').decode(buffer)
+    : utf8;
+};
+
 const readCsvWorkbookSafely = async (file) => {
   if (!XLSX || !XLSX.read || !XLSX.utils) {
     throw new Error('Spreadsheet parser is not ready. Please refresh the page and try uploading again.');
   }
 
   const buffer = await file.arrayBuffer();
-  const utf8 = new TextDecoder('utf-8').decode(buffer);
-  // A replacement char means the bytes were not UTF-8. These files are usually
-  // latin-1, and decoding them as UTF-8 mangles accented characters.
-  const text = /�/.test(utf8)
-    ? new TextDecoder('iso-8859-1').decode(buffer)
-    : utf8;
+  const text = decodeDelimitedTextBuffer(buffer);
 
   const attempts = [
-    () => XLSX.read(text, { type: 'string', raw: false, codepage: 65001 }),
-    () => {
-      const rows = text
-        .split(/\r?\n/)
-        .map((line) => splitDelimitedLine(line, ','));
-      return workbookFromRows(rows);
-    },
-    // Non-comma separators, with wrapped rows stitched back together.
+    // Delimiter-sniffed parsing comes first because many client files are named
+    // .csv but are actually UTF-16 tab-separated exports. SheetJS can accept
+    // those as generic text while still leaving formatting artifacts in values.
     () => {
       const delimiter = detectDelimiter(text);
       const lines = text.split(/\r?\n/).filter((line) => line.trim());
       const rows = rejoinWrappedLines(lines, delimiter)
         .map((line) => splitDelimitedLine(line, delimiter));
       if (rows.length < 2 || rows[0].length < 2) return null;
+      return workbookFromRows(rows);
+    },
+    () => XLSX.read(text, { type: 'string', raw: false, codepage: 65001 }),
+    () => {
+      const rows = text
+        .split(/\r?\n/)
+        .map((line) => splitDelimitedLine(line, ','));
       return workbookFromRows(rows);
     },
   ];
@@ -4065,7 +4175,7 @@ const prepareSingleSheet = (currentWorkbook, currentSheetName, options = {}) => 
   const headerIndex = Number.isFinite(requestedHeaderIndex) && requestedHeaderIndex > 0
     ? requestedHeaderIndex - 1
     : detectHeaderRow(rawRowsForHeaderDetection);
-  const columns = getUsableColumnDescriptors(rows, headerIndex);
+  const columns = getUsableColumnDescriptors(rawRowsForHeaderDetection, headerIndex);
   const currentHeaders = columns.map((column) => column.header);
   const dataSheetRows = rows.slice(headerIndex + 1).filter((row) => row.some((cell) => fmt(cell)));
   const hasOutlineLevels = dataSheetRows.some((row) => Number(row.__rowMeta?.outlineLevel || 0) > 1);
@@ -7557,6 +7667,26 @@ const BomNormalizer = () => {
 
   const handleHeaderRowChange = useCallback((value) => {
     const nextIndex = Math.max(0, Number(value) - 1);
+    const activeSheetName = sheetName || workbook?.SheetNames?.[0] || '';
+    if (workbook && sheetScope === 'single' && activeSheetName) {
+      const prepared = prepareSingleSheet(workbook, activeSheetName, { headerRow: nextIndex + 1 });
+      const nextRoles = inferRoles(prepared.headers, prepared.dataRows, { manufacturerDirectory });
+      setSheetRows(prepared.sheetRows);
+      setHeaderRowIndex(prepared.headerRowIndex);
+      setPreparedHeaders(prepared.headers);
+      setPreparedDataRows(prepared.dataRows);
+      setPatternParserOverrides([]);
+      setSourceEndRow('');
+      setRoles(nextRoles);
+      setNormalizedRows([]);
+      setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
+      setNormalizationSummary(null);
+      setParserTouched(false);
+      setSkipSourceSetupForMerge(false);
+      setConfirmOpen(false);
+      return;
+    }
+
     const columns = getUsableColumnDescriptors(sheetRows, nextIndex);
     const nextHeaders = columns.length
       ? columns.map((column) => column.header)
@@ -7583,7 +7713,7 @@ const BomNormalizer = () => {
     setParserTouched(false);
     setSkipSourceSetupForMerge(false);
     setConfirmOpen(false);
-  }, [manufacturerDirectory, sheetRows]);
+  }, [manufacturerDirectory, sheetName, sheetRows, sheetScope, workbook]);
 
   const handleRoleChange = useCallback((role, header) => {
     setRoles((prev) => ({ ...prev, [role]: header }));
