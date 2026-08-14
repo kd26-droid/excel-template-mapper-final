@@ -32,6 +32,7 @@ import {
   ChevronLeft as ChevronLeftIcon,
   ChevronRight as ChevronRightIcon,
   ContentCut as ContentCutIcon,
+  DeleteOutline as DeleteOutlineIcon,
 } from '@mui/icons-material';
 
 const API_BASE = process.env.REACT_APP_API_BASE_URL || '/api';
@@ -357,6 +358,22 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
     setParts(current => current.map(part => part.id === id ? { ...part, [field]: value } : part));
   };
 
+  const discardPartOutput = (id) => {
+    setParts(current => current.map(part => (
+      part.id === id
+        ? {
+            ...part,
+            outputType: 'discard',
+            specName: '',
+            customName: '',
+            targetColumn: '',
+          }
+        : part
+    )));
+    setError('');
+    setPreviewData(null);
+  };
+
   const outputPreviewItems = useMemo(() => {
     if (step === 0 || !parts.length) {
       return (parseReference?.pairs || []).flatMap((pair) => ([
@@ -534,24 +551,49 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
           <Typography variant="body2" sx={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
             {index + 1}. {part.preview || '(empty)'}
           </Typography>
-          <FormControl size="small">
-            <InputLabel>Output</InputLabel>
-            <Select
-              label="Output"
-              value={part.outputType}
-              onChange={event => {
-                updatePart(part.id, 'outputType', event.target.value);
-                setError('');
-                setPreviewData(null);
-              }}
-            >
-              <MenuItem value="direct">FactWise column</MenuItem>
-              <MenuItem value="spec">Specification</MenuItem>
-              <MenuItem value="tag">Tag</MenuItem>
-              <MenuItem value="custom">Custom column</MenuItem>
-              <MenuItem value="discard">Discard text</MenuItem>
-            </Select>
-          </FormControl>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+            <FormControl size="small" fullWidth>
+              <InputLabel>Output</InputLabel>
+              <Select
+                label="Output"
+                value={part.outputType === 'discard' ? '' : part.outputType}
+                displayEmpty
+                renderValue={(selected) => {
+                  if (!selected) return 'Discarded';
+                  const labels = {
+                    direct: 'FactWise column',
+                    spec: 'Specification',
+                    tag: 'Tag',
+                    custom: 'Custom column',
+                  };
+                  return labels[selected] || selected;
+                }}
+                onChange={event => {
+                  updatePart(part.id, 'outputType', event.target.value);
+                  setError('');
+                  setPreviewData(null);
+                }}
+              >
+                <MenuItem value="direct">FactWise column</MenuItem>
+                <MenuItem value="spec">Specification</MenuItem>
+                <MenuItem value="tag">Tag</MenuItem>
+                <MenuItem value="custom">Custom column</MenuItem>
+              </Select>
+            </FormControl>
+            <Tooltip title="Discard this text">
+              <span>
+                <IconButton
+                  size="small"
+                  onClick={() => discardPartOutput(part.id)}
+                  disabled={part.outputType === 'discard'}
+                  aria-label="Discard this text"
+                  sx={{ color: part.outputType === 'discard' ? '#94a3b8' : '#64748b' }}
+                >
+                  <DeleteOutlineIcon fontSize="small" />
+                </IconButton>
+              </span>
+            </Tooltip>
+          </Box>
           {part.outputType === 'direct' ? (
             <FormControl size="small">
               <InputLabel>Target column</InputLabel>
