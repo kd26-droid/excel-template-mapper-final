@@ -10207,10 +10207,52 @@ const BomNormalizer = () => {
               {patternApplyNotice}
             </Alert>
           )}
-          <Stack direction="row" gap={0.8} flexWrap="wrap" sx={{ mb: 2 }}>
-            <Chip size="small" variant="outlined" label={`${detectedParsingLogic?.sections?.length || 0} source${detectedParsingLogic?.sections?.length === 1 ? '' : 's'}`} sx={{ fontWeight: 650, color: normalizerTheme.text, bgcolor: 'rgba(148, 163, 184, 0.08)' }} />
-            <Chip size="small" variant="outlined" label={`${parsingPatternOptions.length} pattern${parsingPatternOptions.length === 1 ? '' : 's'}`} sx={{ fontWeight: 650, color: normalizerTheme.text, bgcolor: 'rgba(148, 163, 184, 0.08)' }} />
-            <Chip size="small" color="success" variant="outlined" label={`${detectedParsingLogic?.matchingRows || 0} matching values`} sx={{ fontWeight: 650 }} />
+          <Stack direction="row" gap={0.9} flexWrap="wrap" sx={{ mb: 2 }}>
+            <Chip
+              size="small"
+              variant="outlined"
+              label={`${detectedParsingLogic?.sections?.length || 0} source${detectedParsingLogic?.sections?.length === 1 ? '' : 's'}`}
+              sx={{
+                height: 28,
+                px: 0.35,
+                fontSize: 12.5,
+                fontWeight: 800,
+                color: '#1e3a8a',
+                bgcolor: '#eff6ff',
+                borderColor: '#bfdbfe',
+                '& .MuiChip-label': { px: 1.1 },
+              }}
+            />
+            <Chip
+              size="small"
+              variant="outlined"
+              label={`${parsingPatternOptions.length} pattern${parsingPatternOptions.length === 1 ? '' : 's'}`}
+              sx={{
+                height: 28,
+                px: 0.35,
+                fontSize: 12.5,
+                fontWeight: 800,
+                color: '#5b21b6',
+                bgcolor: '#f5f3ff',
+                borderColor: '#ddd6fe',
+                '& .MuiChip-label': { px: 1.1 },
+              }}
+            />
+            <Chip
+              size="small"
+              variant="outlined"
+              label={`${detectedParsingLogic?.matchingRows || 0} matching values`}
+              sx={{
+                height: 28,
+                px: 0.35,
+                fontSize: 12.5,
+                fontWeight: 800,
+                color: '#166534',
+                bgcolor: '#f0fdf4',
+                borderColor: '#bbf7d0',
+                '& .MuiChip-label': { px: 1.1 },
+              }}
+            />
             {selectedParsingPattern?.section?.unmatched?.count > 0 && (
               <Chip size="small" color="warning" variant="outlined" label={`${selectedParsingPattern.section.unmatched.count} unmatched`} sx={{ fontWeight: 650 }} />
             )}
@@ -10235,28 +10277,27 @@ const BomNormalizer = () => {
               </Grid>
               <Grid item xs={12} md={4}>
                 <Stack spacing={1} alignItems="flex-end" sx={{ maxWidth: 300, ml: 'auto' }}>
-                  <Stack direction="row" spacing={0.75} alignItems="center" justifyContent="flex-end">
-                    <IconButton
-                      size="small"
-                      disabled={selectedParsingPatternIndex <= 0}
-                      onClick={() => handleStepParsingPattern(-1)}
-                      sx={{ border: `1px solid ${normalizerTheme.border}` }}
-                    >
-                      <ChevronLeftIcon fontSize="small" />
-                    </IconButton>
-                    <IconButton
-                      size="small"
-                      disabled={selectedParsingPatternIndex < 0 || selectedParsingPatternIndex >= parsingPatternOptions.length - 1}
-                      onClick={() => handleStepParsingPattern(1)}
-                      sx={{ border: `1px solid ${normalizerTheme.border}` }}
-                    >
-                      <ChevronRightIcon fontSize="small" />
-                    </IconButton>
-                  </Stack>
                   <Button
-                    variant="outlined"
+                    variant="contained"
                     disabled={!selectedParsingPattern || configureParserPreparing}
-                    sx={{ width: { xs: '100%', sm: 150 }, minWidth: 0, px: 2, fontWeight: 700 }}
+                    sx={{
+                      width: { xs: '77%', sm: 119 },
+                      minWidth: 0,
+                      px: 2,
+                      fontWeight: 700,
+                      bgcolor: '#2563eb',
+                      color: '#ffffff',
+                      boxShadow: 'none',
+                      '&:hover': {
+                        bgcolor: '#1d4ed8',
+                        boxShadow: 'none',
+                      },
+                      '&.Mui-disabled': {
+                        bgcolor: '#2563eb',
+                        color: '#ffffff',
+                        opacity: 0.55,
+                      },
+                    }}
                     onClick={() => {
                       if (!selectedParsingPattern) return;
                       setParsingLogicOpen(false);
@@ -10389,12 +10430,17 @@ const BomNormalizer = () => {
           <Button
             variant="contained"
             onClick={() => {
+              const hasNextPattern = selectedParsingPatternIndex >= 0 && selectedParsingPatternIndex < parsingPatternOptions.length - 1;
+              if (hasNextPattern) {
+                handleStepParsingPattern(1);
+                return;
+              }
               setParsingLogicOpen(false);
               setPatternApplyNotice('');
               runNormalization();
             }}
           >
-            Continue
+            {selectedParsingPatternIndex >= 0 && selectedParsingPatternIndex < parsingPatternOptions.length - 1 ? 'Next' : 'Continue'}
           </Button>
         </DialogActions>
       </Dialog>
