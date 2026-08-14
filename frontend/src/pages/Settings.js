@@ -163,7 +163,10 @@ const itemDirectoryDefaultsToServerSettings = (defaults) => {
         prefix,
         start: Math.max(1, Number.parseInt(defaults.itemCodeStart || '1', 10) || 1),
         padding: Math.max(0, Number.parseInt(defaults.itemCodePadding || '3', 10) || 0),
-        increment: defaults.itemCodeIncrement !== false,
+        // Not configurable: a non-advancing serial writes one code to every row,
+        // and Item code must be unique. Forced rather than read back so a `false`
+        // saved before the control was locked cannot still take effect.
+        increment: true,
       }
       : {}),
   };
@@ -178,7 +181,7 @@ const normalizeItemDirectoryDefaultsForSave = (defaults) => ({
   itemCodeSeparator: defaults.itemCodeJoinSeparatorMode === 'custom'
     ? (defaults.itemCodeJoinCustomSeparator ?? '')
     : (ITEM_CODE_SEPARATOR_OPTIONS.find(option => option.value === defaults.itemCodeJoinSeparatorMode)?.text ?? ' '),
-  itemCodeIncrement: defaults.itemCodeIncrement !== false,
+  itemCodeIncrement: true,
 });
 
 const emptyProviderStatus = {
@@ -371,7 +374,12 @@ const Settings = () => {
   // When embedded inside Factwise, distributor credentials are managed in
   // Factwise Admin and silently synced into this app's own store. Hide the
   // "API Providers" panel — the rest of Settings still works as normal.
-  const { isEmbedded: isFactwiseEmbedded, entityName: factwiseEntityName } = useFactwise();
+  const {
+    isEmbedded: isFactwiseEmbedded,
+    entityName: factwiseEntityName,
+    entities: factwiseEntities = [],
+    chooseEntity,
+  } = useFactwise();
 
   const readyCount = useMemo(
     () => columnMappings.filter(mapping => normalizeProviders(mapping.providers || mapping.provider).every(provider => Boolean(providerStatus[provider]?.configured))).length,
@@ -414,11 +422,30 @@ const Settings = () => {
         const response = await api.getEditorDefaultSettings(cleanEntityName);
         if (cancelled || !response.data?.success) return;
         const existingDefaults = readItemDirectoryDefaults();
-        const next = response.data.settings?.updated_at
+        const hasServerSettings = Boolean(response.data.settings?.updated_at);
+        const next = hasServerSettings
           ? serverSettingsToItemDirectoryDefaults(response.data.settings, existingDefaults)
           : { ...existingDefaults, procurementEntityName: cleanEntityName };
         setItemDirectoryDefaults(next);
         writeItemDirectoryDefaults(next);
+
+        // Defaults are stored per entity name. When the resolved entity changes
+        // — which it does the moment a wrong name is corrected — the old row is
+        // stranded under the old key and the settings look lost. Re-save what
+        // is still in the browser under the entity now in force.
+        const carriedOver = !hasServerSettings && [
+          'itemType', 'procurementItem', 'salesItem', 'measurementUnit', 'itemCodeContentType',
+        ].some(key => String(existingDefaults[key] || '').trim());
+        if (carriedOver) {
+          try {
+            await api.saveEditorDefaultSettings(
+              cleanEntityName,
+              itemDirectoryDefaultsToServerSettings(normalizeItemDirectoryDefaultsForSave(next)),
+            );
+          } catch (_) {
+            // Non-fatal: the browser copy still drives the editor.
+          }
+        }
       } catch (error) {
         if (!cancelled) {
           setToast({
@@ -1116,20 +1143,46 @@ const Settings = () => {
               <Box sx={{ p: 2.5 }}>
                 <Grid container spacing={2}>
                   <Grid item xs={12} sm={6} md={2.4}>
-                    <TextField
-                      fullWidth
-                      size="small"
-                      label="Procurement entity name"
-                      value={itemDirectoryDefaults.procurementEntityName || ''}
-                      onChange={(event) => {
-                        if (!factwiseEntityName) {
+                    {/* One entity needs no choice and stays read-only. Two or
+                        more has to be asked: the name goes on every exported
+                        row, and FactWise rejects one it does not own. */}
+                    {factwiseEntities.length > 1 ? (
+                      <TextField
+                        select
+                        fullWidth
+                        size="small"
+                        label="Procurement entity"
+                        value={factwiseEntities.some(e => e.name === itemDirectoryDefaults.procurementEntityName)
+                          ? itemDirectoryDefaults.procurementEntityName
+                          : ''}
+                        onChange={(event) => {
+                          const picked = factwiseEntities.find(e => e.name === event.target.value);
+                          if (picked) chooseEntity(picked);
                           handleItemDirectoryDefaultChange('procurementEntityName', event.target.value);
-                        }
-                      }}
-                      placeholder={factwiseEntityName ? '' : 'Waiting for FactWise entity name'}
-                      InputProps={{ readOnly: Boolean(factwiseEntityName) }}
-                      sx={fieldSx}
-                    />
+                        }}
+                        helperText={`${factwiseEntities.length} entities on this account`}
+                        sx={fieldSx}
+                      >
+                        {factwiseEntities.map(entity => (
+                          <MenuItem key={entity.id || entity.name} value={entity.name}>{entity.name}</MenuItem>
+                        ))}
+                      </TextField>
+                    ) : (
+                      <TextField
+                        fullWidth
+                        size="small"
+                        label="Procurement entity name"
+                        value={itemDirectoryDefaults.procurementEntityName || ''}
+                        onChange={(event) => {
+                          if (!factwiseEntityName) {
+                            handleItemDirectoryDefaultChange('procurementEntityName', event.target.value);
+                          }
+                        }}
+                        placeholder={factwiseEntityName ? '' : 'Waiting for FactWise entity name'}
+                        InputProps={{ readOnly: Boolean(factwiseEntityName) }}
+                        sx={fieldSx}
+                      />
+                    )}
                   </Grid>
                   <Grid item xs={12} sm={6} md={2.4}>
                     <TextField
@@ -1528,7 +1581,8 @@ const Settings = () => {
                                 control={(
                                   <Checkbox
                                     size="small"
-                                    checked={itemDirectoryDefaults.itemCodeIncrement !== false}
+                                    checked
+                                    disabled
                                     onChange={(event) => handleItemDirectoryDefaultChange('itemCodeIncrement', event.target.checked)}
                                   />
                                 )}
@@ -1540,6 +1594,9 @@ const Settings = () => {
                                   },
                                 }}
                               />
+                              <Typography variant="caption" sx={{ display: 'block', color: t.text.secondary, mt: -0.5, ml: 3.75 }}>
+                                Always on — Item code must be unique, so every row needs its own number.
+                              </Typography>
                             </Grid>
                           </>
                         )}

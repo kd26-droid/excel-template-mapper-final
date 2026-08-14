@@ -493,6 +493,10 @@ const EnhancedDataEditor = () => {
   const [pageLoading, setPageLoading] = useState(false);
   // Per-column filter text, keyed by column field. Empty/absent means no filter.
   const [columnFilters, setColumnFilters] = useState({});
+  // Rows a BOM issue actually points at. A column filter cannot express "any of
+  // these ten codes", and a duplicate-code issue carries no row numbers at all,
+  // so the grid needs its own value-set filter to show them together.
+  const [issueRowFilter, setIssueRowFilter] = useState(null);
   const [showColumnFilters, setShowColumnFilters] = useState(false);
 
   // Formula Builder state
@@ -823,7 +827,10 @@ const EnhancedDataEditor = () => {
   const [groupWarnings, setGroupWarnings] = useState([]);
   // "Highlight duplicates so I can edit them" — the column + the set of repeated
   // values whose cells the grid should mark. Cleared with the banner's Clear button.
-  const [dupHighlight, setDupHighlight] = useState(null); // { field, values: Set<string> }
+  // { field, values: Set<string>, rows?: Set<number>, label?: string }
+  // Values highlight duplicate cells; rows highlight the lines a BOM issue
+  // names, which is the only thing that works when the offending cell is blank.
+  const [dupHighlight, setDupHighlight] = useState(null);
 
   // Helper function to identify MPN validation columns
   const isMpnValidationColumn = useCallback((columnName) => {
@@ -1428,14 +1435,70 @@ const EnhancedDataEditor = () => {
 
       const itemCodePrefix = String(savedDefaults.itemCodePrefix || '').trim();
       const itemCodeColumn = headerSet.has('Item code') ? 'Item code' : '';
-      if (itemCodeColumn && (savedDefaults.itemCodeContentType || 'serial') === 'serial') {
-        const blankStrategy = (
-          savedDefaults.itemCodeBlankStrategy === 'prefix_sequence' && itemCodePrefix
-        ) ? 'prefix_sequence' : 'leave';
+      const itemCodeMode = savedDefaults.itemCodeContentType || 'serial';
+
+      // Settings offers five ways to set Item code; only 'fixed' (above) and
+      // 'serial' (below) were ever applied, so copy / join / if-else were saved
+      // and silently ignored. They are exactly what fill_or_create_column
+      // already does, so hand them to it.
+      if (itemCodeColumn && ['copy', 'concat', 'conditional'].includes(itemCodeMode)) {
+        const writeMode = savedDefaults.itemCodeRowsToUpdate || 'fill_empty';
+        const branches = (savedDefaults.itemCodeConditionalBranches || []).map(branch => ({
+          column: branch.column,
+          operator: branch.operator || 'contains',
+          compare: branch.compare,
+          output_value: branch.outputType === 'empty' ? '' : branch.outputValue,
+          ...(branch.outputType === 'column' ? { output_source_column: branch.outputColumn } : {}),
+        })).filter(branch => branch.column);
+        const elseSource = savedDefaults.itemCodeElseValueSource || 'default';
+        const rule = {
+          type: 'column_value',
+          target_mode: 'existing',
+          target_column: itemCodeColumn,
+          value_mode: itemCodeMode,
+          source_columns: itemCodeMode === 'copy'
+            ? [savedDefaults.itemCodeCopyFromColumn]
+            : (itemCodeMode === 'concat'
+              ? [savedDefaults.itemCodeJoinFirstColumn, savedDefaults.itemCodeJoinSecondColumn]
+              : []),
+          separator: savedDefaults.itemCodeSeparator ?? ' ',
+          write_mode: writeMode,
+          condition: itemCodeMode === 'conditional'
+            ? {
+                branches,
+                ...(elseSource === 'column'
+                  ? { else_source_column: savedDefaults.itemCodeElseValueColumn }
+                  : (elseSource === 'empty'
+                    ? { else: '' }
+                    : (String(savedDefaults.itemCodeElseDefaultValue || '').trim()
+                      ? { else: savedDefaults.itemCodeElseDefaultValue }
+                      : {}))),
+              }
+            : null,
+        };
+        const hasInputs = itemCodeMode === 'conditional'
+          ? branches.length > 0
+          : rule.source_columns.every(column => String(column || '').trim());
+        if (hasInputs) {
+          const resp = await api.fillOrCreateColumn(sessionId, rule);
+          if (!resp.data?.success) {
+            throw new Error(resp.data?.error || 'Could not apply saved item code settings');
+          }
+          changed = changed || Number(resp.data?.changed || 0) > 0;
+        }
+      }
+
+      if (itemCodeColumn && itemCodeMode === 'serial') {
+        // A prefix is optional: "001, 002, ..." is a perfectly good sequence.
+        // Requiring one here meant a serial rule saved without a prefix did
+        // nothing at all, silently.
+        const blankStrategy = savedDefaults.itemCodeBlankStrategy === 'prefix_sequence'
+          ? 'prefix_sequence'
+          : 'leave';
         const duplicateStrategy = (() => {
           const requested = savedDefaults.itemCodeDuplicateStrategy || 'prefix_sequence';
           if (requested === 'suffix') return 'suffix';
-          if (requested === 'prefix_sequence' && itemCodePrefix) return 'prefix_sequence';
+          if (requested === 'prefix_sequence') return 'prefix_sequence';
           return 'leave';
         })();
 
@@ -2278,7 +2341,9 @@ const EnhancedDataEditor = () => {
           serialPrefix: factwiseSerialPrefix,
           serialStart,
           serialPadding,
-          serialIncrement: factwiseSerialIncrement
+          // This path writes Item code, which must be unique — a serial that
+          // does not advance gives every row the same code.
+          serialIncrement: true
         }
       );
 
@@ -2292,7 +2357,9 @@ const EnhancedDataEditor = () => {
           serialPrefix: factwiseSerialPrefix,
           serialStart,
           serialPadding,
-          serialIncrement: factwiseSerialIncrement
+          // This path writes Item code, which must be unique — a serial that
+          // does not advance gives every row the same code.
+          serialIncrement: true
         });
         recordPostMappingAction({
           type: 'factwise_id',
@@ -2306,7 +2373,7 @@ const EnhancedDataEditor = () => {
             serial_prefix: factwiseSerialPrefix,
             serial_start: serialStart,
             serial_padding: serialPadding,
-            serial_increment: factwiseSerialIncrement,
+            serial_increment: true,
           },
         });
         const responseVersion = syncResult?.result?.data?.template_version;
@@ -2553,6 +2620,15 @@ const EnhancedDataEditor = () => {
     });
   }, [createColumnTarget, rowData]);
 
+  // Item code has to be unique, so a serial that does not advance writes the
+  // same code to every row — a sheet FactWise rejects outright. The choice is
+  // offered for other columns, where repeating a value is legitimate.
+  const serialMustIncrement = useMemo(() => {
+    const target = String(createColumnTarget || '').trim().toLowerCase();
+    return target === 'item code';
+  }, [createColumnTarget]);
+  const effectiveSerialIncrement = serialMustIncrement ? true : factwiseSerialIncrement;
+
   const getMatchingDataColumnField = useCallback((columnName) => {
     const wanted = String(columnName || '').trim().toLowerCase();
     if (!wanted) return '';
@@ -2605,9 +2681,14 @@ const EnhancedDataEditor = () => {
     setCreateColumnSeparatorMode(separatorMode);
     setCreateColumnCustomSeparator(saved.itemCodeJoinCustomSeparator || '');
     setCreateColumnSeparator(separator);
-    setFactwiseSerialPrefix(saved.itemCodePrefix || 'ITEM');
-    setFactwiseSerialStart(saved.itemCodeStart || 1);
-    setFactwiseSerialPadding(saved.itemCodePadding || 2);
+    // `??`, not `||`: an empty prefix and a padding of 0 are both meaningful
+    // answers, and `||` treated them as "unset". A user who cleared the Prefix
+    // box in Settings still got codes reading ITEM001, and "no padding" was
+    // unreachable because 0 became 2. The fallbacks also have to be the ones
+    // Settings itself shows, or the preview and the result disagree.
+    setFactwiseSerialPrefix(saved.itemCodePrefix ?? '');
+    setFactwiseSerialStart(saved.itemCodeStart ?? 1);
+    setFactwiseSerialPadding(saved.itemCodePadding ?? 3);
     setFactwiseSerialIncrement(saved.itemCodeIncrement !== false);
     setConditionalBranches(savedConditionalBranches.map(branch => ({
       ...createConditionalBranch(),
@@ -2776,7 +2857,7 @@ const EnhancedDataEditor = () => {
         serial_prefix: factwiseSerialPrefix,
         serial_start: factwiseSerialStart,
         serial_padding: factwiseSerialPadding,
-        serial_increment: factwiseSerialIncrement,
+        serial_increment: effectiveSerialIncrement,
       };
       const response = await api.fillOrCreateColumn(sessionId, rule);
       if (!response.data?.success) throw new Error(response.data?.error || 'Column update failed');
@@ -3216,6 +3297,7 @@ const EnhancedDataEditor = () => {
       generateIds: true,
     },
     item_code_duplicate: {
+      column: 'Item code',
       title: 'Item codes are not unique',
       rule: 'Two parts sharing a code make every BOM reference to it ambiguous.',
       action: 'Make the duplicated codes unique before exporting.',
@@ -3652,6 +3734,47 @@ const EnhancedDataEditor = () => {
   // told which row to look at. Row numbers index the unfiltered sheet, so any
   // active search or column filter has to come off first or the target row is
   // not on the page we send them to.
+  // The BOM popup lists row numbers; this paints those rows amber in the grid,
+  // the same way duplicate item codes are already highlighted. Values are used
+  // when the issue names them (duplicates carry codes but no rows), rows
+  // otherwise.
+  const highlightBomIssue = useCallback((group, field, label) => {
+    const values = (group.codes?.length ? group.codes : group.values) || [];
+    const rows = group.rows || [];
+    if (values.length === 0 && rows.length === 0) return;
+    setDupHighlight({
+      field: field || '',
+      values: new Set(values.map(value => String(value).trim()).filter(Boolean)),
+      rows: new Set(rows.map(Number).filter(Boolean)),
+      label,
+    });
+    setBomValidationOpen(false);
+    setPage(1);
+    showSnackbar(
+      rows.length
+        ? `Highlighted ${rows.length} row${rows.length === 1 ? '' : 's'} in amber.`
+        : `Highlighted rows matching ${values.length} value${values.length === 1 ? '' : 's'} in amber.`,
+      'info',
+    );
+  }, [showSnackbar]);
+
+  // Show every row an issue names, together, instead of paging to them one at
+  // a time. Duplicates only make sense side by side.
+  const showIssueRows = useCallback((field, values, label) => {
+    const wanted = (values || [])
+      .map(value => String(value ?? '').trim().toLowerCase())
+      .filter(Boolean);
+    if (!field || wanted.length === 0) return;
+    setBomValidationOpen(false);
+    setRowSearchTerm('');
+    setColumnFilters({});
+    setRowFilterMode('all');
+    setIssueRowFilter({ field, values: wanted, label });
+    setPage(1);
+  }, []);
+
+  const clearIssueRowFilter = useCallback(() => setIssueRowFilter(null), []);
+
   const jumpToGridRow = useCallback((gridRow) => {
     const target = Number(gridRow);
     if (!target || target < 1) return;
@@ -3659,6 +3782,7 @@ const EnhancedDataEditor = () => {
     setBomValidationOpen(false);
     setRowSearchTerm('');
     setColumnFilters({});
+    setIssueRowFilter(null);
     setPage(targetPage);
     showSnackbar(`Row ${target} is on page ${targetPage}.`, 'info');
   }, [pageSize, showSnackbar]);
@@ -5608,14 +5732,19 @@ const EnhancedDataEditor = () => {
         String(value ?? '').toLowerCase().includes(rowSearchQuery)
       );
     })
+    .filter(({ row }) => {
+      if (!issueRowFilter) return true;
+      const cell = String(row[issueRowFilter.field] ?? '').trim().toLowerCase();
+      return issueRowFilter.values.includes(cell);
+    })
     .filter(({ row }) => activeColumnFilters.every(([field, needle]) =>
       String(row?.[field] ?? '').toLowerCase().includes(needle)
     ))
-  ), [rowData, rowFilterMode, mpnFilterInvalidOnly, mpnSourceField, rowSearchQuery, activeColumnFilters]);
+  ), [rowData, rowFilterMode, mpnFilterInvalidOnly, mpnSourceField, rowSearchQuery, activeColumnFilters, issueRowFilter]);
 
   const activeColumnFilterCount = activeColumnFilters.length;
   const isFiltering = Boolean(rowSearchQuery) || activeColumnFilterCount > 0
-    || rowFilterMode !== 'all' || mpnFilterInvalidOnly;
+    || rowFilterMode !== 'all' || mpnFilterInvalidOnly || Boolean(issueRowFilter);
   const filteredRowCount = filteredRows.length;
   const totalPages = Math.max(1, Math.ceil(filteredRowCount / Math.max(1, pageSize)));
   const safePage = Math.min(Math.max(1, page), totalPages);
@@ -6324,7 +6453,21 @@ const EnhancedDataEditor = () => {
                   <TextField fullWidth size="small" type="number" label="Number padding" value={factwiseSerialPadding} onChange={(e) => setFactwiseSerialPadding(e.target.value)} />
                 </Grid>
                 <Grid item xs={12}>
-                  <FormControlLabel control={<Checkbox checked={factwiseSerialIncrement} onChange={(e) => setFactwiseSerialIncrement(e.target.checked)} />} label="Increment for each row" />
+                  <FormControlLabel
+                    control={(
+                      <Checkbox
+                        checked={effectiveSerialIncrement}
+                        disabled={serialMustIncrement}
+                        onChange={(e) => setFactwiseSerialIncrement(e.target.checked)}
+                      />
+                    )}
+                    label="Increment for each row"
+                  />
+                  {serialMustIncrement && (
+                    <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mt: -0.5, ml: 4 }}>
+                      Always on for Item code — it must be unique, so every row needs its own number.
+                    </Typography>
+                  )}
                 </Grid>
               </>
             )}
@@ -6903,6 +7046,18 @@ const EnhancedDataEditor = () => {
                   ? (mpnProgress && mpnProgress.total ? `MPN unique ${mpnProgress.done}/${mpnProgress.total}` : 'MPN...')
                   : 'MPN'}
               </Button>
+              {/* A value-set filter is invisible in the Filter menu, so it says
+                  so here and can be cleared in one click. */}
+              {issueRowFilter && (
+                <Chip
+                  size="small"
+                  color="warning"
+                  variant="outlined"
+                  label={`Showing rows: ${issueRowFilter.label}`}
+                  onDelete={clearIssueRowFilter}
+                  sx={{ fontWeight: 700, borderRadius: '8px' }}
+                />
+              )}
               <Button
                 onClick={(e) => setRowFilterMenuAnchor(e.currentTarget)}
                 variant="outlined"
@@ -7381,7 +7536,9 @@ const EnhancedDataEditor = () => {
                   </Button>
                 )}
               >
-                Duplicate <strong>{columnLabel(dupHighlight.field, dupHighlight.field)}</strong> values are highlighted in amber ({dupHighlight.values.size} value{dupHighlight.values.size === 1 ? '' : 's'}). Edit them so each is unique, then export again.
+                {dupHighlight.rows?.size
+                  ? <>The {dupHighlight.rows.size} row{dupHighlight.rows.size === 1 ? '' : 's'} flagged by <strong>{dupHighlight.label || 'the BOM check'}</strong> are highlighted in amber. Fix them, then export again.</>
+                  : <>Duplicate <strong>{columnLabel(dupHighlight.field, dupHighlight.field)}</strong> values are highlighted in amber ({dupHighlight.values.size} value{dupHighlight.values.size === 1 ? '' : 's'}). Edit them so each is unique, then export again.</>}
               </Alert>
             )}
             {pageLoading && <LinearProgress sx={{ mb: 1 }} />}
@@ -7606,7 +7763,16 @@ const EnhancedDataEditor = () => {
                             col.field === mpnColumn &&
                             providerValidValues.some(value => String(value || '').toLowerCase() === 'no')
                           );
-                          const isDupHighlighted = !!(dupHighlight && col.field === dupHighlight.field && cellValue.trim() && dupHighlight.values.has(cellValue.trim()));
+                          const matchesDupValue = !!(dupHighlight && col.field === dupHighlight.field
+                            && cellValue.trim() && dupHighlight.values?.has(cellValue.trim()));
+                          // One cell, never the whole line: the issue is in a
+                          // specific column. When the rule names no column
+                          // (a cycle, a row referencing nothing) the row number
+                          // itself is marked, so the row is still findable
+                          // without washing every cell in amber.
+                          const matchesDupRow = !!(dupHighlight?.rows?.has(rowIndex + 1)
+                            && col.field === (dupHighlight.field || '__row_number__'));
+                          const isDupHighlighted = matchesDupValue || matchesDupRow;
                           return (
                             <td key={`${col.field}-${rowIndex}`} style={{
                               padding: '10px 14px',
@@ -9400,12 +9566,16 @@ const EnhancedDataEditor = () => {
                   <FormControlLabel
                     control={
                       <Checkbox
-                        checked={factwiseSerialIncrement}
+                        checked
+                        disabled
                         onChange={(event) => setFactwiseSerialIncrement(event.target.checked)}
                       />
                     }
                     label="Increase number for each row"
                   />
+                  <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mt: -0.5, ml: 4 }}>
+                    Always on — this dialog writes Item code, which must be unique.
+                  </Typography>
                 </Grid>
               </Grid>
             )}
@@ -9438,7 +9608,7 @@ const EnhancedDataEditor = () => {
             }}>
               <Typography variant="body2" sx={{ color: isDarkMode ? '#cbd5e1' : '#64748b' }}>
                 Preview: {(factwiseSerialPrefix || '')}{String(Number(factwiseSerialStart) || 1).padStart(Math.max(0, Number(factwiseSerialPadding) || 0), '0')}
-                {factwiseSerialIncrement ? `, ${(factwiseSerialPrefix || '')}${String((Number(factwiseSerialStart) || 1) + 1).padStart(Math.max(0, Number(factwiseSerialPadding) || 0), '0')}` : ' for every row'}
+                {`, ${(factwiseSerialPrefix || '')}${String((Number(factwiseSerialStart) || 1) + 1).padStart(Math.max(0, Number(factwiseSerialPadding) || 0), '0')}`}
               </Typography>
             </Box>
           )}
@@ -10625,6 +10795,35 @@ const EnhancedDataEditor = () => {
                         Codes: {group.codes.slice(0, 8).join(', ')}
                         {group.codes.length > 8 ? ` +${group.codes.length - 8} more` : ''}
                       </Typography>
+                    )}
+                    {/* Duplicates carry codes but no row numbers, so the chips
+                        below never render for them — this is the only way to
+                        see the offending rows, and it shows them together. */}
+                    {(group.rows.length > 0 || group.codes.length > 0 || group.values.length > 0) && (
+                      <Box sx={{ display: 'flex', gap: 1.5, flexWrap: 'wrap', alignItems: 'center' }}>
+                        <Button
+                          size="small"
+                          variant="text"
+                          onClick={() => highlightBomIssue(group, fillField, guidance.title || group.rule)}
+                          sx={{ textTransform: 'none', fontWeight: 700, px: 0 }}
+                        >
+                          Highlight in grid
+                        </Button>
+                        {fillField && (group.codes.length > 0 || group.values.length > 0) && (
+                          <Button
+                            size="small"
+                            variant="text"
+                            onClick={() => showIssueRows(
+                              fillField,
+                              group.codes.length > 0 ? group.codes : group.values,
+                              guidance.title || group.rule,
+                            )}
+                            sx={{ textTransform: 'none', fontWeight: 700, px: 0 }}
+                          >
+                            Show only these rows
+                          </Button>
+                        )}
+                      </Box>
                     )}
                   </Box>
 

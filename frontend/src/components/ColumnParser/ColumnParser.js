@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Box,
@@ -10,6 +10,7 @@ import {
   FormControlLabel,
   IconButton,
   InputLabel,
+  ListSubheader,
   MenuItem,
   Select,
   Step,
@@ -50,15 +51,50 @@ const SIMPLE_DELIMITER_PRESETS = [
   { value: '\t', label: 'Tab' },
   { value: '\n', label: 'New line' },
 ];
+// The repeated template groups, one entry per slot. Values are the internal
+// field names (Tag_2, Specification_Value_1) that canonicalHeaderName maps back
+// to their export headers; labels are the '(n)' form the app shows everywhere.
+const REPEATING_TEMPLATE_SLOTS = [
+  ...Array.from({ length: 3 }, (unused, index) => (
+    { field: `Tag_${index + 1}`, label: `Tag (${index + 1})` }
+  )),
+  ...Array.from({ length: 3 }, (unused, index) => ([
+    { field: `Specification_Name_${index + 1}`, label: `Specification name (${index + 1})` },
+    { field: `Specification_Value_${index + 1}`, label: `Specification value (${index + 1})` },
+    { field: `Specification_UOM_${index + 1}`, label: `Specification UOM (${index + 1})` },
+  ])).flat(),
+  { field: 'Customer_Identification_Name_1', label: 'Customer identification name (1)' },
+  { field: 'Customer_Identification_Value_1', label: 'Customer identification value (1)' },
+];
+
+// Every column of the default FactWise template, in one target list. Each one
+// is written straight through: the new header is named exactly `value`.
 const FACTWISE_OUTPUT_COLUMNS = [
-  { value: 'MPN', label: 'MPN' },
-  { value: 'MFR', label: 'MFR' },
-  { value: 'CPN', label: 'CPN' },
-  { value: 'Description', label: 'Description' },
-  { value: 'Quantity', label: 'Quantity' },
-  { value: 'UOM', label: 'UOM' },
-  { value: 'Reference Designator', label: 'Reference Designator' },
-  { value: 'Extra', label: 'Extra' },
+  { value: 'MPN', label: 'MPN', group: 'BOM fields' },
+  { value: 'MFR', label: 'MFR', group: 'BOM fields' },
+  { value: 'CPN', label: 'CPN', group: 'BOM fields' },
+  { value: 'Description', label: 'Description', group: 'BOM fields' },
+  { value: 'Quantity', label: 'Quantity', group: 'BOM fields' },
+  { value: 'UOM', label: 'UOM', group: 'BOM fields' },
+  { value: 'Reference Designator', label: 'Reference Designator', group: 'BOM fields' },
+  { value: 'Extra', label: 'Extra', group: 'BOM fields' },
+
+  { value: 'Item code', label: 'Item code', group: 'Item columns' },
+  { value: 'Item name', label: 'Item name', group: 'Item columns' },
+  { value: 'Item type', label: 'Item type', group: 'Item columns' },
+  { value: 'Measurement unit', label: 'Measurement unit', group: 'Item columns' },
+  { value: 'Notes', label: 'Notes', group: 'Item columns' },
+  { value: 'Internal notes', label: 'Internal notes', group: 'Item columns' },
+  { value: 'Procurement entity name', label: 'Procurement entity name', group: 'Item columns' },
+  { value: 'Procurement item', label: 'Procurement item', group: 'Item columns' },
+  { value: 'Sales item', label: 'Sales item', group: 'Item columns' },
+  { value: 'Preferred vendor code', label: 'Preferred vendor code', group: 'Item columns' },
+  { value: 'Level', label: 'Level', group: 'Item columns' },
+  { value: 'Base BOM Qty', label: 'Base BOM Qty', group: 'Item columns' },
+
+  ...REPEATING_TEMPLATE_SLOTS.map(slot => (
+    { value: slot.field, label: slot.label, group: 'Repeating columns' }
+  )),
 ];
 
 const numberedColumnIndex = (value, pattern, genericName) => {
@@ -99,6 +135,12 @@ const splitGroups = (value, separator) => {
   return groups;
 };
 
+// One packed cell can carry several MPN/MFR entries. Callers that parse a single
+// detected pattern page through those entries, so a cell expands into N samples.
+const expandSampleGroups = (value, separator, trimValues) => splitGroups(String(value ?? ''), separator)
+  .map(group => (trimValues ? group.trim() : group))
+  .filter(group => group.trim() !== '');
+
 const buildParts = (text, boundaries, trimValues, dropEmptyValues) => {
   if (!text || boundaries.length === 0) return [];
   const ordered = [...boundaries].sort((a, b) => a.index - b.index);
@@ -117,7 +159,7 @@ const buildParts = (text, boundaries, trimValues, dropEmptyValues) => {
     delimiterIndex: ordered[0].index,
     delimiterOccurrence: occurrenceForBoundary(ordered[0]),
     preview: cleanValue(text.substring(0, ordered[0].index)),
-    outputType: 'spec',
+    outputType: 'direct',
     specName: '',
     customName: '',
     targetColumn: '',
@@ -136,7 +178,7 @@ const buildParts = (text, boundaries, trimValues, dropEmptyValues) => {
       startDelimiterOccurrence: occurrenceForBoundary(ordered[index]),
       endDelimiterOccurrence: occurrenceForBoundary(ordered[index + 1]),
       preview: cleanValue(text.substring(start, end)),
-      outputType: 'spec',
+      outputType: 'direct',
       specName: '',
       customName: '',
       targetColumn: '',
@@ -151,7 +193,7 @@ const buildParts = (text, boundaries, trimValues, dropEmptyValues) => {
     delimiterIndex: last.index,
     delimiterOccurrence: occurrenceForBoundary(last),
     preview: cleanValue(text.substring(last.index + 1)),
-    outputType: 'spec',
+    outputType: 'direct',
     specName: '',
     customName: '',
     targetColumn: '',
@@ -160,7 +202,7 @@ const buildParts = (text, boundaries, trimValues, dropEmptyValues) => {
   return dropEmptyValues ? parts.filter(part => part.preview !== '') : parts;
 };
 
-const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns = null, parseReference = null }) => {
+const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns = null, parseReference = null, sampleUnit = 'row', describeSample = null }) => {
   const [step, setStep] = useState(0);
   const [columns, setColumns] = useState([]);
   const [selectedColumn, setSelectedColumn] = useState(initialColumn);
@@ -178,7 +220,8 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
   const [chunkSize, setChunkSize] = useState(3);
   const [trimValues, setTrimValues] = useState(true);
   const [dropEmptyValues, setDropEmptyValues] = useState(true);
-  const [keepSourceColumn, setKeepSourceColumn] = useState(true);
+  // The source column is always kept — parsing adds columns, it never drops one.
+  const keepSourceColumn = true;
   const [simpleOutputType, setSimpleOutputType] = useState('tag');
   const [simpleSpecTarget, setSimpleSpecTarget] = useState('new');
   const [simpleSpecName, setSimpleSpecName] = useState('');
@@ -189,6 +232,7 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const hasParseReference = Boolean(parseReference?.source);
+  const autoAnalyzedColumn = useRef('');
 
   useEffect(() => {
     const loadColumns = async () => {
@@ -220,7 +264,13 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
     loadColumns();
   }, [availableColumns, sessionId, initialColumn]);
 
-  const currentSample = sampleValues[currentSampleIndex] || '';
+  // In 'group' mode every entry inside a packed cell counts as its own sample, so
+  // the card shows one entry at a time instead of the whole cell at once.
+  const sampleEntries = useMemo(() => {
+    if (sampleUnit !== 'group') return sampleValues.map(value => String(value ?? ''));
+    return sampleValues.flatMap(value => expandSampleGroups(value, groupSeparator, trimValues));
+  }, [groupSeparator, sampleUnit, sampleValues, trimValues]);
+  const currentSample = sampleEntries[currentSampleIndex] || '';
   const existingTagMax = useMemo(() => columns.reduce((maximum, column) => Math.max(
     maximum,
     numberedColumnIndex(column.value, /^Tag_(\d+)$/, 'Tag')
@@ -251,11 +301,36 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
     }, 0);
   }, [columns, simpleCustomName]);
   const firstGroup = useMemo(() => {
-    if (!currentSample || !groupSeparator) return currentSample;
+    if (!currentSample) return currentSample;
+    // 'group' mode already hands us a single entry — splitting again is a no-op.
+    if (sampleUnit === 'group') return trimValues ? currentSample.trim() : currentSample;
+    if (!groupSeparator) return currentSample;
     const groups = splitGroups(currentSample, groupSeparator);
     const first = groups[0] ?? currentSample;
     return trimValues ? first.trim() : first;
-  }, [currentSample, groupSeparator, trimValues]);
+  }, [currentSample, groupSeparator, sampleUnit, trimValues]);
+
+  // Changing the group separator re-cuts the cell into a different number of
+  // entries; keep the cursor inside the new list.
+  useEffect(() => {
+    setCurrentSampleIndex(index => (index < sampleEntries.length ? index : 0));
+  }, [sampleEntries.length]);
+
+  // Arrow keys page through entries, except while typing in a field.
+  useEffect(() => {
+    if (sampleUnit !== 'group' || step !== 0 || sampleEntries.length < 2) return undefined;
+    const handleKeyDown = (event) => {
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+      const tagName = String(event.target?.tagName || '').toLowerCase();
+      if (tagName === 'input' || tagName === 'textarea' || event.target?.isContentEditable) return;
+      setCurrentSampleIndex(index => Math.min(
+        sampleEntries.length - 1,
+        Math.max(0, event.key === 'ArrowLeft' ? index - 1 : index + 1)
+      ));
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [sampleEntries.length, sampleUnit, step]);
 
   useEffect(() => {
     let nextParts;
@@ -270,7 +345,7 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
           type: 'indexed',
           partIndex: index,
           preview: value,
-          outputType: 'spec',
+          outputType: 'direct',
           specName: '',
           customName: '',
           targetColumn: '',
@@ -288,7 +363,7 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
           type: 'indexed',
           partIndex: nextParts.length,
           preview,
-          outputType: 'spec',
+          outputType: 'direct',
           specName: '',
           customName: '',
           targetColumn: '',
@@ -321,12 +396,19 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
         throw new Error(data.error || 'No values found in this column');
       }
       setSampleValues(data.sample_values);
-      const referenceIndex = parseReference?.source
+      const suggestedSeparator = data.suggested_separator || '';
+      const referenceRowIndex = parseReference?.source
         ? data.sample_values.findIndex(value => String(value || '') === String(parseReference.source || ''))
         : -1;
-      setCurrentSampleIndex(referenceIndex >= 0 ? referenceIndex : 0);
+      // In 'group' mode the flat sample list counts entries, not rows, so skip
+      // past every entry contributed by the rows above the referenced one.
+      const referenceIndex = sampleUnit === 'group' && referenceRowIndex > 0
+        ? data.sample_values
+          .slice(0, referenceRowIndex)
+          .reduce((total, value) => total + expandSampleGroups(value, suggestedSeparator, trimValues).length, 0)
+        : referenceRowIndex;
+      setCurrentSampleIndex(referenceIndex > 0 ? referenceIndex : 0);
       setTotalValues(data.total_values || data.sample_values.length);
-      const suggestedSeparator = data.suggested_separator || '';
       setGroupSeparator(suggestedSeparator);
       if (GROUP_SEPARATOR_PRESETS.includes(suggestedSeparator)) {
         setGroupSeparatorMode(suggestedSeparator);
@@ -345,6 +427,17 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
       setLoading(false);
     }
   };
+
+  // The caller already picked the column (Edit pattern knows which one), so
+  // analyze it straight away instead of parking on an Analyze button.
+  useEffect(() => {
+    if (!initialColumn || !columns.length) return;
+    if (selectedColumn !== initialColumn) return;
+    if (autoAnalyzedColumn.current === selectedColumn) return;
+    autoAnalyzedColumn.current = selectedColumn;
+    analyzeColumn();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [columns.length, initialColumn, selectedColumn]);
 
   const toggleBoundary = useCallback((char, index) => {
     setBoundaries(current => {
@@ -374,9 +467,28 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
     setPreviewData(null);
   };
 
+  // Where the entry on screen sits inside the referenced row, so its detected
+  // MPN/MFR pair can be looked up by position. -1 when it came from another row.
+  const referenceEntryIndex = useMemo(() => {
+    if (sampleUnit !== 'group' || !parseReference?.source || !currentSample) return -1;
+    return expandSampleGroups(parseReference.source, groupSeparator, trimValues)
+      .findIndex(entry => entry === currentSample);
+  }, [currentSample, groupSeparator, parseReference?.source, sampleUnit, trimValues]);
+
+  // What the detector reads out of the entry on screen. Parsing it live keeps
+  // every sample annotated; the review dialog only ever carried one example.
+  const currentSamplePairs = useMemo(() => {
+    if (sampleUnit !== 'group') return parseReference?.pairs || [];
+    if (!currentSample) return [];
+    if (typeof describeSample === 'function') return describeSample(currentSample) || [];
+    // Fall back to the example pair, matched by position within its own row —
+    // never by substring, since MPNs nest (BSS84 / BSS84P).
+    return [(parseReference?.pairs || [])[referenceEntryIndex]].filter(Boolean);
+  }, [currentSample, describeSample, parseReference?.pairs, referenceEntryIndex, sampleUnit]);
+
   const outputPreviewItems = useMemo(() => {
     if (step === 0 || !parts.length) {
-      return (parseReference?.pairs || []).flatMap((pair) => ([
+      return currentSamplePairs.flatMap((pair) => ([
         pair.mpn ? { type: 'mpn', label: `MPN: ${pair.mpn}` } : null,
         pair.manufacturer ? { type: 'mfr', label: `MFR: ${pair.manufacturer}` } : null,
         pair.discarded ? { type: 'discard', label: `Ignore: ${pair.discarded}` } : null,
@@ -388,19 +500,20 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
         const value = part.preview || '';
         if (!value) return null;
         if (part.outputType === 'discard') return { type: 'discard', label: `Ignore: ${value}` };
-        if (part.outputType === 'tag') return { type: 'tag', label: `Tag: ${value}` };
-        if (part.outputType === 'spec') return { type: 'spec', label: `${part.specName || 'Spec'}: ${value}` };
         if (part.outputType === 'custom') return { type: 'custom', label: `${part.customName || 'Custom'}: ${value}` };
         if (part.outputType === 'direct') {
           const target = part.targetColumn || 'FactWise';
+          const label = FACTWISE_OUTPUT_COLUMNS.find(option => option.value === target)?.label || target;
           if (target === 'MPN') return { type: 'mpn', label: `MPN: ${value}` };
           if (target === 'MFR') return { type: 'mfr', label: `MFR: ${value}` };
-          return { type: 'direct', label: `${target}: ${value}` };
+          if (target.startsWith('Tag_')) return { type: 'tag', label: `${label}: ${value}` };
+          if (target.startsWith('Specification_')) return { type: 'spec', label: `${label}: ${value}` };
+          return { type: 'direct', label: `${label}: ${value}` };
         }
         return null;
       })
       .filter(Boolean);
-  }, [parseReference?.pairs, parts, step]);
+  }, [currentSamplePairs, parts, step]);
 
   const previewChipSx = (type) => {
     if (type === 'discard') return { fontWeight: 650, color: '#94a3b8', borderColor: '#334155' };
@@ -412,11 +525,13 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
   };
 
   const renderParseReference = () => {
-    if (!parseReference?.source) return null;
+    // 'group' mode shows the one entry being cut; 'row' mode shows the whole cell.
+    const referenceSample = sampleUnit === 'group' ? currentSample : (parseReference?.source || '');
+    if (!parseReference?.source || !referenceSample) return null;
     return (
       <Box sx={{ p: 1.15, mb: 1.5, border: '1px solid #273244', bgcolor: '#0b1220', borderRadius: 1 }}>
         <Typography sx={{ fontSize: 13, fontWeight: 700, color: '#f8fafc', lineHeight: 1.4, wordBreak: 'break-word' }}>
-          {parseReference.source}
+          {referenceSample}
         </Typography>
         <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap', mt: 0.9 }}>
           {outputPreviewItems.map((item, index) => (
@@ -446,7 +561,7 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
         char1_occurrence: part.type === 'between' ? part.startDelimiterOccurrence : part.delimiterOccurrence,
         char2_occurrence: part.type === 'between' ? part.endDelimiterOccurrence : null,
         output_type: part.outputType,
-        spec_name: part.outputType === 'spec' ? (part.specName || '') : '',
+        spec_name: '',
         spec_pair_index: null,
         include_spec_name: true,
         custom_name: part.outputType === 'custom' ? (part.customName || '').trim() : '',
@@ -467,16 +582,12 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
   }, [chunkSize, dropEmptyValues, groupSeparator, keepSourceColumn, parts, simpleDelimiter, splitMode, trimValues]);
 
   const loadPreview = async () => {
-    if (parts.some(part => part.outputType === 'spec' && !part.specName.trim())) {
-      setError('Enter a name for every Specification output.');
+    if (parts.some(part => part.outputType === 'direct' && !part.targetColumn.trim())) {
+      setError('Select a target column for every FactWise output.');
       return;
     }
     if (parts.some(part => part.outputType === 'custom' && !part.customName.trim())) {
       setError('Enter a name for every Custom column output.');
-      return;
-    }
-    if (parts.some(part => part.outputType === 'direct' && !part.targetColumn.trim())) {
-      setError('Select a target column for every FactWise output.');
       return;
     }
     try {
@@ -561,8 +672,6 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
                 if (!selected) return '';
                 const labels = {
                   direct: 'FactWise column',
-                  spec: 'Specification',
-                  tag: 'Tag',
                   custom: 'Custom column',
                 };
                 return labels[selected] || selected;
@@ -574,8 +683,6 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
               }}
             >
               <MenuItem value="direct">FactWise column</MenuItem>
-              <MenuItem value="spec">Specification</MenuItem>
-              <MenuItem value="tag">Tag</MenuItem>
               <MenuItem value="custom">Custom column</MenuItem>
             </Select>
           </FormControl>
@@ -591,22 +698,14 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
                   setPreviewData(null);
                 }}
               >
-                {FACTWISE_OUTPUT_COLUMNS.map(option => (
-                  <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
-                ))}
+                {FACTWISE_OUTPUT_COLUMNS.flatMap((option, optionIndex, allOptions) => ([
+                  option.group !== allOptions[optionIndex - 1]?.group
+                    ? <ListSubheader key={`${option.group}-header`}>{option.group}</ListSubheader>
+                    : null,
+                  <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>,
+                ].filter(Boolean)))}
               </Select>
             </FormControl>
-          ) : part.outputType === 'spec' ? (
-            <TextField
-              size="small"
-              label="Specification name"
-              value={part.specName}
-              onChange={event => {
-                updatePart(part.id, 'specName', event.target.value);
-                setError('');
-                setPreviewData(null);
-              }}
-            />
           ) : part.outputType === 'custom' ? (
             <TextField
               size="small"
@@ -618,10 +717,6 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
                 setPreviewData(null);
               }}
             />
-          ) : part.outputType === 'tag' ? (
-            <Typography variant="caption" color="text.secondary">
-              Adds the value as the next Tag column.
-            </Typography>
           ) : (
             <Typography variant="caption" color="text.secondary">
               This value will not be added to the output.
@@ -701,15 +796,15 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
             <>
               <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 2, mb: 2 }}>
                 <Box>
-                  <Typography variant="subtitle2">Sample {currentSampleIndex + 1} of {sampleValues.length}</Typography>
+                  <Typography variant="subtitle2">Sample {currentSampleIndex + 1} of {sampleEntries.length}</Typography>
                   <Typography variant="caption" color="text.secondary">{totalValues} populated rows</Typography>
                 </Box>
-                {!hasParseReference && (
+                {(!hasParseReference || sampleUnit === 'group') && (
                   <Box sx={{ display: 'flex', gap: 0.5 }}>
                     <IconButton size="small" onClick={() => setCurrentSampleIndex(index => index - 1)} disabled={currentSampleIndex === 0}>
                       <ChevronLeftIcon />
                     </IconButton>
-                    <IconButton size="small" onClick={() => setCurrentSampleIndex(index => index + 1)} disabled={currentSampleIndex >= sampleValues.length - 1}>
+                    <IconButton size="small" onClick={() => setCurrentSampleIndex(index => index + 1)} disabled={currentSampleIndex >= sampleEntries.length - 1}>
                       <ChevronRightIcon />
                     </IconButton>
                   </Box>
@@ -859,11 +954,6 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
                       label="Drop empty values"
                     />
                   )}
-                  <FormControlLabel
-                    sx={{ m: 0 }}
-                    control={<Checkbox checked={keepSourceColumn} onChange={event => setKeepSourceColumn(event.target.checked)} />}
-                    label="Keep original column"
-                  />
                 </Box>
               </Box>
 
