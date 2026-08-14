@@ -590,7 +590,7 @@ export default function PDFZoneSelection() {
       continueAfterProcessing(response.data || {});
     } catch (err) {
       console.error('Error processing zones:', err);
-      setError('Failed to process zones. Please try again.');
+      setError(err.response?.data?.error || 'Failed to process zones. Please try again.');
       setProcessing(false);
     }
   };

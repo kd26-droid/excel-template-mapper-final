@@ -182,12 +182,78 @@ def process_zones(request, session_id):
                     ew, eh = (None, None)
                 logger.info(f"🧪 Enhanced zone image | zone_id={zone.zone_id} | preset={enhance_preset} | wh={ew}x{eh}")
 
-                # Extract table using Azure OCR (enhanced image)
-                zone_result = ocr_service.extract_table_from_image(enhanced_image)
+                # Extract table using Azure OCR. Some scanned engineering PDFs
+                # lose text after aggressive table enhancement, so retry with
+                # the original crop and a lighter enhancement before declaring
+                # the zone empty.
+                ocr_attempts = [
+                    ('enhanced', enhanced_image),
+                    ('original', zone_image),
+                ]
+                try:
+                    basic_image = pdf_processor.enhance_zone_image(zone_image, preset='basic')
+                    ocr_attempts.append(('basic', basic_image))
+                except Exception as basic_err:
+                    logger.warning(f"Basic OCR enhancement skipped | zone_id={zone.zone_id} | error={basic_err}")
+
+                def score_ocr_table(result):
+                    headers = [str(header or '').strip() for header in result.get('headers', [])]
+                    rows = result.get('rows', []) or []
+                    if not headers or not rows:
+                        return -1
+                    header_text = ' '.join(headers).lower()
+                    semantic_hits = sum(
+                        1 for keyword in ('find', 'part', 'description', 'desc')
+                        if keyword in header_text
+                    )
+                    placeholder_count = sum(
+                        1 for header in headers
+                        if header.lower().startswith('column_') or header.lower().startswith('column ')
+                    )
+                    populated_cells = sum(
+                        1 for row in rows[:20]
+                        for cell in row
+                        if str(cell).strip()
+                    )
+                    return (
+                        semantic_hits * 50
+                        + min(len(headers), 20) * 3
+                        + min(len(rows), 50)
+                        + min(populated_cells, 80)
+                        - placeholder_count * 25
+                    )
+
+                zone_result = {'headers': [], 'rows': []}
+                best_attempt_name = None
+                best_attempt_score = -1
+                for attempt_name, attempt_image in ocr_attempts:
+                    attempt_result = ocr_service.extract_table_from_image(attempt_image)
+                    attempt_headers = attempt_result.get('headers', [])
+                    attempt_rows = attempt_result.get('rows', [])
+                    attempt_score = score_ocr_table(attempt_result)
+                    logger.info(
+                        f"OCR attempt | zone_id={zone.zone_id} | attempt={attempt_name} | "
+                        f"headers={len(attempt_headers)} | rows={len(attempt_rows)} | score={attempt_score}"
+                    )
+                    if attempt_score > best_attempt_score:
+                        zone_result = attempt_result
+                        best_attempt_name = attempt_name
+                        best_attempt_score = attempt_score
+
+                    placeholder_headers = [
+                        header for header in attempt_headers
+                        if str(header or '').strip().lower().startswith(('column_', 'column '))
+                    ]
+                    has_semantic_headers = any(
+                        keyword in ' '.join(str(header or '').lower() for header in attempt_headers)
+                        for keyword in ('find', 'part', 'description', 'desc')
+                    )
+                    if attempt_headers and attempt_rows and has_semantic_headers and not placeholder_headers:
+                        break
                 zone_headers = zone_result.get('headers', [])
                 zone_rows = zone_result.get('rows', [])
 
-                logger.info(f"📑 Zone result | zone_id={zone.zone_id} | headers={len(zone_headers)} | rows={len(zone_rows)} | headers_sample={zone_headers[:8]}")
+                logger.info(f"📑 Zone result | zone_id={zone.zone_id} | attempt={best_attempt_name} | score={best_attempt_score} | headers={len(zone_headers)} | rows={len(zone_rows)} | headers_sample={zone_headers[:8]}")
 
                 all_zone_results.append({
                     'zone_id': zone.zone_id,
@@ -204,6 +270,11 @@ def process_zones(request, session_id):
                 zone.processing_status = 'failed'
                 zone.save()
                 continue
+
+        if not any(result.get('headers') and result.get('rows') for result in all_zone_results):
+            return Response({
+                'error': 'No table data was found inside the selected zone. Redraw the box tightly around the table, or try "Each column separately" if the scan is too faint for whole-table OCR.'
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         # MULTI-PAGE TABLE CONTINUATION DETECTION
         # Group zones by matching headers for intelligent continuation

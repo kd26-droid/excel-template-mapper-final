@@ -50,6 +50,11 @@ export const STRUCTURE_OPTIONS = [
     label: 'Grouped rows with alternates below',
     description: 'Use this when a group row carries item details/quantity and the rows below carry primary and alternate MPN/MFR pairs.',
   },
+  {
+    value: 'assembly_quantity_matrix',
+    label: 'Assembly quantity matrix',
+    description: 'Use this when assembly columns such as 001, 002, 003 contain quantities for each part row.',
+  },
 ];
 
 export const ALTERNATE_LAYOUT_OPTIONS = [

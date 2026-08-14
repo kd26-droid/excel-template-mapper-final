@@ -336,10 +336,13 @@ const getUsableColumnDescriptors = (rows, headerIndex) => {
 const rowsToObjects = (rows, currentHeaders, startRowNumber = 1) => rows
   .map((row, rowIndex) => {
     const mapped = {};
+    const sourceCellStyles = {};
     currentHeaders.forEach((header, index) => {
       mapped[header] = fmt(row[index]);
+      if (row.__cellMeta?.[index]) sourceCellStyles[header] = row.__cellMeta[index];
     });
     mapped.__sourceRow = startRowNumber + rowIndex;
+    if (Object.keys(sourceCellStyles).length) mapped.__sourceCellStyles = sourceCellStyles;
     if (row.__rowMeta?.deletedStyle) mapped.__deletedRowStyle = true;
     if (row.__rowMeta?.redStyle) mapped.__redRowStyle = true;
     if (row.__rowMeta?.strikeStyle) mapped.__strikeRowStyle = true;
@@ -371,7 +374,9 @@ const getCellStyleInfo = (cell = {}) => {
   return { red, strike };
 };
 
-const applyMergedCellValues = (worksheet, valuesByCell, usedColumns, metaByRow) => {
+const hasCellStyleInfo = (styleInfo = {}) => Boolean(styleInfo.red || styleInfo.strike);
+
+const applyMergedCellValues = (worksheet, valuesByCell, usedColumns, metaByRow, metaByCell) => {
   const merges = Array.isArray(worksheet?.['!merges']) ? worksheet['!merges'] : [];
   let maxMergedRow = -1;
 
@@ -404,6 +409,9 @@ const applyMergedCellValues = (worksheet, valuesByCell, usedColumns, metaByRow) 
         if (!fmt(valuesByCell.get(key))) {
           valuesByCell.set(key, mergedValue);
         }
+        if (hasCellStyleInfo(styleInfo) && !metaByCell.has(key)) {
+          metaByCell.set(key, styleInfo);
+        }
       }
     }
   });
@@ -418,6 +426,7 @@ const worksheetToCompactRows = (worksheet, options = {}) => {
   let maxColumn = -1;
   const valuesByCell = new Map();
   const metaByRow = new Map();
+  const metaByCell = new Map();
   const usedColumns = new Set();
   const outlineRows = Array.isArray(worksheet?.['!rows']) ? worksheet['!rows'] : [];
   const range = worksheet?.['!ref'] ? XLSX.utils.decode_range(worksheet['!ref']) : null;
@@ -447,6 +456,7 @@ const worksheetToCompactRows = (worksheet, options = {}) => {
     valuesByCell.set(`${position.r}:${position.c}`, value);
     const styleInfo = getCellStyleInfo(cell);
     if (styleInfo.red || styleInfo.strike) {
+      metaByCell.set(`${position.r}:${position.c}`, styleInfo);
       const rowMeta = metaByRow.get(position.r) || { redStyle: false, strikeStyle: false, deletedStyle: false };
       rowMeta.redStyle = rowMeta.redStyle || styleInfo.red;
       rowMeta.strikeStyle = rowMeta.strikeStyle || styleInfo.strike;
@@ -456,7 +466,7 @@ const worksheetToCompactRows = (worksheet, options = {}) => {
   });
 
   if (expandMergedCells) {
-    maxRow = Math.max(maxRow, applyMergedCellValues(worksheet, valuesByCell, usedColumns, metaByRow));
+    maxRow = Math.max(maxRow, applyMergedCellValues(worksheet, valuesByCell, usedColumns, metaByRow, metaByCell));
     if (usedColumns.size) {
       maxColumn = Math.max(maxColumn, ...usedColumns);
     }
@@ -474,6 +484,12 @@ const worksheetToCompactRows = (worksheet, options = {}) => {
       row.push(valuesByCell.get(`${rowIndex}:${colIndex}`) || '');
     }
     row.__rowMeta = metaByRow.get(rowIndex) || null;
+    const cellMeta = {};
+    for (let colIndex = startColumn; colIndex <= endColumn; colIndex += 1) {
+      const styleInfo = metaByCell.get(`${rowIndex}:${colIndex}`);
+      if (styleInfo) cellMeta[colIndex] = styleInfo;
+    }
+    row.__cellMeta = Object.keys(cellMeta).length ? cellMeta : null;
     rows.push(row);
   }
 
@@ -895,6 +911,66 @@ const isConnectorOnlyMpnPart = (value) => {
   return !compact || MPN_CONNECTOR_WORDS.has(compact);
 };
 
+const CIRCLED_NUMBER_RE = /[\u2460-\u2473]/g;
+
+const circledNumberIndex = (marker) => {
+  const code = String(marker || '').codePointAt(0);
+  return Number.isFinite(code) && code >= 0x2460 && code <= 0x2473 ? code - 0x245f : 0;
+};
+
+const stripCircledNumberMarkers = (value) => fmt(value)
+  .replace(/\u00a0/g, ' ')
+  .replace(CIRCLED_NUMBER_RE, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const parseCircledNumberSegments = (value) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ');
+  CIRCLED_NUMBER_RE.lastIndex = 0;
+  if (!CIRCLED_NUMBER_RE.test(text)) {
+    CIRCLED_NUMBER_RE.lastIndex = 0;
+    return [];
+  }
+  CIRCLED_NUMBER_RE.lastIndex = 0;
+
+  const markers = [];
+  let match = CIRCLED_NUMBER_RE.exec(text);
+  while (match) {
+    markers.push({
+      marker: match[0],
+      number: circledNumberIndex(match[0]),
+      start: match.index,
+      valueStart: match.index + match[0].length,
+    });
+    match = CIRCLED_NUMBER_RE.exec(text);
+  }
+
+  const segments = [];
+  const leadingValue = stripCircledNumberMarkers(text.slice(0, markers[0].start));
+  if (leadingValue) {
+    segments.push({
+      marker: '',
+      number: 0,
+      value: leadingValue,
+    });
+  }
+
+  markers.forEach((marker, index) => {
+    const next = markers[index + 1];
+    const rawValue = text.slice(marker.valueStart, next ? next.start : text.length);
+    const segmentValue = stripCircledNumberMarkers(rawValue);
+    if (segmentValue) {
+      segments.push({
+        marker: marker.marker,
+        number: marker.number,
+        value: segmentValue,
+      });
+    }
+  });
+
+  return segments;
+};
+
 const normalizeMpnParts = (parts) => parts
   .map(stripVendorPrefix)
   .map((part) => fmt(part).replace(/^(?:and|or|and\/or)\s+/i, '').replace(/\s+(?:and|or|and\/or)$/i, '').trim())
@@ -992,7 +1068,7 @@ const splitByExplicitDelimiter = (value, delimiter) => {
 };
 
 const stripVendorPrefix = (value) => {
-  const text = fmt(value).replace(/\s+/g, ' ');
+  const text = stripCircledNumberMarkers(value).replace(/\s+/g, ' ');
   return text
     .replace(/^(?:[A-Za-z]{5,}|\d{5})\s*(?:-\s*|\s+)/, '')
     .replace(/^AGILE\s*(?:-\s*|:\s*|\s+)/i, '')
@@ -1002,6 +1078,14 @@ const stripVendorPrefix = (value) => {
 const splitMpnCell = (value, config = {}) => {
   const text = fmt(value).replace(/\u00a0/g, ' ');
   if (!text) return [];
+
+  const circledSegments = parseCircledNumberSegments(text);
+  if (circledSegments.length > 1) {
+    return normalizeMpnParts(circledSegments.map((segment) => segment.value));
+  }
+  if (circledSegments.length === 1) {
+    return normalizeMpnParts([circledSegments[0].value]);
+  }
 
   const delimiter = selectedDelimiter(config);
   const explicitParts = splitByExplicitDelimiter(text, delimiter);
@@ -1462,9 +1546,18 @@ const splitManufacturerCell = (value, expectedCount, config = {}) => {
   const directoryNames = Array.isArray(directory.names) ? directory.names : [];
   const directoryAliases = directory.aliases || {};
   const canonicalForManufacturer = (name) => {
-    const key = normalizeKey(name).toUpperCase();
-    return directoryAliases[key] || name;
+    const cleanName = stripCircledNumberMarkers(name);
+    const key = normalizeKey(cleanName).toUpperCase();
+    return directoryAliases[key] || cleanName;
   };
+
+  const circledSegments = parseCircledNumberSegments(text);
+  if (circledSegments.length > 1) {
+    return circledSegments.map((segment) => canonicalForManufacturer(segment.value));
+  }
+  if (circledSegments.length === 1) {
+    return [canonicalForManufacturer(circledSegments[0].value)];
+  }
 
   const delimiter = selectedDelimiter(config);
   const explicitParts = splitByExplicitDelimiter(text, delimiter);
@@ -1661,6 +1754,7 @@ const shouldSkipSourceRow = (row, headers, roles, config) => {
   if (config.skipRepeatedHeaders && rowLooksLikeRepeatedHeader(row, headers)) return true;
   if (config.skipDoNotPopulate && rowLooksLikeDoNotPopulate(row, headers)) return true;
   if (config.skipDeletedRows && rowLooksLikeDeleted(row, headers)) return true;
+  if (config.structure === 'assembly_quantity_matrix') return false;
   if (config.structure === 'grouped_rows' && hasGroupedRowContext(row, roles)) return false;
   if (config.skipTitleRows && rowLooksLikeSectionTitle(row, headers, roles)) return true;
   return false;
@@ -2056,6 +2150,89 @@ const detectFollowingRowMfgPartsLayout = (headers = [], rows = [], roles = {}) =
   return { mfgPartsHeader, levelColumns };
 };
 
+const isAssemblyMatrixPartHeader = (header) => {
+  const key = normalizeKey(header);
+  if (!key || /\b(mfr|mfg|manufacturer|maker|vendor|supplier)\b/.test(key)) return false;
+  return /\bpart\s*(no|num|number|nbr)\b/.test(key) || /^part$/.test(key);
+};
+
+const isAssemblyMatrixDescriptionHeader = (header) => {
+  const key = normalizeKey(header);
+  return /\b(desc|description|designation|item\s*name|name)\b/.test(key);
+};
+
+const isAssemblyMatrixFindHeader = (header) => {
+  const key = normalizeKey(header);
+  return /\b(find\s*(no|num|number|nbr)|find|serial\s*(no|number)?|item\s*no)\b/.test(key);
+};
+
+const isAssemblyMatrixHeaderCandidate = (header) => {
+  const text = fmt(header);
+  return /^0*\d{1,4}$/.test(text) || /^(?:ass(?:y|embly)?|bom)\s*[-_ ]*0*\d{1,4}$/i.test(text);
+};
+
+const isMatrixQuantityLikeValue = (value) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ').trim();
+  if (!text) return true;
+  if (/^[-–—]$/.test(text)) return true;
+  if (/^(?:ar|a\/r|as\s*req(?:uired)?|ref|x)$/i.test(text)) return true;
+  return /^-?\d+(?:[.,]\d+)?$/.test(text);
+};
+
+const isMatrixQuantityPresent = (value) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ').trim();
+  if (!text || /^[-–—]$/.test(text)) return false;
+  if (/^0+(?:[.,]0+)?$/.test(text)) return false;
+  return isMatrixQuantityLikeValue(text);
+};
+
+const isNumericMatrixQuantity = (value) => /^-?\d+(?:[.,]\d+)?$/.test(fmt(value).replace(/\u00a0/g, ' ').trim());
+
+const normalizeAssemblyMatrixQuantity = (value) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ').trim();
+  if (text && !isNumericMatrixQuantity(text)) return { quantity: '0', note: '' };
+  return { quantity: text, note: '' };
+};
+
+const detectAssemblyQuantityMatrix = (headers = [], rows = [], roles = {}) => {
+  const visibleHeaders = headers.filter((header) => header && !header.startsWith('__'));
+  const partNumberColumn = visibleHeaders.find(isAssemblyMatrixPartHeader) || roles.cpn || roles.mpn || '';
+  const descriptionColumn = visibleHeaders.find(isAssemblyMatrixDescriptionHeader) || roles.description || '';
+  const findNumberColumn = visibleHeaders.find(isAssemblyMatrixFindHeader) || '';
+
+  if (!partNumberColumn || !descriptionColumn) return null;
+
+  const excluded = new Set([partNumberColumn, descriptionColumn, findNumberColumn]
+    .filter(Boolean)
+    .map(normalizeKey));
+  Object.values(roles || {}).forEach((header) => {
+    if (header) excluded.add(normalizeKey(header));
+  });
+
+  const assemblyColumns = visibleHeaders.filter((header) => {
+    if (excluded.has(normalizeKey(header))) return false;
+    if (!isAssemblyMatrixHeaderCandidate(header)) return false;
+    const sampleValues = rows.slice(0, 80).map((row) => getCell(row, header));
+    const nonBlankValues = sampleValues.filter((value) => fmt(value));
+    if (!nonBlankValues.length) return false;
+    const quantityLikeCount = nonBlankValues.filter(isMatrixQuantityLikeValue).length;
+    const longTextCount = nonBlankValues.filter((value) => fmt(value).length > 12 || /[A-Za-z]{4,}/.test(fmt(value))).length;
+    return quantityLikeCount / nonBlankValues.length >= 0.75 && longTextCount <= Math.max(1, Math.floor(nonBlankValues.length * 0.15));
+  });
+
+  if (assemblyColumns.length < 2) return null;
+  const partSamples = rows.slice(0, 80).filter((row) => getCell(row, partNumberColumn)).length;
+  const descriptionSamples = rows.slice(0, 80).filter((row) => getCell(row, descriptionColumn)).length;
+  if (partSamples < 2 || descriptionSamples < 2) return null;
+
+  return {
+    assemblyColumns,
+    partNumberColumn,
+    descriptionColumn,
+    findNumberColumn,
+  };
+};
+
 const getConsumedSourceHeaders = (roles = {}, config = {}, headers = []) => {
   const consumed = new Set();
   Object.values(roles || {}).forEach((header) => {
@@ -2072,6 +2249,13 @@ const getConsumedSourceHeaders = (roles = {}, config = {}, headers = []) => {
   });
   if (config.alternateLayout === 'following_rows' && config.followingRowAlternateColumn) {
     consumed.add(normalizeKey(config.followingRowAlternateColumn));
+  }
+  if (config.structure === 'assembly_quantity_matrix') {
+    const matrix = config.assemblyMatrix || detectAssemblyQuantityMatrix(headers, [], roles);
+    (matrix?.assemblyColumns || []).forEach((header) => consumed.add(normalizeKey(header)));
+    [matrix?.partNumberColumn, matrix?.descriptionColumn, matrix?.findNumberColumn]
+      .filter(Boolean)
+      .forEach((header) => consumed.add(normalizeKey(header)));
   }
   return consumed;
 };
@@ -2353,50 +2537,69 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
     const cpn = getCell(row, roles.cpn);
     const hasBomIdentity = Boolean(cpn || description || rawParentKey);
     let emittedAnyPart = false;
+    let relationCount = 0;
+
+    const emitPartsFromCells = ({
+      mpnValue,
+      manufacturerValue,
+      quantity,
+      uom,
+      rule,
+    }) => {
+      if (!mpnValue) return;
+      const mpnParts = splitMpnCell(mpnValue, config);
+      const partsToEmit = mpnParts.length ? mpnParts : [stripVendorPrefix(mpnValue)].filter(Boolean);
+      const manufacturerParts = useManufacturerColumns
+        ? splitManufacturerCell(manufacturerValue, partsToEmit.length, config)
+        : [];
+      partsToEmit.forEach((mpn, partIndex) => {
+        const manufacturer = manufacturerParts[partIndex] ||
+          manufacturerParts[0] ||
+          stripCircledNumberMarkers(manufacturerValue);
+        output.push(withSourceColumns({
+          sourceRow,
+          parentKey,
+          parent,
+          relation: relationCount === 0 ? 'Primary' : `Alternate ${relationCount}`,
+          level,
+          cpn,
+          description,
+          mpn: stripVendorPrefix(mpn),
+          manufacturer,
+          quantity,
+          uom,
+          rule,
+          confidence: confidenceForRow(mpn, manufacturer, 'alternate_columns'),
+          discardedText: '',
+        }, row, config));
+        relationCount += 1;
+        emittedAnyPart = true;
+      });
+    };
 
     if (primaryMpn) {
-      output.push(withSourceColumns({
-        sourceRow,
-        parentKey,
-        parent,
-        relation: 'Primary',
-        level,
-        cpn,
-        description,
-        mpn: stripVendorPrefix(primaryMpn),
-        manufacturer: primaryManufacturer,
+      emitPartsFromCells({
+        mpnValue: primaryMpn,
+        manufacturerValue: primaryManufacturer,
         quantity: primaryQty,
         uom: primaryUom,
         rule: 'alternate_columns_primary',
-        confidence: confidenceForRow(primaryMpn, primaryManufacturer, 'alternate_columns'),
-        discardedText: '',
-      }, row, config));
-      emittedAnyPart = true;
+      });
     }
 
-    alternateGroups.forEach((group, groupIndex) => {
+    alternateGroups.forEach((group) => {
       const mpn = getCell(row, group.mpn);
       if (!mpn) return;
       const manufacturer = useManufacturerColumns
         ? getCell(row, group.mfr) || (config.manufacturerMode === 'inherit_blank' ? primaryManufacturer : '')
         : '';
-      output.push(withSourceColumns({
-        sourceRow,
-        parentKey,
-        parent,
-        relation: emittedAnyPart ? `Alternate ${groupIndex + 1}` : 'Primary',
-        level,
-        cpn,
-        description,
-        mpn: stripVendorPrefix(mpn),
-        manufacturer,
+      emitPartsFromCells({
+        mpnValue: mpn,
+        manufacturerValue: manufacturer,
         quantity: config.quantityMode === 'alternate_columns' ? getCell(row, group.qty) || primaryQty : primaryQty,
         uom: config.quantityMode === 'alternate_columns' ? getCell(row, group.uom) || primaryUom : primaryUom,
         rule: 'alternate_columns_unpivot',
-        confidence: confidenceForRow(mpn, manufacturer, 'alternate_columns'),
-        discardedText: '',
-      }, row, config));
-      emittedAnyPart = true;
+      });
     });
 
     if (!emittedAnyPart && hasBomIdentity) {
@@ -2442,6 +2645,50 @@ const normalizeOnePerRow = (rows, roles, config = {}) => rows.map((row, rowIndex
     discardedText: '',
   }, row, config);
 }).filter((row) => row.mpn || row.manufacturer || row.description);
+
+const normalizeAssemblyQuantityMatrix = (rows, headers, roles, config = {}) => {
+  const matrix = config.assemblyMatrix || detectAssemblyQuantityMatrix(headers, rows, roles);
+  if (!matrix?.assemblyColumns?.length) return [];
+
+  const output = [];
+  rows.forEach((row, rowIndex) => {
+    const sourceRow = row.__sourceRow || rowIndex + 1;
+    const partNumber = stripCircledNumberMarkers(getCell(row, matrix.partNumberColumn));
+    const description = stripCircledNumberMarkers(getCell(row, matrix.descriptionColumn));
+    const findNumber = stripCircledNumberMarkers(getCell(row, matrix.findNumberColumn));
+    if (!partNumber && !description) return;
+
+    matrix.assemblyColumns.forEach((assemblyColumn) => {
+      const rawQuantity = stripCircledNumberMarkers(getCell(row, assemblyColumn));
+      if (!isMatrixQuantityPresent(rawQuantity)) return;
+      const quantityInfo = normalizeAssemblyMatrixQuantity(rawQuantity);
+
+      const assemblyKey = fmt(assemblyColumn);
+      const assemblyCode = /^0*\d{1,4}$/.test(assemblyKey) ? `ASSY-${assemblyKey.padStart(3, '0')}` : assemblyKey;
+      const enrichedDescription = quantityInfo.note
+        ? `${description}${description ? ' ' : ''}(${quantityInfo.note})`
+        : description;
+      output.push(withSourceColumns({
+        sourceRow,
+        parentKey: `${assemblyKey}␟${partNumber || description || sourceRow}`,
+        parent: assemblyCode,
+        relation: 'Primary',
+        level: '1',
+        cpn: stripCircledNumberMarkers(getCell(row, roles.cpn)),
+        description: enrichedDescription,
+        mpn: partNumber,
+        manufacturer: '',
+        quantity: quantityInfo.quantity,
+        uom: getCell(row, roles.uom),
+        rule: 'assembly_quantity_matrix',
+        confidence: 90,
+        discardedText: findNumber ? `Find No: ${findNumber}` : '',
+      }, row, config));
+    });
+  });
+
+  return output;
+};
 
 const normalizeSameGroupRows = (rows, roles, config = {}) => {
   const seenByGroup = new Map();
@@ -2658,11 +2905,18 @@ const normalizeGroupedRows = (rows, roles, config) => {
 };
 
 const normalizeRows = (rows, headers, roles, config) => {
+  const assemblyMatrix = config.structure === 'assembly_quantity_matrix'
+    ? (config.assemblyMatrix || detectAssemblyQuantityMatrix(headers, rows, roles))
+    : config.assemblyMatrix;
   const configWithSourceHeaders = {
     ...config,
+    assemblyMatrix,
     sourceHeaders: headers,
-    consumedSourceHeaders: getConsumedSourceHeaders(roles, config, headers),
+    consumedSourceHeaders: getConsumedSourceHeaders(roles, { ...config, assemblyMatrix }, headers),
   };
+  if (config.structure === 'assembly_quantity_matrix') {
+    return normalizeAssemblyQuantityMatrix(rows, headers, roles, configWithSourceHeaders);
+  }
   if (config.alternateLayout === 'following_rows') return normalizeFollowingRows(rows, roles, configWithSourceHeaders);
   // Every structure option describes how MPN/MFR pairs are laid out. With
   // neither column present they are all meaningless, and the default would emit
@@ -2752,6 +3006,15 @@ const analyzeMpnManufacturerPairing = (rows, headers, roles, config) => {
   const manualAltGroups = cleanAlternateColumnGroups(config.alternateColumnGroups || [], headers);
   const alternateGroups = manualAltGroups.length ? manualAltGroups : findAlternateColumnGroups(headers);
 
+  const collectPairingParts = (mpnValue, manufacturerValue) => {
+    const mpnParts = splitMpnCell(mpnValue, config);
+    const mpns = mpnParts.length
+      ? mpnParts
+      : [stripVendorPrefix(mpnValue)].filter(Boolean);
+    const manufacturers = splitManufacturerCell(manufacturerValue, mpns.length || null, config).filter(Boolean);
+    return { mpns, manufacturers };
+  };
+
   rows.forEach((row, rowIndex) => {
     if (shouldSkipSourceRow(row, headers, roles, config)) return;
     const sourceRow = row.__sourceRow || rowIndex + 1;
@@ -2772,11 +3035,19 @@ const analyzeMpnManufacturerPairing = (rows, headers, roles, config) => {
     }
 
     if (config.alternateLayout === 'separate_columns' && alternateGroups.length) {
-      const mpns = [getCell(row, roles.mpn), ...alternateGroups.map((group) => getCell(row, group.mpn))]
-        .map(stripVendorPrefix)
-        .filter(Boolean);
-      const manufacturers = [primaryManufacturer, ...alternateGroups.map((group) => getCell(row, group.mfr))]
-        .filter(Boolean);
+      const mpns = [];
+      const manufacturers = [];
+      const primaryParts = collectPairingParts(getCell(row, roles.mpn), primaryManufacturer);
+      mpns.push(...primaryParts.mpns);
+      manufacturers.push(...primaryParts.manufacturers);
+      alternateGroups.forEach((group) => {
+        const part = collectPairingParts(
+          getCell(row, group.mpn),
+          getCell(row, group.mfr) || (config.manufacturerMode === 'inherit_blank' ? primaryManufacturer : '')
+        );
+        mpns.push(...part.mpns);
+        manufacturers.push(...part.manufacturers);
+      });
       if (mpns.length > 1) {
         scenarios.push({
           key: `alternate-columns-${sourceRow}`,
@@ -3188,6 +3459,7 @@ const rebalanceRelations = (rows) => {
 };
 
 const detectBestStructure = (headers, roles, sampleRows) => {
+  if (detectAssemblyQuantityMatrix(headers, sampleRows, roles)) return 'assembly_quantity_matrix';
   if (detectFollowingRowMfgPartsLayout(headers, sampleRows, roles)) return 'grouped_rows';
   if (roles.mpn && roles.manufacturer && roles.mpn === roles.manufacturer) return 'same_cell';
   const groupedSignals = sampleRows.reduce((score, row, index) => {
@@ -3238,6 +3510,13 @@ const detectBestStructure = (headers, roles, sampleRows) => {
 };
 
 const nextConfigForDetectedStructure = (previousConfig, detectedStructure, detectionContext = {}) => {
+  const assemblyMatrix = detectedStructure === 'assembly_quantity_matrix'
+    ? detectAssemblyQuantityMatrix(
+      detectionContext.headers || [],
+      detectionContext.rows || [],
+      detectionContext.roles || {}
+    )
+    : null;
   const followingMfgPartsLayout = detectFollowingRowMfgPartsLayout(
     detectionContext.headers || [],
     detectionContext.rows || [],
@@ -3261,6 +3540,16 @@ const nextConfigForDetectedStructure = (previousConfig, detectedStructure, detec
       manufacturerMode: followingMfgPartsLayout ? 'never' : previousConfig.manufacturerMode,
       quantityMode: followingMfgPartsLayout ? 'inherit_primary' : previousConfig.quantityMode,
       delimiterMode: followingMfgPartsLayout ? 'auto' : previousConfig.delimiterMode,
+    };
+  }
+
+  if (detectedStructure === 'assembly_quantity_matrix') {
+    return {
+      ...previousConfig,
+      structure: 'assembly_quantity_matrix',
+      alternateLayout: 'already_separate_rows',
+      quantityMode: 'every_row',
+      assemblyMatrix: assemblyMatrix || previousConfig.assemblyMatrix,
     };
   }
 
@@ -3302,23 +3591,23 @@ const getStructureOptionsForRoles = (roles, config = {}) => {
     config.followingRowAlternateColumn === roles.mpn;
 
   if (sameColumnFollowingBlock) {
-    return STRUCTURE_OPTIONS.filter((option) => ['grouped_rows', 'same_cell'].includes(option.value));
+    return STRUCTURE_OPTIONS.filter((option) => ['grouped_rows', 'same_cell', 'assembly_quantity_matrix'].includes(option.value));
   }
 
   if (roles.mpn && roles.manufacturer && roles.mpn === roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => option.value === 'same_cell');
+    return STRUCTURE_OPTIONS.filter((option) => ['same_cell', 'assembly_quantity_matrix'].includes(option.value));
   }
 
   if (roles.mpn && !roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => ['mpn_only_same_cell', 'mpn_only_rows', 'grouped_rows'].includes(option.value));
+    return STRUCTURE_OPTIONS.filter((option) => ['mpn_only_same_cell', 'mpn_only_rows', 'grouped_rows', 'assembly_quantity_matrix'].includes(option.value));
   }
 
   if (!roles.mpn && roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => ['mfr_only_same_cell', 'mfr_only_rows', 'grouped_rows'].includes(option.value));
+    return STRUCTURE_OPTIONS.filter((option) => ['mfr_only_same_cell', 'mfr_only_rows', 'grouped_rows', 'assembly_quantity_matrix'].includes(option.value));
   }
 
   if (roles.mpn && roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => ['separate_cells', 'same_cell', 'one_per_row', 'grouped_rows'].includes(option.value));
+    return STRUCTURE_OPTIONS.filter((option) => ['separate_cells', 'same_cell', 'one_per_row', 'grouped_rows', 'assembly_quantity_matrix'].includes(option.value));
   }
 
   return STRUCTURE_OPTIONS;
@@ -3361,13 +3650,16 @@ const prepareSingleSheet = (currentWorkbook, currentSheetName, options = {}) => 
     .slice(headerIndex + 1)
     .map((row, rowIndex) => {
       const mapped = {};
+      const sourceCellStyles = {};
       columns.forEach((column) => {
         mapped[column.header] = fmt(row[column.index]);
+        if (row.__cellMeta?.[column.index]) sourceCellStyles[column.header] = row.__cellMeta[column.index];
       });
       if (outlineLevelHeader) {
         mapped[outlineLevelHeader] = String(Number(row.__rowMeta?.outlineLevel || 1) || 1);
       }
       mapped.__sourceRow = headerIndex + 2 + rowIndex;
+      if (Object.keys(sourceCellStyles).length) mapped.__sourceCellStyles = sourceCellStyles;
       if (row.__rowMeta?.deletedStyle) mapped.__deletedRowStyle = true;
       if (row.__rowMeta?.redStyle) mapped.__redRowStyle = true;
       if (row.__rowMeta?.strikeStyle) mapped.__strikeRowStyle = true;
@@ -3422,6 +3714,109 @@ const createWorkbookFromObjects = (rows, currentHeaders, sheetLabel = 'Combined'
   return nextWorkbook;
 };
 
+const isGeneratedPdfColumnHeader = (header) => /^column(?:[_\s]*\d+|\.\d+)?$/i.test(fmt(header));
+
+const canonicalAssemblyMatrixHeader = (header) => {
+  const text = fmt(header).toUpperCase().replace(/\s+/g, '');
+  if (/^[0ODQ]{1,3}\d{1,3}$/.test(text) && /[ODQ]/.test(text)) {
+    const fixed = text.replace(/[ODQ]/g, '0');
+    return fixed.length <= 3 ? fixed.padStart(3, '0') : fixed;
+  }
+  return fmt(header);
+};
+
+const joinOcrFragments = (values = []) => values
+  .map(fmt)
+  .filter(Boolean)
+  .join(' ')
+  .replace(/\s+([,.;:])/g, '$1')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const repairAssemblyMatrixPdfExtraction = (headers = [], rawRows = []) => {
+  const sourceHeaders = headers.map(fmt);
+  if (sourceHeaders.length < 5 || !Array.isArray(rawRows) || !rawRows.length) {
+    return { headers: sourceHeaders, rows: rawRows };
+  }
+
+  const rowArrays = rawRows.map((row) => (
+    sourceHeaders.map((header, index) => fmt(Array.isArray(row) ? row[index] : row?.[header]))
+  ));
+
+  const headerKeys = sourceHeaders.map(normalizeKey);
+  const findIndex = sourceHeaders.findIndex(isAssemblyMatrixFindHeader);
+  let partIndexes = [];
+  const exactPartIndex = sourceHeaders.findIndex(isAssemblyMatrixPartHeader);
+  if (exactPartIndex >= 0 && headerKeys[exactPartIndex] !== 'part') {
+    partIndexes = [exactPartIndex];
+  } else {
+    const partOnlyIndex = headerKeys.findIndex((key) => key === 'part');
+    if (
+      partOnlyIndex >= 0 &&
+      ['no', 'num', 'number', 'nbr'].includes(headerKeys[partOnlyIndex + 1])
+    ) {
+      partIndexes = [partOnlyIndex, partOnlyIndex + 1];
+    } else if (exactPartIndex >= 0) {
+      partIndexes = [exactPartIndex];
+    }
+  }
+
+  const descriptionIndex = sourceHeaders.findIndex(isAssemblyMatrixDescriptionHeader);
+  const structuralIndexes = [findIndex, ...partIndexes, descriptionIndex].filter((index) => index >= 0);
+  const structuralStart = structuralIndexes.length ? Math.min(...structuralIndexes) : -1;
+  if (structuralStart <= 0 || !partIndexes.length) {
+    return { headers: sourceHeaders, rows: rawRows };
+  }
+
+  const assemblyIndexes = sourceHeaders
+    .map((header, index) => ({ header, index }))
+    .filter(({ header, index }) => index < structuralStart && isAssemblyMatrixHeaderCandidate(canonicalAssemblyMatrixHeader(header)))
+    .map(({ index }) => index);
+
+  if (assemblyIndexes.length < 2) {
+    return { headers: sourceHeaders, rows: rawRows };
+  }
+
+  let descriptionIndexes = [];
+  if (descriptionIndex >= 0) {
+    descriptionIndexes = [descriptionIndex];
+    for (let index = descriptionIndex + 1; index < sourceHeaders.length; index += 1) {
+      if (isGeneratedPdfColumnHeader(sourceHeaders[index])) descriptionIndexes.push(index);
+    }
+  } else {
+    const afterPartIndex = Math.max(...partIndexes) + 1;
+    descriptionIndexes = sourceHeaders
+      .map((header, index) => ({ header, index }))
+      .filter(({ header, index }) => index >= afterPartIndex && (isGeneratedPdfColumnHeader(header) || !isAssemblyMatrixHeaderCandidate(header)))
+      .map(({ index }) => index);
+  }
+
+  if (!descriptionIndexes.length) {
+    return { headers: sourceHeaders, rows: rawRows };
+  }
+
+  const nextHeaders = [
+    ...assemblyIndexes.map((index) => canonicalAssemblyMatrixHeader(sourceHeaders[index])),
+    ...(findIndex >= 0 ? ['FIND NO.'] : []),
+    'PART NO.',
+    'DESCRIPTION',
+  ];
+
+  const nextRows = rowArrays
+    .map((row) => [
+      ...assemblyIndexes.map((index) => row[index] || ''),
+      ...(findIndex >= 0 ? [row[findIndex] || ''] : []),
+      joinOcrFragments(partIndexes.map((index) => row[index])),
+      joinOcrFragments(descriptionIndexes.map((index) => row[index])),
+    ])
+    .filter((row) => row.some((cell) => fmt(cell)));
+
+  return {
+    headers: makeUniqueHeaders(nextHeaders),
+    rows: nextRows,
+  };
+};
+
 const getFileType = (fileName = '') => {
   const lower = fileName.toLowerCase();
   if (lower.endsWith('.pdf')) return 'pdf';
@@ -3430,17 +3825,19 @@ const getFileType = (fileName = '') => {
 };
 
 const normalizePdfRows = (payload, sourceFile) => {
-  const pdfHeaders = makeUniqueHeaders(payload?.headers || []);
   const rawRows = Array.isArray(payload?.data) ? payload.data : [];
+  const repaired = repairAssemblyMatrixPdfExtraction(payload?.headers || [], rawRows);
+  const pdfHeaders = makeUniqueHeaders(repaired.headers || []);
+  const repairedRows = Array.isArray(repaired.rows) ? repaired.rows : rawRows;
   const decision = payload?.decision;
   const decisionLabel = typeof decision === 'string'
     ? decision
     : (decision?.winner || decision?.method || 'best extraction');
-  if (!pdfHeaders.length || !rawRows.length) {
+  if (!pdfHeaders.length || !repairedRows.length) {
     return { headers: [], rows: [] };
   }
 
-  const rows = rawRows
+  const rows = repairedRows
     .map((row, index) => {
       const mapped = {
         'Source file': sourceFile,
@@ -3771,7 +4168,47 @@ const getMergePreviewExport = (mergePreview, visibleColumns = [], filter = 'all'
   return { headers, rows };
 };
 
-const SourcePreview = ({ headers, rows }) => {
+const sourceCellStyleSx = (row = {}, header = '') => {
+  const styleInfo = row.__sourceCellStyles?.[header] || {};
+  if (!styleInfo.red && !styleInfo.strike) return {};
+  return {
+    color: styleInfo.red ? '#dc2626' : undefined,
+    textDecoration: styleInfo.strike ? 'line-through' : undefined,
+    textDecorationThickness: styleInfo.strike ? '2px' : undefined,
+  };
+};
+
+const isAssemblyMatrixQuantityColumn = (header = '', assemblyMatrix = null) => {
+  if (!assemblyMatrix?.assemblyColumns?.length) return false;
+  const headerKey = normalizeKey(header);
+  return assemblyMatrix.assemblyColumns.some((column) => normalizeKey(column) === headerKey);
+};
+
+const displaySourceCellValue = (value, header = '', assemblyMatrix = null) => {
+  const cleanedValue = stripCircledNumberMarkers(value);
+  if (
+    isAssemblyMatrixQuantityColumn(header, assemblyMatrix) &&
+    isMatrixQuantityPresent(cleanedValue) &&
+    !isNumericMatrixQuantity(cleanedValue)
+  ) {
+    return normalizeAssemblyMatrixQuantity(cleanedValue).quantity;
+  }
+  return cleanedValue;
+};
+
+const excelColumnName = (index) => {
+  let columnNumber = Number(index) + 1;
+  if (!Number.isFinite(columnNumber) || columnNumber <= 0) return '';
+  let name = '';
+  while (columnNumber > 0) {
+    const remainder = (columnNumber - 1) % 26;
+    name = String.fromCharCode(65 + remainder) + name;
+    columnNumber = Math.floor((columnNumber - 1) / 26);
+  }
+  return name;
+};
+
+const SourcePreview = ({ headers, rows, getHeaderLabel = (header) => header, assemblyMatrix = null }) => {
   const { isDarkMode, tokens: themeTokens } = useThemeContext();
   const tableTone = {
     bg: themeTokens.table?.background || (isDarkMode ? 'rgba(6, 12, 24, 0.82)' : '#ffffff'),
@@ -3817,7 +4254,7 @@ const SourcePreview = ({ headers, rows }) => {
                   borderColor: tableTone.border,
                 }}
               >
-                {header}
+                {getHeaderLabel(header)}
               </TableCell>
             ))}
           </TableRow>
@@ -3826,8 +4263,8 @@ const SourcePreview = ({ headers, rows }) => {
           {rows.map((row, index) => (
             <TableRow key={`source-${index}`}>
               {previewHeaders.map((header) => (
-                <TableCell key={header} sx={{ minWidth: 170, maxWidth: 260, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: tableTone.text, borderColor: tableTone.border }}>
-                  {row[header]}
+                <TableCell key={header} sx={{ minWidth: 170, maxWidth: 260, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: tableTone.text, borderColor: tableTone.border, ...sourceCellStyleSx(row, header) }}>
+                  {displaySourceCellValue(row[header], header, assemblyMatrix)}
                 </TableCell>
               ))}
             </TableRow>
@@ -4473,6 +4910,7 @@ const BomNormalizer = () => {
   const [configureParserScope, setConfigureParserScope] = useState(null);
   const [patternParserOverrides, setPatternParserOverrides] = useState([]);
   const [patternApplyNotice, setPatternApplyNotice] = useState('');
+  const [roleColumnLabelModes, setRoleColumnLabelModes] = useState({});
   const [combineItems, setCombineItems] = useState([]);
   const [combineBusy, setCombineBusy] = useState(false);
   const [combineError, setCombineError] = useState('');
@@ -4532,6 +4970,14 @@ const BomNormalizer = () => {
     preparedDataRows.length ? preparedDataRows : rowsToObjects(sheetRows.slice(headerRowIndex + 1), headers, headerRowIndex + 2)
   ), [preparedDataRows, sheetRows, headerRowIndex, headers]);
 
+  const sourceColumnIndexByHeader = useMemo(() => {
+    const map = {};
+    getUsableColumnDescriptors(sheetRows, headerRowIndex).forEach((column) => {
+      if (column.header) map[column.header] = column.index;
+    });
+    return map;
+  }, [sheetRows, headerRowIndex]);
+
   const dataRows = useMemo(() => (
     filterRowsByEndRow(sourceDataRows, sourceEndRow)
   ), [sourceDataRows, sourceEndRow]);
@@ -4555,6 +5001,13 @@ const BomNormalizer = () => {
     patternParserOverrides,
   }), [config, patternParserOverrides]);
 
+  const sourcePreviewAssemblyMatrix = useMemo(() => {
+    if (!headers.length || !dataRows.length) return null;
+    return normalizerConfig.structure === 'assembly_quantity_matrix'
+      ? (normalizerConfig.assemblyMatrix || detectAssemblyQuantityMatrix(headers, dataRows, roles))
+      : detectAssemblyQuantityMatrix(headers, dataRows, roles);
+  }, [dataRows, headers, normalizerConfig.assemblyMatrix, normalizerConfig.structure, roles]);
+
   useEffect(() => {
     setSourceGridPage(0);
   }, [fileName, sheetName, sheetScope, selectedSheetNames, headerRowIndex, sourceEndRow]);
@@ -4576,6 +5029,11 @@ const BomNormalizer = () => {
   const selectedAlternateOption = useMemo(
     () => ALTERNATE_LAYOUT_OPTIONS.find((option) => option.value === config.alternateLayout),
     [config.alternateLayout]
+  );
+
+  const selectedDelimiterOption = useMemo(
+    () => DELIMITER_OPTIONS.find((option) => option.value === config.delimiterMode),
+    [config.delimiterMode]
   );
 
   const selectedQuantityOption = useMemo(
@@ -6544,6 +7002,32 @@ const BomNormalizer = () => {
     if (header) rememberRoleHeader(role, header);
   }, []);
 
+  const getSourceColumnName = useCallback((header, fallbackIndex = -1) => {
+    const sourceIndex = Number.isFinite(sourceColumnIndexByHeader[header])
+      ? sourceColumnIndexByHeader[header]
+      : fallbackIndex;
+    return excelColumnName(sourceIndex);
+  }, [sourceColumnIndexByHeader]);
+
+  const getSourceColumnLabel = useCallback((header, role = '') => {
+    if (!header) return 'None';
+    if (!roleColumnLabelModes[role]) return header;
+    const columnName = getSourceColumnName(header, headers.indexOf(header));
+    return columnName ? `Column ${columnName}` : header;
+  }, [getSourceColumnName, headers, roleColumnLabelModes]);
+
+  const getPreviewHeaderLabel = useCallback((header) => {
+    const matchingRole = ROLE_FIELDS.find((field) => roles[field.key] === header && roleColumnLabelModes[field.key]);
+    return matchingRole ? getSourceColumnLabel(header, matchingRole.key) : header;
+  }, [getSourceColumnLabel, roleColumnLabelModes, roles]);
+
+  const toggleRoleColumnLabelMode = useCallback((role, checked) => {
+    setRoleColumnLabelModes((prev) => ({
+      ...prev,
+      [role]: checked,
+    }));
+  }, []);
+
   const refreshWorkflowTemplates = useCallback(async () => {
     setWorkflowTemplateLoading(true);
     try {
@@ -6769,7 +7253,7 @@ const BomNormalizer = () => {
     // all: SAFRAN-style sheets carry internal part codes and keep manufacturers
     // in a separate AVL sheet. Requiring MPN/MFR here blocked every multi-level
     // BOM from being normalized, so nothing downstream was ever reachable.
-    if (!roles.mpn && !roles.manufacturer && !roles.level) {
+    if (!roles.mpn && !roles.manufacturer && !roles.level && normalizerConfig.structure !== 'assembly_quantity_matrix') {
       setError('Select at least an MPN, Manufacturer, or BOM level column before running normalization.');
       return;
     }
@@ -6778,7 +7262,9 @@ const BomNormalizer = () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     try {
       const result = await normalizeRowsChunked(dataRows, headers, roles, normalizerConfig, setProgress);
-      const pairingCheck = analyzeMpnManufacturerPairing(dataRows, headers, roles, normalizerConfig);
+      const pairingCheck = normalizerConfig.structure === 'assembly_quantity_matrix'
+        ? { checkedRows: 0, matchedRows: 0, issueRows: [] }
+        : analyzeMpnManufacturerPairing(dataRows, headers, roles, normalizerConfig);
       if (pairingCheck.issueRows.length) {
         setPendingNormalization({ rows: result, pairingCheck });
         setPairingReviewRows(pairingCheck.issueRows);
@@ -6795,12 +7281,8 @@ const BomNormalizer = () => {
   }, [commitNormalizedResult, dataRows, headers, normalizerConfig, roles]);
 
   const handleNormalize = useCallback(async () => {
-    if (detectedParsingLogic) {
-      setParsingLogicOpen(true);
-      return;
-    }
-    await runNormalization();
-  }, [detectedParsingLogic, runNormalization]);
+    setParsingLogicOpen(true);
+  }, []);
 
   const handleOpenConfigureSplitColumns = useCallback(async ({ title = 'Split into Columns', initialColumn = '', scope = null } = {}) => {
     if (!headers.length || !dataRows.length) {
@@ -7187,6 +7669,7 @@ const BomNormalizer = () => {
     setConfigureParserInitialColumn('');
     setConfigureParserTitle('Split into Columns');
     setConfigureParserScope(null);
+    setRoleColumnLabelModes({});
     setCombineItems([]);
     setCombineBusy(false);
     setCombineError('');
@@ -8129,7 +8612,7 @@ const BomNormalizer = () => {
                       Preview is filtered to sheet rows up to {sourceEndRow}. Rows after {sourceEndRow} will be ignored during normalization.
                     </Alert>
                   )}
-                  <SourcePreview headers={headers} rows={dataRows.slice(0, 8)} />
+                  <SourcePreview headers={headers} rows={dataRows.slice(0, 8)} assemblyMatrix={sourcePreviewAssemblyMatrix} />
                 </Box>
                 <Stack direction="row" justifyContent="space-between" sx={{ mt: 2 }}>
                   <Button variant="outlined" onClick={handleBackFromSourceSetup} disabled={busy}>Back</Button>
@@ -8171,26 +8654,92 @@ const BomNormalizer = () => {
                 </Stack>
                 <Box sx={{ mt: 2 }}>
                   <Typography sx={{ fontWeight: 800 }}>Source preview</Typography>
-                  <SourcePreview headers={headers} rows={dataRows.slice(0, 8)} />
+                  <SourcePreview headers={headers} rows={dataRows.slice(0, 8)} getHeaderLabel={getPreviewHeaderLabel} assemblyMatrix={sourcePreviewAssemblyMatrix} />
                 </Box>
                 <Grid container spacing={1.5} sx={{ mt: 1 }}>
-                  {ROLE_FIELDS.map((field) => (
-                    <Grid item xs={12} md={6} key={field.key}>
-                      <FormControl fullWidth size="small">
-                        <InputLabel>{field.label}</InputLabel>
-                        <Select
-                          value={roles[field.key] || ''}
-                          label={field.label}
-                          onChange={(event) => handleRoleChange(field.key, event.target.value)}
-                        >
-                          <MenuItem value="">None</MenuItem>
-                          {headers.map((header) => (
-                            <MenuItem key={header} value={header}>{header}</MenuItem>
-                          ))}
-                        </Select>
-                      </FormControl>
-                    </Grid>
-                  ))}
+                  {ROLE_FIELDS.map((field) => {
+                    const selectedHeader = roles[field.key] || '';
+                    return (
+                      <Grid item xs={12} md={6} key={field.key}>
+                        <FormControl fullWidth size="small">
+                          <InputLabel>{field.label}</InputLabel>
+                          <Select
+                            value={selectedHeader}
+                            label={field.label}
+                            renderValue={(selected) => getSourceColumnLabel(selected, field.key)}
+                            onChange={(event) => handleRoleChange(field.key, event.target.value)}
+                          >
+                            <MenuItem value="">None</MenuItem>
+                            {headers.map((header, columnIndex) => {
+                              const isSelected = selectedHeader === header;
+                              const columnName = getSourceColumnName(header, columnIndex);
+                              const showColumnLabel = Boolean(roleColumnLabelModes[field.key] && columnName);
+                              return (
+                                <MenuItem key={`${header}-${columnIndex}`} value={header}>
+                                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%', minWidth: 0 }}>
+                                    <Box sx={{ minWidth: 0, maxWidth: isSelected && columnName ? '62%' : '100%' }}>
+                                      <Typography noWrap sx={{ fontSize: 14, fontWeight: isSelected ? 800 : 600 }}>
+                                        {isSelected && showColumnLabel ? `Column ${columnName}` : header}
+                                      </Typography>
+                                      {isSelected && showColumnLabel && (
+                                        <Typography noWrap sx={{ mt: 0.2, fontSize: 11.5, color: normalizerTheme.muted }}>
+                                          {header}
+                                        </Typography>
+                                      )}
+                                    </Box>
+                                    {isSelected && columnName && (
+                                      <Box
+                                        onClick={(event) => event.stopPropagation()}
+                                        onMouseDown={(event) => event.stopPropagation()}
+                                        sx={{
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: 0.55,
+                                          flexShrink: 0,
+                                          px: 0.75,
+                                          py: 0.25,
+                                          borderRadius: 999,
+                                          border: `1px solid ${normalizerTheme.borderStrong}`,
+                                          bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.34)' : 'rgba(248, 250, 252, 0.92)',
+                                        }}
+                                      >
+                                        <Typography sx={{ fontSize: 11, lineHeight: 1, fontWeight: 800, color: normalizerTheme.muted, whiteSpace: 'nowrap' }}>
+                                          Column {columnName}
+                                        </Typography>
+                                        <Switch
+                                          size="small"
+                                          checked={Boolean(roleColumnLabelModes[field.key])}
+                                          onChange={(event) => toggleRoleColumnLabelMode(field.key, event.target.checked)}
+                                          sx={{
+                                            width: 30,
+                                            height: 18,
+                                            p: 0,
+                                            '& .MuiSwitch-switchBase': {
+                                              p: '2px',
+                                              '&.Mui-checked': {
+                                                transform: 'translateX(12px)',
+                                              },
+                                            },
+                                            '& .MuiSwitch-thumb': {
+                                              width: 14,
+                                              height: 14,
+                                            },
+                                            '& .MuiSwitch-track': {
+                                              borderRadius: 999,
+                                            },
+                                          }}
+                                        />
+                                      </Box>
+                                    )}
+                                  </Box>
+                                </MenuItem>
+                              );
+                            })}
+                          </Select>
+                        </FormControl>
+                      </Grid>
+                    );
+                  })}
                 </Grid>
                 <Paper elevation={0} sx={{ mt: 2, p: 1.5, bgcolor: '#f8fafc', border: '1px solid #e1e6ec' }}>
                   <Typography sx={{ fontSize: 14, fontWeight: 800 }}>Detected setup</Typography>
@@ -8225,6 +8774,7 @@ const BomNormalizer = () => {
                           label="Known delimiter"
                           onChange={(event) => {
                             setDelimiterTouched(true);
+                            setParserTouched(true);
                             setConfig((prev) => ({ ...prev, delimiterMode: event.target.value }));
                           }}
                         >
@@ -8242,6 +8792,7 @@ const BomNormalizer = () => {
                           label="Where are alternates?"
                           onChange={(event) => {
                             const nextLayout = event.target.value;
+                            setParserTouched(true);
                             setConfig((prev) => ({
                               ...prev,
                               alternateLayout: nextLayout,
@@ -8267,10 +8818,13 @@ const BomNormalizer = () => {
                           <Select
                             value={config.followingRowAlternateColumn || ''}
                             label="Following-row alternate column"
-                            onChange={(event) => setConfig((prev) => ({
-                              ...prev,
-                              followingRowAlternateColumn: event.target.value,
-                            }))}
+                            onChange={(event) => {
+                              setParserTouched(true);
+                              setConfig((prev) => ({
+                                ...prev,
+                                followingRowAlternateColumn: event.target.value,
+                              }));
+                            }}
                           >
                             <MenuItem value="">Select column</MenuItem>
                             {headers.map((header) => (
@@ -8738,9 +9292,10 @@ const BomNormalizer = () => {
                             textOverflow: 'ellipsis',
                             color: normalizerTheme.text,
                             borderColor: normalizerTheme.border,
+                            ...sourceCellStyleSx(row, header),
                           }}
                         >
-                          {row[header]}
+                          {displaySourceCellValue(row[header], header, sourcePreviewAssemblyMatrix)}
                         </TableCell>
                       ))}
                     </TableRow>
@@ -9587,9 +10142,9 @@ const BomNormalizer = () => {
       >
         <DialogTitle>
           <Box>
-            <Typography sx={{ fontSize: 19, fontWeight: 760, letterSpacing: 0 }}>Review detected parsing</Typography>
+            <Typography sx={{ fontSize: 19, fontWeight: 760, letterSpacing: 0 }}>Review parsing setup</Typography>
             <Typography sx={{ mt: 0.45, fontSize: 13, lineHeight: 1.45, color: normalizerTheme.muted }}>
-              Combined MPN/MFR values were detected. Choose a pattern to inspect or continue with the automatic parser.
+              Review the selected columns and parser rules before normalization runs.
             </Typography>
           </Box>
         </DialogTitle>
@@ -9612,10 +10167,12 @@ const BomNormalizer = () => {
             <Grid container spacing={1.5} alignItems="center">
               <Grid item xs={12} md={8}>
                 <Typography sx={{ fontSize: 12, color: normalizerTheme.muted }}>
-                  Detected pattern
+                  {selectedParsingPattern ? 'Detected pattern' : 'Selected setup'}
                 </Typography>
                 <Typography sx={{ mt: 0.2, fontSize: 15, fontWeight: 760, lineHeight: 1.35, color: normalizerTheme.text }} noWrap>
-                  {selectedParsingPatternNumber}. {selectedParsingPattern?.pattern?.shape || 'No pattern detected'}
+                  {selectedParsingPattern
+                    ? `${selectedParsingPatternNumber}. ${selectedParsingPattern.pattern?.shape || 'No pattern detected'}`
+                    : (selectedStructureOption?.label || 'Selected parser')}
                 </Typography>
                 {selectedParsingPattern && (
                   <Typography sx={{ mt: 0.25, fontSize: 11.5, color: normalizerTheme.muted }} noWrap>
@@ -9669,6 +10226,27 @@ const BomNormalizer = () => {
               </Grid>
             </Grid>
           </Paper>
+
+          {!selectedParsingPattern && (
+            <Paper elevation={0} sx={{ mt: 1.5, p: 1.6, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+              <Typography sx={{ fontSize: 14, fontWeight: 700, color: normalizerTheme.text }}>
+                Rules to apply
+              </Typography>
+              <Stack gap={0.85} sx={{ mt: 1 }}>
+                {parserLogicRules.map((rule) => (
+                  <Typography key={rule} sx={{ fontSize: 13, color: normalizerTheme.muted, lineHeight: 1.45 }}>
+                    {rule}
+                  </Typography>
+                ))}
+              </Stack>
+              <Stack direction="row" gap={0.75} flexWrap="wrap" sx={{ mt: 1.4 }}>
+                <Chip size="small" variant="outlined" label={`Structure: ${selectedStructureOption?.label || config.structure}`} sx={{ fontWeight: 650 }} />
+                <Chip size="small" variant="outlined" label={`Alternates: ${selectedAlternateOption?.label || config.alternateLayout}`} sx={{ fontWeight: 650 }} />
+                <Chip size="small" variant="outlined" label={`Delimiter: ${selectedDelimiterOption?.label || config.delimiterMode}`} sx={{ fontWeight: 650 }} />
+                <Chip size="small" variant="outlined" label={`Quantity: ${selectedQuantityOption?.label || config.quantityMode}`} sx={{ fontWeight: 650 }} />
+              </Stack>
+            </Paper>
+          )}
 
           {selectedParsingPattern && (
             <Paper elevation={0} sx={{ mt: 1.5, p: 1.6, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>

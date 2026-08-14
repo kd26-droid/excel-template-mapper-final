@@ -23,8 +23,19 @@ class AzureOCRService:
         self.endpoint = getattr(settings, 'AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT')
         self.key = getattr(settings, 'AZURE_DOCUMENT_INTELLIGENCE_KEY')
 
-        if not self.endpoint or not self.key:
-            raise ValueError("Azure Document Intelligence endpoint and key must be configured")
+        endpoint_text = str(self.endpoint or '').strip().lower()
+        key_text = str(self.key or '').strip().lower()
+        placeholder_config = (
+            'your-resource-name' in endpoint_text or
+            'your-azure-form-recognizer-key' in key_text or
+            key_text in ('', 'none', 'null')
+        )
+        if not self.endpoint or not self.key or placeholder_config:
+            raise ValueError(
+                "Azure Document Intelligence is not configured. Set real "
+                "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT and AZURE_DOCUMENT_INTELLIGENCE_KEY "
+                "in backend/.env, then rebuild the backend container."
+            )
 
         self.client = DocumentIntelligenceClient(
             endpoint=self.endpoint,
@@ -1480,9 +1491,18 @@ class AzureOCRService:
             result = poller.result()
             logger.info("🔷 Azure OCR: analysis completed")
 
+            ruled_fallback = self._extract_ruled_table_from_ocr_words(result, image)
+
             # Extract tables
             if not result.tables or len(result.tables) == 0:
                 logger.warning(f"No tables detected by Azure OCR. Tables found: {len(result.tables) if result.tables else 0}")
+                if ruled_fallback.get('headers') and ruled_fallback.get('rows'):
+                    logger.info(
+                        "Using OCR ruled-grid fallback: headers=%s rows=%s",
+                        len(ruled_fallback.get('headers', [])),
+                        len(ruled_fallback.get('rows', [])),
+                    )
+                    return ruled_fallback
                 logger.info(f"Attempting to extract as structured text instead...")
 
                 # Fallback: Try to extract text line by line and treat as a simple table
@@ -1548,9 +1568,247 @@ class AzureOCRService:
                         row.append(cell_matrix[row_idx].get(col_idx, ''))
                     rows.append(row)
 
+            if ruled_fallback.get('headers') and ruled_fallback.get('rows') and len(ruled_fallback['headers']) > len(headers):
+                logger.info(
+                    "Replacing Azure table with OCR ruled-grid fallback: azure_cols=%s fallback_cols=%s fallback_rows=%s",
+                    len(headers),
+                    len(ruled_fallback['headers']),
+                    len(ruled_fallback['rows']),
+                )
+                return ruled_fallback
+
             logger.info(f"📤 Azure table extraction: headers={len(headers)} sample={headers[:8]} | rows={len(rows)}")
             return {'headers': headers, 'rows': rows}
 
         except Exception as e:
             logger.error(f"Error extracting table from image: {e}")
+            raise
+
+    def _extract_ruled_table_from_ocr_words(self, result, image) -> Dict[str, any]:
+        """
+        Rebuild a scanned table from visible grid lines plus Azure OCR word boxes.
+
+        Azure can read the text but still miss the table structure. The paragraph
+        fallback flattens matrix BOMs into one value per row; this fallback keeps
+        the visible cell grid and places words into cells by coordinates.
+        """
+        try:
+            import bisect
+            import re
+            import cv2
+            import numpy as np
+
+            width, height = image.size
+            if width < 40 or height < 40:
+                return {'headers': [], 'rows': []}
+
+            img = np.array(image.convert('RGB'))
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)[1]
+
+            horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(12, width // 35), 1))
+            vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(12, height // 35)))
+            horizontal = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horizontal_kernel, iterations=1)
+            vertical = cv2.morphologyEx(binary, cv2.MORPH_OPEN, vertical_kernel, iterations=1)
+            horizontal = cv2.dilate(horizontal, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 1)), iterations=1)
+            vertical = cv2.dilate(vertical, cv2.getStructuringElement(cv2.MORPH_RECT, (1, 3)), iterations=1)
+
+            def line_positions(mask, axis, min_coverage):
+                projection = (mask > 0).sum(axis=axis)
+                candidate_indexes = np.where(projection >= min_coverage)[0].tolist()
+                if not candidate_indexes:
+                    return []
+                groups = []
+                current = [candidate_indexes[0]]
+                for value in candidate_indexes[1:]:
+                    if value <= current[-1] + 2:
+                        current.append(value)
+                    else:
+                        groups.append(current)
+                        current = [value]
+                groups.append(current)
+                return [int(round(sum(group) / len(group))) for group in groups]
+
+            x_lines = line_positions(vertical, axis=0, min_coverage=max(10, int(height * 0.08)))
+            y_lines = line_positions(horizontal, axis=1, min_coverage=max(10, int(width * 0.08)))
+
+            def normalize_lines(lines, limit):
+                if not lines:
+                    return []
+                lines = sorted(set(max(0, min(limit - 1, int(line))) for line in lines))
+                if lines[0] > 8:
+                    lines.insert(0, 0)
+                if limit - 1 - lines[-1] > 8:
+                    lines.append(limit - 1)
+                cleaned = []
+                for line in lines:
+                    if not cleaned or line - cleaned[-1] >= 6:
+                        cleaned.append(line)
+                    else:
+                        cleaned[-1] = int(round((cleaned[-1] + line) / 2))
+                return cleaned
+
+            x_lines = normalize_lines(x_lines, width)
+            y_lines = normalize_lines(y_lines, height)
+            if len(x_lines) < 3 or len(y_lines) < 3:
+                return {'headers': [], 'rows': []}
+
+            page = result.pages[0] if getattr(result, 'pages', None) else None
+            words = getattr(page, 'words', []) if page else []
+            if not words:
+                return {'headers': [], 'rows': []}
+
+            def point_xy(point):
+                if hasattr(point, 'x') and hasattr(point, 'y'):
+                    return float(point.x), float(point.y)
+                if isinstance(point, dict):
+                    return float(point.get('x', 0)), float(point.get('y', 0))
+                if isinstance(point, (list, tuple)) and len(point) >= 2:
+                    return float(point[0]), float(point[1])
+                return 0.0, 0.0
+
+            def polygon_points(polygon):
+                if not polygon:
+                    return []
+                if (
+                    isinstance(polygon, (list, tuple)) and
+                    len(polygon) >= 4 and
+                    all(isinstance(value, (int, float)) for value in polygon)
+                ):
+                    return [
+                        (float(polygon[index]), float(polygon[index + 1]))
+                        for index in range(0, len(polygon) - 1, 2)
+                    ]
+                return [point_xy(point) for point in polygon]
+
+            raw_boxes = []
+            max_x = 0.0
+            max_y = 0.0
+            for word in words:
+                polygon = getattr(word, 'polygon', None) or getattr(word, 'bounding_polygon', None) or []
+                points = polygon_points(polygon)
+                if not points:
+                    continue
+                xs = [point[0] for point in points]
+                ys = [point[1] for point in points]
+                max_x = max(max_x, max(xs))
+                max_y = max(max_y, max(ys))
+                raw_boxes.append({
+                    'text': getattr(word, 'content', '') or '',
+                    'x0': min(xs),
+                    'x1': max(xs),
+                    'top': min(ys),
+                    'bottom': max(ys),
+                })
+
+            if not raw_boxes:
+                return {'headers': [], 'rows': []}
+
+            scale_x = width / max_x if max_x and (max_x > width * 1.4 or max_x < width * 0.75) else 1.0
+            scale_y = height / max_y if max_y and (max_y > height * 1.4 or max_y < height * 0.75) else 1.0
+            n_rows = len(y_lines) - 1
+            n_cols = len(x_lines) - 1
+            cells = [[[] for _ in range(n_cols)] for _ in range(n_rows)]
+
+            for box in raw_boxes:
+                text = str(box['text']).strip()
+                if not text:
+                    continue
+                cx = ((box['x0'] + box['x1']) / 2) * scale_x
+                cy = ((box['top'] + box['bottom']) / 2) * scale_y
+                if cx < x_lines[0] or cx > x_lines[-1] or cy < y_lines[0] or cy > y_lines[-1]:
+                    continue
+                col = bisect.bisect_right(x_lines, cx) - 1
+                row = bisect.bisect_right(y_lines, cy) - 1
+                if 0 <= row < n_rows and 0 <= col < n_cols:
+                    cells[row][col].append((box['top'] * scale_y, box['x0'] * scale_x, text))
+
+            table_rows = []
+            for row in cells:
+                values = []
+                for cell_words in row:
+                    ordered = sorted(cell_words, key=lambda item: (round(item[0] / 4), item[1]))
+                    values.append(' '.join(item[2] for item in ordered).strip())
+                if any(values):
+                    table_rows.append(values)
+
+            if len(table_rows) < 2:
+                return {'headers': [], 'rows': []}
+
+            # Crops often include a blank strip before/after the ruled table.
+            # Remove columns that have no OCR text anywhere so those strips do
+            # not become fake "Column_1"/"Column_N" fields.
+            populated_columns = [
+                col_index
+                for col_index in range(n_cols)
+                if any(
+                    col_index < len(row) and str(row[col_index]).strip()
+                    for row in table_rows
+                )
+            ]
+            if len(populated_columns) >= 2 and len(populated_columns) < n_cols:
+                table_rows = [
+                    [row[col_index] if col_index < len(row) else '' for col_index in populated_columns]
+                    for row in table_rows
+                ]
+                n_cols = len(populated_columns)
+
+            non_empty_width = max(sum(1 for cell in row if str(cell).strip()) for row in table_rows)
+            if non_empty_width < 2:
+                return {'headers': [], 'rows': []}
+
+            def header_score(row):
+                lowered = ' '.join(str(cell).strip().lower() for cell in row if str(cell).strip())
+                keyword_score = sum(
+                    1 for keyword in ('part no', 'part', 'description', 'desc', 'find no', 'find')
+                    if keyword in lowered
+                )
+                assembly_score = sum(
+                    1 for cell in row
+                    if re.fullmatch(r'\d{1,4}', str(cell).strip())
+                )
+                non_empty = sum(1 for cell in row if str(cell).strip())
+                return (keyword_score * 4) + min(assembly_score, 6) + min(non_empty, 4)
+
+            scored_rows = [(header_score(row), index, row) for index, row in enumerate(table_rows)]
+            best_score, header_row_index, header_row = max(scored_rows, key=lambda item: item[0])
+            first_row = table_rows[0]
+            first_row_text = ' '.join(first_row).lower()
+            first_row_looks_like_header = (
+                any(keyword in first_row_text for keyword in ('part', 'description', 'desc', 'find')) or
+                sum(1 for cell in first_row if re.fullmatch(r'\d{1,4}', str(cell).strip())) >= 2
+            )
+
+            if best_score >= 6 or first_row_looks_like_header:
+                if best_score < 6:
+                    header_row_index = 0
+                    header_row = first_row
+
+                headers = [
+                    str(header_row[index]).strip() if index < len(header_row) and str(header_row[index]).strip() else f'Column_{index + 1}'
+                    for index in range(n_cols)
+                ]
+
+                # Some engineering PDFs put the header block at the bottom of
+                # the table. In that layout the useful data is above the
+                # header, and the label rows below it are explanatory text.
+                if header_row_index > 0:
+                    data_rows = table_rows[:header_row_index]
+                else:
+                    data_rows = table_rows[1:]
+            else:
+                headers = [f'Column_{index + 1}' for index in range(n_cols)]
+                data_rows = table_rows
+
+            logger.info(
+                "OCR ruled-grid fallback built table: rows=%s cols=%s x_lines=%s y_lines=%s header_row=%s",
+                len(data_rows),
+                len(headers),
+                len(x_lines),
+                len(y_lines),
+                header_row_index if 'header_row_index' in locals() else None,
+            )
+            return {'headers': headers, 'rows': data_rows}
+        except Exception as e:
+            logger.warning(f"OCR ruled-grid fallback failed: {e}", exc_info=True)
             return {'headers': [], 'rows': []}
