@@ -109,6 +109,7 @@ function phaseLabel(phase, isRevising) {
       ? 'Revising BOM inside the project…'
       : 'Attaching BOM to the project…';
     case PHASES.ATTACH_BOM_ERROR: return 'BOM attach failed — project exists, retry to link the BOM.';
+    case PHASES.REVIEW_DIFF: return 'Reviewing revision in Factwise… confirm or reject there to continue.';
     case PHASES.DONE: return 'Export complete.';
     default: return '';
   }
@@ -155,6 +156,9 @@ export default function FactwiseProjectExportDialog({
     reviseEnterpriseBomId,
     reviseBomModuleId,
     reviseBomCode,
+    // Kept only so `configFrozen`, phase label logic, and the redirect on
+    // DONE know we're in the revise flow. No dedicated diff dialog reads
+    // these anymore — comparison happens in FactWise's own UI.
     itemCreated,
     itemUpdated,
     bomIds,
@@ -168,6 +172,8 @@ export default function FactwiseProjectExportDialog({
     runFromCheckpoint,
     markRetrySucceeded,
     markRetryFailed,
+    confirmRevisionDiff,
+    cancelRevisionDiff,
     reset,
   } = orchestration;
 
@@ -378,9 +384,8 @@ export default function FactwiseProjectExportDialog({
     const matches = pendingIntent.baseBomId
       ? projectBoms.filter(b => String(b.base_bom_id) === String(pendingIntent.baseBomId))
       : projectBoms.filter(b => String(b.enterprise_bom_id) === String(pendingIntent.enterpriseBomId));
-    // No match means that BOM is not on this project. Leaving it on "create
-    // new" is correct — revising it here is not something FactWise offers, and
-    // silently picking a different BOM would be worse than asking.
+    // No match here means the intent's BOM isn't on this project. The
+    // fallback autofill effect below still runs on the raw project BOMs.
     const usable = matches.filter(b => b.bom_module_id && b.enterprise_bom_id);
     if (!usable.length) return;
     setReviseTargetKeys(
@@ -388,8 +393,36 @@ export default function FactwiseProjectExportDialog({
     );
   }, [open, pendingIntent, projectBoms, reviseTargetKeys]);
 
+  // Fallback autofill for the cold-open case (no intent, or intent's BOM
+  // not in the picked project). The "Create new BOM in this project"
+  // default option was deleted, so a panel with nothing checked leaves the
+  // Start button disabled with no obvious next step. Auto-check the single
+  // usable revisable BOM when there is exactly one — that's zero-ambiguity
+  // and matches what the intent autofill would have picked. When there are
+  // multiple, we still ask the user rather than silently guess.
+  useEffect(() => {
+    if (!open || modeDraft !== PROJECT_MODES.EXISTING) return;
+    if (!pickedProject?.project_id) return;
+    if (reviseTargetKeys.length) return;         // user (or intent) already picked
+    if (pendingIntent) return;                    // intent autofill still deciding
+    if (projectBomsLoading || !projectBoms.length) return;
+    const usable = projectBoms.filter(b => b.bom_module_id && b.enterprise_bom_id);
+    if (usable.length !== 1) return;              // ambiguous — leave to the user
+    const b = usable[0];
+    setReviseTargetKeys([
+      `${b.bom_module_id}::${b.enterprise_bom_id}::${b.bom_code || ''}`
+    ]);
+  }, [
+    open, modeDraft, pickedProject, projectBoms, projectBomsLoading,
+    pendingIntent, reviseTargetKeys,
+  ]);
+
   const activeStep = phaseToStepIndex(phase);
   const isDone = phase === PHASES.DONE;
+  // Awaiting user confirmation in FW's preview page. Dialog body shows a
+  // "review in progress" message; the primary buttons stay disabled so the
+  // user doesn't accidentally re-start.
+  const isAwaitingReview = phase === PHASES.REVIEW_DIFF;
   const hasError =
     phase === PHASES.ITEMS_ERROR
     || phase === PHASES.BOM_ERROR
@@ -397,10 +430,15 @@ export default function FactwiseProjectExportDialog({
     || phase === PHASES.ATTACH_BOM_ERROR;
 
   const canStart =
-    !isRunning && !isDone && (
+    !isRunning && !isDone && !isAwaitingReview && (
       modeDraft === PROJECT_MODES.NEW
         ? !!nameDraft?.trim() && !!pickedTemplate?.template_id
-        : !!pickedProject?.project_id
+        // Existing-project mode now REQUIRES picking a BOM to revise from
+        // the project. The "Create new BOM in this project" option was
+        // deleted (produced a duplicate BOM under the same FG instead of
+        // an update). Without a revise target the orchestrator hard-errors,
+        // so gate the button here to make the requirement visible up front.
+        : (!!pickedProject?.project_id && reviseTargetKeys.length > 0)
     );
 
   // A project restored from a checkpoint or carried over from the upload dialog
@@ -548,6 +586,105 @@ export default function FactwiseProjectExportDialog({
     }
   }, [openTarget, mode, fwOrigin]);
 
+  // FactWise's project BOM comparison page in PREVIEW mode. The mapper has
+  // already created the R5 draft and uploaded the sheet by the time we get
+  // here — those are safe (empty draft, blob-only upload). Items have NOT
+  // been uploaded yet. FW's page reads Aditya's revision-preview endpoint
+  // (which parses the sheet without needing R5 to be populated) and shows
+  // the diff. When the user hits Confirm there, a postMessage lands here
+  // (see the listener below) and confirmRevisionDiff resumes the flow to
+  // upload items + finish the revision.
+  //
+  // Kept as a state ref so we can also close/refocus the popup on Confirm
+  // if the browser didn't do it via window.close.
+  const previewPopupRef = useRef(null);
+  const {
+    revisionReviewConfirmed,
+    revisedNewEnterpriseBomId,
+    bomBulkImportId,
+  } = orchestration;
+  const handleOpenComparisonInFactwise = useCallback(() => {
+    if (!openTarget) return;
+    // Preview params tell BOMComparisonPageClean to fetch from Aditya's
+    // revision-preview endpoint instead of the project comparison-data one,
+    // auto-select the two returned versions, and show the Confirm/Reject
+    // action bar. callback_origin is what FW's page uses as the target
+    // origin for postMessage back to us — required by the browser for
+    // security.
+    const params = new URLSearchParams();
+    if (revisedNewEnterpriseBomId) {
+      params.set('preview_enterprise_bom_id', revisedNewEnterpriseBomId);
+    }
+    if (bomBulkImportId) {
+      params.set('preview_bulk_import_id', bomBulkImportId);
+    }
+    if (window.location.origin) {
+      params.set('callback_origin', window.location.origin);
+    }
+    const path = `/custom/cost-tracking/projects/${openTarget}/bom-comparison?${params.toString()}`;
+    const inIframe = window.parent && window.parent !== window;
+    if (inIframe) {
+      postToFactwiseParent('NAVIGATE', { url: path });
+      return;
+    }
+    if (fwOrigin) {
+      const popup = window.open(fwOrigin + path, 'fw_bom_revision_preview');
+      previewPopupRef.current = popup || null;
+    } else {
+      window.location.href = path;
+    }
+  }, [openTarget, fwOrigin, revisedNewEnterpriseBomId, bomBulkImportId]);
+
+  // Auto-open FW's preview page the instant the orchestrator lands on
+  // REVIEW_DIFF — that's the phase runBomStep patches to after revise +
+  // sheet upload succeed and no items have been uploaded yet.
+  const redirectedRef = useRef(false);
+  useEffect(() => {
+    if (!open) { redirectedRef.current = false; return; }
+    if (redirectedRef.current) return;
+    if (phase !== PHASES.REVIEW_DIFF) return;
+    if (!reviseEnterpriseBomId) return;
+    if (!openTarget) return;
+    redirectedRef.current = true;
+    handleOpenComparisonInFactwise();
+  }, [open, phase, reviseEnterpriseBomId, openTarget, handleOpenComparisonInFactwise]);
+
+  // Listen for FW's preview page confirming or rejecting the revision.
+  // FW's page posts { type, enterpriseBomId, bulkImportId } to our origin.
+  // On Confirm: kick off the item upload + finish sequence via the
+  // orchestrator. On Reject: reset. Close the popup we opened in either
+  // case (the FW page also calls window.close(), but browsers sometimes
+  // block that; belt-and-braces).
+  useEffect(() => {
+    if (!open) return undefined;
+    const onMessage = (event) => {
+      // Origin check — postMessage listener security. Only trust the FW
+      // origin we launched to.
+      if (fwOrigin && event.origin !== fwOrigin) return;
+      const data = event?.data;
+      if (!data || typeof data !== 'object') return;
+      if (data.type === 'FW_REVISION_PREVIEW_CONFIRMED') {
+        confirmRevisionDiff?.();
+        redirectedRef.current = false;
+        const popup = previewPopupRef.current;
+        if (popup && !popup.closed) { try { popup.close(); } catch (_) {} }
+        previewPopupRef.current = null;
+      } else if (data.type === 'FW_REVISION_PREVIEW_REJECTED') {
+        cancelRevisionDiff?.('Revision rejected in FactWise. Adjust the sheet and export again.');
+        redirectedRef.current = false;
+        const popup = previewPopupRef.current;
+        if (popup && !popup.closed) { try { popup.close(); } catch (_) {} }
+        previewPopupRef.current = null;
+      }
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [open, fwOrigin, confirmRevisionDiff, cancelRevisionDiff]);
+  // Silence unused-var warnings when the flag isn't referenced elsewhere in
+  // the render — it's on state and the orchestrator uses it, but eslint
+  // sees only the destructure.
+  void revisionReviewConfirmed;
+
   const handleResetAndClose = useCallback(() => {
     reset();
     onClose?.();
@@ -587,13 +724,17 @@ export default function FactwiseProjectExportDialog({
       PaperProps={{ sx: { borderRadius: '14px' } }}
     >
       <DialogTitle
+        // component=div so the nested Typography variant="h6" isn't rendered
+        // as <h6> inside <h2> — MUI's default DialogTitle root is h2, and
+        // nested headings are invalid HTML per validateDOMNesting.
+        component="div"
         sx={{
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
         }}
       >
-        <Typography variant="h6" sx={{ fontWeight: 650 }}>
+        <Typography variant="h6" component="h2" sx={{ fontWeight: 650 }}>
           Export to Factwise Project
         </Typography>
         {!isRunning && (
@@ -707,7 +848,7 @@ export default function FactwiseProjectExportDialog({
                   label="Pick an existing project"
                   helperText={
                     projectsError
-                      || 'Start typing to search. The BOM you send will either be attached fresh, or revise one of the project\'s existing BOMs — pick below.'
+                      || 'Start typing to search. Pick a project whose BOM you want to revise — this sheet must revise an existing BOM in that project.'
                   }
                   error={Boolean(projectsError)}
                 />
@@ -732,28 +873,19 @@ export default function FactwiseProjectExportDialog({
                 ) : (
                   <FormControl disabled={configFrozen} component="fieldset" variant="standard">
                     <FormGroup>
-                      <FormControlLabel
-                        control={
-                          <Checkbox
-                            size="small"
-                            checked={reviseTargetKeys.length === 0}
-                            // Only ever turned ON here. Unticking it would have
-                            // to mean "revise something" without saying what,
-                            // so it clears when a slot below is ticked instead.
-                            onChange={() => setReviseTargetKeys([])}
-                          />
-                        }
-                        label={
-                          <Typography variant="body2">
-                            <strong>Create new BOM</strong> in this project
-                          </Typography>
-                        }
-                      />
+                      {/* Deleted: "Create new BOM in this project" option.
+                          That path created a fresh BOM under the same
+                          finished good and attached it alongside the
+                          existing one — producing a duplicate BOM record,
+                          not an update. Existing-project exports now MUST
+                          revise one of the project's current BOMs, which
+                          routes through the handoff + revision-preview
+                          diff and lets FactWise move the slot in place. */}
                       {revisableBoms.length === 0 ? (
-                        <Typography variant="caption" sx={{ color: 'text.secondary', ml: 4 }}>
+                        <Typography variant="caption" sx={{ color: 'error.main', ml: 4 }}>
                           {projectBoms.length
-                            ? 'No BOM in this project shares a base BOM with the one being revised.'
-                            : 'Project has no BOMs yet.'}
+                            ? 'No BOM in this project can be revised by this sheet. Pick a different project, or open the source BOM in FactWise first.'
+                            : 'This project has no BOMs to revise. Exporting into an existing project requires revising one of its BOMs — pick a different project or create a new one instead.'}
                         </Typography>
                       ) : (
                         revisableBoms.map((b) => {
@@ -806,7 +938,11 @@ export default function FactwiseProjectExportDialog({
               ? 'Click "Start export" to send items, BOM, and create the project.'
               : reviseTargetKeys.length
                 ? `Click "Start export" to send items and revise ${reviseTargetKeys.length === 1 ? 'the picked BOM' : `the ${reviseTargetKeys.length} picked BOMs`} inside this project.`
-                : 'Click "Start export" to send items and attach the BOM as a new module in this project.')}
+                // The old "attach as a new module" fallback used to live here
+                // — deleted with the "Create new BOM in this project" option.
+                // Existing-project exports must revise a BOM now, so this
+                // branch prompts the user to make that choice instead.
+                : 'Pick which BOM in this project to revise, then click "Start export".')}
         </Typography>
 
         {/* Progress summary */}
@@ -933,6 +1069,19 @@ export default function FactwiseProjectExportDialog({
         {isDone ? (
           <>
             <Button onClick={handleResetAndClose}>Close</Button>
+            {openTarget && reviseEnterpriseBomId && (
+              // Rare — a revise flow reaches DONE only after review + item
+              // upload + slot revise, at which point the diff is history.
+              // Kept as a shortcut into FactWise's normal (non-preview)
+              // comparison page so the user can re-inspect R4 vs R5 there.
+              <Button
+                variant="outlined"
+                startIcon={<LaunchIcon />}
+                onClick={handleOpenComparisonInFactwise}
+              >
+                Open comparison in Factwise
+              </Button>
+            )}
             {openTarget && (
               <Button
                 variant="contained"

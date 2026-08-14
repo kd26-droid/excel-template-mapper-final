@@ -698,15 +698,61 @@ export async function fetchProjectBomVersions(projectId, projectBomsFromPicker =
       return { success: true, boms };
     }
 
-    // Fallback shape — surface the BOMs at least, revise disabled server-side.
-    const boms = existing.map((b) => ({
-      bom_module_id: null,
-      entry_id: null,
-      enterprise_bom_id: b.enterprise_bom_id || null,
-      base_bom_id: b.base_bom_id || null,
-      bom_code: b.bom_code || '',
-      bom_name: b.bom_name || '',
-    }));
+    // Fallback: dashboard picker gave us nothing (empty `.boms[]` — happens
+    // when the project row we picked wasn't the flavour that embeds boms, or
+    // FactWise stripped it for this user). Enrich the existing-boms rows with
+    // bom_module_id by hitting /bom-groups/ per unique base_bom_id — the same
+    // endpoint BomStructureDialog uses to enumerate revisable slots. One call
+    // per distinct base, so a project with N different BOMs takes N+1 total.
+    // Without this, every "Revise: X" checkbox in the export dialog is
+    // disabled because the FormControlLabel requires both ids.
+    const uniqueBaseIds = Array.from(new Set(
+      existing.map((b) => b.base_bom_id).filter(Boolean)
+    ));
+    const slotLookups = await Promise.all(
+      uniqueBaseIds.map(async (baseId) => {
+        try {
+          const slotsResp = await client.get(
+            `/organization/project/${projectId}/bom-groups/`,
+            { params: { base_bom_id: baseId } }
+          );
+          const slots = Array.isArray(slotsResp?.data) ? slotsResp.data : [];
+          return { baseId, slots };
+        } catch (_) {
+          return { baseId, slots: [] };
+        }
+      })
+    );
+    // Index the slots by (base_bom_id, enterprise_bom_id) so a project with
+    // multiple slots on different revisions of the same base still lines up.
+    const slotByKey = new Map();
+    slotLookups.forEach(({ baseId, slots }) => {
+      slots.forEach((slot) => {
+        // bom-groups can return either the module linkage row directly or a
+        // grouped shape with nested `versions[]`. Handle both — the shape
+        // Yash's BomStructureDialog reads is a flat list of slot rows.
+        const list = Array.isArray(slot?.versions) ? slot.versions : [slot];
+        list.forEach((entry) => {
+          const moduleId = entry?.bom_module_id || entry?.entry_id || null;
+          const enterpriseBomId = entry?.enterprise_bom_id || null;
+          if (!moduleId || !enterpriseBomId) return;
+          slotByKey.set(`${baseId}::${enterpriseBomId}`, moduleId);
+        });
+      });
+    });
+
+    const boms = existing.map((b) => {
+      const key = `${b.base_bom_id}::${b.enterprise_bom_id}`;
+      const moduleId = slotByKey.get(key) || null;
+      return {
+        bom_module_id: moduleId,
+        entry_id: moduleId,
+        enterprise_bom_id: b.enterprise_bom_id || null,
+        base_bom_id: b.base_bom_id || null,
+        bom_code: b.bom_code || '',
+        bom_name: b.bom_name || '',
+      };
+    });
     return { success: true, boms };
   } catch (error) {
     return {
@@ -950,6 +996,54 @@ export async function fetchEnterpriseBomDetail(enterpriseBomId) {
     return {
       success: false,
       error: error?.response?.data?.error || error?.message || 'BOM detail fetch failed',
+    };
+  }
+}
+
+// Aditya's revision-preview API. Parses an already-uploaded revision sheet
+// (referenced by bulk_import_id) into a comparison-shaped version tree, so we
+// can render the "what the uploaded sheet would become" side of a diff without
+// implementing our own recursive Excel-to-tree walker.
+//
+// enterpriseBomId is expected to be the R5 draft; the current-side items it
+// returns will be empty (R5 has no items yet) — WE DISCARD IT. Only the
+// preview_version half of the response is used here. R4's real contents come
+// from fetchEnterpriseBomDetail(supersededId) called separately, and the two
+// are diffed on the FE.
+//
+// Response shape (see BE bom_revision_preview_service.py):
+//   { success, data: [{ bom_name, bom_code, versions: [current, preview] }],
+//     bulk_import: {...}, hydrated_sheet_export: {...}, match_summary: {...} }
+export async function fetchBomRevisionPreview({ enterpriseBomId, bulkImportId }) {
+  const client = buildClient();
+  if (!client) return { success: false, error: 'No Factwise session' };
+  try {
+    const { data } = await client.post(
+      '/organization/bom/admin/revision-preview/',
+      { enterprise_bom_id: enterpriseBomId, bulk_import_id: bulkImportId }
+    );
+    // Extract the preview version — it is always the second entry per BE
+    // contract (index 0 is current/R5, index 1 is preview built from sheet).
+    const group = Array.isArray(data?.data) ? data.data[0] : null;
+    const versions = Array.isArray(group?.versions) ? group.versions : [];
+    const previewVersion = versions.find(
+      (v) => String(v?.entry_id || '').startsWith('preview:') || v?.bom_status === 'PREVIEW'
+    ) || versions[1] || null;
+    return {
+      success: true,
+      previewVersion,
+      hydratedSheetExport: data?.hydrated_sheet_export || null,
+      matchSummary: data?.match_summary || null,
+      raw: data,
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error:
+        error?.response?.data?.error
+        || (typeof error?.response?.data === 'string' ? error.response.data : null)
+        || error?.message
+        || 'Revision preview failed',
     };
   }
 }

@@ -192,13 +192,16 @@ export default function FactwiseBomDirectoryExportDialog({
       PaperProps={{ sx: { borderRadius: '14px' } }}
     >
       <DialogTitle
+        // component=div so the nested Typography variant="h6" doesn't render
+        // as <h6> inside <h2> — invalid nesting per validateDOMNesting.
+        component="div"
         sx={{
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
         }}
       >
-        <Typography variant="h6" sx={{ fontWeight: 650 }}>
+        <Typography variant="h6" component="h2" sx={{ fontWeight: 650 }}>
           Export to Factwise BOM Directory
         </Typography>
         {!isRunning && (

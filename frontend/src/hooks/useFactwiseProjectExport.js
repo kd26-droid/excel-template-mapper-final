@@ -21,20 +21,50 @@ import api from '../services/api';
 // the revise flow — FactWise's BOM_UPDATE validator errors with
 // UnreferencedSubBOMConfiguration on any BOM ID row that isn't the target
 // BOM's code AND isn't referenced as a sub-BOM.
+// Locate the actual header row in a FactWise-format BOM sheet. Row 4 is the
+// spec, but blankrows handling in some paths can shift things — so scan.
+// Returns { headerRow, headers } or { headerRow: -1 } if not found.
+function locateBomHeaderRow(aoa) {
+  for (let r = 0; r < Math.min(aoa.length, 10); r++) {
+    const row = aoa[r] || [];
+    for (const cell of row) {
+      const v = String(cell || '').trim().toLowerCase();
+      if (v === 'bom id' || v === 'raw material code' || v === 'finished good code') {
+        return { headerRow: r, headers: row.map((h) => String(h ?? '').trim()) };
+      }
+    }
+  }
+  return { headerRow: -1, headers: [] };
+}
+
+// Rebuild the sheet's array-of-arrays into FactWise's canonical layout:
+// rows 1-3 spacer (row 3 gets a single space so trimmers don't drop it),
+// row 4 headers, row 5+ data. openpyxl/Aditya's parser reads absolute row
+// 4 as headers, so this positioning matters — SheetJS's aoa_to_sheet will
+// otherwise compact away empty leading rows.
+function buildFactwiseFormatAoa(headers, dataRows) {
+  const width = headers.length;
+  const emptyRow = new Array(width).fill('');
+  const spacerRow3 = new Array(width).fill('');
+  spacerRow3[0] = ' ';
+  return [emptyRow, [...emptyRow], spacerRow3, headers, ...dataRows];
+}
+
 async function retargetBomSheetToCode(file, targetCode) {
   if (!targetCode) return file;
   try {
     const buf = await file.arrayBuffer();
     const wb = XLSX.read(buf, { type: 'array' });
-    const sheetName = wb.SheetNames[0];
-    const ws = wb.Sheets[sheetName];
+    const ws = wb.Sheets[wb.SheetNames[0]];
     const aoa = XLSX.utils.sheet_to_json(ws, {
       header: 1,
       defval: '',
-      blankrows: false,
+      blankrows: true,
     });
     if (!aoa.length) return file;
-    const headers = aoa[0].map((h) => String(h ?? '').trim());
+    const { headerRow, headers } = locateBomHeaderRow(aoa);
+    if (headerRow < 0) return file;
+
     const idxBomId = headers.findIndex(
       (h) => /^bom\s*id$/i.test(h) || /^bom_code$/i.test(h)
     );
@@ -43,42 +73,150 @@ async function retargetBomSheetToCode(file, targetCode) {
     );
     if (idxBomId < 0) return file;
 
+    const dataRows = aoa.slice(headerRow + 1);
+
     // First pass: build the set of Sub BOM IDs referenced anywhere. Any BOM ID
     // that IS also a Sub BOM ID represents a legitimate sub-BOM in the tree
     // and must stay named the same. All other BOM ID values are candidates
     // for the "main" BOM row — those get retargeted to targetCode.
     const referencedAsSub = new Set();
     if (idxSubBomId >= 0) {
-      for (let r = 1; r < aoa.length; r++) {
-        const v = String(aoa[r][idxSubBomId] ?? '').trim();
+      for (const row of dataRows) {
+        const v = String(row?.[idxSubBomId] ?? '').trim();
         if (v) referencedAsSub.add(v);
       }
     }
 
     // Renames map: whatever the mapper called the main BOM → targetCode.
     const renames = {};
-    for (let r = 1; r < aoa.length; r++) {
-      const v = String(aoa[r][idxBomId] ?? '').trim();
+    for (const row of dataRows) {
+      const v = String(row?.[idxBomId] ?? '').trim();
       if (!v) continue;
       if (referencedAsSub.has(v)) continue; // real sub-BOM, leave alone
       if (!renames[v]) renames[v] = targetCode;
     }
     if (!Object.keys(renames).length) return file;
 
-    for (let r = 1; r < aoa.length; r++) {
-      const b = String(aoa[r][idxBomId] ?? '').trim();
-      if (b && renames[b]) aoa[r][idxBomId] = renames[b];
+    for (const row of dataRows) {
+      if (!Array.isArray(row)) continue;
+      const b = String(row[idxBomId] ?? '').trim();
+      if (b && renames[b]) row[idxBomId] = renames[b];
       // Also rewrite Sub BOM ID cells that pointed at the mapper's main code
       // (children of the top-level BOM must reference the new code).
       if (idxSubBomId >= 0) {
-        const s = String(aoa[r][idxSubBomId] ?? '').trim();
-        if (s && renames[s]) aoa[r][idxSubBomId] = renames[s];
+        const s = String(row[idxSubBomId] ?? '').trim();
+        if (s && renames[s]) row[idxSubBomId] = renames[s];
       }
     }
 
-    const newWs = XLSX.utils.aoa_to_sheet(aoa);
+    // Rebuild in canonical FactWise layout (row 4 header) so downstream
+    // parsers that index by absolute row see the right thing.
+    const finalAoa = buildFactwiseFormatAoa(headers, dataRows);
+    const newWs = XLSX.utils.aoa_to_sheet(finalAoa);
     const newWb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(newWb, newWs, sheetName);
+    XLSX.utils.book_append_sheet(newWb, newWs, 'BOM Data');
+    const out = XLSX.write(newWb, { bookType: 'xlsx', type: 'array' });
+    const blob = new Blob([out], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    return new File([blob], file.name, { type: blob.type });
+  } catch {
+    return file;
+  }
+}
+
+// Recursively flatten an R4 BOM's item tree into a { raw_material_code:
+// {quantity, cost_per_unit, measurement_unit} } map. Sub-BOM entries are
+// walked but not indexed by themselves — only leaf raw materials go into
+// the map. Alternates are indexed too since a mapper-authored sheet can
+// list either primary or alternate item codes in `Raw material code`.
+function flattenR4ItemsByCode(bomItems, out = {}) {
+  const list = Array.isArray(bomItems) ? bomItems : [];
+  for (const item of list) {
+    const rm = item?.raw_material_item;
+    if (rm?.code) {
+      const key = String(rm.code).trim();
+      if (key && !(key in out)) {
+        out[key] = {
+          quantity: item?.quantity ?? null,
+          cost_per_unit: item?.cost_per_unit ?? null,
+          measurement_unit_id: item?.measurement_unit ?? null,
+        };
+      }
+    }
+    const alts = Array.isArray(item?.alternates) ? item.alternates : [];
+    for (const altWrap of alts) {
+      const alt = altWrap?.alternate_bom_item || altWrap;
+      const altCode = alt?.raw_material_item?.code;
+      if (altCode) {
+        const key = String(altCode).trim();
+        if (key && !(key in out)) {
+          out[key] = {
+            quantity: alt?.quantity ?? null,
+            cost_per_unit: alt?.cost_per_unit ?? null,
+            measurement_unit_id: alt?.measurement_unit ?? null,
+          };
+        }
+      }
+    }
+    const subs = Array.isArray(item?.sub_bom_items) ? item.sub_bom_items : [];
+    if (subs.length) flattenR4ItemsByCode(subs, out);
+  }
+  return out;
+}
+
+// Populate empty Cost per unit cells in the revision sheet from R4's
+// stored costs. Mapper's bom_generator never writes cost (no F_COST
+// constant, cost was never a mapper field concept), so left as-is every
+// row has empty cost → Aditya's revision-preview parses "" as 0 → diffs
+// against R4's real cost on every item → 100% false-positive noise.
+// Skips cells the user explicitly populated (respects intentional cost
+// changes when a source Excel with cost mapped somehow lands here).
+async function hydrateRevisionSheetFromR4(file, r4CostByCode) {
+  if (!r4CostByCode || !Object.keys(r4CostByCode).length) return file;
+  try {
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const aoa = XLSX.utils.sheet_to_json(ws, {
+      header: 1,
+      defval: '',
+      blankrows: true,
+    });
+    if (!aoa.length) return file;
+    const { headerRow, headers } = locateBomHeaderRow(aoa);
+    if (headerRow < 0) return file;
+
+    const idxRawMat = headers.findIndex(
+      (h) => /^raw\s*material\s*code$/i.test(h)
+    );
+    const idxCost = headers.findIndex(
+      (h) => /^cost\s*per\s*unit$/i.test(h)
+    );
+    if (idxRawMat < 0 || idxCost < 0) return file;
+
+    const dataRows = aoa.slice(headerRow + 1);
+    let hydratedCount = 0;
+    for (const row of dataRows) {
+      if (!Array.isArray(row)) continue;
+      const code = String(row[idxRawMat] ?? '').trim();
+      if (!code) continue;
+      const existingCost = row[idxCost];
+      if (existingCost !== '' && existingCost !== null && existingCost !== undefined) {
+        continue; // user (or upstream) explicitly set cost — leave alone
+      }
+      const r4 = r4CostByCode[code];
+      if (r4 && r4.cost_per_unit !== null && r4.cost_per_unit !== undefined) {
+        row[idxCost] = r4.cost_per_unit;
+        hydratedCount += 1;
+      }
+    }
+    if (!hydratedCount) return file;
+
+    const finalAoa = buildFactwiseFormatAoa(headers, dataRows);
+    const newWs = XLSX.utils.aoa_to_sheet(finalAoa);
+    const newWb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(newWb, newWs, 'BOM Data');
     const out = XLSX.write(newWb, { bookType: 'xlsx', type: 'array' });
     const blob = new Blob([out], {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -100,10 +238,15 @@ async function renameCollidingBomCodes(file, existingCodes) {
     const wb = XLSX.read(buf, { type: 'array' });
     const sheetName = wb.SheetNames[0];
     const ws = wb.Sheets[sheetName];
+    // blankrows:true (default) preserves the 3-row spacer FactWise's format
+    // expects above HEADER_ROW=4. Without this, blank rows get stripped and
+    // the rewritten sheet has headers on row 2 instead of row 4 — every
+    // FactWise BOM parser then reports "Missing required columns" because
+    // it reads absolute row 4 and finds empty cells.
     const aoa = XLSX.utils.sheet_to_json(ws, {
       header: 1,
       defval: '',
-      blankrows: false,
+      blankrows: true,
     });
     if (!aoa.length) return { file, renames: {} };
     const headers = aoa[0].map((h) => String(h ?? '').trim());
@@ -174,6 +317,13 @@ export const PHASES = {
   BOM_PROCESSING: 'BOM_PROCESSING',
   BOM_ERROR: 'BOM_ERROR',
   BOM_DONE: 'BOM_DONE',
+  // Revise-only. Fires as the FIRST phase of any revise export, BEFORE any
+  // FactWise-mutating call — no item upload, no /revise/, no sheet upload.
+  // Dialog fetches R4 (read-only) + mapper's own bom_tree (read-only,
+  // session-scoped) and shows a diff. Confirm sets the flag and re-enters
+  // runFromCheckpoint to do the actual work. Reject → IDLE, no state to
+  // unwind server-side.
+  REVIEW_DIFF: 'REVIEW_DIFF',
   // Pause between BOM creation and BOM attach — the BOM record + its
   // bom_items are populated by an async pipeline; hitting attach before
   // /bom/{id}/admin/ returns the full item tree causes create_bom_module
@@ -263,6 +413,13 @@ const emptyState = {
   // Set once we've called /bom/admin/<id>/revise/ — this is the new DRAFT id
   // we upload the bulk import against. Cached so retries don't re-revise.
   revisedNewEnterpriseBomId: null,
+  // Cached from R5's admin detail (fetched during runBomStep Path A) so the
+  // post-review confirm flow can call bulk_import/process/ without a second
+  // round-trip. process/ needs all four of these as additional_information.
+  revisedTemplateId: null,
+  revisedFinishedGoodId: null,
+  revisedEntityIds: [],
+  revisedTargetBomCode: null,
   // Item step checkpoint
   itemBulkImportId: null,
   itemCreated: [],
@@ -279,6 +436,12 @@ const emptyState = {
   lastError: null,
   lastResponseType: null,
   lastBulkImportId: null,
+  // Revision review gate. Revise-mode exports STOP on REVIEW_DIFF as their
+  // very first phase. Only after the user hits Confirm in the diff dialog
+  // does this flip true, and runFromCheckpoint proceeds into the item →
+  // revise → sheet-upload → handoff sequence. Reject resets to IDLE with
+  // this still false and no FactWise state to unwind.
+  revisionReviewConfirmed: false,
 };
 
 function loadCheckpoint(sessionId) {
@@ -477,15 +640,49 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
           const pickedBom = pickedDetailResp?.bom;
           const pickedStatus = pickedBom?.bom_status;
           if (pickedStatus === 'ONGOING') {
-            const revised = await reviseEnterpriseBom(originalReviseId);
-            if (!revised?.success || !revised?.enterprise_bom_id) {
-              patch({
-                phase: PHASES.BOM_ERROR,
-                lastError: revised?.error || 'Could not create a BOM revision in Factwise',
-              });
-              return { ok: false };
+            // Before calling /revise/, check whether an orphan DRAFT for
+            // the next revision already exists. This happens whenever a
+            // prior revise attempt didn't fully complete — user rejected
+            // in the diff review, the flow errored between /revise/ and
+            // handoff save, tab was closed mid-flight, etc. In all those
+            // cases FactWise's admin_revise_bom deterministically builds
+            // the same bom_code for R5 (`<code>_R<version+1>` or the
+            // suffix-replace variant) and the unique-code constraint
+            // rejects the second attempt with a 500. Reusing the orphan
+            // instead of creating a duplicate is both correct (nothing
+            // has been committed to that draft yet) and the ONLY way to
+            // recover without a manual FactWise cleanup.
+            const pickedBaseBomId = pickedBom?.base_bom_id;
+            const nextVersion = (pickedBom?.version || 1) + 1;
+            let existingDraftId = null;
+            if (pickedBaseBomId) {
+              const codesResp = await fetchEnterpriseBomCodes();
+              if (codesResp?.success) {
+                const orphan = (codesResp.boms || []).find((b) => (
+                  String(b.base_bom_id) === String(pickedBaseBomId)
+                  && Number(b.version) === Number(nextVersion)
+                ));
+                if (orphan?.enterprise_bom_id) {
+                  const orphanDetail = await fetchEnterpriseBomDetail(orphan.enterprise_bom_id);
+                  if (orphanDetail?.success && orphanDetail.bom?.bom_status === 'DRAFT') {
+                    existingDraftId = orphan.enterprise_bom_id;
+                  }
+                }
+              }
             }
-            newDraftId = revised.enterprise_bom_id;
+            if (existingDraftId) {
+              newDraftId = existingDraftId;
+            } else {
+              const revised = await reviseEnterpriseBom(originalReviseId);
+              if (!revised?.success || !revised?.enterprise_bom_id) {
+                patch({
+                  phase: PHASES.BOM_ERROR,
+                  lastError: revised?.error || 'Could not create a BOM revision in Factwise',
+                });
+                return { ok: false };
+              }
+              newDraftId = revised.enterprise_bom_id;
+            }
           } else if (pickedStatus === 'DRAFT') {
             newDraftId = originalReviseId;
           } else {
@@ -517,15 +714,41 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
           });
           return { ok: false };
         }
+        // Cache these so the post-review confirm flow can call
+        // bulk_import/process/ without re-fetching R5's admin detail.
+        patch({
+          revisedTemplateId: templateId,
+          revisedFinishedGoodId: finishedGoodId,
+          revisedEntityIds: entityIds,
+          revisedTargetBomCode: targetBomCode,
+        });
 
         // FactWise's BOM_UPDATE validator requires the sheet's main BOM ID to
         // equal the target BOM's code. The mapper's Excel uses its own
         // bom_code (say "MAPPED_BOM_1"), so we rewrite the sheet so its main
         // BOM ID (and any Sub BOM ID references pointing at it) become the
         // draft's code (e.g. "ABB5_R2"). Real sub-BOMs keep their own codes.
-        const retargetedFile = await retargetBomSheetToCode(file, targetBomCode);
+        let sheetFile = await retargetBomSheetToCode(file, targetBomCode);
 
-        const uploaded = await uploadFileToFactwiseBulkImport(retargetedFile, 'BOM_REVISION');
+        // Hydrate empty Cost per unit cells from R4's stored values. Mapper's
+        // bom_generator never writes cost (no F_COST field). Without this
+        // fill-in step, Aditya's revision-preview parses "" as 0 for every
+        // row and the diff flags every item as "cost changed" against R4's
+        // real cost. Only cells the user left blank are touched — a mapped-
+        // source with real cost values takes precedence.
+        try {
+          const r4Detail = await fetchEnterpriseBomDetail(originalReviseId);
+          if (r4Detail?.success && r4Detail.bom?.bom_items) {
+            const r4Map = flattenR4ItemsByCode(r4Detail.bom.bom_items);
+            sheetFile = await hydrateRevisionSheetFromR4(sheetFile, r4Map);
+          }
+        } catch (_) {
+          // Hydration is best-effort — a fetch failure here only means
+          // the diff will show cost changes on unchanged items. It does
+          // not prevent the export from proceeding.
+        }
+
+        const uploaded = await uploadFileToFactwiseBulkImport(sheetFile, 'BOM_REVISION');
         if (!uploaded?.success) {
           patch({
             phase: PHASES.BOM_ERROR,
@@ -571,18 +794,30 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
           return { ok: false };
         }
 
-        // STOP. A revision is handed over, not completed here.
+        // Sheet uploaded, handoff record saved. Everything needed for FW's
+        // revision-preview page is now in place: R5 draft exists, sheet is
+        // in blob keyed by bulk_import_id, handoff row is written.
         //
-        // Everything needed to finish it is now readable from
-        // GET /bom/revision-handoff/<sessionId>/ : the bulk_import_id and its
-        // process arguments, the draft being imported into, and the project
-        // slots to move once that import lands.
+        // If the user hasn't reviewed the diff yet, PAUSE HERE. The export
+        // dialog reacts to REVIEW_DIFF by opening FW's comparison page in
+        // preview mode (Aditya's revision-preview endpoint). When the user
+        // clicks Confirm in FW, a postMessage flips revisionReviewConfirmed
+        // and re-enters this function; second time through, the block below
+        // is skipped and we fall through to the item step + slot revise.
         //
-        // Neither of the remaining calls can be made from here. `process/` is
-        // the importer's to run, and the slot moves cannot happen until it has:
-        // until then the draft has no items, and a slot pointed at it would be
-        // pointed at an empty BOM.
-        patch({ phase: PHASES.DONE, bomIds: [newDraftId] });
+        // Reject in FW cleans up via cancelRevisionDiff — R5 is left as an
+        // orphan draft in the admin BOM directory (harmless, no items,
+        // no project uses it), just like a manually-cancelled revision.
+        if (!stateRef.current.revisionReviewConfirmed) {
+          patch({
+            phase: PHASES.REVIEW_DIFF,
+            bomIds: [newDraftId],
+          });
+          return { ok: true, awaitingReview: true };
+        }
+        // Review confirmed — the caller (runFromCheckpoint) will now run
+        // the item step and then the slot revise. runBomStep is done.
+        patch({ phase: PHASES.BOM_DONE, bomIds: [newDraftId] });
         return { ok: true, handedOff: true };
       }
 
@@ -901,6 +1136,26 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
         patch({ lastError: 'Please enter a project name.' });
         return;
       }
+      // Existing-project exports MUST route through a revision. The old
+      // behaviour — creating a brand new BOM under the same FG and adding
+      // it alongside — was wrong: it produced a duplicate BOM record with
+      // the same finished good rather than updating the one already in the
+      // project. Force the user back to pick a revise target instead. The
+      // revise flow (Path A in runBomStep) then routes through Aditya's
+      // preview API and the handoff, and FactWise moves the slot itself.
+      if (
+        effectiveMode === PROJECT_MODES.EXISTING
+        && !(reviseEnterpriseBomId || cur.reviseEnterpriseBomId)
+      ) {
+        patch({
+          lastError:
+            'Exporting into an existing project must revise one of its BOMs. '
+            + 'Open the BOM step and pick "Revise: <BOM code>" for the BOM you '
+            + 'want this sheet to update — creating a new BOM under the same '
+            + 'finished good is no longer allowed.',
+        });
+        return;
+      }
     }
 
     // Persist config first so later steps can read from checkpoint.
@@ -937,6 +1192,20 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
     // stateRef.current).
     const startPhase = stateRef.current.phase;
 
+    // Order matters here. For a revise-mode export, item upload has to be
+    // DEFERRED until the user has confirmed the diff in FactWise's preview
+    // page — otherwise items land in the Item Directory before the user has
+    // agreed to the revision, which the user has explicitly asked us not to
+    // do. So on the first pass through revise mode we skip runItemStep,
+    // hit runBomStep (which creates R5, uploads the sheet, saves the
+    // handoff, and pauses at REVIEW_DIFF), then return. The second pass —
+    // triggered by confirmRevisionDiff after the user Confirms in FW — has
+    // revisionReviewConfirmed=true, and runs items then.
+    const cur2 = stateRef.current;
+    const isReviseFlow = Boolean(cur2.reviseEnterpriseBomId);
+    const deferItemsUntilReviewed =
+      isReviseFlow && !cur2.revisionReviewConfirmed;
+
     // Item step
     const itemDone =
       startPhase === PHASES.ITEMS_DONE
@@ -947,7 +1216,7 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
       || startPhase === PHASES.ATTACH_BOM
       || startPhase === PHASES.ATTACH_BOM_ERROR
       || startPhase === PHASES.DONE;
-    if (!itemDone) {
+    if (!itemDone && !deferItemsUntilReviewed) {
       const res = await runItemStep();
       if (!res.ok) return;
       // Give FactWise's Celery worker time to index the newly-created items
@@ -969,6 +1238,19 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
     if (!bomDone) {
       const res = await runBomStep();
       if (!res.ok) return;
+    }
+
+    // Revise-mode review pause. runBomStep patches phase to REVIEW_DIFF on
+    // the first pass through a revise flow — items haven't uploaded yet,
+    // handoff is saved, R5 draft exists. The export dialog reads this
+    // phase and opens FactWise's comparison page in preview mode. The
+    // user reviews there, and on Confirm a postMessage flows back to the
+    // export dialog which calls confirmRevisionDiff → sets the flag →
+    // re-enters runFromCheckpoint. This pass through, item step runs
+    // (deferItemsUntilReviewed is now false), BOM step is skipped
+    // (bomDone from BOM_DONE), and we finish the slot revise below.
+    if (stateRef.current.phase === PHASES.REVIEW_DIFF) {
+      return;
     }
 
     // Export-to-BOM-Directory ends here — no project, no attach.
@@ -1045,6 +1327,138 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
     });
   }, [patch]);
 
+  // Called by the export dialog when the user clicks Confirm inside FW's
+  // preview page (postMessage bridges back). This is where the real work
+  // actually happens — everything before this point (R5 draft creation,
+  // sheet upload, handoff save) is safely reversible; everything from here
+  // on is a commit.
+  //
+  // Sequence, in strict order:
+  //   1. runItemStep — upload items to Item Directory. Deferred until
+  //      confirm so we don't add items on a rejected revision.
+  //   2. Settle briefly so FactWise indexes the newly-added items before
+  //      the BOM_REVISION process/ tries to reference them by code.
+  //   3. bulk_import/process/ on the ALREADY-UPLOADED BOM sheet (same
+  //      bulk_import_id we showed the diff for). This is what actually
+  //      populates R5 with the sheet's items; before this R5 is just a
+  //      DRAFT clone of R4's items.
+  //   4. Submit R5 (DRAFT → ONGOING). This is what triggers FactWise's
+  //      admin_update_enterprise_bom_status logic to flip R4 from
+  //      ONGOING → REVISED — the moment the revision becomes "real."
+  //   5. Slot revise — for each project slot in reviseBomModuleIds,
+  //      PUT /project/<pid>/boms/<mid>/revise/ to move it from R4 to R5.
+  //      Delegated to runAttachBomStep which already handles this.
+  //
+  // On any failure, phase goes to *_ERROR and lastError carries the
+  // reason. R5 has already been committed to the admin BOM directory
+  // regardless — that's the tradeoff of splitting the flow around a
+  // user-visible review. A failed step here means R5 is left as-is; the
+  // user can retry or clean up via FactWise admin.
+  const confirmRevisionDiff = useCallback(async () => {
+    const cur = stateRef.current;
+    const newDraftId = cur.revisedNewEnterpriseBomId;
+    const bomBulkImportId = cur.bomBulkImportId;
+    const templateId = cur.revisedTemplateId;
+    const finishedGoodId = cur.revisedFinishedGoodId;
+    const entityIds = cur.revisedEntityIds || [];
+    if (!newDraftId || !bomBulkImportId || !templateId || !finishedGoodId) {
+      patch({
+        phase: PHASES.BOM_ERROR,
+        lastError:
+          'Cannot finalize revision — missing R5 draft id, bulk_import_id, '
+          + 'or the revision context (template / finished good). Retry the '
+          + 'export from Start.',
+      });
+      return;
+    }
+    patch({ revisionReviewConfirmed: true, lastError: null });
+
+    // Step 1 — items
+    const itemRes = await runItemStep();
+    if (!itemRes.ok) return;
+    // Step 2 — settle
+    patch({ phase: PHASES.ITEMS_SETTLING });
+    await new Promise((resolve) => setTimeout(resolve, ITEMS_SETTLE_MS));
+
+    // Step 3 — process the BOM_REVISION sheet into R5's items
+    patch({ phase: PHASES.BOM_PROCESSING });
+    const processed = await processFactwiseBulkImport(bomBulkImportId, {
+      import_type: 'BOM_UPDATE',
+      enterprise_bom_id: newDraftId,
+      template_id: templateId,
+      finished_good_id: finishedGoodId,
+      entity_ids: entityIds,
+    });
+    if (!processed?.success) {
+      patch({
+        phase: PHASES.BOM_ERROR,
+        lastError: processed?.error || 'BOM revision process call failed',
+        lastBulkImportId: bomBulkImportId,
+      });
+      return;
+    }
+    const resp = processed?.response || processed;
+    const rtype = resp?.response_type;
+    if (rtype && rtype !== 'Success') {
+      patch({
+        phase: PHASES.BOM_ERROR,
+        lastError: resp?.error || `BOM revision validation failed (${rtype})`,
+        lastResponseType: rtype,
+        lastBulkImportId: bomBulkImportId,
+      });
+      return;
+    }
+    // FactWise's process/ returns bom_ids covering the whole draft chain
+    // (main draft + any sub-draft revisions it triggered). Submit them all
+    // so a revised sub-BOM inside R5 also promotes correctly.
+    const bomIdsToSubmit = (resp?.bom_ids && resp.bom_ids.length)
+      ? resp.bom_ids
+      : [newDraftId];
+    patch({ phase: PHASES.BOM_DONE, bomIds: bomIdsToSubmit });
+
+    // Step 4 — submit each DRAFT → ONGOING (R5 goes ONGOING, R4 auto-flips
+    // to REVISED via admin_update_enterprise_bom_status).
+    for (const id of bomIdsToSubmit) {
+      const submitted = await submitEnterpriseBom(id);
+      if (!submitted?.success) {
+        patch({
+          phase: PHASES.BOM_ERROR,
+          lastError:
+            submitted?.error
+            || `BOM ${id} imported but could not be submitted to ONGOING.`,
+        });
+        return;
+      }
+    }
+
+    // Step 5 — slot revise for existing-project flows. NEW-mode revisions
+    // don't happen (mode picker enforces revise-only for EXISTING), but be
+    // defensive: only run attach if we actually have project + slots.
+    const afterState = stateRef.current;
+    const hasProjectAttach = Boolean(
+      afterState.projectId
+      && (afterState.reviseBomModuleIds?.length || afterState.reviseBomModuleId)
+    );
+    if (hasProjectAttach) {
+      await runAttachBomStep();
+    } else {
+      patch({ phase: PHASES.DONE });
+    }
+  }, [patch, runItemStep, runAttachBomStep]);
+
+  // Called when the user clicks Reject in FW's preview page. Nothing on the
+  // FactWise side needs a formal undo: R5 exists as an empty DRAFT (harmless
+  // — no items, no project uses it, admins can clean it up), and the sheet
+  // sits in blob storage referenced by the handoff record. Simply reset to
+  // IDLE so the user can adjust the sheet in the mapper and re-export.
+  const cancelRevisionDiff = useCallback((reason) => {
+    patch({
+      phase: PHASES.IDLE,
+      revisionReviewConfirmed: false,
+      lastError: reason || null,
+    });
+  }, [patch]);
+
   return {
     ...state,
     isEmbedded,
@@ -1052,6 +1466,7 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
     isRunning:
       state.phase !== PHASES.IDLE
       && state.phase !== PHASES.DONE
+      && state.phase !== PHASES.REVIEW_DIFF
       && !TERMINAL_ERROR_PHASES.has(state.phase),
     runFromCheckpoint,
     runItemStep,
@@ -1060,6 +1475,8 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
     runAttachBomStep,
     markRetrySucceeded,
     markRetryFailed,
+    confirmRevisionDiff,
+    cancelRevisionDiff,
     reset,
   };
 }

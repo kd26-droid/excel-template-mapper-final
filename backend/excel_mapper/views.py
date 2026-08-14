@@ -14518,7 +14518,24 @@ def bom_tree(request, session_id):
 
 @api_view(['GET'])
 def download_bom_sheet(request, session_id):
-    """Download the generated BOM as .xlsx, laid out like the FactWise import."""
+    """Download the generated BOM as .xlsx, laid out like the FactWise import.
+
+    Layout matches FactWise's own admin export (what
+    bom_revision_import_service and bom_revision_preview_service consume):
+
+    - Sheet name: 'BOM Data' — bom_revision_preview_service.py falls back to
+      workbook.active if the sheet is absent, but revision-import proper
+      looks the sheet up by name, so being explicit is safer.
+    - Rows 1-3: label / spacer rows (kept empty). The FactWise export puts a
+      title in row 1 and instructions in rows 2-3, but the parsers only
+      read HEADER_ROW=4, so blanks here work.
+    - Row 4: column headers.
+    - Row 5+: data rows.
+
+    Previously this wrote headers at row 1 (no spacer rows, sheet named
+    'BOM'), which meant every FactWise revision-import call — and Aditya's
+    revision-preview endpoint — reported all 13 required columns as missing.
+    """
     import openpyxl
     from django.http import HttpResponse
     from .bom_generator import bom_rows_as_lists
@@ -14529,10 +14546,20 @@ def download_bom_sheet(request, session_id):
 
     workbook = openpyxl.Workbook()
     sheet = workbook.active
-    sheet.title = 'BOM'
-    sheet.append(result.bom_headers)
-    for row in bom_rows_as_lists(result):
-        sheet.append(row)
+    sheet.title = 'BOM Data'
+    # Rows 1-3: spacer. Column A gets a single space in row 3 so openpyxl
+    # doesn't trim these rows on save — some readers (Aditya's included)
+    # index by absolute row number and expect at least a physically-present
+    # row above HEADER_ROW.
+    sheet.cell(row=1, column=1, value=None)
+    sheet.cell(row=2, column=1, value=None)
+    sheet.cell(row=3, column=1, value=' ')
+    for column_index, header in enumerate(result.bom_headers, start=1):
+        sheet.cell(row=4, column=column_index, value=header)
+    data_start_row = 5
+    for row_offset, row_values in enumerate(bom_rows_as_lists(result)):
+        for column_index, value in enumerate(row_values, start=1):
+            sheet.cell(row=data_start_row + row_offset, column=column_index, value=value)
 
     response = HttpResponse(
         content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
