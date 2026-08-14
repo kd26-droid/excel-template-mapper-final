@@ -5824,6 +5824,20 @@ const BomNormalizer = () => {
     };
   }, [configureParserScope, parsingPatternOptions, selectedParsingPattern]);
 
+  // Parse Fields shows one entry at a time, so it needs the detected MPN/MFR for
+  // whichever entry is on screen — not just the one example the review dialog carried.
+  const describeParserSample = useCallback((text) => {
+    const source = String(text || '');
+    if (!source) return [];
+    return parsePackedMpnManufacturerPairs(source, normalizerConfig)
+      .filter((pair) => pair?.mpn && pair?.manufacturer)
+      .map((pair) => ({
+        mpn: pair.mpn,
+        manufacturer: pair.manufacturer,
+        discarded: pair.metadata?.discardedText || getDiscardedPackedText(source, pair),
+      }));
+  }, [normalizerConfig]);
+
   const selectedParsingPatternIndex = useMemo(() => {
     if (!selectedParsingPattern) return -1;
     return parsingPatternOptions.findIndex((option) => option.key === selectedParsingPattern.key);
@@ -11188,6 +11202,8 @@ const BomNormalizer = () => {
               availableColumns={headers}
               initialColumn={configureParserInitialColumn}
               parseReference={configureParserReference}
+              sampleUnit={configureParserScope?.mode === 'pattern' ? 'group' : 'row'}
+              describeSample={describeParserSample}
               onApply={handleApplyConfigureSplitColumns}
             />
           ) : (

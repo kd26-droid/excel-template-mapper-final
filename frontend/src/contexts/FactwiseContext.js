@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   FW_SESSION_EXPIRED_EVENT,
+  fetchFactwiseEntities,
   FW_TOKEN_REFRESHED_EVENT,
   clearSessionExpired,
   isTokenExpired,
@@ -55,40 +56,9 @@ const nameFromObject = (obj) => (
   || cleanString(obj?.name)
 );
 
-const findEntityNameInToken = (token, entityId) => {
-  const payload = decodeJwtPayload(token);
-  if (!payload || typeof payload !== 'object') return '';
-
-  const direct = nameFromObject(payload);
-  if (direct && !cleanString(payload?.user_id || payload?.email)) return direct;
-
-  const targetId = cleanString(entityId);
-  const visited = new Set();
-  const stack = [payload];
-  while (stack.length) {
-    const current = stack.pop();
-    if (!current || typeof current !== 'object' || visited.has(current)) continue;
-    visited.add(current);
-
-    const currentId = cleanString(
-      current.entity_id
-      || current.entityId
-      || current.buyer_entity_id
-      || current.buyerEntityId
-      || current.id
-    );
-    const candidateName = nameFromObject(current);
-    if (candidateName && (!targetId || currentId === targetId)) {
-      return candidateName;
-    }
-
-    Object.values(current).forEach((value) => {
-      if (value && typeof value === 'object') stack.push(value);
-    });
-  }
-  return '';
-};
-
+// The token deliberately has no say in which entity this is: its `name` claim
+// is the signed-in USER (that is how "amaan_test" ended up as the procurement
+// entity on exports). Entities come from /organization/entity/ only.
 const fetchEntityNameFromFactwise = async ({ apiUrl, token, entityId }) => {
   const base = cleanString(apiUrl).replace(/\/+$/, '');
   const id = cleanString(entityId);
@@ -159,6 +129,7 @@ function readInitialContext() {
 
   return {
     isEmbedded,
+    entities: [],
     token: captured.token || window.localStorage.getItem(STORAGE_KEYS.token),
     refreshToken:
       captured.refreshToken || window.localStorage.getItem(STORAGE_KEYS.refreshToken),
@@ -176,6 +147,8 @@ function readInitialContext() {
 }
 
 const FactwiseContext = createContext({
+  entities: [],
+  chooseEntity: () => {},
   isEmbedded: false,
   token: null,
   apiEnv: null,
@@ -276,21 +249,41 @@ export function FactwiseProvider({ children }) {
   }, [contextValue.fwOrigin]);
 
   useEffect(() => {
-    if (cleanString(contextValue.entityName)) return undefined;
-
     let cancelled = false;
     const resolveEntityName = async () => {
-      const fromToken = findEntityNameInToken(contextValue.token, contextValue.entityId);
-      if (fromToken) {
-        window.localStorage.setItem(STORAGE_KEYS.entityName, fromToken);
-        if (!cancelled) setContextValue(prev => ({ ...prev, entityName: fromToken }));
+      // Always load the list: even when a name is already known, the UI needs
+      // it to offer a switch when the account has more than one entity.
+      const { entities: list } = await fetchFactwiseEntities();
+      if (cancelled) return;
+      if (list.length > 0) setContextValue(prev => ({ ...prev, entities: list }));
+
+      if (cleanString(contextValue.entityName)) return;
+
+      // An entity_id on the launch URL names exactly one of them.
+      const byId = cleanString(contextValue.entityId)
+        ? list.find(entity => entity.id === cleanString(contextValue.entityId))
+        : null;
+      // One entity means there is nothing to ask about.
+      const only = list.length === 1 ? list[0] : null;
+      const chosen = byId || only;
+      if (chosen) {
+        window.localStorage.setItem(STORAGE_KEYS.entityName, chosen.name);
+        if (chosen.id) window.localStorage.setItem(STORAGE_KEYS.entityId, chosen.id);
+        if (!cancelled) {
+          setContextValue(prev => ({ ...prev, entityName: chosen.name, entityId: chosen.id || prev.entityId }));
+        }
         return;
       }
+      // Several entities and no hint which: leave it unset so the user picks.
+      // Deliberately NOT falling back to the token here — its `name` claim is
+      // the signed-in user ("amaan_test"), which silently became the
+      // "Procurement entity name" on every export.
+      if (list.length > 1) return;
 
       const fromApi = await fetchEntityNameFromFactwise(contextValue);
-      if (fromApi) {
+      if (fromApi && !cancelled) {
         window.localStorage.setItem(STORAGE_KEYS.entityName, fromApi);
-        if (!cancelled) setContextValue(prev => ({ ...prev, entityName: fromApi }));
+        setContextValue(prev => ({ ...prev, entityName: fromApi }));
       }
     };
 
@@ -315,9 +308,18 @@ export function FactwiseProvider({ children }) {
     return () => window.removeEventListener('storage', onStorage);
   }, []);
 
+  const chooseEntity = useCallback((entity) => {
+    const name = cleanString(entity?.name || entity);
+    if (!name) return;
+    const id = cleanString(entity?.id);
+    window.localStorage.setItem(STORAGE_KEYS.entityName, name);
+    if (id) window.localStorage.setItem(STORAGE_KEYS.entityId, id);
+    setContextValue(prev => ({ ...prev, entityName: name, entityId: id || prev.entityId }));
+  }, []);
+
   const value = useMemo(
-    () => ({ ...contextValue, sessionExpired, reconnect }),
-    [contextValue, sessionExpired, reconnect]
+    () => ({ ...contextValue, sessionExpired, reconnect, chooseEntity }),
+    [contextValue, sessionExpired, reconnect, chooseEntity]
   );
   return (
     <FactwiseContext.Provider value={value}>

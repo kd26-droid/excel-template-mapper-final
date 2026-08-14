@@ -10767,6 +10767,28 @@ def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
             else:
                 seen_values.add(value)
 
+    # A generated serial must not collide with a value the rule is leaving in
+    # place. `fill_empty` on a sheet already holding '003' used to generate '003'
+    # for another row, so the tool meant to fix blank item codes handed back a
+    # sheet failing `item_code_duplicate` instead - and duplicate item codes make
+    # every BOM reference to them ambiguous.
+    #
+    # Only the values that SURVIVE this pass are reserved: under `overwrite`
+    # nothing survives, so the sequence stays exactly as before.
+    reserved_values = set()
+    if value_mode == 'serial':
+        for row_index, row in enumerate(output_rows):
+            if write_mode == 'duplicates':
+                rewritten = row_index in duplicate_rows
+            elif write_mode == 'overwrite':
+                rewritten = True
+            else:
+                rewritten = not str(row[target_index] or '').strip() if target_index < len(row) else True
+            if not rewritten and target_index < len(row):
+                value = str(row[target_index] or '').strip()
+                if value:
+                    reserved_values.add(value)
+
     for row_index, row in enumerate(output_rows):
         while len(row) < len(output_headers):
             row.append('')
@@ -10790,9 +10812,22 @@ def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
             values = [str(row[index] or '').strip() for index in source_indexes]
             generated = str(rule.get('separator') or '').join(value for value in values if value)
         elif value_mode == 'serial':
+            prefix = rule.get('serial_prefix', '') or ''
             number = serial_start + row_index if serial_increment else serial_start
-            suffix = str(number).zfill(serial_padding) if serial_padding else str(number)
-            generated = f"{rule.get('serial_prefix', '') or ''}{suffix}"
+
+            def serial_at(value):
+                suffix = str(value).zfill(serial_padding) if serial_padding else str(value)
+                return f"{prefix}{suffix}"
+
+            generated = serial_at(number)
+            # Step past anything already taken. Bounded by the row count so a
+            # pathological column cannot spin here.
+            if serial_increment:
+                limit = number + len(output_rows) + 1
+                while generated in reserved_values and number < limit:
+                    number += 1
+                    generated = serial_at(number)
+            reserved_values.add(generated)
         elif value_mode == 'conditional':
             matching_branch = next(
                 (branch for branch in prepared_branches if condition_matches(row[branch['condition_index']], branch)),
@@ -12566,7 +12601,20 @@ def required_field_report(request):
         # rule that is applied at display/export time but not written into the stored
         # grid. Apply those rules here too, otherwise this check reports the column as
         # all-blank while the user (and the actual export) see it filled.
-        headers, rows = apply_factwise_id_to_grid(headers, rows, info.get('factwise_rules') or [])
+        #
+        # Replayed as fill-only, whatever the rule's own write_mode says. This
+        # report exists to describe what is ALREADY there, so it must never
+        # rewrite a stored value: a join rule whose source column has since been
+        # emptied re-derives a worse value than the one on the sheet. That is how
+        # a grid holding 422 unique item codes was reported as "5 blank cells,
+        # 6 duplicate rows" - the numbers were of the recomputed column, and the
+        # exported file, correctly, had neither.
+        replay_rules = [
+            dict(rule, write_mode='fill_empty')
+            for rule in (info.get('factwise_rules') or [])
+            if isinstance(rule, dict)
+        ]
+        headers, rows = apply_factwise_id_to_grid(headers, rows, replay_rules)
 
         gaps = []
         for column in columns:
@@ -12768,12 +12816,27 @@ def fill_required_defaults(request):
             return Response({'success': False, 'error': 'No data to fill for this session'},
                             status=status.HTTP_400_BAD_REQUEST)
 
+        # Match the way editor_defaults resolves columns: normalized, not
+        # exact. An exact match skips silently when the session header differs
+        # only in case or spacing ("Measurement Unit"), which reads as "the
+        # default does not work" with no error anywhere.
+        def _header_key(value):
+            return re.sub(r'[^a-z0-9]+', '', str(value or '').strip().lower())
+
+        header_index_by_key = {}
+        for position, header in enumerate(headers):
+            header_index_by_key.setdefault(_header_key(header), position)
+
         filled_counts = {}
+        skipped_columns = []
         for column, value in defaults.items():
             value = str(value or '').strip()
-            if not value or column not in headers:
+            if not value:
                 continue
-            idx = headers.index(column)
+            idx = header_index_by_key.get(_header_key(column))
+            if idx is None:
+                skipped_columns.append(column)
+                continue
             n = 0
             for row in rows:
                 while len(row) <= idx:
@@ -12788,8 +12851,11 @@ def fill_required_defaults(request):
         new_version = increment_template_version(session_id)
 
         logger.info(f"🩹 fill_required_defaults on {session_id}: {filled_counts}")
+        if skipped_columns:
+            logger.info(f"🩹 fill_required_defaults skipped (no such column): {skipped_columns}")
         return Response({'success': True, 'headers': headers, 'rows': len(rows),
-                         'filled': filled_counts, 'template_version': new_version})
+                         'filled': filled_counts, 'skipped_columns': skipped_columns,
+                         'template_version': new_version})
     except Exception as e:
         logger.error(f"fill_required_defaults failed: {e}", exc_info=True)
         return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
