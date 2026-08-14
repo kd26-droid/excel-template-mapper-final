@@ -8102,6 +8102,50 @@ const BomNormalizer = () => {
     commitNormalizedResult(pendingNormalization.rows, pendingNormalization.pairingCheck);
   }, [commitNormalizedResult, pendingNormalization]);
 
+  const commitStagedPatternEdits = useCallback(() => {
+    const baseRows = sourceDataRows.length ? sourceDataRows : dataRows;
+    if (!stagedPatternEdits.length) {
+      return { headers, rows: baseRows, overrides: patternParserOverrides };
+    }
+
+    let nextHeaders = headers;
+    let nextRows = baseRows;
+    let nextOverrides = patternParserOverrides;
+
+    stagedPatternEdits.forEach((edit) => {
+      const applied = applyParserResultToSheet({
+        result: edit.result,
+        scope: edit.scope,
+        headers: nextHeaders,
+        sourceRows: nextRows,
+        headerRowIndex,
+      });
+      if (!applied) return;
+      nextHeaders = applied.nextHeaders;
+      nextRows = applied.nextRows;
+      if (applied.override) {
+        nextOverrides = [
+          ...nextOverrides.filter((override) => !(
+            normalizeKey(override.sourceHeader) === normalizeKey(applied.override.sourceHeader) &&
+            override.patternShape === applied.override.patternShape
+          )),
+          applied.override,
+        ];
+      }
+    });
+
+    const headerSet = new Set(nextHeaders);
+    setPreparedHeaders(nextHeaders);
+    setPreparedDataRows(nextRows);
+    setPatternParserOverrides(nextOverrides);
+    setStagedPatternEdits([]);
+    setRoles((prev) => Object.fromEntries(
+      Object.entries(prev).map(([key, value]) => [key, headerSet.has(value) ? value : ''])
+    ));
+
+    return { headers: nextHeaders, rows: nextRows, overrides: nextOverrides };
+  }, [dataRows, headerRowIndex, headers, patternParserOverrides, sourceDataRows, stagedPatternEdits]);
+
   const runNormalization = useCallback(async () => {
     if (!dataRows.length) {
       setError('No data rows found below the selected header row.');
@@ -8269,49 +8313,6 @@ const BomNormalizer = () => {
   // Replay every staged pattern edit onto the sheet, in the order they were
   // made. Returns the committed sheet so normalization can use it immediately
   // instead of waiting for state to settle.
-  const commitStagedPatternEdits = useCallback(() => {
-    const baseRows = sourceDataRows.length ? sourceDataRows : dataRows;
-    if (!stagedPatternEdits.length) {
-      return { headers, rows: baseRows, overrides: patternParserOverrides };
-    }
-
-    let nextHeaders = headers;
-    let nextRows = baseRows;
-    let nextOverrides = patternParserOverrides;
-
-    stagedPatternEdits.forEach((edit) => {
-      const applied = applyParserResultToSheet({
-        result: edit.result,
-        scope: edit.scope,
-        headers: nextHeaders,
-        sourceRows: nextRows,
-        headerRowIndex,
-      });
-      if (!applied) return;
-      nextHeaders = applied.nextHeaders;
-      nextRows = applied.nextRows;
-      if (applied.override) {
-        nextOverrides = [
-          ...nextOverrides.filter((override) => !(
-            normalizeKey(override.sourceHeader) === normalizeKey(applied.override.sourceHeader) &&
-            override.patternShape === applied.override.patternShape
-          )),
-          applied.override,
-        ];
-      }
-    });
-
-    const headerSet = new Set(nextHeaders);
-    setPreparedHeaders(nextHeaders);
-    setPreparedDataRows(nextRows);
-    setPatternParserOverrides(nextOverrides);
-    setStagedPatternEdits([]);
-    setRoles((prev) => Object.fromEntries(
-      Object.entries(prev).map(([key, value]) => [key, headerSet.has(value) ? value : ''])
-    ));
-
-    return { headers: nextHeaders, rows: nextRows, overrides: nextOverrides };
-  }, [dataRows, headerRowIndex, headers, patternParserOverrides, sourceDataRows, stagedPatternEdits]);
 
   const handleOpenFactwiseDialog = useCallback(() => {
     setFactwiseConfig((prev) => ({
