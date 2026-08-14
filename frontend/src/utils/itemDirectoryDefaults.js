@@ -51,14 +51,12 @@ export const ITEM_DIRECTORY_DEFAULTS = [
     field: 'Item code',
     label: 'How to set the value',
     type: 'text',
-    defaultValue: 'serial',
   },
   {
     key: 'itemCodeRowsToUpdate',
     field: 'Item code',
     label: 'Rows to update',
     type: 'text',
-    defaultValue: 'fill_empty',
   },
   {
     key: 'itemCodeDefaultValue',
@@ -166,14 +164,12 @@ export const ITEM_DIRECTORY_DEFAULTS = [
     field: 'Item code',
     label: 'Blank item codes',
     type: 'itemCodeStrategy',
-    defaultValue: 'prefix_sequence',
   },
   {
     key: 'itemCodeDuplicateStrategy',
     field: 'Item code',
     label: 'Duplicate item codes',
     type: 'itemCodeDuplicateStrategy',
-    defaultValue: 'leave',
   },
   {
     key: 'itemCodeSeparator',
@@ -187,21 +183,18 @@ export const ITEM_DIRECTORY_DEFAULTS = [
     field: 'Item code',
     label: 'Start number',
     type: 'number',
-    defaultValue: '1',
   },
   {
     key: 'itemCodePadding',
     field: 'Item code',
     label: 'Number padding',
     type: 'number',
-    defaultValue: '3',
   },
   {
     key: 'itemCodeIncrement',
     field: 'Item code',
     label: 'Increment for each row',
     type: 'boolean',
-    defaultValue: true,
   },
   {
     key: 'measurementUnit',
@@ -212,6 +205,8 @@ export const ITEM_DIRECTORY_DEFAULTS = [
   },
 ];
 
+// Nothing here carries a working default. A value only exists once the user
+// has entered and saved it, so an untouched install never rewrites a sheet.
 export const emptyItemDirectoryDefaults = ITEM_DIRECTORY_DEFAULTS.reduce((acc, item) => ({
   ...acc,
   [item.key]: item.defaultValue || '',

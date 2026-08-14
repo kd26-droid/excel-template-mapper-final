@@ -3836,6 +3836,7 @@ def data_view(request):
                     final_data,
                     settings_obj,
                     sequence_offset=start_idx,
+                    locked_codes=locked_identity_codes(info, final_headers, final_data),
                 )
             confidence_data = {}
             header_confidence_scores = {}
@@ -4968,6 +4969,7 @@ def data_view(request):
                 final_data,
                 settings_obj,
                 sequence_offset=start_idx,
+                locked_codes=locked_identity_codes(info, display_headers, final_data),
             )
         if isinstance(final_data, list):
             for row in final_data:
@@ -5466,6 +5468,68 @@ def _apply_sub_assembly_item_types(session_id, info, rows, headers):
                 row[headers[type_index]] = 'Finished good'
                 changed += 1
     return rows, changed
+
+
+def _dedupe_item_rows(rows, headers):
+    """Collapse repeated item rows, and report codes whose rows disagree.
+
+    One grid row feeds one BOM line AND one item row. A part consumed in three
+    assemblies is three grid rows on purpose — the BOM needs all three — but the
+    item directory needs it once. Deleting the repeats to satisfy the directory
+    is what silently strips those lines out of the BOM, so the collapse happens
+    here, on the way out, and the grid keeps every row.
+
+    Rows identical across every exported column collapse to the first: that is
+    the same item listed again, and nothing is lost. Rows sharing an Item code
+    but differing somewhere do NOT collapse — only the user knows which is
+    right — so they are returned as conflicts and the caller blocks the export.
+
+    Returns ``(rows, conflicting_codes)``.
+    """
+    if not headers:
+        return rows, []
+
+    code_index = -1
+    for position, header in enumerate(headers):
+        if _template_label_key(header) == _template_label_key('Item code'):
+            code_index = position
+            break
+    if code_index < 0:
+        return rows, []
+
+    width = len(headers)
+
+    def signature(row):
+        # Padded to the header count so a row with trailing blanks trimmed off
+        # still matches the identical row that kept them.
+        cells = [str(cell or '').strip() for cell in row[:width]]
+        return tuple(cells + [''] * (width - len(cells)))
+
+    first_seen = {}
+    conflicts = []
+    output = []
+    for row in rows or []:
+        if not isinstance(row, list) or code_index >= len(row):
+            output.append(row)
+            continue
+        code = str(row[code_index] or '').strip()
+        if not code:
+            # A blank code is a different failure with its own message. Passing
+            # these through keeps that check's count honest.
+            output.append(row)
+            continue
+        current = signature(row)
+        if code not in first_seen:
+            first_seen[code] = current
+            output.append(row)
+        elif first_seen[code] == current:
+            continue
+        else:
+            if code not in conflicts:
+                conflicts.append(code)
+            output.append(row)
+
+    return output, conflicts
 
 
 def _append_authored_finished_good(info, rows, headers):
@@ -6379,6 +6443,19 @@ def download_file(request, session_id=None):
             transformed_rows, all_headers = _append_authored_finished_good(
                 info, transformed_rows, all_headers
             )
+            # The item directory lists each part once; the grid lists it once
+            # per BOM line that consumes it. Collapse here rather than asking
+            # the user to delete rows — deleting a row takes it out of the BOM
+            # too. Genuinely conflicting rows are left alone and reported by
+            # validation instead.
+            transformed_rows, collapsed_conflicts = _dedupe_item_rows(
+                transformed_rows, all_headers
+            )
+            if collapsed_conflicts:
+                logger.warning(
+                    "DOWNLOAD: %d item code(s) have rows that disagree: %s"
+                    % (len(collapsed_conflicts), ', '.join(collapsed_conflicts[:5]))
+                )
 
         # Create DataFrame with duplicate column names support
         if transformed_rows and all_headers:
@@ -10499,7 +10576,10 @@ def _apply_editor_defaults_for_session(headers, rows, info):
     settings_obj = get_editor_defaults_for_entity(entity_name)
     if not settings_obj:
         return headers, rows
-    output_rows, summary = apply_editor_defaults_to_rows(headers, rows, settings_obj)
+    output_rows, summary = apply_editor_defaults_to_rows(
+        headers, rows, settings_obj,
+        locked_codes=locked_identity_codes(info, headers, rows),
+    )
     if isinstance(info, dict):
         info['editor_defaults_last_applied'] = summary
     return headers, output_rows
@@ -10611,6 +10691,22 @@ def _legacy_factwise_id_as_column_rule(rule):
 #
 # Everything else — buyer/seller flags, procurement entity, tags, specs — is
 # still filled normally, so the row stays consistent with the rest of the sheet.
+def locked_identity_codes(info, headers, rows):
+    """Item codes whose identity columns no bulk write may touch.
+
+    The authored finished good and every row answered as a sub-BOM in the
+    structure gate. A sub-assembly's item code is what its children point at,
+    so renumbering it silently re-points the tree; its Item type is what makes
+    it an assembly rather than a purchased part.
+
+    Every path that writes these columns resolves the set here, so a row is not
+    protected in the Fill dialog and wide open to the Settings defaults.
+    """
+    codes = [good['code'] for good in _authored_finished_goods(info)]
+    codes.extend(_sub_assembly_codes_from_grid(info, headers, rows))
+    return {str(code).strip() for code in codes if str(code).strip()}
+
+
 AUTHORED_FINISHED_GOOD_LOCKED_COLUMNS = {
     'item code', 'item name', 'description', 'item type', 'measurement unit',
 }
@@ -10887,8 +10983,7 @@ def fill_or_create_column(request):
         # typing it as a raw material would contradict the BOM sheet. Their codes
         # are resolved from the popup's answers by part number, which is cheap —
         # asking generation here would re-derive the whole tree on every fill.
-        locked_codes = [good['code'] for good in _authored_finished_goods(info)]
-        locked_codes.extend(_sub_assembly_codes_from_grid(info, headers, rows))
+        locked_codes = locked_identity_codes(info, headers, rows)
         new_headers, new_rows, changed = apply_column_value_rule(
             headers, rows, clean_rule, locked_item_codes=locked_codes
         )
@@ -12827,6 +12922,15 @@ def fill_required_defaults(request):
         for position, header in enumerate(headers):
             header_index_by_key.setdefault(_header_key(header), position)
 
+        # Finished goods and sub-assemblies keep their identity columns: their
+        # item code is what the rest of the BOM points at, and their Item type
+        # is what makes them an assembly rather than a purchased part.
+        locked_codes = locked_identity_codes(info, headers, rows)
+        item_code_index = header_index_by_key.get(_header_key('Item code'))
+        # Row identities, not a counter: this loops per column, so counting each
+        # skip would report five protected rows once per column filled.
+        locked_row_ids = set()
+
         filled_counts = {}
         skipped_columns = []
         for column, value in defaults.items():
@@ -12837,10 +12941,21 @@ def fill_required_defaults(request):
             if idx is None:
                 skipped_columns.append(column)
                 continue
+            column_is_locked = (
+                _template_label_key(column) in AUTHORED_FINISHED_GOOD_LOCKED_COLUMNS
+                and locked_codes and item_code_index is not None
+            )
             n = 0
             for row in rows:
                 while len(row) <= idx:
                     row.append('')
+                if (
+                    column_is_locked
+                    and item_code_index < len(row)
+                    and str(row[item_code_index] or '').strip() in locked_codes
+                ):
+                    locked_row_ids.add(id(row))
+                    continue
                 if str(row[idx] or '').strip() == '':
                     row[idx] = value
                     n += 1
@@ -12855,6 +12970,7 @@ def fill_required_defaults(request):
             logger.info(f"🩹 fill_required_defaults skipped (no such column): {skipped_columns}")
         return Response({'success': True, 'headers': headers, 'rows': len(rows),
                          'filled': filled_counts, 'skipped_columns': skipped_columns,
+                         'locked_rows_skipped': len(locked_row_ids),
                          'template_version': new_version})
     except Exception as e:
         logger.error(f"fill_required_defaults failed: {e}", exc_info=True)
@@ -13518,6 +13634,13 @@ def resolve_item_code(request):
                             status=status.HTTP_400_BAD_REQUEST)
 
         idx = headers.index(column)
+        # Same lock the Fill / Create Column dialog honours. Without it this
+        # path renumbered sub-assemblies, and their codes are what the rest of
+        # the BOM references.
+        locked_codes = locked_identity_codes(info, headers, rows) if _template_label_key(column) in AUTHORED_FINISHED_GOOD_LOCKED_COLUMNS else set()
+        # A set, not a counter: both passes below walk every row, so counting
+        # each skip would report five protected rows as ten.
+        locked_row_ids = set()
         used = set()
         for row in rows:
             v = str((row[idx] if idx < len(row) else '') or '').strip()
@@ -13542,6 +13665,9 @@ def resolve_item_code(request):
         for row in rows:
             while len(row) <= idx:
                 row.append('')
+            if str(row[idx] or '').strip() in locked_codes:
+                locked_row_ids.add(id(row))
+                continue
             if str(row[idx] or '').strip() == '':
                 if blank_strategy == 'prefix_sequence':
                     row[idx] = next_code()
@@ -13577,6 +13703,11 @@ def resolve_item_code(request):
                 v = str(row[idx] or '').strip()
                 if not v:
                     continue
+                if v in locked_codes:
+                    # Its duplicate is the copy to rename, not this row.
+                    seen.setdefault(v, 1)
+                    locked_row_ids.add(id(row))
+                    continue
                 if v not in seen:
                     seen[v] = 1
                     continue
@@ -13601,8 +13732,11 @@ def resolve_item_code(request):
 
         logger.info(f"🆔 resolve_item_code on {session_id}: filled {blanks_filled} blanks, "
                     f"resolved {dups_resolved} duplicates ({blank_strategy}/{duplicate_strategy})")
+        if locked_row_ids:
+            logger.info(f"🔒 resolve_item_code left {len(locked_row_ids)} locked row(s) alone")
         return Response({'success': True, 'headers': headers, 'rows': len(rows),
                          'blanks_filled': blanks_filled, 'duplicates_resolved': dups_resolved,
+                         'locked_rows_skipped': len(locked_row_ids),
                          'template_version': new_version})
     except Exception as e:
         logger.error(f"resolve_item_code failed: {e}", exc_info=True)
@@ -14628,6 +14762,10 @@ def _exported_item_rows(session_id):
             return None
 
         rows, headers = _append_authored_finished_good(info, list(rows or []), list(headers))
+        # Collapse exactly as the export does, so the duplicate rule fires on
+        # what actually ships. Without this every part used in more than one
+        # place reads as a duplicate item and blocks an export that is fine.
+        rows, _conflicts = _dedupe_item_rows(rows, headers)
 
         code_index = -1
         for position, header in enumerate(headers):

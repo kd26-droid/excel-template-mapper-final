@@ -386,12 +386,18 @@ def validate_bom(bom_headers, bom_rows, item_rows=None, bom_row_grid_rows=None):
             rows_without_child = []
 
         if duplicate_item_codes:
+            # Rows that merely repeat the same item are collapsed on the way out
+            # and never reach here. What is left is a code whose rows disagree,
+            # which is a real conflict: two different parts are claiming it.
             errors.append({
                 'rule': 'item_code_duplicate',
                 'codes': duplicate_item_codes[:10],
                 'count': len(duplicate_item_codes),
-                'message': ('%d item code(s) are used by more than one item, so BOM references '
-                            'are ambiguous.' % len(duplicate_item_codes)),
+                'message': ('%d item code(s) are shared by rows that describe different parts, '
+                            'so BOM references to them are ambiguous. Either give the rows '
+                            'different item codes, or make them match exactly if they are the '
+                            'same part. Deleting a row also removes it from the BOM.'
+                            % len(duplicate_item_codes)),
             })
 
         # Finished goods sit at the top of their BOM, so they are never a child

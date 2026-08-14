@@ -1435,7 +1435,9 @@ const EnhancedDataEditor = () => {
 
       const itemCodePrefix = String(savedDefaults.itemCodePrefix || '').trim();
       const itemCodeColumn = headerSet.has('Item code') ? 'Item code' : '';
-      const itemCodeMode = savedDefaults.itemCodeContentType || 'serial';
+      // No mode saved means no item code rule at all — the tool does not pick
+      // one on the user's behalf.
+      const itemCodeMode = String(savedDefaults.itemCodeContentType || '').trim();
 
       // Settings offers five ways to set Item code; only 'fixed' (above) and
       // 'serial' (below) were ever applied, so copy / join / if-else were saved
@@ -1495,8 +1497,10 @@ const EnhancedDataEditor = () => {
         const blankStrategy = savedDefaults.itemCodeBlankStrategy === 'prefix_sequence'
           ? 'prefix_sequence'
           : 'leave';
+        // Only what was saved. An unset duplicate strategy leaves duplicates
+        // alone rather than quietly renaming rows.
         const duplicateStrategy = (() => {
-          const requested = savedDefaults.itemCodeDuplicateStrategy || 'prefix_sequence';
+          const requested = String(savedDefaults.itemCodeDuplicateStrategy || '').trim();
           if (requested === 'suffix') return 'suffix';
           if (requested === 'prefix_sequence') return 'prefix_sequence';
           return 'leave';
@@ -1510,7 +1514,7 @@ const EnhancedDataEditor = () => {
             prefix: itemCodePrefix,
             separator: savedDefaults.itemCodeSeparator ?? '-',
             start: Math.max(1, Number.parseInt(savedDefaults.itemCodeStart || '1', 10) || 1),
-            padding: Math.max(0, Number.parseInt(savedDefaults.itemCodePadding || '3', 10) || 0),
+            padding: Math.max(0, Number.parseInt(savedDefaults.itemCodePadding, 10) || 0),
             increment: savedDefaults.itemCodeIncrement !== false,
           });
           if (!resp.data?.success) {
@@ -3298,9 +3302,12 @@ const EnhancedDataEditor = () => {
     },
     item_code_duplicate: {
       column: 'Item code',
-      title: 'Item codes are not unique',
-      rule: 'Two parts sharing a code make every BOM reference to it ambiguous.',
-      action: 'Make the duplicated codes unique before exporting.',
+      title: 'One item code, two different parts',
+      rule: 'A code shared by rows that describe different parts makes every BOM '
+           + 'reference to it ambiguous. The same part listed on several lines is '
+           + 'fine — those rows are merged automatically in the item file.',
+      action: 'Give the rows different item codes, or make them match exactly if they '
+             + 'are the same part. Do not delete the row: that removes it from the BOM too.',
     },
     raw_or_sub_missing: {
       title: 'Rows reference nothing',

@@ -145,7 +145,7 @@ const serverSettingsToItemDirectoryDefaults = (settings, currentDefaults = {}) =
 
 const itemDirectoryDefaultsToServerSettings = (defaults) => {
   const prefix = cleanText(defaults.itemCodePrefix);
-  const contentType = cleanText(defaults.itemCodeContentType) || 'serial';
+  const contentType = cleanText(defaults.itemCodeContentType);
   const fixedValue = cleanText(defaults.itemCodeDefaultValue);
   return {
     item_type: cleanText(defaults.itemType),
@@ -174,7 +174,9 @@ const itemDirectoryDefaultsToServerSettings = (defaults) => {
 
 const normalizeItemDirectoryDefaultsForSave = (defaults) => ({
   ...defaults,
-  itemCodeContentType: defaults.itemCodeContentType || 'serial',
+  // Saved as chosen. Defaulting to 'serial' here is what made an untouched
+  // install generate item codes.
+  itemCodeContentType: defaults.itemCodeContentType || '',
   itemCodeRowsToUpdate: defaults.itemCodeRowsToUpdate || 'fill_empty',
   itemCodeBlankStrategy: defaults.itemCodeContentType === 'serial' ? 'prefix_sequence' : 'leave',
   itemCodeDuplicateStrategy: defaults.itemCodeRowsToUpdate === 'duplicates' ? 'prefix_sequence' : 'leave',

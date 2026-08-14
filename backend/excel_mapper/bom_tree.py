@@ -497,7 +497,7 @@ def derive_tree(records, level_column, code_column,
             # itself — that is a one-node cycle, not a tree.
             if row['parent'] is None and row['code'] != root_code:
                 row['parent'] = root_code
-            row['depth'] += 1
+        _set_depth_from_root(rows, root_code)
 
     nodes = _collect_nodes(rows)
     if root_code:
@@ -595,6 +595,42 @@ def _collect_nodes(rows):
     for node in nodes.values():
         node['item_type'] = 'Raw material' if node['is_leaf'] else 'Finished good'
     return nodes
+
+
+def _set_depth_from_root(rows, root_code):
+    """Re-seat every row's depth as its distance from the authored root.
+
+    Depth starts out as ``level - min_level``, which is only right while the
+    root sits ABOVE the table. Shifting everything by one to make room for it
+    assumes exactly that — and a sheet that lists its own finished good as a row
+    breaks the assumption: the root is already at the top, no room needs making,
+    and the blanket shift pushes every block one level too deep. That is how a
+    generated sheet ends up with no Level 1 at all, starting at 2.
+
+    Distance from the root is the one definition that is correct whether the
+    root was inserted above the rows or was already among them. Rows on a cycle
+    keep the depth they had; ``_detect_cycles`` reports those separately.
+    """
+    parent_of = {}
+    for row in rows:
+        parent_of.setdefault(row['code'], row['parent'])
+
+    def distance(code):
+        seen = set()
+        steps = 0
+        current = code
+        while current is not None and current != root_code:
+            if current in seen:
+                return None
+            seen.add(current)
+            current = parent_of.get(current)
+            steps += 1
+        return steps
+
+    for row in rows:
+        steps = distance(row['code'])
+        if steps is not None:
+            row['depth'] = steps
 
 
 def _build_blocks(rows, nodes):

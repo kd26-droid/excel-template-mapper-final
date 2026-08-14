@@ -5605,8 +5605,19 @@ const applyParserResultToSheet = ({ result, scope, headers, sourceRows, headerRo
           ? (parserRow[columnIndex] ?? '')
           : (parserRow?.[parserHeaders[columnIndex]] ?? '');
       };
+      // Every configured output, split back into one value per entry, so a
+      // packed cell's 2nd entry can fill the 2nd normalized row. MPN/MFR/Extra
+      // are excluded: the pair list above already owns those.
+      const fields = {};
+      parserHeaders.forEach((header, columnIndex) => {
+        if (columnIndex === mpnIndex || columnIndex === mfrIndex || columnIndex === extraIndex) return;
+        const values = splitParserJoinedValues(valueAt(columnIndex));
+        if (values.length) fields[header] = values;
+      });
+
       rowsBySourceRow[sourceRow] = {
         pairs: buildManualPairList(valueAt(mpnIndex), valueAt(mfrIndex), valueAt(extraIndex)),
+        fields,
       };
     });
 
@@ -5636,6 +5647,62 @@ const applyParserResultToSheet = ({ result, scope, headers, sourceRows, headerRo
     override,
     scopedCount: scopedSourceRows?.length || 0,
   };
+};
+
+// Parser target column -> the normalized output field it fills. Anything not
+// listed here keeps its own name and simply becomes an extra output column,
+// which getNormalizedExportColumns already picks up.
+const NORMALIZED_FIELD_BY_PARSER_TARGET = {
+  cpn: 'cpn',
+  description: 'description',
+  quantity: 'quantity',
+  uom: 'uom',
+  'item code': 'Item code',
+};
+
+// Fields the normalizer owns outright. MPN/MFR/discarded text reach the output
+// through the pair list, which also drives alternates, vendor-prefix stripping
+// and manufacturer inheritance - overwriting them here would undo all of that.
+const PARSER_PROTECTED_NORMALIZED_FIELDS = new Set([
+  'mpn', 'manufacturer', 'discardedText',
+  'sourceRow', 'parentKey', 'parent', 'relation', 'level', 'rule', 'confidence',
+]);
+
+// Write the parsed values onto the rows normalization produced. A source row
+// expands into one output row per entry, in order, so entry N fills output N -
+// that is what makes "the MPN column shows the parsed MPN" true for alternates
+// as well as the primary.
+const applyPatternOutputsToNormalizedRows = (rows, overrides = []) => {
+  const fieldsBySourceRow = new Map();
+  overrides.forEach((override) => {
+    Object.entries(override?.rows || {}).forEach(([sourceRow, entry]) => {
+      if (entry?.fields && Object.keys(entry.fields).length) {
+        fieldsBySourceRow.set(String(sourceRow), entry.fields);
+      }
+    });
+  });
+  if (!fieldsBySourceRow.size) return rows;
+
+  const positionBySourceRow = new Map();
+  return rows.map((row) => {
+    const key = String(row?.sourceRow ?? '');
+    const fields = fieldsBySourceRow.get(key);
+    if (!fields) return row;
+
+    const position = positionBySourceRow.get(key) || 0;
+    positionBySourceRow.set(key, position + 1);
+
+    const next = { ...row };
+    Object.entries(fields).forEach(([column, values]) => {
+      const target = NORMALIZED_FIELD_BY_PARSER_TARGET[normalizeKey(column)] || column;
+      if (PARSER_PROTECTED_NORMALIZED_FIELDS.has(target)) return;
+      // Fall back to the first entry so a single-valued output (one item code
+      // for the whole cell) still reaches every row it belongs to.
+      const value = fmt(values[position] ?? values[0] ?? '');
+      if (value) next[target] = value;
+    });
+    return next;
+  });
 };
 
 // Replace any edit already staged for the same pattern — re-editing a shape
@@ -5873,10 +5940,30 @@ const BomNormalizer = () => {
     Boolean(sourceEndRow) && Number(row?.__sourceRow || 0) > Number(sourceEndRow)
   ), [sourceEndRow]);
 
+  // Staged edits read as already-applied everywhere the app only LOOKS at the
+  // parse — the review dialog's example, the pattern rules, the source preview.
+  // Committing them to the sheet is still deferred to Run normalization; this
+  // just stops the review step from describing the parse the edit replaced.
+  const previewPatternOverrides = useMemo(() => {
+    if (!stagedPatternEdits.length) return patternParserOverrides;
+    let merged = patternParserOverrides;
+    stagedPatternEdits.forEach((edit) => {
+      if (!edit.override) return;
+      merged = [
+        ...merged.filter((override) => !(
+          normalizeKey(override.sourceHeader) === normalizeKey(edit.override.sourceHeader) &&
+          override.patternShape === edit.override.patternShape
+        )),
+        edit.override,
+      ];
+    });
+    return merged;
+  }, [patternParserOverrides, stagedPatternEdits]);
+
   const normalizerConfig = useMemo(() => ({
     ...config,
-    patternParserOverrides,
-  }), [config, patternParserOverrides]);
+    patternParserOverrides: previewPatternOverrides,
+  }), [config, previewPatternOverrides]);
 
   const sourcePreviewAssemblyMatrix = useMemo(() => {
     if (!headers.length || !dataRows.length) return null;
@@ -8326,7 +8413,8 @@ const BomNormalizer = () => {
     setProgress({ processed: 0, total: runRows.length, outputRows: 0, skippedRows: 0 });
     await new Promise((resolve) => setTimeout(resolve, 0));
     try {
-      const result = await normalizeRowsChunked(runRows, runHeaders, roles, runConfig, setProgress);
+      const normalized = await normalizeRowsChunked(runRows, runHeaders, roles, runConfig, setProgress);
+      const result = applyPatternOutputsToNormalizedRows(normalized, committed.overrides);
       const pairingCheck = layoutStructure === 'assembly_quantity_matrix' || layoutStructure === 'multi_block_assembly'
         ? { checkedRows: 0, matchedRows: 0, issueRows: [] }
         : analyzeMpnManufacturerPairing(runRows, runHeaders, roles, runConfig);
@@ -8428,6 +8516,8 @@ const BomNormalizer = () => {
         patternShape: scope.patternShape || '',
         scopedCount: preview.scopedCount,
         summary: preview.override?.summary || 'manual parser outputs',
+        // Kept so the review dialog can preview the edit without committing it.
+        override: preview.override,
         result,
         scope,
       }));

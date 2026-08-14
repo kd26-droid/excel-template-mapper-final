@@ -74,15 +74,6 @@ BOM_ALTERNATE_GROUP = [
     'Alternate measurement unit',
 ]
 
-# Cost is not part of the normalized input contract, so the generator has no
-# real number to write here. Left blank, FactWise's import applies 0.001 itself
-# — but it applies it *after* the revision preview has already compared the raw
-# sheet against the stored BOM, so the preview reads blank as 0, sees 0 != 0.001
-# on the stored side, and reports every line as "cost changed". Writing the same
-# 0.001 the importer would have written makes both sides agree. The imported
-# result is unchanged; only the phantom diff goes away.
-DEFAULT_COST_PER_UNIT = '0.001'
-
 
 def build_bom_headers(alternate_sets):
     """BOM sheet headers, widened by however many alternates the data needs.
@@ -330,7 +321,6 @@ def generate_flat_bom(records, bom_header):
         row['Level'] = 1
         row['Raw material code'] = _text(primary.get(F_ITEM_CODE))
         row['Description'] = _text(primary.get(F_DESCRIPTION))
-        row['Cost per unit'] = DEFAULT_COST_PER_UNIT
         row['Quantity'] = _text(primary.get(F_QUANTITY))
         row['Measurement unit'] = _text(primary.get(F_UOM))
 
@@ -341,7 +331,7 @@ def generate_flat_bom(records, bom_header):
             names = result.bom_headers[base:base + len(BOM_ALTERNATE_GROUP)]
             values = [
                 _text(alternate.get(F_ITEM_CODE)),
-                DEFAULT_COST_PER_UNIT,
+                '',
                 _text(alternate.get(F_QUANTITY)) or _text(primary.get(F_QUANTITY)),
                 _text(alternate.get(F_UOM)) or _text(primary.get(F_UOM)),
             ]
@@ -522,7 +512,6 @@ def generate_multi_level_bom(tree, bom_header, alternates_of=None, records=None,
             else:
                 row['Raw material code'] = child_code
             row['Description'] = child.get('description', '')
-            row['Cost per unit'] = DEFAULT_COST_PER_UNIT
             row['Quantity'] = child.get('quantity', '')
             row['Measurement unit'] = child.get('uom', '')
 
@@ -532,7 +521,7 @@ def generate_multi_level_bom(tree, bom_header, alternates_of=None, records=None,
                 names = result.bom_headers[base:base + len(BOM_ALTERNATE_GROUP)]
                 values = [
                     _text(alternate.get(F_ITEM_CODE)),
-                    DEFAULT_COST_PER_UNIT,
+                    '',
                     _text(alternate.get(F_QUANTITY)) or child.get('quantity', ''),
                     _text(alternate.get(F_UOM)) or child.get('uom', ''),
                 ]
