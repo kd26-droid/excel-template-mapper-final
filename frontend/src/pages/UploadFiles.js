@@ -3146,19 +3146,24 @@ const UploadFiles = () => {
     // normalizer still carries them and BOM generation stays possible.
     let bomAnswers = passedAnswers || bomStructureAnswers;
 
-    // A reused template may already answer them. Its format answers always
-    // apply; its identity answers only if they still fit this file. When they
-    // all survive, the gate is skipped entirely.
+    // A reused template pre-answers them but never replaces the gate. Its
+    // format answers always apply and its identity answers only if they still
+    // fit this file, so reconciling still earns its keep — it seeds the dialog
+    // rather than skipping it.
+    //
+    // The gate opens even when every saved answer survives, because it also
+    // asks whether this upload is a new BOM or a revision of an existing one.
+    // That belongs to the upload, not to the customer's export format, so no
+    // template can answer it.
     if (!isPDF && !bomAnswers && clientSheetNames.length > 0) {
       const saved = getSavedBomStructure();
       if (saved) {
-        const { answers, complete } = reconcileSavedBomStructure(saved, {
+        const { answers } = reconcileSavedBomStructure(saved, {
           sheetNames: bomStructureSheetNames,
           getSheetHeaders: bomStructureHeaderReader,
           getSheetRecords: bomStructureRecordReader,
         });
-        if (complete) bomAnswers = saved;
-        else setBomStructureSeed(answers);
+        setBomStructureSeed(answers);
       }
     }
 

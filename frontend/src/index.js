@@ -5,6 +5,7 @@ import './index.css';
 import App from './App';
 import { FactWiseThemeProvider } from './utils/ThemeContext';
 import { FactwiseProvider } from './contexts/FactwiseContext';
+import FactwiseSessionExpiredBanner from './components/FactwiseSessionExpiredBanner';
 
 // Chrome's ResizeObserver fires a benign "loop completed with undelivered
 // notifications" warning whenever nested resize-observing components (MUI
@@ -34,6 +35,7 @@ root.render(
       <FactwiseProvider>
         <FactWiseThemeProvider>
           <App />
+          <FactwiseSessionExpiredBanner />
         </FactWiseThemeProvider>
       </FactwiseProvider>
     </BrowserRouter>

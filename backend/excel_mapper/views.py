@@ -5506,11 +5506,24 @@ def _append_authored_finished_good(info, rows, headers):
 
 
 def _constant_column_values(rows, headers):
-    """Columns holding the same non-blank value on every row, as {index: value}.
+    """Columns whose value we can safely inherit onto a synthesised row, as
+    {index: value}.
 
-    Used to carry enterprise-wide settings onto a synthesised row. Anything that
-    varies between items — codes, descriptions, MPNs — is deliberately excluded,
-    so only genuinely sheet-wide values propagate.
+    Enterprise-wide settings (Procurement entity name, currency, buyer/seller
+    flags, etc.) are the same across every real row, so a synthesised
+    finished-good row should carry them too. But we can NOT be strict about
+    100% match — as soon as the user edits one row's Procurement entity name
+    to something else (say, `ffg`), the column stops being "constant" and the
+    synthesised row ends up blank, which then trips a RequiredField error on
+    Factwise's item importer.
+
+    Instead we accept the MAJORITY non-blank value across the sheet:
+      - collect all non-blank values in the column
+      - pick the most common one
+      - if it appears in at least 60% of the non-blank rows, treat it as the
+        column's enterprise value
+
+    Codes / descriptions / MPNs still never inherit — see never_inherit below.
     """
     if not rows or not headers:
         return {}
@@ -5523,27 +5536,28 @@ def _constant_column_values(rows, headers):
          'MPN Code', 'CPN Code', 'ERP Code', 'SAP Item ID', 'HSN Code')
     }
 
+    from collections import Counter
+
     constants = {}
     for position, header in enumerate(headers):
         if _template_label_key(header) in never_inherit:
             continue
-        seen = None
-        consistent = True
+        values = []
         for row in rows:
             if not isinstance(row, list) or position >= len(row):
-                consistent = False
-                break
-            value = str(row[position] or '').strip()
-            if not value:
-                consistent = False
-                break
-            if seen is None:
-                seen = value
-            elif value != seen:
-                consistent = False
-                break
-        if consistent and seen:
-            constants[position] = seen
+                continue
+            v = str(row[position] or '').strip()
+            if v:
+                values.append(v)
+        if not values:
+            continue
+        counter = Counter(values)
+        majority_value, majority_count = counter.most_common(1)[0]
+        # 60% threshold: on a sheet of ~100 items, this happily inherits when
+        # 1-40 rows have been individually edited to a different value. Below
+        # that we assume the column is genuinely variable (per-row) and skip.
+        if majority_count / len(values) >= 0.6:
+            constants[position] = majority_value
     return constants
 
 
@@ -8406,6 +8420,9 @@ def apply_formula_rules(data_rows, headers, formula_rules, replace_existing=Fals
     modified_data = [row.copy() for row in data_rows]
     new_headers = headers.copy()
     new_columns = []
+    # Columns this run actually wrote into (new or existing). The caller needs
+    # them to merge the results into the editor's own data copies.
+    touched_columns = []
 
     # CRITICAL FIX: Only mark Tag columns as "used" if they're actually mapped
     # This allows formulas to reuse unmapped Tag columns
@@ -8450,7 +8467,46 @@ def apply_formula_rules(data_rows, headers, formula_rules, replace_existing=Fals
         # Skip rule if missing required fields
         if not source_column or not sub_rules:
             continue
-        
+
+        # A rule may target ANY column, not just the Tag / Specification slots
+        # that get auto-allocated below. When the destination is an ordinary
+        # column ("Item type", "Notes", ...) write straight into it — the
+        # matched value replaces whatever is there, which is the point of
+        # picking a destination.
+        explicit_target = str(rule.get('target_column') or '').strip()
+        if explicit_target and not (
+            explicit_target.startswith('Tag_')
+            or explicit_target.startswith('Specification_Value_')
+        ):
+            direct_assignments = []
+            for idx, row in enumerate(modified_data):
+                for sub_rule in sub_rules:
+                    search_text = sub_rule.get('search_text', '')
+                    output_value = sub_rule.get('output_value', '')
+                    case_sensitive = sub_rule.get('case_sensitive', False)
+                    if not search_text or not output_value:
+                        continue
+                    cell_value = str(row.get(source_column, ''))
+                    needle = search_text if case_sensitive else str(search_text).lower()
+                    haystack = cell_value if case_sensitive else cell_value.lower()
+                    if needle in haystack:
+                        if str(output_value).strip():
+                            direct_assignments.append((idx, str(output_value)))
+                        break
+
+            if direct_assignments:
+                if explicit_target not in new_headers:
+                    new_headers.append(explicit_target)
+                    new_columns.append(explicit_target)
+                used_column_names.add(explicit_target)
+                for row in modified_data:
+                    if explicit_target not in row:
+                        row[explicit_target] = ''
+                for idx, value in direct_assignments:
+                    modified_data[idx][explicit_target] = value
+                touched_columns.append(explicit_target)
+            continue
+
         # Determine column name based on type - SIMPLIFIED TAG COLUMN MANAGEMENT
         if column_type == 'Tag':
             # Check if this rule already has a target column specified
@@ -8459,12 +8515,17 @@ def apply_formula_rules(data_rows, headers, formula_rules, replace_existing=Fals
             # Initialize column_name to None to ensure it's always assigned
             column_name = None
             
+            # target_locked marks a destination the USER picked (rule editor /
+            # fill dialog). An occupied column is then the point, not a clash,
+            # so it must not be swapped for a fresh Tag_N behind their back.
+            target_locked = bool(rule.get('target_locked'))
+
             direct_target = False
             if target_column and target_column.startswith('Tag_'):
                 # Use the specified target column if it exists
                 column_name = target_column
                 direct_target = True
-                if column_name not in used_column_names:
+                if column_name not in used_column_names or target_locked:
                     pass
                 else:
                     logger.warning(f"🔧 DEBUG: Specified Tag column '{column_name}' already exists, creating new one")
@@ -8479,7 +8540,7 @@ def apply_formula_rules(data_rows, headers, formula_rules, replace_existing=Fals
                         break
             
             # If we don't have a valid column_name yet, create a new one
-            if not column_name or column_name in used_column_names:
+            if not column_name or (column_name in used_column_names and not target_locked):
                 # Use centralized function to get next available Tag column
                 # This ensures consistency with mapping logic
                 # Pass session info to get proper context
@@ -8548,6 +8609,7 @@ def apply_formula_rules(data_rows, headers, formula_rules, replace_existing=Fals
                                 modified_data[idx][column_name] = f"{existing_value}, {value}"
                         else:
                             modified_data[idx][column_name] = value
+                    touched_columns.append(column_name)
                     # Skip generic placement into existing Tag columns
                 else:
                     # Try to fit matches into existing Tag columns first (per-row first empty slot)
@@ -8572,6 +8634,7 @@ def apply_formula_rules(data_rows, headers, formula_rules, replace_existing=Fals
                             current = str(modified_data[idx].get(tcol, '') or '').strip()
                             if not current:
                                 modified_data[idx][tcol] = value
+                                touched_columns.append(tcol)
                                 placed = True
                                 break
                             # If already contains the value, treat as placed
@@ -8605,6 +8668,7 @@ def apply_formula_rules(data_rows, headers, formula_rules, replace_existing=Fals
                                             modified_data[idx][target_fold_col] = f"{existing_value}, {value}"
                                     else:
                                         modified_data[idx][target_fold_col] = value
+                                touched_columns.append(target_fold_col)
                             else:
                                 # No existing Tag_N columns — initialize the chosen column_name without growing headers list
                                 for row in modified_data:
@@ -8623,6 +8687,7 @@ def apply_formula_rules(data_rows, headers, formula_rules, replace_existing=Fals
                                 if column_name not in row:
                                     row[column_name] = ''
                             # Apply unresolved assignments
+                            touched_columns.append(column_name)
                             for idx, value in unresolved:
                                 existing_value = str(modified_data[idx].get(column_name, '')).strip()
                                 if existing_value and existing_value != value:
@@ -8635,9 +8700,15 @@ def apply_formula_rules(data_rows, headers, formula_rules, replace_existing=Fals
             # Try to use generic specification column names first
             name_column = 'Specification name'
             value_column = 'Specification value'
-            
-            # If generic names are already used, create numbered versions
-            if name_column in used_column_names or value_column in used_column_names:
+
+            # An explicit destination (picked in the rule editor) wins over
+            # auto-allocation — Specification_Value_2 pairs with
+            # Specification_Name_2.
+            chosen_target = rule.get('target_column') or ''
+            if chosen_target.startswith('Specification_Value_'):
+                value_column = chosen_target
+                name_column = chosen_target.replace('Specification_Value_', 'Specification_Name_', 1)
+            elif name_column in used_column_names or value_column in used_column_names:
                 name_column = f"Specification_Name_{spec_counter}"
                 value_column = f"Specification_Value_{spec_counter}"
                 
@@ -8684,6 +8755,11 @@ def apply_formula_rules(data_rows, headers, formula_rules, replace_existing=Fals
                         row[value_column] = ''
                 # Apply assignments
                 for idx, value in spec_assignments:
+                    # An existing destination column already has a (possibly
+                    # blank) name cell, so the init loop above skipped it —
+                    # a value without its spec name exports as an orphan.
+                    if not str(modified_data[idx].get(name_column, '') or '').strip():
+                        modified_data[idx][name_column] = specification_name
                     existing_value = str(modified_data[idx].get(value_column, '')).strip()
                     if existing_value and existing_value != value:
                         existing_values = [v.strip() for v in existing_value.split(',')]
@@ -8691,11 +8767,13 @@ def apply_formula_rules(data_rows, headers, formula_rules, replace_existing=Fals
                             modified_data[idx][value_column] = f"{existing_value}, {value}"
                     else:
                         modified_data[idx][value_column] = value
+                touched_columns.extend([name_column, value_column])
                 spec_counter += 1
     return {
         'data': modified_data,
         'headers': new_headers,
         'new_columns': new_columns,
+        'touched_columns': list(dict.fromkeys(touched_columns + new_columns)),
         'total_rows': len(modified_data)
     }
 
@@ -8777,6 +8855,13 @@ def apply_formulas(request):
         updated_formula_rules = []
         for idx, rule in enumerate(formula_rules):
             updated_rule = rule.copy()
+            # A destination the user picked by hand (rule editor / fill dialog)
+            # is not a template leftover — keep it. Without this the reassign
+            # below silently sends the values to a brand new Tag column.
+            if updated_rule.get('target_locked') and updated_rule.get('target_column'):
+                updated_formula_rules.append(updated_rule)
+                all_existing_columns.add(updated_rule['target_column'])
+                continue
             if updated_rule.get('column_type', 'Tag') == 'Tag':
                 target = updated_rule.get('target_column')
 
@@ -8847,6 +8932,34 @@ def apply_formulas(request):
             info.pop('formula_enhanced_data', None)
         info['enhanced_headers'] = formula_result['headers']
         info['current_template_headers'] = formula_result['headers']
+
+        # data_view reads edited_data / enhanced_data BEFORE
+        # formula_enhanced_data, so in a session that has been hand-edited or
+        # MPN-enhanced the values above do not reach the grid on their own.
+        # Copy just the columns this run wrote — rows are the same set in the
+        # same order — into columns those copies ALREADY have. Adding a header
+        # to enhanced_data instead knocks its positional row mapping out of
+        # step and blanks unrelated Tag columns.
+        touched = [c for c in (formula_result.get('touched_columns') or []) if c]
+        if touched:
+            computed_rows = formula_result['data']
+
+            def _merge_touched(rows):
+                if not isinstance(rows, list) or len(rows) != len(computed_rows):
+                    return
+                for row, computed in zip(rows, computed_rows):
+                    if not isinstance(row, dict) or not isinstance(computed, dict):
+                        return
+                    for column in touched:
+                        if column in row:
+                            row[column] = computed.get(column, '')
+
+            if isinstance(info.get('edited_data'), list):
+                _merge_touched(info['edited_data'])
+            mpn_enhanced = info.get('enhanced_data')
+            if isinstance(mpn_enhanced, dict):
+                _merge_touched(mpn_enhanced.get('data'))
+
         # Dynamic Tag column expansion: persist increased Tag count in session
         try:
             new_tag_indices = []
@@ -9784,6 +9897,66 @@ def save_tag_template(request):
         return Response({
             'success': False,
             'error': f'Failed to save tag template: {str(e)}'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['GET'])
+def get_default_template_headers(request):
+    """Columns of the built-in Factwise sheet.
+
+    Used by screens that need the Factwise column list without an open session
+    (e.g. building tag rules from the dashboard, where there is no uploaded
+    sheet to read headers from).
+    """
+    try:
+        tags_count = int(request.GET.get('tags_count') or 3)
+        spec_pairs_count = int(request.GET.get('spec_pairs_count') or 3)
+        customer_id_pairs_count = int(request.GET.get('customer_id_pairs_count') or 1)
+
+        headers = get_sfo_reference_headers()
+        optional_map = get_sfo_reference_optional_map()
+
+        # The sheet lists each repeated group once per physical column (two
+        # Specification triplets, one Tag, ...). Sessions get the numbered
+        # internal fields instead — Tag_1..3, Specification_Name_1..3 — and a
+        # rule's source_column has to match those, so expand the groups to the
+        # same defaults generate_template_columns() uses.
+        expansions = {
+            'Tag': [f'Tag_{i}' for i in range(1, tags_count + 1)],
+            'Specification name': [f'Specification_Name_{i}' for i in range(1, spec_pairs_count + 1)],
+            'Specification value': [f'Specification_Value_{i}' for i in range(1, spec_pairs_count + 1)],
+            'Specification UOM': [f'Specification_UOM_{i}' for i in range(1, spec_pairs_count + 1)],
+            'Customer identification name': [
+                f'Customer_Identification_Name_{i}' for i in range(1, customer_id_pairs_count + 1)
+            ],
+            'Customer identification value': [
+                f'Customer_Identification_Value_{i}' for i in range(1, customer_id_pairs_count + 1)
+            ],
+        }
+
+        result = []
+        result_optional = {}
+        for header in headers:
+            name = str(header).strip()
+            if not name:
+                continue
+            for field in expansions.get(name, [name]):
+                if field in result_optional:
+                    continue
+                result.append(field)
+                result_optional[field] = optional_map.get(name, True)
+
+        return Response({
+            'success': True,
+            'template_name': SFO_TEMPLATE_NAME,
+            'headers': result,
+            'optional_map': result_optional,
+        })
+    except Exception as e:
+        logger.error(f"Error reading default template headers: {e}")
+        return Response({
+            'success': False,
+            'error': f'Failed to read the built-in Factwise template: {str(e)}'
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -14201,6 +14374,115 @@ def generate_bom_sheet(request, session_id):
         'item_rows': result.item_rows,
         'stats': result.stats,
         'warnings': result.warnings,
+    })
+
+
+@api_view(['GET', 'POST'])
+def bom_revision_handoff(request, session_id):
+    """Everything a caller needs to finish a revision this session started.
+
+    The mapper does the first half of a revision — create the draft, retarget
+    the sheet to the draft's code, upload it to blob storage — and then stops.
+    It deliberately does NOT call ``bulk_import/process/`` or move the project's
+    slots. Whoever picks this up does both, in that order.
+
+    The ordering is the reason the slots are handed over rather than moved here:
+    until the import is processed the new revision is an empty draft, so a slot
+    pointed at it would be pointed at a BOM with no items in it.
+
+    GET  -> the bundle, or 404 if this session never uploaded a revision.
+    POST -> store the upload half. Body: bulkImportId, fileName, blobKey.
+
+    The revision half is not posted: it is already on the session, because the
+    BOM structure gate saved it as ``bom_structure.revision`` when the user
+    answered the gate. Only the upload result has to come back from the browser.
+    """
+    info = get_session(session_id)
+    if not info:
+        return Response({'success': False, 'error': 'Invalid session'},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'POST':
+        body = request.data or {}
+        bulk_import_id = str(body.get('bulkImportId') or '').strip()
+        if not bulk_import_id:
+            return Response({'success': False, 'error': 'bulkImportId is required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        info['bom_revision_handoff'] = {
+            'bulk_import_id': bulk_import_id,
+            'file_name': str(body.get('fileName') or '').strip(),
+            'blob_key': str(body.get('blobKey') or '').strip(),
+            # The draft the sheet was retargeted to and uploaded against. Not
+            # the BOM the user picked — that one is now superseded.
+            'enterprise_bom_id': str(body.get('enterpriseBomId') or '').strip(),
+            'bom_code': str(body.get('bomCode') or '').strip(),
+            'template_id': str(body.get('templateId') or '').strip(),
+            'finished_good_id': str(body.get('finishedGoodId') or '').strip(),
+            'entity_ids': [str(e) for e in (body.get('entityIds') or []) if e],
+            'uploaded_at': datetime.now().isoformat(),
+        }
+        save_session(session_id, info)
+        return Response({'success': True, 'handoff': info['bom_revision_handoff']})
+
+    handoff = info.get('bom_revision_handoff')
+    if not handoff:
+        return Response({
+            'success': False,
+            'error': 'This session has not uploaded a BOM revision.',
+        }, status=status.HTTP_404_NOT_FOUND)
+
+    revision = (info.get('bom_structure') or {}).get('revision') or {}
+    slots = revision.get('slots') or []
+
+    # Four ids, flat. Everything here is something the caller cannot work out
+    # for itself: the import to process, the draft to process it into, and the
+    # project rows to point at that draft once it has.
+    return Response({
+        'success': True,
+        'session_id': session_id,
+
+        # The uuid bulk_import/process/ takes.
+        'bulk_import_id': handoff.get('bulk_import_id'),
+
+        # The BOM being revised INTO — the draft created by bom/admin/<id>/revise/
+        # and the one the uploaded sheet was retargeted to. This is the
+        # enterprise_bom_id that goes in the process/ body, and the one the
+        # project slots move onto afterwards.
+        'enterprise_bom_id': handoff.get('enterprise_bom_id'),
+
+        # The project holding the rows to move. Null when the user revised in
+        # the BOM directory only and picked no project — then there is nothing
+        # to move and bom_module_ids is empty.
+        'project_id': revision.get('projectId'),
+
+        # The project's own BOM uuids to revise onto the draft above. These are
+        # LINKAGE ids (bom_module_id), not enterprise_bom_ids — the revise route
+        # is the only one that names the parameter honestly, its siblings take
+        # the same value under the name enterprise_bom_id.
+        #
+        # One PUT per id, sequentially with a fresh process_id each, and only
+        # after the import has been processed: until then the draft has no items
+        # and the slots would point at an empty BOM.
+        'bom_module_ids': [
+            slot.get('bomModuleId') for slot in slots if slot.get('bomModuleId')
+        ],
+
+        # Context, not required to finish the job.
+        'details': {
+            'bom_code': handoff.get('bom_code'),
+            'base_bom_id': revision.get('baseBomId'),
+            'superseded_enterprise_bom_id': revision.get('enterpriseBomId'),
+            'superseded_bom_code': revision.get('bomCode'),
+            'project_code': revision.get('projectCode'),
+            'file_name': handoff.get('file_name'),
+            'blob_key': handoff.get('blob_key'),
+            'uploaded_at': handoff.get('uploaded_at'),
+            # process/ also wants these three; they come off the draft's detail,
+            # which only the mapper fetched.
+            'template_id': handoff.get('template_id') or None,
+            'finished_good_id': handoff.get('finished_good_id') or None,
+            'entity_ids': handoff.get('entity_ids') or [],
+        },
     })
 
 

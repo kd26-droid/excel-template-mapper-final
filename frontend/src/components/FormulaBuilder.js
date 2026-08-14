@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Dialog,
   DialogTitle,
@@ -28,6 +28,7 @@ import {
   List,
   ListItem,
   ListItemText,
+  ListSubheader,
   CircularProgress,
   Snackbar
 } from '@mui/material';
@@ -46,6 +47,7 @@ import {
   RadioButtonUnchecked,
 } from '@mui/icons-material';
 import api from '../services/api';
+import { displayHeaderName } from '../utils/columnHeaderNames';
 
 const FormulaBuilder = ({ 
   open, 
@@ -56,7 +58,11 @@ const FormulaBuilder = ({
   columnFillStats = {},
   onApplyFormulas,
   onClear,
-  initialRules = []
+  initialRules = [],
+  // Template mode: the rules are being authored for a saved tag template, not
+  // for a live session. Everything that talks to a session (preview, conflict
+  // check, apply, clear) is off — the rules are just handed back to the parent.
+  templateMode = false
 }) => {
   // ─── STATE MANAGEMENT ───────────────────────────────────────────────────────
   const [currentTab, setCurrentTab] = useState(0);
@@ -67,6 +73,9 @@ const FormulaBuilder = ({
   const [previewData, setPreviewData] = useState(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [validationResults, setValidationResults] = useState(null);
+  const [showValidation, setShowValidation] = useState(false);
+  // Serialized rules as they were seeded; null once the user has edited them.
+  const pristineRef = useRef(null);
   const [showPreview, setShowPreview] = useState(false);
   const [selectedTemplate, setSelectedTemplate] = useState('');
   
@@ -80,6 +89,7 @@ const FormulaBuilder = ({
       source_column: '',
       column_type: 'Tag', // 'Tag' or 'Specification Value'
       specification_name: '', // Only used when column_type is 'Specification Value'
+      target_column: '', // Empty = let the backend pick the next free Tag column
       sub_rules: [createEmptySubRule()] // Array of sub-rules
     };
   }
@@ -134,6 +144,14 @@ const FormulaBuilder = ({
   const validateRules = useCallback(() => {
     const results = api.validateFormulaRules(formulaRules, availableColumns);
     setValidationResults(results);
+    // "Source column is required" on a rule nobody has typed in yet reads as a
+    // failure, not a checklist — hold the errors until the user edits
+    // something or tries to submit.
+    if (!pristineRef.current) return;
+    if (JSON.stringify(formulaRules) !== pristineRef.current) {
+      pristineRef.current = null;
+      setShowValidation(true);
+    }
   }, [formulaRules, availableColumns]);
 
   const loadTemplates = useCallback(async () => {
@@ -203,9 +221,13 @@ const FormulaBuilder = ({
         console.warn('⚠️ Some rules still invalid after normalization:', invalid);
       }
       setFormulaRules(normalizedAndMapped);
+      pristineRef.current = JSON.stringify(normalizedAndMapped);
     } else {
-      setFormulaRules([createEmptyRule()]);
+      const seeded = [createEmptyRule()];
+      setFormulaRules(seeded);
+      pristineRef.current = JSON.stringify(seeded);
     }
+    setShowValidation(false);
   }, [open, initialRules, availableColumns]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Helper function to find best column match using fuzzy matching
@@ -349,7 +371,15 @@ const FormulaBuilder = ({
   // ─── APPLY FORMULAS ─────────────────────────────────────────────────────────
   const handleApplyFormulas = async () => {
     if (!validationResults?.isValid) {
+      // Submitting is the other moment the errors become useful.
+      setShowValidation(true);
       showSnackbar('Please fix validation errors before applying', 'error');
+      return;
+    }
+
+    // No session to apply against — hand the rules to the parent to store.
+    if (templateMode) {
+      onApplyFormulas?.({ success: true, formula_rules: formulaRules, template_mode: true });
       return;
     }
 
@@ -493,6 +523,32 @@ const FormulaBuilder = ({
 
   
 
+  // Any column can be a destination. The Tag / Specification slots come first
+  // because they are the ones a rule usually fills; the rest of the sheet is
+  // listed after, and writing to one of those replaces its value.
+  const isSlotColumn = col => /^Tag_\d+$/.test(col) || /^Specification_Value_\d+$/.test(col);
+  const toOption = col => ({ field: col, label: displayHeaderName(col, availableColumns) });
+  const slotDestinations = availableColumns.filter(isSlotColumn).map(toOption);
+  const otherDestinations = availableColumns.filter(col => !isSlotColumn(col)).map(toOption);
+
+  const handleDestinationChange = (index, value) => {
+    setFormulaRules(prev => prev.map((rule, i) => {
+      if (i !== index) return rule;
+      const isSpec = value.startsWith('Specification_Value_');
+      return {
+        ...rule,
+        target_column: value,
+        // Chosen by hand, so the engine must write here instead of allocating
+        // a new Tag column when this one is occupied. Auto ('') stays unlocked.
+        target_locked: Boolean(value),
+        // column_type only distinguishes the two auto-allocated slot kinds;
+        // an ordinary destination is written directly and stays 'Tag'.
+        column_type: isSpec ? 'Specification Value' : 'Tag',
+        specification_name: isSpec ? (rule.specification_name || '') : '',
+      };
+    }));
+  };
+
   const statusIcons = {
     full: <CheckCircle sx={{ color: 'success.main', fontSize: '1rem', mr: 1 }} />,
     partial: <DonutLarge sx={{ color: 'warning.main', fontSize: '1rem', mr: 1 }} />,
@@ -530,7 +586,7 @@ const FormulaBuilder = ({
 
         <Grid container spacing={2} sx={{ mb: 3 }}>
           {/* Source Column */}
-          <Grid item xs={12}>
+          <Grid item xs={12} md={6}>
             <FormControl fullWidth size="small">
               <InputLabel>Source Column</InputLabel>
               <Select
@@ -564,7 +620,7 @@ const FormulaBuilder = ({
                     <MenuItem key={col} value={col}>
                       <Box sx={{ display: 'flex', justifyContent: 'space-between', width: '100%', alignItems: 'center' }}>
                         <Typography variant="inherit" noWrap sx={{ flexGrow: 1 }}>
-                          {col} {displayExample}
+                          {displayHeaderName(col, availableColumns)} {displayExample}
                         </Typography>
                         {icon}
                       </Box>
@@ -587,16 +643,51 @@ const FormulaBuilder = ({
             )}
           </Grid>
 
-          {/* Specification Name (only show when column_type is 'Specification Value') */}
-          {false && rule.column_type === 'Specification Value' && (
-            <Grid item xs={12} md={3}>
+          {/* Destination — where the matched value is written. Empty means
+              "let the backend pick the next free Tag column". */}
+          <Grid item xs={12} md={6}>
+            <FormControl fullWidth size="small">
+              <InputLabel>Destination Column</InputLabel>
+              <Select
+                value={rule.target_column || ''}
+                onChange={(e) => handleDestinationChange(index, e.target.value)}
+                label="Destination Column"
+              >
+                <MenuItem value="">
+                  <em>Auto — next free Tag column</em>
+                </MenuItem>
+                {slotDestinations.length > 0 && (
+                  <ListSubheader>Tag &amp; specification columns</ListSubheader>
+                )}
+                {slotDestinations.map(option => (
+                  <MenuItem key={option.field} value={option.field}>
+                    {option.label}
+                  </MenuItem>
+                ))}
+                {otherDestinations.length > 0 && (
+                  <ListSubheader>Other columns (value is replaced)</ListSubheader>
+                )}
+                {otherDestinations.map(option => (
+                  <MenuItem key={option.field} value={option.field}>
+                    {option.label}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+          </Grid>
+
+          {/* A specification value is meaningless without the name it sits
+              under, so ask for it once a spec destination is chosen. */}
+          {rule.column_type === 'Specification Value' && (
+            <Grid item xs={12}>
               <TextField
                 fullWidth
                 size="small"
                 label="Specification Name"
-                value={rule.specification_name}
+                value={rule.specification_name || ''}
                 onChange={(e) => updateRule(index, 'specification_name', e.target.value)}
                 placeholder="e.g., Component Type"
+                helperText="Written into the matching Specification name column."
               />
             </Grid>
           )}
@@ -653,7 +744,7 @@ const FormulaBuilder = ({
               
               <TextField
                 size="small"
-                label={rule.column_type === 'Tag' ? 'Tag Value' : 'Specification Value'}
+                label="Output Value"
                 value={subRule.output_value}
                 onChange={(e) => updateSubRule(index, subIndex, 'output_value', e.target.value)}
                 placeholder={rule.column_type === 'Tag' ? 'e.g., Capacitor' : 'e.g., Passive'}
@@ -702,10 +793,12 @@ const FormulaBuilder = ({
         }}>
           <Typography variant="body2" sx={{ color: isDarkMode ? '#cbd5e1' : 'text.secondary' }}>
             <strong>Rule Preview:</strong> Check "{rule.source_column}" column and apply first matching condition to{' '}
-            {rule.column_type === 'Tag' ? (
-              'Tag column'
+            {rule.column_type === 'Specification Value' ? (
+              `"${rule.specification_name}" specification (${displayHeaderName(rule.target_column || '', availableColumns)})`
             ) : (
-              `"${rule.specification_name}" specification`
+              rule.target_column
+                ? displayHeaderName(rule.target_column, availableColumns)
+                : 'the next free Tag column'
             )}
             {rule.sub_rules && rule.sub_rules.length > 0 && (
               <Box component="span" sx={{ display: 'block', mt: 1 }}>
@@ -836,10 +929,10 @@ const FormulaBuilder = ({
             <ScienceIcon color="primary" />
             <Box>
               <Typography variant="h5" fontWeight="600">
-                Add Tags to Your Data
+                {templateMode ? 'Build Rules' : 'Apply Rules to Your Data'}
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                Create simple rules to automatically tag your components (e.g., if Description contains "Cap" then tag as "Capacitor")
+                Fill a column from what another column contains (e.g. if Description contains "Cap", write "Capacitor")
               </Typography>
             </Box>
           </Box>
@@ -875,7 +968,7 @@ const FormulaBuilder = ({
               <Box>
                 <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
                   <Typography variant="h6">
-                    Create Tagging Rules
+                    Create Rules
                   </Typography>
                   <Tooltip title="Show advanced options">
                     <IconButton 
@@ -888,8 +981,8 @@ const FormulaBuilder = ({
                 </Box>
 
 
-                {/* Validation Results */}
-                {validationResults && (
+                {/* Validation Results — hidden until the rules are touched */}
+                {validationResults && showValidation && (
                   <Box sx={{ mb: 3 }}>
                     {validationResults.errors.length > 0 && (
                       <Alert severity="error" sx={{ mb: 1 }}>
@@ -960,32 +1053,40 @@ const FormulaBuilder = ({
           
 
           <Box sx={{ display: 'flex', gap: 2 }}>
-            <Button
-              onClick={handleClearFormulas}
-              color="error"
-              disabled={loading}
-            >
-              Clear All & Remove Columns
-            </Button>
+            {/* Clearing and previewing both act on a session's columns, so they
+                are meaningless while authoring a reusable template. */}
+            {!templateMode && (
+              <Button
+                onClick={handleClearFormulas}
+                color="error"
+                disabled={loading}
+              >
+                Clear All & Remove Columns
+              </Button>
+            )}
             <Button onClick={onClose} disabled={loading}>
               Cancel
             </Button>
-            
-            <Button
-              onClick={handlePreview}
-              disabled={!validationResults?.isValid || previewLoading}
-              startIcon={previewLoading ? <CircularProgress size={16} /> : <PreviewIcon />}
-            >
-              {previewLoading ? 'Generating...' : 'Preview'}
-            </Button>
-            
+
+            {!templateMode && (
+              <Button
+                onClick={handlePreview}
+                disabled={!validationResults?.isValid || previewLoading}
+                startIcon={previewLoading ? <CircularProgress size={16} /> : <PreviewIcon />}
+              >
+                {previewLoading ? 'Generating...' : 'Preview'}
+              </Button>
+            )}
+
+            {/* Left enabled while invalid: clicking is what surfaces the
+                errors, which are hidden until the rules are touched. */}
             <Button
               onClick={handleApplyFormulas}
               variant="contained"
-              disabled={!validationResults?.isValid || loading}
+              disabled={loading}
               startIcon={loading ? <CircularProgress size={16} /> : <LabelIcon />}
             >
-              {loading ? 'Applying...' : 'Apply Tags'}
+              {templateMode ? 'Save Rules' : (loading ? 'Applying...' : 'Apply Rules')}
             </Button>
           </Box>
         </DialogActions>

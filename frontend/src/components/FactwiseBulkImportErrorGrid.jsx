@@ -496,42 +496,81 @@ export default function FactwiseBulkImportErrorGrid({
       //   Scrape the input value directly, merge into a local snapshot, and
       //   also fire the standard commit path so React/main editor stay in
       //   sync.
+      // Force-commit ANY pending inline edit before serializing. Three
+      // paths, each covering a different failure mode of MUI DataGrid v6:
+      //
+      //   1. Ask MUI directly which cells are in edit mode and stop them.
+      //      apiRef.current.getCellsInEditMode() works even when the DOM's
+      //      `.MuiDataGrid-cell--editing` class was already removed by an
+      //      earlier blur — MUI's internal state is the source of truth.
+      //
+      //   2. Force-blur the focused element. In some browser paths the
+      //      blur wouldn't fire when clicking a MUI Button (MUI cancels
+      //      the mousedown default), so the input never triggers its own
+      //      commit. Explicit blur closes that gap.
+      //
+      //   3. Scrape every INPUT/TEXTAREA inside the grid regardless of
+      //      edit-mode class and merge any value that differs from what
+      //      rowsRef already has. Belt-and-braces for the case where MUI
+      //      already tore down the edit lifecycle but our processRowUpdate
+      //      handler hasn't fired yet (React 18 batching).
       let liveRows = rowsRef.current;
+      const overrides = {};
       try {
-        const editingCells = Array.from(
-          document.querySelectorAll('.MuiDataGrid-cell--editing')
-        );
-        if (editingCells.length) {
-          const overrides = {};
-          editingCells.forEach((cellEl) => {
-            const input = cellEl.querySelector('input, textarea');
-            if (!input) return;
-            const value = input.value;
-            const rowEl = cellEl.closest('[role="row"]');
-            const rowId = rowEl?.getAttribute('data-id');
-            const field = cellEl.getAttribute('data-field');
-            if (rowId == null || !field) return;
-            if (!overrides[rowId]) overrides[rowId] = {};
-            overrides[rowId][field] = value;
-          });
-          if (Object.keys(overrides).length) {
-            liveRows = liveRows.map((r) => {
-              const patch = overrides[String(r.id)];
-              return patch ? { ...r, ...patch } : r;
-            });
-            rowsRef.current = liveRows;
-            setRows(liveRows);
-            scheduleHostSync(liveRows);
+        const editing = apiRef?.current?.getCellsInEditMode?.() || {};
+        for (const key of Object.keys(editing)) {
+          const [rid, field] = key.split('-');
+          const val = editing[key]?.value;
+          if (rid && field && val !== undefined) {
+            (overrides[rid] = overrides[rid] || {})[field] = val;
           }
+          try {
+            apiRef.current.stopCellEditMode({
+              id: editing[key]?.id ?? rid,
+              field,
+              ignoreModifications: false,
+            });
+          } catch { /* best-effort */ }
         }
-      } catch { /* best-effort — fall back to rowsRef.current */ }
-
-      // Cosmetic blur so the cell visually exits edit mode.
+      } catch { /* best-effort */ }
       try {
         if (document.activeElement instanceof HTMLElement) {
           document.activeElement.blur();
         }
       } catch { /* best-effort */ }
+      try {
+        const gridRoot = apiRef?.current?.rootElementRef?.current
+          || document.querySelector('.MuiDataGrid-root');
+        const inputs = gridRoot
+          ? Array.from(gridRoot.querySelectorAll('input, textarea'))
+          : [];
+        for (const input of inputs) {
+          if (input.type === 'checkbox' || input.type === 'radio') continue;
+          const cellEl = input.closest('[data-field], [role="cell"], [role="gridcell"]');
+          if (!cellEl) continue;
+          const field = cellEl.getAttribute('data-field');
+          const rowEl = cellEl.closest('[role="row"]');
+          const rid = rowEl?.getAttribute('data-id');
+          if (!rid || !field) continue;
+          const domVal = input.value;
+          const rowFromRef = rowsRef.current.find(
+            (r) => String(r.id) === String(rid)
+          );
+          const existing = rowFromRef?.[field] ?? '';
+          if (String(domVal) !== String(existing)) {
+            (overrides[rid] = overrides[rid] || {})[field] = domVal;
+          }
+        }
+      } catch { /* best-effort */ }
+      if (Object.keys(overrides).length) {
+        liveRows = liveRows.map((r) => {
+          const patch = overrides[String(r.id)];
+          return patch ? { ...r, ...patch } : r;
+        });
+        rowsRef.current = liveRows;
+        setRows(liveRows);
+        scheduleHostSync(liveRows);
+      }
 
       const file = rowsToXlsxFile(headers, originalHeaders, liveRows, fileName, sheetName);
       const uploaded = await uploadFileToFactwiseBulkImport(file, resourceType);
