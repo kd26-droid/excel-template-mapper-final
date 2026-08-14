@@ -5568,6 +5568,31 @@ const EnhancedDataEditor = () => {
 
   // rowIndex stays the index into rowData, not into the filtered list, so cell
   // edits and autosave keep addressing the right row whatever is filtered away.
+  const duplicateItemCodeInfo = useMemo(() => {
+    const field = itemCodeIssue?.field || getMatchingDataColumnField('Item code');
+    if (!field || !Array.isArray(rowData)) return { field: '', values: new Set(), rowCount: 0 };
+
+    const counts = new Map();
+    rowData.forEach(row => {
+      const value = String(row?.[field] ?? '').trim();
+      if (!value) return;
+      counts.set(value, (counts.get(value) || 0) + 1);
+    });
+
+    const values = new Set();
+    let rowCount = 0;
+    counts.forEach((count, value) => {
+      if (count > 1) {
+        values.add(value);
+        rowCount += count;
+      }
+    });
+
+    return { field, values, rowCount };
+  }, [getMatchingDataColumnField, itemCodeIssue?.field, rowData]);
+  const duplicateItemCodeValues = duplicateItemCodeInfo.values;
+  const hasDuplicateItemCodeRows = Boolean(duplicateItemCodeInfo.field && duplicateItemCodeInfo.rowCount > 0 && duplicateItemCodeValues.size > 0);
+
   const filteredRows = useMemo(() => ((rowData || [])
     .map((row, rowIndex) => ({ row, rowIndex }))
     .filter(({ row }) => {
@@ -6922,6 +6947,21 @@ const EnhancedDataEditor = () => {
                   <ListItemText>All rows</ListItemText>
                 </MenuItem>
                 <MenuItem
+                  onClick={() => {
+                    setRowFilterMenuAnchor(null);
+                    if (hasDuplicateItemCodeRows) {
+                      setDupHighlight({
+                        field: duplicateItemCodeInfo.field,
+                        values: duplicateItemCodeValues,
+                      });
+                    }
+                  }}
+                  disabled={!hasDuplicateItemCodeRows}
+                >
+                  <ListItemIcon>{dupHighlight?.field === duplicateItemCodeInfo.field ? <CheckIcon sx={{ color: t.color.warningText }} /> : <ContentCopyIcon sx={{ color: t.color.warningText }} />}</ListItemIcon>
+                  <ListItemText>Highlight duplicate Item codes</ListItemText>
+                </MenuItem>
+                <MenuItem
                   onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('valid_mpn'); setMpnFilterInvalidOnly(false); setPage(1); }}
                   disabled={!hasMpnValidationColumns}
                 >
@@ -7331,7 +7371,15 @@ const EnhancedDataEditor = () => {
               <Alert
                 severity="warning"
                 sx={{ mb: 1 }}
-                action={<Button color="inherit" size="small" onClick={() => setDupHighlight(null)}>Clear highlight</Button>}
+                action={(
+                  <Button
+                    color="inherit"
+                    size="small"
+                    onClick={() => setDupHighlight(null)}
+                  >
+                    Clear highlight
+                  </Button>
+                )}
               >
                 Duplicate <strong>{columnLabel(dupHighlight.field, dupHighlight.field)}</strong> values are highlighted in amber ({dupHighlight.values.size} value{dupHighlight.values.size === 1 ? '' : 's'}). Edit them so each is unique, then export again.
               </Alert>
