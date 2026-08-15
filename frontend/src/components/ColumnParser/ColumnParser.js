@@ -396,15 +396,23 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
       }
       setSampleValues(data.sample_values);
       const suggestedSeparator = data.suggested_separator || '';
-      const referenceRowIndex = parseReference?.source
-        ? data.sample_values.findIndex(value => String(value || '') === String(parseReference.source || ''))
+      const referenceSource = String(parseReference?.source || '');
+      const referenceEntrySource = String(parseReference?.entrySource || '');
+      const referenceRowIndex = referenceSource
+        ? data.sample_values.findIndex(value => String(value || '') === referenceSource)
         : -1;
       // In 'group' mode the flat sample list counts entries, not rows, so skip
       // past every entry contributed by the rows above the referenced one.
-      const referenceIndex = sampleUnit === 'group' && referenceRowIndex > 0
+      const referenceRowEntries = sampleUnit === 'group' && referenceRowIndex >= 0
+        ? expandSampleGroups(data.sample_values[referenceRowIndex], suggestedSeparator, trimValues)
+        : [];
+      const referenceEntryOffset = referenceEntrySource
+        ? Math.max(0, referenceRowEntries.findIndex(entry => entry === referenceEntrySource))
+        : 0;
+      const referenceIndex = sampleUnit === 'group' && referenceRowIndex >= 0
         ? data.sample_values
           .slice(0, referenceRowIndex)
-          .reduce((total, value) => total + expandSampleGroups(value, suggestedSeparator, trimValues).length, 0)
+          .reduce((total, value) => total + expandSampleGroups(value, suggestedSeparator, trimValues).length, 0) + referenceEntryOffset
         : referenceRowIndex;
       setCurrentSampleIndex(referenceIndex > 0 ? referenceIndex : 0);
       setTotalValues(data.total_values || data.sample_values.length);
