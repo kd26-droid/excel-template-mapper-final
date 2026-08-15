@@ -1910,9 +1910,12 @@ const BomStructureDialog = ({
           <Box key={name} sx={{ mb: 3 }}>
             <Typography variant="subtitle2" sx={{ mb: 1 }}>{name}</Typography>
 
-            {/* Naming a BOM is meaningless without seeing which one it is, so the
-                levels found in the sheet are listed alongside the field. */}
-            {structure && (
+            {/* Rendered for EVERY sheet, not only levelled ones. The root's own
+                five fields live in this card, and a flat sheet has no
+                `structure` — so guarding the whole card left flat sheets with
+                no fields at all while Continue still demanded a finished good
+                code. Only the parts that actually read `structure` — the
+                sub-assembly rows and the documents checkbox — are conditional. */}
               <Box
                 sx={{
                   mb: 2,
@@ -2037,7 +2040,7 @@ const BomStructureDialog = ({
                     controls per assembly a flex row wraps at a different point
                     for each one, so nothing lines up down the column and the
                     block reads as noise. */}
-                {assembliesFor(name).map(assembly => (
+                {structure && assembliesFor(name).map(assembly => (
                   <Box
                     key={assembly.code}
                     sx={{
@@ -2125,7 +2128,7 @@ const BomStructureDialog = ({
                     drawing, but not always — some exports write 0 on real parts
                     — and only the user knows which this sheet is. Excluding is
                     still the default because it is right more often. */}
-                {structure.documents > 0 && (
+                {structure?.documents > 0 && (
                   <Box sx={{ mt: 1 }}>
                     <FormControlLabel
                       control={
@@ -2150,7 +2153,6 @@ const BomStructureDialog = ({
                   </Box>
                 )}
               </Box>
-            )}
 
           </Box>
         );

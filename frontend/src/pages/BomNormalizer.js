@@ -3244,10 +3244,20 @@ const normalizeGroupedRows = (rows, roles, config) => {
 // itself, so a sheet that DOES state its parent is untouched and the two can
 // never be confused.
 const stampInferredParents = (rows, roles) => {
+  if (!rows?.length) return rows;
+
+  // Clear before deciding whether to write. Rows are the SAME objects across
+  // re-runs, so bailing out early used to leave the previous run's stamps in
+  // place — map a real Parent column, re-run, and every row whose stated parent
+  // cell happens to be blank still falls back to a value inferred under the old
+  // configuration. One tree built from two different derivations.
+  const clear = () => rows.forEach((row) => { delete row[LEVEL_PARENT_KEY]; });
+
   // A stated parent always wins; there is nothing to infer.
-  if (!rows?.length || !roles?.level || roles.parent) return rows;
+  if (!roles?.level || roles.parent) { clear(); return rows; }
   const codeRole = roles.cpn || roles.description;
-  if (!codeRole) return rows;
+  if (!codeRole) { clear(); return rows; }
+  clear();
 
   // Index = depth. Holds the most recent code seen at each level.
   const openAt = [];
