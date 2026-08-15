@@ -3472,7 +3472,26 @@ def save_mappings(request):
             if not has_formula_rules:
                 # No formulas, safe to use mapped data
                 info["formula_enhanced_data"] = mapping_result['data']
-                info["enhanced_headers"] = mapping_result['headers']
+                # The mapping result is built from the template, which carries
+                # the template's own slot counts. Storing it verbatim discarded
+                # any Tag / Specification / Custom identification slots added on
+                # the mapping page: the rows kept their extra columns while the
+                # header list shrank back, so those columns vanished from the
+                # export and no tool could address them.
+                mapped_headers = mapping_result['headers']
+                slot_counts = _counts_matching_headers(
+                    mapped_headers,
+                    info.get('tags_count', 3),
+                    info.get('spec_pairs_count', 3),
+                    info.get('customer_id_pairs_count', 1),
+                )
+                info["enhanced_headers"] = build_sfo_clustered_headers(
+                    mapped_headers,
+                    slot_counts['tags_count'],
+                    slot_counts['spec_pairs_count'],
+                    slot_counts['customer_id_pairs_count'],
+                )
+                info["current_template_headers"] = info["enhanced_headers"]
                 logger.info(f"✅ Stored transformed data in session (no formulas, safe to overwrite)")
         except Exception as mapping_error:
             logger.warning(f"⚠️ Failed to apply column mappings in save_mappings: {mapping_error}")
@@ -6392,8 +6411,15 @@ def download_file(request, session_id=None):
 
             # Use template headers for ordering, adding dynamic columns
             if canonical_headers:
+                # Every match below is against the internal shape (Tag_4,
+                # Specification_Name_4). A session storing the label shape
+                # ('Tag (4)') matched nothing, so the export silently fell back
+                # to the template's own slot count — added Tag / Specification /
+                # Custom identification columns were missing from the file even
+                # though the grid showed them.
+                canonical_headers = normalize_headers_to_internal(canonical_headers)
                 # Get base headers from template (non-dynamic columns)
-                base_headers = info.get('template_headers') or []
+                base_headers = normalize_headers_to_internal(info.get('template_headers') or [])
                 correct_order = [h for h in base_headers if not (
                     h.startswith('Tag_') or h.startswith('Specification_') or h.startswith('Custom_Identification_')
                 )]
@@ -7220,6 +7246,20 @@ def update_column_counts(request):
         logger.info(f"SFO SPEC GROUPS: {spec_pairs_count} clustered Specification name/value/UOM group(s)")
         logger.info(f"SFO ITEM ID GROUPS: {customer_id_pairs_count} clustered Custom identification name/value group(s)")
         logger.info(f"FINAL COMBINED HEADERS: {regenerated_headers}")
+
+        # The editor draws from `enhanced_headers`, but tools and the export read
+        # `edited_data` / `enhanced_data` — separate stored grids that kept the
+        # old column set. Adding a Tag or Specification slot therefore produced a
+        # column you could see but nothing could write to ("Column Tag_5 is not
+        # in the grid") and that never reached the exported file. Re-shape those
+        # grids onto the new header list so all of them describe one sheet.
+        for snapshot_key in ('edited_data', 'enhanced_data'):
+            reshaped = _reshape_grid_snapshot(info.get(snapshot_key), regenerated_headers)
+            if reshaped is not None:
+                info[snapshot_key] = reshaped
+                logger.info(
+                    f"🔧 Re-shaped {snapshot_key} to {len(regenerated_headers)} columns"
+                )
 
         # Compute template_optionals for the canonical headers (Tags/Spec/Customer always optional)
         def is_special_optional(h: str) -> bool:
@@ -10678,6 +10718,37 @@ def _apply_editor_defaults_for_session(headers, rows, info):
     if isinstance(info, dict):
         info['editor_defaults_last_applied'] = summary
     return headers, output_rows
+
+
+def _reshape_grid_snapshot(snapshot, new_headers):
+    """Re-key one stored grid onto `new_headers`, keeping values by position.
+
+    Slots are matched by their unique field name (Tag_1, Specification_Value_2),
+    so a column keeps its data wherever it lands in the new order and a newly
+    added slot arrives empty.
+    """
+    if not isinstance(snapshot, dict):
+        return None
+    old_headers = list(snapshot.get('headers') or [])
+    rows = snapshot.get('data')
+    if not old_headers or rows is None:
+        return None
+
+    old_fields = make_unique_field_headers(old_headers)
+    new_fields = make_unique_field_headers(new_headers)
+    position_of = {field: index for index, field in enumerate(old_fields)}
+
+    reshaped = []
+    for row in rows:
+        if isinstance(row, dict):
+            values = [row.get(header, '') for header in old_headers]
+        else:
+            values = list(row)
+        reshaped.append([
+            (values[position_of[field]] if field in position_of and position_of[field] < len(values) else '')
+            for field in new_fields
+        ])
+    return {'headers': list(new_headers), 'data': reshaped}
 
 
 def read_session_grid(session_id, info):

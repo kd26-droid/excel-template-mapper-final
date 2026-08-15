@@ -1325,6 +1325,13 @@ const EnhancedDataEditor = () => {
         if (match) return { kind: 'name', key: `internal_${match[1]}` };
         match = raw.match(/^specification_value_(\d+)$/i);
         if (match) return { kind: 'value', key: `internal_${match[1]}` };
+        // The UOM belongs to the same slot. Without this it was not part of any
+        // pair, so pruning an empty pair removed its name and value and left the
+        // UOM behind — the grid then showed a column of lone UOMs.
+        match = raw.match(/^specification_uom_(\d+)$/i);
+        if (match) return { kind: 'uom', key: `internal_${match[1]}` };
+        match = raw.match(/^specification\s+uom(?:\s*\((\d+)\))?$/i);
+        if (match) return { kind: 'uom', key: `external_${match[1] || 'base'}` };
         match = raw.match(/^specification\s+name(?:\.(\d+))?$/i);
         if (match) return { kind: 'name', key: `external_${match[1] || 'base'}` };
         match = raw.match(/^specification\s+value(?:\.(\d+))?$/i);
@@ -1348,7 +1355,7 @@ const EnhancedDataEditor = () => {
       headers.forEach(h => {
         const specPair = getSpecPair(h);
         if (!specPair) return;
-        pairs[specPair.key] = pairs[specPair.key] || { name: null, value: null };
+        pairs[specPair.key] = pairs[specPair.key] || { name: null, value: null, uom: null };
         pairs[specPair.key][specPair.kind] = h;
       });
 
@@ -1366,10 +1373,13 @@ const EnhancedDataEditor = () => {
 
       Object.values(pairs).forEach(pair => {
         if (!pair.name || !pair.value) return;
-        const allEmpty = cleanedRows.every(r => isCellEmpty(r[pair.name]) && isCellEmpty(r[pair.value]));
+        const allEmpty = cleanedRows.every(r => isCellEmpty(r[pair.name])
+          && isCellEmpty(r[pair.value])
+          && (!pair.uom || isCellEmpty(r[pair.uom])));
         if (allEmpty) {
           toRemove.add(pair.name);
           toRemove.add(pair.value);
+          if (pair.uom) toRemove.add(pair.uom);
         }
       });
 
