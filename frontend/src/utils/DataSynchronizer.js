@@ -446,7 +446,7 @@ class DataSynchronizer {
         const _actualFormulaColumns = validationData.data.headers?.filter(h => 
           h.startsWith('Tag_') || 
           h.startsWith('Specification_') || 
-          h.startsWith('Customer_Identification_') ||
+          h.startsWith('Custom_Identification_') ||
           h === 'Tag'
         ).length || 0;
         

@@ -256,8 +256,25 @@ const blankBomHeader = (sheetName = '') => {
   const guess = guessFinishedGoodCode(sheetName);
   return {
     finishedGoodCode: guess,
+    // The BOM's own code, separate from the finished good's item code. Carries
+    // a real value rather than an empty box with a grey placeholder: a
+    // placeholder cannot be edited into, so changing it meant first retyping
+    // the thing it was already suggesting.
+    bomCode: guess,
+    // Until the user edits the BOM code it follows the finished good, which is
+    // the usual case — the two match. Once they type in it the mirroring stops,
+    // so a later edit to the finished good cannot overwrite their answer.
+    bomCodeTouched: false,
+    // Not asked for any more. The finished good's item name defaults to its
+    // code and is editable in the editor afterwards, where the item is in front
+    // of the user — a name is not worth a field on a gate they have to clear
+    // before they can see anything.
     itemName: '',
-    bomName: '',
+    // Carries a real value for the same reason the BOM code does: a grey
+    // placeholder cannot be backspaced, so "change it if you want" meant
+    // retyping what was already being suggested.
+    bomName: guess,
+    bomNameTouched: false,
     measurementUnit: DEFAULT_MEASUREMENT_UNIT,
     baseQuantity: DEFAULT_BASE_QUANTITY,
   };
@@ -310,6 +327,48 @@ const ExampleTree = () => (
 // What the level column says about a sheet: which codes are assemblies at each
 // level, and how many rows are documents. Used only to label the finished-good
 // step so the user can see which BOM they are naming.
+// Assemblies taken from the sheet's own parent column, when it has one.
+//
+// A value in `parent` IS an assembly code — that is what being a parent means —
+// so this needs no guessing about which column holds a row's own code, and no
+// inference from row order. Both of those were getting it wrong: `cpn` matched
+// the code regex first but held the PARENT on this export, so every assembly
+// came back keyed by its parent, collapsing six sub-BOMs into one.
+//
+// A parent's own level is one above the shallowest row that names it. That is
+// derived rather than looked up, because looking it up would need the very
+// code column that cannot be trusted here.
+//
+// Returns null when the sheet states no parents, leaving the level-order
+// inference below as the only option.
+const assembliesFromParents = (records, levelColumn) => {
+  if (!Array.isArray(records) || !records.length) return null;
+  if (!('parent' in (records[0] || {}))) return null;
+
+  const shallowestChild = new Map();
+  let any = false;
+  records.forEach((record) => {
+    const parent = String(record?.parent ?? '').trim();
+    if (!parent) return;
+    any = true;
+    const level = parseLevelValue(record?.[levelColumn]);
+    if (level === null) return;
+    const seen = shallowestChild.get(parent);
+    if (seen === undefined || level < seen) shallowestChild.set(parent, level);
+  });
+  if (!any) return null;
+
+  // A description for each assembly, from any row that carries the same parent
+  // — they all describe children OF it, so this is only a fallback label.
+  const nameOf = new Map();
+  records.forEach((record) => {
+    const parent = String(record?.parent ?? '').trim();
+    if (parent && !nameOf.has(parent)) nameOf.set(parent, '');
+  });
+
+  return { shallowestChild, nameOf };
+};
+
 const analyzeLevels = (records, levelColumn, headers) => {
   const codeColumn = findHeader(headers, CODE_HEADER_RE);
   const nameColumn = findHeader(headers, NAME_HEADER_RE);
@@ -333,10 +392,61 @@ const analyzeLevels = (records, levelColumn, headers) => {
     rows.push({
       level,
       code,
+      // Carried so a name lookup can tell an assembly's OWN row apart from one
+      // of its children — see the check where these are matched.
+      parent: String(record?.parent ?? '').trim(),
       name: String(record[nameColumn] ?? '').trim(),
       uom: String(record[uomColumn] ?? '').trim(),
     });
   });
+
+  const minLevel = rows.length ? Math.min(...rows.map(row => row.level)) : 0;
+
+  // The sheet's own parent column wins when it has one. Everything below is the
+  // fallback for sheets that only indent by level.
+  const stated = assembliesFromParents(records, levelColumn);
+  if (stated) {
+    const byParentLevel = new Map();
+    // Level of the assembly itself: one above the shallowest row naming it.
+    stated.shallowestChild.forEach((childLevel, code) => {
+      const own = childLevel - 1;
+      if (!byParentLevel.has(own)) byParentLevel.set(own, new Map());
+      // The assembly's OWN row, if it can be identified — and only if. A row
+      // whose parent is this assembly is one of its CHILDREN, so matching on
+      // the code column alone hands back a child's description: 0043-13591
+      // came out labelled "NUT, BLIND, SELF-CLINCHING", which is a nut inside
+      // it, not the cabinet assembly itself. That happens whenever the code
+      // column is really holding the parent, which is the case this branch
+      // exists for. Better an empty name — the field then falls back to the
+      // code — than a confidently wrong one.
+      // No description. Naming an assembly needs its own row, and no column
+      // here reliably holds a row's own part number — the one the regex picks
+      // (`cpn`) carries the PARENT, so the only rows findable by this code are
+      // the assembly's CHILDREN. Using them is what labelled 0043-13591 "NUT,
+      // BLIND, SELF-CLINCHING": a nut inside the cabinet, not the cabinet.
+      //
+      // So the name is left empty and falls back to the code, which is a name
+      // the user can recognise and edit. A wrong description they might not
+      // notice is worse than a plain one they will.
+      byParentLevel.get(own).set(code, { code, name: '', uom: '' });
+    });
+    // Labelled by RANK, not by arithmetic on the sheet's own numbers.
+    // Subtracting a base assumes the tiers are contiguous, and they are not: a
+    // sheet can leave a level unused, which produced "Level 1" then "Level 3"
+    // with no Level 2 — a gap the user has to explain to themselves. Ranking
+    // gives the tiers 1, 2, 3 in depth order, which is what FactWise counts
+    // and what the label is claiming to say.
+    return {
+      levels: [...byParentLevel.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([, assemblies], index) => ({
+          label: index + 1,
+          assemblies: [...assemblies.values()],
+        })),
+      documents,
+      rowCount: rows.length,
+    };
+  }
 
   // An assembly is a row the next row sits deeper than.
   const byLevel = new Map();
@@ -349,7 +459,6 @@ const analyzeLevels = (records, levelColumn, headers) => {
     }
   });
 
-  const minLevel = rows.length ? Math.min(...rows.map(row => row.level)) : 0;
   const levels = [...byLevel.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([level, assemblies]) => ({
@@ -665,6 +774,11 @@ const BomStructureDialog = ({
         // clears blankBomHeader's sheet-name guess, which is exactly the guess
         // that shipped BOMs with a finished good called "Sheet1".
         bomHeader.finishedGoodCode = root ? root.code : '';
+        // Kept in step with the detected code, not left on blankBomHeader's
+        // sheet-name guess — otherwise the BOM code would show a name the
+        // finished good field had just discarded.
+        bomHeader.bomCode = bomHeader.finishedGoodCode;
+        bomHeader.bomName = bomHeader.finishedGoodCode;
         bomHeader.itemName = root && root.name ? root.name : '';
         if (root && root.uom) bomHeader.measurementUnit = root.uom;
         bomHeader.autoDetected = Boolean(root);
@@ -975,6 +1089,52 @@ const BomStructureDialog = ({
     return codes;
   }, [mode, bomOptions]);
 
+  // One entry per distinct sub-assembly CODE, not per (level, code) pair.
+  //
+  // A BOM's identity is its code, so the same code appearing at two levels is
+  // one BOM used in two places, not two BOMs. `analyzeLevels` dedupes within a
+  // level but not across them, and everything downstream keys on the code
+  // alone: `subBoms` in the answer, and `resolved` in the generator. Rendering
+  // it once per level therefore produced two fields bound to the same value —
+  // type in one and the other changed — and made the duplicate check accuse the
+  // sheet of colliding with itself.
+  //
+  // The shallowest level wins the label, since that is where the assembly first
+  // appears.
+  // The finished good is also excluded, for sheets that contain their own.
+  //
+  // FactWise counts from Level 1, and so does this: the shallowest row becomes
+  // Level 1 whether the sheet numbered it 0 or 1. On a sheet like Applied's,
+  // whose top row IS the product, that row is the finished good AND has
+  // children — so it was detected as the root and listed as a Level 1
+  // sub-assembly at the same time, asking for one BOM twice on one screen. Its
+  // name, unit and quantity belong to the finished-good form; the list below is
+  // for the assemblies underneath it.
+  const assembliesFor = useCallback((sheetName) => {
+    const rootCode = String(
+      answers[sheetName]?.bomHeader?.finishedGoodCode || ''
+    ).trim().toLowerCase();
+    const seen = new Set();
+    const unique = [];
+    const all = [];
+    (structureFor(sheetName)?.levels || []).forEach((level) => {
+      level.assemblies.forEach((assembly) => {
+        const key = String(assembly.code || '').trim().toLowerCase();
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        const entry = { ...assembly, levelLabel: level.label };
+        all.push(entry);
+        if (key !== rootCode) unique.push(entry);
+      });
+    });
+    // Removing the root must never remove everything. When it does, the codes
+    // being compared are not what they claim to be — a sheet whose assemblies
+    // ALL carry the root's code means the column being read as "the part" is
+    // actually holding its parent. Showing the wrong rows is recoverable;
+    // showing none leaves the user unable to name any sub-BOM at all.
+    return unique.length ? unique : all;
+  }, [structureFor, answers]);
+
   // A position in the list, so the user has something short to refer to. Stable
   // because the endpoint returns slots sorted by version ascending.
   const slotOrdinal = useCallback((slot) => {
@@ -1075,14 +1235,14 @@ const BomStructureDialog = ({
         // neither the sheet nor the code, and the answers that produced it are
         // three screens back.
         if (!String(header.measurementUnit || '').trim()) {
-          setError(`Enter a measurement unit for the Level 0 BOM in "${name}".`);
+          setError(`Enter a measurement unit for the Level 1 BOM in "${name}".`);
           return false;
         }
         // A base quantity that does not parse used to be silently rewritten to 1
         // at confirm time. Typing "abc" and shipping a BOM built on a quantity
         // nobody chose is worse than being asked to correct it here.
         if (!isPositiveQuantity(header.baseQuantity)) {
-          setError(`Enter a base quantity greater than zero for the Level 0 BOM in "${name}".`);
+          setError(`Enter a base quantity greater than zero for the Level 1 BOM in "${name}".`);
           return false;
         }
         // Sub-BOMs are held to the same rule. They start prefilled, so this only
@@ -1104,27 +1264,28 @@ const BomStructureDialog = ({
         const duplicates = [];
         const alreadyExist = [];
 
+        // The top-level BOM's code — NOT the finished good's. Only BOM codes
+        // are checked against the directory: the finished good is an item, and
+        // an item code matching a BOM code is not a collision, they live in
+        // different namespaces.
         const rootCode = String(
-          revisionTargetCode || header.finishedGoodCode || ''
+          revisionTargetCode || header.bomCode || header.finishedGoodCode || ''
         ).trim();
         const rootKey = rootCode.toLowerCase();
-        // The finished good's own code, on a create. On a revision the BOM code
-        // is server-assigned and the finished good already exists, so neither
-        // is ours to reject.
+        // Skipped on a revision: the BOM code is server-assigned and is
+        // supposed to be new, so there is nothing here for us to reject.
         if (!revisionTargetCode && rootCode && existingBomCodes?.has(rootKey)) {
-          alreadyExist.push(`"${rootCode}" (the finished good)`);
+          alreadyExist.push(`"${rootCode}" (the top-level BOM)`);
         }
 
-        for (const level of structure?.levels || []) {
-          for (const assembly of level.assemblies) {
-            const code = String(subBomValue(name, assembly, 'bomCode') || '').trim();
-            if (!code) { blank.push(`Level ${level.label} "${assembly.code}"`); continue; }
-            const key = code.toLowerCase();
-            if (key === rootKey) clashesWithRoot.push(`"${code}"`);
-            else if (seenCodes.has(key)) duplicates.push(`"${code}" (${seenCodes.get(key)} and ${assembly.code})`);
-            else if (existingBomCodes?.has(key)) alreadyExist.push(`"${code}"`);
-            seenCodes.set(key, assembly.code);
-          }
+        for (const assembly of structure ? assembliesFor(name) : []) {
+          const code = String(subBomValue(name, assembly, 'bomCode') || '').trim();
+          if (!code) { blank.push(`Level ${assembly.levelLabel} "${assembly.code}"`); continue; }
+          const key = code.toLowerCase();
+          if (key === rootKey) clashesWithRoot.push(`"${code}"`);
+          else if (seenCodes.has(key)) duplicates.push(`"${code}" (${seenCodes.get(key)} and ${assembly.code})`);
+          else if (existingBomCodes?.has(key)) alreadyExist.push(`"${code}"`);
+          seenCodes.set(key, assembly.code);
         }
 
         if (blank.length || clashesWithRoot.length || duplicates.length || alreadyExist.length) {
@@ -1134,31 +1295,29 @@ const BomStructureDialog = ({
             parts.push(`Already in FactWise, so they cannot be imported again — ${alreadyExist.join(', ')}. Change them here and every BOM ID and Sub BOM ID reference follows.`);
           }
           if (duplicates.length) parts.push(`Used twice in this sheet — ${duplicates.join(', ')}.`);
-          if (clashesWithRoot.length) parts.push(`Same as the finished good's code — ${clashesWithRoot.join(', ')}.`);
+          if (clashesWithRoot.length) parts.push(`Same as the top-level BOM's code — ${clashesWithRoot.join(', ')}.`);
           setError(parts.join(' '));
           return false;
         }
 
-        for (const level of structure?.levels || []) {
-          for (const assembly of level.assemblies) {
-            if (!String(subBomValue(name, assembly, 'measurementUnit') || '').trim()) {
-              setError(`Enter a measurement unit for the Level ${level.label} BOM "${assembly.code}".`);
-              return false;
-            }
-            if (!String(subBomValue(name, assembly, 'bomName') || '').trim()) {
-              setError(`Enter a BOM name for the Level ${level.label} BOM "${assembly.code}".`);
-              return false;
-            }
-            if (!isPositiveQuantity(subBomValue(name, assembly, 'baseQuantity'))) {
-              setError(`Enter a base quantity greater than zero for the Level ${level.label} BOM "${assembly.code}".`);
-              return false;
-            }
+        for (const assembly of structure ? assembliesFor(name) : []) {
+          if (!String(subBomValue(name, assembly, 'measurementUnit') || '').trim()) {
+            setError(`Enter a measurement unit for the Level ${assembly.levelLabel} BOM "${assembly.code}".`);
+            return false;
+          }
+          if (!String(subBomValue(name, assembly, 'bomName') || '').trim()) {
+            setError(`Enter a BOM name for the Level ${assembly.levelLabel} BOM "${assembly.code}".`);
+            return false;
+          }
+          if (!isPositiveQuantity(subBomValue(name, assembly, 'baseQuantity'))) {
+            setError(`Enter a base quantity greater than zero for the Level ${assembly.levelLabel} BOM "${assembly.code}".`);
+            return false;
           }
         }
       }
     }
     return true;
-  }, [currentKey, leveledSheets, sheetsNeedingRoot, answers, structureFor, subBomValue,
+  }, [currentKey, leveledSheets, sheetsNeedingRoot, answers, structureFor, assembliesFor, subBomValue,
       reviseBom, reviseOnProject, reviseProject, reviseSlots, slotOptions,
       baseBomId, baseBomError, revisionTargetCode, revisionFinishedGoodCode,
       existingBomCodes]);
@@ -1251,10 +1410,17 @@ const BomStructureDialog = ({
         // the field so the confirmed answer carries it even if the user never
         // reached the finished-good step.
         const code = revisionFinishedGoodCode || String(raw.finishedGoodCode || '').trim();
+        // The BOM's code falls back to the finished good's, which is the usual
+        // case. On a revision the server assigns it, so the predicted _Rn code
+        // goes out and the sheet is retargeted to the real one at export.
+        const bomCode = revisionTargetCode || String(raw.bomCode || '').trim() || code;
         bomHeader = {
           finishedGoodCode: code,
+          bomCode,
+          // No longer asked for. Defaults to the finished good's code and is
+          // renamed in the editor, where the item is actually visible.
           itemName: String(raw.itemName || '').trim() || code,
-          bomName: String(raw.bomName || '').trim() || revisionTargetCode || code,
+          bomName: String(raw.bomName || '').trim() || bomCode,
           measurementUnit: String(raw.measurementUnit || '').trim() || DEFAULT_MEASUREMENT_UNIT,
           baseQuantity: Number(raw.baseQuantity) > 0 ? Number(raw.baseQuantity) : DEFAULT_BASE_QUANTITY,
         };
@@ -1266,20 +1432,20 @@ const BomStructureDialog = ({
       // way to change it — so all of them are materialised here.
       const subBoms = {};
       if (answer.hasLevels && answer.treeConfirmed !== false) {
-        (structureFor(name)?.levels || []).forEach((level) => {
-          level.assemblies.forEach((assembly) => {
-            subBoms[assembly.code] = {
-              // Keyed by the SHEET's code so the backend can find the block,
-              // carrying the user's code as a rename applied on top of it.
-              bomCode: String(subBomValue(name, assembly, 'bomCode') || '').trim() || assembly.code,
-              bomName: String(subBomValue(name, assembly, 'bomName') || '').trim() || assembly.code,
-              measurementUnit: String(subBomValue(name, assembly, 'measurementUnit') || '').trim()
-                               || DEFAULT_MEASUREMENT_UNIT,
-              baseQuantity: Number(subBomValue(name, assembly, 'baseQuantity')) > 0
-                ? Number(subBomValue(name, assembly, 'baseQuantity'))
-                : DEFAULT_BASE_QUANTITY,
-            };
-          });
+        // Keyed by code, so the same assembly seen at two levels must be
+        // materialised once — writing it twice would just overwrite itself.
+        assembliesFor(name).forEach((assembly) => {
+          subBoms[assembly.code] = {
+            // Keyed by the SHEET's code so the backend can find the block,
+            // carrying the user's code as a rename applied on top of it.
+            bomCode: String(subBomValue(name, assembly, 'bomCode') || '').trim() || assembly.code,
+            bomName: String(subBomValue(name, assembly, 'bomName') || '').trim() || assembly.code,
+            measurementUnit: String(subBomValue(name, assembly, 'measurementUnit') || '').trim()
+                             || DEFAULT_MEASUREMENT_UNIT,
+            baseQuantity: Number(subBomValue(name, assembly, 'baseQuantity')) > 0
+              ? Number(subBomValue(name, assembly, 'baseQuantity'))
+              : DEFAULT_BASE_QUANTITY,
+          };
         });
       }
       payload.sheets[name] = {
@@ -1711,8 +1877,8 @@ const BomStructureDialog = ({
     <>
       <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
         {revisionTargetCode
-          ? `The Level 0 finished good comes from ${reviseBom?.bom_code || 'the BOM you are revising'} and does not change — every revision of a BOM shares one finished good item. Only the BOM code gains the new revision number. The sub-assemblies below are still yours to name.`
-          : 'Every BOM needs a finished good at Level 0. A single-level sheet lists components but not the thing they build; a multi-level sheet usually starts at Level 1 and names its assembly above the table. Either way it becomes an item in the item directory as well.'}
+          ? `The finished good comes from ${reviseBom?.bom_code || 'the BOM you are revising'} and does not change — every revision of a BOM shares one finished good item. Only the BOM code gains the new revision number. The sub-assemblies below are still yours to name.`
+          : 'Every BOM needs a finished good — the thing it builds. FactWise counts BOM levels from 1, so that finished good’s own BOM is Level 1 and the assemblies inside it are Level 2. A single-level sheet lists components but not the thing they build; a multi-level sheet usually names its assembly above the table. Either way it becomes an item in the item directory as well.'}
       </Typography>
       {sheetsNeedingRoot.map((name) => {
         const answer = answers[name] || blankSheetAnswer();
@@ -1741,7 +1907,7 @@ const BomStructureDialog = ({
               >
                 <Box sx={{ display: 'flex', alignItems: 'baseline', gap: 1, mb: 0.5 }}>
                   <Typography variant="caption" sx={{ fontWeight: 700, width: 110 }}>
-                    Level 0 BOM
+                    Level 1 BOM
                   </Typography>
                   <Typography variant="caption" sx={{ color: code ? 'text.primary' : 'error.main' }}>
                     {code
@@ -1777,9 +1943,9 @@ const BomStructureDialog = ({
                     controls per assembly a flex row wraps at a different point
                     for each one, so nothing lines up down the column and the
                     block reads as noise. */}
-                {structure.levels.map(level => level.assemblies.map(assembly => (
+                {assembliesFor(name).map(assembly => (
                   <Box
-                    key={`${level.label}:${assembly.code}`}
+                    key={assembly.code}
                     sx={{
                       mb: 1.5,
                       pl: 1.5,
@@ -1788,7 +1954,7 @@ const BomStructureDialog = ({
                   >
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
                       <Typography variant="caption" sx={{ fontWeight: 700 }}>
-                        {`Level ${level.label} BOM`}
+                        {`Level ${assembly.levelLabel} BOM`}
                       </Typography>
                       {/* The code as the SHEET states it, so a renamed sub-BOM
                           can still be traced back to the row it came from.
@@ -1842,7 +2008,7 @@ const BomStructureDialog = ({
                       />
                     </Box>
                   </Box>
-                )))}
+                ))}
                 {/* A choice, not a rule. "Consumes nothing" usually means a
                     drawing, but not always — some exports write 0 on real parts
                     — and only the user knows which this sheet is. Excluding is
@@ -1896,7 +2062,19 @@ const BomStructureDialog = ({
                 // finished good, and every revision of it shares that one item.
                 value={revisionFinishedGoodCode || header.finishedGoodCode}
                 disabled={Boolean(revisionFinishedGoodCode)}
-                onChange={e => patchHeader(name, { finishedGoodCode: e.target.value })}
+                // Carries the BOM code along with it until the user has edited
+                // that field themselves. After that the two are independent and
+                // this stops writing to it.
+                // Carries the BOM code, and through it the BOM name, until each
+                // has been edited on its own. The chain breaks per field, so
+                // renaming the BOM does not stop the code following, and
+                // editing the code does not stop the name having followed.
+                onChange={(e) => {
+                  const next = { finishedGoodCode: e.target.value };
+                  if (!header.bomCodeTouched) next.bomCode = e.target.value;
+                  if (!header.bomNameTouched) next.bomName = e.target.value;
+                  patchHeader(name, next);
+                }}
                 helperText={revisionFinishedGoodCode ? 'Existing item — unchanged by the revision' : ''}
               />
 
@@ -1906,32 +2084,39 @@ const BomStructureDialog = ({
                   burying it in helper text is what made the two look like one
                   thing. Read-only: the server assigns the real code when the
                   draft is created, and the sheet is retargeted to it. */}
-              {revisionTargetCode ? (
-                <TextField
-                  size="small"
-                  label="BOM code"
-                  value={revisionTargetCode}
-                  disabled
-                  helperText={`Next revision of ${reviseBom?.bom_code || ''}`}
-                />
-              ) : (
-                <TextField
-                  size="small"
-                  label="Item name"
-                  value={header.itemName}
-                  onChange={e => patchHeader(name, { itemName: e.target.value })}
-                  placeholder={code || 'same as code'}
-                  helperText="Defaults to the finished good code"
-                />
-              )}
+              {/* The BOM's code, not the item's. Separate because they are
+                  separate things — the finished good is an item in the
+                  directory, this identifies the recipe that builds it — and
+                  because a revision is exactly the case where they differ.
+                  Read-only when revising: the server assigns it. */}
+              <TextField
+                size="small"
+                required
+                label="BOM code"
+                value={revisionTargetCode || header.bomCode}
+                disabled={Boolean(revisionTargetCode)}
+                // Editing this breaks the mirror for good. Changing the
+                // finished good afterwards leaves this alone, and changing this
+                // never touches the finished good — they are separate things
+                // that merely start out the same.
+                onChange={(e) => {
+                  const next = { bomCode: e.target.value, bomCodeTouched: true };
+                  if (!header.bomNameTouched) next.bomName = e.target.value;
+                  patchHeader(name, next);
+                }}
+                helperText={revisionTargetCode
+                  ? `Next revision of ${reviseBom?.bom_code || ''}`
+                  : (header.bomCodeTouched ? 'Independent of the finished good code' : 'Follows the finished good code until you change it')}
+              />
 
               <TextField
                 size="small"
                 label="BOM name"
                 value={header.bomName}
-                onChange={e => patchHeader(name, { bomName: e.target.value })}
-                placeholder={(revisionTargetCode || code) || 'same as code'}
-                helperText={revisionTargetCode ? 'Defaults to the BOM code' : 'Defaults to the finished good code'}
+                onChange={e => patchHeader(name, { bomName: e.target.value, bomNameTouched: true })}
+                helperText={header.bomNameTouched
+                  ? 'Independent of the BOM code'
+                  : 'Follows the BOM code until you change it'}
               />
               <TextField
                 size="small"

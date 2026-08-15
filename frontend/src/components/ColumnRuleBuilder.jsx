@@ -10,6 +10,7 @@ import {
 } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import { displayHeaderName } from '../utils/columnHeaderNames';
 
 // The Fill / Create Column fields, as a controlled component so the same rule
 // can be authored in Settings and replayed in the editor. `value` IS the rule
@@ -100,7 +101,7 @@ export default function ColumnRuleBuilder({
       {...extraProps}
     >
       {columnOptions.map(col => (
-        <MenuItem key={col} value={col}>{col}</MenuItem>
+        <MenuItem key={col} value={col}>{displayHeaderName(col, columnOptions)}</MenuItem>
       ))}
     </TextField>
   );

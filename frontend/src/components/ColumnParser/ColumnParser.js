@@ -92,8 +92,8 @@ const FACTWISE_OUTPUT_COLUMNS = [
   { value: 'Level', label: 'Level' },
   { value: 'Base BOM Qty', label: 'Base BOM Qty' },
 
-  { value: 'Customer_Identification_Name_1', label: 'Customer identification name (1)' },
-  { value: 'Customer_Identification_Value_1', label: 'Customer identification value (1)' },
+  { value: 'Custom_Identification_Name_1', label: 'Custom identification name (1)' },
+  { value: 'Custom_Identification_Value_1', label: 'Custom identification value (1)' },
 ];
 
 const numberedColumnIndex = (value, pattern, genericName) => {

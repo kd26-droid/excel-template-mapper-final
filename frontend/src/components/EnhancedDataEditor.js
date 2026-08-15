@@ -95,7 +95,6 @@ import { useFactwise, postToFactwiseParent, openInFactwise } from '../contexts/F
 import FactwiseProjectExportDialog from './FactwiseProjectExportDialog';
 import FactwiseBomDirectoryExportDialog from './FactwiseBomDirectoryExportDialog';
 import * as XLSX from 'xlsx';
-import FormulaBuilder from './FormulaBuilder';
 import BomTreePreview from './BomTreePreview';
 import ColumnParser from './ColumnParser/ColumnParser';
 import { LoaderCard } from './LoaderOverlay';
@@ -325,7 +324,7 @@ const deriveDisplayName = (col, allHeaders = []) => {
   if (legacyDigikeyNames[col]) return legacyDigikeyNames[col];
   const legacyCanonical = String(col).match(/^Canonical MPN (\d+)$/);
   if (legacyCanonical) return `DigiKey Canonical MPN ${legacyCanonical[1]}`;
-  // Repeated template groups (Tag, Specification, Customer identification) and
+  // Repeated template groups (Tag, Specification, Custom identification) and
   // generic split runs keep their slot number in the label — three columns all
   // reading "Tag" gave the user no way to tell which one they were editing.
   // The number is display-only: exports go out under canonicalHeaderName.
@@ -500,7 +499,6 @@ const EnhancedDataEditor = () => {
   const [showColumnFilters, setShowColumnFilters] = useState(false);
 
   // Formula Builder state
-  const [formulaBuilderOpen, setFormulaBuilderOpen] = useState(false);
   const [createColumnDialogOpen, setCreateColumnDialogOpen] = useState(false);
   const [createColumnTab, setCreateColumnTab] = useState(0);
   const [createColumnTarget, setCreateColumnTarget] = useState('Item name');
@@ -1663,7 +1661,7 @@ const EnhancedDataEditor = () => {
       // Initialize columns if not yet set or header count changed
       if (!columnDefs || columnDefs.length === 0 || columnDefs.filter(c => c.field && c.field !== '__row_number__').length !== headers.length) {
         const detectedFormulaColumns = headers.filter(h => 
-          h.startsWith('Tag_') || h.startsWith('Specification_Name_') || h.startsWith('Specification_Value_') || h.startsWith('Customer_Identification_') ||
+          h.startsWith('Tag_') || h.startsWith('Specification_Name_') || h.startsWith('Specification_Value_') || h.startsWith('Custom_Identification_') ||
           h === 'Tag' || h === 'Factwise ID' || (h.includes('Specification') && (h.includes('Name') || h.includes('Value'))) || (h.includes('Customer') && h.includes('Identification'))
         );
         const columns = [
@@ -1873,7 +1871,7 @@ const EnhancedDataEditor = () => {
         h.startsWith('Tag_') || 
         h.startsWith('Specification_Name_') || 
         h.startsWith('Specification_Value_') || 
-        h.startsWith('Customer_Identification_') ||
+        h.startsWith('Custom_Identification_') ||
         h === 'Tag' || 
         h === 'Factwise ID' ||
         (h.includes('Specification') && (h.includes('Name') || h.includes('Value'))) ||
@@ -1885,7 +1883,7 @@ const EnhancedDataEditor = () => {
       // Calculate column counts
       const tagColumns = viewHeaders.filter(h => h.startsWith('Tag_') || h === 'Tag');
       const specNameColumns = viewHeaders.filter(h => h.startsWith('Specification_Name_') || h === 'Specification name');
-      const customerNameColumns = viewHeaders.filter(h => h.startsWith('Customer_Identification_Name_'));
+      const customerNameColumns = viewHeaders.filter(h => h.startsWith('Custom_Identification_Name_'));
       
       const actualColumnCounts = {
         tags_count: Math.max(tagColumns.length, 1),
@@ -1934,7 +1932,7 @@ const EnhancedDataEditor = () => {
 
           const isUnmapped = data.unmapped_columns && data.unmapped_columns.includes(displayName);
           const isSpecificationColumn = displayName.toLowerCase().includes('specification');
-          const isFormulaColumn = detectedFormulaColumns.includes(col) || col.startsWith('Tag_') || col.startsWith('Specification_') || col.startsWith('Customer_Identification_') || col === 'Tag' || col.includes('Specification') || col.includes('Customer identification') || col.includes('Custom identification') || col === 'Factwise ID';
+          const isFormulaColumn = detectedFormulaColumns.includes(col) || col.startsWith('Tag_') || col.startsWith('Specification_') || col.startsWith('Custom_Identification_') || col === 'Tag' || col.includes('Specification') || col.includes('Custom identification') || col.includes('Custom identification') || col === 'Factwise ID';
           const isMpnValidationColumn = [
             'MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued',
             'DigiKey Part Number', 'DigiKey Canonical MPN', 'DigiKey Category',
@@ -2312,13 +2310,7 @@ const EnhancedDataEditor = () => {
       const deadline = Date.now() + 12000; // up to 12s
       while (Date.now() < deadline) {
         try {
-          // Re-apply formulas once if Tag columns are expected but missing
-          if (hasTagRules && !formulasReapplied) {
-            try {
-              await api.applyFormulas(sessionId, sessionMeta.formula_rules);
-            } catch (_) {}
-            formulasReapplied = true;
-          }
+          // Tag rules were removed; nothing re-applies them.
 
           // Force-fresh fetch using synchronizer budget
           const refreshed = await synchronizer.current.fetchDataFast(12000);
@@ -2492,7 +2484,7 @@ const EnhancedDataEditor = () => {
           h.startsWith('Tag_') || 
           h.startsWith('Specification_Name_') || 
           h.startsWith('Specification_Value_') || 
-          h.startsWith('Customer_Identification_') ||
+          h.startsWith('Custom_Identification_') ||
           h === 'Tag' || 
           h.includes('Specification') || 
           h.includes('Customer')
@@ -2504,7 +2496,7 @@ const EnhancedDataEditor = () => {
         const newHeaders = formulaResult.headers || [];
         const tagColumns = newHeaders.filter(h => h.startsWith('Tag_') || h === 'Tag');
         const specColumns = newHeaders.filter(h => h.startsWith('Specification_Name_') || h === 'Specification name');
-        const customerColumns = newHeaders.filter(h => h.startsWith('Customer_Identification_Name_') || h === 'Customer identification name' || h === 'Custom identification name');
+        const customerColumns = newHeaders.filter(h => h.startsWith('Custom_Identification_Name_') || h === 'Custom identification name' || h === 'Custom identification name');
         
         const newCounts = {
           tags_count: Math.max(dynamicColumnCounts.tags_count, tagColumns.length),
@@ -2634,20 +2626,52 @@ const EnhancedDataEditor = () => {
     }
   }, [showSnackbar, fetchDataSynchronized, updateDataIntegrity]);
 
-  // ─── DIALOG HANDLERS ────────────────────────────────────────────────────────
-  const handleOpenFormulaBuilder = useCallback(() => {
-    setFormulaBuilderOpen(true);
-  }, []);
-
-  const handleCloseFormulaBuilder = useCallback(() => {
-    setFormulaBuilderOpen(false);
-  }, []);
-
   const dataColumnFields = useMemo(() => (
     (columnDefs || [])
       .filter(col => col.field && col.field !== '__row_number__')
       .map(col => col.field)
   ), [columnDefs]);
+
+  // Keep the slot counts in step with the sheet actually loaded.
+  //
+  // These start at 1/1/1 and used to stay there, but `handleBackToMapping`
+  // posts them to the session on the way to Modify Mappings. Opening the editor
+  // and clicking through therefore rewrote a 3-specification sheet as a
+  // 1-specification one, and the mapping page then rebuilt the headers to
+  // match — dropping the other two triplets and moving columns about.
+  useEffect(() => {
+    if (!dataColumnFields.length) return;
+    // Headers reach the grid in either shape depending on the session — the
+    // internal 'Specification_Name_2' or the label 'Specification name (2)'.
+    // Matching only the first read zero slots on a label-form sheet and
+    // reported 1, which is exactly the value that shrank the sheet.
+    const highestSlot = (internalPrefix, label) => dataColumnFields.reduce((best, field) => {
+      const name = String(field || '').trim();
+      const internal = new RegExp(`^${internalPrefix}_(\d+)$`, 'i').exec(name);
+      if (internal) return Math.max(best, parseInt(internal[1], 10));
+      const labelled = new RegExp(`^${label}\s*\((\d+)\)$`, 'i').exec(name);
+      if (labelled) return Math.max(best, parseInt(labelled[1], 10));
+      // An unnumbered repeat ('Tag') still counts as one slot.
+      return name.toLowerCase() === label.toLowerCase() ? Math.max(best, 1) : best;
+    }, 0);
+    const next = {
+      tags_count: highestSlot('Tag', 'Tag'),
+      spec_pairs_count: highestSlot('Specification_Name', 'Specification name'),
+      customer_id_pairs_count: highestSlot('Custom_Identification_Name', 'Custom identification name'),
+    };
+    setDynamicColumnCounts(prev => {
+      // Never below what the sheet holds, and never a needless re-render.
+      const merged = {
+        tags_count: Math.max(prev.tags_count || 0, next.tags_count),
+        spec_pairs_count: Math.max(prev.spec_pairs_count || 0, next.spec_pairs_count),
+        customer_id_pairs_count: Math.max(prev.customer_id_pairs_count || 0, next.customer_id_pairs_count),
+      };
+      const same = merged.tags_count === prev.tags_count
+        && merged.spec_pairs_count === prev.spec_pairs_count
+        && merged.customer_id_pairs_count === prev.customer_id_pairs_count;
+      return same ? prev : merged;
+    });
+  }, [dataColumnFields]);
 
   useEffect(() => {
     if (dataColumnFields.length > 0) {
@@ -4758,7 +4782,7 @@ const EnhancedDataEditor = () => {
 
   // "Tag_1" → "Tag (1)  (← Manufacturer)" or "(= default)". No annotation if neither.
   // Numbering used to be applied to Tag only, so duplicate Specification and
-  // Customer identification columns were indistinguishable in these dropdowns.
+  // Custom identification columns were indistinguishable in these dropdowns.
   const columnLabel = useCallback((field, headerName) => {
     const numbered = displayHeaderName(field);
     const base = numbered !== String(field ?? '') ? numbered : (headerName || field);
@@ -7885,24 +7909,7 @@ const EnhancedDataEditor = () => {
         </Paper>
       </Box>
 
-      {/* Enhanced Formula Builder */}
-      <FormulaBuilder
-        open={formulaBuilderOpen}
-        onClose={handleCloseFormulaBuilder}
-        sessionId={sessionId}
-        availableColumns={columnDefs.filter(col => {
-          // Show ALL columns except system columns
-          // This allows formulas to check any column (source data, Tags, Specifications, etc.)
-          // and enables advanced use cases like conditional tagging and cascading rules
-          if (!col.field || col.field === '__row_number__') return false;
 
-          // Include everything else - all data columns, Tag columns, Specification columns, etc.
-          return true;
-        }).map(col => col.field || col.headerName).filter(Boolean)}
-        onApplyFormulas={handleApplyFormulasSynchronized}
-        initialRules={appliedFormulas}
-        columnExamples={columnExamples}
-        columnFillStats={columnFillStats}
       />
 
       {/* Smart Expand — one entry point. Genuinely inspects the columns, shows a

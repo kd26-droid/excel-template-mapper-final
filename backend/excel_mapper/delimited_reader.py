@@ -116,6 +116,18 @@ def dataframe_from_delimited_text(text, header=0, **kwargs):
     if not rows:
         return pd.DataFrame(columns=names or [])
 
+    unwrapped = _unwrap_single_column_records(rows, delimiter)
+    if unwrapped is not None:
+        return dataframe_from_delimited_text(
+            '\n'.join(unwrapped),
+            header=header,
+            dtype=dtype,
+            keep_default_na=keep_default_na,
+            nrows=nrows,
+            names=names,
+            **kwargs
+        )
+
     if header is None:
         data_rows = rows
         columns = list(names) if names is not None else _default_columns(_max_width(data_rows))
@@ -143,6 +155,49 @@ def dataframe_from_delimited_text(text, header=0, **kwargs):
     if not keep_default_na:
         df = df.fillna('')
     return df
+
+
+def _unwrap_single_column_records(rows, outer_delimiter):
+    """
+    Excel re-saves a semicolon/tab export by quoting each whole record and padding
+    the row with commas, so the file parses into one populated column whose cells
+    still hold the original delimited record. Hand those records back so the
+    delimiter can be sniffed again on what the row actually is. Returns None when
+    the file genuinely splits into columns, which is the normal case.
+    """
+    if len(rows) < 2:
+        return None
+
+    records = []
+    for row in rows:
+        filled = [str(cell).strip() for cell in row if str(cell or '').strip()]
+        if len(filled) != 1:
+            return None
+        records.append(filled[0])
+
+    # Only retry when the recovered records form a table on a DIFFERENT separator.
+    # If the same one wins again, the quoting was deliberate - a one-column file of
+    # values that contain commas - and unwrapping would invent columns.
+    return records if _splits_on_other_delimiter(records, outer_delimiter) else None
+
+
+def _splits_on_other_delimiter(records, outer_delimiter):
+    sample = records[:25]
+    if len(sample) < 2:
+        return False
+
+    delimiter = detect_delimiter_safely('\n'.join(sample))
+    if delimiter == outer_delimiter:
+        return False
+
+    widths = [count_delimited_fields_safely(record, delimiter) for record in sample]
+    usable = [width for width in widths if width > 1]
+    if not usable:
+        return False
+
+    target_width = max(set(usable), key=usable.count)
+    agreeing = sum(1 for width in widths if width == target_width)
+    return target_width > 1 and agreeing >= max(2, len(sample) // 2)
 
 
 def _rejoin_wrapped_lines(lines, delimiter, expected_width):

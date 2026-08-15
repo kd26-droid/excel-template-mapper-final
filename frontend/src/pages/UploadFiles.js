@@ -233,6 +233,80 @@ const scoreHeaderRow = (rows = [], rowIndex = 0) => {
   );
 };
 
+// Excel re-saves a foreign-delimiter CSV by wrapping each whole record in quotes
+// and padding the row with commas, so the file parses as one very wide sheet with
+// a single populated column holding the real record. Reading the recovered column
+// back as its own CSV lets the parser find the delimiter that was actually used.
+// The header row is only worth detecting once the file has split into a table.
+const sheetPopulatedColumnCount = (rows = []) => {
+  const populated = new Set();
+  rows.forEach(row => {
+    normalizeRowCells(row).forEach((cell, index) => {
+      if (cell !== '') populated.add(index);
+    });
+  });
+  return populated.size;
+};
+
+// The wrapper Excel writes is always a comma CSV, so a recovered record is only
+// worth re-reading if it forms a consistent table on a DIFFERENT separator. If the
+// comma wins again the quoting was deliberate - a one-column file of values that
+// contain commas - and unwrapping it would invent columns.
+const CSV_RECOVERY_DELIMITERS = [';', '\t', '|'];
+
+const pickRecoveredDelimiter = (lines = []) => {
+  const sample = lines.slice(0, 25);
+  let best = '';
+  let bestScore = 0;
+
+  CSV_RECOVERY_DELIMITERS.forEach(candidate => {
+    const widths = sample.map(line => line.split(candidate).length);
+    const usable = widths.filter(width => width > 1);
+    if (!usable.length) return;
+
+    const counts = new Map();
+    usable.forEach(width => counts.set(width, (counts.get(width) || 0) + 1));
+    const targetWidth = [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+    const agreeing = widths.filter(width => width === targetWidth).length;
+    if (agreeing < Math.max(2, Math.floor(sample.length / 2))) return;
+
+    const score = targetWidth * 2 + agreeing;
+    if (score > bestScore) {
+      bestScore = score;
+      best = candidate;
+    }
+  });
+
+  return best;
+};
+
+const readCsvWorkbook = (text, readOptions) => {
+  const workbook = XLSX.read(text, readOptions);
+  const firstSheet = workbook.SheetNames[0];
+  if (!firstSheet) return workbook;
+
+  const rows = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheet], { header: 1, raw: false, defval: '', blankrows: true });
+  if (sheetPopulatedColumnCount(rows) > 1) return workbook;
+
+  const recoveredLines = rows
+    .map(row => normalizeRowCells(row).find(cell => cell !== '') || '')
+    .filter(line => line !== '');
+  if (recoveredLines.length < 2) return workbook;
+
+  const delimiter = pickRecoveredDelimiter(recoveredLines);
+  if (!delimiter) return workbook;
+
+  try {
+    const retried = XLSX.read(recoveredLines.join('\n'), { ...readOptions, FS: delimiter });
+    const retriedSheet = retried.SheetNames[0];
+    if (!retriedSheet) return workbook;
+    const retriedRows = XLSX.utils.sheet_to_json(retried.Sheets[retriedSheet], { header: 1, raw: false, defval: '', blankrows: true });
+    return sheetPopulatedColumnCount(retriedRows) > 1 ? retried : workbook;
+  } catch (err) {
+    return workbook;
+  }
+};
+
 const readSheetRows = (workbook, sheetName, options = {}) => {
   const { expandMergedCells = true } = options;
   if (!workbook || !sheetName || !workbook.Sheets || !workbook.Sheets[sheetName]) return [];
@@ -256,11 +330,26 @@ const readSheetRows = (workbook, sheetName, options = {}) => {
   return expandMergedCells ? expandMergedCellsInRows(ws, rows) : rows;
 };
 
+// A sheet that parsed into a single populated column - a CSV whose real
+// delimiter was not the one it was saved with, say - gives the scorer nothing to
+// compare. Every row looks alike, so the "best" one is noise; row 1 is the only
+// honest answer.
+const hasSingleUsableColumn = (rows = []) => {
+  const populated = new Set();
+  rows.forEach(row => {
+    normalizeRowCells(row).forEach((cell, index) => {
+      if (cell !== '') populated.add(index);
+    });
+  });
+  return populated.size <= 1;
+};
+
 // Returns a 1-based row number, matching the "Header Row" field.
 const detectHeaderRow = (workbook, sheetName) => {
   const rows = readSheetRows(workbook, sheetName, { expandMergedCells: false }).slice(0, HEADER_SCAN_ROWS);
   const multiLevelMfgPartsHeader = findMultiLevelMfgPartsHeaderRow(rows);
   if (multiLevelMfgPartsHeader) return multiLevelMfgPartsHeader;
+  if (hasSingleUsableColumn(rows)) return 1;
 
   let bestRow = 0;
   let bestScore = Number.NEGATIVE_INFINITY;
@@ -973,6 +1062,10 @@ const UploadFiles = () => {
   const [clientWorkbook, setClientWorkbook] = useState(null);
   const [clientHeaderPreview, setClientHeaderPreview] = useState([]);
   const [clientHeaderAutoDetected, setClientHeaderAutoDetected] = useState(false);
+  // Only a header row the user typed themselves is worth forcing on the
+  // normalizer. An auto-detected one belongs to whichever sheet is previewed
+  // here, which is not necessarily one of the sheets being combined.
+  const [clientHeaderRowTouched, setClientHeaderRowTouched] = useState(false);
 
   // BOM structure gate. Asked on whichever exit the user takes, so the direct
   // Upload -> Mapping path is covered as well as the normalizer route. The
@@ -1067,7 +1160,7 @@ const UploadFiles = () => {
     baseKey: '',
     detailKey: '',
     relationshipName: '',
-    outputMode: 'grouped',
+    outputMode: 'expanded',
     detailColumns: [],
     uniqueIdMode: 'auto',
     uniqueIdBaseColumn: '',
@@ -1441,15 +1534,17 @@ const UploadFiles = () => {
     const isCSV = file.name.toLowerCase().endsWith('.csv');
     reader.onload = (event) => {
       try {
-        const workbook = XLSX.read(event.target.result, isCSV ? {
-          type: 'string',
-          codepage: 65001,
-          raw: false,
-          dateNF: 'YYYY-MM-DD',
-          cellDates: true,
-          cellNF: false,
-          cellText: false
-        } : { type: 'binary' });
+        const workbook = isCSV
+          ? readCsvWorkbook(event.target.result, {
+            type: 'string',
+            codepage: 65001,
+            raw: false,
+            dateNF: 'YYYY-MM-DD',
+            cellDates: true,
+            cellNF: false,
+            cellText: false
+          })
+          : XLSX.read(event.target.result, { type: 'binary' });
         resolve(workbook);
       } catch (err) {
         reject(err);
@@ -2020,6 +2115,7 @@ const UploadFiles = () => {
       setClientHeaderRow(1);
       setClientHeaderPreview([]);
       setClientHeaderAutoDetected(false);
+      setClientHeaderRowTouched(false);
       setCombineSheetsMode(false);
       setSelectedClientSheets([]);
       // A different workbook means different sheets, so the BOM answers no
@@ -2057,7 +2153,7 @@ const UploadFiles = () => {
           
           if (isCSV) {
             // For CSV files, use text reading with proper parsing options
-            workbook = XLSX.read(data, { 
+            workbook = readCsvWorkbook(data, {
               type: 'string',
               codepage: 65001, // UTF-8
               raw: false,
@@ -2112,7 +2208,7 @@ const UploadFiles = () => {
           if (isCSV && !err.message.includes('fallback attempted')) {
             try {
               // Fallback: try reading as binary for CSV files with encoding issues
-              const fallbackWorkbook = XLSX.read(evt.target.result, { 
+              const fallbackWorkbook = readCsvWorkbook(evt.target.result, {
                 type: 'string',
                 raw: true,
                 codepage: 1252 // Windows-1252 (common alternative)
@@ -2177,6 +2273,7 @@ const UploadFiles = () => {
     setClientHeaderRow(1);
     setClientHeaderPreview([]);
     setClientHeaderAutoDetected(false);
+    setClientHeaderRowTouched(false);
     setCombineSheetsMode(false);
     setSelectedClientSheets([]);
     setSheetJoinSetup(null);
@@ -2279,7 +2376,7 @@ const UploadFiles = () => {
           let workbook;
 
           if (isCSV) {
-            workbook = XLSX.read(data, {
+            workbook = readCsvWorkbook(data, {
               type: 'string',
               codepage: 65001,
               raw: false
@@ -2359,12 +2456,14 @@ const UploadFiles = () => {
     const detectedRow = detectHeaderRow(clientWorkbook, sheetName);
     setClientHeaderRow(detectedRow);
     setClientHeaderAutoDetected(detectedRow > 1);
+    setClientHeaderRowTouched(false);
   };
 
   const handleClientHeaderRowChange = (value) => {
     const parsed = Number(value);
     setClientHeaderRow(Number.isFinite(parsed) && parsed > 0 ? parsed : 1);
     setClientHeaderAutoDetected(false);
+    setClientHeaderRowTouched(true);
   };
 
   const handleTemplateSheetChange = (sheetName) => {
@@ -2523,7 +2622,7 @@ const UploadFiles = () => {
       baseKey,
       detailKey,
       relationshipName: sheetJoinSetup?.relationshipName || '',
-      outputMode: sheetJoinSetup?.outputMode || 'grouped',
+      outputMode: sheetJoinSetup?.outputMode || 'expanded',
       detailColumns: sheetJoinSetup?.detailColumns || defaultDetailColumnSelection,
       uniqueIdMode: sheetJoinSetup?.uniqueIdMode || 'auto',
       uniqueIdBaseColumn: sheetJoinSetup?.uniqueIdBaseColumn || baseKey,
@@ -3084,6 +3183,7 @@ const UploadFiles = () => {
     setSelectedClientSheet(extracted.sheetNames[0] || 'PDF_Source');
     setClientHeaderRow(1);
     setClientHeaderAutoDetected(false);
+    setClientHeaderRowTouched(false);
     setCombineSheetsMode(false);
     setSelectedClientSheets([]);
     setSheetJoinSetup(null);
@@ -3188,12 +3288,20 @@ const UploadFiles = () => {
     // or asking about a PDF before it has even been parsed — is just noise.
     const bomAnswers = passedAnswers || bomStructureAnswers;
 
+    // The normalizer reads the workbook itself, so the sheet setup made here has
+    // to travel with it — otherwise a combined multi-sheet source silently
+    // reopens as whichever single sheet the picker happened to be showing.
+    const combiningSheets = combineSheetsMode && selectedClientSheets.length > 1;
+
     navigate('/bom-normalizer', {
       state: {
         initialFile: userFile,
         initialFileMode: 'workbook',
         initialSheetName: selectedClientSheet,
         initialHeaderRow: clientHeaderRow,
+        initialSheetScope: combiningSheets ? 'selected' : 'single',
+        initialSelectedSheets: combiningSheets ? selectedClientSheets : [],
+        initialHeaderRowExplicit: clientHeaderRowTouched,
         templateFile,
         bomStructure: bomAnswers,
         // The normalizer gate reconciles this against the normalized rows, which

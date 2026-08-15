@@ -45,8 +45,10 @@ import { useThemeContext } from '../utils/ThemeContext';
 import api from '../services/api';
 import { useLocation } from 'react-router-dom';
 import ColumnRuleBuilder, { createEmptyColumnRule } from '../components/ColumnRuleBuilder';
+import { displayHeaderName } from '../utils/columnHeaderNames';
 import { useFactwise } from '../contexts/FactwiseContext';
 import {
+  FACTWISE_TEMPLATE_COLUMNS,
   ITEM_DIRECTORY_DEFAULTS,
   readItemDirectoryColumnOptions,
   readItemDirectoryDefaults,
@@ -301,8 +303,14 @@ const Settings = () => {
       ...itemCodeConditionalBranches.flatMap(branch => [branch.column, branch.outputColumn]),
     ];
     const seen = new Set();
-    return [...itemDirectoryColumnOptions, ...savedColumns]
+    // The FactWise template, not the last sheet someone opened. Settings has no
+    // session, and sourcing it from one meant this list carried whatever that
+    // sheet had grown — Tag_1…Tag_8, Tag_1__2, and other per-sheet artefacts.
+    // Anything already saved in a rule is kept on the end so an existing choice
+    // never disappears from its own dropdown.
+    return [...FACTWISE_TEMPLATE_COLUMNS, ...savedColumns]
       .map(value => String(value || '').trim())
+      .filter(value => !/__\d+$/.test(value))
       .filter(value => {
         if (!value || seen.has(value.toLowerCase())) return false;
         seen.add(value.toLowerCase());
@@ -1202,7 +1210,7 @@ const Settings = () => {
                       sx={fieldSx}
                     >
                       {ITEM_TYPE_OPTIONS.map(option => (
-                        <MenuItem key={option} value={option}>{option}</MenuItem>
+                        <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
                       ))}
                     </TextField>
                   </Grid>
@@ -1299,7 +1307,7 @@ const Settings = () => {
                             >
                               <MenuItem value="">Select source column</MenuItem>
                               {itemCodeSourceColumnOptions.map(option => (
-                                <MenuItem key={option} value={option}>{option}</MenuItem>
+                                <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
                               ))}
                             </TextField>
                           </Grid>
@@ -1318,7 +1326,7 @@ const Settings = () => {
                               >
                                 <MenuItem value="">Select first column</MenuItem>
                                 {itemCodeSourceColumnOptions.map(option => (
-                                  <MenuItem key={option} value={option}>{option}</MenuItem>
+                                  <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
                                 ))}
                               </TextField>
                             </Grid>
@@ -1334,7 +1342,7 @@ const Settings = () => {
                               >
                                 <MenuItem value="">Select second column</MenuItem>
                                 {itemCodeSourceColumnOptions.map(option => (
-                                  <MenuItem key={option} value={option}>{option}</MenuItem>
+                                  <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
                                 ))}
                               </TextField>
                             </Grid>
@@ -1402,7 +1410,7 @@ const Settings = () => {
                                       >
                                         <MenuItem value="">Source column</MenuItem>
                                         {itemCodeSourceColumnOptions.map(option => (
-                                          <MenuItem key={option} value={option}>{option}</MenuItem>
+                                          <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
                                         ))}
                                       </TextField>
                                     </Grid>
@@ -1466,7 +1474,7 @@ const Settings = () => {
                                         >
                                           <MenuItem value="">Column to copy from</MenuItem>
                                           {itemCodeSourceColumnOptions.map(option => (
-                                            <MenuItem key={option} value={option}>{option}</MenuItem>
+                                            <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
                                           ))}
                                         </TextField>
                                       </Grid>
@@ -1527,7 +1535,7 @@ const Settings = () => {
                                     >
                                       <MenuItem value="">Column to copy from</MenuItem>
                                       {itemCodeSourceColumnOptions.map(option => (
-                                        <MenuItem key={option} value={option}>{option}</MenuItem>
+                                        <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
                                       ))}
                                     </TextField>
                                   </Grid>

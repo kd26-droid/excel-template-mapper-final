@@ -376,7 +376,7 @@ export default function FactwiseBulkImportErrorGrid({
         // Rename dedupe suffixes (Tag, "Tag (2)", "Tag (3)") into canonical
         // per-column names (Tag_1, Tag_2, Tag_3) so every repeated column's
         // edits reach the session — the mapper stores them under Tag_N
-        // internally. Same trick for Specification_* / Customer_Identification_*.
+        // internally. Same trick for Specification_* / Custom_Identification_*.
         //
         // Old bug: we stripped the "(N)" suffix and used an OBJECT dict keyed
         // by the base name, so the second and third Tag columns collapsed
@@ -387,8 +387,8 @@ export default function FactwiseBulkImportErrorGrid({
           { base: 'Tag', canonical: (n) => `Tag_${n}` },
           { base: 'Specification Name', canonical: (n) => `Specification_Name_${n}` },
           { base: 'Specification Value', canonical: (n) => `Specification_Value_${n}` },
-          { base: 'Customer Identification Name', canonical: (n) => `Customer_Identification_Name_${n}` },
-          { base: 'Customer Identification Value', canonical: (n) => `Customer_Identification_Value_${n}` },
+          { base: 'Customer Identification Name', canonical: (n) => `Custom_Identification_Name_${n}` },
+          { base: 'Customer Identification Value', canonical: (n) => `Custom_Identification_Value_${n}` },
         ];
         const norm = (s) => String(s || '').trim().toLowerCase().replace(/[_\s]+/g, ' ');
         const counters = new Map(); // base -> next index (1-based)

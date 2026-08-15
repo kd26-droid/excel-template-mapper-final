@@ -528,7 +528,21 @@ const worksheetToCompactRows = (worksheet, options = {}) => {
   return rows;
 };
 
+// One populated column means the file did not really split into a table - a CSV
+// saved with the wrong delimiter, typically. Scoring rows against each other is
+// then meaningless, and row 1 is the only honest answer.
+const hasSingleUsableColumn = (rows = []) => {
+  const populated = new Set();
+  rows.slice(0, HEADER_SCAN_ROWS).forEach((row) => {
+    (row || []).forEach((cell, index) => {
+      if (fmt(cell) !== '') populated.add(index);
+    });
+  });
+  return populated.size <= 1;
+};
+
 const detectHeaderRow = (rows) => {
+  if (hasSingleUsableColumn(rows)) return 0;
   let bestIndex = 0;
   let bestScore = Number.NEGATIVE_INFINITY;
   rows.slice(0, HEADER_SCAN_ROWS).forEach((_row, index) => {
@@ -3841,6 +3855,28 @@ const readCsvWorkbookSafely = async (file) => {
         .map((line) => splitDelimitedLine(line, ','));
       return workbookFromRows(rows);
     },
+    // Excel re-saves a semicolon/tab export by quoting each whole record and
+    // padding the row with commas, so every row parses as one populated cell that
+    // still holds the original delimited record. Unwrap that cell and sniff again.
+    () => {
+      const lines = text.split(/\r?\n/).filter((line) => line.trim());
+      const unwrapped = [];
+      for (const line of lines) {
+        const filled = splitDelimitedLine(line, ',').filter((cell) => fmt(cell));
+        if (filled.length !== 1) return null;
+        unwrapped.push(filled[0]);
+      }
+      if (unwrapped.length < 2) return null;
+
+      const delimiter = detectDelimiter(unwrapped.join('\n'));
+      // Same separator winning again means the quoting was deliberate - a
+      // one-column file of values that contain commas - so leave it alone.
+      if (delimiter === ',') return null;
+      const rows = rejoinWrappedLines(unwrapped, delimiter)
+        .map((line) => splitDelimitedLine(line, delimiter));
+      if (rows.length < 2 || rows[0].length < 2) return null;
+      return workbookFromRows(rows);
+    },
   ];
   let lastError = null;
 
@@ -4359,8 +4395,12 @@ const prepareSingleSheet = (currentWorkbook, currentSheetName, options = {}) => 
   };
 };
 
-const prepareMultipleSheets = (currentWorkbook, sheetNames) => {
-  const multiBlockPrepared = prepareMultiBlockSheets(currentWorkbook, sheetNames);
+const prepareMultipleSheets = (currentWorkbook, sheetNames, options = {}) => {
+  const pinnedHeaderRow = Number(options.headerRow);
+  const hasPinnedHeaderRow = Number.isFinite(pinnedHeaderRow) && pinnedHeaderRow > 0;
+  // A pinned header row is a direct instruction about where the table starts,
+  // so block detection (which finds its own header rows) has to stand down.
+  const multiBlockPrepared = hasPinnedHeaderRow ? null : prepareMultiBlockSheets(currentWorkbook, sheetNames);
   if (multiBlockPrepared?.multiBlockSummary?.blockCount > 1) {
     return multiBlockPrepared;
   }
@@ -4369,7 +4409,9 @@ const prepareMultipleSheets = (currentWorkbook, sheetNames) => {
   const combinedRows = [];
 
   sheetNames.forEach((currentSheetName) => {
-    const prepared = prepareSingleSheet(currentWorkbook, currentSheetName);
+    const prepared = prepareSingleSheet(currentWorkbook, currentSheetName, {
+      headerRow: hasPinnedHeaderRow ? pinnedHeaderRow : undefined,
+    });
     prepared.headers.forEach((header) => {
       if (!unionHeaders.includes(header)) unionHeaders.push(header);
     });
@@ -5069,7 +5111,7 @@ const buildBomMappingRowsFromNormalizedRows = (rows = [], baseColumns = getNorma
 // The repeated template slots a parse can fill. Their internal names match the
 // template's own columns once punctuation is ignored, which is exactly how
 // ColumnMapping's findHeaderByCandidates compares - so 'Tag_2' finds 'Tag (2)'.
-const DYNAMIC_TEMPLATE_COLUMN_RE = /^(Tag|Specification_Name|Specification_Value|Specification_UOM|Customer_Identification_Name|Customer_Identification_Value)_\d+$/i;
+const DYNAMIC_TEMPLATE_COLUMN_RE = /^(Tag|Specification_Name|Specification_Value|Specification_UOM|Custom_Identification_Name|Custom_Identification_Value)_\d+$/i;
 
 const buildNormalizerSuggestedMappings = (columns = [], rows = []) => {
   const available = new Set(columns);
@@ -5783,6 +5825,9 @@ const BomNormalizer = () => {
   const [selectedSheetNames, setSelectedSheetNames] = useState([]);
   const [sheetRows, setSheetRows] = useState([]);
   const [headerRowIndex, setHeaderRowIndex] = useState(0);
+  // Multi-sheet only: one header row pinned across every selected sheet. Empty
+  // means each sheet keeps its own auto-detected header row.
+  const [sheetHeaderRowOverride, setSheetHeaderRowOverride] = useState('');
   const [preparedHeaders, setPreparedHeaders] = useState([]);
   const [preparedDataRows, setPreparedDataRows] = useState([]);
   const [sourceEndRow, setSourceEndRow] = useState('');
@@ -6919,21 +6964,32 @@ const BomNormalizer = () => {
     const preferredSheet = options.sheetName && nextWorkbook.SheetNames.includes(options.sheetName)
       ? options.sheetName
       : nextWorkbook.SheetNames[0];
-    const autoMultiBlock = !options.sheetName && !options.headerRow
+    // A caller-supplied multi-sheet selection (e.g. "combine these 6 sheets" set
+    // on the upload screen) wins over anything detected here.
+    const requestedSheets = (options.selectedSheetNames || []).filter((name) => nextWorkbook.SheetNames.includes(name));
+    const useRequestedSelection = options.sheetScope && options.sheetScope !== 'single' && requestedSheets.length > 1;
+    const autoMultiBlock = !useRequestedSelection && !options.sheetName && !options.headerRow
       ? prepareMultiBlockSheets(nextWorkbook, nextWorkbook.SheetNames)
       : null;
-    const prepared = autoMultiBlock?.multiBlockSummary?.blockCount > 1
-      ? autoMultiBlock
-      : prepareSingleSheet(nextWorkbook, preferredSheet, { headerRow: options.headerRow });
+    const prepared = useRequestedSelection
+      ? prepareMultipleSheets(nextWorkbook, requestedSheets, { headerRow: options.headerRow })
+      : autoMultiBlock?.multiBlockSummary?.blockCount > 1
+        ? autoMultiBlock
+        : prepareSingleSheet(nextWorkbook, preferredSheet, { headerRow: options.headerRow });
     const nextHeaders = prepared.headers;
     const nextRoles = rolesForMultiBlockAssembly(nextHeaders, inferRoles(nextHeaders, prepared.dataRows, { manufacturerDirectory }));
     const nextStructure = detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40));
-    const nextSheetScope = autoMultiBlock?.multiBlockSummary?.blockCount > 1 && nextWorkbook.SheetNames.length > 1 ? 'all' : 'single';
-    const nextSelectedSheets = nextSheetScope === 'all' ? nextWorkbook.SheetNames : [preferredSheet];
+    const nextSheetScope = useRequestedSelection
+      ? (options.sheetScope === 'all' && requestedSheets.length === nextWorkbook.SheetNames.length ? 'all' : 'selected')
+      : autoMultiBlock?.multiBlockSummary?.blockCount > 1 && nextWorkbook.SheetNames.length > 1 ? 'all' : 'single';
+    const nextSelectedSheets = useRequestedSelection
+      ? requestedSheets
+      : nextSheetScope === 'all' ? nextWorkbook.SheetNames : [preferredSheet];
 
+    setSheetHeaderRowOverride(useRequestedSelection && options.headerRow ? String(options.headerRow) : '');
     setWorkbook(nextWorkbook);
     setFileName(nextFileName);
-    setSheetName(preferredSheet);
+    setSheetName(nextSelectedSheets[0] || preferredSheet);
     setSheetScope(nextSheetScope);
     setSelectedSheetNames(nextSelectedSheets);
     setSheetRows(prepared.sheetRows);
@@ -7060,7 +7116,7 @@ const BomNormalizer = () => {
     const state = location.state || {};
     const initialFile = state.initialFile;
     const seedKey = initialFile
-      ? `${initialFile.name || 'file'}-${initialFile.size || 0}-${initialFile.lastModified || 0}-${state.initialFileMode || 'source'}-${state.initialSheetName || ''}-${state.initialHeaderRow || ''}`
+      ? `${initialFile.name || 'file'}-${initialFile.size || 0}-${initialFile.lastModified || 0}-${state.initialFileMode || 'source'}-${state.initialSheetName || ''}-${state.initialHeaderRow || ''}-${state.initialSheetScope || ''}-${(state.initialSelectedSheets || []).join('|')}`
       : '';
     // restoredReturnSnapshotRef, not state.returnFromMapping: the restore effect clears
     // that flag once it has consumed it, and this effect would then re-run, still see
@@ -7090,9 +7146,15 @@ const BomNormalizer = () => {
         if (state.initialFileMode === 'workbook') {
           await new Promise((resolve) => setTimeout(resolve, 0));
           const nextWorkbook = await readUploadedWorkbookSafely(initialFile);
+          const multiSheetSeed = state.initialSheetScope && state.initialSheetScope !== 'single';
           handleWorkbookLoaded(nextWorkbook, initialFile.name, {
             sheetName: state.initialSheetName,
-            headerRow: state.initialHeaderRow,
+            // The upload screen's header row is auto-detected from whichever
+            // sheet it previews, so across a multi-sheet selection it is only
+            // trustworthy when the user typed it themselves.
+            headerRow: multiSheetSeed && !state.initialHeaderRowExplicit ? undefined : state.initialHeaderRow,
+            sheetScope: state.initialSheetScope,
+            selectedSheetNames: state.initialSelectedSheets,
           });
           setCombineItems([]);
           setMergeChainMessage('');
@@ -7107,6 +7169,9 @@ const BomNormalizer = () => {
         delete remainingState.initialFileMode;
         delete remainingState.initialSheetName;
         delete remainingState.initialHeaderRow;
+        delete remainingState.initialSheetScope;
+        delete remainingState.initialSelectedSheets;
+        delete remainingState.initialHeaderRowExplicit;
         navigate(location.pathname, { replace: true, state: remainingState });
       } catch (err) {
         setCombineError(err.message || 'Unable to prepare the uploaded file for BOM Normalizer.');
@@ -8015,18 +8080,23 @@ const BomNormalizer = () => {
     setConfirmOpen(false);
   }, [manufacturerDirectory, workbook]);
 
-  const applySheetSelection = useCallback((scope, names) => {
+  const applySheetSelection = useCallback((scope, names, options = {}) => {
     if (!workbook) return;
     const safeNames = names.filter((name) => workbook.SheetNames.includes(name));
     const nextNames = scope === 'all'
       ? workbook.SheetNames
       : (safeNames.length ? safeNames : [workbook.SheetNames[0]]);
+    const pinnedHeaderRow = Number(
+      options.headerRow === undefined ? sheetHeaderRowOverride : options.headerRow
+    );
+    const headerRow = Number.isFinite(pinnedHeaderRow) && pinnedHeaderRow > 0 ? pinnedHeaderRow : undefined;
     const prepared = scope === 'single'
       ? prepareSingleSheet(workbook, nextNames[0])
-      : prepareMultipleSheets(workbook, nextNames);
+      : prepareMultipleSheets(workbook, nextNames, { headerRow });
     const nextRoles = rolesForMultiBlockAssembly(prepared.headers, inferRoles(prepared.headers, prepared.dataRows, { manufacturerDirectory }));
 
     setSheetScope(scope);
+    setSheetHeaderRowOverride(scope === 'single' || !headerRow ? '' : String(headerRow));
     setSelectedSheetNames(nextNames);
     setSheetName(nextNames[0]);
     setSheetRows(prepared.sheetRows);
@@ -8049,7 +8119,7 @@ const BomNormalizer = () => {
     setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
-  }, [manufacturerDirectory, workbook]);
+  }, [manufacturerDirectory, sheetHeaderRowOverride, workbook]);
 
   const handleSheetScopeChange = useCallback((nextScope) => {
     if (!workbook) return;
@@ -8071,6 +8141,12 @@ const BomNormalizer = () => {
   const handleHeaderRowChange = useCallback((value) => {
     const nextIndex = Math.max(0, Number(value) - 1);
     const activeSheetName = sheetName || workbook?.SheetNames?.[0] || '';
+    // Across several sheets one header row applies to all of them; blank hands
+    // each sheet back to its own auto-detection.
+    if (workbook && sheetScope !== 'single') {
+      applySheetSelection(sheetScope, selectedSheetNames, { headerRow: value });
+      return;
+    }
     if (workbook && sheetScope === 'single' && activeSheetName) {
       const prepared = prepareSingleSheet(workbook, activeSheetName, { headerRow: nextIndex + 1 });
       const nextRoles = inferRoles(prepared.headers, prepared.dataRows, { manufacturerDirectory });
@@ -8116,7 +8192,7 @@ const BomNormalizer = () => {
     setParserTouched(false);
     setSkipSourceSetupForMerge(false);
     setConfirmOpen(false);
-  }, [manufacturerDirectory, sheetName, sheetRows, sheetScope, workbook]);
+  }, [applySheetSelection, manufacturerDirectory, selectedSheetNames, sheetName, sheetRows, sheetScope, workbook]);
 
   const handleRoleChange = useCallback((role, header) => {
     setRoles((prev) => ({ ...prev, [role]: header }));
@@ -9701,10 +9777,16 @@ const BomNormalizer = () => {
                       size="small"
                       type="number"
                       label="Header row"
-                      value={headerRowIndex + 1}
-                      inputProps={{ min: 1, max: Math.max(sheetRows.length, 1) }}
-                      disabled={sheetScope !== 'single'}
-                      helperText={sheetScope === 'single' ? '' : 'Header row is auto-detected separately for each selected sheet.'}
+                      value={sheetScope === 'single' ? headerRowIndex + 1 : sheetHeaderRowOverride}
+                      placeholder={sheetScope === 'single' ? '' : 'Auto'}
+                      inputProps={sheetScope === 'single'
+                        ? { min: 1, max: Math.max(sheetRows.length, 1) }
+                        : { min: 1 }}
+                      helperText={sheetScope === 'single'
+                        ? ''
+                        : sheetHeaderRowOverride
+                          ? 'Applied to every selected sheet. Clear it to auto-detect each sheet.'
+                          : 'Header row is auto-detected separately for each selected sheet.'}
                       onChange={(event) => handleHeaderRowChange(event.target.value)}
                     />
                   </Grid>
