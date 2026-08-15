@@ -45,8 +45,10 @@ import { useThemeContext } from '../utils/ThemeContext';
 import api from '../services/api';
 import { useLocation } from 'react-router-dom';
 import ColumnRuleBuilder, { createEmptyColumnRule } from '../components/ColumnRuleBuilder';
+import { displayHeaderName } from '../utils/columnHeaderNames';
 import { useFactwise } from '../contexts/FactwiseContext';
 import {
+  FACTWISE_TEMPLATE_COLUMNS,
   ITEM_DIRECTORY_DEFAULTS,
   readItemDirectoryColumnOptions,
   readItemDirectoryDefaults,
@@ -301,8 +303,14 @@ const Settings = () => {
       ...itemCodeConditionalBranches.flatMap(branch => [branch.column, branch.outputColumn]),
     ];
     const seen = new Set();
-    return [...itemDirectoryColumnOptions, ...savedColumns]
+    // The FactWise template, not the last sheet someone opened. Settings has no
+    // session, and sourcing it from one meant this list carried whatever that
+    // sheet had grown — Tag_1…Tag_8, Tag_1__2, and other per-sheet artefacts.
+    // Anything already saved in a rule is kept on the end so an existing choice
+    // never disappears from its own dropdown.
+    return [...FACTWISE_TEMPLATE_COLUMNS, ...savedColumns]
       .map(value => String(value || '').trim())
+      .filter(value => !/__\d+$/.test(value))
       .filter(value => {
         if (!value || seen.has(value.toLowerCase())) return false;
         seen.add(value.toLowerCase());
@@ -380,6 +388,7 @@ const Settings = () => {
     isEmbedded: isFactwiseEmbedded,
     entityName: factwiseEntityName,
     entities: factwiseEntities = [],
+    entityChangedAtLaunch,
     chooseEntity,
     loadEntities,
   } = useFactwise();
@@ -440,7 +449,11 @@ const Settings = () => {
         // — which it does the moment a wrong name is corrected — the old row is
         // stranded under the old key and the settings look lost. Re-save what
         // is still in the browser under the entity now in force.
-        const carriedOver = !hasServerSettings && [
+        //
+        // Not when the launch itself switched entity, though: there the browser
+        // copy belongs to whoever launched last, and carrying it over would
+        // write one account's defaults into another account's row.
+        const carriedOver = !hasServerSettings && !entityChangedAtLaunch && [
           'itemType', 'procurementItem', 'salesItem', 'measurementUnit', 'itemCodeContentType',
         ].some(key => String(existingDefaults[key] || '').trim());
         if (carriedOver) {
@@ -467,7 +480,8 @@ const Settings = () => {
     return () => {
       cancelled = true;
     };
-  }, [factwiseEntityName]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [factwiseEntityName, entityChangedAtLaunch]);
 
   useEffect(() => {
     const refreshColumnOptions = () => setItemDirectoryColumnOptions(readItemDirectoryColumnOptions());
@@ -1202,7 +1216,7 @@ const Settings = () => {
                       sx={fieldSx}
                     >
                       {ITEM_TYPE_OPTIONS.map(option => (
-                        <MenuItem key={option} value={option}>{option}</MenuItem>
+                        <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
                       ))}
                     </TextField>
                   </Grid>
@@ -1299,7 +1313,7 @@ const Settings = () => {
                             >
                               <MenuItem value="">Select source column</MenuItem>
                               {itemCodeSourceColumnOptions.map(option => (
-                                <MenuItem key={option} value={option}>{option}</MenuItem>
+                                <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
                               ))}
                             </TextField>
                           </Grid>
@@ -1318,7 +1332,7 @@ const Settings = () => {
                               >
                                 <MenuItem value="">Select first column</MenuItem>
                                 {itemCodeSourceColumnOptions.map(option => (
-                                  <MenuItem key={option} value={option}>{option}</MenuItem>
+                                  <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
                                 ))}
                               </TextField>
                             </Grid>
@@ -1334,7 +1348,7 @@ const Settings = () => {
                               >
                                 <MenuItem value="">Select second column</MenuItem>
                                 {itemCodeSourceColumnOptions.map(option => (
-                                  <MenuItem key={option} value={option}>{option}</MenuItem>
+                                  <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
                                 ))}
                               </TextField>
                             </Grid>
@@ -1402,7 +1416,7 @@ const Settings = () => {
                                       >
                                         <MenuItem value="">Source column</MenuItem>
                                         {itemCodeSourceColumnOptions.map(option => (
-                                          <MenuItem key={option} value={option}>{option}</MenuItem>
+                                          <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
                                         ))}
                                       </TextField>
                                     </Grid>
@@ -1466,7 +1480,7 @@ const Settings = () => {
                                         >
                                           <MenuItem value="">Column to copy from</MenuItem>
                                           {itemCodeSourceColumnOptions.map(option => (
-                                            <MenuItem key={option} value={option}>{option}</MenuItem>
+                                            <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
                                           ))}
                                         </TextField>
                                       </Grid>
@@ -1527,7 +1541,7 @@ const Settings = () => {
                                     >
                                       <MenuItem value="">Column to copy from</MenuItem>
                                       {itemCodeSourceColumnOptions.map(option => (
-                                        <MenuItem key={option} value={option}>{option}</MenuItem>
+                                        <MenuItem key={option} value={option}>{displayHeaderName(option, itemCodeSourceColumnOptions)}</MenuItem>
                                       ))}
                                     </TextField>
                                   </Grid>

@@ -992,10 +992,10 @@ class AzureOCRService:
                     'mfr': 'Manufacturer',
                     'brand': 'Manufacturer',
 
-                    'customer identification name': 'Customer_Identification_Name_1',
-                    'customer id name': 'Customer_Identification_Name_1',
-                    'customer identification value': 'Customer_Identification_Value_1',
-                    'customer id value': 'Customer_Identification_Value_1',
+                    'custom identification name': 'Custom_Identification_Name_1',
+                    'customer id name': 'Custom_Identification_Name_1',
+                    'custom identification value': 'Custom_Identification_Value_1',
+                    'customer id value': 'Custom_Identification_Value_1',
 
                     'specification name': 'Specification_Name_1',
                     'spec name': 'Specification_Name_1',

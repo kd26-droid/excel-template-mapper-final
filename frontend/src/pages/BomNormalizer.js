@@ -528,7 +528,21 @@ const worksheetToCompactRows = (worksheet, options = {}) => {
   return rows;
 };
 
+// One populated column means the file did not really split into a table - a CSV
+// saved with the wrong delimiter, typically. Scoring rows against each other is
+// then meaningless, and row 1 is the only honest answer.
+const hasSingleUsableColumn = (rows = []) => {
+  const populated = new Set();
+  rows.slice(0, HEADER_SCAN_ROWS).forEach((row) => {
+    (row || []).forEach((cell, index) => {
+      if (fmt(cell) !== '') populated.add(index);
+    });
+  });
+  return populated.size <= 1;
+};
+
 const detectHeaderRow = (rows) => {
+  if (hasSingleUsableColumn(rows)) return 0;
   let bestIndex = 0;
   let bestScore = Number.NEGATIVE_INFINITY;
   rows.slice(0, HEADER_SCAN_ROWS).forEach((_row, index) => {
@@ -968,7 +982,15 @@ const inferRoles = (headers, dataRows = [], options = {}) => {
     uom: findLearnedHeader('uom') || findHeader([/\buom\b/, /measurement unit/, /\bunit\b/]),
     level: headers.find((header) => normalizeKey(header).startsWith(normalizeKey(EXCEL_OUTLINE_LEVEL_HEADER)))
       || (findLearnedHeader('level') || findHeader([/\blevel\b/])),
-    parent: findLearnedHeader('parent') || findHeader([/parent/, /finished good/, /bom id/, /item code/, /assembly/]),
+    // `parent` must not match this app's OWN `parentKey` column. That is the
+    // grouping key for a part and its alternates — `${parent}␟${identity}` —
+    // not a BOM parent, and a bare /parent/ matches it. Re-running on a
+    // normalized or merged sheet then adopted it as the hierarchy parent, so
+    // every assembly came back named "0043-13591␟0043-13591". Same conflation
+    // the note above parentKeyFor warns about, arriving through auto-detection
+    // instead of through a user's mapping.
+    parent: findLearnedHeader('parent')
+      || findHeader([/parent(?!\s*key)/, /finished good/, /bom id/, /item code/, /assembly/]),
   };
 };
 
@@ -1889,14 +1911,17 @@ const alternatesKey = (row, roles, sourceRow) => {
   //
   // Keyed on the pair, one real customer file goes from 287 lines to 634, which
   // matches its 634 distinct (parent, part) pairs counted straight off the sheet.
-  const parent = getCell(row, roles.parent);
+  // Stated, or inferred from the level walk — either way a real parent, so a
+  // part placed under two different assemblies stays two placements. That is
+  // what stampInferredParents exists for: the level fallback below merged two
+  // placements at the SAME level under different assemblies, because level
+  // alone cannot tell them apart.
+  const parent = hierarchyParent(row, roles);
   if (parent) return `${parent}␟${identity}`;
 
-  // No parent column. Level is then the only thing on the row that says where it
-  // sits, so it stands in: a part listed at level 1 and again at level 2 is two
-  // placements, and merging them loses one. THALES puts a label directly on the
-  // top assembly AND inside its PCBA kit; without this the level-1 placement
-  // vanished and the finished good was left with a single child.
+  // Reached only when there is no parent AND no usable level — a flat sheet.
+  // Kept because it is still the honest answer there: with one tier, level is
+  // the only thing on the row that says where it sits.
   //
   // Weaker than a real parent - two placements at the SAME level under different
   // assemblies still merge. That needs the parent inferred from row order during
@@ -1905,9 +1930,18 @@ const alternatesKey = (row, roles, sourceRow) => {
   return level ? `L${level}␟${identity}` : identity;
 };
 
-// Blank when the sheet does not state a parent. The tree is then derived from
-// the level column exactly as before, so level-only sheets are untouched.
-const hierarchyParent = (row, roles) => getCell(row, roles.parent) || '';
+// Where stampInferredParents writes the parent a row's level implies. Declared
+// beside its reader rather than beside its writer: hierarchyParent runs on
+// every row and this is the only thing it needs to know about the walk.
+const LEVEL_PARENT_KEY = '__inferredParent';
+
+// A stated parent when the sheet has one, otherwise the parent its level
+// implies — stamped by stampInferredParents before any of this runs.
+//
+// Level-only sheets now carry a real parent through to the output, so the tree
+// is built from an explicit statement rather than re-inferred from row order at
+// every stage that needs it.
+const hierarchyParent = (row, roles) => getCell(row, roles.parent) || row?.[LEVEL_PARENT_KEY] || '';
 
 const hasGroupedRowContext = (row, roles) => Boolean(
   getCell(row, roles.parent) ||
@@ -3305,7 +3339,71 @@ const normalizeGroupedRows = (rows, roles, config) => {
   return output;
 };
 
+// Stamp each row with the parent its level implies, for sheets that state no
+// parent of their own.
+//
+// The walk is the same rule the backend applies to level-only sheets — a row's
+// parent is the nearest preceding row one level shallower — but done HERE, once,
+// and written down. That matters for three reasons:
+//
+//   1. It is derived where the answer is known. The user picked the level and
+//      code columns at Configure; the popup had to guess them with a regex,
+//      picked `cpn`, and `cpn` was holding the parent. Deriving twice from two
+//      different guesses is what produced that bug.
+//   2. Row order stops mattering after this point. The walk needs tree order;
+//      everything downstream reads a stored value, so a later sort cannot
+//      silently reshape the tree.
+//   3. Two placements of one part at the SAME level under different assemblies
+//      get different parents, so they stay distinct. `parentKey`'s level
+//      fallback merged them — the honeywell case in BOM_KNOWN_GAPS.
+//
+// Written onto the row as `__inferredParent` rather than into the parent column
+// itself, so a sheet that DOES state its parent is untouched and the two can
+// never be confused.
+const stampInferredParents = (rows, roles) => {
+  if (!rows?.length) return rows;
+
+  // Clear before deciding whether to write. Rows are the SAME objects across
+  // re-runs, so bailing out early used to leave the previous run's stamps in
+  // place — map a real Parent column, re-run, and every row whose stated parent
+  // cell happens to be blank still falls back to a value inferred under the old
+  // configuration. One tree built from two different derivations.
+  const clear = () => rows.forEach((row) => { delete row[LEVEL_PARENT_KEY]; });
+
+  // A stated parent always wins; there is nothing to infer.
+  if (!roles?.level || roles.parent) { clear(); return rows; }
+  const codeRole = roles.cpn || roles.description;
+  if (!codeRole) { clear(); return rows; }
+  clear();
+
+  // Index = depth. Holds the most recent code seen at each level.
+  const openAt = [];
+  rows.forEach((row) => {
+    const rawLevel = String(getCell(row, roles.level) ?? '').trim();
+    const level = Number(rawLevel);
+    if (!rawLevel || !Number.isFinite(level) || !Number.isInteger(level) || level < 0) return;
+    const code = getCell(row, codeRole);
+
+    // A level JUMP (1 -> 3) leaves the skipped tier empty. The nearest open
+    // ancestor is used rather than nothing: attaching the row one level too
+    // high keeps it in the tree, where dropping its parent would orphan it.
+    let parent = '';
+    for (let depth = level - 1; depth >= 0; depth -= 1) {
+      if (openAt[depth]) { parent = openAt[depth]; break; }
+    }
+    row[LEVEL_PARENT_KEY] = parent;
+
+    if (code) {
+      openAt[level] = code;
+      // Anything deeper belonged to a branch this row just closed.
+      openAt.length = level + 1;
+    }
+  });
+  return rows;
+};
+
 const normalizeRows = (rows, headers, roles, config) => {
+  stampInferredParents(rows, roles);
   const layoutStructure = effectiveStructure(config);
   const assemblyMatrix = layoutStructure === 'assembly_quantity_matrix'
     ? (detectAssemblyQuantityMatrix(headers, rows, roles) || config.assemblyMatrix)
@@ -3343,6 +3441,10 @@ const normalizeRows = (rows, headers, roles, config) => {
 };
 
 const normalizeRowsChunked = async (rows, headers, roles, config, onProgress) => {
+  // Before chunking, and over EVERY row. The walk carries state down the sheet,
+  // so running it per 50-row chunk would restart the ancestor stack at each
+  // boundary and orphan the first rows of every chunk after the first.
+  stampInferredParents(rows, roles);
   const layoutStructure = effectiveStructure(config);
   if (config.structure === 'grouped_rows' || layoutStructure === 'multi_block_assembly') {
     const dataRows = [];
@@ -3958,6 +4060,35 @@ const readCsvWorkbookSafely = async (file) => {
         .map((line) => splitDelimitedLine(line, ','));
       return workbookFromRows(rows);
     },
+    // Excel re-saves a semicolon/tab export by quoting each whole record and padding
+    // the row with commas, so a row parses as one populated cell still holding the
+    // original delimited record. Where the record itself held a comma - a reference
+    // list, a European decimal - Excel split it there too, leaving several fragments.
+    // Joining a row's cells back with the comma that split them rebuilds the record
+    // either way; then sniff the delimiter the record actually uses.
+    () => {
+      const lines = text.split(/\r?\n/).filter((line) => line.trim());
+      if (lines.length < 2) return null;
+
+      let singleCellLines = 0;
+      const unwrapped = lines.map((line) => {
+        const cells = splitDelimitedLine(line, ',');
+        if (cells.filter((cell) => fmt(cell)).length <= 1) singleCellLines += 1;
+        let end = cells.length;
+        while (end > 0 && !fmt(cells[end - 1])) end -= 1;
+        return cells.slice(0, end).join(',');
+      });
+      if (singleCellLines < lines.length * 0.6) return null;
+
+      const delimiter = detectDelimiter(unwrapped.join('\n'));
+      // Same separator winning again means the quoting was deliberate - a
+      // one-column file of values that contain commas - so leave it alone.
+      if (delimiter === ',') return null;
+      const rows = rejoinWrappedLines(unwrapped, delimiter)
+        .map((line) => splitDelimitedLine(line, delimiter));
+      if (rows.length < 2 || rows[0].length < 2) return null;
+      return workbookFromRows(rows);
+    },
   ];
   let lastError = null;
 
@@ -4480,8 +4611,12 @@ const prepareSingleSheet = (currentWorkbook, currentSheetName, options = {}) => 
   };
 };
 
-const prepareMultipleSheets = (currentWorkbook, sheetNames) => {
-  const multiBlockPrepared = prepareMultiBlockSheets(currentWorkbook, sheetNames);
+const prepareMultipleSheets = (currentWorkbook, sheetNames, options = {}) => {
+  const pinnedHeaderRow = Number(options.headerRow);
+  const hasPinnedHeaderRow = Number.isFinite(pinnedHeaderRow) && pinnedHeaderRow > 0;
+  // A pinned header row is a direct instruction about where the table starts,
+  // so block detection (which finds its own header rows) has to stand down.
+  const multiBlockPrepared = hasPinnedHeaderRow ? null : prepareMultiBlockSheets(currentWorkbook, sheetNames);
   if (multiBlockPrepared?.multiBlockSummary?.blockCount > 1) {
     return multiBlockPrepared;
   }
@@ -4490,7 +4625,9 @@ const prepareMultipleSheets = (currentWorkbook, sheetNames) => {
   const combinedRows = [];
 
   sheetNames.forEach((currentSheetName) => {
-    const prepared = prepareSingleSheet(currentWorkbook, currentSheetName);
+    const prepared = prepareSingleSheet(currentWorkbook, currentSheetName, {
+      headerRow: hasPinnedHeaderRow ? pinnedHeaderRow : undefined,
+    });
     prepared.headers.forEach((header) => {
       if (!unionHeaders.includes(header)) unionHeaders.push(header);
     });
@@ -5190,7 +5327,7 @@ const buildBomMappingRowsFromNormalizedRows = (rows = [], baseColumns = getNorma
 // The repeated template slots a parse can fill. Their internal names match the
 // template's own columns once punctuation is ignored, which is exactly how
 // ColumnMapping's findHeaderByCandidates compares - so 'Tag_2' finds 'Tag (2)'.
-const DYNAMIC_TEMPLATE_COLUMN_RE = /^(Tag|Specification_Name|Specification_Value|Specification_UOM|Customer_Identification_Name|Customer_Identification_Value)_\d+$/i;
+const DYNAMIC_TEMPLATE_COLUMN_RE = /^(Tag|Specification_Name|Specification_Value|Specification_UOM|Custom_Identification_Name|Custom_Identification_Value)_\d+$/i;
 
 const buildNormalizerSuggestedMappings = (columns = [], rows = []) => {
   const available = new Set(columns);
@@ -5904,6 +6041,9 @@ const BomNormalizer = () => {
   const [selectedSheetNames, setSelectedSheetNames] = useState([]);
   const [sheetRows, setSheetRows] = useState([]);
   const [headerRowIndex, setHeaderRowIndex] = useState(0);
+  // Multi-sheet only: one header row pinned across every selected sheet. Empty
+  // means each sheet keeps its own auto-detected header row.
+  const [sheetHeaderRowOverride, setSheetHeaderRowOverride] = useState('');
   const [preparedHeaders, setPreparedHeaders] = useState([]);
   const [preparedDataRows, setPreparedDataRows] = useState([]);
   const [sourceEndRow, setSourceEndRow] = useState('');
@@ -7144,21 +7284,32 @@ const BomNormalizer = () => {
     const preferredSheet = options.sheetName && nextWorkbook.SheetNames.includes(options.sheetName)
       ? options.sheetName
       : nextWorkbook.SheetNames[0];
-    const autoMultiBlock = !options.sheetName && !options.headerRow
+    // A caller-supplied multi-sheet selection (e.g. "combine these 6 sheets" set
+    // on the upload screen) wins over anything detected here.
+    const requestedSheets = (options.selectedSheetNames || []).filter((name) => nextWorkbook.SheetNames.includes(name));
+    const useRequestedSelection = options.sheetScope && options.sheetScope !== 'single' && requestedSheets.length > 1;
+    const autoMultiBlock = !useRequestedSelection && !options.sheetName && !options.headerRow
       ? prepareMultiBlockSheets(nextWorkbook, nextWorkbook.SheetNames)
       : null;
-    const prepared = autoMultiBlock?.multiBlockSummary?.blockCount > 1
-      ? autoMultiBlock
-      : prepareSingleSheet(nextWorkbook, preferredSheet, { headerRow: options.headerRow });
+    const prepared = useRequestedSelection
+      ? prepareMultipleSheets(nextWorkbook, requestedSheets, { headerRow: options.headerRow })
+      : autoMultiBlock?.multiBlockSummary?.blockCount > 1
+        ? autoMultiBlock
+        : prepareSingleSheet(nextWorkbook, preferredSheet, { headerRow: options.headerRow });
     const nextHeaders = prepared.headers;
     const nextRoles = rolesForMultiBlockAssembly(nextHeaders, inferRoles(nextHeaders, prepared.dataRows, { manufacturerDirectory }));
     const nextStructure = detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40));
-    const nextSheetScope = autoMultiBlock?.multiBlockSummary?.blockCount > 1 && nextWorkbook.SheetNames.length > 1 ? 'all' : 'single';
-    const nextSelectedSheets = nextSheetScope === 'all' ? nextWorkbook.SheetNames : [preferredSheet];
+    const nextSheetScope = useRequestedSelection
+      ? (options.sheetScope === 'all' && requestedSheets.length === nextWorkbook.SheetNames.length ? 'all' : 'selected')
+      : autoMultiBlock?.multiBlockSummary?.blockCount > 1 && nextWorkbook.SheetNames.length > 1 ? 'all' : 'single';
+    const nextSelectedSheets = useRequestedSelection
+      ? requestedSheets
+      : nextSheetScope === 'all' ? nextWorkbook.SheetNames : [preferredSheet];
 
+    setSheetHeaderRowOverride(useRequestedSelection && options.headerRow ? String(options.headerRow) : '');
     setWorkbook(nextWorkbook);
     setFileName(nextFileName);
-    setSheetName(preferredSheet);
+    setSheetName(nextSelectedSheets[0] || preferredSheet);
     setSheetScope(nextSheetScope);
     setSelectedSheetNames(nextSelectedSheets);
     setSheetRows(prepared.sheetRows);
@@ -7285,7 +7436,7 @@ const BomNormalizer = () => {
     const state = location.state || {};
     const initialFile = state.initialFile;
     const seedKey = initialFile
-      ? `${initialFile.name || 'file'}-${initialFile.size || 0}-${initialFile.lastModified || 0}-${state.initialFileMode || 'source'}-${state.initialSheetName || ''}-${state.initialHeaderRow || ''}`
+      ? `${initialFile.name || 'file'}-${initialFile.size || 0}-${initialFile.lastModified || 0}-${state.initialFileMode || 'source'}-${state.initialSheetName || ''}-${state.initialHeaderRow || ''}-${state.initialSheetScope || ''}-${(state.initialSelectedSheets || []).join('|')}`
       : '';
     // restoredReturnSnapshotRef, not state.returnFromMapping: the restore effect clears
     // that flag once it has consumed it, and this effect would then re-run, still see
@@ -7315,9 +7466,15 @@ const BomNormalizer = () => {
         if (state.initialFileMode === 'workbook') {
           await new Promise((resolve) => setTimeout(resolve, 0));
           const nextWorkbook = await readUploadedWorkbookSafely(initialFile);
+          const multiSheetSeed = state.initialSheetScope && state.initialSheetScope !== 'single';
           handleWorkbookLoaded(nextWorkbook, initialFile.name, {
             sheetName: state.initialSheetName,
-            headerRow: state.initialHeaderRow,
+            // The upload screen's header row is auto-detected from whichever
+            // sheet it previews, so across a multi-sheet selection it is only
+            // trustworthy when the user typed it themselves.
+            headerRow: multiSheetSeed && !state.initialHeaderRowExplicit ? undefined : state.initialHeaderRow,
+            sheetScope: state.initialSheetScope,
+            selectedSheetNames: state.initialSelectedSheets,
           });
           setCombineItems([]);
           setMergeChainMessage('');
@@ -7332,6 +7489,9 @@ const BomNormalizer = () => {
         delete remainingState.initialFileMode;
         delete remainingState.initialSheetName;
         delete remainingState.initialHeaderRow;
+        delete remainingState.initialSheetScope;
+        delete remainingState.initialSelectedSheets;
+        delete remainingState.initialHeaderRowExplicit;
         navigate(location.pathname, { replace: true, state: remainingState });
       } catch (err) {
         setCombineError(err.message || 'Unable to prepare the uploaded file for BOM Normalizer.');
@@ -8240,18 +8400,23 @@ const BomNormalizer = () => {
     setConfirmOpen(false);
   }, [manufacturerDirectory, workbook]);
 
-  const applySheetSelection = useCallback((scope, names) => {
+  const applySheetSelection = useCallback((scope, names, options = {}) => {
     if (!workbook) return;
     const safeNames = names.filter((name) => workbook.SheetNames.includes(name));
     const nextNames = scope === 'all'
       ? workbook.SheetNames
       : (safeNames.length ? safeNames : [workbook.SheetNames[0]]);
+    const pinnedHeaderRow = Number(
+      options.headerRow === undefined ? sheetHeaderRowOverride : options.headerRow
+    );
+    const headerRow = Number.isFinite(pinnedHeaderRow) && pinnedHeaderRow > 0 ? pinnedHeaderRow : undefined;
     const prepared = scope === 'single'
       ? prepareSingleSheet(workbook, nextNames[0])
-      : prepareMultipleSheets(workbook, nextNames);
+      : prepareMultipleSheets(workbook, nextNames, { headerRow });
     const nextRoles = rolesForMultiBlockAssembly(prepared.headers, inferRoles(prepared.headers, prepared.dataRows, { manufacturerDirectory }));
 
     setSheetScope(scope);
+    setSheetHeaderRowOverride(scope === 'single' || !headerRow ? '' : String(headerRow));
     setSelectedSheetNames(nextNames);
     setSheetName(nextNames[0]);
     setSheetRows(prepared.sheetRows);
@@ -8274,7 +8439,7 @@ const BomNormalizer = () => {
     setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
-  }, [manufacturerDirectory, workbook]);
+  }, [manufacturerDirectory, sheetHeaderRowOverride, workbook]);
 
   const handleSheetScopeChange = useCallback((nextScope) => {
     if (!workbook) return;
@@ -8296,6 +8461,12 @@ const BomNormalizer = () => {
   const handleHeaderRowChange = useCallback((value) => {
     const nextIndex = Math.max(0, Number(value) - 1);
     const activeSheetName = sheetName || workbook?.SheetNames?.[0] || '';
+    // Across several sheets one header row applies to all of them; blank hands
+    // each sheet back to its own auto-detection.
+    if (workbook && sheetScope !== 'single') {
+      applySheetSelection(sheetScope, selectedSheetNames, { headerRow: value });
+      return;
+    }
     if (workbook && sheetScope === 'single' && activeSheetName) {
       const prepared = prepareSingleSheet(workbook, activeSheetName, { headerRow: nextIndex + 1 });
       const nextRoles = inferRoles(prepared.headers, prepared.dataRows, { manufacturerDirectory });
@@ -8341,7 +8512,7 @@ const BomNormalizer = () => {
     setParserTouched(false);
     setSkipSourceSetupForMerge(false);
     setConfirmOpen(false);
-  }, [manufacturerDirectory, sheetName, sheetRows, sheetScope, workbook]);
+  }, [applySheetSelection, manufacturerDirectory, selectedSheetNames, sheetName, sheetRows, sheetScope, workbook]);
 
   const handleRoleChange = useCallback((role, header) => {
     setRoles((prev) => ({ ...prev, [role]: header }));
@@ -9930,10 +10101,16 @@ const BomNormalizer = () => {
                       size="small"
                       type="number"
                       label="Header row"
-                      value={headerRowIndex + 1}
-                      inputProps={{ min: 1, max: Math.max(sheetRows.length, 1) }}
-                      disabled={sheetScope !== 'single'}
-                      helperText={sheetScope === 'single' ? '' : 'Header row is auto-detected separately for each selected sheet.'}
+                      value={sheetScope === 'single' ? headerRowIndex + 1 : sheetHeaderRowOverride}
+                      placeholder={sheetScope === 'single' ? '' : 'Auto'}
+                      inputProps={sheetScope === 'single'
+                        ? { min: 1, max: Math.max(sheetRows.length, 1) }
+                        : { min: 1 }}
+                      helperText={sheetScope === 'single'
+                        ? ''
+                        : sheetHeaderRowOverride
+                          ? 'Applied to every selected sheet. Clear it to auto-detect each sheet.'
+                          : 'Header row is auto-detected separately for each selected sheet.'}
                       onChange={(event) => handleHeaderRowChange(event.target.value)}
                     />
                   </Grid>

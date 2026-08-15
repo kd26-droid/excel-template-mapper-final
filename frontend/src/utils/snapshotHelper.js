@@ -81,11 +81,11 @@ function applySnapshotToEditor(snapshot, stateFunctions) {
           displayName = displayHeaderName(h, headers);
           columnType = 'spec';
           specColumns++;
-        } else if (h.startsWith('Customer_Identification_Name_') || h === 'Customer identification name' || h === 'Custom identification name') {
+        } else if (h.startsWith('Custom_Identification_Name_') || h === 'Custom identification name' || h === 'Custom identification name') {
           displayName = displayHeaderName(h, headers);
           columnType = 'customer';
           customerColumns++;
-        } else if (h.startsWith('Customer_Identification_Value_') || h === 'Customer identification value' || h === 'Custom identification value') {
+        } else if (h.startsWith('Custom_Identification_Value_') || h === 'Custom identification value' || h === 'Custom identification value') {
           displayName = displayHeaderName(h, headers);
           columnType = 'customer';
           customerColumns++;
@@ -96,10 +96,10 @@ function applySnapshotToEditor(snapshot, stateFunctions) {
 
         const isFormulaColumn = h.startsWith('Tag_') || 
                               h.startsWith('Specification_') || 
-                              h.startsWith('Customer_Identification_') || 
+                              h.startsWith('Custom_Identification_') || 
                               h === 'Tag' || 
                               h.includes('Specification') || 
-                              h.includes('Customer identification') || 
+                              h.includes('Custom identification') || 
                               h === 'Factwise ID';
 
         // Create column with enhanced debugging
@@ -165,11 +165,11 @@ function applySnapshotToEditor(snapshot, stateFunctions) {
         h.startsWith('Tag_') || 
         h.startsWith('Specification_Name_') || 
         h.startsWith('Specification_Value_') || 
-        h.startsWith('Customer_Identification_') ||
+        h.startsWith('Custom_Identification_') ||
         h === 'Tag' || 
         h === 'Factwise ID' ||
         h.includes('Specification') ||
-        h.includes('Customer identification')
+        h.includes('Custom identification')
       );
       setFormulaColumns(detectedFormulaColumns);
     }
@@ -259,10 +259,10 @@ function createColumnDefsFromHeaders(headers) {
       displayName = displayHeaderName(header, headers);
       isFormulaColumn = true;
       isSpecificationColumn = true;
-    } else if (header.startsWith('Customer_Identification_Name_') || header.includes('Customer identification name')) {
+    } else if (header.startsWith('Custom_Identification_Name_') || header.includes('Custom identification name')) {
       displayName = displayHeaderName(header, headers);
       isFormulaColumn = true;
-    } else if (header.startsWith('Customer_Identification_Value_') || header.includes('Customer identification value')) {
+    } else if (header.startsWith('Custom_Identification_Value_') || header.includes('Custom identification value')) {
       displayName = displayHeaderName(header, headers);
       isFormulaColumn = true;
     } else if (header === 'Factwise ID' || header === 'Item code') {

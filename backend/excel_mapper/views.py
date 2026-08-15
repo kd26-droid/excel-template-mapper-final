@@ -225,7 +225,7 @@ def cleanup_empty_spec_pairs(headers: list, rows: list) -> int:
     on export. A name typed without a value yet was therefore wiped moments
     later, with nothing to show the user why.
 
-    Specification (name/value/UOM) and customer identification (name/value) are
+    Specification (name/value/UOM) and custom identification (name/value) are
     written as whole groups even when parts are empty, so a half-filled group is
     a normal in-progress state, not something to repair. The user may complete it
     in the exported sheet, so the export must preserve what they entered rather
@@ -474,7 +474,7 @@ def generate_template_columns(tags_count=3, spec_pairs_count=3, customer_id_pair
     """
     Generate complete template column headers including all standard template fields.
     Always includes the 6 core Factwise headers, standard template fields, and dynamic columns.
-    Default: 3 tags, 3 spec pairs, 1 customer identification pair.
+    Default: 3 tags, 3 spec pairs, 1 custom identification pair.
     """
     # Start with core Factwise headers - these must always be present
     headers = [
@@ -496,7 +496,7 @@ def generate_template_columns(tags_count=3, spec_pairs_count=3, customer_id_pair
     
     # Add dynamic Customer Identification pairs (default 1)
     for i in range(1, customer_id_pairs_count + 1):
-        headers.extend([f"Customer_Identification_Name_{i}", f"Customer_Identification_Value_{i}"])
+        headers.extend([f"Custom_Identification_Name_{i}", f"Custom_Identification_Value_{i}"])
     
     return headers
 
@@ -574,12 +574,8 @@ _INTERNAL_PREFIX_BY_SLOT_LABEL = {
     "specification name": "Specification_Name_",
     "specification value": "Specification_Value_",
     "specification uom": "Specification_UOM_",
-    "customer identification name": "Customer_Identification_Name_",
-    "customer identification value": "Customer_Identification_Value_",
-    "custom identification name": "Customer_Identification_Name_",
-    "custom identification value": "Customer_Identification_Value_",
-    "item identifications name": "Customer_Identification_Name_",
-    "item identifications value": "Customer_Identification_Value_",
+    "custom identification name": "Custom_Identification_Name_",
+    "custom identification value": "Custom_Identification_Value_",
 }
 
 
@@ -631,7 +627,7 @@ def build_sfo_clustered_headers(base_headers: list, tags_count: int, spec_pairs_
             "Item code", "ERP Code", "CPN Code", "MPN Code", "HSN Code", "Item name",
             "Description", "Item type", "Measurement unit", "Alternate UoM 1", "Notes",
             "SAP Description", "Specification name", "Specification value", "Specification UOM",
-            "Item identifications name", "Item identifications value", "Procurement item",
+            "Custom identification name", "Custom identification value", "Procurement item",
             "Procurement item price currency code", "Procurement item price", "Sales item",
             "Tag", "Procurement entity name", "Preferred vendor code",
             "Alternate Item Name for Preferred Vendor",
@@ -644,14 +640,12 @@ def build_sfo_clustered_headers(base_headers: list, tags_count: int, spec_pairs_
         if key in {"specification name", "specification value", "specification uom"}:
             return "spec"
         if key in {
-            "item identifications name", "item identifications value",
-            "customer identification name", "customer identification value",
             "custom identification name", "custom identification value",
         }:
             return "customer"
-        if re.match(r"^(tag|specification name|specification value|customer identification name|customer identification value) \d+$", key):
+        if re.match(r"^(tag|specification name|specification value|custom identification name|custom identification value) \d+$", key):
             return "dynamic"
-        if re.match(r"^(tag|specification_name|specification_value|customer_identification_name|customer_identification_value)_\d+$", str(header or "").strip().lower()):
+        if re.match(r"^(tag|specification_name|specification_value|custom_identification_name|custom_identification_value)_\d+$", str(header or "").strip().lower()):
             return "dynamic"
         return None
 
@@ -686,7 +680,7 @@ def build_sfo_clustered_headers(base_headers: list, tags_count: int, spec_pairs_
                 for label in labels]
 
     insert_group("spec", numbered(["Specification name", "Specification value", "Specification UOM"], spec_pairs_count))
-    insert_group("customer", numbered(["Item identifications name", "Item identifications value"], customer_id_pairs_count))
+    insert_group("customer", numbered(["Custom identification name", "Custom identification value"], customer_id_pairs_count))
     insert_group("tag", numbered(["Tag"], tags_count))
 
     # The default workbook now carries Level / Quantity / Base BOM Qty as real
@@ -720,17 +714,28 @@ def derive_sfo_column_counts_from_headers(headers: list) -> dict:
         label_key = _template_label_key(header)
         tag_repeated += 1 if label_key == "tag" else 0
         spec_repeated += 1 if label_key == "specification name" else 0
-        customer_repeated += 1 if label_key in {"item identifications name", "customer identification name", "custom identification name"} else 0
+        customer_repeated += 1 if label_key in {"custom identification name", "custom identification name", "custom identification name"} else 0
 
         raw = str(header or "").strip()
         tag_internal_max = max(tag_internal_max, _internal_dynamic_index(raw, "Tag"))
         spec_internal_max = max(spec_internal_max, _internal_dynamic_index(raw, "Specification_Name"))
-        customer_internal_max = max(customer_internal_max, _internal_dynamic_index(raw, "Customer_Identification_Name"))
+        customer_internal_max = max(customer_internal_max, _internal_dynamic_index(raw, "Custom_Identification_Name"))
 
     return {
         "tags_count": max(tag_repeated, tag_internal_max, 0),
         "spec_pairs_count": max(spec_repeated, spec_internal_max, 0),
         "customer_id_pairs_count": max(customer_repeated, customer_internal_max, 0),
+    }
+
+
+
+def _counts_matching_headers(headers, tags_count, spec_pairs_count, customer_id_pairs_count):
+    """Slot counts that cannot be smaller than the headers they describe."""
+    present = derive_sfo_column_counts_from_headers(headers or [])
+    return {
+        'tags_count': max(int(tags_count or 0), present['tags_count']),
+        'spec_pairs_count': max(int(spec_pairs_count or 0), present['spec_pairs_count']),
+        'customer_id_pairs_count': max(int(customer_id_pairs_count or 0), present['customer_id_pairs_count']),
     }
 
 
@@ -746,10 +751,10 @@ def get_sfo_slot_key(header: str, occurrence: int) -> str:
         return f"Specification_Value_{index}"
     if label_key == "specification uom":
         return f"Specification_UOM_{index}"
-    if label_key in {"item identifications name", "customer identification name", "custom identification name"}:
-        return f"Customer_Identification_Name_{index}"
-    if label_key in {"item identifications value", "customer identification value", "custom identification value"}:
-        return f"Customer_Identification_Value_{index}"
+    if label_key in {"custom identification name", "custom identification name", "custom identification name"}:
+        return f"Custom_Identification_Name_{index}"
+    if label_key in {"custom identification value", "custom identification value", "custom identification value"}:
+        return f"Custom_Identification_Value_{index}"
     return str(header or "")
 
 
@@ -761,8 +766,8 @@ def get_sfo_slot_keys(headers: list) -> list:
         if label_key in {
             "tag",
             "specification name", "specification value", "specification uom",
-            "item identifications name", "item identifications value",
-            "customer identification name", "customer identification value",
+            "custom identification name", "custom identification value",
+            "custom identification name", "custom identification value",
             "custom identification name", "custom identification value",
         }:
             seen[label_key] += 1
@@ -1550,8 +1555,8 @@ def update_session_data(request):
             canonical_headers.append(f'Specification_Name_{i}')
             canonical_headers.append(f'Specification_Value_{i}')
         for i in range(1, max(1, int(customer_id_pairs_count)) + 1):
-            canonical_headers.append(f'Customer_Identification_Name_{i}')
-            canonical_headers.append(f'Customer_Identification_Value_{i}')
+            canonical_headers.append(f'Custom_Identification_Name_{i}')
+            canonical_headers.append(f'Custom_Identification_Value_{i}')
 
         # Prefer the fuller header set between session headers and canonical
         existing_headers = (
@@ -1603,8 +1608,8 @@ def update_session_data(request):
         tag_targets = sorted([h for h in canonical_headers if isinstance(h, str) and h.strip().lower().startswith('tag_')], key=_suffix_idx)
         spec_name_targets = sorted([h for h in canonical_headers if isinstance(h, str) and _norm(h).startswith('specification name')], key=_suffix_idx)
         spec_value_targets = sorted([h for h in canonical_headers if isinstance(h, str) and _norm(h).startswith('specification value')], key=_suffix_idx)
-        cust_name_targets = sorted([h for h in canonical_headers if isinstance(h, str) and _norm(h).startswith('customer identification name')], key=_suffix_idx)
-        cust_value_targets = sorted([h for h in canonical_headers if isinstance(h, str) and _norm(h).startswith('customer identification value')], key=_suffix_idx)
+        cust_name_targets = sorted([h for h in canonical_headers if isinstance(h, str) and _norm(h).startswith('custom identification name')], key=_suffix_idx)
+        cust_value_targets = sorted([h for h in canonical_headers if isinstance(h, str) and _norm(h).startswith('custom identification value')], key=_suffix_idx)
 
         tag_i = 0
         specn_i = 0
@@ -1625,9 +1630,9 @@ def update_session_data(request):
                 mapped = spec_name_targets[specn_i]; specn_i += 1
             elif hn == 'specification value' and specv_i < len(spec_value_targets):
                 mapped = spec_value_targets[specv_i]; specv_i += 1
-            elif hn == 'customer identification name' and custn_i < len(cust_name_targets):
+            elif hn == 'custom identification name' and custn_i < len(cust_name_targets):
                 mapped = cust_name_targets[custn_i]; custn_i += 1
-            elif hn == 'customer identification value' and custv_i < len(cust_value_targets):
+            elif hn == 'custom identification value' and custv_i < len(cust_value_targets):
                 mapped = cust_value_targets[custv_i]; custv_i += 1
 
             if mapped:
@@ -2887,11 +2892,11 @@ def get_headers(request, session_id):
             # Only match Specification_Value_N pattern
             return bool(re.match(r'^specification_value_\d+$', _norm(h)))
         def _is_cust_name(h: str) -> bool:
-            # Only match Customer_Identification_Name_N pattern
-            return bool(re.match(r'^customer_identification_name_\d+$', _norm(h)))
+            # Only match Custom_Identification_Name_N pattern
+            return bool(re.match(r'^custom_identification_name_\d+$', _norm(h)))
         def _is_cust_value(h: str) -> bool:
-            # Only match Customer_Identification_Value_N pattern
-            return bool(re.match(r'^customer_identification_value_\d+$', _norm(h)))
+            # Only match Custom_Identification_Value_N pattern
+            return bool(re.match(r'^custom_identification_value_\d+$', _norm(h)))
 
         # Prefer enhanced headers if present to preserve dynamically added columns (e.g., Tag_4)
         if enhanced_headers and isinstance(enhanced_headers, list) and len(enhanced_headers) > 0:
@@ -2911,6 +2916,18 @@ def get_headers(request, session_id):
                     info['tags_count'] = derived_tags
                     info['spec_pairs_count'] = derived_spec_pairs
                     info['customer_id_pairs_count'] = derived_customer_pairs
+                    # The session keeps a second copy of these under
+                    # `column_counts`, and the mapping page reads that one.
+                    # Healing only the top-level keys left the two disagreeing:
+                    # the editor drew 3 specification triplets from the headers
+                    # while the mapping page drew 1 from the stale dict, and
+                    # saving from there pushed triplets 2 and 3 out of the
+                    # clustered block to the end of the sheet.
+                    info['column_counts'] = {
+                        'tags_count': derived_tags,
+                        'spec_pairs_count': derived_spec_pairs,
+                        'customer_id_pairs_count': derived_customer_pairs,
+                    }
                     template_headers_to_use = build_sfo_clustered_headers(
                         template_headers_to_use,
                         derived_tags,
@@ -2977,10 +2994,10 @@ def get_headers(request, session_id):
                 regenerated_headers.append(f'Specification_Name_{i+1}')
                 regenerated_headers.append(f'Specification_Value_{i+1}')
             
-            # Add Customer identification pairs with simple numbering
+            # Add Custom identification pairs with simple numbering
             for i in range(customer_id_pairs_count):
-                regenerated_headers.append(f'Customer_Identification_Name_{i+1}')
-                regenerated_headers.append(f'Customer_Identification_Value_{i+1}')
+                regenerated_headers.append(f'Custom_Identification_Name_{i+1}')
+                regenerated_headers.append(f'Custom_Identification_Value_{i+1}')
 
             # Store canonical headers in session
             info["current_template_headers"] = regenerated_headers
@@ -3041,8 +3058,8 @@ def get_headers(request, session_id):
             return (h == 'Tag' or h.startswith('Tag_') or
                    'specification' in h_lower or
                    'item identifications' in h_lower or
-                   'customer identification' in h_lower or
-                   'customer_identification' in h_lower)
+                   'custom identification' in h_lower or
+                   'custom_identification' in h_lower)
         
         template_optionals = []
         for h in complete_template_headers:  # Use complete_template_headers to match what's being returned
@@ -3106,11 +3123,16 @@ def get_headers(request, session_id):
             'template_headers': complete_template_headers,  # Always return complete headers
             'template_columns': template_columns,
             'template_optionals': template_optionals,
-            'column_counts': {
-                'tags_count': tags_count,
-                'spec_pairs_count': spec_pairs_count,
-                'customer_id_pairs_count': customer_id_pairs_count
-            },
+            # Derived from the headers being returned, never from the stored
+            # count alone: the mapping page draws its slots from this, and a
+            # stored value that had drifted below the sheet showed 1
+            # specification pair next to an editor showing 3.
+            'column_counts': _counts_matching_headers(
+                complete_template_headers,
+                tags_count,
+                spec_pairs_count,
+                customer_id_pairs_count,
+            ),
             'client_file': info.get('original_client_name', ''),
             'template_file': info.get('original_template_name', ''),
             'session_metadata': session_metadata
@@ -3303,7 +3325,7 @@ def save_mappings(request):
         if 'mappings' in info and isinstance(info['mappings'], dict) and 'mappings' in info['mappings']:
             for mapping in info['mappings']['mappings']:
                 target = mapping.get('target', '')
-                if target.startswith(('Tag_', 'Specification_Name_', 'Specification_Value_', 'Customer_Identification_Name_', 'Customer_Identification_Value_')):
+                if target.startswith(('Tag_', 'Specification_Name_', 'Specification_Value_', 'Custom_Identification_Name_', 'Custom_Identification_Value_')):
                     existing_used_columns.add(target)
         
         # If no existing mappings found, try to get from other session data
@@ -3320,8 +3342,8 @@ def save_mappings(request):
                 existing_used_columns.add(f'Specification_Name_{i}')
                 existing_used_columns.add(f'Specification_Value_{i}')
             for i in range(1, customer_id_pairs_count + 1):
-                existing_used_columns.add(f'Customer_Identification_Name_{i}')
-                existing_used_columns.add(f'Customer_Identification_Value_{i}')
+                existing_used_columns.add(f'Custom_Identification_Name_{i}')
+                existing_used_columns.add(f'Custom_Identification_Value_{i}')
             
         
         
@@ -3355,7 +3377,7 @@ def save_mappings(request):
                 enhanced_headers = info.get('enhanced_headers', []) or info.get('current_template_headers', []) or []
                 all_headers = list(set(template_headers + enhanced_headers))
 
-                if target.startswith(('Tag_', 'Specification_Name_', 'Specification_Value_', 'Customer_Identification_Name_', 'Customer_Identification_Value_')):
+                if target.startswith(('Tag_', 'Specification_Name_', 'Specification_Value_', 'Custom_Identification_Name_', 'Custom_Identification_Value_')):
                     # Target is already an internal name, just track it
                     used_columns.add(target)
                 elif internal_name_for_slot_label(target):
@@ -3375,7 +3397,7 @@ def save_mappings(request):
                     # This preserves user's original column names like "Specification value", "Tag", etc.
                     logger.info(f"📊 SAVE_MAPPINGS: Preserving target '{target}' as-is (exists in template headers)")
                     pass  # Keep converted_mapping['target'] unchanged
-                elif target in ['Tag', 'Specification name', 'Specification value', 'Customer identification name', 'Customer identification value']:
+                elif target in ['Tag', 'Specification name', 'Specification value', 'Custom identification name', 'Custom identification value']:
                     # Target is an external name that doesn't exist in template - convert to internal name
                     internal_name = convert_external_to_internal_name(target, info, used_columns)
                     converted_mapping['target'] = internal_name
@@ -3450,7 +3472,26 @@ def save_mappings(request):
             if not has_formula_rules:
                 # No formulas, safe to use mapped data
                 info["formula_enhanced_data"] = mapping_result['data']
-                info["enhanced_headers"] = mapping_result['headers']
+                # The mapping result is built from the template, which carries
+                # the template's own slot counts. Storing it verbatim discarded
+                # any Tag / Specification / Custom identification slots added on
+                # the mapping page: the rows kept their extra columns while the
+                # header list shrank back, so those columns vanished from the
+                # export and no tool could address them.
+                mapped_headers = mapping_result['headers']
+                slot_counts = _counts_matching_headers(
+                    mapped_headers,
+                    info.get('tags_count', 3),
+                    info.get('spec_pairs_count', 3),
+                    info.get('customer_id_pairs_count', 1),
+                )
+                info["enhanced_headers"] = build_sfo_clustered_headers(
+                    mapped_headers,
+                    slot_counts['tags_count'],
+                    slot_counts['spec_pairs_count'],
+                    slot_counts['customer_id_pairs_count'],
+                )
+                info["current_template_headers"] = info["enhanced_headers"]
                 logger.info(f"✅ Stored transformed data in session (no formulas, safe to overwrite)")
         except Exception as mapping_error:
             logger.warning(f"⚠️ Failed to apply column mappings in save_mappings: {mapping_error}")
@@ -4421,9 +4462,9 @@ def data_view(request):
                         matched_field = slot_to_header.get(field_name)
                     elif field_name.startswith('Specification_Value_'):
                         matched_field = slot_to_header.get(field_name)
-                    elif field_name.startswith('Customer_Identification_Name_'):
+                    elif field_name.startswith('Custom_Identification_Name_'):
                         matched_field = slot_to_header.get(field_name)
-                    elif field_name.startswith('Customer_Identification_Value_'):
+                    elif field_name.startswith('Custom_Identification_Value_'):
                         matched_field = slot_to_header.get(field_name)
                     elif field_name.startswith('Tag_'):
                         matched_field = slot_to_header.get(field_name)
@@ -4440,16 +4481,16 @@ def data_view(request):
                             if header.startswith('Specification_Value_'):
                                 matched_field = header
                                 break
-                    elif field_name == "Customer identification name":
-                        # Find the first available Customer_Identification_Name_X column
+                    elif field_name == "Custom identification name":
+                        # Find the first available Custom_Identification_Name_X column
                         for header in headers_to_use:
-                            if header.startswith('Customer_Identification_Name_'):
+                            if header.startswith('Custom_Identification_Name_'):
                                 matched_field = header
                                 break
-                    elif field_name == "Customer identification value":
-                        # Find the first available Customer_Identification_Value_X column
+                    elif field_name == "Custom identification value":
+                        # Find the first available Custom_Identification_Value_X column
                         for header in headers_to_use:
-                            if header.startswith('Customer_Identification_Value_'):
+                            if header.startswith('Custom_Identification_Value_'):
                                 matched_field = header
                                 break
                     elif field_name == "Tag":
@@ -4480,7 +4521,7 @@ def data_view(request):
                             rows_updated += 1
                     
                 else:
-                    if re.match(r"^(Tag|Specification_(Name|Value|UOM)|Customer_Identification_(Name|Value))_\d+$", str(field_name or "")):
+                    if re.match(r"^(Tag|Specification_(Name|Value|UOM)|Custom_Identification_(Name|Value))_\d+$", str(field_name or "")):
                         logger.warning(f"Default value target '{field_name}' has no matching SFO slot in current headers; skipping")
                         continue
                     # If the default-only field is missing from headers, add it canonically and populate
@@ -4521,7 +4562,7 @@ def data_view(request):
         # Convert internal column names to external names for frontend display
         # Internal: Tag_1, Tag_2, etc. -> External: Tag (always generic name)
         # Internal: Specification_Name_1, Specification_Value_1, etc. -> External: Specification name, Specification value
-        # Internal: Customer_Identification_Name_1, Customer_Identification_Value_1, etc. -> External: Customer identification name, Customer identification value
+        # Internal: Custom_Identification_Name_1, Custom_Identification_Value_1, etc. -> External: Custom identification name, Custom identification value
         external_headers = []
         internal_to_external_mapping = {}
         
@@ -4533,10 +4574,10 @@ def data_view(request):
                 external_header = 'Specification name'
             elif header.startswith('Specification_Value_') or header == 'Specification value':
                 external_header = 'Specification value'
-            elif header.startswith('Customer_Identification_Name_') or header == 'Customer identification name':
-                external_header = 'Customer identification name'
-            elif header.startswith('Customer_Identification_Value_') or header == 'Customer identification value':
-                external_header = 'Customer identification value'
+            elif header.startswith('Custom_Identification_Name_') or header == 'Custom identification name':
+                external_header = 'Custom identification name'
+            elif header.startswith('Custom_Identification_Value_') or header == 'Custom identification value':
+                external_header = 'Custom identification value'
             else:
                 external_header = header
             
@@ -4588,8 +4629,8 @@ def data_view(request):
             
             # Add Customer Identification columns
             for i in range(1, customer_id_pairs_count + 1):
-                template_norm.add(_canon(f"Customer_Identification_Name_{i}"))
-                template_norm.add(_canon(f"Customer_Identification_Value_{i}"))
+                template_norm.add(_canon(f"Custom_Identification_Name_{i}"))
+                template_norm.add(_canon(f"Custom_Identification_Value_{i}"))
 
             # Add MPN validation columns if they exist in session
             mpn_validation = session_info.get('mpn_validation', {})
@@ -5265,8 +5306,8 @@ def _cluster_factwise_columns(headers):
             return 'spec'
         if n == 'tag' or re.match(r'^tag_\d+$', n):
             return 'tag'
-        if (n.startswith('customer identification') or n.startswith('custom identification')
-                or re.match(r'^customer_identification_(name|value)_\d+$', n)):
+        if (n.startswith('custom identification') or n.startswith('custom identification')
+                or re.match(r'^custom_identification_(name|value)_\d+$', n)):
             return 'customer'
         return None
 
@@ -5749,8 +5790,12 @@ _TEMPLATE_GROUP_PREFIXES = (
     ('Specification_Name_', 'Specification name'),
     ('Specification_Value_', 'Specification value'),
     ('Specification_UOM_', 'Specification UOM'),
-    ('Customer_Identification_Name_', 'Customer identification name'),
-    ('Customer_Identification_Value_', 'Customer identification value'),
+    # FactWise's column is 'Custom identification'; the internal field keeps the
+    # longer spelling because every saved session and mapping uses it. Only what
+    # is written to the file changes — 'Custom identification name' is not a
+    # column FactWise knows, so its values were dropped on import.
+    ('Custom_Identification_Name_', 'Custom identification name'),
+    ('Custom_Identification_Value_', 'Custom identification value'),
 )
 
 _DISPLAY_SUFFIX_RE = re.compile(r'\s*\(\d+\)\s*$')
@@ -6366,10 +6411,17 @@ def download_file(request, session_id=None):
 
             # Use template headers for ordering, adding dynamic columns
             if canonical_headers:
+                # Every match below is against the internal shape (Tag_4,
+                # Specification_Name_4). A session storing the label shape
+                # ('Tag (4)') matched nothing, so the export silently fell back
+                # to the template's own slot count — added Tag / Specification /
+                # Custom identification columns were missing from the file even
+                # though the grid showed them.
+                canonical_headers = normalize_headers_to_internal(canonical_headers)
                 # Get base headers from template (non-dynamic columns)
-                base_headers = info.get('template_headers') or []
+                base_headers = normalize_headers_to_internal(info.get('template_headers') or [])
                 correct_order = [h for h in base_headers if not (
-                    h.startswith('Tag_') or h.startswith('Specification_') or h.startswith('Customer_Identification_')
+                    h.startswith('Tag_') or h.startswith('Specification_') or h.startswith('Custom_Identification_')
                 )]
 
                 # Add Tag columns in correct order
@@ -6391,9 +6443,9 @@ def download_file(request, session_id=None):
                         correct_order.append(spec_value_headers[i])
 
                 # Add Customer ID columns in correct order
-                customer_name_headers = sorted([h for h in canonical_headers if h.startswith('Customer_Identification_Name_')],
+                customer_name_headers = sorted([h for h in canonical_headers if h.startswith('Custom_Identification_Name_')],
                                              key=lambda x: int(x.split('_')[3]) if len(x.split('_')) > 3 and x.split('_')[3].isdigit() else 0)
-                customer_value_headers = sorted([h for h in canonical_headers if h.startswith('Customer_Identification_Value_')],
+                customer_value_headers = sorted([h for h in canonical_headers if h.startswith('Custom_Identification_Value_')],
                                               key=lambda x: int(x.split('_')[3]) if len(x.split('_')) > 3 and x.split('_')[3].isdigit() else 0)
 
                 # Interleave customer names and values
@@ -6537,7 +6589,7 @@ def download_file(request, session_id=None):
             # Create empty DataFrame
             df = pd.DataFrame(columns=all_headers or [])
 
-        # Cluster repeated FactWise groups (Specification/Tag/Customer identification)
+        # Cluster repeated FactWise groups (Specification/Tag/Custom identification)
         # so no unrelated column sits between two like columns — otherwise the
         # FactWise importer reports false "Same specification value" duplicates.
         # Reorder by POSITION so it is safe even with duplicate header names.
@@ -7100,10 +7152,40 @@ def update_column_counts(request):
                 'error': 'Column counts must be positive integers'
             }, status=status.HTTP_400_BAD_REQUEST)
         
+        # The sheet itself is the floor. A caller may legitimately ASK for more
+        # slots, but a count below what the grid already holds is always stale
+        # state, not an instruction to delete columns — the editor used to post
+        # its un-initialised 1/1/1 on the way to Modify Mappings, and that alone
+        # rewrote a three-specification sheet as a one-specification one and
+        # pushed the surviving triplets to the end.
+        #
+        # Removing slots deliberately is a different operation: it goes through
+        # the -/+ control, which sends a count derived from what is on screen.
+        present = derive_sfo_column_counts_from_headers(
+            info.get('current_template_headers') or info.get('enhanced_headers') or []
+        )
+        requested = (tags_count, spec_pairs_count, customer_id_pairs_count)
+        tags_count = max(tags_count, present['tags_count'])
+        spec_pairs_count = max(spec_pairs_count, present['spec_pairs_count'])
+        customer_id_pairs_count = max(customer_id_pairs_count, present['customer_id_pairs_count'])
+        if requested != (tags_count, spec_pairs_count, customer_id_pairs_count):
+            logger.info(
+                f"📊 Raised stale counts {requested} to what the sheet holds: "
+                f"({tags_count}, {spec_pairs_count}, {customer_id_pairs_count})"
+            )
+
         # Store column counts in session (version will be bumped later atomically)
         info['tags_count'] = tags_count
         info['spec_pairs_count'] = spec_pairs_count
         info['customer_id_pairs_count'] = customer_id_pairs_count
+        # Both copies, always together: the mapping page reads this dict while
+        # the editor reads the headers, and letting them drift is what made one
+        # screen show 1 specification pair and the other 3.
+        info['column_counts'] = {
+            'tags_count': tags_count,
+            'spec_pairs_count': spec_pairs_count,
+            'customer_id_pairs_count': customer_id_pairs_count,
+        }
         
         # Get existing headers to preserve numbering
         existing_headers = info.get('current_template_headers') or info.get('enhanced_headers') or []
@@ -7141,9 +7223,9 @@ def update_column_counts(request):
         def _is_dynamic_spec_value(h: str) -> bool:
             return bool(re.match(r'^specification_value_\d+$', _norm(h)))
         def _is_dynamic_cust_name(h: str) -> bool:
-            return bool(re.match(r'^customer_identification_name_\d+$', _norm(h)))
+            return bool(re.match(r'^custom_identification_name_\d+$', _norm(h)))
         def _is_dynamic_cust_value(h: str) -> bool:
-            return bool(re.match(r'^customer_identification_value_\d+$', _norm(h)))
+            return bool(re.match(r'^custom_identification_value_\d+$', _norm(h)))
 
         # Use uploaded template headers as base, add dynamic columns if needed
         # Filter out ONLY numbered dynamic columns (Tag_1, Specification_Name_1, etc.)
@@ -7162,8 +7244,22 @@ def update_column_counts(request):
 
         logger.info(f"SFO TAG COLUMNS: {tags_count} repeated Tag header(s)")
         logger.info(f"SFO SPEC GROUPS: {spec_pairs_count} clustered Specification name/value/UOM group(s)")
-        logger.info(f"SFO ITEM ID GROUPS: {customer_id_pairs_count} clustered Item identifications name/value group(s)")
+        logger.info(f"SFO ITEM ID GROUPS: {customer_id_pairs_count} clustered Custom identification name/value group(s)")
         logger.info(f"FINAL COMBINED HEADERS: {regenerated_headers}")
+
+        # The editor draws from `enhanced_headers`, but tools and the export read
+        # `edited_data` / `enhanced_data` — separate stored grids that kept the
+        # old column set. Adding a Tag or Specification slot therefore produced a
+        # column you could see but nothing could write to ("Column Tag_5 is not
+        # in the grid") and that never reached the exported file. Re-shape those
+        # grids onto the new header list so all of them describe one sheet.
+        for snapshot_key in ('edited_data', 'enhanced_data'):
+            reshaped = _reshape_grid_snapshot(info.get(snapshot_key), regenerated_headers)
+            if reshaped is not None:
+                info[snapshot_key] = reshaped
+                logger.info(
+                    f"🔧 Re-shaped {snapshot_key} to {len(regenerated_headers)} columns"
+                )
 
         # Compute template_optionals for the canonical headers (Tags/Spec/Customer always optional)
         def is_special_optional(h: str) -> bool:
@@ -7171,8 +7267,8 @@ def update_column_counts(request):
             return (h == 'Tag' or h.startswith('Tag_') or
                    'specification' in h_lower or
                    'item identifications' in h_lower or
-                   'customer identification' in h_lower or
-                   'customer_identification' in h_lower)
+                   'custom identification' in h_lower or
+                   'custom_identification' in h_lower)
 
         template_optionals = [True if is_special_optional(h) else False for h in regenerated_headers]
 
@@ -7293,7 +7389,7 @@ def save_mapping_template(request):
                     else:
                         # Only log if this field was actually supposed to have a default value
                         # (i.e., if the user had set a value but it's now empty)
-                        if field_name in ['Specification name', 'Procurement entity name', 'Customer identification name']:
+                        if field_name in ['Specification name', 'Procurement entity name', 'Custom identification name']:
                             pass
 
             # Conditional default-value rules (if/else against another column) set on
@@ -7949,11 +8045,11 @@ def apply_mapping_template(request):
                         if idx:
                             mapped_spec_indices.add(idx)
                             logger.debug(f"Found mapped Specification_Name_{idx}")
-                    elif target.startswith('Customer_Identification_Name_'):
-                        idx = _extract_index(target, 'Customer_Identification_Name_')
+                    elif target.startswith('Custom_Identification_Name_'):
+                        idx = _extract_index(target, 'Custom_Identification_Name_')
                         if idx:
                             mapped_customer_indices.add(idx)
-                            logger.debug(f"Found mapped Customer_Identification_Name_{idx}")
+                            logger.debug(f"Found mapped Custom_Identification_Name_{idx}")
             elif isinstance(template_mappings, dict):
                 logger.debug(f"Processing old format mappings: {template_mappings}")
                 for target in (template_mappings or {}).keys():
@@ -7968,11 +8064,11 @@ def apply_mapping_template(request):
                         if idx:
                             mapped_spec_indices.add(idx)
                             logger.debug(f"Found mapped Specification_Name_{idx}")
-                    elif target.startswith('Customer_Identification_Name_'):
-                        idx = _extract_index(target, 'Customer_Identification_Name_')
+                    elif target.startswith('Custom_Identification_Name_'):
+                        idx = _extract_index(target, 'Custom_Identification_Name_')
                         if idx:
                             mapped_customer_indices.add(idx)
-                            logger.debug(f"Found mapped Customer_Identification_Name_{idx}")
+                            logger.debug(f"Found mapped Custom_Identification_Name_{idx}")
             
             logger.debug(f"Mapped indices found - Tags: {mapped_tag_indices}, Spec: {mapped_spec_indices}, Customer: {mapped_customer_indices}")
             
@@ -8026,7 +8122,7 @@ def apply_mapping_template(request):
             
             # CRITICAL FIX: Prevent tag duplication by checking existing headers first
             # Only regenerate if we don't already have the right number of dynamic columns
-            existing_dynamic_columns = [h for h in existing_template_headers if any(h.startswith(prefix) for prefix in ['Tag_', 'Specification_Name_', 'Specification_Value_', 'Customer_Identification_']) or h in ['Tag', 'Specification name', 'Specification value', 'Customer identification name', 'Customer identification value']]
+            existing_dynamic_columns = [h for h in existing_template_headers if any(h.startswith(prefix) for prefix in ['Tag_', 'Specification_Name_', 'Specification_Value_', 'Custom_Identification_']) or h in ['Tag', 'Specification name', 'Specification value', 'Custom identification name', 'Custom identification value']]
             
             debug_log(session_id, "Checking existing dynamic columns before regeneration", {
                 'existing_dynamic_count': len(existing_dynamic_columns),
@@ -8035,14 +8131,14 @@ def apply_mapping_template(request):
                 'existing_dynamic_columns': existing_dynamic_columns[:10],  # Log first 10 for readability
                 'tag_columns': [h for h in existing_dynamic_columns if h.startswith('Tag_') or h == 'Tag'],
                 'spec_columns': [h for h in existing_dynamic_columns if h.startswith('Specification_') or h in ['Specification name', 'Specification value']],
-                'customer_columns': [h for h in existing_dynamic_columns if h.startswith('Customer_Identification_') or h in ['Customer identification name', 'Customer identification value']]
+                'customer_columns': [h for h in existing_dynamic_columns if h.startswith('Custom_Identification_') or h in ['Custom identification name', 'Custom identification value']]
             })
             
             # Only regenerate if counts don't match or if no dynamic columns exist
             should_regenerate = (not existing_template_headers) and (
                 len([h for h in existing_dynamic_columns if h.startswith('Tag_') or h == 'Tag']) != tags_count or
                 len([h for h in existing_dynamic_columns if h.startswith('Specification_Name_') or h == 'Specification name']) != spec_pairs_count or
-                len([h for h in existing_dynamic_columns if h.startswith('Customer_Identification_Name_') or h == 'Customer identification name']) != customer_id_pairs_count or
+                len([h for h in existing_dynamic_columns if h.startswith('Custom_Identification_Name_') or h == 'Custom identification name']) != customer_id_pairs_count or
                 len(existing_dynamic_columns) == 0
             )
             
@@ -8052,7 +8148,7 @@ def apply_mapping_template(request):
                     'expected_tags': tags_count,
                     'existing_specs': len([h for h in existing_dynamic_columns if h.startswith('Specification_Name_') or h == 'Specification name']),
                     'expected_specs': spec_pairs_count,
-                    'existing_customers': len([h for h in existing_dynamic_columns if h.startswith('Customer_Identification_Name_') or h == 'Customer identification name'])
+                    'existing_customers': len([h for h in existing_dynamic_columns if h.startswith('Custom_Identification_Name_') or h == 'Custom identification name'])
                 })
                 
                 regenerated_headers = generate_template_columns(
@@ -10265,19 +10361,19 @@ def create_factwise_id(request):
             """Convert external display names to internal column names."""
             external_name_lower = external_name.lower().strip()
             
-            # Handle Customer identification name variations
-            if external_name_lower in ['customer identification name', 'custom identification name']:
-                # Find the first available Customer_Identification_Name_* column
+            # Handle Custom identification name variations
+            if external_name_lower in ['custom identification name', 'custom identification name']:
+                # Find the first available Custom_Identification_Name_* column
                 for header in headers:
-                    if header.startswith('Customer_Identification_Name_'):
+                    if header.startswith('Custom_Identification_Name_'):
                         return header
                 return None
             
-            # Handle Customer identification value variations
-            elif external_name_lower in ['customer identification value', 'custom identification value']:
-                # Find the first available Customer_Identification_Value_* column
+            # Handle Custom identification value variations
+            elif external_name_lower in ['custom identification value', 'custom identification value']:
+                # Find the first available Custom_Identification_Value_* column
                 for header in headers:
-                    if header.startswith('Customer_Identification_Value_'):
+                    if header.startswith('Custom_Identification_Value_'):
                         return header
                 return None
             
@@ -10622,6 +10718,37 @@ def _apply_editor_defaults_for_session(headers, rows, info):
     if isinstance(info, dict):
         info['editor_defaults_last_applied'] = summary
     return headers, output_rows
+
+
+def _reshape_grid_snapshot(snapshot, new_headers):
+    """Re-key one stored grid onto `new_headers`, keeping values by position.
+
+    Slots are matched by their unique field name (Tag_1, Specification_Value_2),
+    so a column keeps its data wherever it lands in the new order and a newly
+    added slot arrives empty.
+    """
+    if not isinstance(snapshot, dict):
+        return None
+    old_headers = list(snapshot.get('headers') or [])
+    rows = snapshot.get('data')
+    if not old_headers or rows is None:
+        return None
+
+    old_fields = make_unique_field_headers(old_headers)
+    new_fields = make_unique_field_headers(new_headers)
+    position_of = {field: index for index, field in enumerate(old_fields)}
+
+    reshaped = []
+    for row in rows:
+        if isinstance(row, dict):
+            values = [row.get(header, '') for header in old_headers]
+        else:
+            values = list(row)
+        reshaped.append([
+            (values[position_of[field]] if field in position_of and position_of[field] < len(values) else '')
+            for field in new_fields
+        ])
+    return {'headers': list(new_headers), 'data': reshaped}
 
 
 def read_session_grid(session_id, info):
@@ -12887,7 +13014,7 @@ def _incomplete_group_warnings(headers, rows):
 
     groups = [
         ('Specification name', 'Specification value', 'specification'),
-        ('Item identifications name', 'Item identifications value', 'customer identification'),
+        ('Custom identification name', 'Custom identification value', 'custom identification'),
     ]
 
     warnings = []
@@ -13941,10 +14068,10 @@ def convert_internal_to_external_name(column_name):
         return 'Specification name'
     elif column_name.startswith('Specification_Value_') or column_name == 'Specification value':
         return 'Specification value'
-    elif column_name.startswith('Customer_Identification_Name_') or column_name == 'Customer identification name':
-        return 'Customer identification name'
-    elif column_name.startswith('Customer_Identification_Value_') or column_name == 'Customer identification value':
-        return 'Customer identification value'
+    elif column_name.startswith('Custom_Identification_Name_') or column_name == 'Custom identification name':
+        return 'Custom identification name'
+    elif column_name.startswith('Custom_Identification_Value_') or column_name == 'Custom identification value':
+        return 'Custom identification value'
     
     return column_name
 
@@ -13974,22 +14101,22 @@ def convert_external_to_internal_name(column_name, session_info, used_columns=No
         while f'Specification_Value_{next_number}' in existing_spec_columns or f'Specification_Value_{next_number}' in used_columns:
             next_number += 1
         return f'Specification_Value_{next_number}'
-    elif column_name == 'Customer identification name':
+    elif column_name == 'Custom identification name':
         # Find next available customer number
         existing_headers = session_info.get('current_template_headers', []) or session_info.get('enhanced_headers', []) or []
-        existing_customer_columns = [h for h in existing_headers if h.startswith('Customer_Identification_Name_')]
+        existing_customer_columns = [h for h in existing_headers if h.startswith('Custom_Identification_Name_')]
         next_number = 1
-        while f'Customer_Identification_Name_{next_number}' in existing_customer_columns or f'Customer_Identification_Name_{next_number}' in used_columns:
+        while f'Custom_Identification_Name_{next_number}' in existing_customer_columns or f'Custom_Identification_Name_{next_number}' in used_columns:
             next_number += 1
-        return f'Customer_Identification_Name_{next_number}'
-    elif column_name == 'Customer identification value':
+        return f'Custom_Identification_Name_{next_number}'
+    elif column_name == 'Custom identification value':
         # Find next available customer number
         existing_headers = session_info.get('current_template_headers', []) or session_info.get('enhanced_headers', []) or []
-        existing_customer_columns = [h for h in existing_headers if h.startswith('Customer_Identification_Value_')]
+        existing_customer_columns = [h for h in existing_headers if h.startswith('Custom_Identification_Value_')]
         next_number = 1
-        while f'Customer_Identification_Value_{next_number}' in existing_customer_columns or f'Customer_Identification_Value_{next_number}' in used_columns:
+        while f'Custom_Identification_Value_{next_number}' in existing_customer_columns or f'Custom_Identification_Value_{next_number}' in used_columns:
             next_number += 1
-        return f'Customer_Identification_Value_{next_number}'
+        return f'Custom_Identification_Value_{next_number}'
     
     return column_name
 
@@ -14828,6 +14955,11 @@ def _exported_item_rows(session_id):
             return None
 
         rows, headers = _append_authored_finished_good(info, list(rows or []), list(headers))
+        # Level / Quantity / Base BOM Qty are per-BOM-line, not item attributes,
+        # and the export strips them before collapsing. Leaving them in here made
+        # the same part consumed in two places with different quantities compare
+        # as two different items, so the gate blocked an export that ships fine.
+        rows, headers = _drop_bom_columns(rows, headers)
         # Collapse exactly as the export does, so the duplicate rule fires on
         # what actually ships. Without this every part used in more than one
         # place reads as a duplicate item and blocks an export that is fine.

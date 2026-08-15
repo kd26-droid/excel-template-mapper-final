@@ -75,7 +75,7 @@ const generateTemplateColumns = (tagsCount, specPairsCount, customerIdPairsCount
 
   // Preserve non-dynamic base headers if provided
   if (baseTemplateHeaders && baseTemplateHeaders.length > 0) {
-    const dynamicColumnPattern = /^(Tag_|Specification_Name_|Specification_Value_|Customer_Identification_Name_|Customer_Identification_Value_)\d+$/;
+    const dynamicColumnPattern = /^(Tag_|Specification_Name_|Specification_Value_|Custom_Identification_Name_|Custom_Identification_Value_)\d+$/;
     columns.push(...baseTemplateHeaders.filter(h => !dynamicColumnPattern.test(h)));
   }
 
@@ -90,8 +90,8 @@ const generateTemplateColumns = (tagsCount, specPairsCount, customerIdPairsCount
   }
   // Customer ID pairs
   for (let i = 1; i <= (customerIdPairsCount || 0); i++) {
-    columns.push(`Customer_Identification_Name_${i}`);
-    columns.push(`Customer_Identification_Value_${i}`);
+    columns.push(`Custom_Identification_Name_${i}`);
+    columns.push(`Custom_Identification_Value_${i}`);
   }
   
   return columns;
@@ -1063,7 +1063,6 @@ export default function ColumnMapping() {
               } catch (err) {
                 console.warn('[TAGFLOW][FE] Could not fetch mappings:', err);
               }
-              await api.applyFormulas(sessionId, rules, currentMappings);
             } catch (e) {
             }
           }
@@ -1250,7 +1249,6 @@ export default function ColumnMapping() {
                   }
                 }
               } catch (err) { /* ignore */ }
-              await api.applyFormulas(sessionId, rules, currentMappings);
             } catch (_) { /* non-fatal */ }
           }
 
@@ -1704,7 +1702,7 @@ export default function ColumnMapping() {
     // Only match numbered dynamic columns (Specification_Name_1, etc.)
     return (
       (/^Specification_Name_\d+$/i.test(fieldName) && /^Specification_Value_\d+$/i.test(nextFieldName) && fieldNum === nextFieldNum) ||
-      (/^Customer_Identification_Name_\d+$/i.test(fieldName) && /^Customer_Identification_Value_\d+$/i.test(nextFieldName) && fieldNum === nextFieldNum)
+      (/^Custom_Identification_Name_\d+$/i.test(fieldName) && /^Custom_Identification_Value_\d+$/i.test(nextFieldName) && fieldNum === nextFieldNum)
     );
   }
 
@@ -1717,7 +1715,7 @@ export default function ColumnMapping() {
     // Only match numbered dynamic columns (Specification_Value_1, etc.)
     return (
       (/^Specification_Value_\d+$/i.test(fieldName) && /^Specification_Name_\d+$/i.test(prevFieldName) && fieldNum === prevFieldNum) ||
-      (/^Customer_Identification_Value_\d+$/i.test(fieldName) && /^Customer_Identification_Name_\d+$/i.test(prevFieldName) && fieldNum === prevFieldNum)
+      (/^Custom_Identification_Value_\d+$/i.test(fieldName) && /^Custom_Identification_Name_\d+$/i.test(prevFieldName) && fieldNum === prevFieldNum)
     );
   }
 
@@ -1726,14 +1724,14 @@ export default function ColumnMapping() {
   function getPairTypeUpdated(fieldName) {
     // Use regex to match only numbered patterns
     if (/^Specification_(Name|Value)_\d+$/i.test(fieldName)) return 'specification';
-    if (/^Customer_Identification_(Name|Value)_\d+$/i.test(fieldName)) return 'customer';
+    if (/^Custom_Identification_(Name|Value)_\d+$/i.test(fieldName)) return 'customer';
     if (/^Tag_\d+$/i.test(fieldName)) return 'tag';
     return 'single';
   }
 
   // Helper to check if a column is a dynamic (numbered) column
   function isDynamicColumn(fieldName) {
-    return /^(Tag_\d+|Specification_(Name|Value)_\d+|Customer_Identification_(Name|Value)_\d+)$/i.test(fieldName);
+    return /^(Tag_\d+|Specification_(Name|Value)_\d+|Custom_Identification_(Name|Value)_\d+)$/i.test(fieldName);
   }
 
   function getPairIndexUpdated(fieldName) {
@@ -1758,7 +1756,7 @@ export default function ColumnMapping() {
     const normalized = normalizeTemplateHeaderLabel(fieldName);
     if (normalized === 'tag') return 'tag';
     if (['specification name', 'specification value', 'specification uom'].includes(normalized)) return 'specification';
-    if (['item identifications name', 'item identifications value', 'customer identification name', 'customer identification value', 'custom identification name', 'custom identification value'].includes(normalized)) return 'customer';
+    if (['custom identification name', 'custom identification value', 'custom identification name', 'custom identification value', 'custom identification name', 'custom identification value'].includes(normalized)) return 'customer';
     return null;
   }
 
@@ -1773,11 +1771,11 @@ export default function ColumnMapping() {
     if (normalized === 'tag') return `Tag_${index}`;
     if (normalized === 'specification name') return `Specification_Name_${index}`;
     if (normalized === 'specification value') return `Specification_Value_${index}`;
-    if (normalized === 'customer identification name' || normalized === 'custom identification name' || normalized === 'item identifications name') {
-      return `Customer_Identification_Name_${index}`;
+    if (normalized === 'custom identification name' || normalized === 'custom identification name' || normalized === 'custom identification name') {
+      return `Custom_Identification_Name_${index}`;
     }
-    if (normalized === 'customer identification value' || normalized === 'custom identification value' || normalized === 'item identifications value') {
-      return `Customer_Identification_Value_${index}`;
+    if (normalized === 'custom identification value' || normalized === 'custom identification value' || normalized === 'custom identification value') {
+      return `Custom_Identification_Value_${index}`;
     }
     return fieldName;
   }
@@ -1849,14 +1847,14 @@ export default function ColumnMapping() {
       if (pairNodes.length >= 2) {
         newCounts.spec_pairs_count = Math.max(1, (newCounts.spec_pairs_count || 1) - 1);
       }
-    } else if (fieldName.includes('Customer_Identification')) {
+    } else if (fieldName.includes('Custom_Identification')) {
       // For customer IDs, we delete pairs
       const fieldNum = getFieldNumber(fieldName);
       const pairNodes = nodes.filter(n => 
         n.id.startsWith('t-') && 
         n.data?.originalLabel && 
-        (n.data.originalLabel.includes(`Customer_Identification_Name_${fieldNum}`) || 
-         n.data.originalLabel.includes(`Customer_Identification_Value_${fieldNum}`))
+        (n.data.originalLabel.includes(`Custom_Identification_Name_${fieldNum}`) || 
+         n.data.originalLabel.includes(`Custom_Identification_Value_${fieldNum}`))
       );
       
       // Only decrease if we're deleting a complete pair
@@ -1962,8 +1960,8 @@ export default function ColumnMapping() {
       const prevHeader = templateHdrs[idx - 1];
       
       const normalizedHeader = normalizeTemplateHeaderLabel(header);
-      const isSfoPairStart = normalizedHeader === 'specification name' || normalizedHeader === 'item identifications name' || normalizedHeader === 'customer identification name' || normalizedHeader === 'custom identification name';
-      const isSfoPairEnd = normalizedHeader === 'specification uom' || normalizedHeader === 'item identifications value' || normalizedHeader === 'customer identification value' || normalizedHeader === 'custom identification value';
+      const isSfoPairStart = normalizedHeader === 'specification name' || normalizedHeader === 'custom identification name' || normalizedHeader === 'custom identification name' || normalizedHeader === 'custom identification name';
+      const isSfoPairEnd = normalizedHeader === 'specification uom' || normalizedHeader === 'custom identification value' || normalizedHeader === 'custom identification value' || normalizedHeader === 'custom identification value';
       const isPairStart = sfoGroupType === 'specification' || sfoGroupType === 'customer' ? isSfoPairStart : isPairStartUpdated(header, nextHeader);
       const isPairEnd = sfoGroupType === 'specification' || sfoGroupType === 'customer' ? isSfoPairEnd : isPairEndUpdated(header, prevHeader);
       const pairType = sfoGroupType || getPairTypeUpdated(header);
@@ -2839,19 +2837,20 @@ export default function ColumnMapping() {
         }
       }
       
-      if (targetCol === 'Customer identification name') {
-        // Look for Customer_Identification_Name_1, etc.
+      // Either spelling: the app said 'Customer …' for years, FactWise says 'Custom …'.
+      if (targetCol === 'Custom identification name' || targetCol === 'Custom identification name') {
+        // Look for Custom_Identification_Name_1, etc.
         for (let i = 0; i < templateHdrs.length; i++) {
-          if (templateHdrs[i].startsWith('Customer_Identification_Name_')) {
+          if (templateHdrs[i].startsWith('Custom_Identification_Name_')) {
             return { targetIdx: i, targetCol: templateHdrs[i], confidence: 'dynamic_customer_name' };
           }
         }
       }
       
-      if (targetCol === 'Customer identification value') {
-        // Look for Customer_Identification_Value_1, etc.
+      if (targetCol === 'Custom identification value' || targetCol === 'Custom identification value') {
+        // Look for Custom_Identification_Value_1, etc.
         for (let i = 0; i < templateHdrs.length; i++) {
-          if (templateHdrs[i].startsWith('Customer_Identification_Value_')) {
+          if (templateHdrs[i].startsWith('Custom_Identification_Value_')) {
             return { targetIdx: i, targetCol: templateHdrs[i], confidence: 'dynamic_customer_value' };
           }
         }
@@ -3239,10 +3238,10 @@ export default function ColumnMapping() {
       headers.push(`Specification_Value_${i}`);
     }
     
-    // Add customer identification pairs
+    // Add custom identification pairs
     for (let i = 1; i <= (counts.customer_id_pairs_count || 0); i++) {
-      headers.push(`Customer_Identification_Name_${i}`);
-      headers.push(`Customer_Identification_Value_${i}`);
+      headers.push(`Custom_Identification_Name_${i}`);
+      headers.push(`Custom_Identification_Value_${i}`);
     }
     
     return headers;
@@ -3340,7 +3339,7 @@ export default function ColumnMapping() {
             target: m.target,
             isTag: m.target?.startsWith('Tag_'),
             isSpec: m.target?.startsWith('Specification_'),
-            isCustomer: m.target?.startsWith('Customer_Identification_')
+            isCustomer: m.target?.startsWith('Custom_Identification_')
           }))
         });
       }
@@ -4367,8 +4366,7 @@ export default function ColumnMapping() {
       try {
         const rules = Array.isArray(formulaRulesRef.current) ? formulaRulesRef.current : [];
         if (rules.length > 0) {
-          // CRITICAL FIX: Pass mappings that were just saved
-          await api.applyFormulas(sessionId, rules, mappingData.mappings);
+          // Tag rules were removed; mapping no longer applies formula rules.
         }
       } catch (e) {
         console.warn('Formula re-apply skipped/failed:', e?.message || e);
@@ -4610,7 +4608,7 @@ export default function ColumnMapping() {
       const h = headers.map(x => String(x || '').toLowerCase());
       const anyTag = headers.some(x => typeof x === 'string' && (x.startsWith('Tag_') || x === 'Tag'));
       const anySpec = headers.some(x => typeof x === 'string' && (x.startsWith('Specification_Name_') || x.startsWith('Specification_Value_')));
-      const anyCust = headers.some(x => typeof x === 'string' && (x.startsWith('Customer_Identification_Name_') || x.startsWith('Customer_Identification_Value_')));
+      const anyCust = headers.some(x => typeof x === 'string' && (x.startsWith('Custom_Identification_Name_') || x.startsWith('Custom_Identification_Value_')));
       const hasFactwise = h.some(v => v.includes('factwise') || v === 'item code' || v === 'item_code');
       return anyTag || anySpec || anyCust || hasFactwise;
     };
@@ -4670,7 +4668,7 @@ export default function ColumnMapping() {
                 }
               }
             } catch (err) { /* ignore */ }
-            await api.applyFormulas(sessionId, formulaRules, currentMappings);
+            // Tag rules were removed; nothing re-applies formula rules here.
             appliedOnce = true;
           } catch (e) {
             console.warn('Formula re-apply during readiness failed:', e?.message || e);
