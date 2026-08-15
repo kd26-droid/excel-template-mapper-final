@@ -280,11 +280,18 @@ const blankBomHeader = (sheetName = '') => {
   };
 };
 
+// Every BOM has the same five fields, sub-assemblies included. A sub-BOM's
+// finished good is the assembly itself, which is why the two codes start equal
+// — but they are still two identifiers, and keeping them separate is what lets
+// a BOM take a free code without the part being renamed along with it.
 const blankSubBom = (assembly = {}) => ({
-  // Editable, and defaulted to the code the sheet gave. FactWise rejects a BOM
-  // whose code already exists, and a customer's internal assembly numbers
-  // collide with the directory more often than not — so the sheet's code is a
-  // starting point, not a verdict.
+  // The ITEM this sub-BOM builds. Renaming it renames the part, and the
+  // parent's Raw material / Sub BOM reference follows.
+  finishedGoodCode: assembly.code || '',
+  // The recipe's own code. Editable, and defaulted to the item's. FactWise
+  // rejects a BOM whose code already exists, and a customer's internal assembly
+  // numbers collide with the directory more often than not — so the sheet's
+  // code is a starting point, not a verdict.
   bomCode: assembly.code || '',
   bomName: assembly.name || assembly.code || '',
   measurementUnit: assembly.uom || DEFAULT_MEASUREMENT_UNIT,
@@ -1279,8 +1286,14 @@ const BomStructureDialog = ({
         }
 
         for (const assembly of structure ? assembliesFor(name) : []) {
+          if (!String(subBomValue(name, assembly, 'finishedGoodCode') || '').trim()) {
+            blank.push(`a finished good code for Level ${assembly.levelLabel} "${assembly.code}"`);
+          }
+          // Only the BOM code is checked for collisions. The finished good is
+          // an ITEM — an item sharing a string with a BOM is not a clash, and
+          // an item that already exists is the normal case, not an error.
           const code = String(subBomValue(name, assembly, 'bomCode') || '').trim();
-          if (!code) { blank.push(`Level ${assembly.levelLabel} "${assembly.code}"`); continue; }
+          if (!code) { blank.push(`a BOM code for Level ${assembly.levelLabel} "${assembly.code}"`); continue; }
           const key = code.toLowerCase();
           if (key === rootKey) clashesWithRoot.push(`"${code}"`);
           else if (seenCodes.has(key)) duplicates.push(`"${code}" (${seenCodes.get(key)} and ${assembly.code})`);
@@ -1290,7 +1303,7 @@ const BomStructureDialog = ({
 
         if (blank.length || clashesWithRoot.length || duplicates.length || alreadyExist.length) {
           const parts = [];
-          if (blank.length) parts.push(`Enter a BOM code for ${blank.join(', ')}.`);
+          if (blank.length) parts.push(`Enter ${blank.join(', ')}.`);
           if (alreadyExist.length) {
             parts.push(`Already in FactWise, so they cannot be imported again — ${alreadyExist.join(', ')}. Change them here and every BOM ID and Sub BOM ID reference follows.`);
           }
@@ -1436,8 +1449,12 @@ const BomStructureDialog = ({
         // materialised once — writing it twice would just overwrite itself.
         assembliesFor(name).forEach((assembly) => {
           subBoms[assembly.code] = {
-            // Keyed by the SHEET's code so the backend can find the block,
-            // carrying the user's code as a rename applied on top of it.
+            // Keyed by the SHEET's code so the backend can find the block. The
+            // two codes below are renames applied on top of it, and they are
+            // independent: the item can keep its number while the BOM takes a
+            // free one.
+            finishedGoodCode: String(subBomValue(name, assembly, 'finishedGoodCode') || '').trim()
+                              || assembly.code,
             bomCode: String(subBomValue(name, assembly, 'bomCode') || '').trim() || assembly.code,
             bomName: String(subBomValue(name, assembly, 'bomName') || '').trim() || assembly.code,
             measurementUnit: String(subBomValue(name, assembly, 'measurementUnit') || '').trim()
@@ -1915,20 +1932,97 @@ const BomStructureDialog = ({
                         ? ` — ${revisionFinishedGoodCode ? reviseBomFinishedGood.name : header.itemName}` : ''}`
                       : 'not found in the sheet — name it below'}
                   </Typography>
-                  {/* On a revision it was neither found in the sheet nor
-                      guessed: it came from the BOM the user picked, and saying
-                      "auto-detected" would invite them to check it against a
-                      sheet it did not come from. */}
-                  {revisionTargetCode ? (
+                  {/* No "auto-detected" chip. Every BOM on this screen came out
+                      of the sheet — the root as its shallowest row, the
+                      sub-assemblies from the parent column — so the label was
+                      true of all of them and said nothing. Appearing on the
+                      root alone made it read as a count, as though one BOM had
+                      been found and the rest had not.
+                      The informative state is the opposite one, and it is
+                      already covered: when the root is NOT in the sheet, the
+                      line above says so and asks for a name.
+                      A revision is genuinely different provenance — that one
+                      came from the BOM the user picked, not from the file — so
+                      it keeps its chip. */}
+                  {revisionTargetCode && (
                     <Chip size="small" variant="outlined" label={`revising as ${revisionTargetCode}`} />
-                  ) : header.autoDetected && (
-                    <Chip size="small" variant="outlined" label="auto-detected" />
                   )}
                   <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                    {revisionTargetCode
-                      ? '— inherited from the BOM being revised'
-                      : '— set its fields below'}
+                    {revisionTargetCode ? '— inherited from the BOM being revised' : ''}
                   </Typography>
+                </Box>
+
+                {/* The root's own five fields, inline and first.
+                    They used to sit in a separate block below the list, in a
+                    different layout — which read as a different KIND of thing.
+                    It is not: now that a sub-assembly carries its own finished
+                    good and BOM code too, every BOM on this screen answers the
+                    same five questions, so they belong in one list in tree
+                    order with the root at the top. */}
+                <Box
+                  sx={{
+                    mb: 1.5,
+                    pl: 1.5,
+                    borderLeft: theme => `2px solid ${theme.palette.primary.main}`,
+                  }}
+                >
+                  <Box
+                    sx={{
+                      display: 'grid',
+                      gap: 1,
+                      gridTemplateColumns: {
+                        xs: '1fr',
+                        sm: 'repeat(2, minmax(0, 1fr))',
+                        md: 'minmax(140px, 1fr) minmax(140px, 1fr) minmax(150px, 1.2fr) minmax(105px, 0.6fr) minmax(95px, 0.5fr)',
+                      },
+                    }}
+                  >
+                    <TextField
+                      size="small"
+                      required
+                      label="Finished good code"
+                      value={revisionFinishedGoodCode || header.finishedGoodCode}
+                      disabled={Boolean(revisionFinishedGoodCode)}
+                      onChange={(e) => {
+                        const next = { finishedGoodCode: e.target.value };
+                        if (!header.bomCodeTouched) next.bomCode = e.target.value;
+                        if (!header.bomNameTouched) next.bomName = e.target.value;
+                        patchHeader(name, next);
+                      }}
+                    />
+                    <TextField
+                      size="small"
+                      required
+                      label="BOM code"
+                      value={revisionTargetCode || header.bomCode}
+                      disabled={Boolean(revisionTargetCode)}
+                      onChange={(e) => {
+                        const next = { bomCode: e.target.value, bomCodeTouched: true };
+                        if (!header.bomNameTouched) next.bomName = e.target.value;
+                        patchHeader(name, next);
+                      }}
+                    />
+                    <TextField
+                      size="small"
+                      label="BOM name"
+                      value={header.bomName}
+                      onChange={e => patchHeader(name, { bomName: e.target.value, bomNameTouched: true })}
+                    />
+                    <TextField
+                      size="small"
+                      required
+                      label="Measurement unit"
+                      value={header.measurementUnit}
+                      onChange={e => patchHeader(name, { measurementUnit: e.target.value })}
+                    />
+                    <TextField
+                      size="small"
+                      type="number"
+                      label="Base quantity"
+                      value={header.baseQuantity}
+                      onChange={e => patchHeader(name, { baseQuantity: e.target.value })}
+                    />
+                  </Box>
                 </Box>
                 {/* Each sub-assembly is its own BOM in the FactWise import and
                     needs its own code, name, base quantity and unit. The sheet
@@ -1975,16 +2069,34 @@ const BomStructureDialog = ({
                         gap: 1,
                         gridTemplateColumns: {
                           xs: '1fr',
-                          sm: 'minmax(150px, 1fr) minmax(150px, 1.3fr) minmax(110px, 0.6fr) minmax(100px, 0.5fr)',
+                          sm: 'repeat(2, minmax(0, 1fr))',
+                          md: 'minmax(140px, 1fr) minmax(140px, 1fr) minmax(150px, 1.2fr) minmax(105px, 0.6fr) minmax(95px, 0.5fr)',
                         },
                       }}
                     >
+                      {/* Same five fields as the Level 1 BOM, in the same
+                          order. A sub-assembly is a BOM like any other; the
+                          only reason it used to show four was that its item
+                          code and BOM code were forced to be one value. */}
+                      <TextField
+                        size="small"
+                        required
+                        label="Finished good code"
+                        value={subBomValue(name, assembly, 'finishedGoodCode')}
+                        onChange={(e) => {
+                          const next = { finishedGoodCode: e.target.value };
+                          if (!subBomValue(name, assembly, 'bomCodeTouched')) next.bomCode = e.target.value;
+                          patchSubBom(name, assembly.code, next);
+                        }}
+                      />
                       <TextField
                         size="small"
                         required
                         label="BOM code"
                         value={subBomValue(name, assembly, 'bomCode')}
-                        onChange={e => patchSubBom(name, assembly.code, { bomCode: e.target.value })}
+                        onChange={e => patchSubBom(name, assembly.code, {
+                          bomCode: e.target.value, bomCodeTouched: true,
+                        })}
                       />
                       <TextField
                         size="small"
@@ -2040,99 +2152,6 @@ const BomStructureDialog = ({
               </Box>
             )}
 
-            {/* Grid, not a wrapping row: with five controls at fixed pixel
-                widths the last one dropped to its own line and nothing lined up
-                down the column. */}
-            <Box
-              sx={{
-                display: 'grid',
-                gap: 2,
-                gridTemplateColumns: {
-                  xs: '1fr',
-                  sm: 'repeat(2, minmax(0, 1fr))',
-                  md: 'repeat(3, minmax(0, 1fr))',
-                },
-              }}
-            >
-              <TextField
-                size="small"
-                required
-                label="Finished good code"
-                // Not authored when revising: the chosen BOM already has a
-                // finished good, and every revision of it shares that one item.
-                value={revisionFinishedGoodCode || header.finishedGoodCode}
-                disabled={Boolean(revisionFinishedGoodCode)}
-                // Carries the BOM code along with it until the user has edited
-                // that field themselves. After that the two are independent and
-                // this stops writing to it.
-                // Carries the BOM code, and through it the BOM name, until each
-                // has been edited on its own. The chain breaks per field, so
-                // renaming the BOM does not stop the code following, and
-                // editing the code does not stop the name having followed.
-                onChange={(e) => {
-                  const next = { finishedGoodCode: e.target.value };
-                  if (!header.bomCodeTouched) next.bomCode = e.target.value;
-                  if (!header.bomNameTouched) next.bomName = e.target.value;
-                  patchHeader(name, next);
-                }}
-                helperText={revisionFinishedGoodCode ? 'Existing item — unchanged by the revision' : ''}
-              />
-
-              {/* Shown as its own field for a revision rather than as a note
-                  under the finished good. It is a different identifier that
-                  gains the _Rn suffix while the finished good does not, and
-                  burying it in helper text is what made the two look like one
-                  thing. Read-only: the server assigns the real code when the
-                  draft is created, and the sheet is retargeted to it. */}
-              {/* The BOM's code, not the item's. Separate because they are
-                  separate things — the finished good is an item in the
-                  directory, this identifies the recipe that builds it — and
-                  because a revision is exactly the case where they differ.
-                  Read-only when revising: the server assigns it. */}
-              <TextField
-                size="small"
-                required
-                label="BOM code"
-                value={revisionTargetCode || header.bomCode}
-                disabled={Boolean(revisionTargetCode)}
-                // Editing this breaks the mirror for good. Changing the
-                // finished good afterwards leaves this alone, and changing this
-                // never touches the finished good — they are separate things
-                // that merely start out the same.
-                onChange={(e) => {
-                  const next = { bomCode: e.target.value, bomCodeTouched: true };
-                  if (!header.bomNameTouched) next.bomName = e.target.value;
-                  patchHeader(name, next);
-                }}
-                helperText={revisionTargetCode
-                  ? `Next revision of ${reviseBom?.bom_code || ''}`
-                  : (header.bomCodeTouched ? 'Independent of the finished good code' : 'Follows the finished good code until you change it')}
-              />
-
-              <TextField
-                size="small"
-                label="BOM name"
-                value={header.bomName}
-                onChange={e => patchHeader(name, { bomName: e.target.value, bomNameTouched: true })}
-                helperText={header.bomNameTouched
-                  ? 'Independent of the BOM code'
-                  : 'Follows the BOM code until you change it'}
-              />
-              <TextField
-                size="small"
-                required
-                label="Measurement unit"
-                value={header.measurementUnit}
-                onChange={e => patchHeader(name, { measurementUnit: e.target.value })}
-              />
-              <TextField
-                size="small"
-                type="number"
-                label="Base quantity"
-                value={header.baseQuantity}
-                onChange={e => patchHeader(name, { baseQuantity: e.target.value })}
-              />
-            </Box>
           </Box>
         );
       })}

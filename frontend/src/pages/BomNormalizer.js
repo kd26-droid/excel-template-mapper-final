@@ -935,7 +935,15 @@ const inferRoles = (headers, dataRows = [], options = {}) => {
     uom: findLearnedHeader('uom') || findHeader([/\buom\b/, /measurement unit/, /\bunit\b/]),
     level: headers.find((header) => normalizeKey(header).startsWith(normalizeKey(EXCEL_OUTLINE_LEVEL_HEADER)))
       || (findLearnedHeader('level') || findHeader([/\blevel\b/])),
-    parent: findLearnedHeader('parent') || findHeader([/parent/, /finished good/, /bom id/, /item code/, /assembly/]),
+    // `parent` must not match this app's OWN `parentKey` column. That is the
+    // grouping key for a part and its alternates — `${parent}␟${identity}` —
+    // not a BOM parent, and a bare /parent/ matches it. Re-running on a
+    // normalized or merged sheet then adopted it as the hierarchy parent, so
+    // every assembly came back named "0043-13591␟0043-13591". Same conflation
+    // the note above parentKeyFor warns about, arriving through auto-detection
+    // instead of through a user's mapping.
+    parent: findLearnedHeader('parent')
+      || findHeader([/parent(?!\s*key)/, /finished good/, /bom id/, /item code/, /assembly/]),
   };
 };
 
@@ -1830,14 +1838,17 @@ const alternatesKey = (row, roles, sourceRow) => {
   //
   // Keyed on the pair, one real customer file goes from 287 lines to 634, which
   // matches its 634 distinct (parent, part) pairs counted straight off the sheet.
-  const parent = getCell(row, roles.parent);
+  // Stated, or inferred from the level walk — either way a real parent, so a
+  // part placed under two different assemblies stays two placements. That is
+  // what stampInferredParents exists for: the level fallback below merged two
+  // placements at the SAME level under different assemblies, because level
+  // alone cannot tell them apart.
+  const parent = hierarchyParent(row, roles);
   if (parent) return `${parent}␟${identity}`;
 
-  // No parent column. Level is then the only thing on the row that says where it
-  // sits, so it stands in: a part listed at level 1 and again at level 2 is two
-  // placements, and merging them loses one. THALES puts a label directly on the
-  // top assembly AND inside its PCBA kit; without this the level-1 placement
-  // vanished and the finished good was left with a single child.
+  // Reached only when there is no parent AND no usable level — a flat sheet.
+  // Kept because it is still the honest answer there: with one tier, level is
+  // the only thing on the row that says where it sits.
   //
   // Weaker than a real parent - two placements at the SAME level under different
   // assemblies still merge. That needs the parent inferred from row order during
@@ -1846,9 +1857,18 @@ const alternatesKey = (row, roles, sourceRow) => {
   return level ? `L${level}␟${identity}` : identity;
 };
 
-// Blank when the sheet does not state a parent. The tree is then derived from
-// the level column exactly as before, so level-only sheets are untouched.
-const hierarchyParent = (row, roles) => getCell(row, roles.parent) || '';
+// Where stampInferredParents writes the parent a row's level implies. Declared
+// beside its reader rather than beside its writer: hierarchyParent runs on
+// every row and this is the only thing it needs to know about the walk.
+const LEVEL_PARENT_KEY = '__inferredParent';
+
+// A stated parent when the sheet has one, otherwise the parent its level
+// implies — stamped by stampInferredParents before any of this runs.
+//
+// Level-only sheets now carry a real parent through to the output, so the tree
+// is built from an explicit statement rather than re-inferred from row order at
+// every stage that needs it.
+const hierarchyParent = (row, roles) => getCell(row, roles.parent) || row?.[LEVEL_PARENT_KEY] || '';
 
 const hasGroupedRowContext = (row, roles) => Boolean(
   getCell(row, roles.parent) ||
@@ -3202,7 +3222,61 @@ const normalizeGroupedRows = (rows, roles, config) => {
   return output;
 };
 
+// Stamp each row with the parent its level implies, for sheets that state no
+// parent of their own.
+//
+// The walk is the same rule the backend applies to level-only sheets — a row's
+// parent is the nearest preceding row one level shallower — but done HERE, once,
+// and written down. That matters for three reasons:
+//
+//   1. It is derived where the answer is known. The user picked the level and
+//      code columns at Configure; the popup had to guess them with a regex,
+//      picked `cpn`, and `cpn` was holding the parent. Deriving twice from two
+//      different guesses is what produced that bug.
+//   2. Row order stops mattering after this point. The walk needs tree order;
+//      everything downstream reads a stored value, so a later sort cannot
+//      silently reshape the tree.
+//   3. Two placements of one part at the SAME level under different assemblies
+//      get different parents, so they stay distinct. `parentKey`'s level
+//      fallback merged them — the honeywell case in BOM_KNOWN_GAPS.
+//
+// Written onto the row as `__inferredParent` rather than into the parent column
+// itself, so a sheet that DOES state its parent is untouched and the two can
+// never be confused.
+const stampInferredParents = (rows, roles) => {
+  // A stated parent always wins; there is nothing to infer.
+  if (!rows?.length || !roles?.level || roles.parent) return rows;
+  const codeRole = roles.cpn || roles.description;
+  if (!codeRole) return rows;
+
+  // Index = depth. Holds the most recent code seen at each level.
+  const openAt = [];
+  rows.forEach((row) => {
+    const rawLevel = String(getCell(row, roles.level) ?? '').trim();
+    const level = Number(rawLevel);
+    if (!rawLevel || !Number.isFinite(level) || !Number.isInteger(level) || level < 0) return;
+    const code = getCell(row, codeRole);
+
+    // A level JUMP (1 -> 3) leaves the skipped tier empty. The nearest open
+    // ancestor is used rather than nothing: attaching the row one level too
+    // high keeps it in the tree, where dropping its parent would orphan it.
+    let parent = '';
+    for (let depth = level - 1; depth >= 0; depth -= 1) {
+      if (openAt[depth]) { parent = openAt[depth]; break; }
+    }
+    row[LEVEL_PARENT_KEY] = parent;
+
+    if (code) {
+      openAt[level] = code;
+      // Anything deeper belonged to a branch this row just closed.
+      openAt.length = level + 1;
+    }
+  });
+  return rows;
+};
+
 const normalizeRows = (rows, headers, roles, config) => {
+  stampInferredParents(rows, roles);
   const layoutStructure = effectiveStructure(config);
   const assemblyMatrix = layoutStructure === 'assembly_quantity_matrix'
     ? (detectAssemblyQuantityMatrix(headers, rows, roles) || config.assemblyMatrix)
@@ -3240,6 +3314,10 @@ const normalizeRows = (rows, headers, roles, config) => {
 };
 
 const normalizeRowsChunked = async (rows, headers, roles, config, onProgress) => {
+  // Before chunking, and over EVERY row. The walk carries state down the sheet,
+  // so running it per 50-row chunk would restart the ancestor stack at each
+  // boundary and orphan the first rows of every chunk after the first.
+  stampInferredParents(rows, roles);
   const layoutStructure = effectiveStructure(config);
   if (config.structure === 'grouped_rows' || layoutStructure === 'multi_block_assembly') {
     const dataRows = [];

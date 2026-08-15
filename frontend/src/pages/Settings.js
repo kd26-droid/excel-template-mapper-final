@@ -388,6 +388,7 @@ const Settings = () => {
     isEmbedded: isFactwiseEmbedded,
     entityName: factwiseEntityName,
     entities: factwiseEntities = [],
+    entityChangedAtLaunch,
     chooseEntity,
     loadEntities,
   } = useFactwise();
@@ -448,7 +449,11 @@ const Settings = () => {
         // — which it does the moment a wrong name is corrected — the old row is
         // stranded under the old key and the settings look lost. Re-save what
         // is still in the browser under the entity now in force.
-        const carriedOver = !hasServerSettings && [
+        //
+        // Not when the launch itself switched entity, though: there the browser
+        // copy belongs to whoever launched last, and carrying it over would
+        // write one account's defaults into another account's row.
+        const carriedOver = !hasServerSettings && !entityChangedAtLaunch && [
           'itemType', 'procurementItem', 'salesItem', 'measurementUnit', 'itemCodeContentType',
         ].some(key => String(existingDefaults[key] || '').trim());
         if (carriedOver) {
@@ -475,7 +480,8 @@ const Settings = () => {
     return () => {
       cancelled = true;
     };
-  }, [factwiseEntityName]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [factwiseEntityName, entityChangedAtLaunch]);
 
   useEffect(() => {
     const refreshColumnOptions = () => setItemDirectoryColumnOptions(readItemDirectoryColumnOptions());

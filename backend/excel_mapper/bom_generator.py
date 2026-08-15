@@ -484,22 +484,36 @@ def generate_multi_level_bom(tree, bom_header, alternates_of=None, records=None,
 
     sub_boms = sub_boms or {}
 
-    # A sub-assembly's BOM code, when the user renamed it.
+    # Every block has TWO identifiers, and they are not the same thing:
     #
-    # Applied into `resolved` rather than at the point of use, because that map
-    # is what BOTH `BOM ID` and the parent's `Sub BOM ID` are read through. Set
-    # it here and the two cannot disagree; set it anywhere else and a renamed
-    # sub-BOM would be referenced by its old code one block up, which imports as
-    # a sub-BOM pointing at nothing.
+    #   Finished good code  the ITEM this BOM builds        -> `resolved`
+    #   BOM ID              the recipe's own code           -> `bom_code_of`
     #
-    # The root is excluded: its code is the finished good, authored in the
-    # popup's own form, not in the per-assembly rows.
+    # They used to be forced equal for sub-assemblies, which meant giving a
+    # sub-BOM a free code to dodge a duplicate also renamed the part — the
+    # original item stopped being the one used, silently. Splitting them lets
+    # `0043-13591` stay the part while its BOM becomes `0043-13591_BOM`.
+    #
+    # The invariant that must survive the split: a parent's `Sub BOM ID` has to
+    # equal the child block's `BOM ID`. Both are read through `bom_code_for`
+    # below and nowhere else, so they cannot drift — get that wrong and a parent
+    # references a sub-BOM that was never written.
+    #
+    # The root is excluded: its two codes are authored in the popup's own form.
+    bom_code_of = {}
     for code, override in sub_boms.items():
         if code == root_code:
             continue
-        renamed = _text((override or {}).get('bomCode'))
-        if renamed:
-            resolved[code] = renamed
+        item = _text((override or {}).get('finishedGoodCode'))
+        if item:
+            resolved[code] = item
+        bom = _text((override or {}).get('bomCode'))
+        if bom:
+            bom_code_of[code] = bom
+
+    def bom_code_for(tree_code):
+        """A block's BOM ID: its own code when given, else its item code."""
+        return bom_code_of.get(tree_code) or resolved.get(tree_code, tree_code)
 
     for block in tree.blocks:
         parent_code = resolved.get(block['bom_id'], block['bom_id'])
@@ -523,12 +537,11 @@ def generate_multi_level_bom(tree, bom_header, alternates_of=None, records=None,
             base_quantity = override.get('baseQuantity') or DEFAULT_BASE_QUANTITY
             block_uom = (_text(override.get('measurementUnit'))
                          or block.get('uom') or DEFAULT_MEASUREMENT_UNIT)
-            # A sub-assembly's BOM and its item share a code: the thing the
-            # sub-BOM builds IS that assembly. Renaming one renames both, which
-            # is why the rename went into `resolved` and is already reflected in
-            # parent_code.
-            block_bom_id = parent_code
-            bom_name = _text(override.get('bomName')) or parent_code
+            # Its own code when the user gave it one, otherwise the item's —
+            # the same fallback the root uses, so an untouched sheet generates
+            # exactly what it always did.
+            block_bom_id = bom_code_for(block['bom_id'])
+            bom_name = _text(override.get('bomName')) or block_bom_id
 
         for child in block['children']:
             child_code = resolved.get(child['code'], child['code'])
@@ -543,8 +556,11 @@ def generate_multi_level_bom(tree, bom_header, alternates_of=None, records=None,
             row['BOM measurement unit'] = block_uom
             row['Level'] = block['level']
             if is_assembly:
-                row['Sub BOM ID'] = child_code
+                # The child's BOM ID, not its item code — the two can now
+                # differ, and this cell references the BOM.
+                row['Sub BOM ID'] = bom_code_for(child['code'])
             else:
+                # A leaf is a part, so this cell references the item.
                 row['Raw material code'] = child_code
             row['Description'] = child.get('description', '')
             row['Quantity'] = child.get('quantity', '')
