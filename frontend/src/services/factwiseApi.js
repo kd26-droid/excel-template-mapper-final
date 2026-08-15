@@ -652,9 +652,14 @@ export async function submitEnterpriseBom(enterpriseBomId) {
     );
     return { success: true };
   } catch (error) {
+    // FW answers a transition its state machine disallows with
+    // { ErrorCode: 'INVALID BOM STATUS', Cause: [...] } and no `error` key, so
+    // without ErrorCode the caller only ever sees axios' "status code 400".
+    const errorCode = error?.response?.data?.ErrorCode || null;
     return {
       success: false,
-      error: error?.response?.data?.error || error?.message || 'BOM submit failed',
+      errorCode,
+      error: error?.response?.data?.error || errorCode || error?.message || 'BOM submit failed',
     };
   }
 }
