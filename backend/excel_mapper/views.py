@@ -14955,6 +14955,11 @@ def _exported_item_rows(session_id):
             return None
 
         rows, headers = _append_authored_finished_good(info, list(rows or []), list(headers))
+        # Level / Quantity / Base BOM Qty are per-BOM-line, not item attributes,
+        # and the export strips them before collapsing. Leaving them in here made
+        # the same part consumed in two places with different quantities compare
+        # as two different items, so the gate blocked an export that ships fine.
+        rows, headers = _drop_bom_columns(rows, headers)
         # Collapse exactly as the export does, so the duplicate rule fires on
         # what actually ships. Without this every part used in more than one
         # place reads as a duplicate item and blocks an export that is fine.

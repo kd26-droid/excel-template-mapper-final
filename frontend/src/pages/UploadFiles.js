@@ -233,11 +233,14 @@ const scoreHeaderRow = (rows = [], rowIndex = 0) => {
   );
 };
 
-// Excel re-saves a foreign-delimiter CSV by wrapping each whole record in quotes
-// and padding the row with commas, so the file parses as one very wide sheet with
-// a single populated column holding the real record. Reading the recovered column
-// back as its own CSV lets the parser find the delimiter that was actually used.
-// The header row is only worth detecting once the file has split into a table.
+// Excel re-saves a foreign-delimiter CSV by quoting each whole record and padding
+// the row with commas, so the file parses as one very wide sheet whose rows carry a
+// single populated cell holding the real record. Where the record itself contained a
+// comma - a "MN1, MN2, MN7" reference list, a European decimal, a part code - Excel
+// split it there too, so a row can hold several fragments. Joining a row's cells back
+// with the comma that split them rebuilds the record either way; re-reading those
+// records finds the delimiter actually in use. The header row is only worth detecting
+// once the file has split into a table.
 const sheetPopulatedColumnCount = (rows = []) => {
   const populated = new Set();
   rows.forEach(row => {
@@ -280,17 +283,36 @@ const pickRecoveredDelimiter = (lines = []) => {
   return best;
 };
 
+// Most rows carrying at most one populated cell is the wrapper's signature: the
+// record never really split into columns. Rows broken by a comma inside the record
+// are the minority, so this stays true for them.
+const looksLikeWrappedRecords = (rows = []) => {
+  const filledRows = rows.filter(row => normalizeRowCells(row).some(cell => cell !== ''));
+  if (filledRows.length < 2) return false;
+  const singleCellRows = filledRows.filter(row => normalizeRowCells(row).filter(cell => cell !== '').length <= 1).length;
+  return singleCellRows >= filledRows.length * 0.6;
+};
+
+// Keep interior blanks - they are real empty columns - but drop the padding run at
+// the end, and do not trim: the record's own spacing is data.
+const csvRecordFromRow = (row = []) => {
+  const cells = (row || []).map(cell => (cell === null || cell === undefined ? '' : String(cell)));
+  let end = cells.length;
+  while (end > 0 && cells[end - 1].trim() === '') end -= 1;
+  return cells.slice(0, end).join(',');
+};
+
 const readCsvWorkbook = (text, readOptions) => {
   const workbook = XLSX.read(text, readOptions);
   const firstSheet = workbook.SheetNames[0];
   if (!firstSheet) return workbook;
 
   const rows = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheet], { header: 1, raw: false, defval: '', blankrows: true });
-  if (sheetPopulatedColumnCount(rows) > 1) return workbook;
+  if (!looksLikeWrappedRecords(rows)) return workbook;
 
   const recoveredLines = rows
-    .map(row => normalizeRowCells(row).find(cell => cell !== '') || '')
-    .filter(line => line !== '');
+    .map(csvRecordFromRow)
+    .filter(line => line.trim() !== '');
   if (recoveredLines.length < 2) return workbook;
 
   const delimiter = pickRecoveredDelimiter(recoveredLines);

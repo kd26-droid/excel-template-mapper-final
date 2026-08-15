@@ -161,19 +161,32 @@ def _unwrap_single_column_records(rows, outer_delimiter):
     """
     Excel re-saves a semicolon/tab export by quoting each whole record and padding
     the row with commas, so the file parses into one populated column whose cells
-    still hold the original delimited record. Hand those records back so the
-    delimiter can be sniffed again on what the row actually is. Returns None when
-    the file genuinely splits into columns, which is the normal case.
+    still hold the original delimited record. Where the record itself contained the
+    comma - a "MN1, MN2, MN7" reference list, a European decimal - Excel split it
+    there too, leaving a row of fragments. Joining a row's cells back with the
+    separator that split them rebuilds the record either way. Returns None when the
+    file genuinely splits into columns, which is the normal case.
     """
     if len(rows) < 2:
         return None
 
+    single_cell_rows = 0
     records = []
     for row in rows:
-        filled = [str(cell).strip() for cell in row if str(cell or '').strip()]
-        if len(filled) != 1:
-            return None
-        records.append(filled[0])
+        cells = [str(cell) if cell is not None else '' for cell in row]
+        if len([cell for cell in cells if cell.strip()]) <= 1:
+            single_cell_rows += 1
+        # Interior blanks are real empty columns; only the padding run at the end goes.
+        end = len(cells)
+        while end > 0 and not cells[end - 1].strip():
+            end -= 1
+        records.append(outer_delimiter.join(cells[:end]))
+
+    # Most rows carrying at most one populated cell is the wrapper's signature: the
+    # record never really split into columns. Rows broken by a comma inside the
+    # record are the minority, so this stays true for them.
+    if single_cell_rows < len(rows) * 0.6:
+        return None
 
     # Only retry when the recovered records form a table on a DIFFERENT separator.
     # If the same one wins again, the quoting was deliberate - a one-column file of

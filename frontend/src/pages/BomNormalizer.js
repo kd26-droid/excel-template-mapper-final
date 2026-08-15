@@ -3943,18 +3943,25 @@ const readCsvWorkbookSafely = async (file) => {
         .map((line) => splitDelimitedLine(line, ','));
       return workbookFromRows(rows);
     },
-    // Excel re-saves a semicolon/tab export by quoting each whole record and
-    // padding the row with commas, so every row parses as one populated cell that
-    // still holds the original delimited record. Unwrap that cell and sniff again.
+    // Excel re-saves a semicolon/tab export by quoting each whole record and padding
+    // the row with commas, so a row parses as one populated cell still holding the
+    // original delimited record. Where the record itself held a comma - a reference
+    // list, a European decimal - Excel split it there too, leaving several fragments.
+    // Joining a row's cells back with the comma that split them rebuilds the record
+    // either way; then sniff the delimiter the record actually uses.
     () => {
       const lines = text.split(/\r?\n/).filter((line) => line.trim());
-      const unwrapped = [];
-      for (const line of lines) {
-        const filled = splitDelimitedLine(line, ',').filter((cell) => fmt(cell));
-        if (filled.length !== 1) return null;
-        unwrapped.push(filled[0]);
-      }
-      if (unwrapped.length < 2) return null;
+      if (lines.length < 2) return null;
+
+      let singleCellLines = 0;
+      const unwrapped = lines.map((line) => {
+        const cells = splitDelimitedLine(line, ',');
+        if (cells.filter((cell) => fmt(cell)).length <= 1) singleCellLines += 1;
+        let end = cells.length;
+        while (end > 0 && !fmt(cells[end - 1])) end -= 1;
+        return cells.slice(0, end).join(',');
+      });
+      if (singleCellLines < lines.length * 0.6) return null;
 
       const delimiter = detectDelimiter(unwrapped.join('\n'));
       // Same separator winning again means the quoting was deliberate - a
