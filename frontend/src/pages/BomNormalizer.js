@@ -615,6 +615,31 @@ const getDiscardedPackedText = (value, pair = {}) => {
 
 const stripTrailingMpnSeparator = (value) => fmt(value).replace(/\s+@$/, '').trim();
 
+const cleanPreviewMpnPair = (pair = {}, source = '') => {
+  const mpn = fmt(pair.mpn);
+  const atIndex = mpn.indexOf('@');
+  const existingDiscarded = fmt(pair.discarded || pair.metadata?.discardedText || getDiscardedPackedText(source, pair));
+  if (atIndex <= 0) {
+    return {
+      mpn,
+      manufacturer: pair.manufacturer,
+      discarded: existingDiscarded,
+    };
+  }
+
+  const cleanMpn = fmt(mpn.slice(0, atIndex)).replace(/[,\s]+$/g, '');
+  const suffix = fmt(mpn.slice(atIndex));
+  const discardedParts = existingDiscarded.includes(suffix)
+    ? [existingDiscarded]
+    : [suffix, existingDiscarded].filter(Boolean);
+
+  return {
+    mpn: cleanMpn || mpn,
+    manufacturer: pair.manufacturer,
+    discarded: discardedParts.join(' '),
+  };
+};
+
 const stripTrailingStatusRefBlocks = (value) => {
   let core = fmt(value).replace(/\u00a0/g, ' ');
   const blocks = [];
@@ -1436,13 +1461,40 @@ const mpnsFromColonManufacturerValue = (value) => {
     ));
 };
 
+const knownManufacturerKeySet = new Set(KNOWN_COLON_MANUFACTURERS.map((name) => normalizeKey(name).toUpperCase()));
+
+const looksLikeColonMpnSide = (value) => {
+  const text = fmt(value);
+  if (!text || knownManufacturerKeySet.has(normalizeKey(text).toUpperCase())) return false;
+  return looksLikeMpnToken(text) || looksLikeParenthesizedMpn(text) || looksLikeManufacturerPartsMpn(text);
+};
+
+const cleanColonManufacturerValue = (value) => {
+  const { text } = extractPackedMetadata(value);
+  return cleanCaretManufacturer(text)
+    .replace(/^[,;:\s]+|[,;:\s]+$/g, '')
+    .trim();
+};
+
 const parseColonManufacturerMpnPart = (value, config = {}) => {
   const text = decodeBasicHtmlEntities(value).replace(/\u00a0/g, ' ').trim();
   const colonIndex = text.indexOf(':');
   if (colonIndex <= 0) return [];
 
-  const { manufacturer: label, discardedText: labelDiscardedText } = cleanColonManufacturerLabel(text.slice(0, colonIndex));
+  const rawLeft = fmt(text.slice(0, colonIndex));
   const rawValue = fmt(text.slice(colonIndex + 1));
+  if (looksLikeColonMpnSide(rawLeft)) {
+    const manufacturer = cleanColonManufacturerValue(rawValue);
+    if (manufacturer && /[A-Za-z]/.test(manufacturer)) {
+      return [{
+        mpn: stripVendorPrefix(rawLeft),
+        manufacturer,
+        metadata: {},
+      }];
+    }
+  }
+
+  const { manufacturer: label, discardedText: labelDiscardedText } = cleanColonManufacturerLabel(rawLeft);
   if (!label || !rawValue) return [];
 
   if (COLON_MFR_NOTE_LABEL_RE.test(label)) {
@@ -6720,11 +6772,7 @@ const BomNormalizer = () => {
             rawSource: source,
             entryIndex: exampleEntryIndex,
             entryCount: sourceEntryCount,
-            pairs: (examplePairs.length ? examplePairs : pairs.slice(0, 1)).map((pair) => ({
-              mpn: pair.mpn,
-              manufacturer: pair.manufacturer,
-              discarded: pair.metadata?.discardedText || getDiscardedPackedText(exampleSource, pair),
-            })),
+            pairs: (examplePairs.length ? examplePairs : pairs.slice(0, 1)).map((pair) => cleanPreviewMpnPair(pair, exampleSource)),
             discarded: firstPair?.metadata?.discardedText || getDiscardedPackedText(exampleSource, firstPair),
           });
         }
@@ -6863,11 +6911,7 @@ const BomNormalizer = () => {
     if (!source) return [];
     return parsePackedMpnManufacturerPairs(source, normalizerConfig)
       .filter((pair) => pair?.mpn && pair?.manufacturer)
-      .map((pair) => ({
-        mpn: pair.mpn,
-        manufacturer: pair.manufacturer,
-        discarded: pair.metadata?.discardedText || getDiscardedPackedText(source, pair),
-      }));
+      .map((pair) => cleanPreviewMpnPair(pair, source));
   }, [normalizerConfig]);
 
   const stagedEditForPattern = useCallback((option) => (
