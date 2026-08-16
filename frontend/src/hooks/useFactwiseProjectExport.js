@@ -1127,7 +1127,18 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
           const collectSubs = (items) => {
             if (!Array.isArray(items)) return;
             for (const it of items) {
-              if (it?.sub_bom_id) referencedAsSub.add(String(it.sub_bom_id));
+              // FW's /bom/<id>/admin/ returns `sub_bom` as a full object
+              // (with enterprise_bom_id), not a flat `sub_bom_id` field.
+              // Handle both shapes: `sub_bom_id` for older responses, plus
+              // `sub_bom.enterprise_bom_id` / `sub_bom.bom_id` for the
+              // current admin response. Missing this made the whole filter
+              // a no-op — every BOM in the set looked like a root, so all
+              // sub-BOMs got attached to the project as separate BOMs.
+              const subId = it?.sub_bom_id
+                || it?.sub_bom?.enterprise_bom_id
+                || it?.sub_bom?.bom_id
+                || null;
+              if (subId) referencedAsSub.add(String(subId));
               if (Array.isArray(it?.sub_bom_items)) collectSubs(it.sub_bom_items);
             }
           };
