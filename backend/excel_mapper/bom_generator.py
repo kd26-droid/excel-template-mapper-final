@@ -265,8 +265,16 @@ def generate_flat_bom(records, bom_header):
         })
         return result
 
-    bom_id = _text((bom_header or {}).get('bomName')) or finished_good
-    bom_name = bom_id
+    # The BOM's own code, authored separately from the finished good.
+    #
+    # It used to be `bomName or finishedGoodCode`, which meant typing a BOM NAME
+    # silently became the BOM's ID — and disagreed with the hierarchical path,
+    # which always used the code. The two are different things: the finished
+    # good is an ITEM in the directory, the BOM ID identifies the recipe that
+    # builds it. Defaulting to the finished good keeps the common case where
+    # they match.
+    bom_id = _text((bom_header or {}).get('bomCode')) or finished_good
+    bom_name = _text((bom_header or {}).get('bomName')) or bom_id
     base_quantity = (bom_header or {}).get('baseQuantity') or 1
     bom_uom = _text((bom_header or {}).get('measurementUnit'))
 
@@ -472,8 +480,40 @@ def generate_multi_level_bom(tree, bom_header, alternates_of=None, records=None,
     authored_base_quantity = (bom_header or {}).get('baseQuantity') or 1
     authored_uom = _text((bom_header or {}).get('measurementUnit'))
     authored_name = _text((bom_header or {}).get('bomName'))
+    authored_bom_code = _text((bom_header or {}).get('bomCode'))
 
     sub_boms = sub_boms or {}
+
+    # Every block has TWO identifiers, and they are not the same thing:
+    #
+    #   Finished good code  the ITEM this BOM builds        -> `resolved`
+    #   BOM ID              the recipe's own code           -> `bom_code_of`
+    #
+    # They used to be forced equal for sub-assemblies, which meant giving a
+    # sub-BOM a free code to dodge a duplicate also renamed the part — the
+    # original item stopped being the one used, silently. Splitting them lets
+    # `0043-13591` stay the part while its BOM becomes `0043-13591_BOM`.
+    #
+    # The invariant that must survive the split: a parent's `Sub BOM ID` has to
+    # equal the child block's `BOM ID`. Both are read through `bom_code_for`
+    # below and nowhere else, so they cannot drift — get that wrong and a parent
+    # references a sub-BOM that was never written.
+    #
+    # The root is excluded: its two codes are authored in the popup's own form.
+    bom_code_of = {}
+    for code, override in sub_boms.items():
+        if code == root_code:
+            continue
+        item = _text((override or {}).get('finishedGoodCode'))
+        if item:
+            resolved[code] = item
+        bom = _text((override or {}).get('bomCode'))
+        if bom:
+            bom_code_of[code] = bom
+
+    def bom_code_for(tree_code):
+        """A block's BOM ID: its own code when given, else its item code."""
+        return bom_code_of.get(tree_code) or resolved.get(tree_code, tree_code)
 
     for block in tree.blocks:
         parent_code = resolved.get(block['bom_id'], block['bom_id'])
@@ -488,12 +528,20 @@ def generate_multi_level_bom(tree, bom_header, alternates_of=None, records=None,
         if is_root_block:
             base_quantity = authored_base_quantity
             block_uom = authored_uom or block.get('uom') or DEFAULT_MEASUREMENT_UNIT
-            bom_name = authored_name or parent_code
+            # The root's BOM ID is authored separately from its finished good,
+            # so the two can differ — a revision is exactly that case, where the
+            # BOM becomes X_R5 while the finished good it builds is unchanged.
+            block_bom_id = authored_bom_code or parent_code
+            bom_name = authored_name or block_bom_id
         else:
             base_quantity = override.get('baseQuantity') or DEFAULT_BASE_QUANTITY
             block_uom = (_text(override.get('measurementUnit'))
                          or block.get('uom') or DEFAULT_MEASUREMENT_UNIT)
-            bom_name = _text(override.get('bomName')) or parent_code
+            # Its own code when the user gave it one, otherwise the item's —
+            # the same fallback the root uses, so an untouched sheet generates
+            # exactly what it always did.
+            block_bom_id = bom_code_for(block['bom_id'])
+            bom_name = _text(override.get('bomName')) or block_bom_id
 
         for child in block['children']:
             child_code = resolved.get(child['code'], child['code'])
@@ -502,14 +550,17 @@ def generate_multi_level_bom(tree, bom_header, alternates_of=None, records=None,
 
             row = OrderedDict((header, '') for header in result.bom_headers)
             row['Finished good code'] = parent_code
-            row['BOM ID'] = parent_code
+            row['BOM ID'] = block_bom_id
             row['BOM name'] = bom_name
             row['Base quantity'] = base_quantity
             row['BOM measurement unit'] = block_uom
             row['Level'] = block['level']
             if is_assembly:
-                row['Sub BOM ID'] = child_code
+                # The child's BOM ID, not its item code — the two can now
+                # differ, and this cell references the BOM.
+                row['Sub BOM ID'] = bom_code_for(child['code'])
             else:
+                # A leaf is a part, so this cell references the item.
                 row['Raw material code'] = child_code
             row['Description'] = child.get('description', '')
             row['Quantity'] = child.get('quantity', '')

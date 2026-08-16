@@ -528,7 +528,21 @@ const worksheetToCompactRows = (worksheet, options = {}) => {
   return rows;
 };
 
+// One populated column means the file did not really split into a table - a CSV
+// saved with the wrong delimiter, typically. Scoring rows against each other is
+// then meaningless, and row 1 is the only honest answer.
+const hasSingleUsableColumn = (rows = []) => {
+  const populated = new Set();
+  rows.slice(0, HEADER_SCAN_ROWS).forEach((row) => {
+    (row || []).forEach((cell, index) => {
+      if (fmt(cell) !== '') populated.add(index);
+    });
+  });
+  return populated.size <= 1;
+};
+
 const detectHeaderRow = (rows) => {
+  if (hasSingleUsableColumn(rows)) return 0;
   let bestIndex = 0;
   let bestScore = Number.NEGATIVE_INFINITY;
   rows.slice(0, HEADER_SCAN_ROWS).forEach((_row, index) => {
@@ -677,6 +691,53 @@ const buildParsedPatternShape = (value, pairs = []) => {
   }
 
   return buildSinglePairPatternShape(source, pairs[0]);
+};
+
+const splitStructuredMpnMfrEntries = (value) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ');
+  if (!text) return [];
+
+  const entries = [];
+  let start = 0;
+  let index = 0;
+
+  const skipSpaces = (position) => {
+    let cursor = position;
+    while (cursor < text.length && /\s/.test(text[cursor])) cursor += 1;
+    return cursor;
+  };
+
+  while (index < text.length) {
+    if (text[index] !== ')') {
+      index += 1;
+      continue;
+    }
+
+    let cursor = skipSpaces(index + 1);
+    let consumedMetadataBlock = false;
+
+    while (cursor < text.length && (text[cursor] === '{' || text[cursor] === '[')) {
+      const closing = text[cursor] === '{' ? '}' : ']';
+      const closeIndex = text.indexOf(closing, cursor + 1);
+      if (closeIndex === -1) break;
+      consumedMetadataBlock = true;
+      cursor = skipSpaces(closeIndex + 1);
+    }
+
+    if (consumedMetadataBlock || cursor >= text.length) {
+      const entry = fmt(text.slice(start, cursor));
+      if (entry) entries.push(entry);
+      start = cursor;
+      index = cursor;
+      continue;
+    }
+
+    index += 1;
+  }
+
+  const tail = fmt(text.slice(start));
+  if (tail && !entries.includes(tail)) entries.push(tail);
+  return entries.length > 1 ? entries : [];
 };
 
 const describePatternShape = (shape = '') => {
@@ -921,7 +982,15 @@ const inferRoles = (headers, dataRows = [], options = {}) => {
     uom: findLearnedHeader('uom') || findHeader([/\buom\b/, /measurement unit/, /\bunit\b/]),
     level: headers.find((header) => normalizeKey(header).startsWith(normalizeKey(EXCEL_OUTLINE_LEVEL_HEADER)))
       || (findLearnedHeader('level') || findHeader([/\blevel\b/])),
-    parent: findLearnedHeader('parent') || findHeader([/parent/, /finished good/, /bom id/, /item code/, /assembly/]),
+    // `parent` must not match this app's OWN `parentKey` column. That is the
+    // grouping key for a part and its alternates — `${parent}␟${identity}` —
+    // not a BOM parent, and a bare /parent/ matches it. Re-running on a
+    // normalized or merged sheet then adopted it as the hierarchy parent, so
+    // every assembly came back named "0043-13591␟0043-13591". Same conflation
+    // the note above parentKeyFor warns about, arriving through auto-detection
+    // instead of through a user's mapping.
+    parent: findLearnedHeader('parent')
+      || findHeader([/parent(?!\s*key)/, /finished good/, /bom id/, /item code/, /assembly/]),
   };
 };
 
@@ -1346,7 +1415,8 @@ const parseParenthesizedMpnManufacturerPairs = (value, config = {}) => {
 
   const delimiter = selectedDelimiter(config);
   const explicitParts = splitByExplicitDelimiter(text, delimiter);
-  const parts = explicitParts.length > 1 ? explicitParts : splitDelimited(text);
+  const structuredParts = explicitParts.length > 1 ? [] : splitStructuredMpnMfrEntries(text);
+  const parts = explicitParts.length > 1 ? explicitParts : (structuredParts.length > 1 ? structuredParts : splitDelimited(text));
   const candidates = parts.length ? parts : [text];
 
   const parsed = candidates.map((part) => {
@@ -1428,6 +1498,14 @@ const parsePackedMpnManufacturerPairs = (value, config = {}) => {
   const caretPairs = parseCaretMpnManufacturerPairs(text);
   if (caretPairs.length) return caretPairs;
 
+  const structuredEntries = splitStructuredMpnMfrEntries(text);
+  if (structuredEntries.length > 1) {
+    const structuredPairs = structuredEntries
+      .flatMap((entry) => parseParenthesizedMpnManufacturerPairs(entry, config))
+      .filter((pair) => pair?.mpn && pair?.manufacturer);
+    if (structuredPairs.length) return structuredPairs;
+  }
+
   const trailingParenthesizedPair = parseTrailingParenthesizedMpnManufacturerPair(text);
   if (trailingParenthesizedPair.length) return trailingParenthesizedPair;
 
@@ -1458,6 +1536,23 @@ const parsePackedMpnManufacturerPairs = (value, config = {}) => {
   }).filter(Boolean);
 
   return parsed.length >= 1 && parsed.length === parts.length ? parsed : [];
+};
+
+const sameParsedPair = (left = {}, right = {}) => (
+  fmt(left.mpn).toUpperCase() === fmt(right.mpn).toUpperCase() &&
+  fmt(left.manufacturer).toUpperCase() === fmt(right.manufacturer).toUpperCase()
+);
+
+const sourceForParsedPair = (source, pair, config = {}) => {
+  const text = fmt(source).replace(/\u00a0/g, ' ');
+  if (!text || !pair?.mpn || !pair?.manufacturer) return text;
+
+  const entries = splitStructuredMpnMfrEntries(text);
+  if (!entries.length) return text;
+
+  return entries.find((entry) => (
+    parsePackedMpnManufacturerPairs(entry, config).some((entryPair) => sameParsedPair(entryPair, pair))
+  )) || entries[0] || text;
 };
 
 const isManufacturerPartsBlockHeader = (value) => {
@@ -1816,14 +1911,17 @@ const alternatesKey = (row, roles, sourceRow) => {
   //
   // Keyed on the pair, one real customer file goes from 287 lines to 634, which
   // matches its 634 distinct (parent, part) pairs counted straight off the sheet.
-  const parent = getCell(row, roles.parent);
+  // Stated, or inferred from the level walk — either way a real parent, so a
+  // part placed under two different assemblies stays two placements. That is
+  // what stampInferredParents exists for: the level fallback below merged two
+  // placements at the SAME level under different assemblies, because level
+  // alone cannot tell them apart.
+  const parent = hierarchyParent(row, roles);
   if (parent) return `${parent}␟${identity}`;
 
-  // No parent column. Level is then the only thing on the row that says where it
-  // sits, so it stands in: a part listed at level 1 and again at level 2 is two
-  // placements, and merging them loses one. THALES puts a label directly on the
-  // top assembly AND inside its PCBA kit; without this the level-1 placement
-  // vanished and the finished good was left with a single child.
+  // Reached only when there is no parent AND no usable level — a flat sheet.
+  // Kept because it is still the honest answer there: with one tier, level is
+  // the only thing on the row that says where it sits.
   //
   // Weaker than a real parent - two placements at the SAME level under different
   // assemblies still merge. That needs the parent inferred from row order during
@@ -1832,9 +1930,18 @@ const alternatesKey = (row, roles, sourceRow) => {
   return level ? `L${level}␟${identity}` : identity;
 };
 
-// Blank when the sheet does not state a parent. The tree is then derived from
-// the level column exactly as before, so level-only sheets are untouched.
-const hierarchyParent = (row, roles) => getCell(row, roles.parent) || '';
+// Where stampInferredParents writes the parent a row's level implies. Declared
+// beside its reader rather than beside its writer: hierarchyParent runs on
+// every row and this is the only thing it needs to know about the walk.
+const LEVEL_PARENT_KEY = '__inferredParent';
+
+// A stated parent when the sheet has one, otherwise the parent its level
+// implies — stamped by stampInferredParents before any of this runs.
+//
+// Level-only sheets now carry a real parent through to the output, so the tree
+// is built from an explicit statement rather than re-inferred from row order at
+// every stage that needs it.
+const hierarchyParent = (row, roles) => getCell(row, roles.parent) || row?.[LEVEL_PARENT_KEY] || '';
 
 const hasGroupedRowContext = (row, roles) => Boolean(
   getCell(row, roles.parent) ||
@@ -2304,6 +2411,47 @@ const normalizeAssemblyMatrixQuantity = (value) => {
   return { quantity: text, note: '' };
 };
 
+const QUANTITY_VARIANT_ALL = 'all';
+
+const getSelectedQuantityVariant = (config = {}) => {
+  const selected = fmt(config.quantityVariant || QUANTITY_VARIANT_ALL).trim();
+  return selected && selected !== QUANTITY_VARIANT_ALL ? selected : '';
+};
+
+const quantityVariantMatches = (value, selectedVariant) => (
+  Boolean(selectedVariant) && normalizeKey(value) === normalizeKey(selectedVariant)
+);
+
+const filterQuantityVariantHeaders = (headers = [], config = {}) => {
+  const selectedVariant = getSelectedQuantityVariant(config);
+  if (!selectedVariant) return headers;
+  return headers.filter((header) => quantityVariantMatches(header, selectedVariant));
+};
+
+const getRowQuantityVariant = (row = {}) => row.__quantityColumn || row['Quantity variant'] || '';
+const getRowQuantityVariantGroup = (row = {}) => row.__blockId || [
+  row['Source sheet'],
+  row['BOM block'],
+  row.__blockTitle,
+].map(fmt).filter(Boolean).join('::');
+
+const filterRowsByQuantityVariant = (rows = [], config = {}) => {
+  const selectedVariant = getSelectedQuantityVariant(config);
+  const selectedByBlock = config.quantityVariantByBlock || {};
+  if (!selectedVariant && !Object.keys(selectedByBlock).length) return rows;
+  return rows.filter((row) => {
+    const rowVariant = getRowQuantityVariant(row);
+    if (!rowVariant) return true;
+    if (row?.__multiBlockMode === '1') {
+      const groupKey = getRowQuantityVariantGroup(row);
+      const blockVariant = fmt(selectedByBlock[groupKey]);
+      if (!blockVariant || blockVariant === QUANTITY_VARIANT_ALL) return true;
+      return quantityVariantMatches(rowVariant, blockVariant);
+    }
+    return !selectedVariant || quantityVariantMatches(rowVariant, selectedVariant);
+  });
+};
+
 const detectAssemblyQuantityMatrix = (headers = [], rows = [], roles = {}) => {
   const visibleHeaders = headers.filter((header) => header && !header.startsWith('__'));
   const partNumberColumn = visibleHeaders.find(isAssemblyMatrixPartHeader) || roles.cpn || roles.mpn || '';
@@ -2761,6 +2909,8 @@ const normalizeOnePerRow = (rows, roles, config = {}) => rows.map((row, rowIndex
 const normalizeAssemblyQuantityMatrix = (rows, headers, roles, config = {}) => {
   const matrix = detectAssemblyQuantityMatrix(headers, rows, roles) || config.assemblyMatrix;
   if (!matrix?.assemblyColumns?.length) return [];
+  const assemblyColumns = filterQuantityVariantHeaders(matrix.assemblyColumns, config);
+  if (!assemblyColumns.length) return [];
 
   const output = [];
   rows.forEach((row, rowIndex) => {
@@ -2770,7 +2920,7 @@ const normalizeAssemblyQuantityMatrix = (rows, headers, roles, config = {}) => {
     const findNumber = stripCircledNumberMarkers(getCell(row, matrix.findNumberColumn));
     if (!partNumber && !description) return;
 
-    matrix.assemblyColumns.forEach((assemblyColumn) => {
+    assemblyColumns.forEach((assemblyColumn) => {
       const rawQuantity = stripCircledNumberMarkers(getCell(row, assemblyColumn));
       if (!isMatrixQuantityPresent(rawQuantity)) return;
       const quantityInfo = normalizeAssemblyMatrixQuantity(rawQuantity);
@@ -2906,7 +3056,8 @@ const buildMultiBlockAssemblyIndex = (rows = []) => {
 };
 
 const normalizeMultiBlockAssembly = (rows, roles, config = {}) => {
-  const index = buildMultiBlockAssemblyIndex(rows);
+  const filteredRows = filterRowsByQuantityVariant(rows, config);
+  const index = buildMultiBlockAssemblyIndex(filteredRows);
   const output = [];
   const emittedSubtreeKeys = new Set();
 
@@ -3188,7 +3339,71 @@ const normalizeGroupedRows = (rows, roles, config) => {
   return output;
 };
 
+// Stamp each row with the parent its level implies, for sheets that state no
+// parent of their own.
+//
+// The walk is the same rule the backend applies to level-only sheets — a row's
+// parent is the nearest preceding row one level shallower — but done HERE, once,
+// and written down. That matters for three reasons:
+//
+//   1. It is derived where the answer is known. The user picked the level and
+//      code columns at Configure; the popup had to guess them with a regex,
+//      picked `cpn`, and `cpn` was holding the parent. Deriving twice from two
+//      different guesses is what produced that bug.
+//   2. Row order stops mattering after this point. The walk needs tree order;
+//      everything downstream reads a stored value, so a later sort cannot
+//      silently reshape the tree.
+//   3. Two placements of one part at the SAME level under different assemblies
+//      get different parents, so they stay distinct. `parentKey`'s level
+//      fallback merged them — the honeywell case in BOM_KNOWN_GAPS.
+//
+// Written onto the row as `__inferredParent` rather than into the parent column
+// itself, so a sheet that DOES state its parent is untouched and the two can
+// never be confused.
+const stampInferredParents = (rows, roles) => {
+  if (!rows?.length) return rows;
+
+  // Clear before deciding whether to write. Rows are the SAME objects across
+  // re-runs, so bailing out early used to leave the previous run's stamps in
+  // place — map a real Parent column, re-run, and every row whose stated parent
+  // cell happens to be blank still falls back to a value inferred under the old
+  // configuration. One tree built from two different derivations.
+  const clear = () => rows.forEach((row) => { delete row[LEVEL_PARENT_KEY]; });
+
+  // A stated parent always wins; there is nothing to infer.
+  if (!roles?.level || roles.parent) { clear(); return rows; }
+  const codeRole = roles.cpn || roles.description;
+  if (!codeRole) { clear(); return rows; }
+  clear();
+
+  // Index = depth. Holds the most recent code seen at each level.
+  const openAt = [];
+  rows.forEach((row) => {
+    const rawLevel = String(getCell(row, roles.level) ?? '').trim();
+    const level = Number(rawLevel);
+    if (!rawLevel || !Number.isFinite(level) || !Number.isInteger(level) || level < 0) return;
+    const code = getCell(row, codeRole);
+
+    // A level JUMP (1 -> 3) leaves the skipped tier empty. The nearest open
+    // ancestor is used rather than nothing: attaching the row one level too
+    // high keeps it in the tree, where dropping its parent would orphan it.
+    let parent = '';
+    for (let depth = level - 1; depth >= 0; depth -= 1) {
+      if (openAt[depth]) { parent = openAt[depth]; break; }
+    }
+    row[LEVEL_PARENT_KEY] = parent;
+
+    if (code) {
+      openAt[level] = code;
+      // Anything deeper belonged to a branch this row just closed.
+      openAt.length = level + 1;
+    }
+  });
+  return rows;
+};
+
 const normalizeRows = (rows, headers, roles, config) => {
+  stampInferredParents(rows, roles);
   const layoutStructure = effectiveStructure(config);
   const assemblyMatrix = layoutStructure === 'assembly_quantity_matrix'
     ? (detectAssemblyQuantityMatrix(headers, rows, roles) || config.assemblyMatrix)
@@ -3226,6 +3441,10 @@ const normalizeRows = (rows, headers, roles, config) => {
 };
 
 const normalizeRowsChunked = async (rows, headers, roles, config, onProgress) => {
+  // Before chunking, and over EVERY row. The walk carries state down the sheet,
+  // so running it per 50-row chunk would restart the ancestor stack at each
+  // boundary and orphan the first rows of every chunk after the first.
+  stampInferredParents(rows, roles);
   const layoutStructure = effectiveStructure(config);
   if (config.structure === 'grouped_rows' || layoutStructure === 'multi_block_assembly') {
     const dataRows = [];
@@ -3841,6 +4060,35 @@ const readCsvWorkbookSafely = async (file) => {
         .map((line) => splitDelimitedLine(line, ','));
       return workbookFromRows(rows);
     },
+    // Excel re-saves a semicolon/tab export by quoting each whole record and padding
+    // the row with commas, so a row parses as one populated cell still holding the
+    // original delimited record. Where the record itself held a comma - a reference
+    // list, a European decimal - Excel split it there too, leaving several fragments.
+    // Joining a row's cells back with the comma that split them rebuilds the record
+    // either way; then sniff the delimiter the record actually uses.
+    () => {
+      const lines = text.split(/\r?\n/).filter((line) => line.trim());
+      if (lines.length < 2) return null;
+
+      let singleCellLines = 0;
+      const unwrapped = lines.map((line) => {
+        const cells = splitDelimitedLine(line, ',');
+        if (cells.filter((cell) => fmt(cell)).length <= 1) singleCellLines += 1;
+        let end = cells.length;
+        while (end > 0 && !fmt(cells[end - 1])) end -= 1;
+        return cells.slice(0, end).join(',');
+      });
+      if (singleCellLines < lines.length * 0.6) return null;
+
+      const delimiter = detectDelimiter(unwrapped.join('\n'));
+      // Same separator winning again means the quoting was deliberate - a
+      // one-column file of values that contain commas - so leave it alone.
+      if (delimiter === ',') return null;
+      const rows = rejoinWrappedLines(unwrapped, delimiter)
+        .map((line) => splitDelimitedLine(line, delimiter));
+      if (rows.length < 2 || rows[0].length < 2) return null;
+      return workbookFromRows(rows);
+    },
   ];
   let lastError = null;
 
@@ -3990,6 +4238,8 @@ const nextConfigForDetectedStructure = (previousConfig, detectedStructure, detec
       bomLayout: 'assembly_quantity_matrix',
       alternateLayout: 'already_separate_rows',
       quantityMode: 'every_row',
+      quantityVariant: QUANTITY_VARIANT_ALL,
+      quantityVariantByBlock: {},
       assemblyMatrix: assemblyMatrix || previousConfig.assemblyMatrix,
     };
   }
@@ -4001,6 +4251,8 @@ const nextConfigForDetectedStructure = (previousConfig, detectedStructure, detec
       bomLayout: 'multi_block_assembly',
       alternateLayout: 'inside_selected_mpn_columns',
       quantityMode: 'every_row',
+      quantityVariant: QUANTITY_VARIANT_ALL,
+      quantityVariantByBlock: {},
       delimiterMode: 'auto',
       manufacturerMode: 'inherit_blank',
     };
@@ -4359,8 +4611,12 @@ const prepareSingleSheet = (currentWorkbook, currentSheetName, options = {}) => 
   };
 };
 
-const prepareMultipleSheets = (currentWorkbook, sheetNames) => {
-  const multiBlockPrepared = prepareMultiBlockSheets(currentWorkbook, sheetNames);
+const prepareMultipleSheets = (currentWorkbook, sheetNames, options = {}) => {
+  const pinnedHeaderRow = Number(options.headerRow);
+  const hasPinnedHeaderRow = Number.isFinite(pinnedHeaderRow) && pinnedHeaderRow > 0;
+  // A pinned header row is a direct instruction about where the table starts,
+  // so block detection (which finds its own header rows) has to stand down.
+  const multiBlockPrepared = hasPinnedHeaderRow ? null : prepareMultiBlockSheets(currentWorkbook, sheetNames);
   if (multiBlockPrepared?.multiBlockSummary?.blockCount > 1) {
     return multiBlockPrepared;
   }
@@ -4369,7 +4625,9 @@ const prepareMultipleSheets = (currentWorkbook, sheetNames) => {
   const combinedRows = [];
 
   sheetNames.forEach((currentSheetName) => {
-    const prepared = prepareSingleSheet(currentWorkbook, currentSheetName);
+    const prepared = prepareSingleSheet(currentWorkbook, currentSheetName, {
+      headerRow: hasPinnedHeaderRow ? pinnedHeaderRow : undefined,
+    });
     prepared.headers.forEach((header) => {
       if (!unionHeaders.includes(header)) unionHeaders.push(header);
     });
@@ -5066,8 +5324,32 @@ const buildBomMappingRowsFromNormalizedRows = (rows = [], baseColumns = getNorma
   return { columns, rows: outputRows };
 };
 
+// The repeated template slots a parse can fill. Their internal names match the
+// template's own columns once punctuation is ignored, which is exactly how
+// ColumnMapping's findHeaderByCandidates compares - so 'Tag_2' finds 'Tag (2)'.
+const DYNAMIC_TEMPLATE_COLUMN_RE = /^(Tag|Specification_Name|Specification_Value|Specification_UOM|Custom_Identification_Name|Custom_Identification_Value)_\d+$/i;
+
 const buildNormalizerSuggestedMappings = (columns = [], rows = []) => {
   const available = new Set(columns);
+
+  // Anything the parser routed into a template slot maps to that same slot.
+  // Without this the column reaches the mapping page unconnected, and an
+  // unconnected column never makes it as far as the editor.
+  const dynamicCandidates = columns
+    .filter((column) => DYNAMIC_TEMPLATE_COLUMN_RE.test(String(column || '')))
+    .map((column) => ({ source: column, targets: [column] }));
+
+  // Manufacturers ride along as a tag, so they must not claim a slot the parse
+  // already filled - the mapping page drops the loser of a contested target.
+  const filledTagSlots = new Set(
+    columns
+      .map((column) => String(column || '').match(/^Tag_(\d+)$/i))
+      .filter(Boolean)
+      .map((match) => Number(match[1]))
+  );
+  let manufacturerTagSlot = 1;
+  while (filledTagSlots.has(manufacturerTagSlot)) manufacturerTagSlot += 1;
+
   const candidates = [
     { source: 'cpn', targets: ['CPN Code', 'Customer part number', 'Customer Part Number'] },
     { source: 'mpn', targets: ['MPN Code', 'Manufacturer part number', 'Manufacturer Part Number'] },
@@ -5075,9 +5357,11 @@ const buildNormalizerSuggestedMappings = (columns = [], rows = []) => {
     { source: 'quantity', targets: ['Quantity', 'Qty'] },
     { source: 'uom', targets: ['Measurement unit', 'UOM', 'Unit of measure'] },
     { source: 'level', targets: ['Level', 'BOM level'] },
+    { source: 'Item code', targets: ['Item code'] },
     { source: 'parentKey', targets: ['Parent / group key', 'Parent group key', 'Sub BOM ID', 'BOM ID'] },
+    ...dynamicCandidates,
     ...(hasManufacturerValues(rows)
-      ? [{ source: 'manufacturer', targets: ['Tag', 'Tag_1'] }]
+      ? [{ source: 'manufacturer', targets: [`Tag_${manufacturerTagSlot}`, 'Tag'] }]
       : []),
   ];
 
@@ -5757,6 +6041,9 @@ const BomNormalizer = () => {
   const [selectedSheetNames, setSelectedSheetNames] = useState([]);
   const [sheetRows, setSheetRows] = useState([]);
   const [headerRowIndex, setHeaderRowIndex] = useState(0);
+  // Multi-sheet only: one header row pinned across every selected sheet. Empty
+  // means each sheet keeps its own auto-detected header row.
+  const [sheetHeaderRowOverride, setSheetHeaderRowOverride] = useState('');
   const [preparedHeaders, setPreparedHeaders] = useState([]);
   const [preparedDataRows, setPreparedDataRows] = useState([]);
   const [sourceEndRow, setSourceEndRow] = useState('');
@@ -5772,6 +6059,8 @@ const BomNormalizer = () => {
     groupHeaderMode: 'auto',
     manufacturerMode: 'inherit_blank',
     quantityMode: 'inherit_primary',
+    quantityVariant: QUANTITY_VARIANT_ALL,
+    quantityVariantByBlock: {},
     inheritLevels: true,
     skipTitleRows: true,
     skipRepeatedHeaders: true,
@@ -5929,13 +6218,6 @@ const BomNormalizer = () => {
   const sourceRowsExcludedByLimit = Math.max(0, sourceDataRows.length - dataRows.length);
   const sourceLimitActive = Boolean(sourceEndRow && sourceRowsExcludedByLimit > 0);
   const sourceGridRowsPerPage = 50;
-  const sourceGridTotalPages = Math.max(1, Math.ceil(sourceDataRows.length / sourceGridRowsPerPage));
-  const sourceGridVisibleRows = useMemo(() => (
-    sourceDataRows.slice(
-      sourceGridPage * sourceGridRowsPerPage,
-      sourceGridPage * sourceGridRowsPerPage + sourceGridRowsPerPage
-    )
-  ), [sourceDataRows, sourceGridPage]);
   const isSourceRowExcluded = useCallback((row) => (
     Boolean(sourceEndRow) && Number(row?.__sourceRow || 0) > Number(sourceEndRow)
   ), [sourceEndRow]);
@@ -6034,6 +6316,91 @@ const BomNormalizer = () => {
   );
   const activeBomLayout = selectedBomLayout(config);
   const bomLayoutActive = Boolean(activeBomLayout);
+  const hasMultiBlockRows = Boolean(multiBlockSummary);
+  const assemblyQuantityVariantOptions = useMemo(() => (
+    activeBomLayout === 'assembly_quantity_matrix'
+      ? [...new Set((sourcePreviewAssemblyMatrix?.assemblyColumns || []).map(fmt).filter(Boolean))]
+      : []
+  ), [activeBomLayout, sourcePreviewAssemblyMatrix]);
+  const multiBlockQuantityVariantGroups = useMemo(() => {
+    if (!hasMultiBlockRows) return [];
+    const groups = new Map();
+    dataRows.forEach((row) => {
+      if (row?.__multiBlockMode !== '1') return;
+      const variant = fmt(getRowQuantityVariant(row));
+      if (!variant) return;
+      const groupKey = getRowQuantityVariantGroup(row);
+      if (!groupKey) return;
+      if (!groups.has(groupKey)) {
+        groups.set(groupKey, {
+          key: groupKey,
+          label: [
+            row['BOM block'] || row.__blockName || row.__blockTitle,
+            row['Source sheet'] ? `(${row['Source sheet']})` : '',
+          ].map(fmt).filter(Boolean).join(' '),
+          variants: [],
+        });
+      }
+      const group = groups.get(groupKey);
+      if (!group.variants.some((existing) => quantityVariantMatches(existing, variant))) {
+        group.variants.push(variant);
+      }
+    });
+    return [...groups.values()].filter((group) => group.variants.length > 1);
+  }, [dataRows, hasMultiBlockRows]);
+  const showAssemblyQuantityVariantSelector = assemblyQuantityVariantOptions.length > 1;
+  const showMultiBlockQuantityVariantSelectors = multiBlockQuantityVariantGroups.length > 0;
+  const previewDataRows = useMemo(() => (
+    hasMultiBlockRows
+      ? filterRowsByQuantityVariant(dataRows, normalizerConfig)
+      : dataRows
+  ), [dataRows, hasMultiBlockRows, normalizerConfig]);
+  const sourceGridRows = useMemo(() => (
+    hasMultiBlockRows
+      ? filterRowsByQuantityVariant(sourceDataRows, normalizerConfig)
+      : sourceDataRows
+  ), [hasMultiBlockRows, normalizerConfig, sourceDataRows]);
+  const sourceGridTotalPages = Math.max(1, Math.ceil(sourceGridRows.length / sourceGridRowsPerPage));
+  const sourceGridVisibleRows = useMemo(() => (
+    sourceGridRows.slice(
+      sourceGridPage * sourceGridRowsPerPage,
+      sourceGridPage * sourceGridRowsPerPage + sourceGridRowsPerPage
+    )
+  ), [sourceGridRows, sourceGridPage]);
+  const quantityVariantFilterActive = sourceGridRows.length !== sourceDataRows.length || previewDataRows.length !== dataRows.length;
+
+  useEffect(() => {
+    if (sourceGridPage >= sourceGridTotalPages) {
+      setSourceGridPage(Math.max(0, sourceGridTotalPages - 1));
+    }
+  }, [sourceGridPage, sourceGridTotalPages]);
+
+  useEffect(() => {
+    if (activeBomLayout !== 'assembly_quantity_matrix') return;
+    const selectedVariant = getSelectedQuantityVariant(config);
+    if (!selectedVariant) return;
+    const stillAvailable = assemblyQuantityVariantOptions.some((option) => quantityVariantMatches(option, selectedVariant));
+    if (!stillAvailable || assemblyQuantityVariantOptions.length <= 1) {
+      setConfig((prev) => ({ ...prev, quantityVariant: QUANTITY_VARIANT_ALL }));
+    }
+  }, [activeBomLayout, assemblyQuantityVariantOptions, config.quantityVariant]);
+
+  useEffect(() => {
+    const selectedByBlock = config.quantityVariantByBlock || {};
+    if (!Object.keys(selectedByBlock).length) return;
+    const validGroups = new Map(multiBlockQuantityVariantGroups.map((group) => [group.key, group]));
+    const cleaned = {};
+    Object.entries(selectedByBlock).forEach(([groupKey, selectedVariant]) => {
+      const group = validGroups.get(groupKey);
+      if (!group || !selectedVariant || selectedVariant === QUANTITY_VARIANT_ALL) return;
+      if (group.variants.some((variant) => quantityVariantMatches(variant, selectedVariant))) {
+        cleaned[groupKey] = selectedVariant;
+      }
+    });
+    if (JSON.stringify(cleaned) !== JSON.stringify(selectedByBlock)) {
+      setConfig((prev) => ({ ...prev, quantityVariantByBlock: cleaned }));
+    }
+  }, [config.quantityVariantByBlock, multiBlockQuantityVariantGroups]);
 
   const parserLogicRules = useMemo(() => {
     const sourceHeader = roles.mpn || roles.manufacturer || 'selected source column';
@@ -6132,29 +6499,52 @@ const BomNormalizer = () => {
           shape,
           count: 0,
           examples: [],
+          matchedRows: [],
           sourceRows: [],
           rules: manualParse?.rules?.length ? manualParse.rules : describePatternShape(shape),
         };
         current.count += 1;
         current.sourceRows.push(sourceRow);
+        const sourceEntries = splitStructuredMpnMfrEntries(source);
+        const sourceEntryCount = sourceEntries.length || pairs.length || 1;
+        current.matchedRows.push({ sourceRow, source, entryCount: sourceEntryCount });
         if (current.examples.length < 1) {
           const firstPair = pairs[0];
           const manualExample = manualParse?.displayExample;
+          const manualExampleSource = sourceEntries.find((entry) => {
+            const entryKey = entry.toUpperCase();
+            const mpnKey = fmt(firstPair?.mpn).toUpperCase();
+            const manufacturerKey = fmt(firstPair?.manufacturer).toUpperCase();
+            return (
+              (mpnKey && entryKey.includes(mpnKey)) ||
+              (manufacturerKey && entryKey.includes(manufacturerKey))
+            );
+          }) || sourceEntries[0] || '';
+          const exampleSource = manualExample
+            ? (manualExampleSource || manualExample?.source || source)
+            : (sourceForParsedPair(source, firstPair, normalizerConfig) || source);
+          const exampleEntryIndex = Math.max(0, sourceEntries.findIndex((entry) => entry === exampleSource)) + 1;
           current.examples.push(manualExample || !pairs.length ? {
             sourceRow,
-            source: manualExample?.source || source,
+            source: exampleSource,
+            rawSource: source,
+            entryIndex: exampleEntryIndex,
+            entryCount: sourceEntryCount,
             outputs: manualExample?.items || [],
             pairs: [],
             discarded: '',
           } : {
             sourceRow,
-            source,
+            source: exampleSource,
+            rawSource: source,
+            entryIndex: exampleEntryIndex,
+            entryCount: sourceEntryCount,
             pairs: pairs.slice(0, 1).map((pair) => ({
               mpn: pair.mpn,
               manufacturer: pair.manufacturer,
-              discarded: pair.metadata?.discardedText || getDiscardedPackedText(source, pair),
+              discarded: pair.metadata?.discardedText || getDiscardedPackedText(exampleSource, pair),
             })),
-            discarded: firstPair?.metadata?.discardedText || getDiscardedPackedText(source, firstPair),
+            discarded: firstPair?.metadata?.discardedText || getDiscardedPackedText(exampleSource, firstPair),
           });
         }
         patternMap.set(shape, current);
@@ -6278,7 +6668,8 @@ const BomNormalizer = () => {
     const example = option?.pattern?.examples?.[0];
     if (!example) return null;
     return {
-      source: example.source,
+      source: example.rawSource || example.source,
+      entrySource: example.source,
       sourceRow: example.sourceRow,
       pairs: example.pairs || [],
     };
@@ -6893,21 +7284,32 @@ const BomNormalizer = () => {
     const preferredSheet = options.sheetName && nextWorkbook.SheetNames.includes(options.sheetName)
       ? options.sheetName
       : nextWorkbook.SheetNames[0];
-    const autoMultiBlock = !options.sheetName && !options.headerRow
+    // A caller-supplied multi-sheet selection (e.g. "combine these 6 sheets" set
+    // on the upload screen) wins over anything detected here.
+    const requestedSheets = (options.selectedSheetNames || []).filter((name) => nextWorkbook.SheetNames.includes(name));
+    const useRequestedSelection = options.sheetScope && options.sheetScope !== 'single' && requestedSheets.length > 1;
+    const autoMultiBlock = !useRequestedSelection && !options.sheetName && !options.headerRow
       ? prepareMultiBlockSheets(nextWorkbook, nextWorkbook.SheetNames)
       : null;
-    const prepared = autoMultiBlock?.multiBlockSummary?.blockCount > 1
-      ? autoMultiBlock
-      : prepareSingleSheet(nextWorkbook, preferredSheet, { headerRow: options.headerRow });
+    const prepared = useRequestedSelection
+      ? prepareMultipleSheets(nextWorkbook, requestedSheets, { headerRow: options.headerRow })
+      : autoMultiBlock?.multiBlockSummary?.blockCount > 1
+        ? autoMultiBlock
+        : prepareSingleSheet(nextWorkbook, preferredSheet, { headerRow: options.headerRow });
     const nextHeaders = prepared.headers;
     const nextRoles = rolesForMultiBlockAssembly(nextHeaders, inferRoles(nextHeaders, prepared.dataRows, { manufacturerDirectory }));
     const nextStructure = detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40));
-    const nextSheetScope = autoMultiBlock?.multiBlockSummary?.blockCount > 1 && nextWorkbook.SheetNames.length > 1 ? 'all' : 'single';
-    const nextSelectedSheets = nextSheetScope === 'all' ? nextWorkbook.SheetNames : [preferredSheet];
+    const nextSheetScope = useRequestedSelection
+      ? (options.sheetScope === 'all' && requestedSheets.length === nextWorkbook.SheetNames.length ? 'all' : 'selected')
+      : autoMultiBlock?.multiBlockSummary?.blockCount > 1 && nextWorkbook.SheetNames.length > 1 ? 'all' : 'single';
+    const nextSelectedSheets = useRequestedSelection
+      ? requestedSheets
+      : nextSheetScope === 'all' ? nextWorkbook.SheetNames : [preferredSheet];
 
+    setSheetHeaderRowOverride(useRequestedSelection && options.headerRow ? String(options.headerRow) : '');
     setWorkbook(nextWorkbook);
     setFileName(nextFileName);
-    setSheetName(preferredSheet);
+    setSheetName(nextSelectedSheets[0] || preferredSheet);
     setSheetScope(nextSheetScope);
     setSelectedSheetNames(nextSelectedSheets);
     setSheetRows(prepared.sheetRows);
@@ -7034,7 +7436,7 @@ const BomNormalizer = () => {
     const state = location.state || {};
     const initialFile = state.initialFile;
     const seedKey = initialFile
-      ? `${initialFile.name || 'file'}-${initialFile.size || 0}-${initialFile.lastModified || 0}-${state.initialFileMode || 'source'}-${state.initialSheetName || ''}-${state.initialHeaderRow || ''}`
+      ? `${initialFile.name || 'file'}-${initialFile.size || 0}-${initialFile.lastModified || 0}-${state.initialFileMode || 'source'}-${state.initialSheetName || ''}-${state.initialHeaderRow || ''}-${state.initialSheetScope || ''}-${(state.initialSelectedSheets || []).join('|')}`
       : '';
     // restoredReturnSnapshotRef, not state.returnFromMapping: the restore effect clears
     // that flag once it has consumed it, and this effect would then re-run, still see
@@ -7064,9 +7466,15 @@ const BomNormalizer = () => {
         if (state.initialFileMode === 'workbook') {
           await new Promise((resolve) => setTimeout(resolve, 0));
           const nextWorkbook = await readUploadedWorkbookSafely(initialFile);
+          const multiSheetSeed = state.initialSheetScope && state.initialSheetScope !== 'single';
           handleWorkbookLoaded(nextWorkbook, initialFile.name, {
             sheetName: state.initialSheetName,
-            headerRow: state.initialHeaderRow,
+            // The upload screen's header row is auto-detected from whichever
+            // sheet it previews, so across a multi-sheet selection it is only
+            // trustworthy when the user typed it themselves.
+            headerRow: multiSheetSeed && !state.initialHeaderRowExplicit ? undefined : state.initialHeaderRow,
+            sheetScope: state.initialSheetScope,
+            selectedSheetNames: state.initialSelectedSheets,
           });
           setCombineItems([]);
           setMergeChainMessage('');
@@ -7081,6 +7489,9 @@ const BomNormalizer = () => {
         delete remainingState.initialFileMode;
         delete remainingState.initialSheetName;
         delete remainingState.initialHeaderRow;
+        delete remainingState.initialSheetScope;
+        delete remainingState.initialSelectedSheets;
+        delete remainingState.initialHeaderRowExplicit;
         navigate(location.pathname, { replace: true, state: remainingState });
       } catch (err) {
         setCombineError(err.message || 'Unable to prepare the uploaded file for BOM Normalizer.');
@@ -7989,18 +8400,23 @@ const BomNormalizer = () => {
     setConfirmOpen(false);
   }, [manufacturerDirectory, workbook]);
 
-  const applySheetSelection = useCallback((scope, names) => {
+  const applySheetSelection = useCallback((scope, names, options = {}) => {
     if (!workbook) return;
     const safeNames = names.filter((name) => workbook.SheetNames.includes(name));
     const nextNames = scope === 'all'
       ? workbook.SheetNames
       : (safeNames.length ? safeNames : [workbook.SheetNames[0]]);
+    const pinnedHeaderRow = Number(
+      options.headerRow === undefined ? sheetHeaderRowOverride : options.headerRow
+    );
+    const headerRow = Number.isFinite(pinnedHeaderRow) && pinnedHeaderRow > 0 ? pinnedHeaderRow : undefined;
     const prepared = scope === 'single'
       ? prepareSingleSheet(workbook, nextNames[0])
-      : prepareMultipleSheets(workbook, nextNames);
+      : prepareMultipleSheets(workbook, nextNames, { headerRow });
     const nextRoles = rolesForMultiBlockAssembly(prepared.headers, inferRoles(prepared.headers, prepared.dataRows, { manufacturerDirectory }));
 
     setSheetScope(scope);
+    setSheetHeaderRowOverride(scope === 'single' || !headerRow ? '' : String(headerRow));
     setSelectedSheetNames(nextNames);
     setSheetName(nextNames[0]);
     setSheetRows(prepared.sheetRows);
@@ -8023,7 +8439,7 @@ const BomNormalizer = () => {
     setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
-  }, [manufacturerDirectory, workbook]);
+  }, [manufacturerDirectory, sheetHeaderRowOverride, workbook]);
 
   const handleSheetScopeChange = useCallback((nextScope) => {
     if (!workbook) return;
@@ -8045,6 +8461,12 @@ const BomNormalizer = () => {
   const handleHeaderRowChange = useCallback((value) => {
     const nextIndex = Math.max(0, Number(value) - 1);
     const activeSheetName = sheetName || workbook?.SheetNames?.[0] || '';
+    // Across several sheets one header row applies to all of them; blank hands
+    // each sheet back to its own auto-detection.
+    if (workbook && sheetScope !== 'single') {
+      applySheetSelection(sheetScope, selectedSheetNames, { headerRow: value });
+      return;
+    }
     if (workbook && sheetScope === 'single' && activeSheetName) {
       const prepared = prepareSingleSheet(workbook, activeSheetName, { headerRow: nextIndex + 1 });
       const nextRoles = inferRoles(prepared.headers, prepared.dataRows, { manufacturerDirectory });
@@ -8090,7 +8512,7 @@ const BomNormalizer = () => {
     setParserTouched(false);
     setSkipSourceSetupForMerge(false);
     setConfirmOpen(false);
-  }, [manufacturerDirectory, sheetName, sheetRows, sheetScope, workbook]);
+  }, [applySheetSelection, manufacturerDirectory, selectedSheetNames, sheetName, sheetRows, sheetScope, workbook]);
 
   const handleRoleChange = useCallback((role, header) => {
     setRoles((prev) => ({ ...prev, [role]: header }));
@@ -8350,42 +8772,36 @@ const BomNormalizer = () => {
       return { headers, rows: baseRows, overrides: patternParserOverrides };
     }
 
-    let nextHeaders = headers;
-    let nextRows = baseRows;
+    // Only the overrides are committed. The parsed COLUMNS are deliberately not
+    // written onto the source sheet: they hold one ' | '-joined string per cell,
+    // and normalization carries source columns onto the output, so a 'Description'
+    // column of "[2225412] | [2225668" shadowed the per-entry `description` that
+    // applyPatternOutputsToNormalizedRows fills. The override already carries
+    // every parsed value, split per entry, so the sheet copy was pure noise.
     let nextOverrides = patternParserOverrides;
 
     stagedPatternEdits.forEach((edit) => {
       const applied = applyParserResultToSheet({
         result: edit.result,
         scope: edit.scope,
-        headers: nextHeaders,
-        sourceRows: nextRows,
+        headers,
+        sourceRows: baseRows,
         headerRowIndex,
       });
-      if (!applied) return;
-      nextHeaders = applied.nextHeaders;
-      nextRows = applied.nextRows;
-      if (applied.override) {
-        nextOverrides = [
-          ...nextOverrides.filter((override) => !(
-            normalizeKey(override.sourceHeader) === normalizeKey(applied.override.sourceHeader) &&
-            override.patternShape === applied.override.patternShape
-          )),
-          applied.override,
-        ];
-      }
+      if (!applied?.override) return;
+      nextOverrides = [
+        ...nextOverrides.filter((override) => !(
+          normalizeKey(override.sourceHeader) === normalizeKey(applied.override.sourceHeader) &&
+          override.patternShape === applied.override.patternShape
+        )),
+        applied.override,
+      ];
     });
 
-    const headerSet = new Set(nextHeaders);
-    setPreparedHeaders(nextHeaders);
-    setPreparedDataRows(nextRows);
     setPatternParserOverrides(nextOverrides);
     setStagedPatternEdits([]);
-    setRoles((prev) => Object.fromEntries(
-      Object.entries(prev).map(([key, value]) => [key, headerSet.has(value) ? value : ''])
-    ));
 
-    return { headers: nextHeaders, rows: nextRows, overrides: nextOverrides };
+    return { headers, rows: baseRows, overrides: nextOverrides };
   }, [dataRows, headerRowIndex, headers, patternParserOverrides, sourceDataRows, stagedPatternEdits]);
 
   const runNormalization = useCallback(async () => {
@@ -8745,6 +9161,8 @@ const BomNormalizer = () => {
       groupHeaderMode: 'auto',
       manufacturerMode: 'inherit_blank',
       quantityMode: 'inherit_primary',
+      quantityVariant: QUANTITY_VARIANT_ALL,
+      quantityVariantByBlock: {},
       inheritLevels: true,
       skipTitleRows: true,
       skipRepeatedHeaders: true,
@@ -8839,6 +9257,8 @@ const BomNormalizer = () => {
       groupHeaderMode: 'auto',
       manufacturerMode: 'inherit_blank',
       quantityMode: 'inherit_primary',
+      quantityVariant: QUANTITY_VARIANT_ALL,
+      quantityVariantByBlock: {},
       inheritLevels: true,
       skipTitleRows: true,
       skipRepeatedHeaders: true,
@@ -9681,10 +10101,16 @@ const BomNormalizer = () => {
                       size="small"
                       type="number"
                       label="Header row"
-                      value={headerRowIndex + 1}
-                      inputProps={{ min: 1, max: Math.max(sheetRows.length, 1) }}
-                      disabled={sheetScope !== 'single'}
-                      helperText={sheetScope === 'single' ? '' : 'Header row is auto-detected separately for each selected sheet.'}
+                      value={sheetScope === 'single' ? headerRowIndex + 1 : sheetHeaderRowOverride}
+                      placeholder={sheetScope === 'single' ? '' : 'Auto'}
+                      inputProps={sheetScope === 'single'
+                        ? { min: 1, max: Math.max(sheetRows.length, 1) }
+                        : { min: 1 }}
+                      helperText={sheetScope === 'single'
+                        ? ''
+                        : sheetHeaderRowOverride
+                          ? 'Applied to every selected sheet. Clear it to auto-detect each sheet.'
+                          : 'Header row is auto-detected separately for each selected sheet.'}
                       onChange={(event) => handleHeaderRowChange(event.target.value)}
                     />
                   </Grid>
@@ -9705,12 +10131,75 @@ const BomNormalizer = () => {
                       }}
                     />
                   </Grid>
+
+                  {showAssemblyQuantityVariantSelector && (
+                    <Grid item xs={12} md={6}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel>Quantity variant</InputLabel>
+                        <Select
+                          value={config.quantityVariant || QUANTITY_VARIANT_ALL}
+                          label="Quantity variant"
+                          onChange={(event) => {
+                            setParserTouched(true);
+                            setConfig((prev) => ({
+                              ...prev,
+                              quantityVariant: event.target.value,
+                            }));
+                            setNormalizedRows([]);
+                            setNormalizationSummary(null);
+                          }}
+                        >
+                          <MenuItem value={QUANTITY_VARIANT_ALL}>All variants</MenuItem>
+                          {assemblyQuantityVariantOptions.map((variant) => (
+                            <MenuItem key={variant} value={variant}>{variant}</MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                  )}
+
+                  {showMultiBlockQuantityVariantSelectors && multiBlockQuantityVariantGroups.map((group) => (
+                    <Grid item xs={12} md={6} key={group.key}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel>{`Quantity variant - ${group.label || 'BOM table'}`}</InputLabel>
+                        <Select
+                          value={(config.quantityVariantByBlock || {})[group.key] || QUANTITY_VARIANT_ALL}
+                          label={`Quantity variant - ${group.label || 'BOM table'}`}
+                          onChange={(event) => {
+                            const nextValue = event.target.value;
+                            setParserTouched(true);
+                            setConfig((prev) => {
+                              const nextByBlock = { ...(prev.quantityVariantByBlock || {}) };
+                              if (!nextValue || nextValue === QUANTITY_VARIANT_ALL) {
+                                delete nextByBlock[group.key];
+                              } else {
+                                nextByBlock[group.key] = nextValue;
+                              }
+                              return {
+                                ...prev,
+                                quantityVariantByBlock: nextByBlock,
+                              };
+                            });
+                            setNormalizedRows([]);
+                            setNormalizationSummary(null);
+                          }}
+                        >
+                          <MenuItem value={QUANTITY_VARIANT_ALL}>All variants</MenuItem>
+                          {group.variants.map((variant) => (
+                            <MenuItem key={`${group.key}-${variant}`} value={variant}>{variant}</MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                  ))}
                 </Grid>
                 <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 1.5 }}>
                   <Chip size="small" label={`${visibleSourceHeaders.length} columns`} />
                   <Chip
                     size="small"
-                    label={sourceEndRow ? `${dataRows.length} included / ${sourceDataRows.length} detected rows` : `${dataRows.length} data rows`}
+                    label={quantityVariantFilterActive
+                      ? `${previewDataRows.length} shown / ${dataRows.length} included rows`
+                      : (sourceEndRow ? `${dataRows.length} included / ${sourceDataRows.length} detected rows` : `${dataRows.length} data rows`)}
                   />
                   {multiBlockSummary && <Chip size="small" color="success" variant="outlined" label={`${multiBlockSummary.blockCount} BOM tables`} />}
                   {sourceEndRow && <Chip size="small" color="info" variant="outlined" label={`Using rows through ${sourceEndRow}`} />}
@@ -9720,7 +10209,7 @@ const BomNormalizer = () => {
                 <Box sx={{ mt: 2 }}>
                   <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1} flexWrap="wrap">
                     <Typography sx={{ fontWeight: 800 }}>Source preview</Typography>
-                    <Button size="small" variant="outlined" startIcon={<VisibilityIcon />} onClick={() => setSourceGridOpen(true)} disabled={!sourceDataRows.length}>
+                    <Button size="small" variant="outlined" startIcon={<VisibilityIcon />} onClick={() => setSourceGridOpen(true)} disabled={!sourceGridRows.length}>
                       View all rows
                     </Button>
                   </Stack>
@@ -9729,7 +10218,7 @@ const BomNormalizer = () => {
                       Preview is filtered to sheet rows up to {sourceEndRow}. Rows after {sourceEndRow} will be ignored during normalization.
                     </Alert>
                   )}
-                  <SourcePreview headers={headers} rows={dataRows.slice(0, 8)} assemblyMatrix={sourcePreviewAssemblyMatrix} />
+                  <SourcePreview headers={headers} rows={previewDataRows.slice(0, 8)} assemblyMatrix={sourcePreviewAssemblyMatrix} />
                 </Box>
                 <Stack direction="row" justifyContent="space-between" sx={{ mt: 2 }}>
                   <Button variant="outlined" onClick={handleBackFromSourceSetup} disabled={busy}>Back</Button>
@@ -9753,7 +10242,7 @@ const BomNormalizer = () => {
                       variant="outlined"
                       startIcon={<VisibilityIcon />}
                       onClick={() => setSourceGridOpen(true)}
-                      disabled={!sourceDataRows.length}
+                      disabled={!sourceGridRows.length}
                     >
                       View all rows
                     </Button>
@@ -9763,7 +10252,9 @@ const BomNormalizer = () => {
                   <Chip size="small" label={`${visibleSourceHeaders.length} columns`} />
                   <Chip
                     size="small"
-                    label={sourceEndRow ? `${dataRows.length} included / ${sourceDataRows.length} detected rows` : `${dataRows.length} data rows`}
+                    label={quantityVariantFilterActive
+                      ? `${previewDataRows.length} shown / ${dataRows.length} included rows`
+                      : (sourceEndRow ? `${dataRows.length} included / ${sourceDataRows.length} detected rows` : `${dataRows.length} data rows`)}
                   />
                   {multiBlockSummary && <Chip size="small" color="success" variant="outlined" label={`${multiBlockSummary.blockCount} linked BOM tables`} />}
                   {sourceEndRow && <Chip size="small" color="info" variant="outlined" label={`Using rows through ${sourceEndRow}`} />}
@@ -9779,7 +10270,7 @@ const BomNormalizer = () => {
                 )}
                 <Box sx={{ mt: 2 }}>
                   <Typography sx={{ fontWeight: 800 }}>Source preview</Typography>
-                  <SourcePreview headers={headers} rows={dataRows.slice(0, 8)} getHeaderLabel={getPreviewHeaderLabel} assemblyMatrix={sourcePreviewAssemblyMatrix} />
+                  <SourcePreview headers={headers} rows={previewDataRows.slice(0, 8)} getHeaderLabel={getPreviewHeaderLabel} assemblyMatrix={sourcePreviewAssemblyMatrix} />
                 </Box>
                 <Grid container spacing={1.5} sx={{ mt: 1 }}>
                   {ROLE_FIELDS.map((field) => {
@@ -9994,6 +10485,12 @@ const BomNormalizer = () => {
                               quantityMode: ['assembly_quantity_matrix', 'multi_block_assembly'].includes(nextLayout)
                                 ? 'every_row'
                                 : prev.quantityMode,
+                              quantityVariant: nextLayout === 'assembly_quantity_matrix'
+                                ? QUANTITY_VARIANT_ALL
+                                : prev.quantityVariant || QUANTITY_VARIANT_ALL,
+                              quantityVariantByBlock: nextLayout === 'assembly_quantity_matrix'
+                                ? {}
+                                : prev.quantityVariantByBlock || {},
                             }));
                           }}
                         >
@@ -10003,6 +10500,65 @@ const BomNormalizer = () => {
                         </Select>
                       </FormControl>
                     </Grid>
+                    {showAssemblyQuantityVariantSelector && (
+                      <Grid item xs={12} md={3}>
+                        <FormControl fullWidth size="small">
+                          <InputLabel>Quantity variant</InputLabel>
+                          <Select
+                            value={config.quantityVariant || QUANTITY_VARIANT_ALL}
+                            label="Quantity variant"
+                            onChange={(event) => {
+                              setParserTouched(true);
+                              setConfig((prev) => ({
+                                ...prev,
+                                quantityVariant: event.target.value,
+                              }));
+                              setNormalizedRows([]);
+                            setNormalizationSummary(null);
+                          }}
+                        >
+                          <MenuItem value={QUANTITY_VARIANT_ALL}>All variants</MenuItem>
+                            {assemblyQuantityVariantOptions.map((variant) => (
+                              <MenuItem key={variant} value={variant}>{variant}</MenuItem>
+                            ))}
+                          </Select>
+                        </FormControl>
+                      </Grid>
+                    )}
+                    {showMultiBlockQuantityVariantSelectors && multiBlockQuantityVariantGroups.map((group) => (
+                      <Grid item xs={12} md={3} key={group.key}>
+                        <FormControl fullWidth size="small">
+                          <InputLabel>{`Quantity variant - ${group.label || 'BOM table'}`}</InputLabel>
+                          <Select
+                            value={(config.quantityVariantByBlock || {})[group.key] || QUANTITY_VARIANT_ALL}
+                            label={`Quantity variant - ${group.label || 'BOM table'}`}
+                            onChange={(event) => {
+                              const nextValue = event.target.value;
+                              setParserTouched(true);
+                              setConfig((prev) => {
+                                const nextByBlock = { ...(prev.quantityVariantByBlock || {}) };
+                                if (!nextValue || nextValue === QUANTITY_VARIANT_ALL) {
+                                  delete nextByBlock[group.key];
+                                } else {
+                                  nextByBlock[group.key] = nextValue;
+                                }
+                                return {
+                                  ...prev,
+                                  quantityVariantByBlock: nextByBlock,
+                                };
+                              });
+                              setNormalizedRows([]);
+                              setNormalizationSummary(null);
+                            }}
+                          >
+                            <MenuItem value={QUANTITY_VARIANT_ALL}>All variants</MenuItem>
+                            {group.variants.map((variant) => (
+                              <MenuItem key={`${group.key}-${variant}`} value={variant}>{variant}</MenuItem>
+                            ))}
+                          </Select>
+                        </FormControl>
+                      </Grid>
+                    ))}
                     {showManufacturerInheritanceOption && (
                       <Grid item xs={12} md={3}>
                         <FormControl fullWidth size="small">
@@ -10399,7 +10955,7 @@ const BomNormalizer = () => {
               </Typography>
             </Box>
             <Stack direction="row" gap={0.75} flexWrap="wrap">
-              <Chip size="small" label={`${sourceDataRows.length} detected rows`} />
+              <Chip size="small" label={`${sourceGridRows.length} shown / ${sourceDataRows.length} detected rows`} />
               {sourceEndRow && <Chip size="small" color="info" variant="outlined" label={`Cutoff row ${sourceEndRow}`} />}
               {sourceLimitActive && <Chip size="small" color="warning" variant="outlined" label={`${sourceRowsExcludedByLimit} excluded`} />}
             </Stack>
@@ -11514,29 +12070,8 @@ const BomNormalizer = () => {
                 </Box>
                 <Stack direction="row" gap={0.75} flexWrap="wrap" alignItems="center" justifyContent={{ xs: 'flex-start', sm: 'flex-end' }}>
                   <Chip size="small" variant="outlined" label={`${selectedParsingPattern.pattern.count} rows`} sx={{ fontWeight: 650 }} />
-                  <IconButton
-                    size="small"
-                    onClick={() => setSelectedParsingDetailsOpen(open => !open)}
-                    sx={{ ml: 0.25, border: `1px solid ${normalizerTheme.border}` }}
-                  >
-                    {selectedParsingDetailsOpen ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
-                  </IconButton>
                 </Stack>
               </Stack>
-
-              {selectedParsingDetailsOpen && (
-                <>
-                  <Typography sx={{ mt: 1.25, fontSize: 13, fontWeight: 680, color: normalizerTheme.text }}>
-                    {selectedParsingPattern.pattern.shape}
-                  </Typography>
-
-                  <Stack direction="row" gap={0.75} flexWrap="wrap" sx={{ mt: 1 }}>
-                    {(selectedParsingPattern.pattern.rules || []).slice(0, 3).map((rule) => (
-                      <Chip key={rule} size="small" variant="outlined" label={rule} sx={{ fontWeight: 600, color: normalizerTheme.muted, bgcolor: 'transparent' }} />
-                    ))}
-                  </Stack>
-                </>
-              )}
 
               <Stack gap={1} sx={{ mt: 1.5 }}>
                 {(selectedParsingPattern.pattern.examples || []).slice(0, 1).map((example, index) => (
@@ -11549,8 +12084,13 @@ const BomNormalizer = () => {
                       bgcolor: normalizerTheme.paperSoft,
                     }}
                   >
+                    <Typography sx={{ mb: 0.75, fontSize: 12.5, fontWeight: 780, color: normalizerTheme.text }}>
+                      Example used for this pattern
+                    </Typography>
                     <Typography sx={{ fontSize: 11.5, fontWeight: 650, color: normalizerTheme.muted }}>
-                      {example.sourceRow ? `Source row ${example.sourceRow}` : `Example ${index + 1}`}
+                      {example.sourceRow
+                        ? `Source row ${example.sourceRow}`
+                        : `Representative entry ${index + 1}`}
                     </Typography>
                     <Typography sx={{ mt: 0.35, fontSize: 13, fontWeight: 650, lineHeight: 1.4, color: normalizerTheme.text, wordBreak: 'break-word' }}>
                       {example.source}
@@ -11582,6 +12122,56 @@ const BomNormalizer = () => {
                   </Box>
                 ))}
               </Stack>
+
+              <Box sx={{ mt: 1.25 }}>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  onClick={() => setSelectedParsingDetailsOpen(open => !open)}
+                  endIcon={selectedParsingDetailsOpen ? <ExpandLessIcon fontSize="small" /> : <ExpandMoreIcon fontSize="small" />}
+                  sx={{ minHeight: 28, fontSize: 11.5, fontWeight: 750, textTransform: 'none' }}
+                >
+                  {selectedParsingDetailsOpen ? 'Hide raw matched rows' : 'View raw matched rows'}
+                </Button>
+              </Box>
+
+              {selectedParsingDetailsOpen && (
+                <Box sx={{ mt: 1.25 }}>
+                  <Typography sx={{ fontSize: 12.5, fontWeight: 750, color: normalizerTheme.text }}>
+                    Raw matched source rows
+                  </Typography>
+                  <Stack
+                    gap={0.85}
+                    sx={{
+                      mt: 0.8,
+                      maxHeight: 260,
+                      overflowY: 'auto',
+                      pr: 0.5,
+                    }}
+                  >
+                    {(selectedParsingPattern.pattern.matchedRows || []).map((matchedRow, rowIndex) => (
+                      <Box
+                        key={`${selectedParsingPattern.key}-matched-${matchedRow.sourceRow || rowIndex}-${rowIndex}`}
+                        sx={{
+                          p: 1,
+                          borderRadius: '8px',
+                          border: `1px solid ${normalizerTheme.border}`,
+                          bgcolor: normalizerTheme.paperSoft,
+                        }}
+                      >
+                        <Typography sx={{ fontSize: 11.25, fontWeight: 700, color: normalizerTheme.muted }}>
+                          {matchedRow.sourceRow
+                            ? `Source row ${matchedRow.sourceRow}${matchedRow.entryCount > 1 ? ` - ${matchedRow.entryCount} entries in source cell` : ''}`
+                            : `Matched row ${rowIndex + 1}`}
+                        </Typography>
+                        <Typography sx={{ mt: 0.25, fontSize: 12.5, fontWeight: 600, lineHeight: 1.4, color: normalizerTheme.text, wordBreak: 'break-word' }}>
+                          {matchedRow.source}
+                        </Typography>
+                      </Box>
+                    ))}
+                  </Stack>
+                </Box>
+              )}
             </Paper>
           )}
         </DialogContent>

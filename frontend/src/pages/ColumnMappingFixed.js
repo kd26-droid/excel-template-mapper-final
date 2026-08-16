@@ -19,7 +19,7 @@ const isPairStartUpdated = (fieldName, nextFieldName) => {
   
   return (
     (fieldName.includes('Specification_Name_') && nextFieldName.includes('Specification_Value_') && fieldNum === nextFieldNum) ||
-    (fieldName.includes('Customer_Identification_Name_') && nextFieldName.includes('Customer_Identification_Value_') && fieldNum === nextFieldNum)
+    (fieldName.includes('Custom_Identification_Name_') && nextFieldName.includes('Custom_Identification_Value_') && fieldNum === nextFieldNum)
   );
 };
 
@@ -31,14 +31,14 @@ const isPairEndUpdated = (fieldName, prevFieldName) => {
   
   return (
     (fieldName.includes('Specification_Value_') && prevFieldName.includes('Specification_Name_') && fieldNum === prevFieldNum) ||
-    (fieldName.includes('Customer_Identification_Value_') && prevFieldName.includes('Customer_Identification_Name_') && fieldNum === prevFieldNum)
+    (fieldName.includes('Custom_Identification_Value_') && prevFieldName.includes('Custom_Identification_Name_') && fieldNum === prevFieldNum)
   );
 };
 
 // UPDATED PAIR TYPE DETECTION
 const getPairTypeUpdated = (fieldName) => {
   if (fieldName.includes('Specification')) return 'specification';
-  if (fieldName.includes('Customer_Identification') || fieldName.includes('Customer Identification')) return 'customer';
+  if (fieldName.includes('Custom_Identification') || fieldName.includes('Customer Identification')) return 'customer';
   if (fieldName.includes('Tag_')) return 'tag';
   return 'single';
 };
@@ -63,7 +63,7 @@ const isOptionalFieldUpdated = (fieldName, templateOptionals, headerIndex) => {
   // All dynamic fields are optional by default
   return fieldName.includes('Tag_') || 
          fieldName.includes('Specification') || 
-         fieldName.includes('Customer_Identification') ||
+         fieldName.includes('Custom_Identification') ||
          fieldName.includes('Customer Identification');
 };
 
@@ -101,14 +101,14 @@ const handleDeleteOptionalFieldUpdated = (nodeId, nodes, edges, columnCounts, up
     if (pairNodes.length >= 2) {
       newCounts.spec_pairs_count = Math.max(0, (newCounts.spec_pairs_count || 0) - 1);
     }
-  } else if (fieldName.includes('Customer_Identification')) {
+  } else if (fieldName.includes('Custom_Identification')) {
     // For customer IDs, we delete pairs
     const fieldNum = getFieldNumber(fieldName);
     const pairNodes = nodes.filter(n => 
       n.id.startsWith('t-') && 
       n.data?.originalLabel && 
-      (n.data.originalLabel.includes(`Customer_Identification_Name_${fieldNum}`) || 
-       n.data.originalLabel.includes(`Customer_Identification_Value_${fieldNum}`))
+      (n.data.originalLabel.includes(`Custom_Identification_Name_${fieldNum}`) || 
+       n.data.originalLabel.includes(`Custom_Identification_Value_${fieldNum}`))
     );
     
     // Only decrease if we're deleting a complete pair

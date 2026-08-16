@@ -376,6 +376,44 @@ async function waitForBomReady({ enterpriseBomId, timeoutMs = 45000, intervalMs 
   return { ok: false, error: `BOM ${enterpriseBomId} not hydrated after ${timeoutMs}ms` };
 }
 
+// Publish a freshly-imported BOM: DRAFT → ONGOING, tolerant of the states the
+// BOM can legitimately already be in.
+//
+// FactWise rejects any transition its state machine disallows with
+// 400 INVALID BOM STATUS — including the two harmless cases here: the BOM's
+// import is still finishing (BOM_DASHBOARD returns bom_ids before the async
+// pipeline has committed the BOM), and the BOM is ALREADY ONGOING because an
+// earlier attempt of this same export published it and the user retried. So
+// read the status instead of submitting blind: only a real DRAFT is submitted,
+// ONGOING is already the goal state, and anything unreadable is retried a few
+// times before giving up on it.
+async function publishBomToOngoing(enterpriseBomId, { attempts = 4, intervalMs = 3000 } = {}) {
+  let lastError = null;
+  for (let i = 0; i < attempts; i++) {
+    const detail = await fetchEnterpriseBomDetail(enterpriseBomId);
+    const status = detail?.success ? detail.bom?.bom_status : null;
+    if (status === 'ONGOING') return { success: true, alreadyOngoing: true };
+    if (status === 'DRAFT') {
+      const submitted = await submitEnterpriseBom(enterpriseBomId);
+      if (submitted?.success) return { success: true };
+      lastError = submitted?.error;
+    } else if (status) {
+      // REVISED (or anything else terminal) will never become ONGOING by
+      // waiting — stop immediately and say what state blocked us.
+      return {
+        success: false,
+        error: `BOM ${enterpriseBomId} is in "${status}" status; only DRAFT BOMs can be published.`,
+      };
+    } else {
+      lastError = detail?.error || `Could not read the status of BOM ${enterpriseBomId}.`;
+    }
+    if (i < attempts - 1) {
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+  }
+  return { success: false, error: lastError };
+}
+
 // New vs existing project target.
 export const PROJECT_MODES = {
   NEW: 'NEW',
@@ -912,7 +950,13 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
       // submit, attaching the BOM to a project shows an empty Add Item tab
       // and the project's own Submit BOM button silently fails.
       for (const id of bomIds) {
-        const submitted = await submitEnterpriseBom(id);
+        // Wait for the import's async tail before touching the status — the
+        // same guard the attach step uses. A timeout here is not fatal on its
+        // own: publishBomToOngoing re-checks and reports the real blocker.
+        patch({ phase: PHASES.BOM_SETTLING });
+        await waitForBomReady({ enterpriseBomId: id });
+        patch({ phase: PHASES.BOM_PROCESSING });
+        const submitted = await publishBomToOngoing(id);
         if (!submitted?.success) {
           patch({
             phase: PHASES.BOM_ERROR,

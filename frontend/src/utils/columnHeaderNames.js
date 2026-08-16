@@ -22,23 +22,27 @@ const TEMPLATE_GROUPS = [
   ['Specification_Name_', 'Specification name'],
   ['Specification_Value_', 'Specification value'],
   ['Specification_UOM_', 'Specification UOM'],
-  ['Customer_Identification_Name_', 'Customer identification name'],
-  ['Customer_Identification_Value_', 'Customer identification value'],
+  // FactWise calls this 'Custom identification'. The internal field says
+  // 'Customer_…' for historical reasons; the export header must not.
+  ['Custom_Identification_Name_', 'Custom identification name'],
+  ['Custom_Identification_Value_', 'Custom identification value'],
+  // Sessions saved before the rename still carry the longer spelling.
+  ['Custom_Identification_Name_', 'Custom identification name'],
+  ['Custom_Identification_Value_', 'Custom identification value'],
 ];
 
 // Labels the app may already be carrying, mapped back to their export text.
-// 'Custom identification …' is a legacy misspelling still present in old sessions.
+// One word per column: FactWise's column is 'Custom identification', and the
+// key, label and export header all say so — Custom_Identification_Name_1,
+// 'Custom identification name (1)', 'Custom identification name'.
 const CANONICAL_BY_LABEL = new Map([
   ['tag', 'Tag'],
   ['specification name', 'Specification name'],
   ['specification value', 'Specification value'],
   ['specification uom', 'Specification UOM'],
-  ['customer identification name', 'Customer identification name'],
-  ['customer identification value', 'Customer identification value'],
-  ['custom identification name', 'Customer identification name'],
-  ['custom identification value', 'Customer identification value'],
-  ['item identifications name', 'Item identifications name'],
-  ['item identifications value', 'Item identifications value'],
+  // Every spelling this app has used resolves to the one FactWise accepts.
+  ['custom identification name', 'Custom identification name'],
+  ['custom identification value', 'Custom identification value'],
 ]);
 
 const DISPLAY_SUFFIX_RE = /\s*\((\d+)\)\s*$/;

@@ -117,6 +117,19 @@ function readInitialContext() {
     fwOrigin: params.get('fw_origin'),
   };
 
+  // A launch naming a DIFFERENT entity is a different account (or at least a
+  // different filing entity), so nothing derived from the previous launch
+  // survives it. Only params the URL actually carries get written below — FW
+  // sends entity_id but not always entity_name — so without this the previous
+  // account's name outlives its own token and goes on every exported row.
+  const previousEntityId = cleanString(window.localStorage.getItem(STORAGE_KEYS.entityId));
+  const entityChangedAtLaunch = Boolean(
+    cleanString(captured.entityId) && previousEntityId && cleanString(captured.entityId) !== previousEntityId
+  );
+  if (entityChangedAtLaunch) {
+    window.localStorage.removeItem(STORAGE_KEYS.entityName);
+  }
+
   Object.entries(captured).forEach(([key, value]) => {
     if (value !== null && value !== '') {
       window.localStorage.setItem(STORAGE_KEYS[key], value);
@@ -130,6 +143,7 @@ function readInitialContext() {
   return {
     isEmbedded,
     entities: [],
+    entityChangedAtLaunch,
     token: captured.token || window.localStorage.getItem(STORAGE_KEYS.token),
     refreshToken:
       captured.refreshToken || window.localStorage.getItem(STORAGE_KEYS.refreshToken),
@@ -148,6 +162,7 @@ function readInitialContext() {
 
 const FactwiseContext = createContext({
   entities: [],
+  entityChangedAtLaunch: false,
   chooseEntity: () => {},
   loadEntities: () => {},
   isEmbedded: false,
@@ -264,41 +279,61 @@ export function FactwiseProvider({ children }) {
     }
     setContextValue((prev) => {
       const next = { ...prev, entities: list };
-      if (cleanString(prev.entityName)) return next;
+      // The list is the ONLY authority on entity names. A name already in hand
+      // is kept only when the list confirms it — otherwise a leftover from an
+      // earlier launch or another account (that is how "FactWise" outlived a
+      // Syrma-only account) sticks forever and lands on every exported row.
+      const storedName = cleanString(prev.entityName);
+      const byName = storedName
+        ? list.find(entity => entity.name.toLowerCase() === storedName.toLowerCase())
+        : null;
       // An entity_id from the launch URL names one of them; a single entity
       // needs no choice. Anything else is left for the user to pick.
       const byId = cleanString(prev.entityId)
         ? list.find(entity => entity.id === cleanString(prev.entityId))
         : null;
-      const chosen = byId || (list.length === 1 ? list[0] : null);
+      const chosen = byName || byId || (list.length === 1 ? list[0] : null);
       if (!chosen) return next;
+      if (chosen.name === prev.entityName && (!chosen.id || chosen.id === prev.entityId)) return next;
       window.localStorage.setItem(STORAGE_KEYS.entityName, chosen.name);
       if (chosen.id) window.localStorage.setItem(STORAGE_KEYS.entityId, chosen.id);
       return { ...next, entityName: chosen.name, entityId: chosen.id || prev.entityId };
     });
   }, []);
 
-  // On load, resolve a name only from what the launch already carried — no
+  // On load, resolve the name from the entity the launch actually named — no
   // list call. The token is deliberately not consulted: its `name` claim is the
   // signed-in user ("amaan_test"), which silently became the "Procurement
   // entity name" on every export.
+  //
+  // This runs even when a name is already stored, once per entity_id: a stale
+  // browser copy from an earlier launch would otherwise win over the entity in
+  // force and be exported on every row. It cannot fight a user's own pick —
+  // chooseEntity() writes the id alongside the name, so the lookup returns the
+  // very entity they picked.
+  const entityIdCheckedRef = useRef('');
   useEffect(() => {
-    if (cleanString(contextValue.entityName)) return undefined;
-    if (!contextValue.token || !cleanString(contextValue.entityId)) return undefined;
+    const entityId = cleanString(contextValue.entityId);
+    if (!contextValue.token || !entityId) return undefined;
+    if (entityIdCheckedRef.current === entityId) return undefined;
+    entityIdCheckedRef.current = entityId;
 
     let cancelled = false;
     (async () => {
       const fromApi = await fetchEntityNameFromFactwise(contextValue);
-      if (fromApi && !cancelled) {
-        window.localStorage.setItem(STORAGE_KEYS.entityName, fromApi);
-        setContextValue(prev => ({ ...prev, entityName: fromApi }));
+      if (cancelled) return;
+      if (!fromApi) {
+        entityIdCheckedRef.current = '';
+        return;
       }
+      window.localStorage.setItem(STORAGE_KEYS.entityName, fromApi);
+      setContextValue(prev => (prev.entityName === fromApi ? prev : { ...prev, entityName: fromApi }));
     })();
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contextValue.token, contextValue.entityId, contextValue.entityName]);
+  }, [contextValue.token, contextValue.entityId]);
 
   // Cross-tab reconnect: if the user re-launches the mapper in another
   // tab, that tab writes a fresh token to localStorage → this tab picks
@@ -320,8 +355,11 @@ export function FactwiseProvider({ children }) {
     if (!name) return;
     const id = cleanString(entity?.id);
     window.localStorage.setItem(STORAGE_KEYS.entityName, name);
+    // An id-less pick has to drop the old id too, or the id lookup above would
+    // resolve the entity they just moved away from and undo the choice.
     if (id) window.localStorage.setItem(STORAGE_KEYS.entityId, id);
-    setContextValue(prev => ({ ...prev, entityName: name, entityId: id || prev.entityId }));
+    else window.localStorage.removeItem(STORAGE_KEYS.entityId);
+    setContextValue(prev => ({ ...prev, entityName: name, entityId: id }));
   }, []);
 
   const value = useMemo(

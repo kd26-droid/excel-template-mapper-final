@@ -10,7 +10,6 @@ import {
   FormControlLabel,
   IconButton,
   InputLabel,
-  ListSubheader,
   MenuItem,
   Select,
   Step,
@@ -54,47 +53,47 @@ const SIMPLE_DELIMITER_PRESETS = [
 // The repeated template groups, one entry per slot. Values are the internal
 // field names (Tag_2, Specification_Value_1) that canonicalHeaderName maps back
 // to their export headers; labels are the '(n)' form the app shows everywhere.
-const REPEATING_TEMPLATE_SLOTS = [
+const TAG_AND_SPEC_SLOTS = [
   ...Array.from({ length: 3 }, (unused, index) => (
-    { field: `Tag_${index + 1}`, label: `Tag (${index + 1})` }
+    { value: `Tag_${index + 1}`, label: `Tag (${index + 1})` }
   )),
   ...Array.from({ length: 3 }, (unused, index) => ([
-    { field: `Specification_Name_${index + 1}`, label: `Specification name (${index + 1})` },
-    { field: `Specification_Value_${index + 1}`, label: `Specification value (${index + 1})` },
-    { field: `Specification_UOM_${index + 1}`, label: `Specification UOM (${index + 1})` },
+    { value: `Specification_Name_${index + 1}`, label: `Specification name (${index + 1})` },
+    { value: `Specification_Value_${index + 1}`, label: `Specification value (${index + 1})` },
+    { value: `Specification_UOM_${index + 1}`, label: `Specification UOM (${index + 1})` },
   ])).flat(),
-  { field: 'Customer_Identification_Name_1', label: 'Customer identification name (1)' },
-  { field: 'Customer_Identification_Value_1', label: 'Customer identification value (1)' },
 ];
 
-// Every column of the default FactWise template, in one target list. Each one
-// is written straight through: the new header is named exactly `value`.
+// Every column of the default FactWise template, in one flat list. Each one is
+// written straight through: the new header is named exactly `value`. Tags and
+// specs lead because they are the slots picked most often.
 const FACTWISE_OUTPUT_COLUMNS = [
-  { value: 'MPN', label: 'MPN', group: 'BOM fields' },
-  { value: 'MFR', label: 'MFR', group: 'BOM fields' },
-  { value: 'CPN', label: 'CPN', group: 'BOM fields' },
-  { value: 'Description', label: 'Description', group: 'BOM fields' },
-  { value: 'Quantity', label: 'Quantity', group: 'BOM fields' },
-  { value: 'UOM', label: 'UOM', group: 'BOM fields' },
-  { value: 'Reference Designator', label: 'Reference Designator', group: 'BOM fields' },
-  { value: 'Extra', label: 'Extra', group: 'BOM fields' },
+  ...TAG_AND_SPEC_SLOTS,
 
-  { value: 'Item code', label: 'Item code', group: 'Item columns' },
-  { value: 'Item name', label: 'Item name', group: 'Item columns' },
-  { value: 'Item type', label: 'Item type', group: 'Item columns' },
-  { value: 'Measurement unit', label: 'Measurement unit', group: 'Item columns' },
-  { value: 'Notes', label: 'Notes', group: 'Item columns' },
-  { value: 'Internal notes', label: 'Internal notes', group: 'Item columns' },
-  { value: 'Procurement entity name', label: 'Procurement entity name', group: 'Item columns' },
-  { value: 'Procurement item', label: 'Procurement item', group: 'Item columns' },
-  { value: 'Sales item', label: 'Sales item', group: 'Item columns' },
-  { value: 'Preferred vendor code', label: 'Preferred vendor code', group: 'Item columns' },
-  { value: 'Level', label: 'Level', group: 'Item columns' },
-  { value: 'Base BOM Qty', label: 'Base BOM Qty', group: 'Item columns' },
+  { value: 'MPN', label: 'MPN' },
+  { value: 'MFR', label: 'MFR' },
+  { value: 'CPN', label: 'CPN' },
+  { value: 'Description', label: 'Description' },
+  { value: 'Quantity', label: 'Quantity' },
+  { value: 'UOM', label: 'UOM' },
+  { value: 'Reference Designator', label: 'Reference Designator' },
+  { value: 'Extra', label: 'Extra' },
 
-  ...REPEATING_TEMPLATE_SLOTS.map(slot => (
-    { value: slot.field, label: slot.label, group: 'Repeating columns' }
-  )),
+  { value: 'Item code', label: 'Item code' },
+  { value: 'Item name', label: 'Item name' },
+  { value: 'Item type', label: 'Item type' },
+  { value: 'Measurement unit', label: 'Measurement unit' },
+  { value: 'Notes', label: 'Notes' },
+  { value: 'Internal notes', label: 'Internal notes' },
+  { value: 'Procurement entity name', label: 'Procurement entity name' },
+  { value: 'Procurement item', label: 'Procurement item' },
+  { value: 'Sales item', label: 'Sales item' },
+  { value: 'Preferred vendor code', label: 'Preferred vendor code' },
+  { value: 'Level', label: 'Level' },
+  { value: 'Base BOM Qty', label: 'Base BOM Qty' },
+
+  { value: 'Custom_Identification_Name_1', label: 'Custom identification name (1)' },
+  { value: 'Custom_Identification_Value_1', label: 'Custom identification value (1)' },
 ];
 
 const numberedColumnIndex = (value, pattern, genericName) => {
@@ -397,15 +396,23 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
       }
       setSampleValues(data.sample_values);
       const suggestedSeparator = data.suggested_separator || '';
-      const referenceRowIndex = parseReference?.source
-        ? data.sample_values.findIndex(value => String(value || '') === String(parseReference.source || ''))
+      const referenceSource = String(parseReference?.source || '');
+      const referenceEntrySource = String(parseReference?.entrySource || '');
+      const referenceRowIndex = referenceSource
+        ? data.sample_values.findIndex(value => String(value || '') === referenceSource)
         : -1;
       // In 'group' mode the flat sample list counts entries, not rows, so skip
       // past every entry contributed by the rows above the referenced one.
-      const referenceIndex = sampleUnit === 'group' && referenceRowIndex > 0
+      const referenceRowEntries = sampleUnit === 'group' && referenceRowIndex >= 0
+        ? expandSampleGroups(data.sample_values[referenceRowIndex], suggestedSeparator, trimValues)
+        : [];
+      const referenceEntryOffset = referenceEntrySource
+        ? Math.max(0, referenceRowEntries.findIndex(entry => entry === referenceEntrySource))
+        : 0;
+      const referenceIndex = sampleUnit === 'group' && referenceRowIndex >= 0
         ? data.sample_values
           .slice(0, referenceRowIndex)
-          .reduce((total, value) => total + expandSampleGroups(value, suggestedSeparator, trimValues).length, 0)
+          .reduce((total, value) => total + expandSampleGroups(value, suggestedSeparator, trimValues).length, 0) + referenceEntryOffset
         : referenceRowIndex;
       setCurrentSampleIndex(referenceIndex > 0 ? referenceIndex : 0);
       setTotalValues(data.total_values || data.sample_values.length);
@@ -698,12 +705,9 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
                   setPreviewData(null);
                 }}
               >
-                {FACTWISE_OUTPUT_COLUMNS.flatMap((option, optionIndex, allOptions) => ([
-                  option.group !== allOptions[optionIndex - 1]?.group
-                    ? <ListSubheader key={`${option.group}-header`}>{option.group}</ListSubheader>
-                    : null,
-                  <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>,
-                ].filter(Boolean)))}
+                {FACTWISE_OUTPUT_COLUMNS.map(option => (
+                  <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                ))}
               </Select>
             </FormControl>
           ) : part.outputType === 'custom' ? (

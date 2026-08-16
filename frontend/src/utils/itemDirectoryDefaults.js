@@ -1,5 +1,51 @@
-export const ITEM_DIRECTORY_DEFAULTS_KEY = 'factwise.itemDirectoryDefaults.v1';
+// v2 drops every browser copy written by the old built-in defaults, which
+// stored itemCodeContentType:'serial' + blankStrategy:'prefix_sequence' without
+// anyone choosing them — indistinguishable from a real choice, and the reason
+// blank item codes kept filling with 1, 2, 3. Starting from a clean key means a
+// value exists only if the user saved it.
+export const ITEM_DIRECTORY_DEFAULTS_KEY = 'factwise.itemDirectoryDefaults.v2';
 export const ITEM_DIRECTORY_COLUMN_OPTIONS_KEY = 'factwise.itemDirectoryColumnOptions.v1';
+
+// The built-in FactWise template's columns, in sheet order, as the internal
+// field names a session's grid actually carries (Tag_2, Specification_Value_1).
+// `displayHeaderName` turns them into the '(n)' labels shown everywhere else.
+//
+// 36, not 38: the workbook lists 'Preferred vendor code' and 'Alternate Item
+// Name for Preferred Vendor' twice, for a second preferred vendor. Offering the
+// same name twice in a dropdown is a choice nobody can make meaningfully, and
+// pandas renames the repeat to `…__2` on read anyway.
+//
+// Settings is global — it has no session — so it offers these rather than the
+// columns of whichever sheet happened to be open last.
+export const FACTWISE_TEMPLATE_COLUMNS = [
+  'Item code',
+  'SAP Item ID',
+  'CPN Code',
+  'MPN Code',
+  'HSN Code',
+  'Item name',
+  'Description',
+  'Item type',
+  'Measurement unit',
+  'Alternate UoM 1',
+  'Notes',
+  'SAP Description',
+  'Specification_Name_1', 'Specification_Value_1', 'Specification_UOM_1',
+  'Specification_Name_2', 'Specification_Value_2', 'Specification_UOM_2',
+  'Specification_Name_3', 'Specification_Value_3', 'Specification_UOM_3',
+  'Custom_Identification_Name_1', 'Custom_Identification_Value_1',
+  'Procurement item',
+  'Procurement item price currency code',
+  'Procurement item price',
+  'Sales item',
+  'Tag_1', 'Tag_2', 'Tag_3',
+  'Level',
+  'Quantity',
+  'Base BOM Qty',
+  'Procurement entity name',
+  'Preferred vendor code',
+  'Alternate Item Name for Preferred Vendor',
+];
 
 export const DEFAULT_ITEM_DIRECTORY_COLUMN_OPTIONS = [
   'Item code',
