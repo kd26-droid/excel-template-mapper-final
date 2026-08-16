@@ -275,6 +275,113 @@ def parse_final_parenthetical_group(text, trim_values=True):
     return [mpn, mfr, extra]
 
 
+def parse_status_parenthetical_group(text, trim_values=True):
+    """
+    Parse Thales-like entries:
+      <MPN>@<package> (<qualifier>) (<MFR>) {status} [ref]
+      <MPN> (<MFR>) {status} [ref]
+
+    Manual split points are chosen from one sample, but rows in the same column
+    can omit @/qualifier text. Shape parsing keeps those rows from falling back
+    to the full source string as MPN.
+    """
+    text = str(text or '')
+    if trim_values:
+        text = text.strip()
+
+    extra = ''
+    extra_match = re.search(r'\s*(\{[^}]*\}\s*\[[^\]]*\])\s*$', text)
+    core = text
+    if extra_match:
+        extra = extra_match.group(1)
+        core = text[:extra_match.start()]
+
+    if trim_values:
+        core = core.strip()
+        extra = extra.strip()
+
+    mfr = ''
+    mfr_match = re.search(r'\s*\(([^()]*)\)\s*$', core)
+    if mfr_match:
+        mfr = mfr_match.group(1)
+        mpn_side = core[:mfr_match.start()]
+    else:
+        mpn_side = core
+
+    ignored_parts = []
+    qualifier_match = re.search(r'\s*(\([^()]*\))\s*$', mpn_side)
+    while qualifier_match:
+        ignored_parts.insert(0, qualifier_match.group(1))
+        mpn_side = mpn_side[:qualifier_match.start()]
+        qualifier_match = re.search(r'\s*(\([^()]*\))\s*$', mpn_side)
+
+    mpn = mpn_side
+    if '@' in mpn_side and extra:
+        at_index = mpn_side.find('@')
+        package_text = mpn_side[at_index:]
+        if package_text:
+            ignored_parts.insert(0, package_text)
+        mpn = mpn_side[:at_index]
+
+    if trim_values:
+        mpn = mpn.strip().rstrip(',').strip()
+        mfr = mfr.strip()
+
+    ignored = ' '.join([part for part in ignored_parts + ([extra] if extra else []) if part]).strip()
+    return {'mpn': mpn, 'manufacturer': mfr, 'ignored': ignored}
+
+
+def is_status_parenthetical_manual_split(pattern_config, extractions, split_mode):
+    """Detect manual Parse Fields configs made from Thales structured blocks."""
+    if split_mode != 'pattern':
+        return False
+    if pattern_config.get('group_separator') != STRUCTURED_STATUS_GROUP_SEPARATOR:
+        return False
+
+    has_mpn_output = False
+    has_secondary_output = False
+    has_at_boundary = False
+    for extraction in extractions:
+        ext_type, char1, char2 = normalize_extraction_rule(extraction)
+        output_type = extraction.get('output_type', 'spec')
+        target_column = str(extraction.get('target_column') or '').strip()
+        if char1 == '@' or char2 == '@':
+            has_at_boundary = True
+        if output_type in ('direct', 'factwise') and target_column == 'MPN':
+            has_mpn_output = True
+            continue
+        if output_type != 'discard':
+            has_secondary_output = True
+
+    return has_mpn_output and has_secondary_output and has_at_boundary
+
+
+def append_status_parenthetical_values(result, extractions, parsed, drop_empty):
+    """Route shape-parsed MPN/MFR values through the user's chosen outputs."""
+    manufacturer_used = False
+    ignored_used = False
+    for extraction in sorted(extractions, key=extraction_sort_key):
+        output_type = extraction.get('output_type', 'spec')
+        target_column = str(extraction.get('target_column') or '').strip()
+        if output_type == 'discard':
+            continue
+
+        value = ''
+        if output_type in ('direct', 'factwise') and target_column == 'MPN':
+            value = parsed.get('mpn', '')
+        elif output_type in ('direct', 'factwise') and target_column == 'MFR':
+            value = parsed.get('manufacturer', '')
+            manufacturer_used = True
+        elif not manufacturer_used:
+            value = parsed.get('manufacturer', '')
+            manufacturer_used = True
+        elif not ignored_used:
+            value = parsed.get('ignored', '')
+            ignored_used = True
+
+        append_extracted_value(result, extraction, value, drop_empty)
+
+
 _parse_log_count = 0
 
 def parse_cell_single_pattern(cell_value, pattern_config):
@@ -336,6 +443,21 @@ def parse_cell_single_pattern(cell_value, pattern_config):
                 append_extracted_value(result, extraction, value, drop_empty)
                 if _parse_log_count <= 3:
                     logger.info(f"   â†’ Smart final-parenthetical extract: '{value[:30] if value else 'EMPTY'}'")
+
+        if _parse_log_count <= 3:
+                logger.info(f"   Result: specs={list(result['spec'].keys())}, tags={len(result['tag'])}, custom={list(result['custom'].keys())}, direct={list(result['direct'].keys())}")
+        return result
+
+    if is_status_parenthetical_manual_split(pattern_config, extractions, split_mode):
+        for group in groups:
+            parsed = parse_status_parenthetical_group(group, trim_values)
+            append_status_parenthetical_values(result, extractions, parsed, drop_empty)
+            if _parse_log_count <= 3:
+                logger.info(
+                    f"   → Smart status-parenthetical extract: "
+                    f"mpn='{parsed.get('mpn', '')[:30]}', "
+                    f"mfr='{parsed.get('manufacturer', '')[:30]}'"
+                )
 
         if _parse_log_count <= 3:
             logger.info(f"   Result: specs={list(result['spec'].keys())}, tags={len(result['tag'])}, custom={list(result['custom'].keys())}, direct={list(result['direct'].keys())}")
