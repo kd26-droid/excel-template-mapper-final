@@ -42,6 +42,7 @@ import {
   fetchModuleTemplates,
 } from '../services/factwiseApi';
 import FactwiseBulkImportErrorGrid from './FactwiseBulkImportErrorGrid';
+import BomCodeConflictPrompt from './BomCodeConflictPrompt';
 import { readBomRevisionIntent, saveBomRevisionIntent } from '../utils/bomRevisionIntent';
 
 const STEP_ORDER = [
@@ -62,6 +63,7 @@ function phaseToStepIndex(phase) {
     || phase === PHASES.BOM_UPLOADING
     || phase === PHASES.BOM_PROCESSING
     || phase === PHASES.BOM_ERROR
+    || phase === PHASES.BOM_CODE_CONFLICT
   ) return 1;
   if (
     phase === PHASES.BOM_DONE
@@ -82,6 +84,7 @@ function stepStatus(phase, index) {
     if (
       phase === PHASES.ITEMS_ERROR
       || phase === PHASES.BOM_ERROR
+      || phase === PHASES.BOM_CODE_CONFLICT
       || phase === PHASES.PROJECT_ERROR
       || phase === PHASES.ATTACH_BOM_ERROR
     ) return 'error';
@@ -101,6 +104,7 @@ function phaseLabel(phase, isRevising) {
     case PHASES.BOM_UPLOADING: return 'Uploading BOM file to Factwise…';
     case PHASES.BOM_PROCESSING: return 'Validating BOM structure…';
     case PHASES.BOM_ERROR: return 'BOM import failed — items were saved. See errors below.';
+    case PHASES.BOM_CODE_CONFLICT: return 'This BOM ID is already used in Factwise — pick a different one below.';
     case PHASES.BOM_DONE: return 'BOM imported. Moving to project step…';
     case PHASES.BOM_SETTLING: return 'Waiting for Factwise to finish building the BOM before attaching it to the project…';
     case PHASES.PROJECT_CREATING: return 'Creating project in Factwise…';
@@ -172,10 +176,12 @@ export default function FactwiseProjectExportDialog({
     lastError,
     lastResponseType,
     lastBulkImportId,
+    bomCodeConflicts,
     isRunning,
     runFromCheckpoint,
     markRetrySucceeded,
     markRetryFailed,
+    setBomCodeOverrides,
     confirmRevisionDiff,
     cancelRevisionDiff,
     reset,
@@ -427,6 +433,10 @@ export default function FactwiseProjectExportDialog({
   // "review in progress" message; the primary buttons stay disabled so the
   // user doesn't accidentally re-start.
   const isAwaitingReview = phase === PHASES.REVIEW_DIFF;
+  // Not an error — nothing was uploaded and nothing failed. The run is parked
+  // on a question, so it gets its own card and its own actions rather than the
+  // error alert + "Retry" button, which would just re-ask the same question.
+  const needsBomCode = phase === PHASES.BOM_CODE_CONFLICT;
   const hasError =
     phase === PHASES.ITEMS_ERROR
     || phase === PHASES.BOM_ERROR
@@ -434,7 +444,7 @@ export default function FactwiseProjectExportDialog({
     || phase === PHASES.ATTACH_BOM_ERROR;
 
   const canStart =
-    !isRunning && !isDone && !isAwaitingReview && (
+    !isRunning && !isDone && !isAwaitingReview && !needsBomCode && (
       modeDraft === PROJECT_MODES.NEW
         ? !!nameDraft?.trim() && !!pickedTemplate?.template_id
         // Existing-project mode now REQUIRES picking a BOM to revise from
@@ -543,6 +553,13 @@ export default function FactwiseProjectExportDialog({
   const handleStart = useCallback(() => {
     runFromCheckpoint(buildRunPayload());
   }, [runFromCheckpoint, buildRunPayload]);
+
+  // The user supplied replacement BOM IDs. Record them, then resume — the BOM
+  // step rebuilds the sheet from the session and re-applies the renames to it.
+  const handleBomCodeChosen = useCallback((renames) => {
+    setBomCodeOverrides(renames);
+    runFromCheckpoint(buildRunPayload());
+  }, [setBomCodeOverrides, runFromCheckpoint, buildRunPayload]);
 
   // Advance the orchestrator's phase to reflect the retry that just
   // succeeded (item or bom) BEFORE resuming — otherwise runFromCheckpoint
@@ -1011,6 +1028,15 @@ export default function FactwiseProjectExportDialog({
           )}
         </Stack>
 
+        {/* BOM ID already taken — ask for a new one before anything uploads */}
+        {needsBomCode && (
+          <BomCodeConflictPrompt
+            conflicts={bomCodeConflicts || []}
+            disabled={isRunning}
+            onSubmit={handleBomCodeChosen}
+          />
+        )}
+
         {/* Error card */}
         {hasError && (
           <Alert severity="error" sx={{ mb: 2 }}>
@@ -1095,6 +1121,21 @@ export default function FactwiseProjectExportDialog({
                 Open project in Factwise
               </Button>
             )}
+          </>
+        ) : needsBomCode ? (
+          // No retry button here on purpose — retrying without answering the
+          // question just re-opens it. The prompt's own button resumes the run.
+          <>
+            <Button
+              color="warning"
+              onClick={handleResetAndClose}
+              disabled={isRunning}
+            >
+              Start over
+            </Button>
+            <Button onClick={onClose} disabled={isRunning}>
+              Dismiss
+            </Button>
           </>
         ) : hasError ? (
           <>
