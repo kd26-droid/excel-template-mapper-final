@@ -140,7 +140,11 @@ export default function FactwiseProjectExportDialog({
   const wasOpenRef = useRef(false);
   useEffect(() => {
     if (open && !wasOpenRef.current) {
-      orchestration.reset();
+      // softReset — keeps sessionExportedItems / sessionExportedBom flags
+      // (and the BOM ids) so a Project export following a BOM Directory
+      // export reuses the already-created BOM instead of duplicating it.
+      // Hard reset() is triggered by the Start Over button.
+      orchestration.softReset();
     }
     wasOpenRef.current = open;
     // eslint-disable-next-line react-hooks/exhaustive-deps

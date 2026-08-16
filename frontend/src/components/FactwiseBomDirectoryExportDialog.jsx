@@ -101,7 +101,11 @@ export default function FactwiseBomDirectoryExportDialog({
   const wasOpenRef = useRef(false);
   useEffect(() => {
     if (open && !wasOpenRef.current) {
-      orchestration.reset();
+      // softReset — clears phase + errors so the dialog starts fresh, but
+      // KEEPS the sessionExportedItems / sessionExportedBom flags so a
+      // subsequent Export to Project won't re-upload items or re-create
+      // the BOM. Hard reset() only fires from the "Start over" button.
+      orchestration.softReset();
     }
     wasOpenRef.current = open;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -151,9 +155,14 @@ export default function FactwiseBomDirectoryExportDialog({
     markRetryFailed(kind, error, bulkImportId, resp);
   }, [phase, markRetryFailed]);
 
+  // Prefer opening the newly-created BOM directly at its admin edit page —
+  // that's what the user actually wants to look at after a successful
+  // export. Falls back to the directory listing only if we somehow don't
+  // have the id (e.g. an old checkpoint that predates the bomIds field).
   const handleOpenBomDirectory = useCallback(() => {
-    openInFactwise('/admin/BOM/');
-  }, []);
+    const firstBomId = Array.isArray(bomIds) && bomIds.length ? bomIds[0] : null;
+    openInFactwise(firstBomId ? `/admin/BOM/edit/${firstBomId}` : '/admin/BOM/');
+  }, [bomIds]);
 
   const handleResetAndClose = useCallback(() => {
     reset();
@@ -307,7 +316,9 @@ export default function FactwiseBomDirectoryExportDialog({
               startIcon={<LaunchIcon />}
               onClick={handleOpenBomDirectory}
             >
-              Open BOM Directory in Factwise
+              {Array.isArray(bomIds) && bomIds.length
+                ? 'Open BOM in Factwise'
+                : 'Open BOM Directory in Factwise'}
             </Button>
           </>
         ) : hasError ? (

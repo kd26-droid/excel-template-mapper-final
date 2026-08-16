@@ -442,6 +442,16 @@ const emptyState = {
   // revise → sheet-upload → handoff sequence. Reject resets to IDLE with
   // this still false and no FactWise state to unwind.
   revisionReviewConfirmed: false,
+  // Sticky "we already exported this to Factwise" flags, persisted via the
+  // checkpoint. Set to true after a successful runItemStep / BOM_DASHBOARD
+  // runBomStep. runFromCheckpoint honors them across dialog opens — so a
+  // user who exported items+BOM via the BOM Directory dialog and then
+  // opens the Project dialog won't re-upload items and re-create the BOM.
+  // Cleared by hard reset() (Start Over button); preserved by softReset()
+  // (dialog transition closed→open). See runFromCheckpoint's itemDone
+  // and bomDone checks.
+  sessionExportedItems: false,
+  sessionExportedBom: false,
 };
 
 function loadCheckpoint(sessionId) {
@@ -535,6 +545,31 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
     stateRef.current = emptyState;
   }, [sessionId]);
 
+  // Soft reset — clears the CURRENT run's phase and error surfaces so the
+  // user starts fresh in the dialog, but keeps the sticky sessionExported
+  // flags and the ids we'd need to attach an already-uploaded BOM to a
+  // new project. Called on dialog transition closed→open so opening the
+  // Project dialog after the BOM Directory dialog doesn't re-upload items
+  // or re-create the BOM. A hard reset (via Start Over button) clears
+  // everything and forces a fresh export.
+  const softReset = useCallback(() => {
+    const cur = stateRef.current;
+    const next = {
+      ...emptyState,
+      sessionExportedItems: cur.sessionExportedItems,
+      sessionExportedBom: cur.sessionExportedBom,
+      // Keep the ids we'd need to attach an existing BOM into a new project.
+      itemBulkImportId: cur.sessionExportedItems ? cur.itemBulkImportId : null,
+      itemCreated: cur.sessionExportedItems ? cur.itemCreated : [],
+      itemUpdated: cur.sessionExportedItems ? cur.itemUpdated : [],
+      bomBulkImportId: cur.sessionExportedBom ? cur.bomBulkImportId : null,
+      bomIds: cur.sessionExportedBom ? cur.bomIds : [],
+    };
+    saveCheckpoint(sessionId, next);
+    setState(next);
+    stateRef.current = next;
+  }, [sessionId]);
+
   // -------- Item step --------
   const runItemStep = useCallback(async () => {
     patch({ phase: PHASES.ITEMS_UPLOADING, lastError: null, lastResponseType: null });
@@ -580,6 +615,10 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
         phase: PHASES.ITEMS_DONE,
         itemCreated: resp?.created_identifiers || [],
         itemUpdated: resp?.updated_identifiers || [],
+        // Sticky flag — future dialog opens will skip this step so items
+        // aren't re-uploaded to the Item Directory. Cleared only by hard
+        // reset (Start Over button).
+        sessionExportedItems: true,
       });
       return { ok: true };
     } catch (error) {
@@ -884,7 +923,16 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
           return { ok: false };
         }
       }
-      patch({ phase: PHASES.BOM_DONE, bomIds });
+      patch({
+        phase: PHASES.BOM_DONE,
+        bomIds,
+        // Sticky flag — future dialog opens will skip this step. Combined
+        // with sessionExportedItems, an "Export to BOM Directory" run
+        // followed by "Export to Project" reuses the already-created BOM
+        // (attach step reads bomIds from the checkpoint) instead of
+        // uploading + creating duplicates.
+        sessionExportedBom: true,
+      });
       return { ok: true };
     } catch (error) {
       patch({
@@ -951,13 +999,57 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
     try {
       const saved = loadCheckpoint(sessionId) || {};
       const projectId = saved.projectId;
-      const bomIds = saved.bomIds || [];
-      if (!projectId || !bomIds.length) {
+      const allBomIds = saved.bomIds || [];
+      if (!projectId || !allBomIds.length) {
         patch({
           phase: PHASES.ATTACH_BOM_ERROR,
           lastError: 'Missing project or BOM identifiers to attach.',
         });
         return { ok: false };
+      }
+
+      // FactWise's BOM_DASHBOARD process returns EVERY BOM it created —
+      // main BOM plus every sub-BOM in the hierarchy. Sub-BOMs are already
+      // referenced by their parent's items (sub_bom_id foreign key), so
+      // attaching them independently to the project both duplicates and
+      // corrupts the linkage — the second attach hits create_project_boms
+      // → add_section_id_via_name and errors because the sub-BOM's
+      // custom_section names collide with the parent's already-attached
+      // sections.
+      //
+      // Filter down to just the roots: fetch each BOM's detail, collect
+      // every sub_bom_id referenced by any BOM in the set, and keep only
+      // the ids that are NOT referenced by any other BOM. Those are the
+      // top-level BOMs the project should actually attach.
+      let bomIds = allBomIds;
+      if (allBomIds.length > 1) {
+        try {
+          const details = await Promise.all(
+            allBomIds.map((id) => fetchEnterpriseBomDetail(id))
+          );
+          const referencedAsSub = new Set();
+          const collectSubs = (items) => {
+            if (!Array.isArray(items)) return;
+            for (const it of items) {
+              if (it?.sub_bom_id) referencedAsSub.add(String(it.sub_bom_id));
+              if (Array.isArray(it?.sub_bom_items)) collectSubs(it.sub_bom_items);
+            }
+          };
+          details.forEach((d) => {
+            if (d?.success && Array.isArray(d.bom?.bom_items)) {
+              collectSubs(d.bom.bom_items);
+            }
+          });
+          const roots = allBomIds.filter((id) => !referencedAsSub.has(String(id)));
+          if (roots.length) bomIds = roots;
+          // If our filter somehow dropped everything (unexpected — would
+          // mean every BOM is a sub of every other, i.e. a cycle), fall
+          // back to the original list so attach at least runs.
+        } catch (_) {
+          // Detail fetch failure — proceed with the unfiltered list rather
+          // than block attach entirely. Duplicate-attach is still bad but
+          // "attach nothing at all" is worse.
+        }
       }
 
       const currResp = await fetchCurrencies();
@@ -1215,7 +1307,12 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
       || startPhase === PHASES.PROJECT_CREATING
       || startPhase === PHASES.ATTACH_BOM
       || startPhase === PHASES.ATTACH_BOM_ERROR
-      || startPhase === PHASES.DONE;
+      || startPhase === PHASES.DONE
+      // Sticky across dialog opens — if this session already exported
+      // items to the Item Directory (via any prior dialog run), skip.
+      // The user can force a fresh upload via the Start Over button
+      // (which calls hard reset() and clears this flag).
+      || cur2.sessionExportedItems;
     if (!itemDone && !deferItemsUntilReviewed) {
       const res = await runItemStep();
       if (!res.ok) return;
@@ -1234,7 +1331,13 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
       || startPhase === PHASES.PROJECT_CREATING
       || startPhase === PHASES.ATTACH_BOM
       || startPhase === PHASES.ATTACH_BOM_ERROR
-      || startPhase === PHASES.DONE;
+      || startPhase === PHASES.DONE
+      // Sticky — if this session already created a BOM via the Directory
+      // export, the ids sit in state (bomIds) and downstream attach uses
+      // them. No point re-uploading + creating a duplicate BOM record.
+      // Only honored in NON-revise flows: a revise export always needs
+      // to run Path A to create the R5 draft.
+      || (cur2.sessionExportedBom && !isReviseFlow);
     if (!bomDone) {
       const res = await runBomStep();
       if (!res.ok) return;
@@ -1478,5 +1581,6 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
     confirmRevisionDiff,
     cancelRevisionDiff,
     reset,
+    softReset,
   };
 }
