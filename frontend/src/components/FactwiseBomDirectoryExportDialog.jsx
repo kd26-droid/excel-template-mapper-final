@@ -26,7 +26,9 @@ import {
   useFactwiseProjectExport,
 } from '../hooks/useFactwiseProjectExport';
 import { openInFactwise, postToFactwiseParent, useFactwise } from '../contexts/FactwiseContext';
+import { fetchEnterpriseBomDetail } from '../services/factwiseApi';
 import FactwiseBulkImportErrorGrid from './FactwiseBulkImportErrorGrid';
+import BomCodeConflictPrompt from './BomCodeConflictPrompt';
 import { readBomRevisionIntent } from '../utils/bomRevisionIntent';
 
 // Two-step export flow: items first, then BOM. Same orchestrator + error grid
@@ -51,6 +53,7 @@ function phaseToStepIndex(phase) {
     || phase === PHASES.BOM_UPLOADING
     || phase === PHASES.BOM_PROCESSING
     || phase === PHASES.BOM_ERROR
+    || phase === PHASES.BOM_CODE_CONFLICT
   ) return 1;
   if (phase === PHASES.DONE) return STEP_ORDER.length;
   return 0;
@@ -60,7 +63,11 @@ function stepStatus(phase, index) {
   const current = phaseToStepIndex(phase);
   if (index < current) return 'completed';
   if (index === current) {
-    if (phase === PHASES.ITEMS_ERROR || phase === PHASES.BOM_ERROR) return 'error';
+    if (
+      phase === PHASES.ITEMS_ERROR
+      || phase === PHASES.BOM_ERROR
+      || phase === PHASES.BOM_CODE_CONFLICT
+    ) return 'error';
     return 'active';
   }
   return 'pending';
@@ -78,6 +85,7 @@ function phaseLabel(phase) {
     case PHASES.BOM_PROCESSING: return 'Validating BOM structure…';
     case PHASES.BOM_ERROR: return 'BOM import failed — items were saved. See errors below.';
     case PHASES.REVIEW_DIFF: return 'Reviewing revision in Factwise… confirm or reject there to continue.';
+    case PHASES.BOM_CODE_CONFLICT: return 'This BOM ID is already used in Factwise — pick a different one below.';
     case PHASES.DONE: return 'BOM imported into Factwise.';
     default: return '';
   }
@@ -120,6 +128,7 @@ export default function FactwiseBomDirectoryExportDialog({
     lastError,
     lastResponseType,
     lastBulkImportId,
+    bomCodeConflicts,
     isRunning,
     // Revise-mode fields — driven by the comparison hookup below.
     revisedNewEnterpriseBomId,
@@ -129,6 +138,7 @@ export default function FactwiseBomDirectoryExportDialog({
     markRetryFailed,
     confirmRevisionDiff,
     cancelRevisionDiff,
+    setBomCodeOverrides,
     reset,
   } = orchestration;
 
@@ -155,10 +165,15 @@ export default function FactwiseBomDirectoryExportDialog({
 
   const activeStep = phaseToStepIndex(phase);
   const isDone = phase === PHASES.DONE;
+  // A question, not a failure — nothing has been uploaded yet. See the same
+  // flag in FactwiseProjectExportDialog for why it stays out of `hasError`.
+  const needsBomCode = phase === PHASES.BOM_CODE_CONFLICT;
   const hasError = phase === PHASES.ITEMS_ERROR || phase === PHASES.BOM_ERROR;
-  // Waiting for user to click Confirm/Reject in FW's preview tab. Buttons
-  // stay disabled so the user doesn't accidentally re-start.
-  const canStart = !isRunning && !isDone && phase !== PHASES.REVIEW_DIFF;
+  // Both of these are waiting on the user, so neither may start a run:
+  // REVIEW_DIFF wants Confirm/Reject in FW's preview tab, BOM_CODE_CONFLICT
+  // wants a different BOM ID below. Buttons stay disabled either way so the
+  // export can't be accidentally re-started out from under the prompt.
+  const canStart = !isRunning && !isDone && !needsBomCode && phase !== PHASES.REVIEW_DIFF;
 
   // Pass the revise target into the orchestrator so runBomStep enters
   // Path A (create R5, upload, REVIEW_DIFF pause, submit) instead of
@@ -174,6 +189,12 @@ export default function FactwiseBomDirectoryExportDialog({
       reviseBomModuleIds: undefined,
     });
   }, [runFromCheckpoint, reviseIntent]);
+
+  // Replacement BOM IDs supplied — record them and resume at the BOM step.
+  const handleBomCodeChosen = useCallback((renames) => {
+    setBomCodeOverrides(renames);
+    runFromCheckpoint({ stopAfterBom: true });
+  }, [setBomCodeOverrides, runFromCheckpoint]);
 
   // Advance phase before resuming so runFromCheckpoint skips the
   // just-succeeded step (see FactwiseProjectExportDialog for the full
@@ -286,9 +307,42 @@ export default function FactwiseBomDirectoryExportDialog({
   // that's what the user actually wants to look at after a successful
   // export. Falls back to the directory listing only if we somehow don't
   // have the id (e.g. an old checkpoint that predates the bomIds field).
-  const handleOpenBomDirectory = useCallback(() => {
-    const firstBomId = Array.isArray(bomIds) && bomIds.length ? bomIds[0] : null;
-    openInFactwise(firstBomId ? `/admin/BOM/edit/${firstBomId}` : '/admin/BOM/');
+  const handleOpenBomDirectory = useCallback(async () => {
+    const ids = Array.isArray(bomIds) ? bomIds.filter(Boolean) : [];
+    if (!ids.length) {
+      openInFactwise('/admin/BOM/');
+      return;
+    }
+    if (ids.length === 1) {
+      openInFactwise(`/admin/BOM/edit/${ids[0]}`);
+      return;
+    }
+
+    // Open the TOP of the tree, not whichever id came back first.
+    //
+    // A multi-level export creates one BOM per assembly — this file made five —
+    // and `bom_ids` arrives in no meaningful order, so "Open BOM" was a lottery
+    // between the finished good and one of its sub-assemblies. The root is the
+    // one NO other BOM references as a sub-BOM, which needs no knowledge of
+    // what the popup was told and no extra lookup beyond these details.
+    //
+    // Falls back to the first id if the details cannot be read: landing on some
+    // BOM beats refusing to open anything.
+    let root = ids[0];
+    try {
+      const details = await Promise.all(ids.map(id => fetchEnterpriseBomDetail(id)));
+      const childIds = new Set();
+      details.forEach((detail) => {
+        (detail?.bom?.bom_items || []).forEach((item) => {
+          const child = item?.sub_bom?.enterprise_bom_id || item?.sub_bom;
+          if (child) childIds.add(String(child));
+        });
+      });
+      root = ids.find(id => !childIds.has(String(id))) || ids[0];
+    } catch (err) {
+      /* keep the fallback */
+    }
+    openInFactwise(`/admin/BOM/edit/${root}`);
   }, [bomIds]);
 
   const handleResetAndClose = useCallback(() => {
@@ -403,6 +457,14 @@ export default function FactwiseBomDirectoryExportDialog({
           )}
         </Stack>
 
+        {needsBomCode && (
+          <BomCodeConflictPrompt
+            conflicts={bomCodeConflicts || []}
+            disabled={isRunning}
+            onSubmit={handleBomCodeChosen}
+          />
+        )}
+
         {hasError && (
           <Alert severity="error" sx={{ mb: 2 }}>
             <Typography variant="body2" sx={{ fontWeight: 600 }}>
@@ -464,9 +526,28 @@ export default function FactwiseBomDirectoryExportDialog({
               startIcon={<LaunchIcon />}
               onClick={handleOpenBomDirectory}
             >
+              {/* Says which one it opens. "Open BOM" beside a "5 BOM(s)
+                  created" chip reads as though it opens all of them. */}
               {Array.isArray(bomIds) && bomIds.length
-                ? 'Open BOM in Factwise'
+                ? (bomIds.length > 1
+                  ? 'Open top-level BOM in Factwise'
+                  : 'Open BOM in Factwise')
                 : 'Open BOM Directory in Factwise'}
+            </Button>
+          </>
+        ) : needsBomCode ? (
+          // The prompt's own button resumes the run — a retry here would only
+          // re-ask the question it is already showing.
+          <>
+            <Button
+              color="warning"
+              onClick={handleResetAndClose}
+              disabled={isRunning}
+            >
+              Start over
+            </Button>
+            <Button onClick={onClose} disabled={isRunning}>
+              Dismiss
             </Button>
           </>
         ) : hasError ? (

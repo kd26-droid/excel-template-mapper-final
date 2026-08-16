@@ -5280,7 +5280,18 @@ const EnhancedDataEditor = () => {
       const resp = await api.deleteRowsConditional(sessionId, delCol, delOp, delCompare);
       if (!resp.data?.success) throw new Error(resp.data?.error || 'Delete failed');
       const n = resp.data.removed || 0;
-      showSnackbar(`Deleted ${n} row${n !== 1 ? 's' : ''} — ${resp.data.remaining} remaining.`, 'success');
+      // Rows the BOM depends on are kept even when they match — say so, or the
+      // count looks like the tool missed them. An assembly has no MPN and no
+      // manufacturer, so "delete where MPN is empty" matches every finished
+      // good on the sheet.
+      const kept = resp.data.protected || 0;
+      showSnackbar(
+        `Deleted ${n} row${n !== 1 ? 's' : ''} — ${resp.data.remaining} remaining.`
+        + (kept
+          ? ` Kept ${kept} finished good / sub-assembly row${kept !== 1 ? 's' : ''} the BOM needs.`
+          : ''),
+        'success'
+      );
       // Saved with the template like the fill tools are. Without this, removing
       // the document rows was something the user had to redo by hand on every
       // file, and "Save template" quietly did not include it.

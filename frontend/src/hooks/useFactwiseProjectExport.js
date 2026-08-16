@@ -227,77 +227,98 @@ async function hydrateRevisionSheetFromR4(file, r4CostByCode) {
   }
 }
 
-// Rewrites the mapper's BOM Excel so its BOM ID / Sub BOM ID cells that
-// collide with an existing ONGOING enterprise BOM code get a unique suffix
-// appended. Prevents FactWise's "Cannot update submitted BOM" error in the
-// BOM_DASHBOARD path, which refuses to overwrite non-DRAFT BOMs.
-// Returns the (possibly-new) File and the code map used.
-async function renameCollidingBomCodes(file, existingCodes) {
-  try {
-    const buf = await file.arrayBuffer();
-    const wb = XLSX.read(buf, { type: 'array' });
-    const sheetName = wb.SheetNames[0];
-    const ws = wb.Sheets[sheetName];
-    // blankrows:true (default) preserves the 3-row spacer FactWise's format
-    // expects above HEADER_ROW=4. Without this, blank rows get stripped and
-    // the rewritten sheet has headers on row 2 instead of row 4 — every
-    // FactWise BOM parser then reports "Missing required columns" because
-    // it reads absolute row 4 and finds empty cells.
-    const aoa = XLSX.utils.sheet_to_json(ws, {
-      header: 1,
-      defval: '',
-      blankrows: true,
-    });
-    if (!aoa.length) return { file, renames: {} };
-    const headers = aoa[0].map((h) => String(h ?? '').trim());
-    const idxBomId = headers.findIndex(
-      (h) => /^bom\s*id$/i.test(h) || /^bom_code$/i.test(h)
-    );
-    const idxSubBomId = headers.findIndex(
-      (h) => /^sub\s*bom\s*id$/i.test(h) || /^sub_bom_code$/i.test(h)
-    );
-    if (idxBomId < 0) return { file, renames: {} };
+// Locate the BOM ID / Sub BOM ID columns in the mapper's BOM Excel.
+// Returns null when the sheet cannot be read as a BOM sheet at all.
+//
+// The header row is FOUND, not assumed to be row 1: the mapper's sheet puts
+// rows 1-3 as spacers and the headers on row 4, which is what FactWise's own
+// parsers index by. Reading aoa[0] here silently found nothing, and the
+// collision check below never ran on a single real export.
+async function readBomCodeColumns(file) {
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: 'array' });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  // blankrows:true preserves the 3-row spacer, so headerRow stays the sheet's
+  // real row index and the rebuild below puts the headers back on row 4.
+  const aoa = XLSX.utils.sheet_to_json(ws, {
+    header: 1,
+    defval: '',
+    blankrows: true,
+  });
+  if (!aoa.length) return null;
+  const { headerRow, headers } = locateBomHeaderRow(aoa);
+  if (headerRow < 0) return null;
+  const idxBomId = headers.findIndex(
+    (h) => /^bom\s*id$/i.test(h) || /^bom_code$/i.test(h)
+  );
+  if (idxBomId < 0) return null;
+  const idxSubBomId = headers.findIndex(
+    (h) => /^sub\s*bom\s*id$/i.test(h) || /^sub_bom_code$/i.test(h)
+  );
+  return { headers, dataRows: aoa.slice(headerRow + 1), idxBomId, idxSubBomId };
+}
 
-    const existingSet = new Set(
+// Which of the sheet's BOM IDs FactWise already has, in sheet order.
+//
+// bom_code is unique per organisation, so a fresh create whose BOM ID is
+// already taken fails inside FactWise with a bare 500 and no per-row error
+// file — nothing the user can act on. Checking here, before anything is
+// uploaded, turns that into a question we can ask.
+//
+// Every BOM ID value is checked, not just the main one: a multi-block sheet
+// creates one BOM per distinct BOM ID and each has to be unique.
+async function findTakenBomCodes(file, existingCodes) {
+  try {
+    const parsed = await readBomCodeColumns(file);
+    if (!parsed) return [];
+    const taken = new Set(
       (existingCodes || []).map((c) => String(c || '').trim().toLowerCase())
     );
-
-    // Compute one rename per unique conflicting code (stable across the sheet).
-    const renames = {};
-    const suffix = `_M${Date.now().toString(36)}`;
-    for (let r = 1; r < aoa.length; r++) {
-      const value = String(aoa[r][idxBomId] ?? '').trim();
-      if (!value) continue;
-      const key = value.toLowerCase();
-      if (existingSet.has(key) && !renames[value]) {
-        renames[value] = `${value}${suffix}`;
-      }
+    const conflicts = [];
+    const seen = new Set();
+    for (const row of parsed.dataRows) {
+      const value = String(row?.[parsed.idxBomId] ?? '').trim();
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      if (taken.has(value.toLowerCase())) conflicts.push(value);
     }
-    if (!Object.keys(renames).length) return { file, renames: {} };
+    return conflicts;
+  } catch {
+    // Unreadable sheet — let FactWise be the one to complain about it.
+    return [];
+  }
+}
 
-    // Apply renames to BOM ID and (if present) Sub BOM ID columns.
-    for (let r = 1; r < aoa.length; r++) {
-      const b = String(aoa[r][idxBomId] ?? '').trim();
-      if (b && renames[b]) aoa[r][idxBomId] = renames[b];
+// Apply a user-supplied {oldCode: newCode} map to the BOM ID column and to any
+// Sub BOM ID that referenced a renamed code, so the tree still points at itself.
+async function applyBomCodeRenames(file, renames) {
+  const map = renames || {};
+  if (!Object.keys(map).length) return file;
+  try {
+    const parsed = await readBomCodeColumns(file);
+    if (!parsed) return file;
+    const { headers, dataRows, idxBomId, idxSubBomId } = parsed;
+    for (const row of dataRows) {
+      if (!Array.isArray(row)) continue;
+      const b = String(row[idxBomId] ?? '').trim();
+      if (b && map[b]) row[idxBomId] = map[b];
       if (idxSubBomId >= 0) {
-        const s = String(aoa[r][idxSubBomId] ?? '').trim();
-        if (s && renames[s]) aoa[r][idxSubBomId] = renames[s];
+        const s = String(row[idxSubBomId] ?? '').trim();
+        if (s && map[s]) row[idxSubBomId] = map[s];
       }
     }
-
-    const newWs = XLSX.utils.aoa_to_sheet(aoa);
+    const newWs = XLSX.utils.aoa_to_sheet(buildFactwiseFormatAoa(headers, dataRows));
     const newWb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(newWb, newWs, sheetName);
+    XLSX.utils.book_append_sheet(newWb, newWs, 'BOM Data');
     const out = XLSX.write(newWb, { bookType: 'xlsx', type: 'array' });
     const blob = new Blob([out], {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     });
-    const newFile = new File([blob], file.name, { type: blob.type });
-    return { file: newFile, renames };
+    return new File([blob], file.name, { type: blob.type });
   } catch {
     // If anything about the client-side rewrite goes wrong, fall through to
     // the original file — FactWise will error clearly and the user can retry.
-    return { file, renames: {} };
+    return file;
   }
 }
 
@@ -317,6 +338,12 @@ export const PHASES = {
   BOM_PROCESSING: 'BOM_PROCESSING',
   BOM_ERROR: 'BOM_ERROR',
   BOM_DONE: 'BOM_DONE',
+  // Fresh-create only. One or more of the sheet's BOM IDs already exist in
+  // FactWise, where bom_code is unique per organisation. A gate, not a
+  // failure: nothing has been uploaded yet, and the dialog asks the user for
+  // a different BOM ID before the create is attempted. Items are already in
+  // the directory by this point, so answering it resumes at the BOM step.
+  BOM_CODE_CONFLICT: 'BOM_CODE_CONFLICT',
   // Revise-only. Fires as the FIRST phase of any revise export, BEFORE any
   // FactWise-mutating call — no item upload, no /revise/, no sheet upload.
   // Dialog fetches R4 (read-only) + mapper's own bom_tree (read-only,
@@ -465,6 +492,12 @@ const emptyState = {
   // BOM step checkpoint
   bomBulkImportId: null,
   bomIds: [],
+  // BOM code gate. `bomCodeConflicts` are the sheet's BOM IDs FactWise already
+  // has; `bomCodeOverrides` is what the user chose to call them instead, and is
+  // re-applied to the freshly-built sheet on every subsequent run — the sheet
+  // is rebuilt from the session each time, so the rename cannot be stored in it.
+  bomCodeConflicts: [],
+  bomCodeOverrides: {},
   // Project step checkpoint
   projectId: null,
   // BOM attach checkpoint
@@ -899,11 +932,30 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
       }
 
       // -------- Path B: fresh create --------
+      // BOM IDs the user renamed on an earlier pass through the conflict gate.
+      // Applied first so the check below tests the codes that will actually be
+      // uploaded, and a second collision re-opens the prompt instead of 500ing.
+      file = await applyBomCodeRenames(file, stateRef.current.bomCodeOverrides);
+
       const codesResp = await fetchEnterpriseBomCodes();
       if (codesResp?.success) {
         const existingCodes = (codesResp.boms || []).map((b) => b.bom_code);
-        const rewritten = await renameCollidingBomCodes(file, existingCodes);
-        file = rewritten.file;
+        const conflicts = await findTakenBomCodes(file, existingCodes);
+        if (conflicts.length) {
+          // Ask, don't rename. The old behaviour appended a timestamp suffix
+          // and threw the map away, so the export "succeeded" into a BOM code
+          // the user never chose and could not find afterwards.
+          patch({
+            phase: PHASES.BOM_CODE_CONFLICT,
+            bomCodeConflicts: conflicts,
+            lastError: conflicts.length === 1
+              ? `BOM ID "${conflicts[0]}" already exists in Factwise and cannot be `
+                + 'duplicated. Enter a different BOM ID to continue.'
+              : `${conflicts.length} BOM IDs in this sheet already exist in Factwise `
+                + 'and cannot be duplicated. Enter different BOM IDs to continue.',
+          });
+          return { ok: false };
+        }
       }
 
       const uploaded = await uploadFileToFactwiseBulkImport(file, 'BOM');
@@ -1347,6 +1399,7 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
       startPhase === PHASES.ITEMS_DONE
       || startPhase === PHASES.BOM_UPLOADING
       || startPhase === PHASES.BOM_PROCESSING
+      || startPhase === PHASES.BOM_CODE_CONFLICT
       || startPhase === PHASES.BOM_DONE
       || startPhase === PHASES.PROJECT_CREATING
       || startPhase === PHASES.ATTACH_BOM
@@ -1626,6 +1679,19 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
     });
   }, [patch]);
 
+  // The user answered the BOM-ID prompt. Record what they chose and drop back
+  // to ITEMS_DONE so the resumed run skips the item step (those are already in
+  // FactWise) and re-enters the BOM step with the overrides applied.
+  const setBomCodeOverrides = useCallback((overrides) => {
+    const cur = stateRef.current;
+    patch({
+      phase: PHASES.ITEMS_DONE,
+      bomCodeOverrides: { ...(cur.bomCodeOverrides || {}), ...(overrides || {}) },
+      bomCodeConflicts: [],
+      lastError: null,
+    });
+  }, [patch]);
+
   return {
     ...state,
     isEmbedded,
@@ -1634,6 +1700,7 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
       state.phase !== PHASES.IDLE
       && state.phase !== PHASES.DONE
       && state.phase !== PHASES.REVIEW_DIFF
+      && state.phase !== PHASES.BOM_CODE_CONFLICT
       && !TERMINAL_ERROR_PHASES.has(state.phase),
     runFromCheckpoint,
     runItemStep,
@@ -1642,6 +1709,7 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
     runAttachBomStep,
     markRetrySucceeded,
     markRetryFailed,
+    setBomCodeOverrides,
     confirmRevisionDiff,
     cancelRevisionDiff,
     reset,
