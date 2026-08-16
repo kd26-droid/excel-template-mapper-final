@@ -376,7 +376,7 @@ const assembliesFromParents = (records, levelColumn) => {
   return { shallowestChild, nameOf };
 };
 
-const analyzeLevels = (records, levelColumn, headers) => {
+const analyzeLevels = (records, levelColumn, headers, rootCode = '') => {
   const codeColumn = findHeader(headers, CODE_HEADER_RE);
   const nameColumn = findHeader(headers, NAME_HEADER_RE);
   const qtyColumn = findHeader(headers, QTY_HEADER_RE);
@@ -443,11 +443,25 @@ const analyzeLevels = (records, levelColumn, headers) => {
     // with no Level 2 — a gap the user has to explain to themselves. Ranking
     // gives the tiers 1, 2, 3 in depth order, which is what FactWise counts
     // and what the label is claiming to say.
+    // The finished good is Level 1, whether or not the sheet contains it.
+    //
+    // Ranking only sees tiers that appear in the DATA. When the root is in the
+    // sheet it is named as a parent, so it takes rank 1 and its children fall
+    // to 2 — correct. When the root was authored in the popup, nothing names
+    // it, so it is absent from these tiers and the sheet's top tier took rank 1
+    // — the same label as the root shown above it. With several assemblies at
+    // that tier the user saw multiple "Level 1 BOM" rows and no way to tell
+    // they were children rather than roots.
+    const rootKey = String(rootCode || '').trim().toLowerCase();
+    const rootIsRanked = rootKey && [...byParentLevel.values()].some(
+      tier => [...tier.keys()].some(code => String(code).trim().toLowerCase() === rootKey)
+    );
+    const offset = rootIsRanked ? 0 : 1;
     return {
       levels: [...byParentLevel.entries()]
         .sort((a, b) => a[0] - b[0])
         .map(([, assemblies], index) => ({
-          label: index + 1,
+          label: index + 1 + offset,
           assemblies: [...assemblies.values()],
         })),
       documents,
@@ -822,7 +836,12 @@ const BomStructureDialog = ({
     const levelColumn = answers[sheetName]?.levelColumn;
     if (!levelColumn || typeof getSheetRecords !== 'function') return null;
     try {
-      return analyzeLevels(getSheetRecords(sheetName), levelColumn, headersFor(sheetName));
+      return analyzeLevels(
+        getSheetRecords(sheetName),
+        levelColumn,
+        headersFor(sheetName),
+        answers[sheetName]?.bomHeader?.finishedGoodCode || ''
+      );
     } catch (err) {
       // The structure preview is a convenience; failing to draw it must never
       // stop the user from naming the finished good.

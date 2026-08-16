@@ -5038,6 +5038,112 @@ def data_view(request):
             logger.warning(f"Spec pair cleanup in data_view skipped: {spec_cleanup_err}")
 
         display_headers = list(final_headers or [])
+
+        # An assembly is a Finished good in the editor too, not only on the way
+        # out of the download.
+        #
+        # `_apply_sub_assembly_item_types` already does this, but it is called
+        # from download_file, so the corrected type existed only in the exported
+        # file. The grid the user is looking at said every one of these rows was
+        # a raw material — filter Item type for "Finished good" and nothing came
+        # back, while the export contained seven. Two answers to one question.
+        #
+        # Resolved from the popup's answers via the same join `locked_identity_
+        # codes` uses, NOT by generating a BOM: this runs on every load of the
+        # editor, and BOM generation is far too heavy for that. It also works
+        # before a BOM has ever been generated, which is the state the user is
+        # in when they first reach this page.
+        _type_authored_assemblies(info, display_headers, final_data)
+
+        # The authored finished good, onto the page being returned.
+        #
+        # Also done to the stored grid below, but that only runs once a grid
+        # exists — on the FIRST load there is no `edited_data` yet, and without
+        # this the row the user just authored would be missing from the very
+        # screen they land on. Appending in both places is safe: the helper
+        # skips anything already present by Item code.
+        if isinstance(final_data, list):
+            final_data, display_headers = _append_authored_finished_good(
+                info, final_data, display_headers
+            )
+
+        # And onto the STORED grid, not just the page being returned.
+        #
+        # `final_data` is one page, rebuilt per request — typing it makes the
+        # editor look right and changes nothing else. Every tool that has to
+        # leave these rows alone (Fill column, Settings defaults, the editor
+        # defaults above) resolves them through `_sub_assembly_codes_from_grid`,
+        # which joins on the STORED grid's Item code. Leave that blank and the
+        # lock set comes back empty, so a bulk "set Item type to Raw material"
+        # would quietly turn all seven finished goods back into bought-in parts
+        # and the BOMs would reference items that no longer claim to be made.
+        stored = info.get('edited_data')
+        stored_rows = stored.get('data') if isinstance(stored, dict) else stored
+        stored_headers = (
+            stored.get('headers') if isinstance(stored, dict) else None
+        ) or display_headers
+        if isinstance(stored_rows, list) and stored_rows:
+            dirty = _type_authored_assemblies(info, stored_headers, stored_rows)
+
+            # Drop an authored row that the sheet turns out to contain itself.
+            #
+            # An earlier load could append a finished good before its real row
+            # was recognised — the sheet's row carried the ID rule's code
+            # ("MPN1 SAMSUNG") rather than the answered one ("CPN1"), so the
+            # append saw no match. Once the real row is corrected to "CPN1"
+            # there are two rows for one item, which the item export reports as
+            # a conflict and refuses to collapse.
+            #
+            # The appended one is identifiable: it has no CPN, because it never
+            # came from a sheet row.
+            fg_codes = {str(g['code']).strip() for g in _authored_finished_goods(info)}
+            fg_codes.discard('')
+            code_i = _grid_column_index(stored_headers, 'Item code')
+            cpn_i = _grid_column_index(stored_headers, 'CPN Code')
+            if fg_codes and code_i >= 0 and cpn_i >= 0:
+                def cell(row, position):
+                    return str(row[position] or '').strip() if (
+                        isinstance(row, list) and position < len(row)
+                    ) else ''
+                real = {cell(r, cpn_i) for r in stored_rows} & fg_codes
+                if real:
+                    kept = [
+                        r for r in stored_rows
+                        if not (cell(r, code_i) in real and not cell(r, cpn_i))
+                    ]
+                    if len(kept) != len(stored_rows):
+                        stored_rows[:] = kept
+                        dirty = True
+
+            # A flat sheet's finished good has no row of its own.
+            #
+            # It was authored in the popup — a single-level sheet lists the
+            # components but not the thing they build — so it exists only in
+            # `bom_structure` and never came from the uploaded file. The item
+            # EXPORT appends it (`_append_authored_finished_good`), but the
+            # editor never did, so the user answered for a finished good and
+            # then could not find it in the grid. Nor could they edit it, or
+            # see that it would be created at all.
+            #
+            # Appended to the stored grid so the editor, the export and the BOM
+            # all describe the same set of items. The helper skips anything
+            # already present by Item code, so a multi-level sheet whose root IS
+            # in the data is untouched, and repeat loads cannot duplicate it.
+            before = len(stored_rows)
+            appended_rows, appended_headers = _append_authored_finished_good(
+                info, stored_rows, stored_headers
+            )
+            if len(appended_rows) != before or appended_headers != stored_headers:
+                if isinstance(stored, dict):
+                    stored['data'] = appended_rows
+                    stored['headers'] = appended_headers
+                else:
+                    info['edited_data'] = appended_rows
+                dirty = True
+
+            if dirty:
+                save_session(session_id, info)
+
         field_headers = make_unique_field_headers(display_headers)
         response_data = []
         response_defaults = info.get("default_values", {}) or {}
@@ -5511,6 +5617,126 @@ def _sub_assembly_codes_from_grid(info, headers, rows):
     return codes
 
 
+def _type_authored_assemblies(info, headers, rows):
+    """Type the authored finished good and every sub-assembly as Finished good.
+
+    "Anything with a BOM under it is a finished good" — the root the user
+    authored in the structure gate, and every part they answered as a sub-BOM.
+    Left as Raw material, FactWise treats them as bought-in while a BOM claims
+    to produce them.
+
+    Codes come from the popup's answers, not from deriving a tree: this runs on
+    every editor load, and it has to work before any BOM has been generated.
+    Sub-BOM answers are keyed by the customer's part number, so they are joined
+    to the grid on ``CPN Code`` — the same join ``locked_identity_codes`` uses,
+    which is what then protects the value from being bulk-filled away again.
+
+    Mutates ``rows`` in place and returns how many it changed.
+    """
+    if not headers or not isinstance(rows, list):
+        return 0
+
+    # Match value -> the item code that row should carry.
+    #
+    # An assembly usually has NO generated Item code: the FactWise ID rule
+    # builds from MPN + manufacturer and an assembly has neither, so the column
+    # comes out blank on exactly the seven rows the user just named. But the
+    # popup asked for those codes and they are on the session — a blank cell
+    # here is an answer that was given and then dropped, and it is the code
+    # FactWise needs to create the item at all.
+    item_code_of = {}
+    for good in _authored_finished_goods(info):
+        code = str(good['code']).strip()
+        if code:
+            item_code_of[code] = code
+    # Resolved item codes, for rows that already have one.
+    for code in _sub_assembly_codes_from_grid(info, headers, rows):
+        code = str(code).strip()
+        if code:
+            item_code_of.setdefault(code, code)
+    # Sub-BOM answers are keyed by the customer's part number, which is what the
+    # grid carries in CPN Code. `finishedGoodCode` is the item the sub-BOM
+    # builds, and may have been renamed away from the sheet's own number.
+    for answer in (((info or {}).get('bom_structure') or {}).get('sheets') or {}).values():
+        if not isinstance(answer, dict):
+            continue
+        for part_number, sub in (answer.get('subBoms') or {}).items():
+            part_number = str(part_number).strip()
+            if not part_number:
+                continue
+            resolved = str((sub or {}).get('finishedGoodCode') or '').strip() or part_number
+            item_code_of[part_number] = resolved
+
+    codes = set(item_code_of)
+    codes.discard('')
+    if not codes:
+        return 0
+
+    code_index = _grid_column_index(headers, 'Item code')
+    type_index = _grid_column_index(headers, 'Item type')
+    cpn_index = _grid_column_index(headers, 'CPN Code')
+    if type_index < 0:
+        return 0
+
+    changed = 0
+    for row in rows:
+        if isinstance(row, list):
+            def read(position):
+                return str(row[position] or '').strip() if 0 <= position < len(row) else ''
+            # The authored root has no generated Item code of its own, so the
+            # part number is accepted too — that is the only handle it has.
+            existing_code = read(code_index)
+            # CPN first, ALWAYS. The sub-BOM answers are keyed by part number,
+            # so CPN is the reliable handle; the row's own Item code is what may
+            # be wrong. Checking Item code first let a row match on its own bad
+            # code — `_sub_assembly_codes_from_grid` had added "SAMSUNG" to the
+            # set, so the CPN9 row resolved to itself and was left alone.
+            cpn_value = read(cpn_index)
+            matched = cpn_value if cpn_value in codes else (
+                existing_code if existing_code in codes else ''
+            )
+            if matched not in codes:
+                continue
+            while len(row) <= max(type_index, code_index):
+                row.append('')
+            if str(row[type_index] or '').strip() != 'Finished good':
+                row[type_index] = 'Finished good'
+                changed += 1
+            # The popup's code WINS, even over one the ID rule already wrote.
+            #
+            # The BOM sheet is generated from these answers, so its Finished
+            # good code / Sub BOM ID cells carry them. If the item directory
+            # holds something else the two files cannot be reconciled: the ID
+            # rule builds from MPN + manufacturer, so this sheet's assemblies
+            # came out as "MPN1 SAMSUNG" and — for one with no MPN at all —
+            # bare "SAMSUNG", while the BOM referenced CPN1 and CPN9. The
+            # import then fails on the second file with the sub-BOM missing
+            # from the directory.
+            wanted = item_code_of[matched]
+            if code_index >= 0 and wanted and existing_code != wanted:
+                row[code_index] = wanted
+                changed += 1
+        elif isinstance(row, dict):
+            code_key = headers[code_index] if 0 <= code_index < len(headers) else None
+            cpn_key = headers[cpn_index] if 0 <= cpn_index < len(headers) else None
+            type_key = headers[type_index]
+            existing_code = str(row.get(code_key) or '').strip() if code_key else ''
+            cpn_value = str(row.get(cpn_key) or '').strip() if cpn_key else ''
+            matched = cpn_value if cpn_value in codes else (
+                existing_code if existing_code in codes else ''
+            )
+            if matched not in codes:
+                continue
+            if str(row.get(type_key) or '').strip() != 'Finished good':
+                row[type_key] = 'Finished good'
+                changed += 1
+            wanted = item_code_of[matched]
+            if code_key and wanted and existing_code != wanted:
+                row[code_key] = wanted
+                changed += 1
+    return changed
+
+
 def _apply_sub_assembly_item_types(session_id, info, rows, headers):
     """Type every sub-assembly row in the item export as a Finished good."""
     sheets = ((info or {}).get('bom_structure') or {}).get('sheets') or {}
@@ -5640,10 +5866,22 @@ def _append_authored_finished_good(info, rows, headers):
     type_index = index_of('Item type')
     uom_index = index_of('Measurement unit')
 
+    # Matched on CPN as well as Item code.
+    #
+    # A multi-level sheet contains its own finished good, so a row for it
+    # already exists — but its Item code is whatever the FactWise ID rule
+    # generated ("MPN1 SAMSUNG"), not the code the popup answered ("CPN1").
+    # Keying on Item code alone therefore saw no match and appended a second
+    # row for the same item.
+    cpn_index = index_of('CPN Code')
     existing = set()
     for row in rows or []:
-        if isinstance(row, list) and code_index < len(row):
+        if not isinstance(row, list):
+            continue
+        if code_index < len(row):
             existing.add(str(row[code_index] or '').strip())
+        if 0 <= cpn_index < len(row):
+            existing.add(str(row[cpn_index] or '').strip())
 
     constants = _constant_column_values(rows, headers)
 
@@ -12892,17 +13130,48 @@ def required_field_report(request):
 
         # Optional duplicate report for key columns (e.g. Item code must be unique
         # in FactWise). Reports how many rows carry a value that repeats.
+        #
+        # For Item code this asks the question the EXPORT asks, not "does this
+        # string appear twice in the grid".
+        #
+        # A part consumed in two assemblies is two grid rows on purpose — the BOM
+        # needs both, with their own quantities — and the item export collapses
+        # them: `_drop_bom_columns` removes Level/Quantity, then
+        # `_dedupe_item_rows` merges rows that are then identical. So the file
+        # FactWise receives already has each code once.
+        #
+        # Counting raw grid repeats warned about 22 rows that were never going
+        # to reach FactWise as duplicates — and the remedy it offered, Fill
+        # Column, would have given one physical part two item codes and split it
+        # into two items with the BOM lines pointing at different ones. Only a
+        # genuine conflict (same code, rows disagreeing about what the part IS)
+        # is worth stopping for.
         duplicates = []
+        item_code_key = _template_label_key('Item code')
         for column in (request.data.get('dupe_columns') or []):
             if column not in headers:
                 continue
             idx = headers.index(column)
             from collections import Counter
-            counts = Counter()
-            for row in rows:
-                v = str((row[idx] if idx < len(row) else '') or '').strip()
-                if v:
-                    counts[v] += 1
+
+            if _template_label_key(column) == item_code_key:
+                export_rows, export_headers = _drop_bom_columns(
+                    [list(row) for row in rows], list(headers)
+                )
+                _kept, conflicting = _dedupe_item_rows(export_rows, export_headers)
+                conflicting = set(conflicting)
+                counts = Counter()
+                for row in rows:
+                    v = str((row[idx] if idx < len(row) else '') or '').strip()
+                    if v and v in conflicting:
+                        counts[v] += 1
+            else:
+                counts = Counter()
+                for row in rows:
+                    v = str((row[idx] if idx < len(row) else '') or '').strip()
+                    if v:
+                        counts[v] += 1
+
             dup_rows = sum(c for c in counts.values() if c > 1)
             dup_values = sum(1 for c in counts.values() if c > 1)
             if dup_rows > 0:
@@ -13238,8 +13507,41 @@ def delete_rows_conditional(request):
                 return compare in cl
             return False
 
-        # Keep rows that DON'T match the delete condition.
-        kept = [r for r in rows if not matches(r[idx] if idx < len(r) else '')]
+        # The BOM's own rows survive any condition.
+        #
+        # The finished good and every sub-assembly are structure, not data: a
+        # BOM references them, and deleting one leaves that BOM pointing at an
+        # item the directory no longer contains. They are also the rows most
+        # likely to match a condition by accident — an assembly has no MPN and
+        # no manufacturer, so "delete where MPN is empty" takes all of them.
+        #
+        # Bulk fills already refuse to touch these (see locked_identity_codes);
+        # deletion is a separate endpoint and had no such guard, so the tool
+        # that was safest to reach for was the one that removed the BOM.
+        # Deleting one deliberately is still possible — one row at a time, where
+        # the user can see which row it is.
+        locked_codes = locked_identity_codes(info, headers, rows)
+        code_index = _grid_column_index(headers, 'Item code')
+        cpn_index = _grid_column_index(headers, 'CPN Code')
+
+        def is_locked(row):
+            if not locked_codes:
+                return False
+            for position in (code_index, cpn_index):
+                if 0 <= position < len(row):
+                    if str(row[position] or '').strip() in locked_codes:
+                        return True
+            return False
+
+        # Keep rows that DON'T match the delete condition, plus any the BOM needs.
+        kept = []
+        protected = 0
+        for r in rows:
+            if not matches(r[idx] if idx < len(r) else ''):
+                kept.append(r)
+            elif is_locked(r):
+                kept.append(r)
+                protected += 1
         removed = len(rows) - len(kept)
 
         if removed > 0:
@@ -13250,8 +13552,13 @@ def delete_rows_conditional(request):
             new_version = info.get('template_version')
 
         logger.info(f"🗑️ delete_rows_conditional on {session_id}: removed {removed} rows where "
-                    f"\"{column}\" {operator} {compare!r} ({len(rows)} → {len(kept)})")
+                    f"\"{column}\" {operator} {compare!r} ({len(rows)} → {len(kept)}); "
+                    f"kept {protected} BOM row(s) the condition also matched")
+        # `protected` is reported, not swallowed: the user asked for those rows
+        # to go and they did not, so the count has to be visible or the tool
+        # looks like it silently under-deleted.
         return Response({'success': True, 'removed': removed, 'remaining': len(kept),
+                         'protected': protected,
                          'column': column, 'template_version': new_version})
     except Exception as e:
         logger.error(f"delete_rows_conditional failed: {e}", exc_info=True)
@@ -14636,6 +14943,44 @@ def _generate_bom_for_session(session_id):
     # Generating from the uploaded sheet alone is what made every edit after
     # mapping invisible to BOM export.
     headers, rows = read_session_grid(session_id, info)
+
+    # The authored finished good is an ITEM, not a source row.
+    #
+    # It has a place in the grid — the item directory has to contain the thing
+    # the BOM builds — but it never came from the uploaded sheet, so it must not
+    # take part in the grid↔source join below. That join is positional and
+    # rejects any grid row the sheet does not have, so leaving it in made the
+    # grid one row longer than the source and failed generation outright with
+    # "rows added in the editor have no place in the BOM structure".
+    #
+    # It reaches the tree the proper way regardless: `root=` is passed to
+    # derive_tree from the popup's answer, which is where a finished good the
+    # sheet does not contain belongs.
+    authored_codes = {
+        str(good['code']).strip() for good in _authored_finished_goods(info)
+    }
+    authored_codes.discard('')
+    # Only the APPENDED row, never a real one. A multi-level sheet contains its
+    # own finished good, and that row IS a source row — it is the parent of
+    # everything at the tier below. Matching on the code alone dropped it and
+    # every child then reported `parent_not_found`. The appended row is the one
+    # with no CPN: it was built from the popup's answer, not from a sheet row.
+    if authored_codes and headers:
+        code_index = _grid_column_index(headers, 'Item code')
+        cpn_index = _grid_column_index(headers, 'CPN Code')
+        if code_index >= 0:
+            def is_appended(row):
+                if not isinstance(row, list) or code_index >= len(row):
+                    return False
+                if str(row[code_index] or '').strip() not in authored_codes:
+                    return False
+                if cpn_index < 0:
+                    return True
+                return not str(
+                    row[cpn_index] if cpn_index < len(row) else ''
+                ).strip()
+            rows = [row for row in (rows or []) if not is_appended(row)]
+
     records = _normalized_records_from_grid(headers or [], rows or [])
     if not _has_normalizer_columns(records):
         source_headers, source_rows = _read_normalized_source_table(info)
