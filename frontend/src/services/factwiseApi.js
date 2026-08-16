@@ -1223,7 +1223,7 @@ export async function attachBomToProject({
     const bom = detailResp?.data || {};
     const project = projectResp?.data || {};
     const bomItems = Array.isArray(bom.bom_items) ? bom.bom_items : [];
-    const projectBomItems = flattenBomItemsForProject(bomItems);
+    let projectBomItems = flattenBomItemsForProject(bomItems);
 
     // Step 1c: fetch the project template so we can look up the ACTUAL name
     // FW's UI expects for the BOM_TERMS custom_section. FW UI's Submit
@@ -1306,6 +1306,32 @@ export async function attachBomToProject({
           custom_fields: [],
         }))
       : [];
+
+    // Filter each sub-BOM parent's custom_sections down to names the project's
+    // BOM-scope map actually contains. FW's create_project_boms crashes with
+    //   KeyError: 'BOM Details'
+    // in add_section_id_via_name → custom_section_name_map[section.name]
+    // when a sub-BOM item carries a section name (e.g. default "BOM Details"
+    // baked into the BOM by admin_import) that isn't registered in the
+    // project's own template. Stripping unknowns is safe: FW's per-item BOM
+    // section attach is optional metadata, and the top-level custom_sections
+    // above still populate the project's BOM linkage.
+    const projectBomSectionNames = new Set(
+      projectCustomSections
+        .filter((s) => String(s?.section_type || '').toUpperCase() === 'BOM'
+          || /bom/i.test(String(s?.name || '')))
+        .map((s) => String(s?.name || '').trim())
+        .filter(Boolean)
+    );
+    projectBomItems = projectBomItems.map((pbi) => {
+      if (!Array.isArray(pbi?.custom_sections) || !pbi.custom_sections.length) {
+        return pbi;
+      }
+      const kept = pbi.custom_sections.filter(
+        (cs) => projectBomSectionNames.has(String(cs?.name || '').trim())
+      );
+      return { ...pbi, custom_sections: kept };
+    });
 
     // Prefer the BOM's own currency/quantity/total when caller didn't pass
     // one — the "Add BOM" popup does the same.
