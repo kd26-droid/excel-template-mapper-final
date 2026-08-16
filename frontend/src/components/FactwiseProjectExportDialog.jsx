@@ -349,25 +349,44 @@ export default function FactwiseProjectExportDialog({
   // the very thing it came for already erased. Held in state rather than a ref
   // because the write-back has to wait on it, and a ref would not re-run it.
   const [pendingIntent, setPendingIntent] = useState(null);
+  // Separate flag for "revise without a project" intent — user picked
+  // Revise: X in BomStructureDialog with project=No. We treat this as
+  // "revise the BOM AND put the revision in whichever project the user
+  // picks in this dialog" (NEW project by default). Kept as its own
+  // ref-tracked field so the EXISTING-mode intent (which fills project +
+  // revise target) and this one don't fight over the same state slot.
+  const [reviseNoProjectIntent, setReviseNoProjectIntent] = useState(null);
   const intentAppliedRef = useRef(false);
   useEffect(() => {
     if (!open) {
       intentAppliedRef.current = false;
       setPendingIntent(null);
+      setReviseNoProjectIntent(null);
       return;
     }
     if (intentAppliedRef.current) return;
     intentAppliedRef.current = true;
     if (phase !== PHASES.IDLE || existingProjectId || pickedProject) return;
     const intent = readBomRevisionIntent();
-    if (!intent?.projectId) return;
-    setPendingIntent(intent.enterpriseBomId ? intent : null);
-    setModeDraft(PROJECT_MODES.EXISTING);
-    setPickedProject({
-      project_id: intent.projectId,
-      project_code: intent.projectCode || '',
-      project_name: intent.projectName || '',
-    });
+    if (!intent?.enterpriseBomId) return;
+    if (intent.projectId) {
+      // EXISTING project + revise: preselect the project, later effect
+      // will match the revise target once project's BOMs load.
+      setPendingIntent(intent);
+      setModeDraft(PROJECT_MODES.EXISTING);
+      setPickedProject({
+        project_id: intent.projectId,
+        project_code: intent.projectCode || '',
+        project_name: intent.projectName || '',
+      });
+    } else {
+      // Revise-with-no-project: user wants a fresh revision that goes
+      // into a NEW project. Default the mode picker to NEW and stash
+      // the intent so handleStart passes reviseEnterpriseBomId into
+      // the orchestrator's Path A.
+      setReviseNoProjectIntent(intent);
+      setModeDraft(PROJECT_MODES.NEW);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
@@ -525,20 +544,34 @@ export default function FactwiseProjectExportDialog({
   }, [open, modeDraft, pickedProject, parsedReviseTargets, primaryReviseTarget,
       lockedBaseBomId, pendingIntent]);
 
-  const buildRunPayload = useCallback(() => ({
-    mode: modeDraft,
-    projectName: nameDraft?.trim(),
-    templateId: pickedTemplate?.template_id || null,
-    templateName: pickedTemplate?.name || null,
-    existingProjectId: pickedProject?.project_id || null,
-    existingProjectName: pickedProject?.project_name || null,
-    reviseEnterpriseBomId: primaryReviseTarget.enterpriseBomId || null,
-    reviseBomModuleId: primaryReviseTarget.bomModuleId || null,
-    // What the run actually iterates. One sequential PUT per entry.
-    reviseBomModuleIds: parsedReviseTargets.map(t => t.bomModuleId).filter(Boolean),
-    reviseBomCode: primaryReviseTarget.bomCode || null,
-  }), [modeDraft, nameDraft, pickedTemplate, pickedProject, parsedReviseTargets,
-       primaryReviseTarget]);
+  const buildRunPayload = useCallback(() => {
+    // NEW-mode + revise-no-project intent: user picked "Revise: X" with
+    // project=No in BomStructureDialog, then chose to put the revised
+    // BOM into a NEW project here. Orchestrator's Path A creates R5;
+    // confirmRevisionDiff runs items → process → submit → project create
+    // → attach R5. reviseBomModuleIds stays empty since a NEW project
+    // has no existing slots to move.
+    const reviseFromNoProjectIntent =
+      modeDraft === PROJECT_MODES.NEW && reviseNoProjectIntent?.enterpriseBomId;
+    return {
+      mode: modeDraft,
+      projectName: nameDraft?.trim(),
+      templateId: pickedTemplate?.template_id || null,
+      templateName: pickedTemplate?.name || null,
+      existingProjectId: pickedProject?.project_id || null,
+      existingProjectName: pickedProject?.project_name || null,
+      reviseEnterpriseBomId:
+        primaryReviseTarget.enterpriseBomId
+        || (reviseFromNoProjectIntent ? reviseNoProjectIntent.enterpriseBomId : null),
+      reviseBomModuleId: primaryReviseTarget.bomModuleId || null,
+      // What the run actually iterates. One sequential PUT per entry.
+      reviseBomModuleIds: parsedReviseTargets.map(t => t.bomModuleId).filter(Boolean),
+      reviseBomCode:
+        primaryReviseTarget.bomCode
+        || (reviseFromNoProjectIntent ? reviseNoProjectIntent.bomCode : null),
+    };
+  }, [modeDraft, nameDraft, pickedTemplate, pickedProject, parsedReviseTargets,
+      primaryReviseTarget, reviseNoProjectIntent]);
 
   const handleStart = useCallback(() => {
     runFromCheckpoint(buildRunPayload());
@@ -608,7 +641,6 @@ export default function FactwiseProjectExportDialog({
     bomBulkImportId,
   } = orchestration;
   const handleOpenComparisonInFactwise = useCallback(() => {
-    if (!openTarget) return;
     // Preview params tell BOMComparisonPageClean to fetch from Aditya's
     // revision-preview endpoint instead of the project comparison-data one,
     // auto-select the two returned versions, and show the Confirm/Reject
@@ -625,7 +657,15 @@ export default function FactwiseProjectExportDialog({
     if (window.location.origin) {
       params.set('callback_origin', window.location.origin);
     }
-    const path = `/custom/cost-tracking/projects/${openTarget}/bom-comparison?${params.toString()}`;
+    // Two URL shapes for the same FW page. When there's already a project
+    // (EXISTING mode or a previously-created NEW project), use the
+    // project-scoped comparison route so the page's project sidebar hydrates.
+    // In NEW-mode revise-no-project (Bug B) the project doesn't exist yet at
+    // the review pause, so use the project-less preview mount (same route
+    // Bug A's BOM Directory dialog uses).
+    const path = openTarget
+      ? `/custom/cost-tracking/projects/${openTarget}/bom-comparison?${params.toString()}`
+      : `/custom/cost-tracking/bom-revision-preview?${params.toString()}`;
     const inIframe = window.parent && window.parent !== window;
     if (inIframe) {
       postToFactwiseParent('NAVIGATE', { url: path });
@@ -642,16 +682,19 @@ export default function FactwiseProjectExportDialog({
   // Auto-open FW's preview page the instant the orchestrator lands on
   // REVIEW_DIFF — that's the phase runBomStep patches to after revise +
   // sheet upload succeed and no items have been uploaded yet.
+  //
+  // No openTarget guard: NEW-mode revise-no-project (Bug B) pauses at
+  // REVIEW_DIFF before any project exists. handleOpenComparisonInFactwise
+  // falls back to the project-less preview URL in that case.
   const redirectedRef = useRef(false);
   useEffect(() => {
     if (!open) { redirectedRef.current = false; return; }
     if (redirectedRef.current) return;
     if (phase !== PHASES.REVIEW_DIFF) return;
     if (!reviseEnterpriseBomId) return;
-    if (!openTarget) return;
     redirectedRef.current = true;
     handleOpenComparisonInFactwise();
-  }, [open, phase, reviseEnterpriseBomId, openTarget, handleOpenComparisonInFactwise]);
+  }, [open, phase, reviseEnterpriseBomId, handleOpenComparisonInFactwise]);
 
   // Listen for FW's preview page confirming or rejecting the revision.
   // FW's page posts { type, enterpriseBomId, bulkImportId } to our origin.
@@ -771,6 +814,24 @@ export default function FactwiseProjectExportDialog({
 
         {modeDraft === PROJECT_MODES.NEW ? (
           <Box sx={{ mb: 2 }}>
+            {/* Revise-no-project banner. Fires when BomStructureDialog
+                said "Revise: X, project=No" and the user landed on the
+                Project export dialog. Instead of fresh-creating a
+                duplicate BOM, we route through Path A (create R5) and
+                attach that R5 to the new project. */}
+            {reviseNoProjectIntent && (
+              <Alert severity="info" sx={{ mb: 1.5 }}>
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                  Revising <strong>{reviseNoProjectIntent.bomCode}</strong> —
+                  the new revision will be attached to this new project.
+                </Typography>
+                <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: 'text.secondary' }}>
+                  You&apos;ll review the diff in Factwise before it commits.
+                  Switch to &quot;Existing project&quot; if you want to move
+                  a slot instead.
+                </Typography>
+              </Alert>
+            )}
             <Stack spacing={1.5}>
               <TextField
                 label="Project name"

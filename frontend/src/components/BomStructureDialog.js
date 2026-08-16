@@ -1601,7 +1601,7 @@ const BomStructureDialog = ({
   const renderReviseProject = () => (
     <>
       <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
-        Do you want to revise this BOM on a project too?
+        Do you want to revise this BOM on an <strong>existing</strong> project too?
       </Typography>
       <RadioGroup
         row
