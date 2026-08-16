@@ -1631,20 +1631,40 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
       }
     }
 
-    // Step 5 — slot revise for existing-project flows. NEW-mode revisions
-    // don't happen (mode picker enforces revise-only for EXISTING), but be
-    // defensive: only run attach if we actually have project + slots.
+    // Step 5 — project attachment. Three shapes:
+    //   (a) EXISTING project + slot revise: user picked "Revise" from the
+    //       project dialog. Run runAttachBomStep — its slot-revise branch
+    //       PUTs /revise/ on each linkage id, moving the slot from R4 to R5.
+    //   (b) NEW project + revise-no-project intent: user picked "Revise" from
+    //       BomStructureDialog with project=No, then chose the NEW-project
+    //       tab. R5 exists in the BOM directory; we still need to spin up the
+    //       new project and attach R5 to it as a fresh BOM (no slot revise —
+    //       there's no prior slot to move). Create the project, then let
+    //       runAttachBomStep's fall-through "attach as new" branch link R5.
+    //   (c) No project at all (Export-to-BOM-Directory path): nothing more to
+    //       do. R5 is submitted, the user is done.
     const afterState = stateRef.current;
-    const hasProjectAttach = Boolean(
+    const mode = afterState.mode || PROJECT_MODES.NEW;
+    const hasExistingSlotRevise = Boolean(
       afterState.projectId
       && (afterState.reviseBomModuleIds?.length || afterState.reviseBomModuleId)
     );
-    if (hasProjectAttach) {
+    const needsNewProjectAttach = Boolean(
+      mode === PROJECT_MODES.NEW
+      && afterState.projectName
+      && !afterState.projectId
+    );
+
+    if (hasExistingSlotRevise) {
+      await runAttachBomStep();
+    } else if (needsNewProjectAttach) {
+      const projRes = await runProjectStep(afterState.projectName);
+      if (!projRes.ok) return;
       await runAttachBomStep();
     } else {
       patch({ phase: PHASES.DONE });
     }
-  }, [patch, runItemStep, runAttachBomStep]);
+  }, [patch, runItemStep, runAttachBomStep, runProjectStep]);
 
   // Called when the user clicks Reject in FW's preview page. Nothing on the
   // FactWise side needs a formal undo: R5 exists as an empty DRAFT (harmless

@@ -25,10 +25,11 @@ import {
   PHASES,
   useFactwiseProjectExport,
 } from '../hooks/useFactwiseProjectExport';
-import { openInFactwise } from '../contexts/FactwiseContext';
+import { openInFactwise, postToFactwiseParent, useFactwise } from '../contexts/FactwiseContext';
 import { fetchEnterpriseBomDetail } from '../services/factwiseApi';
 import FactwiseBulkImportErrorGrid from './FactwiseBulkImportErrorGrid';
 import BomCodeConflictPrompt from './BomCodeConflictPrompt';
+import { readBomRevisionIntent } from '../utils/bomRevisionIntent';
 
 // Two-step export flow: items first, then BOM. Same orchestrator + error grid
 // used by the Project export dialog, minus the project creation / attach.
@@ -83,6 +84,7 @@ function phaseLabel(phase) {
     case PHASES.BOM_UPLOADING: return 'Uploading BOM file to Factwise…';
     case PHASES.BOM_PROCESSING: return 'Validating BOM structure…';
     case PHASES.BOM_ERROR: return 'BOM import failed — items were saved. See errors below.';
+    case PHASES.REVIEW_DIFF: return 'Reviewing revision in Factwise… confirm or reject there to continue.';
     case PHASES.BOM_CODE_CONFLICT: return 'This BOM ID is already used in Factwise — pick a different one below.';
     case PHASES.DONE: return 'BOM imported into Factwise.';
     default: return '';
@@ -128,14 +130,38 @@ export default function FactwiseBomDirectoryExportDialog({
     lastBulkImportId,
     bomCodeConflicts,
     isRunning,
+    // Revise-mode fields — driven by the comparison hookup below.
+    revisedNewEnterpriseBomId,
+    bomBulkImportId,
     runFromCheckpoint,
     markRetrySucceeded,
     markRetryFailed,
+    confirmRevisionDiff,
+    cancelRevisionDiff,
     setBomCodeOverrides,
     reset,
   } = orchestration;
 
   const [retryMessage] = useState(null);
+
+  // Revise intent from BomStructureDialog. If the user picked "Revise: X"
+  // there with project=No, they explicitly asked for a new revision that
+  // is pushed only to the BOM directory (no project involvement). Without
+  // reading this intent, the BOM Directory export would fall back to
+  // fresh-create semantics and produce a duplicate BOM under the same
+  // finished-good code. Read once per dialog open (mirrors Project
+  // dialog's pattern).
+  const [reviseIntent, setReviseIntent] = useState(null);
+  const intentReadRef = useRef(false);
+  useEffect(() => {
+    if (!open) { intentReadRef.current = false; setReviseIntent(null); return; }
+    if (intentReadRef.current) return;
+    intentReadRef.current = true;
+    const intent = readBomRevisionIntent();
+    if (intent?.enterpriseBomId) {
+      setReviseIntent(intent);
+    }
+  }, [open]);
 
   const activeStep = phaseToStepIndex(phase);
   const isDone = phase === PHASES.DONE;
@@ -143,11 +169,26 @@ export default function FactwiseBomDirectoryExportDialog({
   // flag in FactwiseProjectExportDialog for why it stays out of `hasError`.
   const needsBomCode = phase === PHASES.BOM_CODE_CONFLICT;
   const hasError = phase === PHASES.ITEMS_ERROR || phase === PHASES.BOM_ERROR;
-  const canStart = !isRunning && !isDone && !needsBomCode;
+  // Both of these are waiting on the user, so neither may start a run:
+  // REVIEW_DIFF wants Confirm/Reject in FW's preview tab, BOM_CODE_CONFLICT
+  // wants a different BOM ID below. Buttons stay disabled either way so the
+  // export can't be accidentally re-started out from under the prompt.
+  const canStart = !isRunning && !isDone && !needsBomCode && phase !== PHASES.REVIEW_DIFF;
 
+  // Pass the revise target into the orchestrator so runBomStep enters
+  // Path A (create R5, upload, REVIEW_DIFF pause, submit) instead of
+  // Path B (fresh-create duplicate). No project fields — this dialog is
+  // BOM-directory-only. confirmRevisionDiff's hasProjectAttach check
+  // will fall to DONE cleanly since no projectId + no reviseBomModuleIds.
   const handleStart = useCallback(() => {
-    runFromCheckpoint({ stopAfterBom: true });
-  }, [runFromCheckpoint]);
+    runFromCheckpoint({
+      stopAfterBom: true,
+      reviseEnterpriseBomId: reviseIntent?.enterpriseBomId || undefined,
+      reviseBomCode: reviseIntent?.bomCode || undefined,
+      reviseBomModuleId: undefined,
+      reviseBomModuleIds: undefined,
+    });
+  }, [runFromCheckpoint, reviseIntent]);
 
   // Replacement BOM IDs supplied — record them and resume at the BOM step.
   const handleBomCodeChosen = useCallback((renames) => {
@@ -162,8 +203,12 @@ export default function FactwiseBomDirectoryExportDialog({
   const handleGridRetrySuccess = useCallback((resp, bulkImportId) => {
     const kind = phase === PHASES.BOM_ERROR ? 'BOM' : 'ITEM';
     markRetrySucceeded(kind, resp, bulkImportId);
-    runFromCheckpoint({ stopAfterBom: true });
-  }, [phase, markRetrySucceeded, runFromCheckpoint]);
+    runFromCheckpoint({
+      stopAfterBom: true,
+      reviseEnterpriseBomId: reviseIntent?.enterpriseBomId || undefined,
+      reviseBomCode: reviseIntent?.bomCode || undefined,
+    });
+  }, [phase, markRetrySucceeded, runFromCheckpoint, reviseIntent]);
 
   // Swap the error grid over to the retry's new bulk_import_id when a
   // Save & retry produces a fresh error state — otherwise the grid stays
@@ -173,6 +218,90 @@ export default function FactwiseBomDirectoryExportDialog({
     const kind = phase === PHASES.BOM_ERROR ? 'BOM' : 'ITEM';
     markRetryFailed(kind, error, bulkImportId, resp);
   }, [phase, markRetryFailed]);
+
+  // -----------------------------------------------------------------------
+  // Comparison hookup (revise-mode only) — mirrors the Project dialog's
+  // wiring. Path A of runBomStep pauses on REVIEW_DIFF after creating R5
+  // and uploading the sheet. This dialog then:
+  //   1. auto-opens FactWise's comparison page in preview mode (a new,
+  //      project-less route added to FW so this BOM-Directory-only flow
+  //      doesn't need to fabricate a project_id in the URL)
+  //   2. listens for the confirm/reject postMessage FW's page sends back
+  //   3. delegates to confirmRevisionDiff / cancelRevisionDiff — which
+  //      run the item upload → process → submit sequence (no attach step
+  //      because this dialog is BOM-Directory-only)
+  // -----------------------------------------------------------------------
+  const { fwOrigin } = useFactwise();
+  const previewPopupRef = useRef(null);
+
+  const handleOpenComparisonInFactwise = useCallback(() => {
+    const params = new URLSearchParams();
+    if (revisedNewEnterpriseBomId) {
+      params.set('preview_enterprise_bom_id', revisedNewEnterpriseBomId);
+    }
+    if (bomBulkImportId) {
+      params.set('preview_bulk_import_id', bomBulkImportId);
+    }
+    if (window.location.origin) {
+      params.set('callback_origin', window.location.origin);
+    }
+    // Project-less preview route — added to FactWise's Accounting.tsx
+    // Switch specifically for this flow. Same BOMComparisonPageClean
+    // component; page.useParams returns undefined project_id and the
+    // preview-mode guard in its fetch effect skips the "missing
+    // project_id" error.
+    const path = `/custom/cost-tracking/bom-revision-preview?${params.toString()}`;
+    const inIframe = window.parent && window.parent !== window;
+    if (inIframe) {
+      postToFactwiseParent('NAVIGATE', { url: path });
+      return;
+    }
+    if (fwOrigin) {
+      const popup = window.open(fwOrigin + path, 'fw_bom_revision_preview');
+      previewPopupRef.current = popup || null;
+    } else {
+      window.location.href = path;
+    }
+  }, [fwOrigin, revisedNewEnterpriseBomId, bomBulkImportId]);
+
+  // Fire the preview redirect the moment we hit REVIEW_DIFF. Same
+  // one-shot guard as the Project dialog so the tab isn't re-opened on
+  // every re-render.
+  const redirectedRef = useRef(false);
+  useEffect(() => {
+    if (!open) { redirectedRef.current = false; return; }
+    if (redirectedRef.current) return;
+    if (phase !== PHASES.REVIEW_DIFF) return;
+    if (!reviseIntent?.enterpriseBomId) return;
+    redirectedRef.current = true;
+    handleOpenComparisonInFactwise();
+  }, [open, phase, reviseIntent, handleOpenComparisonInFactwise]);
+
+  // postMessage listener for confirm/reject from FW's preview page.
+  // Same shape the Project dialog uses.
+  useEffect(() => {
+    if (!open) return undefined;
+    const onMessage = (event) => {
+      if (fwOrigin && event.origin !== fwOrigin) return;
+      const data = event?.data;
+      if (!data || typeof data !== 'object') return;
+      if (data.type === 'FW_REVISION_PREVIEW_CONFIRMED') {
+        confirmRevisionDiff?.();
+        redirectedRef.current = false;
+        const popup = previewPopupRef.current;
+        if (popup && !popup.closed) { try { popup.close(); } catch (_) {} }
+        previewPopupRef.current = null;
+      } else if (data.type === 'FW_REVISION_PREVIEW_REJECTED') {
+        cancelRevisionDiff?.('Revision rejected in FactWise. Adjust the sheet and export again.');
+        redirectedRef.current = false;
+        const popup = previewPopupRef.current;
+        if (popup && !popup.closed) { try { popup.close(); } catch (_) {} }
+        previewPopupRef.current = null;
+      }
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [open, fwOrigin, confirmRevisionDiff, cancelRevisionDiff]);
 
   // Prefer opening the newly-created BOM directly at its admin edit page —
   // that's what the user actually wants to look at after a successful
@@ -275,9 +404,30 @@ export default function FactwiseBomDirectoryExportDialog({
       <DialogContent dividers>
         {stepperContent}
 
+        {/* Revise-mode banner — surfaces the BOM that will be revised so
+            the user can double-check before hitting Start. The intent
+            comes from BomStructureDialog earlier in the flow (mode=revise
+            + project=No selection). If nothing is shown here, this dialog
+            will fresh-create a new BOM instead of revising. */}
+        {reviseIntent && (
+          <Alert severity="info" sx={{ mb: 2 }}>
+            <Typography variant="body2" sx={{ fontWeight: 600 }}>
+              Revising <strong>{reviseIntent.bomCode}</strong> — a new
+              revision will be created in the BOM Directory.
+            </Typography>
+            <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: 'text.secondary' }}>
+              No project will be touched. If you also wanted to move a
+              project's slot to this new revision, close and use
+              &quot;Export to Factwise Project&quot; instead.
+            </Typography>
+          </Alert>
+        )}
+
         <Typography variant="body2" sx={{ mb: 2, color: 'text.secondary' }}>
           {phaseLabel(phase)
-            || 'Click "Start export" to send items to the Item Directory first, then the BOM. The BOM references item codes that must exist in Factwise, so items are imported before it.'}
+            || (reviseIntent
+              ? 'Click "Start export" to send items to the Item Directory, then upload the sheet as a revision — you\'ll review the diff in Factwise before it commits.'
+              : 'Click "Start export" to send items to the Item Directory first, then the BOM. The BOM references item codes that must exist in Factwise, so items are imported before it.')}
         </Typography>
 
         <Stack direction="row" spacing={1} flexWrap="wrap" sx={{ mb: 2 }}>
