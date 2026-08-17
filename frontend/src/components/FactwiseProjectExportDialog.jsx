@@ -422,29 +422,12 @@ export default function FactwiseProjectExportDialog({
     );
   }, [open, pendingIntent, projectBoms, reviseTargetKeys]);
 
-  // Fallback autofill for the cold-open case (no intent, or intent's BOM
-  // not in the picked project). The "Create new BOM in this project"
-  // default option was deleted, so a panel with nothing checked leaves the
-  // Start button disabled with no obvious next step. Auto-check the single
-  // usable revisable BOM when there is exactly one — that's zero-ambiguity
-  // and matches what the intent autofill would have picked. When there are
-  // multiple, we still ask the user rather than silently guess.
-  useEffect(() => {
-    if (!open || modeDraft !== PROJECT_MODES.EXISTING) return;
-    if (!pickedProject?.project_id) return;
-    if (reviseTargetKeys.length) return;         // user (or intent) already picked
-    if (pendingIntent) return;                    // intent autofill still deciding
-    if (projectBomsLoading || !projectBoms.length) return;
-    const usable = projectBoms.filter(b => b.bom_module_id && b.enterprise_bom_id);
-    if (usable.length !== 1) return;              // ambiguous — leave to the user
-    const b = usable[0];
-    setReviseTargetKeys([
-      `${b.bom_module_id}::${b.enterprise_bom_id}::${b.bom_code || ''}`
-    ]);
-  }, [
-    open, modeDraft, pickedProject, projectBoms, projectBomsLoading,
-    pendingIntent, reviseTargetKeys,
-  ]);
+  // Fallback autofill (auto-check the single revisable BOM) was removed
+  // 2026-08-17 — EXISTING mode no longer requires a revise target, so an
+  // unchecked panel is a valid "attach as a fresh new BOM in this project"
+  // choice. Auto-checking hid that option from the user, forcing revise
+  // whenever the project had exactly one BOM. Intent-driven autofill (a
+  // Revise: X pick from BomStructureDialog) still runs above.
 
   const activeStep = phaseToStepIndex(phase);
   const isDone = phase === PHASES.DONE;
@@ -466,12 +449,12 @@ export default function FactwiseProjectExportDialog({
     !isRunning && !isDone && !isAwaitingReview && !needsBomCode && (
       modeDraft === PROJECT_MODES.NEW
         ? !!nameDraft?.trim() && !!pickedTemplate?.template_id
-        // Existing-project mode now REQUIRES picking a BOM to revise from
-        // the project. The "Create new BOM in this project" option was
-        // deleted (produced a duplicate BOM under the same FG instead of
-        // an update). Without a revise target the orchestrator hard-errors,
-        // so gate the button here to make the requirement visible up front.
-        : (!!pickedProject?.project_id && reviseTargetKeys.length > 0)
+        // Existing-project mode: revise-target is OPTIONAL. Picking one or
+        // more revises those slots; leaving them all unchecked attaches the
+        // mapper's BOM to the project as a fresh new BOM (uses
+        // runAttachBomStep's "no revise slots" branch). The user asked for
+        // this shape 2026-08-17.
+        : !!pickedProject?.project_id
     );
 
   // A project restored from a checkpoint or carried over from the upload dialog
@@ -964,10 +947,10 @@ export default function FactwiseProjectExportDialog({
                           routes through the handoff + revision-preview
                           diff and lets FactWise move the slot in place. */}
                       {revisableBoms.length === 0 ? (
-                        <Typography variant="caption" sx={{ color: 'error.main', ml: 4 }}>
+                        <Typography variant="caption" sx={{ color: 'text.secondary', ml: 4 }}>
                           {projectBoms.length
-                            ? 'No BOM in this project can be revised by this sheet. Pick a different project, or open the source BOM in FactWise first.'
-                            : 'This project has no BOMs to revise. Exporting into an existing project requires revising one of its BOMs — pick a different project or create a new one instead.'}
+                            ? 'No BOM in this project can be revised by this sheet. Click Start export to attach the mapper\'s BOM as a fresh new BOM in this project instead.'
+                            : 'This project has no BOMs to revise. Click Start export to attach the mapper\'s BOM as a fresh new BOM in this project.'}
                         </Typography>
                       ) : (
                         revisableBoms.map((b) => {
@@ -1002,9 +985,11 @@ export default function FactwiseProjectExportDialog({
                   </FormControl>
                 )}
                 <Typography variant="caption" sx={{ display: 'block', mt: 0.75, color: 'text.secondary' }}>
-                  {reviseTargetKeys.length > 1
-                    ? `Revising creates one new revision in the BOM directory and repoints all ${reviseTargetKeys.length} selected slots to it, one at a time. A failure partway leaves the earlier ones moved.`
-                    : 'Revising creates a new revision in the BOM directory and repoints this project\'s BOM to it. Both places are updated.'}
+                  {reviseTargetKeys.length === 0
+                    ? 'Leave everything unchecked to attach the mapper\'s BOM as a fresh new BOM in this project (no revise).'
+                    : reviseTargetKeys.length > 1
+                      ? `Revising creates one new revision in the BOM directory and repoints all ${reviseTargetKeys.length} selected slots to it, one at a time. A failure partway leaves the earlier ones moved.`
+                      : 'Revising creates a new revision in the BOM directory and repoints this project\'s BOM to it. Both places are updated.'}
                   {lockedBaseBomId && projectBoms.length > revisableBoms.length
                     ? ' Only BOMs that are revisions of the same BOM are listed — FactWise rejects anything else.'
                     : ''}
@@ -1020,11 +1005,7 @@ export default function FactwiseProjectExportDialog({
               ? 'Click "Start export" to send items, BOM, and create the project.'
               : reviseTargetKeys.length
                 ? `Click "Start export" to send items and revise ${reviseTargetKeys.length === 1 ? 'the picked BOM' : `the ${reviseTargetKeys.length} picked BOMs`} inside this project.`
-                // The old "attach as a new module" fallback used to live here
-                // — deleted with the "Create new BOM in this project" option.
-                // Existing-project exports must revise a BOM now, so this
-                // branch prompts the user to make that choice instead.
-                : 'Pick which BOM in this project to revise, then click "Start export".')}
+                : 'Click "Start export" to attach the mapper\'s BOM as a fresh new BOM in this project.')}
         </Typography>
 
         {/* Progress summary */}

@@ -2307,9 +2307,26 @@ const rowLooksLikeSectionTitle = (row, headers, roles) => {
 // where keying on part number produces exactly the same groups.
 const alternatesKey = (row, roles, sourceRow) => {
   // WHAT the part is.
-  const identity = getCell(row, roles.cpn)
-    || getCell(row, roles.description)
-    || `Source row ${sourceRow}`;
+  //
+  // Prefer MPN + manufacturer (the pair the FactWise ID rule builds the item
+  // code from later, so this is item identity at normalization time). Rows
+  // with different MPN or different manufacturer therefore stay as separate
+  // BOM lines — an AML sheet listing three approved suppliers for one
+  // position no longer collapses into "one line + two alternates", it
+  // becomes three lines, one per approved MPN.
+  //
+  // Fall back to CPN or description when neither MPN nor manufacturer is
+  // present (assembly parents, sub-BOM rows, notes rows). Only rows that
+  // are byte-identical on (parent, mpn, manufacturer) — or on (parent, cpn)
+  // when MPN is missing — collapse now, which is the shape the user asked
+  // for 2026-08-17.
+  const mpn = getCell(row, roles.mpn);
+  const manufacturer = getCell(row, roles.manufacturer);
+  const identity = (mpn || manufacturer)
+    ? `${mpn}|${manufacturer}`
+    : (getCell(row, roles.cpn)
+      || getCell(row, roles.description)
+      || `Source row ${sourceRow}`);
 
   // ...and WHERE it sits. A BOM line is identified by both, and keying on either
   // one alone collapses rows that are not the same line:

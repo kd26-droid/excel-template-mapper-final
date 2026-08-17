@@ -1223,7 +1223,7 @@ export async function attachBomToProject({
     const bom = detailResp?.data || {};
     const project = projectResp?.data || {};
     const bomItems = Array.isArray(bom.bom_items) ? bom.bom_items : [];
-    const projectBomItems = flattenBomItemsForProject(bomItems);
+    let projectBomItems = flattenBomItemsForProject(bomItems);
 
     // Step 1c: fetch the project template so we can look up the ACTUAL name
     // FW's UI expects for the BOM_TERMS custom_section. FW UI's Submit
@@ -1295,17 +1295,57 @@ export async function attachBomToProject({
         .filter((s) => /^bom(\s|$)/i.test(String(s?.name || '').trim()))
         .sort((a, b) => String(b?.name || '').length - String(a?.name || '').length);
     }
+    // Rebuild each section from the project's own custom_sections entry so it
+    // carries the FULL custom_fields shape FW's UI sends — name/type/value/
+    // is_locked/is_visible/is_required/is_negotiable/description per field,
+    // with `value: null`. Verified 2026-08-16 against a manual "Add BOM"
+    // network trace: FW UI sends the section identically at top level AND on
+    // every sub-BOM-parent item. Sending `custom_fields: []` created linkage
+    // rows without the field entries the project template expects, breaking
+    // downstream Submit; copying whatever the BOM's `item.custom_sections`
+    // carried let names like "BOM Details" through, which crashed FW's
+    // add_section_id_via_name because the project's BOM-scope name map
+    // (scoped to project_id + section_type=BOM) doesn't contain them.
+    const buildSectionFields = (section) => {
+      const fields = Array.isArray(section?.custom_fields)
+        ? section.custom_fields
+        : (Array.isArray(section?.customFields) ? section.customFields : []);
+      return fields.map((field) => ({
+        name: field?.name || '',
+        type: field?.type || 'TEXT',
+        value: null,
+        is_locked: field?.is_locked !== undefined
+          ? Boolean(field.is_locked)
+          : Boolean(field?.isLocked ?? true),
+        is_visible: field?.is_visible !== undefined
+          ? Boolean(field.is_visible)
+          : Boolean(field?.isVisible ?? true),
+        is_required: field?.is_required !== undefined
+          ? Boolean(field.is_required)
+          : Boolean(field?.isRequired ?? false),
+        is_negotiable: field?.is_negotiable !== undefined
+          ? Boolean(field.is_negotiable)
+          : Boolean(field?.isNegotiable ?? false),
+        description: field?.description || '',
+      }));
+    };
     const outgoingCustomSections = bomSectionMatches.length
       ? bomSectionMatches.map((s) => ({
           name: s.name,
           section_type: 'BOM',
-          // Empty fields — matches what FW's own UI sends when the BOM
-          // template has no custom fields. FW's server iterates our list
-          // and creates the linkage row keyed by name; per-field values
-          // are set to their defaults from the template.
-          custom_fields: [],
+          custom_fields: buildSectionFields(s),
         }))
       : [];
+
+    // Every sub-BOM parent item carries the SAME sections shape. Replace
+    // whatever the BOM detail's `item.custom_sections` had (which may name
+    // sections not registered on this project's template) with the
+    // project-derived list. Leaves don't get custom_sections at all — FW UI
+    // omits them there.
+    projectBomItems = projectBomItems.map((pbi) => {
+      if (!Array.isArray(pbi?.custom_sections)) return pbi;
+      return { ...pbi, custom_sections: outgoingCustomSections };
+    });
 
     // Prefer the BOM's own currency/quantity/total when caller didn't pass
     // one — the "Add BOM" popup does the same.
