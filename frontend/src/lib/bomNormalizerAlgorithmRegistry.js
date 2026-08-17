@@ -5,6 +5,8 @@ export const ROLE_FIELDS = [
   { key: 'description', label: 'Description / item name' },
   { key: 'quantity', label: 'Quantity' },
   { key: 'uom', label: 'UOM' },
+  { key: 'notes', label: 'Notes' },
+  { key: 'internalNotes', label: 'Internal notes' },
   { key: 'level', label: 'BOM level' },
   { key: 'parent', label: 'Parent / group key' },
 ];
@@ -83,18 +85,18 @@ export const ALTERNATE_LAYOUT_OPTIONS = [
   },
   {
     value: 'already_separate_rows',
-    label: 'Each source row is already one BOM row',
-    description: 'Use this when pipe-separated values should stay in the same row instead of becoming alternates.',
+    label: 'Each row is already a final BOM row',
+    description: 'Use this when every source row should stay as its own output row. The normalizer will not group nearby rows as alternates.',
   },
   {
     value: 'same_group_rows',
-    label: 'Rows with the same group key are alternates',
-    description: 'Use this when each row has one MPN/MFR pair, but repeated item/group details mean the later rows are alternates of the first row.',
+    label: 'Same group key means alternates',
+    description: 'Use this when rows with the same parent/group/item key are the same part: first row is Primary, later rows become alternates.',
   },
   {
     value: 'following_rows',
     label: 'Alternates are in following rows',
-    description: 'Use this when alternate values appear in rows below the main BOM row, often in a different column.',
+    description: 'Use this when a main BOM row is followed by one or more alternate rows, often in a separate column such as Niv.',
   },
 ];
 

@@ -3461,6 +3461,13 @@ def save_mappings(request):
             )
             logger.info(f"✅ Column mappings applied in save_mappings: {len(mapping_result.get('headers', []))} headers, {len(mapping_result.get('data', []))} rows")
 
+            # A Review from Column Mapping is a new mapped-grid boundary. Any
+            # editor snapshots from a previous Review must not win over the
+            # freshly applied mappings, otherwise a deleted edge can still look
+            # populated in the editor (for example Notes -> Notes).
+            for stale_grid_key in ("edited_data", "enhanced_data", "formula_enhanced_data"):
+                info.pop(stale_grid_key, None)
+
             # Store mapped data as both mapped_data and formula_enhanced_data
             info["mapped_data"] = mapping_result['data']
             info["mapped_headers"] = mapping_result['headers']

@@ -41,6 +41,7 @@ import {
   TableHead,
   TableRow,
   TextField,
+  Tooltip,
   Typography,
 } from '@mui/material';
 import CloudUploadIcon from '@mui/icons-material/CloudUpload';
@@ -408,6 +409,25 @@ const getCellStyleInfo = (cell = {}) => {
 
 const hasCellStyleInfo = (styleInfo = {}) => Boolean(styleInfo.red || styleInfo.strike);
 
+const looksLikeStackedPartIdentifierLine = (value) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ').trim();
+  if (!text || !/[0-9]/.test(text)) return false;
+  const tokens = text.split(/\s+/).filter(Boolean);
+  if (!tokens.length || tokens.length > 3) return false;
+  return tokens.every((token) => /^[A-Z]{0,4}[A-Z0-9][A-Z0-9._/-]{2,24}$/i.test(token));
+};
+
+const cleanStackedPartIdentifierCell = (value) => {
+  const lines = fmt(value)
+    .replace(/\u00a0/g, ' ')
+    .split(/\r?\n+/)
+    .map(fmt)
+    .filter(Boolean);
+  if (lines.length < 2) return fmt(value);
+  if (!lines.every(looksLikeStackedPartIdentifierLine)) return fmt(value);
+  return lines[lines.length - 1];
+};
+
 const applyMergedCellValues = (worksheet, valuesByCell, usedColumns, metaByRow, metaByCell) => {
   const merges = Array.isArray(worksheet?.['!merges']) ? worksheet['!merges'] : [];
   let maxMergedRow = -1;
@@ -684,8 +704,12 @@ const buildSinglePairPatternShape = (value, pair = {}) => {
 
   let mpnSide = manufacturerSegment.before;
   let qualifierCount = 0;
+  let slashSuffixQualifier = false;
   let qualifierSegment = popTrailingParenthesizedSegment(mpnSide);
   while (qualifierSegment) {
+    if (qualifierCount === 0 && parseSlashSuffixVariantGroup(qualifierSegment.inside).length) {
+      slashSuffixQualifier = true;
+    }
     qualifierCount += 1;
     mpnSide = qualifierSegment.before;
     qualifierSegment = popTrailingParenthesizedSegment(mpnSide);
@@ -699,7 +723,12 @@ const buildSinglePairPatternShape = (value, pair = {}) => {
   let shape = '<MPN>';
   if (atSeparator) shape += ' @';
   if (hasAtVariant) shape += '@<TEXT>';
-  if (qualifierCount) shape += ` ${Array.from({ length: qualifierCount }, () => '(<QUALIFIER>)').join(' ')}`;
+  if (slashSuffixQualifier) {
+    shape += ' (/<SUFFIX> repeated)';
+    if (qualifierCount > 1) shape += ` ${Array.from({ length: qualifierCount - 1 }, () => '(<QUALIFIER>)').join(' ')}`;
+  } else if (qualifierCount) {
+    shape += ` ${Array.from({ length: qualifierCount }, () => '(<QUALIFIER>)').join(' ')}`;
+  }
   if (hasSlashVariant) shape += ' / <TEXT>';
   shape += ' (<MFR>)';
 
@@ -733,6 +762,67 @@ const splitQualifiedMpnSide = (value, hasStatusRefBlocks = false) => {
   return {
     mpn,
     discarded,
+  };
+};
+
+const cleanSlashVariantBaseMpn = (value) => fmt(value)
+  .replace(/\s*@\s*$/g, '')
+  .replace(/[,\s]+$/g, '')
+  .trim();
+
+const parseSlashSuffixVariantGroup = (value) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ');
+  if (!text || !text.includes('/')) return [];
+  const cleanText = text.trim();
+  const parts = cleanText
+    .split('/')
+    .map((part) => fmt(part).replace(/^[-_]+|[-_]+$/g, ''))
+    .filter(Boolean);
+  if (parts.length < 2) return [];
+  if (!cleanText.startsWith('/') && parts.length !== cleanText.split('/').length) return [];
+  if (!parts.every((part) => /^[A-Z0-9._-]{1,16}$/i.test(part) && !/\s/.test(part))) return [];
+  return parts;
+};
+
+const detectSlashSuffixVariantExpansion = (value) => {
+  const source = fmt(value).replace(/\u00a0/g, ' ');
+  if (!source || !source.includes('@') || !source.includes('/')) return null;
+
+  const { core, blocks } = stripTrailingStatusRefBlocks(source);
+  const manufacturerSegment = popTrailingParenthesizedSegment(core);
+  if (!manufacturerSegment) return null;
+
+  const manufacturer = fmt(manufacturerSegment.inside);
+  if (!manufacturer || !/[A-Za-z]/.test(manufacturer)) return null;
+
+  const variantSegment = popTrailingParenthesizedSegment(manufacturerSegment.before);
+  if (!variantSegment) return null;
+  if (!/\s*@\s*$/.test(variantSegment.before)) return null;
+
+  const suffixes = parseSlashSuffixVariantGroup(variantSegment.inside);
+  if (!suffixes.length) return null;
+
+  const baseMpn = cleanSlashVariantBaseMpn(variantSegment.before);
+  if (!baseMpn || !/[0-9]/.test(baseMpn)) return null;
+  if (!looksLikeMpnToken(baseMpn) && !looksLikeParenthesizedMpn(baseMpn)) return null;
+
+  const expandedMpns = [baseMpn, ...suffixes.map((suffix) => `${baseMpn}${suffix}`)]
+    .map(stripVendorPrefix)
+    .filter(Boolean);
+  const uniqueMpns = [...new Set(expandedMpns.map((mpn) => fmt(mpn)))];
+  if (uniqueMpns.length < 2) return null;
+
+  return {
+    source,
+    baseMpn,
+    manufacturer,
+    suffixes,
+    mpns: uniqueMpns,
+    pairs: uniqueMpns.map((mpn) => ({
+      mpn,
+      manufacturer,
+      metadata: blocks.length ? { discardedText: blocks.join(' ') } : {},
+    })),
   };
 };
 
@@ -814,6 +904,7 @@ const describePatternShape = (shape = '') => {
   const rules = ['Extract every <MPN> and <MFR> pair from values matching this shape.'];
   if (shape.includes(' @')) rules.push('Ignore @ as a separator before reading the manufacturer bracket.');
   if (shape.includes('@<TEXT>')) rules.push('Treat text after @ as ignored package/variant text.');
+  if (shape.includes('/<SUFFIX>')) rules.push('Slash suffix variants can be expanded into primary plus alternate MPNs when selected.');
   if (shape.includes('<QUALIFIER>')) rules.push('Treat qualifier brackets before the manufacturer as ignored package/variant text.');
   if (shape.includes('^')) rules.push('Treat ^ as a repeated alternate separator.');
   if (shape.includes('<MFR>') && shape.includes(': <MPN>')) rules.push('Read text before : as Manufacturer and text after : as MPN.');
@@ -1041,6 +1132,21 @@ const inferRoles = (headers, dataRows = [], options = {}) => {
     : '';
   const manufacturerHeader = namedManufacturerSafe || learnedManufacturerSafe || scoredManufacturerHeader ||
     (structuredMpnMfrHeader && structuredMpnMfrHeader === mpnHeader ? structuredMpnMfrHeader : '');
+  const internalNotesHeader = findLearnedHeader('internalNotes') || findHeader([
+    /^internal\s+notes?$/,
+    /^internal\s+remarks?$/,
+    /^internal\s+comments?$/,
+    /^private\s+notes?$/,
+    /^engineering\s+notes?$/,
+  ]);
+  const notesHeader = findLearnedHeader('notes') || findHeader([
+    /^notes?$/,
+    /^remarks?$/,
+    /^comments?$/,
+    /^comment$/,
+    /customer\s+notes?/,
+    /bom\s+notes?/,
+  ], [/internal/, /private/]);
   const followingMfgPartsLayout = detectFollowingRowMfgPartsLayout(headers, dataRows.slice(0, 120), {
     description: findLearnedHeader('description') || findHeader([/description/, /item name/, /\bname\b/]),
   });
@@ -1052,6 +1158,8 @@ const inferRoles = (headers, dataRows = [], options = {}) => {
     description: findLearnedHeader('description') || findHeader([/description/, /item name/, /\bname\b/]),
     quantity: findLearnedHeader('quantity') || findHeader([/quantity/, /\bqty\b/, /\bqnty\b/, /^count$/, /\bcount\b/]),
     uom: findLearnedHeader('uom') || findHeader([/\buom\b/, /measurement unit/, /\bunit\b/]),
+    notes: notesHeader,
+    internalNotes: internalNotesHeader,
     level: headers.find((header) => normalizeKey(header).startsWith(normalizeKey(EXCEL_OUTLINE_LEVEL_HEADER)))
       || (findLearnedHeader('level') || findHeader([/\blevel\b/])),
     // `parent` must not match this app's OWN `parentKey` column. That is the
@@ -1119,15 +1227,6 @@ const parseCircledNumberSegments = (value) => {
   }
 
   const segments = [];
-  const leadingValue = stripCircledNumberMarkers(text.slice(0, markers[0].start));
-  if (leadingValue) {
-    segments.push({
-      marker: '',
-      number: 0,
-      value: leadingValue,
-    });
-  }
-
   markers.forEach((marker, index) => {
     const next = markers[index + 1];
     const rawValue = text.slice(marker.valueStart, next ? next.start : text.length);
@@ -1142,6 +1241,64 @@ const parseCircledNumberSegments = (value) => {
   });
 
   return segments;
+};
+
+const deletedCircledNumbersFromRemarks = (remarks) => {
+  const text = fmt(remarks).replace(/\u00a0/g, ' ');
+  if (!text) return new Set();
+  const deleted = new Set();
+  CIRCLED_NUMBER_RE.lastIndex = 0;
+  let match = CIRCLED_NUMBER_RE.exec(text);
+  while (match) {
+    const markerNumber = circledNumberIndex(match[0]);
+    const context = text.slice(Math.max(0, match.index - 18), Math.min(text.length, match.index + 18));
+    if (/(?:delete(?:d)?|remove(?:d)?|\u524a\u9664)/i.test(context)) {
+      deleted.add(markerNumber);
+    }
+    match = CIRCLED_NUMBER_RE.exec(text);
+  }
+  CIRCLED_NUMBER_RE.lastIndex = 0;
+  return deleted;
+};
+
+const nonEmptyTextLines = (value) => fmt(value)
+  .replace(/\u00a0/g, ' ')
+  .split(/\r?\n+/)
+  .map(fmt)
+  .filter(Boolean);
+
+const hasLeadingTextBeforeFirstCircledNumber = (value) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ');
+  CIRCLED_NUMBER_RE.lastIndex = 0;
+  const match = CIRCLED_NUMBER_RE.exec(text);
+  CIRCLED_NUMBER_RE.lastIndex = 0;
+  return Boolean(match && stripCircledNumberMarkers(text.slice(0, match.index)));
+};
+
+const removeLeadingUnnumberedLineWhenCompanionIsNumbered = (value, companionValue) => {
+  if (parseCircledNumberSegments(value).length) return fmt(value);
+  const companionSegments = parseCircledNumberSegments(companionValue);
+  if (!companionSegments.length || !hasLeadingTextBeforeFirstCircledNumber(companionValue)) return fmt(value);
+
+  const lines = nonEmptyTextLines(value);
+  if (lines.length !== companionSegments.length + 1) return fmt(value);
+  return lines.slice(1).join('\n');
+};
+
+const removeDeletedCircledSegments = (value, remarks) => {
+  const segments = parseCircledNumberSegments(value);
+  const deletedNumbers = deletedCircledNumbersFromRemarks(remarks);
+  if (!segments.length) {
+    if (!deletedNumbers.size) return fmt(value);
+    const lines = nonEmptyTextLines(value);
+    if (lines.length <= 1) return fmt(value);
+    const keptLines = lines.filter((_, index) => !deletedNumbers.has(index + 1));
+    return keptLines.length ? keptLines.join('\n') : '';
+  }
+  const keptSegments = segments
+    .filter((segment) => !deletedNumbers.has(segment.number));
+  if (!keptSegments.length) return '';
+  return keptSegments.map((segment) => `${segment.marker || ''}${segment.value}`).join('\n');
 };
 
 const normalizeMpnParts = (parts) => parts
@@ -1760,6 +1917,40 @@ const parsePackedMpnManufacturerPairs = (value, config = {}) => {
   return parsed.length >= 1 && parsed.length === parts.length ? parsed : [];
 };
 
+const slashVariantExpansionsInSource = (value) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ');
+  if (!text) return [];
+  const entries = splitStructuredMpnMfrEntries(text);
+  const candidates = entries.length ? entries : [text];
+  return candidates
+    .map((entry) => detectSlashSuffixVariantExpansion(entry))
+    .filter(Boolean);
+};
+
+const expandSlashVariantsForSource = (value, config = {}) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ');
+  if (!text) return { pairs: [], expansions: [] };
+  const entries = splitStructuredMpnMfrEntries(text);
+  const candidates = entries.length ? entries : [text];
+  const expansions = [];
+  const pairs = [];
+
+  candidates.forEach((entry) => {
+    const expansion = detectSlashSuffixVariantExpansion(entry);
+    if (expansion?.pairs?.length) {
+      expansions.push(expansion);
+      pairs.push(...expansion.pairs);
+      return;
+    }
+    pairs.push(...parsePackedMpnManufacturerPairs(entry, config));
+  });
+
+  return {
+    pairs: pairs.filter((pair) => pair?.mpn && pair?.manufacturer),
+    expansions,
+  };
+};
+
 const sameParsedPair = (left = {}, right = {}) => (
   fmt(left.mpn).toUpperCase() === fmt(right.mpn).toUpperCase() &&
   fmt(left.manufacturer).toUpperCase() === fmt(right.manufacturer).toUpperCase()
@@ -2067,8 +2258,7 @@ const rowLooksLikeDoNotPopulate = (row, headers) => {
 
 const rowLooksLikeDeleted = (row, headers) => {
   if (row.__deletedRowStyle || row.__redRowStyle || row.__strikeRowStyle) return true;
-  const text = rowValues(row, headers).join(' ').toLowerCase();
-  return /\b(deleted|delete|removed|obsolete|cancelled|canceled)\b/.test(text);
+  return false;
 };
 
 const rowLooksLikeSectionTitle = (row, headers, roles) => {
@@ -2206,12 +2396,18 @@ const confidenceForRow = (mpn, manufacturer, ruleId) => {
 
 const withSourceColumns = (normalizedRow, sourceRow, config = {}) => {
   const sourceHeaders = Array.isArray(config.sourceHeaders) ? config.sourceHeaders : [];
-  if (!sourceHeaders.length) return normalizedRow;
+  const roleOutputHeaders = config.roleOutputHeaders || {};
+  const carried = { ...normalizedRow };
+  Object.entries(roleOutputHeaders).forEach(([outputHeader, sourceHeader]) => {
+    if (!outputHeader || !sourceHeader) return;
+    if (Object.prototype.hasOwnProperty.call(carried, outputHeader) && fmt(carried[outputHeader])) return;
+    carried[outputHeader] = sourceRow?.[sourceHeader] ?? '';
+  });
+  if (!sourceHeaders.length) return carried;
   const consumedSourceHeaders = config.consumedSourceHeaders instanceof Set
     ? config.consumedSourceHeaders
     : new Set((config.consumedSourceHeaders || []).map(normalizeKey));
 
-  const carried = { ...normalizedRow };
   sourceHeaders.forEach((header) => {
     if (!header || header.startsWith('__')) return;
     if (consumedSourceHeaders.has(normalizeKey(header))) return;
@@ -2748,6 +2944,7 @@ const getConsumedSourceHeaders = (roles = {}, config = {}, headers = []) => {
 const normalizeFollowingRows = (rows, roles, config = {}) => {
   const output = [];
   const alternateColumn = config.followingRowAlternateColumn || '';
+  const includeInsideCellAlternates = config.includeInsideCellAlternatesWithFollowingRows !== false;
   const followingMfgPartsLayout = detectFollowingRowMfgPartsLayout(config.sourceHeaders || [], rows, roles);
   const levelColumns = followingMfgPartsLayout?.levelColumns || [];
   const hierarchyStack = [];
@@ -2799,15 +2996,19 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
     const mpnManualParse = getManualPatternParse(row, roles.mpn, config);
     const manufacturerPackedPairs = getPatternAwarePackedPairs(row, roles.manufacturer, rawManufacturer, config);
     const mpnPackedPairs = getPatternAwarePackedPairs(row, roles.mpn, rawMpn, config);
-    const packedPairs = manufacturerPackedPairs.length ? manufacturerPackedPairs : mpnPackedPairs;
+    let packedPairs = manufacturerPackedPairs.length ? manufacturerPackedPairs : mpnPackedPairs;
+    if (!includeInsideCellAlternates && packedPairs.length > 1) {
+      packedPairs = packedPairs.slice(0, 1);
+    }
     if (packedPairs.length) return { packedPairs, mpns: [], manufacturers: [] };
     if (manufacturerManualParse || mpnManualParse) return { packedPairs: [], mpns: [], manufacturers: [] };
 
     const mpns = parseStandaloneMpnText(rawMpn);
+    const scopedMpns = includeInsideCellAlternates ? mpns : mpns.slice(0, 1);
     const manufacturers = mpns.length
-      ? splitManufacturerCell(rawManufacturer, mpns.length, config)
+      ? splitManufacturerCell(rawManufacturer, scopedMpns.length, config)
       : [];
-    return { packedPairs: [], mpns, manufacturers };
+    return { packedPairs: [], mpns: scopedMpns, manufacturers };
   };
 
   const getLevelItemInfo = (row) => {
@@ -2869,6 +3070,18 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
       !ignoredHeaders.has(normalizeKey(header)) &&
       getCell(row, header)
     ));
+  };
+
+  const hasSameRowAlternateContext = (row) => {
+    const levelInfo = getLevelItemInfo(row);
+    if (levelInfo?.cpn) return true;
+    return Boolean(
+      getCell(row, roles.parent) ||
+      getCell(row, roles.cpn) ||
+      getCell(row, roles.description) ||
+      getCell(row, roles.quantity) ||
+      getCell(row, roles.uom)
+    );
   };
 
   const emitContextPrimary = (row, rowIndex) => {
@@ -2958,12 +3171,19 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
       primaryParts.packedPairs.length ||
       primaryParts.mpns.length
     );
-    const followingAlternatePairs = alternateColumn && alternateText && !rowHasNormalPart && currentGroup
+    const sameRowAlternateGroup = alternateColumn && alternateText && !rowHasNormalPart && hasSameRowAlternateContext(row)
+      ? groupValuesFromContext(row, rowIndex)
+      : null;
+    const activeGroup = sameRowAlternateGroup || currentGroup;
+    const followingAlternatePairs = alternateColumn && alternateText && !rowHasNormalPart && activeGroup
       ? parseAlternateText(row, alternateText)
       : [];
     const rowLooksLikeFollowingAlternate = followingAlternatePairs.length > 0;
 
     if (rowLooksLikeFollowingAlternate) {
+      if (sameRowAlternateGroup) {
+        currentGroup = sameRowAlternateGroup;
+      }
       followingAlternatePairs.forEach((pair) => {
         const relationIndex = Number.isFinite(Number(currentGroup.relationCount))
           ? Number(currentGroup.relationCount)
@@ -3639,6 +3859,10 @@ const normalizeRows = (rows, headers, roles, config) => {
     ...config,
     assemblyMatrix,
     sourceHeaders: headers,
+    roleOutputHeaders: {
+      Notes: roles.notes,
+      'Internal notes': roles.internalNotes,
+    },
     consumedSourceHeaders: getConsumedSourceHeaders(roles, { ...config, assemblyMatrix }, headers),
   };
   if (layoutStructure === 'assembly_quantity_matrix') {
@@ -4719,20 +4943,24 @@ const buildMultiBlockRowsForSheet = (currentWorkbook, currentSheetName) => {
       const row = rows[rowIndex] || [];
       if (!row.some((cell) => fmt(cell))) continue;
       if (rowLooksLikeMultiBlockHeader(row)) continue;
+      const remarks = cellAtIndex(row, columnMap.remarks);
+      const rawManufacturer = cellAtIndex(row, columnMap.manufacturer);
+      const rawMpn = cellAtIndex(row, columnMap.mpn);
+      const alignedMpn = removeLeadingUnnumberedLineWhenCompanionIsNumbered(rawMpn, rawManufacturer);
 
       const baseValues = {
         'Source sheet': currentSheetName,
         'BOM block': block.name,
         'Block codes': block.codes.join(', '),
         Item: cellAtIndex(row, columnMap.item),
-        'Reference D/N': cellAtIndex(row, columnMap.reference),
+        'Reference D/N': stripCircledNumberMarkers(cleanStackedPartIdentifierCell(cellAtIndex(row, columnMap.reference))),
         Description: cellAtIndex(row, columnMap.description),
         Specification: cellAtIndex(row, columnMap.specification),
         'Other specification:HKK Request': cellAtIndex(row, columnMap.otherSpecification),
         'Part number': cellAtIndex(row, columnMap.partNumber),
-        'Parts Maker': cellAtIndex(row, columnMap.manufacturer),
-        'Parts Name': cellAtIndex(row, columnMap.mpn),
-        Remarks: cellAtIndex(row, columnMap.remarks),
+        'Parts Maker': removeDeletedCircledSegments(rawManufacturer, remarks),
+        'Parts Name': removeDeletedCircledSegments(alignedMpn, remarks),
+        Remarks: remarks,
         __multiBlockMode: '1',
         __blockId: block.id,
         __blockTitle: block.title,
@@ -5507,7 +5735,7 @@ const SourcePreview = ({ headers, rows, getHeaderLabel = (header) => header, ass
           {rows.map((row, index) => (
             <TableRow key={`source-${index}`}>
               {previewHeaders.map((header) => (
-                <TableCell key={header} sx={{ minWidth: 170, maxWidth: 260, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', color: tableTone.text, borderColor: tableTone.border, ...sourceCellStyleSx(row, header) }}>
+                <TableCell key={header} sx={{ minWidth: 170, maxWidth: 260, whiteSpace: 'pre-line', overflow: 'hidden', textOverflow: 'ellipsis', color: tableTone.text, borderColor: tableTone.border, ...sourceCellStyleSx(row, header) }}>
                   {displaySourceCellValue(row[header], header, assemblyMatrix)}
                 </TableCell>
               ))}
@@ -6295,6 +6523,7 @@ const BomNormalizer = () => {
     skipDeletedRows: true,
     alternateColumnGroups: [],
     followingRowAlternateColumn: '',
+    includeInsideCellAlternatesWithFollowingRows: true,
   });
   const [normalizedRows, setNormalizedRows] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -6528,6 +6757,47 @@ const BomNormalizer = () => {
     [config.alternateLayout]
   );
 
+  const followingRowsInsideCellAlternateInfo = useMemo(() => {
+    if (config.alternateLayout !== 'following_rows') return null;
+    const sourceHeaders = [...new Set([roles.mpn, roles.manufacturer].filter(Boolean))]
+      .filter((header) => normalizeKey(header) !== normalizeKey(config.followingRowAlternateColumn));
+    if (!sourceHeaders.length) return null;
+
+    let matchedRows = 0;
+    let example = null;
+    dataRows.forEach((row) => {
+      if (matchedRows > 25) return;
+      const hasInsideAlternates = sourceHeaders.some((header) => {
+        const value = getCell(row, header);
+        if (!value) return false;
+        const packedPairs = getPatternAwarePackedPairs(row, header, value, normalizerConfig);
+        if (packedPairs.length > 1) return true;
+        return splitMpnCell(value, normalizerConfig).length > 1;
+      });
+      if (!hasInsideAlternates) return;
+      matchedRows += 1;
+      if (!example) {
+        const header = sourceHeaders.find((candidate) => {
+          const value = getCell(row, candidate);
+          return value && (
+            getPatternAwarePackedPairs(row, candidate, value, normalizerConfig).length > 1 ||
+            splitMpnCell(value, normalizerConfig).length > 1
+          );
+        });
+        example = {
+          header,
+          value: header ? getCell(row, header) : '',
+        };
+      }
+    });
+
+    if (!matchedRows) return null;
+    return {
+      matchedRows,
+      example,
+    };
+  }, [config.alternateLayout, config.followingRowAlternateColumn, dataRows, normalizerConfig, roles.manufacturer, roles.mpn]);
+
   const selectedDelimiterOption = useMemo(
     () => DELIMITER_OPTIONS.find((option) => option.value === config.delimiterMode),
     [config.delimiterMode]
@@ -6658,13 +6928,16 @@ const BomNormalizer = () => {
 
     if (config.alternateLayout === 'following_rows') {
       rules.push(`2. Attach values from ${config.followingRowAlternateColumn || 'the selected following-row column'} to the nearest previous primary row`);
+      if (config.includeInsideCellAlternatesWithFollowingRows !== false) {
+        rules.push('3. Also split multi-entry values in the selected MPN/MFR cells when detected');
+      }
     } else if (config.structure === 'same_cell' || config.structure === 'separate_cells') {
       rules.push('2. Split alternates on ^, then split each pair on the first valid comma');
     } else {
       rules.push('2. Group repeated part rows as primary plus alternates');
     }
 
-    rules.push('3. Remove status notes from MFR names, keep only clean MPN/MFR output');
+    rules.push(`${rules.length + 1}. Remove status notes from MFR names, keep only clean MPN/MFR output`);
     return rules;
   }, [config, roles.manufacturer, roles.mpn]);
 
@@ -6925,6 +7198,9 @@ const BomNormalizer = () => {
     () => stagedEditForPattern(selectedParsingPattern),
     [selectedParsingPattern, stagedEditForPattern]
   );
+  const selectedSlashVariantStaged = Boolean(
+    selectedPatternStagedEdit && String(selectedPatternStagedEdit.summary || '').includes('slash variants')
+  );
 
   const selectedParsingPatternIndex = useMemo(() => {
     if (!selectedParsingPattern) return -1;
@@ -6935,6 +7211,20 @@ const BomNormalizer = () => {
     ? selectedParsingPatternIndex + 1
     : 1;
 
+  const selectedParsingPatternExample = selectedParsingPattern?.pattern?.examples?.[0] || null;
+
+  const selectedSlashVariantExpansion = useMemo(() => {
+    if (!selectedParsingPatternExample) return null;
+    const detected = slashVariantExpansionsInSource(
+      selectedParsingPatternExample.source || selectedParsingPatternExample.rawSource
+    );
+    if (!detected.length) return null;
+    return {
+      count: detected.length,
+      example: detected[0],
+    };
+  }, [selectedParsingPatternExample]);
+
   const handleStepParsingPattern = useCallback((direction) => {
     if (!parsingPatternOptions.length) return;
     const currentIndex = selectedParsingPatternIndex >= 0 ? selectedParsingPatternIndex : 0;
@@ -6944,6 +7234,99 @@ const BomNormalizer = () => {
     );
     setSelectedParsingPatternKey(parsingPatternOptions[nextIndex].key);
   }, [parsingPatternOptions, selectedParsingPatternIndex]);
+
+  const handleExpandSlashVariantsForPattern = useCallback(() => {
+    if (!selectedParsingPattern) return;
+    if (!selectedSlashVariantExpansion?.example) {
+      setError('No slash suffix variants were found in the selected example.');
+      return;
+    }
+    const sourceHeader = selectedParsingPattern.section?.sourceHeader || '';
+    const patternShape = selectedParsingPattern.pattern?.shape || '';
+    const sourceRows = selectedParsingPattern.pattern?.sourceRows || [];
+    if (!sourceHeader || !patternShape || !sourceRows.length) {
+      setError('Could not find the selected pattern rows to expand.');
+      return;
+    }
+
+    const rowSet = new Set(sourceRows.map((rowNumber) => Number(rowNumber)));
+    const rowsBySourceRow = {};
+    let expandedCount = 0;
+    let firstExpansion = null;
+
+    dataRows.forEach((row, index) => {
+      const sourceRow = Number(row?.__sourceRow || index + headerRowIndex + 2);
+      if (!rowSet.has(sourceRow)) return;
+      const source = getCell(row, sourceHeader);
+      const expanded = expandSlashVariantsForSource(source, normalizerConfig);
+      if (!expanded.expansions.length || !expanded.pairs.length) return;
+      rowsBySourceRow[sourceRow] = {
+        pairs: expanded.pairs,
+        fields: {},
+      };
+      expandedCount += 1;
+      if (!firstExpansion) firstExpansion = expanded.expansions[0];
+    });
+
+    if (!expandedCount) {
+      setError('No slash suffix variants were found in the selected pattern.');
+      return;
+    }
+
+    const summary = firstExpansion?.suffixes?.length
+      ? `slash variants: ${firstExpansion.suffixes.map((suffix) => `/${suffix}`).join(', ')}`
+      : 'slash variants';
+    const previewItems = firstExpansion?.pairs?.flatMap((pair, index) => ([
+      {
+        type: 'mpn',
+        label: `${index === 0 ? 'Primary MPN' : `Alternate ${index}`}: ${pair.mpn}`,
+      },
+      {
+        type: 'mfr',
+        label: `MFR: ${pair.manufacturer}`,
+      },
+      ...(pair.metadata?.discardedText && index === 0 ? [{
+        type: 'discard',
+        label: `Ignore: ${pair.metadata.discardedText}`,
+      }] : []),
+    ])) || [];
+    const override = {
+      sourceHeader,
+      patternShape,
+      rows: rowsBySourceRow,
+      displayExample: firstExpansion ? {
+        source: firstExpansion.source,
+        items: previewItems,
+      } : null,
+      rules: [
+        'Slash suffix variant expansion applied.',
+        'Base MPN stays Primary; generated suffix MPNs become alternates.',
+        `Configured variants: ${summary}.`,
+      ],
+      summary,
+    };
+
+    setStagedPatternEdits((prev) => withStagedPatternEdit(prev, {
+      patternKey: selectedParsingPattern.key,
+      sourceHeader,
+      patternShape,
+      scopedCount: expandedCount,
+      summary,
+      override,
+      result: null,
+      scope: {
+        mode: 'pattern',
+        patternKey: selectedParsingPattern.key,
+        sourceHeader,
+        patternShape,
+        sourceRows,
+      },
+    }));
+    setSelectedParsingPatternKey(selectedParsingPattern.key);
+    const message = `Slash variants staged for ${expandedCount} row${expandedCount === 1 ? '' : 's'}. They run when you start normalization.`;
+    setPatternApplyNotice(message);
+      setSuccessMessage(message);
+  }, [dataRows, headerRowIndex, normalizerConfig, selectedParsingPattern, selectedSlashVariantExpansion]);
 
   useEffect(() => {
     if (!parsingLogicOpen || !parsingPatternOptions.length) return;
@@ -9395,6 +9778,7 @@ const BomNormalizer = () => {
       skipDeletedRows: true,
       alternateColumnGroups: [],
       followingRowAlternateColumn: '',
+      includeInsideCellAlternatesWithFollowingRows: true,
     });
     setNormalizedRows([]);
     setCurrentStep(0);
@@ -9491,6 +9875,7 @@ const BomNormalizer = () => {
       skipDeletedRows: true,
       alternateColumnGroups: [],
       followingRowAlternateColumn: '',
+      includeInsideCellAlternatesWithFollowingRows: true,
     });
     setNormalizedRows([]);
     setCurrentStep(0);
@@ -10649,7 +11034,37 @@ const BomNormalizer = () => {
                           }}
                         >
                           {ALTERNATE_LAYOUT_OPTIONS.map((option) => (
-                            <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                            <MenuItem key={option.value} value={option.value}>
+                              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, width: '100%', minWidth: 0 }}>
+                                <Typography noWrap sx={{ fontSize: 14, fontWeight: 700 }}>
+                                  {option.label}
+                                </Typography>
+                                {option.description && (
+                                  <Tooltip title={option.description} placement="right" arrow>
+                                    <Box
+                                      component="span"
+                                      onClick={(event) => event.stopPropagation()}
+                                      onMouseDown={(event) => event.stopPropagation()}
+                                      sx={{
+                                        width: 18,
+                                        height: 18,
+                                        borderRadius: '50%',
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        flexShrink: 0,
+                                        fontSize: 12,
+                                        fontWeight: 900,
+                                        color: normalizerTheme.muted,
+                                        border: `1px solid ${normalizerTheme.borderStrong}`,
+                                      }}
+                                    >
+                                      i
+                                    </Box>
+                                  </Tooltip>
+                                )}
+                              </Box>
+                            </MenuItem>
                           ))}
                         </Select>
                       </FormControl>
@@ -10675,6 +11090,73 @@ const BomNormalizer = () => {
                             ))}
                           </Select>
                         </FormControl>
+                      </Grid>
+                    )}
+                    {config.alternateLayout === 'following_rows' && followingRowsInsideCellAlternateInfo && !bomLayoutActive && (
+                      <Grid item xs={12} md={3}>
+                        <Box
+                          sx={{
+                            height: '100%',
+                            minHeight: 40,
+                            display: 'flex',
+                            alignItems: 'center',
+                            px: 0.5,
+                          }}
+                        >
+                          <FormControlLabel
+                            sx={{
+                              m: 0,
+                              maxWidth: '100%',
+                              '& .MuiFormControlLabel-label': {
+                                minWidth: 0,
+                              },
+                            }}
+                            control={(
+                              <Checkbox
+                                size="small"
+                                checked={config.includeInsideCellAlternatesWithFollowingRows !== false}
+                                onChange={(event) => {
+                                  setParserTouched(true);
+                                  setConfig((prev) => ({
+                                    ...prev,
+                                    includeInsideCellAlternatesWithFollowingRows: event.target.checked,
+                                  }));
+                                }}
+                              />
+                            )}
+                            label={(
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.6, minWidth: 0 }}>
+                                <Typography noWrap sx={{ fontSize: 12.5, fontWeight: 800, color: normalizerTheme.text }}>
+                                  Include in-cell alternates
+                                </Typography>
+                                <Tooltip
+                                  arrow
+                                  placement="top"
+                                  title={`Also split alternates already present inside the selected MPN/MFR cell, then attach alternates from following rows. Detected ${followingRowsInsideCellAlternateInfo.matchedRows} multi-entry row${followingRowsInsideCellAlternateInfo.matchedRows === 1 ? '' : 's'}.`}
+                                >
+                                  <Box
+                                    component="span"
+                                    sx={{
+                                      width: 17,
+                                      height: 17,
+                                      borderRadius: '50%',
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      justifyContent: 'center',
+                                      flexShrink: 0,
+                                      fontSize: 11,
+                                      fontWeight: 900,
+                                      color: normalizerTheme.muted,
+                                      border: `1px solid ${normalizerTheme.borderStrong}`,
+                                    }}
+                                  >
+                                    i
+                                  </Box>
+                                </Tooltip>
+                              </Box>
+                            )}
+                          />
+                        </Box>
                       </Grid>
                     )}
                     <Grid item xs={12} md={3}>
@@ -12320,6 +12802,52 @@ const BomNormalizer = () => {
                     <Typography sx={{ mt: 0.35, fontSize: 13, fontWeight: 650, lineHeight: 1.4, color: normalizerTheme.text, wordBreak: 'break-word' }}>
                       {example.source}
                     </Typography>
+                    {selectedSlashVariantExpansion?.example && (
+                      <Box
+                        sx={{
+                          mt: 0.9,
+                          p: 1,
+                          borderRadius: '8px',
+                          border: `1px solid ${selectedSlashVariantStaged ? '#86efac' : normalizerTheme.border}`,
+                          bgcolor: selectedSlashVariantStaged ? 'rgba(34, 197, 94, 0.09)' : normalizerTheme.paper,
+                        }}
+                      >
+                        <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'center' }} gap={1}>
+                          <Box sx={{ minWidth: 0 }}>
+                            <Typography sx={{ fontSize: 12.5, fontWeight: 800, color: normalizerTheme.text }}>
+                              Slash variant expansion
+                            </Typography>
+                            <Stack direction="row" gap={0.65} flexWrap="wrap" sx={{ mt: 0.65 }}>
+                              {(selectedSlashVariantExpansion.example.pairs || []).map((pair, pairIndex) => (
+                                <Chip
+                                  key={`${selectedParsingPattern.key}-slash-preview-${pairIndex}-${pair.mpn}`}
+                                  size="small"
+                                  color={pairIndex === 0 ? 'success' : undefined}
+                                  variant={pairIndex === 0 ? 'filled' : 'outlined'}
+                                  label={`${pairIndex === 0 ? 'Primary' : `Alt ${pairIndex}`}: ${pair.mpn}`}
+                                  sx={{ fontWeight: 700 }}
+                                />
+                              ))}
+                              <Chip
+                                size="small"
+                                color="info"
+                                label={`MFR: ${selectedSlashVariantExpansion.example.manufacturer}`}
+                                sx={{ fontWeight: 700 }}
+                              />
+                            </Stack>
+                          </Box>
+                          <Button
+                            size="small"
+                            variant={selectedSlashVariantStaged ? 'outlined' : 'contained'}
+                            disabled={!selectedParsingPattern || configureParserPreparing}
+                            onClick={handleExpandSlashVariantsForPattern}
+                            sx={{ minWidth: 154, fontWeight: 800, textTransform: 'none' }}
+                          >
+                            {selectedSlashVariantStaged ? 'Expansion staged' : 'Use expansion'}
+                          </Button>
+                        </Stack>
+                      </Box>
+                    )}
                     <Stack direction="row" gap={0.75} flexWrap="wrap" sx={{ mt: 0.85 }}>
                       {(example.outputs || []).map((item, outputIndex) => (
                         <Chip
