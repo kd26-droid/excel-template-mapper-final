@@ -173,24 +173,24 @@ export const ALTERNATE_LAYOUT_OPTIONS = [
   },
   {
     value: 'already_separate_rows',
-    label: 'Each row is already a final BOM row',
-    description: 'Use this when every source row should stay as its own output row. The normalizer will not group nearby rows as alternates.',
+    label: 'There are no alternates',
+    description: 'Every row stays as its own BOM row. Nothing collapses into alternates.',
     example: {
-      caption: 'Every row stays as its OWN BOM line — no alternates created.',
+      caption: 'Every row is its own BOM line. No alternates are created — different rows = different parts.',
       rows: [
-        [{ text: 'MPN', role: 'header' }, { text: 'Qty', role: 'header' }],
-        [{ text: 'RC0805FR-0710KL', role: 'primary' }, { text: '1', role: 'plain' }],
-        [{ text: 'CR21-0100F-T', role: 'primary' }, { text: '1', role: 'plain' }],
-        [{ text: 'CRCW08050100F', role: 'primary' }, { text: '1', role: 'plain' }],
+        [{ text: 'MPN', role: 'header' }, { text: 'Manufacturer', role: 'header' }, { text: 'Qty', role: 'header' }],
+        [{ text: 'RC0805FR-0710KL', role: 'primary' }, { text: 'YAGEO', role: 'primary' }, { text: '1', role: 'plain' }],
+        [{ text: 'CR21-0100F-T', role: 'primary' }, { text: 'AVX', role: 'primary' }, { text: '1', role: 'plain' }],
+        [{ text: 'CRCW08050100F', role: 'primary' }, { text: 'VISHAY', role: 'primary' }, { text: '1', role: 'plain' }],
       ],
     },
   },
   {
     value: 'same_group_rows',
-    label: 'Same group key means alternates',
-    description: 'Use this when rows with the same parent/group/item key are the same part: first row is Primary, later rows become alternates.',
+    label: 'Alternates identified by group key',
+    description: 'Rows that share a group key (CPN / item code / parent) are the same part: the first row is Primary, later rows become alternates.',
     example: {
-      caption: 'Same CPN repeated → first row is primary, rest are alternates.',
+      caption: 'Rows with the same group key (here CPN) are treated as one part. First row = Primary, the rest = Alternates.',
       rows: [
         [{ text: 'CPN', role: 'header' }, { text: 'MPN', role: 'header' }, { text: 'Manufacturer', role: 'header' }],
         [{ text: 'C0004', role: 'key' }, { text: 'RC0805FR-0710KL', role: 'primary' }, { text: 'YAGEO', role: 'primary' }],
@@ -201,10 +201,10 @@ export const ALTERNATE_LAYOUT_OPTIONS = [
   },
   {
     value: 'following_rows',
-    label: 'Alternates are in following rows',
-    description: 'Use this when a main BOM row is followed by one or more alternate rows, often in a separate column such as Niv.',
+    label: 'Alternates are in the below rows',
+    description: 'The primary carries MPN + MFR. Rows below with the same context but blank grouping column are alternates of the primary.',
     example: {
-      caption: 'Row with a Level = primary. Blank-Level rows below it = alternates of that primary.',
+      caption: 'Primary row has the MPN and Manufacturer. The rows directly below (with blank Level) are its alternates.',
       rows: [
         [{ text: 'Level', role: 'header' }, { text: 'MPN', role: 'header' }, { text: 'Manufacturer', role: 'header' }],
         [{ text: '1', role: 'key' }, { text: 'RC0805FR-0710KL', role: 'primary' }, { text: 'YAGEO', role: 'primary' }],
@@ -215,14 +215,16 @@ export const ALTERNATE_LAYOUT_OPTIONS = [
   },
   {
     value: 'following_item_rows',
-    label: 'Alternates are following item rows',
-    description: 'Use this when a main item row is followed by sparse rows whose selected item/MPN/MFR values are alternates for that item.',
+    label: 'Items and alternates are in the below rows',
+    description: 'An item row (with its identity, no MPN/MFR yet) is followed by rows carrying the primary MPN/MFR and its alternates.',
     example: {
-      caption: 'Item row = primary. Sparse rows below (item code blank) = alternates.',
+      caption: 'Item row on top (with item name, no MPN). The rows directly below hold the MPN/MFR pairs — first is Primary, rest are alternates.',
       rows: [
-        [{ text: 'Item code', role: 'header' }, { text: 'MPN', role: 'header' }, { text: 'Manufacturer', role: 'header' }],
-        [{ text: 'A1002779', role: 'key' }, { text: 'RC0805FR-0710KL', role: 'primary' }, { text: 'YAGEO', role: 'primary' }],
+        [{ text: 'Item name', role: 'header' }, { text: 'MPN', role: 'header' }, { text: 'Manufacturer', role: 'header' }],
+        [{ text: '100nF 0805 cap', role: 'key' }, { text: '', role: 'plain' }, { text: '', role: 'plain' }],
+        [{ text: '', role: 'plain' }, { text: 'RC0805FR-0710KL', role: 'primary' }, { text: 'YAGEO', role: 'primary' }],
         [{ text: '', role: 'plain' }, { text: 'CR21-0100F-T', role: 'alt' }, { text: 'AVX', role: 'alt' }],
+        [{ text: '', role: 'plain' }, { text: 'CRCW08050100F', role: 'alt' }, { text: 'VISHAY', role: 'alt' }],
       ],
     },
   },
