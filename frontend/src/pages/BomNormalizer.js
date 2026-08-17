@@ -740,28 +740,62 @@ const buildSinglePairPatternShape = (value, pair = {}) => {
 
 const cleanStatusBlockLabel = (block = '') => fmt(block).replace(/^[{[]|[}\]]$/g, '');
 
+const joinAtQualifiedMpn = (value) => {
+  const text = fmt(value);
+  if (!text.includes('@')) return stripTrailingMpnSeparator(text);
+  const atIndex = text.indexOf('@');
+  const before = fmt(text.slice(0, atIndex)).replace(/[,\s]+$/g, '');
+  const after = fmt(text.slice(atIndex + 1)).replace(/\s+/g, ' ');
+  if (!after) return before.replace(/[-\s]+$/g, '').trim();
+  if (before.endsWith('-') && after.startsWith('-')) return `${before}${after.slice(1)}`.trim();
+  return `${before}${after}`.trim();
+};
+
 const splitQualifiedMpnSide = (value, hasStatusRefBlocks = false) => {
   let mpnSide = fmt(value);
   const qualifiers = [];
   let qualifierSegment = popTrailingParenthesizedSegment(mpnSide);
   while (qualifierSegment) {
-    qualifiers.unshift(`(${qualifierSegment.inside})`);
+    qualifiers.unshift({
+      inside: qualifierSegment.inside,
+      text: `(${qualifierSegment.inside})`,
+    });
     mpnSide = qualifierSegment.before;
     qualifierSegment = popTrailingParenthesizedSegment(mpnSide);
   }
 
-  const discarded = [...qualifiers];
-  let mpn = stripTrailingMpnSeparator(mpnSide);
-  if (hasStatusRefBlocks && mpn.includes('@')) {
-    const atIndex = mpn.indexOf('@');
-    const suffix = mpn.slice(atIndex);
-    if (suffix) discarded.unshift(suffix);
-    mpn = fmt(mpn.slice(0, atIndex)).replace(/[,\s]+$/g, '');
+  const hasAtQualifier = mpnSide.includes('@');
+  const baseMpn = joinAtQualifiedMpn(mpnSide);
+  if (hasAtQualifier && qualifiers.length) {
+    const qualifierText = fmt(qualifiers[0].inside);
+    const slashSuffixes = parseSlashSuffixVariantGroup(qualifierText);
+    const includeBaseMpn = qualifierText.trim().startsWith('/');
+    if (slashSuffixes.length && (includeBaseMpn || slashSuffixes.length > 1)) {
+      const expandedMpns = includeBaseMpn
+        ? [baseMpn, ...slashSuffixes.map((suffix) => `${baseMpn}${suffix}`)]
+        : slashSuffixes.map((suffix) => `${baseMpn}${suffix}`);
+      debugSlashVariantParser('split qualified MPN side', {
+        rawMpn: value,
+        mpnSide,
+        baseMpn,
+        qualifier: qualifierText,
+        suffixes: slashSuffixes,
+        includeBaseMpn,
+        mpns: expandedMpns,
+        discarded: qualifiers.slice(1).map((qualifier) => qualifier.text),
+      });
+      return {
+        mpn: expandedMpns[0],
+        mpns: expandedMpns,
+        discarded: qualifiers.slice(1).map((qualifier) => qualifier.text),
+      };
+    }
   }
 
   return {
-    mpn,
-    discarded,
+    mpn: baseMpn,
+    mpns: [baseMpn],
+    discarded: qualifiers.map((qualifier) => qualifier.text),
   };
 };
 
@@ -778,10 +812,23 @@ const parseSlashSuffixVariantGroup = (value) => {
     .split('/')
     .map((part) => fmt(part).replace(/^[-_]+|[-_]+$/g, ''))
     .filter(Boolean);
-  if (parts.length < 2) return [];
-  if (!cleanText.startsWith('/') && parts.length !== cleanText.split('/').length) return [];
+  const startsWithSlash = cleanText.startsWith('/');
+  if (startsWithSlash ? parts.length < 1 : parts.length < 2) return [];
+  if (!startsWithSlash && parts.length !== cleanText.split('/').length) return [];
   if (!parts.every((part) => /^[A-Z0-9._-]{1,16}$/i.test(part) && !/\s/.test(part))) return [];
   return parts;
+};
+
+const shouldDebugSlashVariantSource = (value = '') => {
+  const text = fmt(value);
+  return Boolean(text && text.includes('@') && /\([^)]*\/[^)]*\)/.test(text));
+};
+
+const debugSlashVariantParser = (stage, payload = {}) => {
+  if (!shouldDebugSlashVariantSource(payload.source || payload.rawMpn || payload.value)) return;
+  // Temporary targeted debug for BOM parser QA. Keep this narrow so client data does not flood the console.
+  // eslint-disable-next-line no-console
+  console.log(`[BOM parser][slash-variant] ${stage}`, payload);
 };
 
 const detectSlashSuffixVariantExpansion = (value) => {
@@ -797,20 +844,34 @@ const detectSlashSuffixVariantExpansion = (value) => {
 
   const variantSegment = popTrailingParenthesizedSegment(manufacturerSegment.before);
   if (!variantSegment) return null;
-  if (!/\s*@\s*$/.test(variantSegment.before)) return null;
+  if (!variantSegment.before.includes('@')) return null;
 
   const suffixes = parseSlashSuffixVariantGroup(variantSegment.inside);
   if (!suffixes.length) return null;
 
-  const baseMpn = cleanSlashVariantBaseMpn(variantSegment.before);
+  const baseMpn = joinAtQualifiedMpn(variantSegment.before);
   if (!baseMpn || !/[0-9]/.test(baseMpn)) return null;
   if (!looksLikeMpnToken(baseMpn) && !looksLikeParenthesizedMpn(baseMpn)) return null;
 
-  const expandedMpns = [baseMpn, ...suffixes.map((suffix) => `${baseMpn}${suffix}`)]
+  const includeBaseMpn = fmt(variantSegment.inside).trim().startsWith('/');
+  const expandedMpns = [
+    ...(includeBaseMpn ? [baseMpn] : []),
+    ...suffixes.map((suffix) => `${baseMpn}${suffix}`),
+  ]
     .map(stripVendorPrefix)
     .filter(Boolean);
   const uniqueMpns = [...new Set(expandedMpns.map((mpn) => fmt(mpn)))];
   if (uniqueMpns.length < 2) return null;
+
+  debugSlashVariantParser('detected expansion', {
+    source,
+    baseMpn,
+    manufacturer,
+    qualifier: variantSegment.inside,
+    suffixes,
+    mpns: uniqueMpns,
+    discarded: blocks,
+  });
 
   return {
     source,
@@ -1785,12 +1846,12 @@ const parseParenthesizedMpnManufacturerPairs = (value, config = {}) => {
   const parts = explicitParts.length > 1 ? explicitParts : (structuredParts.length > 1 ? structuredParts : splitDelimited(text));
   const candidates = parts.length ? parts : [text];
 
-  const parsed = candidates.map((part) => {
+  const parsed = candidates.flatMap((part) => {
     // Trailing {status} and [id] blocks are a common PLM export convention
     // ("DOWSIL RTV 3140 (DOW-CHEM) {HOM} [3157976]"). Allow them after the
     // manufacturer bracket and keep them as metadata instead of failing the match.
     const match = fmt(part).match(/^(.+?)\s*\(([^()]*)\)\s*((?:\{[^}]*\}|\[[^\]]*\]|\s)*)$/);
-    if (!match) return null;
+    if (!match) return [];
 
     const rawMpn = fmt(match[1]);
     const inside = fmt(match[2]);
@@ -1802,12 +1863,15 @@ const parseParenthesizedMpnManufacturerPairs = (value, config = {}) => {
     if (idMatch && fmt(idMatch[1])) trailingMeta.internalId = fmt(idMatch[1]);
     const statusRefBlocks = trailing.match(/\{[^}]*\}|\[[^\]]*\]/g) || [];
     const mpnInfo = splitQualifiedMpnSide(rawMpn, statusRefBlocks.length > 0);
-    if (!mpnInfo.mpn || !inside || !looksLikeParenthesizedMpn(mpnInfo.mpn)) return null;
+    const mpns = (mpnInfo.mpns?.length ? mpnInfo.mpns : [mpnInfo.mpn])
+      .map(stripVendorPrefix)
+      .filter(Boolean);
+    if (!mpns.length || !inside || !mpns.every(looksLikeParenthesizedMpn)) return [];
 
     const insideParts = splitTopLevelDelimited(inside, [','])
       .map(fmt)
       .filter(Boolean);
-    if (!insideParts.length) return null;
+    if (!insideParts.length) return [];
 
     const codeIndex = insideParts.findIndex((partValue, index) => (
       index > 0 && /^(?:mfr|manuf(?:acturer)?|vendor)?\s*(?:code|id)?\s*[:#-]?\s*[A-Z]?\d{4,}$/i.test(partValue)
@@ -1815,10 +1879,10 @@ const parseParenthesizedMpnManufacturerPairs = (value, config = {}) => {
     const manufacturerParts = codeIndex > 0 ? insideParts.slice(0, codeIndex) : [insideParts[0]];
     const manufacturer = manufacturerParts.join(', ').trim();
     const manufacturerCode = codeIndex > 0 ? insideParts.slice(codeIndex).join(', ').trim() : insideParts.slice(1).join(', ').trim();
-    if (!manufacturer || !/[A-Za-z]/.test(manufacturer)) return null;
+    if (!manufacturer || !/[A-Za-z]/.test(manufacturer)) return [];
 
-    return {
-      mpn: stripVendorPrefix(mpnInfo.mpn),
+    return mpns.map((mpn) => ({
+      mpn,
       manufacturer,
       metadata: {
         ...(manufacturerCode ? { manufacturerCode } : {}),
@@ -1832,7 +1896,7 @@ const parseParenthesizedMpnManufacturerPairs = (value, config = {}) => {
           ].filter(Boolean).join(' '),
         } : {}),
       },
-    };
+    }));
   }).filter(Boolean);
 
   // Requiring EVERY entry to parse meant one odd line threw away its siblings: item
@@ -1856,15 +1920,34 @@ const parseTrailingParenthesizedMpnManufacturerPair = (value) => {
 
   const rawMpn = fmt(match[1]);
   const manufacturer = fmt(match[2]);
-  const validationMpn = rawMpn.replace(/\([^()]*\)/g, '').trim();
   if (!rawMpn || !manufacturer || !/[A-Za-z]/.test(manufacturer)) return [];
-  if (!looksLikeParenthesizedMpn(rawMpn) && !looksLikeParenthesizedMpn(validationMpn)) return [];
 
-  return [{
-    mpn: stripTrailingMpnSeparator(stripVendorPrefix(rawMpn)),
+  const statusRefBlocks = extra.match(/\{[^}]*\}|\[[^\]]*\]/g) || [];
+  const mpnInfo = splitQualifiedMpnSide(rawMpn, statusRefBlocks.length > 0);
+  const mpns = (mpnInfo.mpns?.length ? mpnInfo.mpns : [mpnInfo.mpn])
+    .map(stripVendorPrefix)
+    .filter(Boolean);
+  const validationMpns = mpns.length ? mpns : [rawMpn.replace(/\([^()]*\)/g, '').trim()];
+  if (!validationMpns.every(looksLikeParenthesizedMpn)) return [];
+
+  const discardedText = [
+    ...(mpnInfo.discarded || []),
+    ...statusRefBlocks,
+  ].filter(Boolean).join(' ');
+
+  debugSlashVariantParser('trailing parenthesized pair parse', {
+    source: value,
+    rawMpn,
     manufacturer,
-    metadata: extra ? { discardedText: extra } : {},
-  }];
+    mpns,
+    discardedText,
+  });
+
+  return mpns.map((mpn) => ({
+    mpn,
+    manufacturer,
+    metadata: discardedText ? { discardedText } : {},
+  }));
 };
 
 const parsePackedMpnManufacturerPairs = (value, config = {}) => {
@@ -7190,6 +7273,17 @@ const BomNormalizer = () => {
               parsePackedMpnManufacturerPairs(exampleSource, normalizerConfig)
                 .some((entryPair) => sameParsedPair(entryPair, pair))
             ));
+          const previewPairs = (examplePairs.length ? examplePairs : pairs.slice(0, 1))
+            .map((pair) => cleanPreviewMpnPair(pair, exampleSource));
+          debugSlashVariantParser('pattern preview example', {
+            source: exampleSource,
+            rawSource: source,
+            sourceHeader,
+            shape,
+            parsedPairs: pairs,
+            examplePairs,
+            previewPairs,
+          });
           current.examples.push(manualExample || !pairs.length ? {
             sourceRow,
             source: exampleSource,
@@ -7205,7 +7299,7 @@ const BomNormalizer = () => {
             rawSource: source,
             entryIndex: exampleEntryIndex,
             entryCount: sourceEntryCount,
-            pairs: (examplePairs.length ? examplePairs : pairs.slice(0, 1)).map((pair) => cleanPreviewMpnPair(pair, exampleSource)),
+            pairs: previewPairs,
             discarded: firstPair?.metadata?.discardedText || getDiscardedPackedText(exampleSource, firstPair),
           });
         }
