@@ -44,6 +44,7 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
+import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import CloudUploadIcon from '@mui/icons-material/CloudUpload';
 import DownloadIcon from '@mui/icons-material/Download';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
@@ -6722,6 +6723,109 @@ const withStagedPatternEdit = (staged, edit) => ([
   edit,
 ]);
 
+// Cell-role → colour map used by the option-example tooltip. Green = primary,
+// orange = alternate, blue = group/key column, yellow = mixed-primary+alt
+// value packed in one cell. Rendered against a dark tooltip background so
+// the visual pattern reads at a glance without parsing the text.
+const EXAMPLE_ROLE_STYLES = {
+  header:  { bg: '#2d2d3a', color: '#ffffff', weight: 700 },
+  primary: { bg: '#1f4d2b', color: '#c8f7c8', weight: 600 },
+  alt:     { bg: '#4a2f1f', color: '#ffcfa8', weight: 500 },
+  key:     { bg: '#2a3a4d', color: '#a8d0ff', weight: 500 },
+  mixed:   { bg: '#4a3f1f', color: '#ffe89a', weight: 500 },
+  plain:   { bg: 'transparent', color: '#dddddd', weight: 400 },
+};
+
+// Big, high-contrast option-example tooltip. Same shape drives every
+// dropdown that carries `option.example = { caption, rows: [[{text, role}]] }`.
+// Includes the option label as a heading, the mini-sheet, a "what to look
+// for" caption, and a colour legend for primary vs alternate.
+const OptionExampleTooltip = ({ option, children }) => {
+  if (!option?.example) return children;
+  return (
+    <Tooltip
+      arrow
+      placement="right"
+      enterDelay={100}
+      leaveDelay={200}
+      componentsProps={{
+        tooltip: {
+          sx: {
+            bgcolor: '#1e1e28',
+            color: '#ffffff',
+            maxWidth: 'none',
+            p: 2,
+            border: '1px solid #444',
+            boxShadow: 6,
+          },
+        },
+        arrow: { sx: { color: '#1e1e28' } },
+      }}
+      title={
+        <Box sx={{ minWidth: 380 }}>
+          <Box sx={{ fontSize: 14, fontWeight: 700, mb: 0.5 }}>{option.label}</Box>
+          <Box sx={{ fontSize: 12, opacity: 0.75, mb: 1.5 }}>
+            Example of what your sheet looks like:
+          </Box>
+          <Box
+            component="table"
+            sx={{
+              borderCollapse: 'collapse',
+              fontFamily: 'monospace',
+              fontSize: 13,
+              width: '100%',
+            }}
+          >
+            <tbody>
+              {option.example.rows.map((row, ri) => (
+                <tr key={ri}>
+                  {row.map((cell, ci) => {
+                    const style = EXAMPLE_ROLE_STYLES[cell.role || 'plain'] || EXAMPLE_ROLE_STYLES.plain;
+                    return (
+                      <Box
+                        key={ci}
+                        component="td"
+                        sx={{
+                          border: '1px solid #555',
+                          px: 1.25,
+                          py: 0.75,
+                          fontWeight: style.weight,
+                          bgcolor: style.bg,
+                          color: style.color,
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {cell.text || ' '}
+                      </Box>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </Box>
+          {option.example.caption && (
+            <Box sx={{ mt: 1.5, fontSize: 12.5, lineHeight: 1.5, color: '#ffe07a' }}>
+              <strong>What to look for:</strong> {option.example.caption}
+            </Box>
+          )}
+          <Box sx={{ display: 'flex', gap: 1.5, mt: 1.25, fontSize: 11, opacity: 0.85, flexWrap: 'wrap' }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <Box sx={{ width: 12, height: 12, bgcolor: '#1f4d2b', border: '1px solid #555' }} />
+              <span>= Primary</span>
+            </Box>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+              <Box sx={{ width: 12, height: 12, bgcolor: '#4a2f1f', border: '1px solid #555' }} />
+              <span>= Alternate</span>
+            </Box>
+          </Box>
+        </Box>
+      }
+    >
+      {children}
+    </Tooltip>
+  );
+};
+
 const BomNormalizer = () => {
   const navigate = useNavigate();
   const location = useLocation();
@@ -11271,6 +11375,10 @@ const BomNormalizer = () => {
                           disabled={bomLayoutActive}
                           value={config.structure}
                           label="Where are MPN and MFR?"
+                          renderValue={(selected) => {
+                            const opt = STRUCTURE_OPTIONS.find((o) => o.value === selected);
+                            return opt?.label || selected;
+                          }}
                           onChange={(event) => {
                             setParserTouched(true);
                             setConfig((prev) => ({
@@ -11281,29 +11389,43 @@ const BomNormalizer = () => {
                           }}
                         >
                           {availableStructureOptions.map((option) => (
-                            <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                            <MenuItem
+                              key={option.value}
+                              value={option.value}
+                              sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}
+                            >
+                              <Box sx={{ flex: 1, minWidth: 0, whiteSpace: 'normal' }}>{option.label}</Box>
+                              {option.example && (
+                                <OptionExampleTooltip option={option}>
+                                  <InfoOutlinedIcon
+                                    fontSize="small"
+                                    sx={{ color: 'text.secondary', opacity: 0.7, ml: 1, '&:hover': { opacity: 1 } }}
+                                    onClick={(e) => e.stopPropagation()}
+                                  />
+                                </OptionExampleTooltip>
+                              )}
+                            </MenuItem>
                           ))}
                         </Select>
                       </FormControl>
                     </Grid>
-                    <Grid item xs={12} md={3}>
-                      <FormControl fullWidth size="small">
-                        <InputLabel>Known delimiter</InputLabel>
-                        <Select
-                          value={config.delimiterMode}
-                          label="Known delimiter"
-                          onChange={(event) => {
-                            setDelimiterTouched(true);
-                            setParserTouched(true);
-                            setConfig((prev) => ({ ...prev, delimiterMode: event.target.value }));
-                          }}
-                        >
-                          {DELIMITER_OPTIONS.map((option) => (
-                            <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
-                          ))}
-                        </Select>
-                      </FormControl>
-                    </Grid>
+                    {showManufacturerInheritanceOption && (
+                      <Grid item xs={12} md={3}>
+                        <FormControl fullWidth size="small">
+                          <InputLabel>Alternate manufacturer</InputLabel>
+                          <Select
+                            disabled={bomLayoutActive}
+                            value={config.manufacturerMode || 'inherit_blank'}
+                            label="Alternate manufacturer"
+                            onChange={(event) => setConfig((prev) => ({ ...prev, manufacturerMode: event.target.value }))}
+                          >
+                            {MANUFACTURER_INHERIT_OPTIONS.map((option) => (
+                              <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                            ))}
+                          </Select>
+                        </FormControl>
+                      </Grid>
+                    )}
                     <Grid item xs={12} md={3}>
                       <FormControl fullWidth size="small">
                         <InputLabel>Where are alternates?</InputLabel>
@@ -11311,6 +11433,10 @@ const BomNormalizer = () => {
                           disabled={bomLayoutActive}
                           value={config.alternateLayout}
                           label="Where are alternates?"
+                          renderValue={(selected) => {
+                            const opt = ALTERNATE_LAYOUT_OPTIONS.find((o) => o.value === selected);
+                            return opt?.label || selected;
+                          }}
                           onChange={(event) => {
                             const nextLayout = event.target.value;
                             setParserTouched(true);
@@ -11341,8 +11467,11 @@ const BomNormalizer = () => {
                                 <Typography noWrap sx={{ fontSize: 14, fontWeight: 700 }}>
                                   {option.label}
                                 </Typography>
-                                {option.description && (
-                                  <Tooltip title={option.description} placement="right" arrow>
+                                {/* One "i" affordance, two payloads: the worked example when the
+                                    option carries one, the plain description otherwise. Both use
+                                    the same circled marker so the row looks uniform either way. */}
+                                {(option.example || option.description) && (() => {
+                                  const marker = (
                                     <Box
                                       component="span"
                                       onClick={(event) => event.stopPropagation()}
@@ -11363,8 +11492,15 @@ const BomNormalizer = () => {
                                     >
                                       i
                                     </Box>
-                                  </Tooltip>
-                                )}
+                                  );
+                                  return option.example ? (
+                                    <OptionExampleTooltip option={option}>{marker}</OptionExampleTooltip>
+                                  ) : (
+                                    <Tooltip title={option.description} placement="right" arrow>
+                                      {marker}
+                                    </Tooltip>
+                                  );
+                                })()}
                               </Box>
                             </MenuItem>
                           ))}
@@ -11503,10 +11639,29 @@ const BomNormalizer = () => {
                           disabled={bomLayoutActive}
                           value={config.quantityMode}
                           label="Quantity/UOM handling"
+                          renderValue={(selected) => {
+                            const opt = QTY_OPTIONS.find((o) => o.value === selected);
+                            return opt?.label || selected;
+                          }}
                           onChange={(event) => setConfig((prev) => ({ ...prev, quantityMode: event.target.value }))}
                         >
                           {QTY_OPTIONS.map((option) => (
-                            <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                            <MenuItem
+                              key={option.value}
+                              value={option.value}
+                              sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}
+                            >
+                              <Box sx={{ flex: 1, minWidth: 0, whiteSpace: 'normal' }}>{option.label}</Box>
+                              {option.example && (
+                                <OptionExampleTooltip option={option}>
+                                  <InfoOutlinedIcon
+                                    fontSize="small"
+                                    sx={{ color: 'text.secondary', opacity: 0.7, ml: 1, '&:hover': { opacity: 1 } }}
+                                    onClick={(e) => e.stopPropagation()}
+                                  />
+                                </OptionExampleTooltip>
+                              )}
+                            </MenuItem>
                           ))}
                         </Select>
                       </FormControl>
@@ -11603,23 +11758,24 @@ const BomNormalizer = () => {
                         </FormControl>
                       </Grid>
                     ))}
-                    {showManufacturerInheritanceOption && (
-                      <Grid item xs={12} md={3}>
-                        <FormControl fullWidth size="small">
-                          <InputLabel>Alternate manufacturer</InputLabel>
-                          <Select
-                            disabled={bomLayoutActive}
-                            value={config.manufacturerMode || 'inherit_blank'}
-                            label="Alternate manufacturer"
-                            onChange={(event) => setConfig((prev) => ({ ...prev, manufacturerMode: event.target.value }))}
-                          >
-                            {MANUFACTURER_INHERIT_OPTIONS.map((option) => (
-                              <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
-                            ))}
-                          </Select>
-                        </FormControl>
-                      </Grid>
-                    )}
+                    <Grid item xs={12} md={3}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel>Known delimiter</InputLabel>
+                        <Select
+                          value={config.delimiterMode}
+                          label="Known delimiter"
+                          onChange={(event) => {
+                            setDelimiterTouched(true);
+                            setParserTouched(true);
+                            setConfig((prev) => ({ ...prev, delimiterMode: event.target.value }));
+                          }}
+                        >
+                          {DELIMITER_OPTIONS.map((option) => (
+                            <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    </Grid>
                     {config.delimiterMode === 'custom' && (
                       <Grid item xs={12} md={3}>
                         <TextField
@@ -11638,10 +11794,29 @@ const BomNormalizer = () => {
                           <Select
                             value={config.groupHeaderMode || 'auto'}
                             label="Group header handling"
+                            renderValue={(selected) => {
+                              const opt = GROUP_HEADER_OPTIONS.find((o) => o.value === selected);
+                              return opt?.label || selected;
+                            }}
                             onChange={(event) => setConfig((prev) => ({ ...prev, groupHeaderMode: event.target.value }))}
                           >
                             {GROUP_HEADER_OPTIONS.map((option) => (
-                              <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                              <MenuItem
+                                key={option.value}
+                                value={option.value}
+                                sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}
+                              >
+                                <Box sx={{ flex: 1, minWidth: 0, whiteSpace: 'normal' }}>{option.label}</Box>
+                                {option.example && (
+                                  <OptionExampleTooltip option={option}>
+                                    <InfoOutlinedIcon
+                                      fontSize="small"
+                                      sx={{ color: 'text.secondary', opacity: 0.7, ml: 1, '&:hover': { opacity: 1 } }}
+                                      onClick={(e) => e.stopPropagation()}
+                                    />
+                                  </OptionExampleTooltip>
+                                )}
+                              </MenuItem>
                             ))}
                           </Select>
                         </FormControl>
