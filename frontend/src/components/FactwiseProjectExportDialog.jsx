@@ -466,12 +466,12 @@ export default function FactwiseProjectExportDialog({
     !isRunning && !isDone && !isAwaitingReview && !needsBomCode && (
       modeDraft === PROJECT_MODES.NEW
         ? !!nameDraft?.trim() && !!pickedTemplate?.template_id
-        // Existing-project mode now REQUIRES picking a BOM to revise from
-        // the project. The "Create new BOM in this project" option was
-        // deleted (produced a duplicate BOM under the same FG instead of
-        // an update). Without a revise target the orchestrator hard-errors,
-        // so gate the button here to make the requirement visible up front.
-        : (!!pickedProject?.project_id && reviseTargetKeys.length > 0)
+        // Existing-project mode: revise-target is OPTIONAL. Picking one or
+        // more revises those slots; leaving them all unchecked attaches the
+        // mapper's BOM to the project as a fresh new BOM (uses
+        // runAttachBomStep's "no revise slots" branch). The user asked for
+        // this shape 2026-08-17.
+        : !!pickedProject?.project_id
     );
 
   // A project restored from a checkpoint or carried over from the upload dialog
@@ -1002,9 +1002,11 @@ export default function FactwiseProjectExportDialog({
                   </FormControl>
                 )}
                 <Typography variant="caption" sx={{ display: 'block', mt: 0.75, color: 'text.secondary' }}>
-                  {reviseTargetKeys.length > 1
-                    ? `Revising creates one new revision in the BOM directory and repoints all ${reviseTargetKeys.length} selected slots to it, one at a time. A failure partway leaves the earlier ones moved.`
-                    : 'Revising creates a new revision in the BOM directory and repoints this project\'s BOM to it. Both places are updated.'}
+                  {reviseTargetKeys.length === 0
+                    ? 'Leave everything unchecked to attach the mapper\'s BOM as a fresh new BOM in this project (no revise).'
+                    : reviseTargetKeys.length > 1
+                      ? `Revising creates one new revision in the BOM directory and repoints all ${reviseTargetKeys.length} selected slots to it, one at a time. A failure partway leaves the earlier ones moved.`
+                      : 'Revising creates a new revision in the BOM directory and repoints this project\'s BOM to it. Both places are updated.'}
                   {lockedBaseBomId && projectBoms.length > revisableBoms.length
                     ? ' Only BOMs that are revisions of the same BOM are listed — FactWise rejects anything else.'
                     : ''}
