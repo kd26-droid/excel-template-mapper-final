@@ -3427,6 +3427,23 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
   const manufacturerColumn = config.followingItemRowsManufacturerColumn || roles.manufacturer || '';
   const strictContextMarker = Boolean(contextColumn);
   let currentGroup = null;
+  const emittedPartsByGroup = new WeakMap();
+
+  const partIdentity = (pair) => {
+    const mpn = fmt(pair?.mpn).replace(/\s+/g, ' ').trim().toUpperCase();
+    const manufacturer = fmt(pair?.manufacturer).replace(/\s+/g, ' ').trim().toUpperCase();
+    return `${mpn}␟${manufacturer}`;
+  };
+
+  const shouldEmitPartForGroup = (group, pair) => {
+    const identity = partIdentity(pair);
+    if (!identity || identity === '␟') return true;
+    const emittedParts = emittedPartsByGroup.get(group) || new Set();
+    if (emittedParts.has(identity)) return false;
+    emittedParts.add(identity);
+    emittedPartsByGroup.set(group, emittedParts);
+    return true;
+  };
 
   const splitParts = (row) => {
     const rawMpn = getCell(row, mpnColumn);
@@ -3492,6 +3509,7 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
     if (canAttachAsAlternate) {
       const pairs = parts.length ? parts : [{ mpn: '', manufacturer: '', metadata: {} }];
       pairs.forEach((pair) => {
+        if (!shouldEmitPartForGroup(currentGroup, pair)) return;
         const relationIndex = Number(currentGroup.relationCount || 0);
         output.push(withSourceColumns({
           sourceRow,
@@ -3523,10 +3541,12 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
       return;
     }
     const pairs = parts.length ? parts : [{ mpn: '', manufacturer: '', metadata: {} }];
-    pairs.forEach((pair, pairIndex) => {
+    let emittedPairCount = 0;
+    pairs.forEach((pair) => {
+      if (!shouldEmitPartForGroup(group, pair)) return;
       output.push(withSourceColumns({
         ...group,
-        relation: pairIndex === 0 ? 'Primary' : `Alternate ${pairIndex}`,
+        relation: emittedPairCount === 0 ? 'Primary' : `Alternate ${emittedPairCount}`,
         cpn: group.cpn || itemValue,
         mpn: pair.mpn,
         manufacturer: pair.manufacturer,
@@ -3537,8 +3557,9 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
         discardedText: '',
         ...pair.metadata,
       }, row, config));
+      emittedPairCount += 1;
     });
-    currentGroup.relationCount = Math.max(1, pairs.length);
+    currentGroup.relationCount = Math.max(1, emittedPairCount);
   });
 
   return output;
