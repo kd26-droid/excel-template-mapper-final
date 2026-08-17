@@ -648,7 +648,7 @@ const cleanPreviewMpnPair = (pair = {}, source = '') => {
     };
   }
 
-  const cleanMpn = fmt(mpn.slice(0, atIndex)).replace(/[,\s]+$/g, '');
+  const cleanMpn = fmt(mpn.slice(0, atIndex)).replace(/\s+$/g, '');
   const suffix = fmt(mpn.slice(atIndex));
   const discardedParts = existingDiscarded.includes(suffix)
     ? [existingDiscarded]
@@ -745,11 +745,94 @@ const joinAtQualifiedMpn = (value) => {
   const text = fmt(value);
   if (!text.includes('@')) return stripTrailingMpnSeparator(text);
   const atIndex = text.indexOf('@');
-  const before = fmt(text.slice(0, atIndex)).replace(/[,\s]+$/g, '');
+  const before = fmt(text.slice(0, atIndex)).replace(/\s+$/g, '');
   const after = fmt(text.slice(atIndex + 1)).replace(/\s+/g, ' ');
-  if (!after) return before.replace(/[-\s]+$/g, '').trim();
+  if (!after) return before.trim();
   if (before.endsWith('-') && after.startsWith('-')) return `${before}${after.slice(1)}`.trim();
   return `${before}${after}`.trim();
+};
+
+const splitAtQualifiedMpnPieces = (value) => {
+  const text = fmt(value);
+  const atIndex = text.indexOf('@');
+  if (atIndex < 0) {
+    return {
+      hasAt: false,
+      before: text,
+      after: '',
+      base: stripTrailingMpnSeparator(text),
+    };
+  }
+
+  const before = fmt(text.slice(0, atIndex)).replace(/\s+$/g, '');
+  const after = fmt(text.slice(atIndex + 1)).replace(/\s+/g, ' ');
+  return {
+    hasAt: true,
+    before,
+    after,
+    base: joinAtQualifiedMpn(text),
+  };
+};
+
+const qualifierTokensForAtMpn = (value) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ');
+  const slashTokens = parseSlashSuffixVariantGroup(text);
+  if (slashTokens.length) return slashTokens;
+  if (!text || text.includes('/') || /\s/.test(text)) return [];
+  return /^[A-Z0-9._-]{1,16}$/i.test(text) ? [text] : [];
+};
+
+const insertAtQualifierBeforeText = (afterText, suffixes = []) => {
+  const after = fmt(afterText).replace(/\s+/g, '');
+  if (!after) return true;
+  if (/^\d/.test(after)) return true;
+  if (suffixes.length === 1 && /^[A-Z]+$/i.test(after)) return true;
+  return false;
+};
+
+const combineAtQualifiedMpnVariant = ({ before, after }, suffix) => {
+  const cleanBefore = fmt(before).replace(/\s+$/g, '');
+  const cleanAfter = fmt(after).replace(/\s+/g, ' ');
+  const cleanSuffix = fmt(suffix);
+  const suffixBeforeText = insertAtQualifierBeforeText(cleanAfter, [cleanSuffix]);
+  if (suffixBeforeText) {
+    if (cleanBefore.endsWith('-') && cleanSuffix.startsWith('-')) {
+      return `${cleanBefore}${cleanSuffix.slice(1)}${cleanAfter}`.trim();
+    }
+    return `${cleanBefore}${cleanSuffix}${cleanAfter}`.trim();
+  }
+  if (cleanBefore.endsWith('-') && cleanAfter.startsWith('-')) {
+    return `${cleanBefore}${cleanAfter.slice(1)}${cleanSuffix}`.trim();
+  }
+  return `${cleanBefore}${cleanAfter}${cleanSuffix}`.trim();
+};
+
+const expandAtQualifiedMpnVariants = (mpnSide, qualifierText) => {
+  const pieces = splitAtQualifiedMpnPieces(mpnSide);
+  const suffixes = qualifierTokensForAtMpn(qualifierText);
+  if (!pieces.hasAt || !suffixes.length) return null;
+
+  const startsWithSlash = fmt(qualifierText).trim().startsWith('/');
+  const variants = startsWithSlash
+    ? [pieces.base, ...suffixes.map((suffix) => `${pieces.base}${suffix}`)]
+    : suffixes.map((suffix) => combineAtQualifiedMpnVariant(pieces, suffix));
+
+  const mpns = [...new Set(variants.map((mpn) => fmt(mpn)).filter(Boolean))];
+  return mpns.length ? {
+    baseMpn: pieces.base,
+    suffixes,
+    includeBaseMpn: startsWithSlash,
+    mpns,
+  } : null;
+};
+
+const isMpnDescriptorQualifier = (value) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ');
+  if (!text || text.includes('/')) return false;
+  return (
+    /\b\d+(?:[.,]\d+)?\s*(?:ML|CL|L|KG|G|MG|MM|CM|M|IN|OZ|V|A|W)\b/i.test(text) ||
+    /\b(?:TUBE|BOTTLE|CARTRIDGE|CARTOUCHE|KIT|PACK|BAG|ROLL|REEL|SPOOL)\b/i.test(text)
+  );
 };
 
 const splitQualifiedMpnSide = (value, hasStatusRefBlocks = false) => {
@@ -769,34 +852,60 @@ const splitQualifiedMpnSide = (value, hasStatusRefBlocks = false) => {
   const baseMpn = joinAtQualifiedMpn(mpnSide);
   if (hasAtQualifier && qualifiers.length) {
     const qualifierText = fmt(qualifiers[0].inside);
-    const slashSuffixes = parseSlashSuffixVariantGroup(qualifierText);
-    const includeBaseMpn = qualifierText.trim().startsWith('/');
-    if (slashSuffixes.length && (includeBaseMpn || slashSuffixes.length > 1)) {
-      const expandedMpns = includeBaseMpn
-        ? [baseMpn, ...slashSuffixes.map((suffix) => `${baseMpn}${suffix}`)]
-        : slashSuffixes.map((suffix) => `${baseMpn}${suffix}`);
+    const expansion = expandAtQualifiedMpnVariants(mpnSide, qualifierText);
+    if (expansion?.mpns?.length) {
       debugSlashVariantParser('split qualified MPN side', {
         rawMpn: value,
         mpnSide,
-        baseMpn,
+        baseMpn: expansion.baseMpn,
         qualifier: qualifierText,
-        suffixes: slashSuffixes,
-        includeBaseMpn,
-        mpns: expandedMpns,
+        suffixes: expansion.suffixes,
+        includeBaseMpn: expansion.includeBaseMpn,
+        mpns: expansion.mpns,
         discarded: qualifiers.slice(1).map((qualifier) => qualifier.text),
       });
       return {
-        mpn: expandedMpns[0],
-        mpns: expandedMpns,
+        mpn: expansion.mpns[0],
+        mpns: expansion.mpns,
         discarded: qualifiers.slice(1).map((qualifier) => qualifier.text),
       };
     }
   }
 
+  const retainedQualifiers = hasAtQualifier
+    ? []
+    : qualifiers.filter((qualifier) => isMpnDescriptorQualifier(qualifier.inside));
+  const discardedQualifiers = qualifiers.filter((qualifier) => !retainedQualifiers.includes(qualifier));
+  const mpnWithDescriptors = [
+    baseMpn,
+    ...retainedQualifiers.map((qualifier) => qualifier.text),
+  ].filter(Boolean).join(' ');
+
   return {
-    mpn: baseMpn,
-    mpns: [baseMpn],
-    discarded: qualifiers.map((qualifier) => qualifier.text),
+    mpn: mpnWithDescriptors,
+    mpns: [mpnWithDescriptors],
+    discarded: discardedQualifiers.map((qualifier) => qualifier.text),
+  };
+};
+
+const normalizeAtQualifiedParsedPair = (pair = {}, source = '') => {
+  const mpn = fmt(pair.mpn);
+  const original = fmt(source);
+  if (!mpn || !original.includes('@') || mpn.includes('@')) return pair;
+
+  const { core } = stripTrailingStatusRefBlocks(original);
+  const manufacturerSegment = popTrailingParenthesizedSegment(core);
+  if (!manufacturerSegment) return pair;
+  const qualifierSegment = popTrailingParenthesizedSegment(manufacturerSegment.before);
+  if (!qualifierSegment || !qualifierSegment.before.includes('@')) return pair;
+
+  const expansion = expandAtQualifiedMpnVariants(qualifierSegment.before, qualifierSegment.inside);
+  if (!expansion?.mpns?.length) return pair;
+
+  const normalizedMpn = expansion.mpns.find((candidate) => normalizeKey(candidate) === normalizeKey(mpn)) || expansion.mpns[0];
+  return {
+    ...pair,
+    mpn: normalizedMpn,
   };
 };
 
@@ -847,29 +956,22 @@ const detectSlashSuffixVariantExpansion = (value) => {
   if (!variantSegment) return null;
   if (!variantSegment.before.includes('@')) return null;
 
-  const suffixes = parseSlashSuffixVariantGroup(variantSegment.inside);
-  if (!suffixes.length) return null;
+  const expansion = expandAtQualifiedMpnVariants(variantSegment.before, variantSegment.inside);
+  if (!expansion?.mpns?.length) return null;
 
-  const baseMpn = joinAtQualifiedMpn(variantSegment.before);
+  const baseMpn = expansion.baseMpn;
   if (!baseMpn || !/[0-9]/.test(baseMpn)) return null;
   if (!looksLikeMpnToken(baseMpn) && !looksLikeParenthesizedMpn(baseMpn)) return null;
 
-  const includeBaseMpn = fmt(variantSegment.inside).trim().startsWith('/');
-  const expandedMpns = [
-    ...(includeBaseMpn ? [baseMpn] : []),
-    ...suffixes.map((suffix) => `${baseMpn}${suffix}`),
-  ]
-    .map(stripVendorPrefix)
-    .filter(Boolean);
-  const uniqueMpns = [...new Set(expandedMpns.map((mpn) => fmt(mpn)))];
-  if (uniqueMpns.length < 2) return null;
+  const uniqueMpns = [...new Set(expansion.mpns.map(stripVendorPrefix).map((mpn) => fmt(mpn)).filter(Boolean))];
+  if (uniqueMpns.length < 1) return null;
 
   debugSlashVariantParser('detected expansion', {
     source,
     baseMpn,
     manufacturer,
     qualifier: variantSegment.inside,
-    suffixes,
+    suffixes: expansion.suffixes,
     mpns: uniqueMpns,
     discarded: blocks,
   });
@@ -878,7 +980,7 @@ const detectSlashSuffixVariantExpansion = (value) => {
     source,
     baseMpn,
     manufacturer,
-    suffixes,
+    suffixes: expansion.suffixes,
     mpns: uniqueMpns,
     pairs: uniqueMpns.map((mpn) => ({
       mpn,
@@ -1891,7 +1993,7 @@ const parseParenthesizedMpnManufacturerPairs = (value, config = {}) => {
     const manufacturerCode = codeIndex > 0 ? insideParts.slice(codeIndex).join(', ').trim() : insideParts.slice(1).join(', ').trim();
     if (!manufacturer || !/[A-Za-z]/.test(manufacturer)) return [];
 
-    return mpns.map((mpn) => ({
+    return mpns.map((mpn) => normalizeAtQualifiedParsedPair({
       mpn,
       manufacturer,
       metadata: {
@@ -1906,7 +2008,7 @@ const parseParenthesizedMpnManufacturerPairs = (value, config = {}) => {
           ].filter(Boolean).join(' '),
         } : {}),
       },
-    }));
+    }, part));
   }).filter(Boolean);
 
   // Requiring EVERY entry to parse meant one odd line threw away its siblings: item
@@ -1953,11 +2055,11 @@ const parseTrailingParenthesizedMpnManufacturerPair = (value) => {
     discardedText,
   });
 
-  return mpns.map((mpn) => ({
+  return mpns.map((mpn) => normalizeAtQualifiedParsedPair({
     mpn,
     manufacturer,
     metadata: discardedText ? { discardedText } : {},
-  }));
+  }, value));
 };
 
 const parsePackedMpnManufacturerPairs = (value, config = {}) => {
@@ -3467,7 +3569,19 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
   };
 
   const hasPrimaryContext = (row) => {
-    if (strictContextMarker) return Boolean(getCell(row, contextColumn));
+    if (strictContextMarker) {
+      const contextValue = getCell(row, contextColumn);
+      if (!contextValue) return false;
+      const hasContextDetail = Boolean(
+        getCell(row, roles.parent) ||
+        getCell(row, roles.cpn) ||
+        getCell(row, roles.description) ||
+        getCell(row, roles.quantity) ||
+        getCell(row, roles.uom)
+      );
+      if (normalizeKey(contextColumn) === normalizeKey(mpnColumn) && !hasContextDetail) return false;
+      return true;
+    }
     return Boolean(
       getCell(row, roles.parent) ||
       getCell(row, roles.description) ||
@@ -6291,6 +6405,23 @@ const NORMALIZED_TABLE_BASE_COLUMNS = [
   { key: 'confidence', label: 'Confidence', editable: false, width: 105 },
 ];
 
+const CONFIDENCE_HELP_TEXT = 'Confidence is the normalizer estimate for how safely this row was parsed from the selected columns and rules. It is a review signal, not supplier validation.';
+
+const NORMALIZED_RELATION_FILTERS = [
+  { value: 'all', label: 'All relations' },
+  { value: 'primary', label: 'Primary only' },
+  { value: 'alternate', label: 'Alternates only' },
+];
+
+const NORMALIZED_ISSUE_FILTERS = [
+  { value: 'all', label: 'All rows' },
+  { value: 'missing_mpn', label: 'Missing MPN' },
+  { value: 'missing_mfr', label: 'Missing manufacturer' },
+  { value: 'missing_cpn', label: 'Missing CPN' },
+  { value: 'missing_qty', label: 'Missing quantity' },
+  { value: 'low_confidence', label: 'Low confidence' },
+];
+
 const hasManufacturerValues = (rows = []) => rows.some((row) => fmt(row?.manufacturer));
 
 const buildBomMappingRowsFromNormalizedRows = (rows = [], baseColumns = getNormalizedExportColumns(rows)) => {
@@ -6469,15 +6600,26 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
   const defaultVisibleColumns = ['relation', 'level', 'cpn', 'mpn', 'manufacturer', 'quantity', 'uom', 'Item code', 'confidence'];
   const [visibleColumnKeys, setVisibleColumnKeys] = useState(defaultVisibleColumns);
   const [searchQuery, setSearchQuery] = useState('');
+  const [relationFilter, setRelationFilter] = useState('all');
+  const [issueFilter, setIssueFilter] = useState('all');
   const [pendingPrimaryDeleteIndex, setPendingPrimaryDeleteIndex] = useState(null);
   const [allRowsOpen, setAllRowsOpen] = useState(false);
   const [allRowsPage, setAllRowsPage] = useState(0);
   const visibleColumns = columns.filter((column) => visibleColumnKeys.includes(column.key));
   const normalizedSearch = searchQuery.trim().toLowerCase();
+  const activeRelationFilter = NORMALIZED_RELATION_FILTERS.find((option) => option.value === relationFilter);
+  const activeIssueFilter = NORMALIZED_ISSUE_FILTERS.find((option) => option.value === issueFilter);
   const filteredRows = rows
     .map((row, originalIndex) => ({ row, originalIndex }))
     .filter(({ row }) => {
       if (lowConfidenceOnly && Number(row.confidence || 0) >= 70) return false;
+      if (relationFilter === 'primary' && row.relation !== 'Primary') return false;
+      if (relationFilter === 'alternate' && row.relation === 'Primary') return false;
+      if (issueFilter === 'low_confidence' && Number(row.confidence || 0) >= 70) return false;
+      if (issueFilter === 'missing_mpn' && fmt(row.mpn)) return false;
+      if (issueFilter === 'missing_mfr' && fmt(row.manufacturer)) return false;
+      if (issueFilter === 'missing_cpn' && fmt(row.cpn)) return false;
+      if (issueFilter === 'missing_qty' && fmt(row.quantity)) return false;
       if (!normalizedSearch) return true;
       return Object.values(row).some((value) => fmt(value).toLowerCase().includes(normalizedSearch));
     });
@@ -6555,6 +6697,22 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
               onDelete={() => onLowConfidenceOnlyChange(false)}
             />
           )}
+          {relationFilter !== 'all' && (
+            <Chip
+              size="small"
+              variant="outlined"
+              label={activeRelationFilter?.label || 'Relation filter'}
+              onDelete={() => setRelationFilter('all')}
+            />
+          )}
+          {issueFilter !== 'all' && (
+            <Chip
+              size="small"
+              variant="outlined"
+              label={activeIssueFilter?.label || 'Issue filter'}
+              onDelete={() => setIssueFilter('all')}
+            />
+          )}
         </Stack>
         <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap" justifyContent="flex-end">
           <Button
@@ -6574,6 +6732,30 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
             onChange={(event) => setSearchQuery(event.target.value)}
             sx={{ width: 220 }}
           />
+          <FormControl size="small" sx={{ minWidth: 150 }}>
+            <InputLabel>Relation</InputLabel>
+            <Select
+              value={relationFilter}
+              label="Relation"
+              onChange={(event) => setRelationFilter(event.target.value)}
+            >
+              {NORMALIZED_RELATION_FILTERS.map((option) => (
+                <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <FormControl size="small" sx={{ minWidth: 180 }}>
+            <InputLabel>Data issue</InputLabel>
+            <Select
+              value={issueFilter}
+              label="Data issue"
+              onChange={(event) => setIssueFilter(event.target.value)}
+            >
+              {NORMALIZED_ISSUE_FILTERS.map((option) => (
+                <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+              ))}
+            </Select>
+          </FormControl>
           <FormControl size="small" sx={{ minWidth: 230 }}>
             <InputLabel>Visible columns</InputLabel>
             <Select
@@ -6601,7 +6783,14 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
             <TableCell sx={{ fontWeight: 800, bgcolor: tableTone.header, color: tableTone.text, borderColor: tableTone.border, width: 56 }}>Actions</TableCell>
             {visibleColumns.map((column) => (
               <TableCell key={column.key} sx={{ fontWeight: 800, bgcolor: tableTone.header, color: tableTone.text, borderColor: tableTone.border, minWidth: column.width }}>
-                {column.label}
+                {column.key === 'confidence' ? (
+                  <Stack direction="row" alignItems="center" gap={0.5}>
+                    <span>{column.label}</span>
+                    <Tooltip title={CONFIDENCE_HELP_TEXT} arrow>
+                      <InfoOutlinedIcon sx={{ fontSize: 16, color: tableTone.muted }} />
+                    </Tooltip>
+                  </Stack>
+                ) : column.label}
               </TableCell>
             ))}
           </TableRow>
@@ -6685,6 +6874,8 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
               <Chip size="small" label={`${filteredRows.length} of ${rows.length} rows`} />
               <Chip size="small" label={`${visibleColumns.length} columns`} />
               {lowConfidenceOnly && <Chip size="small" color="warning" label="Low confidence only" />}
+              {relationFilter !== 'all' && <Chip size="small" variant="outlined" label={activeRelationFilter?.label || 'Relation filter'} />}
+              {issueFilter !== 'all' && <Chip size="small" variant="outlined" label={activeIssueFilter?.label || 'Issue filter'} />}
               {normalizedSearch && <Chip size="small" variant="outlined" label={`Search: ${searchQuery}`} />}
             </Stack>
           </Stack>
@@ -6724,7 +6915,14 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
                         borderColor: tableTone.border,
                       }}
                     >
-                      {column.label}
+                      {column.key === 'confidence' ? (
+                        <Stack direction="row" alignItems="center" gap={0.5}>
+                          <span>{column.label}</span>
+                          <Tooltip title={CONFIDENCE_HELP_TEXT} arrow>
+                            <InfoOutlinedIcon sx={{ fontSize: 16, color: tableTone.muted }} />
+                          </Tooltip>
+                        </Stack>
+                      ) : column.label}
                     </TableCell>
                   ))}
                 </TableRow>
@@ -7874,6 +8072,13 @@ const BomNormalizer = () => {
       example: detected[0],
     };
   }, [selectedParsingPatternExample]);
+  const showSelectedSlashVariantExpansion = useMemo(() => {
+    const expansionPairs = selectedSlashVariantExpansion?.example?.pairs || [];
+    const previewPairs = selectedParsingPatternExample?.pairs || [];
+    if (!expansionPairs.length || !previewPairs.length) return Boolean(expansionPairs.length);
+    if (expansionPairs.length !== previewPairs.length) return true;
+    return expansionPairs.some((pair, index) => !sameParsedPair(pair, previewPairs[index]));
+  }, [selectedParsingPatternExample, selectedSlashVariantExpansion]);
 
   const handleStepParsingPattern = useCallback((direction) => {
     if (!parsingPatternOptions.length) return;
@@ -12266,26 +12471,28 @@ const BomNormalizer = () => {
                     <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap">
                       <Typography sx={{ fontSize: 18, fontWeight: 800 }}>Normalized editable sheet</Typography>
                       {quality.lowConfidence > 0 && (
-                        <Chip
-                          size="small"
-                          clickable
-                          color="warning"
-                          variant={lowConfidenceOnly ? 'filled' : 'outlined'}
-                          label={`${quality.lowConfidence} low confidence`}
-                          onClick={() => setLowConfidenceOnly((prev) => !prev)}
-                          sx={{
-                            height: 28,
-                            px: 0.5,
-                            fontSize: 13,
-                            fontWeight: 800,
-                            borderColor: lowConfidenceOnly ? 'transparent' : '#f59e0b',
-                            bgcolor: lowConfidenceOnly ? '#f59e0b' : (isDarkMode ? 'rgba(245, 158, 11, 0.16)' : '#fff7ed'),
-                            color: lowConfidenceOnly ? '#111827' : (isDarkMode ? '#fbbf24' : '#92400e'),
-                            '&:hover': {
-                              bgcolor: lowConfidenceOnly ? '#fbbf24' : (isDarkMode ? 'rgba(245, 158, 11, 0.24)' : '#ffedd5'),
-                            },
-                          }}
-                        />
+                        <Tooltip title={CONFIDENCE_HELP_TEXT} arrow>
+                          <Chip
+                            size="small"
+                            clickable
+                            color="warning"
+                            variant={lowConfidenceOnly ? 'filled' : 'outlined'}
+                            label={`${quality.lowConfidence} low confidence`}
+                            onClick={() => setLowConfidenceOnly((prev) => !prev)}
+                            sx={{
+                              height: 28,
+                              px: 0.5,
+                              fontSize: 13,
+                              fontWeight: 800,
+                              borderColor: lowConfidenceOnly ? 'transparent' : '#f59e0b',
+                              bgcolor: lowConfidenceOnly ? '#f59e0b' : (isDarkMode ? 'rgba(245, 158, 11, 0.16)' : '#fff7ed'),
+                              color: lowConfidenceOnly ? '#111827' : (isDarkMode ? '#fbbf24' : '#92400e'),
+                              '&:hover': {
+                                bgcolor: lowConfidenceOnly ? '#fbbf24' : (isDarkMode ? 'rgba(245, 158, 11, 0.24)' : '#ffedd5'),
+                              },
+                            }}
+                          />
+                        </Tooltip>
                       )}
                     </Stack>
                     <Typography sx={{ mt: 0.5, fontSize: 13, color: '#66717f' }}>
@@ -13590,7 +13797,7 @@ const BomNormalizer = () => {
                     <Typography sx={{ mt: 0.35, fontSize: 13, fontWeight: 650, lineHeight: 1.4, color: normalizerTheme.text, wordBreak: 'break-word' }}>
                       {example.source}
                     </Typography>
-                    {selectedSlashVariantExpansion?.example && (
+                    {showSelectedSlashVariantExpansion && selectedSlashVariantExpansion?.example && (
                       <Box
                         sx={{
                           mt: 0.9,
