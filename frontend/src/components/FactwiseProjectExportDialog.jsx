@@ -422,29 +422,12 @@ export default function FactwiseProjectExportDialog({
     );
   }, [open, pendingIntent, projectBoms, reviseTargetKeys]);
 
-  // Fallback autofill for the cold-open case (no intent, or intent's BOM
-  // not in the picked project). The "Create new BOM in this project"
-  // default option was deleted, so a panel with nothing checked leaves the
-  // Start button disabled with no obvious next step. Auto-check the single
-  // usable revisable BOM when there is exactly one — that's zero-ambiguity
-  // and matches what the intent autofill would have picked. When there are
-  // multiple, we still ask the user rather than silently guess.
-  useEffect(() => {
-    if (!open || modeDraft !== PROJECT_MODES.EXISTING) return;
-    if (!pickedProject?.project_id) return;
-    if (reviseTargetKeys.length) return;         // user (or intent) already picked
-    if (pendingIntent) return;                    // intent autofill still deciding
-    if (projectBomsLoading || !projectBoms.length) return;
-    const usable = projectBoms.filter(b => b.bom_module_id && b.enterprise_bom_id);
-    if (usable.length !== 1) return;              // ambiguous — leave to the user
-    const b = usable[0];
-    setReviseTargetKeys([
-      `${b.bom_module_id}::${b.enterprise_bom_id}::${b.bom_code || ''}`
-    ]);
-  }, [
-    open, modeDraft, pickedProject, projectBoms, projectBomsLoading,
-    pendingIntent, reviseTargetKeys,
-  ]);
+  // Fallback autofill (auto-check the single revisable BOM) was removed
+  // 2026-08-17 — EXISTING mode no longer requires a revise target, so an
+  // unchecked panel is a valid "attach as a fresh new BOM in this project"
+  // choice. Auto-checking hid that option from the user, forcing revise
+  // whenever the project had exactly one BOM. Intent-driven autofill (a
+  // Revise: X pick from BomStructureDialog) still runs above.
 
   const activeStep = phaseToStepIndex(phase);
   const isDone = phase === PHASES.DONE;

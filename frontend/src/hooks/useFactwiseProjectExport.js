@@ -718,6 +718,41 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
   const runBomStep = useCallback(async () => {
     patch({ phase: PHASES.BOM_UPLOADING, lastError: null, lastResponseType: null });
     try {
+      // Resume-from-publish shortcut. If a prior attempt already uploaded
+      // the sheet and created enterprise BOMs (bomIds present in state) but
+      // fell over in the publish-DRAFT-to-ONGOING loop (many-level BOMs can
+      // exceed the per-level 45s hydration window), re-run only that loop
+      // instead of re-uploading. Re-uploading would hit
+      // unique_enterprise_bom_code and reject the whole retry with "BOM
+      // exists, use a different name."
+      //
+      // Only for non-revise flows: revise (Path A) has its own resume
+      // handling further down via revisedNewEnterpriseBomId.
+      const savedForResume = loadCheckpoint(sessionId) || {};
+      if (
+        !savedForResume.reviseEnterpriseBomId
+        && Array.isArray(savedForResume.bomIds)
+        && savedForResume.bomIds.length > 0
+      ) {
+        for (const id of savedForResume.bomIds) {
+          patch({ phase: PHASES.BOM_SETTLING });
+          await waitForBomReady({ enterpriseBomId: id });
+          patch({ phase: PHASES.BOM_PROCESSING });
+          const submitted = await publishBomToOngoing(id);
+          if (!submitted?.success) {
+            patch({
+              phase: PHASES.BOM_ERROR,
+              lastError:
+                submitted?.error
+                || `BOM ${id} imported but could not be submitted to ONGOING.`,
+            });
+            return { ok: false };
+          }
+        }
+        patch({ phase: PHASES.BOM_DONE, sessionExportedBom: true });
+        return { ok: true };
+      }
+
       const columnOrder = getColumnOrder?.() || null;
       let file = await buildFile(sessionId, columnOrder, 'bom', 'bom', refreshHost);
 
@@ -997,6 +1032,23 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
       }
 
       const bomIds = resp?.bom_ids || [];
+      // Persist bomIds BEFORE publishing. The publish loop below can take
+      // minutes for deeply-nested BOMs (each level polls admin up to 45s
+      // for hydration, then submits, then verifies), and if ANY level fails
+      // or times out we abort with BOM_ERROR. Without saving bomIds first,
+      // a subsequent retry would re-enter runBomStep, re-upload the sheet,
+      // and FactWise's admin_import would reject the second attempt with a
+      // unique_enterprise_bom_code violation — "BOM exists, use a different
+      // name" — even though the BOM was already created and just needs its
+      // publish step retried.
+      //
+      // sessionExportedBom is NOT set yet — see the final patch at the
+      // bottom of the loop. That flag means "the whole BOM step is done and
+      // future runs may skip it"; setting it here would make a retry skip
+      // the publish loop, leaving DRAFT BOMs unpublished and downstream
+      // attach silently fail with an empty Add Items tab.
+      patch({ bomIds });
+
       // Publish DRAFT → ONGOING so the project can actually use it. FactWise's
       // BOM_DASHBOARD import leaves new BOMs in DRAFT status; without this
       // submit, attaching the BOM to a project shows an empty Add Item tab
@@ -1021,7 +1073,6 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
       }
       patch({
         phase: PHASES.BOM_DONE,
-        bomIds,
         // Sticky flag — future dialog opens will skip this step. Combined
         // with sessionExportedItems, an "Export to BOM Directory" run
         // followed by "Export to Project" reuses the already-created BOM
