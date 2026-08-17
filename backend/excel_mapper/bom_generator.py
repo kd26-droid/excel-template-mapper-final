@@ -926,18 +926,41 @@ def find_records_duplicate_groups(records):
     return groups
 
 
-def apply_records_duplicate_policy(records, policy, per_group_target_level=None):
+def apply_records_duplicate_policy(records, policy, per_group_target_level=None,
+                                   per_group_quantity=None):
     """Apply a duplicate-handling policy to a normalized records list.
 
     Records use ``F_QUANTITY`` / ``F_LEVEL`` for the fields the policy
     negotiates, so mutation is straightforward. Returns a new list of records.
+
+    ``per_group_quantity`` maps a group to the quantity the USER decided, and it
+    outranks everything the policy would compute. Keyed by ``signature_id`` for
+    a whole group, or ``"signature_id::level"`` for one level of it - a sheet
+    that repeats a part at three levels needs three answers, not one.
+
+    This is what turns "choose the quantity" from a separate mode into an edit.
+    The dialog shows the summed figure as the suggestion; typing 4 over a
+    suggested 5 keeps one row's quantity and drops the other, and typing 1.7
+    works too, because a BOM can consume a fraction of a metre of cable.
+    An override also RESOLVES the group: a decision that specific outranks a
+    global "do not aggregate", so it collapses even under keep_duplicates.
     """
     if policy not in VALID_DUP_POLICIES:
         raise ValueError('Unknown duplicate policy: %r' % policy)
     per_group_target_level = per_group_target_level or {}
+    per_group_quantity = per_group_quantity or {}
     groups = find_records_duplicate_groups(records)
     if not groups:
         return list(records)
+
+    def chosen_quantity(gid, level):
+        """The user's figure for this group at this level, or None."""
+        for key in ('%s::%s' % (gid, level), gid):
+            if key in per_group_quantity:
+                text = str(per_group_quantity[key]).strip()
+                if text:
+                    return _num(text)
+        return None
 
     row_to_group = {}
     for group in groups:
@@ -966,7 +989,25 @@ def apply_records_duplicate_policy(records, policy, per_group_target_level=None)
             if level is not None:
                 target_record[F_LEVEL] = level
 
-        if policy == POLICY_KEEP_AT_ALL_LEVELS:
+        # A quantity the user set for this group wins outright, whatever the
+        # policy is - including keep_duplicates, because an explicit decision
+        # about one group is not overridden by a global "leave things alone".
+        override = chosen_quantity(gid, row_level)
+        if override is not None:
+            bucket = (gid, row_level)
+            if bucket in per_bucket_written:
+                continue  # already written at this level; this row is absorbed
+            new_row = dict(record)
+            write(new_row, qty=override)
+            per_bucket_written[bucket] = len(output)
+            output.append(new_row)
+            continue
+
+        if policy == POLICY_KEEP_DUPLICATES:
+            # Untouched, and left for validation to object to.
+            output.append(dict(record))
+
+        elif policy == POLICY_KEEP_AT_ALL_LEVELS:
             bucket = (gid, row_level)
             per_bucket_qty[bucket] = per_bucket_qty.get(bucket, 0.0) + row_qty
             if bucket in per_bucket_written:
@@ -1212,11 +1253,21 @@ POLICY_KEEP_AT_ALL_LEVELS = 'keep_at_all_levels'        # 2
 POLICY_AGGREGATE_PER_LEVEL = 'aggregate_per_level'      # 3
 POLICY_AGGREGATE_ALL_TO_ONE_LEVEL = 'aggregate_all_to_one_level'  # 4
 
+# Leave every duplicate row exactly where it is.
+#
+# Not a way of resolving duplicates - a way of declining to. FactWise refuses a
+# BOM that lists one part twice, so an unresolved same-level group leaves the
+# export failing validation with `duplicate_child`. That is the point: the user
+# turned aggregation off, so the app must not quietly decide a quantity on their
+# behalf. It says what is wrong and waits.
+POLICY_KEEP_DUPLICATES = 'keep_duplicates'              # 5
+
 VALID_DUP_POLICIES = {
     POLICY_IGNORE_OTHER_LEVELS,
     POLICY_KEEP_AT_ALL_LEVELS,
     POLICY_AGGREGATE_PER_LEVEL,
     POLICY_AGGREGATE_ALL_TO_ONE_LEVEL,
+    POLICY_KEEP_DUPLICATES,
 }
 
 
@@ -1301,7 +1352,15 @@ def apply_bom_duplicate_policy(bom_rows, bom_headers, policy, per_group_target_l
         row_level = str((row.get('Level') if isinstance(row, dict) else '') or '').strip()
         row_qty = _num(row.get('Quantity') if isinstance(row, dict) else '')
 
-        if policy == POLICY_KEEP_AT_ALL_LEVELS:
+        # Every policy must have a branch here. A row that belongs to a
+        # duplicate group and matches none of them is never appended, so it
+        # vanishes from the output with no error - which is how adding a
+        # policy to VALID_DUP_POLICIES without covering every applier turns
+        # into silent row loss.
+        if policy == POLICY_KEEP_DUPLICATES:
+            output.append(dict(row) if isinstance(row, dict) else row)
+
+        elif policy == POLICY_KEEP_AT_ALL_LEVELS:
             # Same-level dup rows still collapse to one row per level with
             # summed qty — a same-level dup is never valid to keep as two rows.
             bucket = (gid, row_level)
@@ -1452,7 +1511,12 @@ def apply_grid_duplicate_policy(headers, rows, policy, per_group_target_level=No
                 target_row.append('')
             target_row[level_i] = value
 
-        if policy == POLICY_KEEP_AT_ALL_LEVELS:
+        # See the note in apply_bom_duplicate_policy: an unhandled policy
+        # drops the row silently rather than raising.
+        if policy == POLICY_KEEP_DUPLICATES:
+            output.append(dict(row) if isinstance(row, dict) else row)
+
+        elif policy == POLICY_KEEP_AT_ALL_LEVELS:
             bucket = (gid, row_level)
             per_bucket_qty[bucket] = per_bucket_qty.get(bucket, 0.0) + row_qty
             if bucket in per_bucket_written:
