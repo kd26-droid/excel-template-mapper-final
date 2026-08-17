@@ -348,6 +348,22 @@ const ExampleTree = () => (
 //
 // Returns null when the sheet states no parents, leaving the level-order
 // inference below as the only option.
+// Separators a sheet might write a breadcrumb path with. The normalizer reduces
+// paths to plain codes before this runs, so reaching for this means it declined
+// to — too few of the path's segments matched a code on the sheet for it to be
+// sure. The list is still better off naming the assembly than naming its whole
+// trail: an assembly's own code is the last segment either way, and asking
+// someone to confirm ">E36047BB01>A1234990" is asking them to confirm a string
+// that appears nowhere in their PLM.
+const PATH_SEPARATORS = ['>', '::', '|', '\\'];
+
+const assemblyCodeFromPath = (value) => {
+  const separator = PATH_SEPARATORS.find((candidate) => value.includes(candidate));
+  if (!separator) return value;
+  const segments = value.split(separator).map((part) => part.trim()).filter(Boolean);
+  return segments.length ? segments[segments.length - 1] : value;
+};
+
 const assembliesFromParents = (records, levelColumn) => {
   if (!Array.isArray(records) || !records.length) return null;
   if (!('parent' in (records[0] || {}))) return null;
@@ -355,7 +371,7 @@ const assembliesFromParents = (records, levelColumn) => {
   const shallowestChild = new Map();
   let any = false;
   records.forEach((record) => {
-    const parent = String(record?.parent ?? '').trim();
+    const parent = assemblyCodeFromPath(String(record?.parent ?? '').trim());
     if (!parent) return;
     any = true;
     const level = parseLevelValue(record?.[levelColumn]);
@@ -369,7 +385,9 @@ const assembliesFromParents = (records, levelColumn) => {
   // — they all describe children OF it, so this is only a fallback label.
   const nameOf = new Map();
   records.forEach((record) => {
-    const parent = String(record?.parent ?? '').trim();
+    // Reduced the same way as above, or the two maps key on different strings
+    // and every lookup here misses.
+    const parent = assemblyCodeFromPath(String(record?.parent ?? '').trim());
     if (parent && !nameOf.has(parent)) nameOf.set(parent, '');
   });
 

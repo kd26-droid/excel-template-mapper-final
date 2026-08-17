@@ -1459,6 +1459,15 @@ const splitByExplicitDelimiter = (value, delimiter) => {
   return splitTopLevelDelimited(text, [delimiter]);
 };
 
+const splitSpacedSlashManufacturerParts = (value) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ');
+  if (!text || !/\s\/\s/.test(text)) return [];
+  return text
+    .split(/\s+\/\s+/)
+    .map(fmt)
+    .filter(Boolean);
+};
+
 const stripVendorPrefix = (value) => {
   const text = stripCircledNumberMarkers(value).replace(/\s+/g, ' ');
   return text
@@ -2270,6 +2279,9 @@ const splitManufacturerCell = (value, expectedCount, config = {}) => {
   const explicitParts = splitByExplicitDelimiter(text, delimiter);
   if (explicitParts.length > 1) return mergeManufacturerSuffixParts(explicitParts).map(canonicalForManufacturer);
 
+  const slashParts = splitSpacedSlashManufacturerParts(text);
+  if (slashParts.length > 1) return mergeManufacturerSuffixParts(slashParts).map(canonicalForManufacturer);
+
   const knownPhrases = [
     ...directoryNames,
     ...Object.keys(directoryAliases),
@@ -2315,6 +2327,27 @@ const splitManufacturerCell = (value, expectedCount, config = {}) => {
 };
 
 const getCell = (row, header) => (header ? fmt(row[header]) : '');
+
+const pairMpnsWithManufacturers = (mpns = [], manufacturers = [], rawManufacturer = '') => {
+  const cleanMpns = mpns.map(stripVendorPrefix).map(fmt).filter(Boolean);
+  const cleanManufacturers = manufacturers.map(fmt).filter(Boolean);
+  if (!cleanMpns.length && !cleanManufacturers.length) return [];
+
+  if (cleanMpns.length === 1 && cleanManufacturers.length > 1) {
+    return cleanManufacturers.map((manufacturer) => ({
+      mpn: cleanMpns[0],
+      manufacturer,
+      metadata: {},
+    }));
+  }
+
+  const count = Math.max(cleanMpns.length, cleanManufacturers.length || 0);
+  return Array.from({ length: count }).map((_, index) => ({
+    mpn: cleanMpns[index] || cleanMpns[0] || '',
+    manufacturer: cleanManufacturers[index] || cleanManufacturers[0] || rawManufacturer || '',
+    metadata: {},
+  })).filter((pair) => pair.mpn || pair.manufacturer);
+};
 
 const isPlaceholderCell = (value) => {
   const text = fmt(value).replace(/\u00a0/g, ' ').trim().toLowerCase();
@@ -2444,7 +2477,7 @@ const alternatesKey = (row, roles, sourceRow) => {
   // Weaker than a real parent - two placements at the SAME level under different
   // assemblies still merge. That needs the parent inferred from row order during
   // normalization, which is the backend's job today.
-  const level = getCell(row, roles.level);
+  const level = rowLevel(row, roles);
   return level ? `L${level}␟${identity}` : identity;
 };
 
@@ -2453,13 +2486,66 @@ const alternatesKey = (row, roles, sourceRow) => {
 // every row and this is the only thing it needs to know about the walk.
 const LEVEL_PARENT_KEY = '__inferredParent';
 
+// Where unpackParentPaths writes the plain parent code it read out of a
+// breadcrumb path. Kept off the source cell on purpose: the sheet view still
+// shows what the file actually says, and re-running with different roles
+// re-derives from the original rather than from a value we already rewrote.
+const PATH_PARENT_KEY = '__pathParent';
+
+// A row's own trail states two more things outright, and only when the trail is
+// the ROW's (takeLeaf === false). If the path names the PARENT instead, its last
+// segment is the parent's code and neither of these can be read from it.
+//
+//   depth  — the number of segments IS the FactWise level. A root is one segment
+//            and Level 1. This beats the sheet's own level column whenever that
+//            column counts something else: THALES numbers a drawing with the
+//            level of the part it documents, not its own position, so 97 of 345
+//            rows report a level one tier too shallow.
+//   code   — the last segment is the row's own PART NUMBER, and it lands in the
+//            CPN role (THALES calls it Ref. Article). Not the grid's "Item code"
+//            column, which is a separate field this never touches. 130 rows in
+//            the same export arrive with an empty CPN cell but a complete path,
+//            so the number is sitting right there.
+const PATH_DEPTH_KEY = '__pathDepth';
+const PATH_CODE_KEY = '__pathCode';
+// Set on rows whose blank CPN cell we filled from the path, so a re-run can put
+// it back rather than treating our own fill as the sheet's data.
+const PATH_CODE_FILLED_KEY = '__pathCodeFilled';
+
+// What the sheet states this row's parent to be, as a plain code. A breadcrumb
+// path (">E36047BB01>F1288042") is not a code and matches nothing, so the
+// stamped reading of it wins when there is one.
+//
+// Presence of the stamp decides, not its truth. A root's path is one segment
+// long and correctly reads as "no parent" — an empty stamp — and falling back
+// on empty handed the root its OWN path as its parent, which is how
+// ">E36047BB01" kept appearing in the assembly list next to "E36047BB01".
+const statedParent = (row, roles) => (
+  row && PATH_PARENT_KEY in row ? row[PATH_PARENT_KEY] : getCell(row, roles.parent)
+) || '';
+
 // A stated parent when the sheet has one, otherwise the parent its level
 // implies — stamped by stampInferredParents before any of this runs.
 //
 // Level-only sheets now carry a real parent through to the output, so the tree
 // is built from an explicit statement rather than re-inferred from row order at
 // every stage that needs it.
-const hierarchyParent = (row, roles) => getCell(row, roles.parent) || row?.[LEVEL_PARENT_KEY] || '';
+const hierarchyParent = (row, roles) => statedParent(row, roles) || row?.[LEVEL_PARENT_KEY] || '';
+
+// The level this row sits at. A depth read off the row's own path outranks the
+// sheet's level column, because the path counts tiers and the column may not.
+const rowLevel = (row, roles) => String(row?.[PATH_DEPTH_KEY] ?? '') || getCell(row, roles.level);
+
+// Whether this row's parent cell reads as a trail rather than a plain code.
+// Only used to decide whether to OFFER the option - a separator alone does not
+// prove a path, so what the option actually does is still measured against the
+// sheet's codes before anything is written.
+const rowHoldsParentPath = (row, roles) => {
+  if (!roles?.parent) return false;
+  const value = getCell(row, roles.parent);
+  if (!value) return false;
+  return PATH_SEPARATORS.some((separator) => value.includes(separator));
+};
 
 const hasGroupedRowContext = (row, roles) => Boolean(
   getCell(row, roles.parent) ||
@@ -2543,7 +2629,7 @@ const normalizeSeparateCells = (rows, roles, config) => {
     const description = getCell(row, roles.description);
     const parentKey = alternatesKey(row, roles, sourceRow);
     const parent = hierarchyParent(row, roles);
-    const level = getCell(row, roles.level) || '1';
+    const level = rowLevel(row, roles) || '1';
     const rule = explicitDelimiterUsed ? 'separate_cells_user_delimiter' : 'separate_cells_position_pairing';
     const cpn = getCell(row, roles.cpn);
 
@@ -2676,7 +2762,7 @@ const normalizeSameCell = (rows, roles, config) => {
     const description = getCell(row, roles.description);
     const parentKey = alternatesKey(row, roles, sourceRow);
     const parent = hierarchyParent(row, roles);
-    const level = getCell(row, roles.level) || '1';
+    const level = rowLevel(row, roles) || '1';
     const cpn = getCell(row, roles.cpn);
 
     if (packedPairs.length) {
@@ -3147,7 +3233,7 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
     const levelInfo = getLevelItemInfo(row);
     if (levelInfo) syncHierarchy(levelInfo);
     const cpn = levelInfo?.cpn || getCell(row, roles.cpn);
-    const level = levelInfo?.level || getCell(row, roles.level) || '1';
+    const level = levelInfo?.level || rowLevel(row, roles) || '1';
     const parent = levelInfo?.parent || hierarchyParent(row, roles);
     const description = getCell(row, roles.description);
     const identity = cpn || description || `Source row ${sourceRow}`;
@@ -3235,11 +3321,7 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
 
     const pairs = packedPairs.length
       ? packedPairs
-      : mpns.map((mpn, index) => ({
-        mpn,
-        manufacturer: manufacturers[index] || (!index ? primaryManufacturer : ''),
-        metadata: {},
-      }));
+      : pairMpnsWithManufacturers(mpns, manufacturers, primaryManufacturer);
 
     if (!pairs.length && rawMpn && !looksLikeHierarchyPath(rawMpn)) {
       output.push(withSourceColumns({
@@ -3343,7 +3425,25 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
   const itemColumn = config.followingItemRowsItemColumn || roles.cpn || '';
   const mpnColumn = config.followingItemRowsMpnColumn || roles.mpn || '';
   const manufacturerColumn = config.followingItemRowsManufacturerColumn || roles.manufacturer || '';
+  const strictContextMarker = Boolean(contextColumn);
   let currentGroup = null;
+  const emittedPartsByGroup = new WeakMap();
+
+  const partIdentity = (pair) => {
+    const mpn = fmt(pair?.mpn).replace(/\s+/g, ' ').trim().toUpperCase();
+    const manufacturer = fmt(pair?.manufacturer).replace(/\s+/g, ' ').trim().toUpperCase();
+    return `${mpn}␟${manufacturer}`;
+  };
+
+  const shouldEmitPartForGroup = (group, pair) => {
+    const identity = partIdentity(pair);
+    if (!identity || identity === '␟') return true;
+    const emittedParts = emittedPartsByGroup.get(group) || new Set();
+    if (emittedParts.has(identity)) return false;
+    emittedParts.add(identity);
+    emittedPartsByGroup.set(group, emittedParts);
+    return true;
+  };
 
   const splitParts = (row) => {
     const rawMpn = getCell(row, mpnColumn);
@@ -3355,13 +3455,7 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
 
     const mpns = splitMpnCell(rawMpn, config);
     const manufacturers = splitManufacturerCell(rawManufacturer, mpns.length || null, config);
-    if (mpns.length) {
-      return mpns.map((mpn, index) => ({
-        mpn,
-        manufacturer: manufacturers[index] || manufacturers[0] || rawManufacturer || '',
-        metadata: {},
-      }));
-    }
+    if (mpns.length) return pairMpnsWithManufacturers(mpns, manufacturers, rawManufacturer);
     if (rawMpn || rawManufacturer) {
       return [{
         mpn: stripVendorPrefix(rawMpn),
@@ -3372,17 +3466,19 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
     return [];
   };
 
-  const hasPrimaryContext = (row) => Boolean(
-    (contextColumn && getCell(row, contextColumn)) ||
-    getCell(row, roles.parent) ||
-    getCell(row, roles.description) ||
-    getCell(row, roles.quantity) ||
-    getCell(row, roles.uom)
-  );
+  const hasPrimaryContext = (row) => {
+    if (strictContextMarker) return Boolean(getCell(row, contextColumn));
+    return Boolean(
+      getCell(row, roles.parent) ||
+      getCell(row, roles.description) ||
+      getCell(row, roles.quantity) ||
+      getCell(row, roles.uom)
+    );
+  };
 
   const groupFromRow = (row, rowIndex) => {
     const sourceRow = row.__sourceRow || rowIndex + 1;
-    const level = getCell(row, roles.level) || '1';
+    const level = rowLevel(row, roles) || '1';
     const cpn = getCell(row, roles.cpn) || getCell(row, itemColumn);
     const description = getCell(row, roles.description);
     const parent = hierarchyParent(row, roles);
@@ -3406,11 +3502,14 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
     const itemValue = getCell(row, itemColumn);
     const parts = splitParts(row).filter((pair) => pair?.mpn || pair?.manufacturer);
     const isContextRow = hasPrimaryContext(row);
-    const canAttachAsAlternate = Boolean(currentGroup && !isContextRow && (itemValue || parts.length));
+    const canAttachAsAlternate = Boolean(currentGroup && !isContextRow && (
+      strictContextMarker ? parts.length : (itemValue || parts.length)
+    ));
 
     if (canAttachAsAlternate) {
       const pairs = parts.length ? parts : [{ mpn: '', manufacturer: '', metadata: {} }];
       pairs.forEach((pair) => {
+        if (!shouldEmitPartForGroup(currentGroup, pair)) return;
         const relationIndex = Number(currentGroup.relationCount || 0);
         output.push(withSourceColumns({
           sourceRow,
@@ -3418,7 +3517,7 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
           parent: currentGroup.parent,
           relation: relationIndex === 0 ? 'Primary' : `Alternate ${relationIndex}`,
           level: currentGroup.level,
-          cpn: itemValue || currentGroup.cpn,
+          cpn: strictContextMarker ? currentGroup.cpn : (itemValue || currentGroup.cpn),
           description: currentGroup.description,
           mpn: pair.mpn,
           manufacturer: pair.manufacturer,
@@ -3438,11 +3537,16 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
 
     const group = groupFromRow(row, rowIndex);
     currentGroup = group;
+    if (strictContextMarker && isContextRow && !parts.length) {
+      return;
+    }
     const pairs = parts.length ? parts : [{ mpn: '', manufacturer: '', metadata: {} }];
-    pairs.forEach((pair, pairIndex) => {
+    let emittedPairCount = 0;
+    pairs.forEach((pair) => {
+      if (!shouldEmitPartForGroup(group, pair)) return;
       output.push(withSourceColumns({
         ...group,
-        relation: pairIndex === 0 ? 'Primary' : `Alternate ${pairIndex}`,
+        relation: emittedPairCount === 0 ? 'Primary' : `Alternate ${emittedPairCount}`,
         cpn: group.cpn || itemValue,
         mpn: pair.mpn,
         manufacturer: pair.manufacturer,
@@ -3453,8 +3557,9 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
         discardedText: '',
         ...pair.metadata,
       }, row, config));
+      emittedPairCount += 1;
     });
-    currentGroup.relationCount = Math.max(1, pairs.length);
+    currentGroup.relationCount = Math.max(1, emittedPairCount);
   });
 
   return output;
@@ -3475,7 +3580,7 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
     const description = getCell(row, roles.description);
     const parentKey = alternatesKey(row, roles, sourceRow);
     const parent = hierarchyParent(row, roles);
-    const level = getCell(row, roles.level) || '1';
+    const level = rowLevel(row, roles) || '1';
     const cpn = getCell(row, roles.cpn);
     const hasBomIdentity = Boolean(cpn || description || rawParentKey);
     let emittedAnyPart = false;
@@ -3577,7 +3682,7 @@ const normalizeOnePerRow = (rows, roles, config = {}) => rows.map((row, rowIndex
     parentKey: alternatesKey(row, roles, sourceRow),
     parent: hierarchyParent(row, roles),
     relation: 'Primary',
-    level: getCell(row, roles.level) || '1',
+    level: rowLevel(row, roles) || '1',
     cpn: getCell(row, roles.cpn),
     description: getCell(row, roles.description),
     mpn,
@@ -3841,7 +3946,7 @@ const normalizeSameGroupRows = (rows, roles, config = {}) => {
       parentKey,
       parent,
       relation: groupIndex === 0 ? 'Primary' : `Alternate ${groupIndex}`,
-      level: getCell(row, roles.level) || '1',
+      level: rowLevel(row, roles) || '1',
       cpn: getCell(row, roles.cpn),
       description: getCell(row, roles.description),
       mpn,
@@ -3864,7 +3969,7 @@ const normalizeManufacturerOnly = (rows, roles, config, splitCells) => {
       : [getCell(row, roles.manufacturer)].filter(Boolean);
     const parentKey = alternatesKey(row, roles, sourceRow);
     const parent = hierarchyParent(row, roles);
-    const level = getCell(row, roles.level) || '1';
+    const level = rowLevel(row, roles) || '1';
     const cpn = getCell(row, roles.cpn);
 
     manufacturers.forEach((manufacturer, partIndex) => {
@@ -3906,7 +4011,7 @@ const normalizeGroupedRows = (rows, roles, config) => {
       description: getCell(row, roles.description),
       quantity: getCell(row, roles.quantity),
       uom: getCell(row, roles.uom),
-      level: getCell(row, roles.level) || '1',
+      level: rowLevel(row, roles) || '1',
       relationCount: 0,
     };
   };
@@ -3929,7 +4034,7 @@ const normalizeGroupedRows = (rows, roles, config) => {
   };
 
   const rowStartsGroup = (row) => {
-    const nextParentKey = getCell(row, roles.parent) || getCell(row, roles.cpn) || getCell(row, roles.description);
+    const nextParentKey = statedParent(row, roles) || getCell(row, roles.cpn) || getCell(row, roles.description);
     const hasIdentity = Boolean(getCell(row, roles.parent) || getCell(row, roles.cpn) || getCell(row, roles.description));
     const hasRealContext = Boolean(
       !isPlaceholderCell(getCell(row, roles.quantity)) ||
@@ -3960,7 +4065,7 @@ const normalizeGroupedRows = (rows, roles, config) => {
         ...Object.fromEntries(Object.entries(nextGroup).filter(([, value]) => value)),
       } : nextGroup;
 
-      const contextPrimaryMpn = currentGroup.cpn || getCell(row, roles.parent);
+      const contextPrimaryMpn = currentGroup.cpn || statedParent(row, roles);
       const shouldEmitHeaderPrimary = config.groupHeaderMode === 'header_primary';
       if (startsGroup && !rowHasPart && contextPrimaryMpn && shouldEmitHeaderPrimary) {
         const primaryMpn = contextPrimaryMpn;
@@ -4004,7 +4109,7 @@ const normalizeGroupedRows = (rows, roles, config) => {
         parentKey: currentGroup.parentKey,
         parent: currentGroup.parent || hierarchyParent(row, roles),
         relation: relationIndex === 0 ? 'Primary' : `Alternate ${relationIndex}`,
-        level: currentGroup.level || getCell(row, roles.level) || '1',
+        level: currentGroup.level || rowLevel(row, roles) || '1',
         cpn: currentGroup.cpn || getCell(row, roles.cpn),
         description: currentGroup.description || getCell(row, roles.description),
         mpn: stripVendorPrefix(mpn),
@@ -4086,8 +4191,157 @@ const stampInferredParents = (rows, roles) => {
   return rows;
 };
 
-const normalizeRows = (rows, headers, roles, config) => {
-  stampInferredParents(rows, roles);
+// Separators a breadcrumb path might be written with. '/' and '\' are included
+// because some exports use them, but a part number can legitimately contain one
+// (THALES ships 'QCPF11/041'), so a separator is only ever adopted when it
+// demonstrably resolves more parents than leaving the value alone.
+const PATH_SEPARATORS = ['>', '::', '|', '\\', '/'];
+
+// A candidate is rejected if it leaves more than this share of rows pointing at
+// a parent that does not exist. Not zero: one malformed row should not veto a
+// reading that works for the other eight hundred.
+const PATH_UNRESOLVED_TOLERANCE = 0.05;
+
+// Pull the parent's code out of one breadcrumb path.
+const pathParent = (value, separator, takeLeaf) => {
+  const segments = String(value).split(separator).map((s) => s.trim()).filter(Boolean);
+  if (!segments.length) return '';
+  // The path names the parent, so its last segment is the parent.
+  if (takeLeaf) return segments[segments.length - 1];
+  // The path is the row's own trail, so the parent is the segment before the
+  // row itself. A one-segment trail is the root and has no parent.
+  return segments.length > 1 ? segments[segments.length - 2] : '';
+};
+
+// Read breadcrumb-path parents as plain parent codes, stamped onto each row.
+//
+// A sheet may answer "what is this row's parent?" with a whole path rather than
+// a code, and it may write either the parent's path or the row's own path. Both
+// are unusable as given: the value is matched against row codes and never
+// matches, so the tree comes out as one flat tier under a root nobody can find.
+// THALES' ARTDOC export does this — ">E36047BB01>F1288042" — and its 28
+// assemblies came through as 28 assemblies named after their own paths.
+//
+// Which convention a sheet uses cannot be assumed, so it is measured. Every
+// (separator, reading) pair is scored by the number of real parent-child edges
+// it produces, and one is adopted only if it beats leaving the values alone.
+// Scoring counts edges rather than "did it resolve" on purpose: reading a row's
+// own path as its parent's makes every row its own parent, which resolves
+// perfectly and yields a tree of roots that says nothing.
+//
+// A sheet of plain codes contains no separator, scores no candidates, and is
+// left untouched. This mirrors _unpack_stated_parent_paths in the backend's
+// bom_tree.py, which does the same job too late to reach the popup — by then
+// the assembly list the user is asked to name has already been built.
+const unpackParentPaths = (rows, roles, config = {}) => {
+  if (!rows?.length) return rows;
+
+  // Reading the parent code out of a path is always safe - the value matches
+  // nothing as it stands. Reading DEPTH and OWN CODE out of it overrides columns
+  // the sheet filled in, so it stays behind a switch the user can see and turn
+  // off. Default on: a sheet that writes trails is stating its tree in them.
+  const usePathHierarchy = config.parentPathLevels !== false;
+
+  // Clear before deciding whether to write. Rows are the SAME objects across
+  // re-runs, so a stamp from a run under different roles would otherwise
+  // survive into a run that should have left the column alone. The filled code
+  // cell is undone too — it is our writing, not the sheet's.
+  const codeRoleForClear = roles?.cpn || roles?.description;
+  rows.forEach((row) => {
+    delete row[PATH_PARENT_KEY];
+    delete row[PATH_DEPTH_KEY];
+    delete row[PATH_CODE_KEY];
+    if (row[PATH_CODE_FILLED_KEY]) {
+      if (codeRoleForClear) row[codeRoleForClear] = '';
+      delete row[PATH_CODE_FILLED_KEY];
+    }
+  });
+  if (!roles?.parent) return rows;
+
+  const codeRole = roles.cpn || roles.description;
+  if (!codeRole) return rows;
+
+  const stated = rows.filter((row) => getCell(row, roles.parent));
+  if (!stated.length) return rows;
+
+  const known = new Set();
+  rows.forEach((row) => {
+    const code = getCell(row, codeRole);
+    if (code) known.add(code);
+  });
+  const tolerance = stated.length * PATH_UNRESOLVED_TOLERANCE;
+
+  // Edge count for one reading, or null if too much of it dangles.
+  const score = (derive) => {
+    let edges = 0;
+    let unresolved = 0;
+    for (const row of stated) {
+      const parent = derive(row);
+      if (!parent || parent === getCell(row, codeRole)) continue; // a root
+      if (!known.has(parent)) {
+        unresolved += 1;
+        if (unresolved > tolerance) return null;
+        continue;
+      }
+      edges += 1;
+    }
+    return edges;
+  };
+
+  const baseline = score((row) => getCell(row, roles.parent));
+  if (baseline !== null && baseline === stated.length) return rows; // already codes
+
+  let best = null;
+  PATH_SEPARATORS.forEach((separator) => {
+    if (!stated.some((row) => getCell(row, roles.parent).includes(separator))) return;
+    [false, true].forEach((takeLeaf) => {
+      const edges = score((row) => pathParent(getCell(row, roles.parent), separator, takeLeaf));
+      if (edges === null) return;
+      if (!best || edges > best.edges) best = { edges, separator, takeLeaf };
+    });
+  });
+
+  if (!best || best.edges <= (baseline || 0)) return rows;
+  stated.forEach((row) => {
+    row[PATH_PARENT_KEY] = pathParent(getCell(row, roles.parent), best.separator, best.takeLeaf);
+  });
+
+  // Only a row's OWN trail states its depth and its own part number. A path that
+  // names the parent says nothing about either.
+  if (best.takeLeaf) return rows;
+
+  stated.forEach((row) => {
+    const segments = getCell(row, roles.parent)
+      .split(best.separator)
+      .map((segment) => segment.trim())
+      .filter(Boolean);
+    if (!segments.length) return;
+    row[PATH_CODE_KEY] = segments[segments.length - 1];
+    if (!usePathHierarchy) return;
+    row[PATH_DEPTH_KEY] = segments.length;
+    // Fill only what the sheet left empty. A code the sheet DID state stands,
+    // even where it disagrees with the path — overruling it here would silently
+    // re-identify parts on every sheet that writes both.
+    if (!getCell(row, codeRole)) {
+      row[codeRole] = row[PATH_CODE_KEY];
+      row[PATH_CODE_FILLED_KEY] = true;
+    }
+  });
+  return rows;
+};
+
+// Both passes below walk the WHOLE sheet to decide what they write, so they run
+// once over every row before anything is split up. `prepared` is how the chunked
+// caller says it has already done that: re-running them on a 50-row slice clears
+// the sheet-wide answer and replaces it with whatever that slice can see on its
+// own, which for unpackParentPaths is usually nothing at all. That produced a
+// half-unpacked sheet — plain codes from the chunks that happened to contain
+// enough of the tree, raw paths from the ones that did not.
+const normalizeRows = (rows, headers, roles, config, prepared = false) => {
+  if (!prepared) {
+    stampInferredParents(rows, roles);
+    unpackParentPaths(rows, roles, config);
+  }
   const layoutStructure = effectiveStructure(config);
   const assemblyMatrix = layoutStructure === 'assembly_quantity_matrix'
     ? (detectAssemblyQuantityMatrix(headers, rows, roles) || config.assemblyMatrix)
@@ -4134,6 +4388,10 @@ const normalizeRowsChunked = async (rows, headers, roles, config, onProgress) =>
   // so running it per 50-row chunk would restart the ancestor stack at each
   // boundary and orphan the first rows of every chunk after the first.
   stampInferredParents(rows, roles);
+  // Same reason, plus one of its own: the reading is chosen by scoring derived
+  // parents against every code on the sheet, and a 50-row window does not hold
+  // enough of them to tell a working reading from a dangling one.
+  unpackParentPaths(rows, roles, config);
   const layoutStructure = effectiveStructure(config);
   if (config.structure === 'grouped_rows' || layoutStructure === 'multi_block_assembly') {
     const dataRows = [];
@@ -4143,7 +4401,7 @@ const normalizeRowsChunked = async (rows, headers, roles, config, onProgress) =>
       if (skip) skippedRows += 1;
       else dataRows.push(row);
     });
-    const output = normalizeRows(dataRows, headers, roles, config);
+    const output = normalizeRows(dataRows, headers, roles, config, true);
     if (onProgress) {
       onProgress({
         processed: rows.length,
@@ -4169,7 +4427,7 @@ const normalizeRowsChunked = async (rows, headers, roles, config, onProgress) =>
       if (skip) skippedRows += 1;
       else dataChunk.push(row);
     }
-    output.push(...normalizeRows(dataChunk, headers, roles, config));
+    output.push(...normalizeRows(dataChunk, headers, roles, config, true));
     if (onProgress) {
       onProgress({
         processed: Math.min(start + chunkSize, rows.length),
@@ -4268,7 +4526,7 @@ const analyzeMpnManufacturerPairing = (rows, headers, roles, config) => {
       const mfrCount = scenario.manufacturers.length;
       if (mpnCount <= 1 && mfrCount <= 1) return;
       checkedRows += 1;
-      if (mpnCount === mfrCount) {
+      if (mpnCount === mfrCount || (mpnCount === 1 && mfrCount > 1)) {
         matchedRows += 1;
         return;
       }
@@ -4584,7 +4842,12 @@ const cleanDelimitedCell = (value) => {
   return text.replace(/""/g, '"');
 };
 
-const splitDelimitedLineSafely = (line, delimiter) => {
+// Brackets are treated as grouping so that a comma INSIDE one does not split a
+// cell - THALES writes manufacturer references like "Y2552860 (B724, 26X6)".
+// That only holds while the brackets balance. `groupAware` is how the function
+// tells itself they did not: a line ending mid-group was never grouped, and
+// re-reading it on quotes alone is the honest fallback.
+const splitDelimitedLineSafely = (line, delimiter, groupAware = true) => {
   const text = String(line || '');
   const cells = [];
   let current = '';
@@ -4606,10 +4869,12 @@ const splitDelimitedLineSafely = (line, delimiter) => {
     }
 
     if (!inQuotes) {
-      if ('([{'.includes(char)) {
-        groupDepth += 1;
-      } else if (')]}'.includes(char) && groupDepth > 0) {
-        groupDepth -= 1;
+      if (groupAware) {
+        if ('([{'.includes(char)) {
+          groupDepth += 1;
+        } else if (')]}'.includes(char) && groupDepth > 0) {
+          groupDepth -= 1;
+        }
       }
 
       if (char === delimiter && groupDepth === 0) {
@@ -4622,6 +4887,14 @@ const splitDelimitedLineSafely = (line, delimiter) => {
     current += char;
   }
 
+  // An unclosed bracket swallowed every delimiter after it, so this line came
+  // back as a handful of cells instead of a full row. Left standing it does not
+  // just mangle one line: rejoinWrappedLines below waits for a row to reach the
+  // header's width, and a row that never can absorbs the entire rest of the
+  // file. One "(B724," on line 819 of a THALES export cost 140 lines and 23 of
+  // its 28 assemblies.
+  if (groupAware && groupDepth > 0) return splitDelimitedLineSafely(line, delimiter, false);
+
   cells.push(cleanDelimitedCell(current));
   return cells;
 };
@@ -4632,6 +4905,13 @@ const countDelimitedFieldsSafely = (line, delimiter) => splitDelimitedLineSafely
 // quoting it, so a plain line split shreds one record across several lines. A line
 // that carries fewer separators than the header is a continuation of the row above,
 // not a new row.
+// How many lines one record may absorb before the wrap reading is abandoned.
+// A record CAN legitimately span many lines - a manufacturer list runs to a
+// dozen - but a buffer that has swallowed forty and still has not reached the
+// header's width is not a wrapped record, it is a row this parser cannot count.
+// Without a bound it takes the rest of the file with it.
+const MAX_WRAPPED_LINES = 40;
+
 const rejoinWrappedLines = (lines, delimiter) => {
   if (!lines.length) return [];
   const expected = countDelimitedFieldsSafely(lines[0], delimiter);
@@ -4639,11 +4919,22 @@ const rejoinWrappedLines = (lines, delimiter) => {
 
   const joined = [];
   let buffer = null;
+  let held = 0;
   lines.forEach((line) => {
     buffer = buffer === null ? line : `${buffer}\n${line}`;
+    held += 1;
     if (countDelimitedFieldsSafely(buffer, delimiter) >= expected) {
       joined.push(buffer);
       buffer = null;
+      held = 0;
+      return;
+    }
+    // Give up on this record rather than on the file. The short row that comes
+    // out is one bad row; the alternative is every row after it.
+    if (held >= MAX_WRAPPED_LINES) {
+      joined.push(buffer);
+      buffer = null;
+      held = 0;
     }
   });
   if (buffer !== null) joined.push(buffer);
@@ -6862,6 +7153,7 @@ const BomNormalizer = () => {
     skipRepeatedHeaders: true,
     skipDoNotPopulate: false,
     skipDeletedRows: true,
+    parentPathLevels: true,
     alternateColumnGroups: [],
     followingRowAlternateColumn: '',
     includeInsideCellAlternatesWithFollowingRows: true,
@@ -8133,12 +8425,14 @@ const BomNormalizer = () => {
       skipRepeatedHeaders: 0,
       skipDoNotPopulate: 0,
       skipDeletedRows: 0,
+      parentPathLevels: 0,
     };
     sourceDataRows.forEach((row) => {
       if (rowLooksLikeSectionTitle(row, headers, roles)) detections.skipTitleRows += 1;
       if (rowLooksLikeRepeatedHeader(row, headers)) detections.skipRepeatedHeaders += 1;
       if (rowLooksLikeDoNotPopulate(row, headers)) detections.skipDoNotPopulate += 1;
       if (rowLooksLikeDeleted(row, headers)) detections.skipDeletedRows += 1;
+      if (rowHoldsParentPath(row, roles)) detections.parentPathLevels += 1;
     });
     return detections;
   }, [headers, roles, sourceDataRows]);
@@ -10134,6 +10428,7 @@ const BomNormalizer = () => {
       skipRepeatedHeaders: true,
       skipDoNotPopulate: false,
       skipDeletedRows: true,
+      parentPathLevels: true,
       alternateColumnGroups: [],
       followingRowAlternateColumn: '',
       includeInsideCellAlternatesWithFollowingRows: true,
@@ -10235,6 +10530,7 @@ const BomNormalizer = () => {
       skipRepeatedHeaders: true,
       skipDoNotPopulate: false,
       skipDeletedRows: true,
+      parentPathLevels: true,
       alternateColumnGroups: [],
       followingRowAlternateColumn: '',
       includeInsideCellAlternatesWithFollowingRows: true,
@@ -11502,7 +11798,7 @@ const BomNormalizer = () => {
                     {config.alternateLayout === 'following_item_rows' && !bomLayoutActive && (
                       <>
                         {[
-                          ['followingItemRowsContextColumn', 'Primary/context marker', 'Optional. A filled value starts a new primary group.'],
+                          ['followingItemRowsContextColumn', 'Primary/context marker', 'A filled value starts a new group; following rows inherit CPN, quantity, and UOM.'],
                           ['followingItemRowsItemColumn', 'Alternate item column', 'The identifier to show on alternate rows, such as CPN or Part No.'],
                           ['followingItemRowsMpnColumn', 'Alternate MPN column', 'MPN value from the following sparse rows.'],
                           ['followingItemRowsManufacturerColumn', 'Alternate MFR column', 'Manufacturer value from the following sparse rows.'],
