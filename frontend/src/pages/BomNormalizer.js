@@ -2360,6 +2360,7 @@ const findKnownManufacturerMatches = (text, phrases, canonicalForManufacturer) =
 const splitManufacturerCell = (value, expectedCount, config = {}) => {
   const text = fmt(value).replace(/\u00a0/g, ' ');
   if (!text) return [];
+  const keepSingleManufacturerCell = config.manufacturerCellMode === 'single_cell';
   const directory = config.manufacturerDirectory || {};
   const directoryNames = Array.isArray(directory.names) ? directory.names : [];
   const directoryAliases = directory.aliases || {};
@@ -2379,24 +2380,28 @@ const splitManufacturerCell = (value, expectedCount, config = {}) => {
 
   const delimiter = selectedDelimiter(config);
   const explicitParts = splitByExplicitDelimiter(text, delimiter);
-  if (explicitParts.length > 1) return mergeManufacturerSuffixParts(explicitParts).map(canonicalForManufacturer);
+  if (!keepSingleManufacturerCell && explicitParts.length > 1) return mergeManufacturerSuffixParts(explicitParts).map(canonicalForManufacturer);
 
   const slashParts = splitSpacedSlashManufacturerParts(text);
-  if (slashParts.length > 1) return mergeManufacturerSuffixParts(slashParts).map(canonicalForManufacturer);
+  if (!keepSingleManufacturerCell && slashParts.length > 1) return mergeManufacturerSuffixParts(slashParts).map(canonicalForManufacturer);
 
   const knownPhrases = [
     ...directoryNames,
     ...Object.keys(directoryAliases),
     ...KNOWN_MANUFACTURERS,
   ];
-  const knownMatches = findKnownManufacturerMatches(text, knownPhrases, canonicalForManufacturer);
-  if (knownMatches.length >= Math.min(expectedCount || 1, 2)) return knownMatches;
+  if (!keepSingleManufacturerCell) {
+    const knownMatches = findKnownManufacturerMatches(text, knownPhrases, canonicalForManufacturer);
+    if (knownMatches.length >= Math.min(expectedCount || 1, 2)) return knownMatches;
+  }
 
   const colonSegments = parseColonSegments(text);
-  if (colonSegments.length > 1) return colonSegments.map((segment) => canonicalForManufacturer(segment.label));
+  if (!keepSingleManufacturerCell && colonSegments.length > 1) return colonSegments.map((segment) => canonicalForManufacturer(segment.label));
 
   const delimited = mergeManufacturerSuffixParts(splitDelimited(text));
-  if (delimited.length > 1) return delimited.map(canonicalForManufacturer);
+  if (!keepSingleManufacturerCell && delimited.length > 1) return delimited.map(canonicalForManufacturer);
+
+  if (keepSingleManufacturerCell) return [canonicalForManufacturer(text)];
 
   if (!expectedCount || expectedCount <= 1) return [text];
 
@@ -3527,6 +3532,8 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
   const itemColumn = config.followingItemRowsItemColumn || roles.cpn || '';
   const mpnColumn = config.followingItemRowsMpnColumn || roles.mpn || '';
   const manufacturerColumn = config.followingItemRowsManufacturerColumn || roles.manufacturer || '';
+  const parserConfig = { ...config, manufacturerCellMode: 'single_cell' };
+  const cpnAutofillMode = config.followingItemRowsCpnMode || 'primary';
   const strictContextMarker = Boolean(contextColumn);
   let currentGroup = null;
   const emittedPartsByGroup = new WeakMap();
@@ -3555,8 +3562,8 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
       : [];
     if (packedPairs.length) return packedPairs;
 
-    const mpns = splitMpnCell(rawMpn, config);
-    const manufacturers = splitManufacturerCell(rawManufacturer, mpns.length || null, config);
+    const mpns = splitMpnCell(rawMpn, parserConfig);
+    const manufacturers = splitManufacturerCell(rawManufacturer, mpns.length || null, parserConfig);
     if (mpns.length) return pairMpnsWithManufacturers(mpns, manufacturers, rawManufacturer);
     if (rawMpn || rawManufacturer) {
       return [{
@@ -3631,7 +3638,7 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
           parent: currentGroup.parent,
           relation: relationIndex === 0 ? 'Primary' : `Alternate ${relationIndex}`,
           level: currentGroup.level,
-          cpn: strictContextMarker ? currentGroup.cpn : (itemValue || currentGroup.cpn),
+          cpn: cpnAutofillMode === 'column' ? (itemValue || currentGroup.cpn) : currentGroup.cpn,
           description: currentGroup.description,
           mpn: pair.mpn,
           manufacturer: pair.manufacturer,
@@ -3651,7 +3658,7 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
 
     const group = groupFromRow(row, rowIndex);
     currentGroup = group;
-    if (strictContextMarker && isContextRow && !parts.length) {
+    if (!parts.length) {
       return;
     }
     const pairs = parts.length ? parts : [{ mpn: '', manufacturer: '', metadata: {} }];
@@ -3661,7 +3668,7 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
       output.push(withSourceColumns({
         ...group,
         relation: emittedPairCount === 0 ? 'Primary' : `Alternate ${emittedPairCount}`,
-        cpn: group.cpn || itemValue,
+        cpn: cpnAutofillMode === 'column' ? (itemValue || group.cpn) : group.cpn,
         mpn: pair.mpn,
         manufacturer: pair.manufacturer,
         rule: 'following_item_rows_primary',
@@ -7359,6 +7366,7 @@ const BomNormalizer = () => {
     followingItemRowsItemColumn: '',
     followingItemRowsMpnColumn: '',
     followingItemRowsManufacturerColumn: '',
+    followingItemRowsCpnMode: 'primary',
   });
   const [normalizedRows, setNormalizedRows] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -7767,7 +7775,9 @@ const BomNormalizer = () => {
         rules.push('3. Also split multi-entry values in the selected MPN/MFR cells when detected');
       }
     } else if (config.alternateLayout === 'following_item_rows') {
-      rules.push(`2. Attach sparse following rows from ${config.followingItemRowsItemColumn || 'the selected item column'} as alternates for the nearest previous item row`);
+      rules.push('2. Attach sparse following rows as alternates for the nearest previous item row');
+      rules.push(`3. CPN values ${config.followingItemRowsCpnMode === 'column' ? 'come from the selected CPN column when available' : 'are copied from the primary item'}`);
+      rules.push('4. Treat each manufacturer cell as one manufacturer value');
     } else if (config.structure === 'same_cell' || config.structure === 'separate_cells') {
       rules.push('2. Split alternates on ^, then split each pair on the first valid comma');
     } else {
@@ -10641,6 +10651,7 @@ const BomNormalizer = () => {
       followingItemRowsItemColumn: '',
       followingItemRowsMpnColumn: '',
       followingItemRowsManufacturerColumn: '',
+      followingItemRowsCpnMode: 'primary',
     });
     setNormalizedRows([]);
     setCurrentStep(0);
@@ -10743,6 +10754,7 @@ const BomNormalizer = () => {
       followingItemRowsItemColumn: '',
       followingItemRowsMpnColumn: '',
       followingItemRowsManufacturerColumn: '',
+      followingItemRowsCpnMode: 'primary',
     });
     setNormalizedRows([]);
     setCurrentStep(0);
@@ -11928,6 +11940,9 @@ const BomNormalizer = () => {
                               followingItemRowsManufacturerColumn: nextLayout === 'following_item_rows'
                                 ? (prev.followingItemRowsManufacturerColumn || roles.manufacturer || '')
                                 : prev.followingItemRowsManufacturerColumn,
+                              followingItemRowsCpnMode: nextLayout === 'following_item_rows'
+                                ? (prev.followingItemRowsCpnMode || 'primary')
+                                : prev.followingItemRowsCpnMode,
                             }));
                           }}
                         >
@@ -12002,11 +12017,31 @@ const BomNormalizer = () => {
                     )}
                     {config.alternateLayout === 'following_item_rows' && !bomLayoutActive && (
                       <>
+                        <Grid item xs={12} md={3}>
+                          <FormControl fullWidth size="small">
+                            <InputLabel>CPN autofilling rule</InputLabel>
+                            <Select
+                              value={config.followingItemRowsCpnMode || 'primary'}
+                              label="CPN autofilling rule"
+                              onChange={(event) => {
+                                setParserTouched(true);
+                                setConfig((prev) => ({
+                                  ...prev,
+                                  followingItemRowsCpnMode: event.target.value,
+                                }));
+                              }}
+                            >
+                              <MenuItem value="primary">Autofill from primary</MenuItem>
+                              <MenuItem value="column">Autofill from CPN column</MenuItem>
+                            </Select>
+                            <Typography sx={{ mt: 0.35, fontSize: 11.5, color: normalizerTheme.muted }}>
+                              Use primary for sparse alternate rows; use CPN column when alternate rows carry their own CPN.
+                            </Typography>
+                          </FormControl>
+                        </Grid>
                         {[
-                          ['followingItemRowsContextColumn', 'Primary/context marker', 'A filled value starts a new group; following rows inherit CPN, quantity, and UOM.'],
-                          ['followingItemRowsItemColumn', 'Alternate item column', 'The identifier to show on alternate rows, such as CPN or Part No.'],
-                          ['followingItemRowsMpnColumn', 'Alternate MPN column', 'MPN value from the following sparse rows.'],
-                          ['followingItemRowsManufacturerColumn', 'Alternate MFR column', 'Manufacturer value from the following sparse rows.'],
+                          ['followingItemRowsMpnColumn', 'MPN column for following rows', 'MPN value from the sparse rows below each main item.'],
+                          ['followingItemRowsManufacturerColumn', 'MFR column for following rows', 'Manufacturer value from the sparse rows below each main item.'],
                         ].map(([key, label, helper]) => (
                           <Grid item xs={12} md={3} key={key}>
                             <FormControl fullWidth size="small">
@@ -12022,7 +12057,7 @@ const BomNormalizer = () => {
                                   }));
                                 }}
                               >
-                                <MenuItem value="">{key === 'followingItemRowsContextColumn' ? 'Auto from item context' : 'Select column'}</MenuItem>
+                                <MenuItem value="">Select column</MenuItem>
                                 {visibleSourceHeaders.map((header) => (
                                   <MenuItem key={`${key}-${header}`} value={header}>{header}</MenuItem>
                                 ))}
@@ -12420,13 +12455,13 @@ const BomNormalizer = () => {
                     </Alert>
                   )}
                   {config.alternateLayout === 'following_item_rows' && !bomLayoutActive && (
-                    (!config.followingItemRowsItemColumn || !config.followingItemRowsMpnColumn || !config.followingItemRowsManufacturerColumn) ? (
+                    (!config.followingItemRowsMpnColumn || !config.followingItemRowsManufacturerColumn) ? (
                       <Alert severity="warning" sx={{ mt: 1 }}>
-                        Select the alternate item, MPN, and MFR columns for following item rows.
+                        Select the MPN and MFR columns used by the following sparse rows.
                       </Alert>
                     ) : (
                       <Alert severity="info" sx={{ mt: 1 }}>
-                        Sparse following rows using {config.followingItemRowsItemColumn}, {config.followingItemRowsMpnColumn}, and {config.followingItemRowsManufacturerColumn} will attach to the nearest previous item row with context.
+                        Sparse rows using {config.followingItemRowsMpnColumn} and {config.followingItemRowsManufacturerColumn} will attach to the nearest previous item. CPN will {config.followingItemRowsCpnMode === 'column' ? 'come from the mapped CPN column when available' : 'copy from the primary item'}.
                       </Alert>
                     )
                   )}
