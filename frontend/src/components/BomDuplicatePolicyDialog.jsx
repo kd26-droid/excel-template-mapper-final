@@ -9,50 +9,23 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
-  FormControl,
   FormControlLabel,
-  MenuItem,
-  Radio,
-  RadioGroup,
-  Select,
   Stack,
+  Switch,
+  TextField,
   Typography,
 } from '@mui/material';
 import api from '../services/api';
 
-// The four policy modes match the backend's VALID_DUP_POLICIES. Copy is kept
-// short and concrete because these choices decide how the BOM sheet is built
-// — leave user in no doubt about what each one does to their data.
-export const DUP_POLICIES = [
-  {
-    value: 'keep_at_all_levels',
-    label: 'Keep it at every level (sum same-level dups)',
-    description:
-      'Leave one row per level exactly as it is. Multiple rows at the SAME level get summed into one row for that level (a same-level duplicate is never a valid two rows).',
-    needsLevelPick: false,
-  },
-  {
-    value: 'aggregate_per_level',
-    label: 'Aggregate quantity at each level',
-    description:
-      'One row per (item, level). Quantity at each level is the sum of every row of that item at that level. Across-level rows stay separate.',
-    needsLevelPick: false,
-  },
-  {
-    value: 'aggregate_all_to_one_level',
-    label: 'Aggregate all quantities into one level',
-    description:
-      'One row per item. Quantity is the sum of every occurrence across every level. You pick which level the single row lands on.',
-    needsLevelPick: true,
-  },
-  {
-    value: 'ignore_other_levels',
-    label: 'Ignore other levels — keep only at one',
-    description:
-      'Only the level you pick survives. Every other occurrence of that item across other levels is dropped.',
-    needsLevelPick: true,
-  },
-];
+// The two policy values this dialog can store. The backend still understands
+// three older modes (target-level picks and across-level merges); nothing here
+// sends them, because the only question that turned out to matter is what
+// happens to one item listed twice at ONE level.
+const POLICY_AGGREGATE = 'aggregate_per_level';
+const POLICY_KEEP = 'keep_duplicates';
+
+// Kept in sync with GLOBAL_DUP_POLICY_KEY in pages/Settings.js.
+const GLOBAL_DUP_POLICY_KEY = 'fw_bom_default_dup_policy';
 
 const KIND_LABEL = {
   same_level: 'Same level',
@@ -66,8 +39,68 @@ const KIND_COLOR = {
   both: 'error',
 };
 
+const toNumber = (value) => {
+  const parsed = parseFloat(String(value ?? '').trim());
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+// Float addition leaves noise — 0.1 + 0.2 is 0.30000000000000004, and nobody
+// wants that offered as a suggested BOM quantity.
+const formatQuantity = (value) => {
+  if (!Number.isFinite(value)) return '';
+  return String(Math.round(value * 1e6) / 1e6);
+};
+
+// A group can span levels, and each level is its own decision — a part used
+// twice at Level 2 and once at Level 3 needs an answer for Level 2 and an
+// answer for Level 3, not one answer for both.
+const levelBucketsOf = (group) => {
+  const byLevel = new Map();
+  (group.occurrences || []).forEach((occurrence) => {
+    const level = String(occurrence.level ?? '');
+    if (!byLevel.has(level)) byLevel.set(level, []);
+    byLevel.get(level).push(occurrence);
+  });
+  return [...byLevel.entries()]
+    // Only levels that actually hold the item more than once.
+    //
+    // A level with ONE occurrence is not a duplicate to resolve — it is the
+    // same part legitimately used in another sub-assembly, which a multi-level
+    // BOM is supposed to contain. Listing those asked the user to decide
+    // something that has no wrong answer, and buried the rows that do.
+    //
+    // Filtering here rather than on group.kind is deliberate: a group marked
+    // "both" has real same-level duplicates AND across-level rows, so dropping
+    // the whole group would hide work that needs doing. This keeps its
+    // same-level rows and drops only the rest.
+    //
+    // To show across-level rows again, drop this filter:
+    //   .filter(([, occurrences]) => occurrences.length > 1)
+    .filter(([, occurrences]) => occurrences.length > 1)
+    .map(([level, occurrences]) => ({
+      level,
+      occurrences,
+      // What aggregating would produce. Pre-filled, and free to overwrite.
+      suggested: formatQuantity(
+        occurrences.reduce((total, occurrence) => total + toNumber(occurrence.quantity), 0)
+      ),
+    }));
+};
+
+// Matches the backend's per-level lookup key in apply_records_duplicate_policy.
+const quantityKey = (signatureId, level) => `${signatureId}::${level}`;
+
 /**
  * Modal shown before an export when the mapper's BOM has duplicate rows.
+ *
+ * Two things to decide, and only two:
+ *   1. aggregate quantities of the same item within a level, or leave them
+ *   2. for any individual (item, level), the exact quantity to use
+ *
+ * A quantity typed here beats the switch. That is what makes "delete the
+ * duplicates and choose the quantity" the same control as aggregation rather
+ * than a separate mode: the sum is only ever the suggestion, and typing one of
+ * the original figures over it keeps that row and drops the other.
  *
  * Props:
  *   open           bool
@@ -80,15 +113,17 @@ const BomDuplicatePolicyDialog = ({ open, sessionId, onClose, onApplied }) => {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const [groups, setGroups] = useState([]);
-  // Same default the backend applies when no policy is stored — keeps the
-  // dialog's initial state honest about what will happen if the user just
-  // clicks Save without changing anything.
-  const [policy, setPolicy] = useState('aggregate_per_level');
-  // Per-group target level — only meaningful for policies with needsLevelPick.
-  const [perGroupLevel, setPerGroupLevel] = useState({});
+  const [aggregate, setAggregate] = useState(true);
+  // Only what the user actually typed — never the suggested sums, even though
+  // the boxes SHOW those. Storing the suggestions here would send an explicit
+  // quantity for every group, resolving them all and leaving the switch with
+  // nothing to do; turning aggregation off would then silently keep working.
+  // So the sum is displayed, and sent only once someone has taken it as their
+  // own by editing it.
+  const [quantities, setQuantities] = useState({});
 
   useEffect(() => {
-    if (!open || !sessionId) return;
+    if (!open || !sessionId) return undefined;
     let cancelled = false;
     setLoading(true);
     setError(null);
@@ -96,20 +131,21 @@ const BomDuplicatePolicyDialog = ({ open, sessionId, onClose, onApplied }) => {
       .then((resp) => {
         if (cancelled) return;
         const data = resp?.data || {};
-        const foundGroups = Array.isArray(data.groups) ? data.groups : [];
-        setGroups(foundGroups);
-        // Seed level pickers from existing stored policy if present, otherwise
-        // default each group to its first (lowest / earliest) level. Users can
-        // adjust below.
-        const seed = {};
-        const storedLevels = data.policy?.per_group_target_level || {};
-        foundGroups.forEach((g) => {
-          seed[g.signature_id] = storedLevels[g.signature_id] || g.levels[0] || '';
-        });
-        setPerGroupLevel(seed);
-        if (data.policy?.policy && DUP_POLICIES.some((p) => p.value === data.policy.policy)) {
-          setPolicy(data.policy.policy);
+        setGroups(Array.isArray(data.groups) ? data.groups : []);
+
+        const stored = data.policy || {};
+        if (stored.policy === POLICY_KEEP) {
+          setAggregate(false);
+        } else if (stored.policy) {
+          setAggregate(true);
+        } else {
+          // No per-session choice yet: fall back to the global default so the
+          // dialog opens showing what would happen if the user just saved.
+          let preference = null;
+          try { preference = window.localStorage.getItem(GLOBAL_DUP_POLICY_KEY); } catch (_) { /* ignore */ }
+          setAggregate(preference !== POLICY_KEEP);
         }
+        setQuantities({ ...(stored.per_group_quantity || {}) });
       })
       .catch((err) => {
         if (cancelled) return;
@@ -119,21 +155,51 @@ const BomDuplicatePolicyDialog = ({ open, sessionId, onClose, onApplied }) => {
     return () => { cancelled = true; };
   }, [open, sessionId]);
 
-  const activePolicy = useMemo(
-    () => DUP_POLICIES.find((p) => p.value === policy) || DUP_POLICIES[0],
-    [policy],
-  );
+  const invalidKeys = useMemo(() => (
+    Object.entries(quantities)
+      .filter(([, value]) => String(value ?? '').trim() !== '' && !Number.isFinite(parseFloat(value)))
+      .map(([key]) => key)
+  ), [quantities]);
+
+  // Groups with something to decide. A group whose only duplication is across
+  // levels has no same-level buckets left after filtering, so it drops out
+  // entirely rather than showing as an empty row.
+  const visibleGroups = useMemo(() => (
+    groups
+      .map((group) => ({ group, buckets: levelBucketsOf(group) }))
+      .filter((entry) => entry.buckets.length > 0)
+  ), [groups]);
+
+  // With aggregation off, a group is only resolved once the user has taken
+  // ownership of a quantity by editing it. The rest is what the export refuses.
+  const unresolvedCount = useMemo(() => {
+    if (aggregate) return 0;
+    return visibleGroups.reduce((total, { group, buckets }) => (
+      total + buckets.filter((bucket) => (
+        String(quantities[quantityKey(group.signature_id, bucket.level)] ?? '').trim() === ''
+      )).length
+    ), 0);
+  }, [aggregate, visibleGroups, quantities]);
+
+  const setQuantity = (key, value) => {
+    setQuantities((prev) => {
+      const next = { ...prev };
+      if (String(value ?? '').trim() === '') delete next[key];
+      else next[key] = value;
+      return next;
+    });
+  };
 
   const handleApply = async () => {
-    if (!sessionId) return;
+    if (!sessionId || invalidKeys.length) return;
     setSaving(true);
     setError(null);
     try {
-      const body = {
-        policy,
-        per_group_target_level: activePolicy.needsLevelPick ? perGroupLevel : {},
-      };
-      await api.setBomDuplicatePolicy(sessionId, body);
+      await api.setBomDuplicatePolicy(sessionId, {
+        policy: aggregate ? POLICY_AGGREGATE : POLICY_KEEP,
+        per_group_target_level: {},
+        per_group_quantity: quantities,
+      });
       onApplied?.();
     } catch (err) {
       setError(err?.response?.data?.error || err?.message || 'Failed to save policy');
@@ -142,20 +208,16 @@ const BomDuplicatePolicyDialog = ({ open, sessionId, onClose, onApplied }) => {
     }
   };
 
-  const handleClearAndClose = async () => {
-    // If the user cancels but a stored policy exists, do NOT clear it — leaves
-    // whatever they picked last time in place. Cancel is a "not now" not a
-    // "forget my last choice."
-    onClose?.();
-  };
+  // Cancel is "not now", not "forget my last choice" — a stored policy stays.
+  const handleClose = () => { onClose?.(); };
 
   return (
-    <Dialog open={open} onClose={handleClearAndClose} maxWidth="md" fullWidth>
+    <Dialog open={open} onClose={handleClose} maxWidth="md" fullWidth>
       <DialogTitle component="div">
         <Typography variant="h6" component="h2">Duplicate BOM rows detected</Typography>
         <Typography variant="body2" sx={{ color: 'text.secondary', mt: 0.5 }}>
-          These items appear more than once in the BOM (same identity, only Level and Quantity differ).
-          Pick how the exported BOM sheet should handle them. Your item directory is unaffected.
+          These items appear more than once in the BOM (same identity — only Level and Quantity differ).
+          Your item directory is unaffected; this only reshapes the BOM sheet.
         </Typography>
       </DialogTitle>
       <DialogContent dividers>
@@ -165,103 +227,133 @@ const BomDuplicatePolicyDialog = ({ open, sessionId, onClose, onApplied }) => {
             <Typography variant="body2">Checking for duplicates…</Typography>
           </Stack>
         )}
-        {!loading && error && (
-          <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>
-        )}
-        {!loading && !error && groups.length === 0 && (
+        {!loading && error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+        {/* visibleGroups, not groups: a sheet whose only duplication is across
+            levels has nothing here to decide, so it should read as clear rather
+            than open onto an empty list. */}
+        {!loading && !error && visibleGroups.length === 0 && (
           <Alert severity="success">
-            No duplicate BOM rows found. Nothing to configure — you can proceed with the export.
+            No duplicate BOM rows found at a single level. Nothing to configure — you can proceed
+            with the export.
           </Alert>
         )}
-        {!loading && !error && groups.length > 0 && (
+
+        {!loading && !error && visibleGroups.length > 0 && (
           <>
+            <FormControlLabel
+              control={<Switch checked={aggregate} onChange={(e) => setAggregate(e.target.checked)} />}
+              sx={{ alignItems: 'flex-start', ml: 0, mr: 0, mb: 1 }}
+              label={
+                <Box sx={{ ml: 1 }}>
+                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                    Aggregate quantity of the same item within a level
+                  </Typography>
+                  <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                    {aggregate
+                      ? 'Rows below become one row per level, using the quantity shown. Replace any of them to use a different quantity.'
+                      : 'Rows are left as they are. FactWise does not accept a part listed twice in one BOM, so the export will stop unless you set a quantity below.'}
+                  </Typography>
+                </Box>
+              }
+            />
+
+            {!aggregate && unresolvedCount > 0 && (
+              <Alert severity="warning" variant="outlined" sx={{ mb: 1.5 }}>
+                {unresolvedCount} group{unresolvedCount === 1 ? '' : 's'} still {unresolvedCount === 1 ? 'has' : 'have'} no
+                quantity set. The BOM export will report {unresolvedCount === 1 ? 'it' : 'them'} and stop.
+              </Alert>
+            )}
+
             <Typography variant="subtitle2" sx={{ mb: 1 }}>
-              {groups.length} duplicate group{groups.length === 1 ? '' : 's'} found:
+              {visibleGroups.length} duplicate group{visibleGroups.length === 1 ? '' : 's'} found:
             </Typography>
-            <Box sx={{ maxHeight: 220, overflowY: 'auto', border: '1px solid', borderColor: 'divider', borderRadius: 1, p: 1, mb: 2 }}>
-              {groups.map((g) => (
-                <Box key={g.signature_id} sx={{ py: 0.75, borderBottom: '1px dashed', borderColor: 'divider', '&:last-child': { borderBottom: 'none' } }}>
+
+            <Box sx={{ maxHeight: 380, overflowY: 'auto', border: '1px solid', borderColor: 'divider', borderRadius: 1, p: 1 }}>
+              {visibleGroups.map(({ group, buckets }) => (
+                <Box
+                  key={group.signature_id}
+                  sx={{ py: 1, borderBottom: '1px dashed', borderColor: 'divider', '&:last-child': { borderBottom: 'none' } }}
+                >
                   <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap">
                     <Typography variant="body2" sx={{ fontFamily: 'monospace', fontWeight: 600 }}>
-                      {g.raw_material_code || '(no code)'}
+                      {group.raw_material_code || '(no code)'}
                     </Typography>
                     <Chip
                       size="small"
-                      label={KIND_LABEL[g.kind] || g.kind}
-                      color={KIND_COLOR[g.kind] || 'default'}
+                      label={KIND_LABEL[group.kind] || group.kind}
+                      color={KIND_COLOR[group.kind] || 'default'}
                       variant="outlined"
                     />
-                    <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                      {g.occurrences.length} rows · Levels {g.levels.join(', ')}
-                    </Typography>
                   </Stack>
-                  {g.description && (
+                  {group.description && (
                     <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mt: 0.25 }}>
-                      {g.description}
+                      {group.description}
                     </Typography>
                   )}
-                  <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 0.5 }}>
-                    {g.occurrences.map((occ, idx) => (
-                      <Chip
-                        key={idx}
-                        size="small"
-                        variant="outlined"
-                        label={`L${occ.level || '?'} qty ${occ.quantity || '?'}`}
-                        sx={{ fontFamily: 'monospace', fontSize: 11 }}
-                      />
-                    ))}
-                  </Stack>
-                  {activePolicy.needsLevelPick && (
-                    <FormControl size="small" sx={{ mt: 0.75, minWidth: 200 }}>
-                      <Select
-                        value={perGroupLevel[g.signature_id] || g.levels[0] || ''}
-                        onChange={(e) => setPerGroupLevel((prev) => ({ ...prev, [g.signature_id]: e.target.value }))}
-                        displayEmpty
+
+                  {buckets.map((bucket) => {
+                    const key = quantityKey(group.signature_id, bucket.level);
+                    const typed = quantities[key];
+                    const hasTyped = String(typed ?? '').trim() !== '';
+                    const invalid = invalidKeys.includes(key);
+                    return (
+                      <Stack
+                        key={key}
+                        direction="row"
+                        alignItems="center"
+                        gap={1.5}
+                        flexWrap="wrap"
+                        sx={{ mt: 0.75, pl: 0.5 }}
                       >
-                        {g.levels.map((level) => (
-                          <MenuItem key={level} value={level}>Keep at Level {level}</MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                  )}
+                        <Typography variant="caption" sx={{ minWidth: 62, color: 'text.secondary' }}>
+                          Level {bucket.level || '?'}
+                        </Typography>
+                        <Stack direction="row" gap={0.5} flexWrap="wrap" sx={{ flex: 1, minWidth: 140 }}>
+                          {bucket.occurrences.map((occurrence, index) => (
+                            <Chip
+                              key={index}
+                              size="small"
+                              variant="outlined"
+                              label={`qty ${occurrence.quantity || '?'}`}
+                              sx={{ fontFamily: 'monospace', fontSize: 11 }}
+                            />
+                          ))}
+                        </Stack>
+                        <TextField
+                          size="small"
+                          label="Quantity"
+                          // Shows the aggregated figure until the user replaces
+                          // it. What is stored stays separate — see `quantities`.
+                          value={hasTyped ? typed : bucket.suggested}
+                          onChange={(e) => setQuantity(key, e.target.value)}
+                          error={invalid}
+                          helperText={invalid ? 'Must be a number' : undefined}
+                          inputProps={{ inputMode: 'decimal', style: { fontFamily: 'monospace', width: 92 } }}
+                        />
+                      </Stack>
+                    );
+                  })}
                 </Box>
               ))}
             </Box>
 
-            <Typography variant="subtitle2" sx={{ mb: 1 }}>How should these be handled?</Typography>
-            <RadioGroup value={policy} onChange={(e) => setPolicy(e.target.value)}>
-              {DUP_POLICIES.map((p) => (
-                <FormControlLabel
-                  key={p.value}
-                  value={p.value}
-                  control={<Radio />}
-                  sx={{ alignItems: 'flex-start', mr: 0, mb: 0.5, '.MuiRadio-root': { pt: 0.5 } }}
-                  label={
-                    <Box>
-                      <Typography variant="body2" sx={{ fontWeight: 600 }}>{p.label}</Typography>
-                      <Typography variant="caption" sx={{ color: 'text.secondary' }}>{p.description}</Typography>
-                    </Box>
-                  }
-                />
-              ))}
-            </RadioGroup>
-
-            <Alert severity="info" sx={{ mt: 1.5 }} variant="outlined">
-              The item directory sheet is unaffected — items are always deduplicated normally.
-              This choice only reshapes the BOM sheet.
-            </Alert>
+            <Typography variant="caption" sx={{ color: 'text.secondary', display: 'block', mt: 1 }}>
+              Each box is filled with the aggregated quantity. Replace it with whatever quantity you
+              want that line to carry — decimals such as 1.7 are allowed — and yours is used instead,
+              whether or not aggregation is on.
+            </Typography>
           </>
         )}
       </DialogContent>
       <DialogActions>
-        <Button onClick={handleClearAndClose} disabled={saving}>Cancel</Button>
+        <Button onClick={handleClose} disabled={saving}>Cancel</Button>
         <Button
           variant="contained"
-          onClick={groups.length === 0 ? onApplied : handleApply}
-          disabled={loading || saving}
+          onClick={visibleGroups.length === 0 ? onApplied : handleApply}
+          disabled={loading || saving || invalidKeys.length > 0}
           startIcon={saving ? <CircularProgress size={14} /> : null}
         >
-          {groups.length === 0 ? 'Close' : 'Save'}
+          {visibleGroups.length === 0 ? 'Close' : 'Save'}
         </Button>
       </DialogActions>
     </Dialog>

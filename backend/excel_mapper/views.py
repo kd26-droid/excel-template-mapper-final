@@ -15345,10 +15345,12 @@ def _generate_bom_for_session(session_id, apply_dup_policy=True):
         if policy_name not in VALID_DUP_POLICIES:
             policy_name = 'aggregate_per_level'
         per_group_levels = stored_policy.get('per_group_target_level') or {}
+        per_group_qty = stored_policy.get('per_group_quantity') or {}
         try:
             records = apply_records_duplicate_policy(
                 records, policy_name,
                 per_group_target_level=per_group_levels,
+                per_group_quantity=per_group_qty,
             )
         except Exception as dup_err:
             logger.warning('Records duplicate policy application failed: %s', dup_err)
@@ -15442,11 +15444,34 @@ def bom_duplicate_policy(request, session_id):
                 'success': False,
                 'error': 'per_group_target_level must be an object of {signature_id: level}.',
             }, status=status.HTTP_400_BAD_REQUEST)
+        per_group_qty = body.get('per_group_quantity') or {}
+        if not isinstance(per_group_qty, dict):
+            return Response({
+                'success': False,
+                'error': 'per_group_quantity must be an object of {signature_id: quantity}.',
+            }, status=status.HTTP_400_BAD_REQUEST)
+        # Blanks are dropped rather than stored as "": an empty box in the
+        # dialog means "no decision here, use the policy", and storing it would
+        # read back as a decision to make the quantity zero.
+        cleaned_qty = {}
+        for key, value in per_group_qty.items():
+            text = str(value).strip()
+            if not text:
+                continue
+            try:
+                float(text)
+            except (TypeError, ValueError):
+                return Response({
+                    'success': False,
+                    'error': 'Quantity for %r must be a number (decimals allowed).' % str(key),
+                }, status=status.HTTP_400_BAD_REQUEST)
+            cleaned_qty[str(key)] = text
         # Coerce every value to a string so the applier's ``==`` compares
         # cleanly regardless of whether the FE sent numbers or strings.
         info['bom_duplicate_policy'] = {
             'policy': policy,
             'per_group_target_level': {str(k): str(v) for k, v in per_group.items()},
+            'per_group_quantity': cleaned_qty,
         }
         save_session(session_id, info)
         return Response({'success': True, 'policy': info['bom_duplicate_policy']})

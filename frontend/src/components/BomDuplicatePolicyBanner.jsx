@@ -2,13 +2,15 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Alert, Button, Chip, Stack, Typography } from '@mui/material';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import api from '../services/api';
-import BomDuplicatePolicyDialog, { DUP_POLICIES } from './BomDuplicatePolicyDialog';
+import BomDuplicatePolicyDialog from './BomDuplicatePolicyDialog';
 
 const DEFAULT_POLICY = 'aggregate_per_level';
 // Kept in sync with GLOBAL_DUP_POLICY_KEY in pages/Settings.js. If those
 // diverge the banner would ignore the user's global default.
 const GLOBAL_DEFAULT_KEY = 'fw_bom_default_dup_policy';
-const ALLOWED_GLOBAL_DEFAULTS = new Set(['aggregate_per_level', 'keep_at_all_levels']);
+// 'keep_at_all_levels' is still read because it may be sitting in a browser
+// from the radio version of Settings; it behaves exactly as aggregate did.
+const ALLOWED_GLOBAL_DEFAULTS = new Set(['aggregate_per_level', 'keep_at_all_levels', 'keep_duplicates']);
 
 function readGlobalDefault() {
   try {
@@ -19,12 +21,14 @@ function readGlobalDefault() {
   }
 }
 
-const shortLabel = (value) => {
-  const opt = DUP_POLICIES.find((p) => p.value === value);
-  if (!opt) return value;
-  // Trim parenthetical footnotes for the compact chip.
-  return opt.label.replace(/\s*\(.*\)$/, '');
-};
+// The chip states what the export will DO, in the fewest words that stay
+// true. Anything not explicitly "leave them" aggregates, including the older
+// stored values from when this was a four-way choice.
+const shortLabel = (value) => (
+  value === 'keep_duplicates'
+    ? 'Leave duplicates (export will stop)'
+    : 'Aggregate quantity at each level'
+);
 
 /**
  * Editor-level banner showing "this sheet has N duplicate item groups; they

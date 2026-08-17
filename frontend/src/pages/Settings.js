@@ -23,8 +23,7 @@ import {
   Checkbox,
   CircularProgress,
   ListItemText,
-  Radio,
-  RadioGroup,
+  Switch,
   TextField,
   Typography
 } from '@mui/material';
@@ -307,38 +306,37 @@ const normalizeItemCodeConditionalBranches = (defaults = {}) => {
 // the session has none of its own — that way exports honour the user's
 // preferred default without a manual click per session.
 //
-// Options limited to the two that don't need per-group target levels
-// (those are session-specific by nature — you can't pick a target Level
-// globally without knowing what levels the session actually has). The
-// per-session picker in the editor still exposes all four.
+// One question, so one switch. It used to be a pair of radios, and the two
+// options were the same policy under two names — whichever you picked, the
+// export was identical.
+//
+// Off does NOT mean "silently keep two rows": FactWise refuses a BOM that lists
+// a part twice, so an unresolved group leaves the export failing validation
+// with a duplicate error naming the rows. That is deliberate. The alternative
+// is inventing a quantity for the user, and a wrong quantity that exports
+// cleanly is worse than a blocked export that says why.
 const GLOBAL_DUP_POLICY_KEY = 'fw_bom_default_dup_policy';
-const GLOBAL_DUP_POLICY_DEFAULT = 'aggregate_per_level';
-const GLOBAL_DUP_POLICY_OPTIONS = [
-  {
-    value: 'aggregate_per_level',
-    label: 'Aggregate quantity at each level',
-    detail: 'Same code at the same level is summed into one row. Same code across levels stays as separate rows per level. Recommended.',
-  },
-  {
-    value: 'keep_at_all_levels',
-    label: 'Keep at every level (only sum same-level dups)',
-    detail: 'One row per level as-is. Multiple rows at the SAME level still get summed (a same-level dup is never valid as two rows).',
-  },
-];
+const POLICY_AGGREGATE = 'aggregate_per_level';
+const POLICY_KEEP = 'keep_duplicates';
+const GLOBAL_DUP_POLICY_DEFAULT = POLICY_AGGREGATE;
 
 const BomDuplicatePolicyDefaultSection = ({ t, panelSx, sectionHeaderSx }) => {
-  const [selected, setSelected] = React.useState(() => {
+  const [aggregate, setAggregate] = React.useState(() => {
     try {
-      const stored = window.localStorage.getItem(GLOBAL_DUP_POLICY_KEY);
-      if (GLOBAL_DUP_POLICY_OPTIONS.some((o) => o.value === stored)) return stored;
+      // Anything other than an explicit "keep" reads as on, so the older
+      // stored values from the radio version land on the same behaviour they
+      // already had rather than silently flipping to unresolved duplicates.
+      return window.localStorage.getItem(GLOBAL_DUP_POLICY_KEY) !== POLICY_KEEP;
     } catch (_) { /* localStorage disabled — fall through */ }
-    return GLOBAL_DUP_POLICY_DEFAULT;
+    return GLOBAL_DUP_POLICY_DEFAULT === POLICY_AGGREGATE;
   });
   const [savedAt, setSavedAt] = React.useState(0);
   const handleChange = (event) => {
-    const value = event.target.value;
-    setSelected(value);
-    try { window.localStorage.setItem(GLOBAL_DUP_POLICY_KEY, value); } catch (_) { /* ignore */ }
+    const next = event.target.checked;
+    setAggregate(next);
+    try {
+      window.localStorage.setItem(GLOBAL_DUP_POLICY_KEY, next ? POLICY_AGGREGATE : POLICY_KEEP);
+    } catch (_) { /* ignore */ }
     setSavedAt(Date.now());
   };
   return (
@@ -357,25 +355,25 @@ const BomDuplicatePolicyDefaultSection = ({ t, panelSx, sectionHeaderSx }) => {
         </Box>
       </Box>
       <Box sx={{ p: 2.5 }}>
-        <RadioGroup value={selected} onChange={handleChange}>
-          {GLOBAL_DUP_POLICY_OPTIONS.map((option) => (
-            <FormControlLabel
-              key={option.value}
-              value={option.value}
-              control={<Radio />}
-              sx={{ alignItems: 'flex-start', mr: 0, mb: 1, '.MuiRadio-root': { pt: 0.5 } }}
-              label={
-                <Box>
-                  <Typography variant="body2" sx={{ fontWeight: 600, color: t.text.heading }}>{option.label}</Typography>
-                  <Typography variant="caption" sx={{ color: t.text.secondary }}>{option.detail}</Typography>
-                </Box>
-              }
-            />
-          ))}
-        </RadioGroup>
-        <Typography variant="caption" sx={{ color: t.text.secondary, display: 'block', mt: 1 }}>
+        <FormControlLabel
+          control={<Switch checked={aggregate} onChange={handleChange} />}
+          sx={{ alignItems: 'flex-start', mr: 0, ml: 0, '.MuiSwitch-root': { mt: 0.25 } }}
+          label={
+            <Box sx={{ ml: 1 }}>
+              <Typography variant="body2" sx={{ fontWeight: 600, color: t.text.heading }}>
+                Aggregate quantity of the same item within a level
+              </Typography>
+              <Typography variant="caption" sx={{ color: t.text.secondary }}>
+                {aggregate
+                  ? 'The same item listed more than once at one level becomes a single row, with the quantities added together.'
+                  : 'Those rows are left as they are. FactWise does not accept a part listed twice in one BOM, so the export will report them and stop — resolve each one in the editor.'}
+              </Typography>
+            </Box>
+          }
+        />
+        <Typography variant="caption" sx={{ color: t.text.secondary, display: 'block', mt: 1.5 }}>
           {savedAt ? 'Saved. Applies to sheets you open from now on.' : 'Change to update immediately — no save button.'}
-          {' '}For per-sheet overrides (or the two policies that need a target level pick), use the banner above the grid in the editor.
+          {' '}Whatever this is set to, the banner above the grid in the editor lets you set an exact quantity for any individual group.
         </Typography>
       </Box>
     </Paper>
