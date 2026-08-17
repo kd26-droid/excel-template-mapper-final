@@ -11334,7 +11334,11 @@ def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
 
         if operator == 'is_empty':
             return value == ''
-        if operator == 'not_empty':
+        # 'is_not_empty' is what the Settings rule builder used to send; an
+        # unknown operator falls through to False, so those rules matched
+        # nothing at all. Accepted as an alias rather than dropped, so rules
+        # already saved with it start working instead of staying dead.
+        if operator in ('not_empty', 'is_not_empty'):
             return value != ''
         if operator == 'equals':
             return any(lowered == c for c in compares)
@@ -11343,6 +11347,12 @@ def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
             return all(lowered != c for c in compares)
         if operator == 'contains':
             return any(c in lowered for c in compares)
+        # Offered by the rule builder since it shipped, but never implemented
+        # here, so both silently matched nothing.
+        if operator == 'starts_with':
+            return any(lowered.startswith(c) for c in compares)
+        if operator == 'ends_with':
+            return any(lowered.endswith(c) for c in compares)
         return False
 
     # Resolve the lock once: which rows are protected, for this target column.

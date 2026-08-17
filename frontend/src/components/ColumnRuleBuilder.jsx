@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Box,
   Button,
+  Chip,
   Grid,
   IconButton,
   MenuItem,
@@ -40,13 +41,17 @@ const SEPARATOR_OPTIONS = [
   { value: ',', label: 'Comma ,' },
 ];
 
+// These values go to the engine verbatim. 'is_not_empty' was not one it knows
+// — an unrecognised operator matches nothing, so that option silently never
+// fired. 'not_empty' is the name the engine and the editor's own dialog use.
 const CONDITION_OPERATORS = [
   { value: 'contains', label: 'contains' },
   { value: 'equals', label: 'equals' },
+  { value: 'not_equals', label: 'does not equal' },
   { value: 'starts_with', label: 'starts with' },
   { value: 'ends_with', label: 'ends with' },
   { value: 'is_empty', label: 'is empty' },
-  { value: 'is_not_empty', label: 'is not empty' },
+  { value: 'not_empty', label: 'is not empty' },
 ];
 
 export function createEmptyColumnRule() {
@@ -88,6 +93,22 @@ export default function ColumnRuleBuilder({
   const setBranch = (index, patch) => {
     const next = branches.map((branch, i) => (i === index ? { ...branch, ...patch } : branch));
     set({ condition: { ...(rule.condition || {}), branches: next } });
+  };
+
+  // A branch matches "any of these" when `compare` is a list — the shape the
+  // engine already accepts. A single typed value stays a plain string, so
+  // nothing about existing rules changes; pressing Enter is what promotes it
+  // to a list. Commas are never split: component descriptions are full of them
+  // ("CAPACITOR 0.22U, 10V"), so splitting would match far more than intended.
+  const [compareDrafts, setCompareDrafts] = useState({});
+  const compareList = (branch) => (Array.isArray(branch.compare) ? branch.compare : null);
+
+  const commitCompareDraft = (index, branch) => {
+    const entered = String(compareDrafts[index] ?? '').trim();
+    if (!entered) return;
+    const existing = compareList(branch) || [];
+    setBranch(index, { compare: Array.from(new Set([...existing, entered])) });
+    setCompareDrafts(prev => ({ ...prev, [index]: '' }));
   };
 
   const columnField = (label, current, onPick, extraProps = {}) => (
@@ -190,10 +211,8 @@ export default function ColumnRuleBuilder({
       {rule.value_mode === 'conditional' && (
         <Grid item xs={12}>
           {branches.map((branch, index) => (
-            <Box
-              key={index}
-              sx={{ display: 'flex', gap: 1, alignItems: 'center', mb: 1, flexWrap: 'wrap' }}
-            >
+            <Box key={index} sx={{ mb: 1 }}>
+              <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
               <Typography variant="caption" sx={{ minWidth: 54 }}>
                 {index === 0 ? 'If' : 'Else if'}
               </Typography>
@@ -210,12 +229,35 @@ export default function ColumnRuleBuilder({
               >
                 {CONDITION_OPERATORS.map(o => <MenuItem key={o.value} value={o.value}>{o.label}</MenuItem>)}
               </TextField>
-              {!['is_empty', 'is_not_empty'].includes(branch.operator) && (
+              {!['is_empty', 'not_empty'].includes(branch.operator) && (
                 <TextField
                   size="small"
                   label="Text"
-                  value={branch.compare || ''}
-                  onChange={(e) => setBranch(index, { compare: e.target.value })}
+                  value={compareList(branch) ? (compareDrafts[index] ?? '') : (branch.compare || '')}
+                  placeholder={compareList(branch)
+                    ? 'Type another value, then press Enter'
+                    : 'Press Enter to match any of several values'}
+                  onChange={(e) => {
+                    if (compareList(branch)) {
+                      setCompareDrafts(prev => ({ ...prev, [index]: e.target.value }));
+                    } else {
+                      setBranch(index, { compare: e.target.value });
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key !== 'Enter') return;
+                    e.preventDefault();
+                    if (compareList(branch)) {
+                      commitCompareDraft(index, branch);
+                      return;
+                    }
+                    const entered = String(branch.compare || '').trim();
+                    if (entered) setBranch(index, { compare: [entered] });
+                  }}
+                  // Committed on the way out too. Typing a value and clicking
+                  // Save rule without pressing Enter would otherwise drop it
+                  // silently, which is the failure this whole field invites.
+                  onBlur={() => { if (compareList(branch)) commitCompareDraft(index, branch); }}
                   sx={{ minWidth: 130 }}
                 />
               )}
@@ -238,6 +280,29 @@ export default function ColumnRuleBuilder({
                 >
                   <DeleteOutlineIcon fontSize="small" />
                 </IconButton>
+              )}
+              </Box>
+              {/* Values sit on their own row so the controls above stay
+                  aligned however many are added. */}
+              {compareList(branch)?.length > 0 && (
+                <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap', alignItems: 'center', mt: 0.75, ml: 7 }}>
+                  <Typography variant="caption" sx={{ mr: 0.5 }}>
+                    {branch.operator === 'not_equals' ? 'None of:' : 'Any of:'}
+                  </Typography>
+                  {compareList(branch).map(entry => (
+                    <Chip
+                      key={entry}
+                      size="small"
+                      label={entry}
+                      onDelete={() => {
+                        const remaining = compareList(branch).filter(v => v !== entry);
+                        // Back to a plain string once the list is empty, so the
+                        // field returns to ordinary typing.
+                        setBranch(index, { compare: remaining.length ? remaining : '' });
+                      }}
+                    />
+                  ))}
+                </Box>
               )}
             </Box>
           ))}
