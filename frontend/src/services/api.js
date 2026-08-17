@@ -628,14 +628,17 @@ const api = {
    * @param {string} sessionId - Session ID
    * @param {string} format - File format ('excel' or 'csv')
    */
-  downloadProcessedFile: (sessionId, format = 'excel', columnOrder = null, exportType = 'item') =>
+  downloadProcessedFile: (sessionId, format = 'excel', columnOrder = null, exportType = 'item', highlightDuplicateColumns = []) =>
     axios.post(`${API_URL}/download/`, {
       session_id: sessionId,
       format: format,
       column_order: columnOrder,
       // 'item' strips BOM structure columns; the two FactWise imports are
       // different files even though the working grid holds both.
-      export_type: exportType
+      export_type: exportType,
+      // Repeated values in these columns are shaded amber in the xlsx, the same
+      // way the editor grid flags them. Item code is always checked.
+      highlight_duplicate_columns: highlightDuplicateColumns
     }, {
       responseType: 'blob'
     }),
@@ -1746,7 +1749,7 @@ const api = {
     }, { timeout: 120000 }),
 
   /** Fill blank cells or replace exact user-selected values. */
-  fillMissingValues: (sessionId, column, targetMode, selectedValues, strategy, defaultValue = '', validation = {}) =>
+  fillMissingValues: (sessionId, column, targetMode, selectedValues, strategy, defaultValue = '', validation = {}, sourceColumn = '') =>
     axios.post(`${API_URL}/transforms/fill-missing-values/`, {
       session_id: sessionId,
       column,
@@ -1755,6 +1758,7 @@ const api = {
       selected_values: selectedValues,
       strategy,
       default_value: defaultValue,
+      source_column: sourceColumn,
       validation,
     }, { timeout: 120000 }),
 

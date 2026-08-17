@@ -6192,6 +6192,60 @@ def _headers_with_repeats(ordered_headers, present_headers):
     return output
 
 
+def _duplicate_highlight_positions(df, extra_columns=None):
+    """Cells the editor would flag as duplicates, as {col_position: {row_positions}}.
+
+    Duplicate Item codes are the error the editor highlights in amber, and the
+    downloaded workbook used to lose that entirely — the user had to find the
+    repeats again by eye in Excel. Positions rather than names because the
+    export can legitimately carry repeated header labels (Tag, Specification).
+    """
+    targets = {_template_label_key('Item code')}
+    for name in (extra_columns or []):
+        key = _template_label_key(str(name or ''))
+        if key:
+            targets.add(key)
+
+    positions = {}
+    for pos, column in enumerate(df.columns):
+        if _template_label_key(str(column or '')) not in targets:
+            continue
+        counts = Counter()
+        values = []
+        for value in df.iloc[:, pos].tolist():
+            text = str(value if value is not None else '').strip()
+            values.append(text)
+            if text:
+                counts[text] += 1
+        repeated = {row for row, text in enumerate(values) if text and counts[text] > 1}
+        if repeated:
+            positions[pos] = repeated
+    return positions
+
+
+def _highlight_duplicate_cells(output_file, df, extra_columns=None):
+    """Paint the duplicate cells amber in an already-written xlsx. Returns count."""
+    positions = _duplicate_highlight_positions(df, extra_columns)
+    if not positions:
+        return 0
+
+    from openpyxl import load_workbook
+    workbook = load_workbook(output_file)
+    sheet = workbook.active
+    fill = PatternFill(start_color='FFF2CC', end_color='FFF2CC', fill_type='solid')
+    font = Font(bold=True, color='92400E')
+    painted = 0
+    for col_pos, rows in positions.items():
+        for row_pos in rows:
+            # Row 1 is the header row, so grid row 0 is spreadsheet row 2.
+            cell = sheet.cell(row=row_pos + 2, column=col_pos + 1)
+            cell.fill = fill
+            cell.font = font
+            painted += 1
+    workbook.save(output_file)
+    return painted
+
+
 @api_view(['GET', 'POST'])
 def download_file(request, session_id=None):
     """Download processed/converted file."""
@@ -6207,9 +6261,13 @@ def download_file(request, session_id=None):
         # Extract column order from request if provided
         requested_column_order = None
         export_type = 'item'
+        highlight_duplicate_columns = []
         if request.method == 'POST':
             requested_column_order = request.data.get('column_order')
             export_type = str(request.data.get('export_type') or 'item').strip().lower()
+            extra_highlight = request.data.get('highlight_duplicate_columns')
+            if isinstance(extra_highlight, list):
+                highlight_duplicate_columns = extra_highlight
 
         # The working grid holds item and BOM fields together so the user can
         # edit them in one place, but the two FactWise imports are different
@@ -7010,6 +7068,13 @@ def download_file(request, session_id=None):
             output_file = output_dir / filename
             df.to_excel(output_file, index=False, engine='openpyxl')
             content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            try:
+                painted = _highlight_duplicate_cells(output_file, df, highlight_duplicate_columns)
+                if painted:
+                    logger.info(f"DOWNLOAD: highlighted {painted} duplicate cell(s) in {filename}")
+            except Exception as highlight_error:
+                # A missing highlight is not worth failing the download over.
+                logger.warning(f"Duplicate highlighting skipped for {filename}: {highlight_error}")
 
         try:
             from .intermediate_artifacts import save_file_artifact
@@ -12555,6 +12620,7 @@ def fill_missing_values(request):
         strategy = str(request.data.get('strategy') or '').strip().lower()
         default_value = request.data.get('default_value', '')
         default_value = '' if default_value is None else str(default_value).strip()
+        source_column = str(request.data.get('source_column') or '').strip()
         validation = request.data.get('validation') or {}
 
         if not session_id:
@@ -12568,10 +12634,15 @@ def fill_missing_values(request):
                 return Response({'success': False, 'error': 'target_mode must be empty or selected_values'}, status=status.HTTP_400_BAD_REQUEST)
             if target_mode == 'selected_values' and (not isinstance(selected_values, list) or not selected_values):
                 return Response({'success': False, 'error': 'Select at least one value to replace'}, status=status.HTTP_400_BAD_REQUEST)
-            if strategy not in {'above', 'below', 'default'}:
-                return Response({'success': False, 'error': 'strategy must be above, below, or default'}, status=status.HTTP_400_BAD_REQUEST)
+            if strategy not in {'above', 'below', 'default', 'source_column'}:
+                return Response({'success': False, 'error': 'strategy must be above, below, default, or source_column'}, status=status.HTTP_400_BAD_REQUEST)
             if strategy == 'default' and not default_value:
                 return Response({'success': False, 'error': 'default_value required'}, status=status.HTTP_400_BAD_REQUEST)
+            if strategy == 'source_column':
+                if not source_column:
+                    return Response({'success': False, 'error': 'source_column required'}, status=status.HTTP_400_BAD_REQUEST)
+                if source_column == column:
+                    return Response({'success': False, 'error': 'Pick a different column to copy from'}, status=status.HTTP_400_BAD_REQUEST)
 
         info = get_session_consistent(session_id)
         if not info:
@@ -12653,6 +12724,21 @@ def fill_missing_values(request):
             for row, problem in zip(rows, problem_mask):
                 if problem and row[ci] != default_value:
                     row[ci] = default_value
+                    changed += 1
+        elif strategy == 'source_column':
+            si = _grid_column_index(headers, source_column)
+            if si < 0:
+                return Response({'success': False, 'error': f'Column "{source_column}" is not in the grid'}, status=status.HTTP_400_BAD_REQUEST)
+            for row, problem in zip(rows, problem_mask):
+                if not problem:
+                    continue
+                # Blank source cells are left alone so a half-filled source
+                # column cannot wipe values the user already has.
+                value = row[si]
+                if not str(value or '').strip():
+                    continue
+                if row[ci] != value:
+                    row[ci] = value
                     changed += 1
         elif strategy == 'above':
             nearest = None

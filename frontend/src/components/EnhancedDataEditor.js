@@ -772,6 +772,7 @@ const EnhancedDataEditor = () => {
   const [fillMissingMode, setFillMissingMode] = useState('');
   const [fillMissingStrategy, setFillMissingStrategy] = useState('');
   const [fillMissingDefault, setFillMissingDefault] = useState('');
+  const [fillMissingSourceColumn, setFillMissingSourceColumn] = useState('');
   const [fillMissingBusy, setFillMissingBusy] = useState(false);
   const [fillMissingAnalysis, setFillMissingAnalysis] = useState(null);
   const [fillMissingAnalysisLoading, setFillMissingAnalysisLoading] = useState(false);
@@ -779,6 +780,10 @@ const EnhancedDataEditor = () => {
   const [fillMissingSelectedValues, setFillMissingSelectedValues] = useState([]);
   const fillMissingAnalysisSeqRef = useRef(0);
   const fillMissingReturnToGuardRef = useRef(false);
+  // The column whose repeats the grid shades amber, so a download can shade the
+  // same cells. A ref because the export handlers are defined above the memo
+  // that works the field out.
+  const duplicateHighlightFieldRef = useRef('');
   // Conditional delete-rows tool
   const [deleteRowsOpen, setDeleteRowsOpen] = useState(false);
   const [delCol, setDelCol] = useState('');
@@ -2205,7 +2210,8 @@ const EnhancedDataEditor = () => {
             Array.isArray(action.selected_values) ? action.selected_values : [],
             action.strategy,
             action.default_value || '',
-            action.validation || {}
+            action.validation || {},
+            action.source_column || ''
           );
           if (!resp.data?.success) throw new Error(resp.data?.error || 'Fill missing values failed');
           changed = true;
@@ -4059,6 +4065,7 @@ const EnhancedDataEditor = () => {
     setFillMissingMode('');
     setFillMissingStrategy('');
     setFillMissingDefault('');
+    setFillMissingSourceColumn('');
     setFillMissingAnalysis(null);
     setFillMissingAnalysisError('');
     setFillMissingSelectedValues([]);
@@ -4115,6 +4122,10 @@ const EnhancedDataEditor = () => {
       showSnackbar('Enter the default value to apply.', 'warning');
       return;
     }
+    if (fillMissingStrategy === 'source_column' && !fillMissingSourceColumn) {
+      showSnackbar('Pick the column to copy values from.', 'warning');
+      return;
+    }
     setFillMissingBusy(true);
     try {
       const requiredName = getRequiredNameForColumn(fillMissingColumn);
@@ -4126,7 +4137,8 @@ const EnhancedDataEditor = () => {
         fillMissingSelectedValues.map(item => item.value),
         fillMissingStrategy,
         fillMissingDefault,
-        validation
+        validation,
+        fillMissingSourceColumn
       );
       if (!resp.data?.success) throw new Error(resp.data?.error || 'Fill failed');
       recordPostMappingAction({
@@ -4137,6 +4149,7 @@ const EnhancedDataEditor = () => {
         selected_values: fillMissingSelectedValues.map(item => item.value),
         strategy: fillMissingStrategy,
         default_value: fillMissingDefault,
+        source_column: fillMissingSourceColumn,
         validation,
       });
       await fetchDataSynchronized();
@@ -4145,7 +4158,11 @@ const EnhancedDataEditor = () => {
       const unresolved = resp.data.unresolved || 0;
       showSnackbar(
         unresolved > 0
-          ? `Updated ${changed} cells. ${unresolved} could not be filled because no valid nearby value was available.`
+          ? `Updated ${changed} cells. ${unresolved} could not be filled because ${
+              fillMissingStrategy === 'source_column'
+                ? 'the source column was empty on those rows'
+                : 'no valid nearby value was available'
+            }.`
           : `${fillMissingMode === 'empty' ? 'Filled' : 'Replaced'} ${changed} cell${changed === 1 ? '' : 's'}.`,
         unresolved > 0 ? 'warning' : 'success'
       );
@@ -4159,7 +4176,7 @@ const EnhancedDataEditor = () => {
     } finally {
       setFillMissingBusy(false);
     }
-  }, [fillMissingColumn, fillMissingMode, fillMissingTargetCount, fillMissingSelectedValues, fillMissingStrategy, fillMissingDefault, sessionId, getRequiredNameForColumn, getRequiredValidationRule, fetchDataSynchronized, showSnackbar, getFriendlyErrorMessage, runGuardedExport, recordPostMappingAction]);
+  }, [fillMissingColumn, fillMissingMode, fillMissingTargetCount, fillMissingSelectedValues, fillMissingStrategy, fillMissingDefault, fillMissingSourceColumn, sessionId, getRequiredNameForColumn, getRequiredValidationRule, fetchDataSynchronized, showSnackbar, getFriendlyErrorMessage, runGuardedExport, recordPostMappingAction]);
 
   const highlightItemCodeDuplicates = useCallback(() => {
     if (!itemCodeIssue?.dupRows) return;
@@ -4234,7 +4251,8 @@ const EnhancedDataEditor = () => {
         sessionId,
         'excel',
         getCurrentExportColumnOrder(),
-        'raw'
+        'raw',
+        duplicateHighlightFieldRef.current ? [duplicateHighlightFieldRef.current] : []
       );
       const blob = new Blob([response.data], {
         type: response.headers?.['content-type']
@@ -4296,7 +4314,8 @@ const EnhancedDataEditor = () => {
             sessionId,
             format === 'csv' ? 'csv' : 'excel',
             columnOrder,
-            'item'
+            'item',
+            duplicateHighlightFieldRef.current ? [duplicateHighlightFieldRef.current] : []
           );
       const contentDisposition = response.headers?.['content-disposition'];
       let filename = `factwise_${label}_${sessionId}.${extension}`;
@@ -5904,6 +5923,9 @@ const EnhancedDataEditor = () => {
   }, [getMatchingDataColumnField, itemCodeIssue?.field, rowData]);
   const duplicateItemCodeValues = duplicateItemCodeInfo.values;
   const hasDuplicateItemCodeRows = Boolean(duplicateItemCodeInfo.field && duplicateItemCodeInfo.rowCount > 0 && duplicateItemCodeValues.size > 0);
+  useEffect(() => {
+    duplicateHighlightFieldRef.current = duplicateItemCodeInfo.field || '';
+  }, [duplicateItemCodeInfo.field]);
 
   const filteredRows = useMemo(() => ((rowData || [])
     .map((row, rowIndex) => ({ row, rowIndex }))
@@ -6722,6 +6744,7 @@ const EnhancedDataEditor = () => {
                 setFillMissingMode('');
                 setFillMissingStrategy('');
                 setFillMissingDefault('');
+                setFillMissingSourceColumn('');
               }}
             >
               {columnDefs.filter(column => column.field && column.field !== '__row_number__').map(column => (
@@ -6745,7 +6768,7 @@ const EnhancedDataEditor = () => {
             <>
               {fillMissingAllEmpty ? (
                 <Alert severity="info">
-                  All {fillMissingAnalysis.total_rows} cells in this column are empty. Enter one default value to fill them.
+                  All {fillMissingAnalysis.total_rows} cells in this column are empty. Fill them with one default value, or copy them from another column.
                 </Alert>
               ) : (
               <Box>
@@ -6757,6 +6780,7 @@ const EnhancedDataEditor = () => {
                     const nextMode = event.target.value;
                     setFillMissingMode(nextMode);
                     setFillMissingStrategy(nextMode === 'empty' && fillMissingAllEmpty ? 'default' : '');
+                    setFillMissingSourceColumn('');
                   }}
                   sx={{ mt: 0.5, gap: 1.5 }}
                 >
@@ -6823,30 +6847,40 @@ const EnhancedDataEditor = () => {
               {fillMissingMode && fillMissingTargetCount > 0 && (
                 <FormControl component="fieldset" fullWidth>
                   <FormLabel component="legend" sx={{ mb: 1, fontWeight: 800, color: 'primary.main' }}>
-                    {fillMissingMode === 'empty' && fillMissingAllEmpty ? '3. Enter a default value' : '3. Choose the replacement'}
+                    3. Choose the replacement
                   </FormLabel>
-                  {!(fillMissingMode === 'empty' && fillMissingAllEmpty) && (
-                    <RadioGroup value={fillMissingStrategy} onChange={(event) => setFillMissingStrategy(event.target.value)}>
-                      <FormControlLabel
-                        value="above"
-                        control={<Radio />}
-                        label={<Box><Typography variant="body2" fontWeight={700}>Use the filled cell above</Typography><Typography variant="caption" color="text.secondary">Uses the nearest non-target value above each selected cell.</Typography></Box>}
-                        sx={{ alignItems: 'flex-start', mb: 1, '& .MuiRadio-root': { mt: -0.5 } }}
-                      />
-                      <FormControlLabel
-                        value="below"
-                        control={<Radio />}
-                        label={<Box><Typography variant="body2" fontWeight={700}>Use the filled cell below</Typography><Typography variant="caption" color="text.secondary">Uses the nearest non-target value below each selected cell.</Typography></Box>}
-                        sx={{ alignItems: 'flex-start', mb: 1, '& .MuiRadio-root': { mt: -0.5 } }}
-                      />
-                      <FormControlLabel
-                        value="default"
-                        control={<Radio />}
-                        label={<Box><Typography variant="body2" fontWeight={700}>Add a default value</Typography><Typography variant="caption" color="text.secondary">Uses one value for every targeted cell.</Typography></Box>}
-                        sx={{ alignItems: 'flex-start', '& .MuiRadio-root': { mt: -0.5 } }}
-                      />
-                    </RadioGroup>
-                  )}
+                  <RadioGroup value={fillMissingStrategy} onChange={(event) => setFillMissingStrategy(event.target.value)}>
+                    {/* A fully empty column has no filled neighbours to borrow from,
+                        so only the default and copy-from-column options apply. */}
+                    {!(fillMissingMode === 'empty' && fillMissingAllEmpty) && (
+                      <>
+                        <FormControlLabel
+                          value="above"
+                          control={<Radio />}
+                          label={<Box><Typography variant="body2" fontWeight={700}>Use the filled cell above</Typography><Typography variant="caption" color="text.secondary">Uses the nearest non-target value above each selected cell.</Typography></Box>}
+                          sx={{ alignItems: 'flex-start', mb: 1, '& .MuiRadio-root': { mt: -0.5 } }}
+                        />
+                        <FormControlLabel
+                          value="below"
+                          control={<Radio />}
+                          label={<Box><Typography variant="body2" fontWeight={700}>Use the filled cell below</Typography><Typography variant="caption" color="text.secondary">Uses the nearest non-target value below each selected cell.</Typography></Box>}
+                          sx={{ alignItems: 'flex-start', mb: 1, '& .MuiRadio-root': { mt: -0.5 } }}
+                        />
+                      </>
+                    )}
+                    <FormControlLabel
+                      value="default"
+                      control={<Radio />}
+                      label={<Box><Typography variant="body2" fontWeight={700}>Add a default value</Typography><Typography variant="caption" color="text.secondary">Uses one value for every targeted cell.</Typography></Box>}
+                      sx={{ alignItems: 'flex-start', mb: 1, '& .MuiRadio-root': { mt: -0.5 } }}
+                    />
+                    <FormControlLabel
+                      value="source_column"
+                      control={<Radio />}
+                      label={<Box><Typography variant="body2" fontWeight={700}>Copy from another column</Typography><Typography variant="caption" color="text.secondary">Takes the value from the same row of the column you pick.</Typography></Box>}
+                      sx={{ alignItems: 'flex-start', '& .MuiRadio-root': { mt: -0.5 } }}
+                    />
+                  </RadioGroup>
                   {fillMissingStrategy === 'default' && (
                     <TextField
                       autoFocus
@@ -6857,6 +6891,29 @@ const EnhancedDataEditor = () => {
                       onChange={(event) => setFillMissingDefault(event.target.value)}
                       sx={{ mt: 1.5 }}
                     />
+                  )}
+                  {fillMissingStrategy === 'source_column' && (
+                    <>
+                      <FormControl fullWidth size="small" sx={{ mt: 1.5 }}>
+                        <InputLabel>Copy from</InputLabel>
+                        <Select
+                          label="Copy from"
+                          value={fillMissingSourceColumn}
+                          onChange={(event) => setFillMissingSourceColumn(event.target.value)}
+                        >
+                          {columnDefs
+                            .filter(column => column.field && column.field !== '__row_number__' && column.field !== fillMissingColumn)
+                            .map(column => (
+                              <MenuItem key={column.field} value={column.field}>
+                                {columnLabel(column.field, column.headerName)}
+                              </MenuItem>
+                            ))}
+                        </Select>
+                      </FormControl>
+                      <Alert severity="info" sx={{ mt: 1.5 }}>
+                        Rows where the source column is empty are left untouched.
+                      </Alert>
+                    </>
                   )}
                 </FormControl>
               )}
@@ -6871,7 +6928,8 @@ const EnhancedDataEditor = () => {
             disabled={
               fillMissingBusy || fillMissingAnalysisLoading || !fillMissingColumn || !fillMissingMode ||
               fillMissingTargetCount === 0 || !fillMissingStrategy ||
-              (fillMissingStrategy === 'default' && !fillMissingDefault.trim())
+              (fillMissingStrategy === 'default' && !fillMissingDefault.trim()) ||
+              (fillMissingStrategy === 'source_column' && !fillMissingSourceColumn)
             }
             startIcon={fillMissingBusy ? <CircularProgress size={16} /> : <EditNoteIcon />}
           >
@@ -7285,8 +7343,8 @@ const EnhancedDataEditor = () => {
                   </MenuItem>
                 )}
                 <Divider />
-                <MenuItem onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('all'); setMpnFilterInvalidOnly(false); setPage(1); }}>
-                  <ListItemIcon>{rowFilterMode === 'all' && !mpnFilterInvalidOnly ? <CheckIcon sx={{ color: t.color.primary }} /> : null}</ListItemIcon>
+                <MenuItem onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('all'); setMpnFilterInvalidOnly(false); setIssueRowFilter(null); setPage(1); }}>
+                  <ListItemIcon>{rowFilterMode === 'all' && !mpnFilterInvalidOnly && !issueRowFilter ? <CheckIcon sx={{ color: t.color.primary }} /> : null}</ListItemIcon>
                   <ListItemText>All rows</ListItemText>
                 </MenuItem>
                 <MenuItem
@@ -7303,6 +7361,27 @@ const EnhancedDataEditor = () => {
                 >
                   <ListItemIcon>{dupHighlight?.field === duplicateItemCodeInfo.field ? <CheckIcon sx={{ color: t.color.warningText }} /> : <ContentCopyIcon sx={{ color: t.color.warningText }} />}</ListItemIcon>
                   <ListItemText>Highlight duplicate Item codes</ListItemText>
+                </MenuItem>
+                <MenuItem
+                  onClick={() => {
+                    setRowFilterMenuAnchor(null);
+                    if (!hasDuplicateItemCodeRows) return;
+                    // Highlight as well as filter: once only the repeats are on
+                    // screen the amber cells are what tells the pairs apart.
+                    setDupHighlight({
+                      field: duplicateItemCodeInfo.field,
+                      values: duplicateItemCodeValues,
+                    });
+                    showIssueRows(
+                      duplicateItemCodeInfo.field,
+                      Array.from(duplicateItemCodeValues),
+                      'Duplicate Item codes'
+                    );
+                  }}
+                  disabled={!hasDuplicateItemCodeRows}
+                >
+                  <ListItemIcon>{issueRowFilter?.label === 'Duplicate Item codes' ? <CheckIcon sx={{ color: t.color.warningText }} /> : <FilterAltIcon sx={{ color: t.color.warningText }} />}</ListItemIcon>
+                  <ListItemText>Show only duplicate Item codes</ListItemText>
                 </MenuItem>
                 <MenuItem
                   onClick={() => { setRowFilterMenuAnchor(null); setRowFilterMode('valid_mpn'); setMpnFilterInvalidOnly(false); setPage(1); }}
