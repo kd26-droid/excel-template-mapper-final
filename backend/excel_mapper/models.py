@@ -793,12 +793,23 @@ class ProviderCredential(models.Model):
 class EditorDefaultSettings(models.Model):
     """Persistent blank-only editor defaults scoped by entity."""
 
-    entity_name = models.CharField(max_length=200, unique=True, db_index=True)
+    # FactWise's entity_id is the only stable key. The name was the key until
+    # now, which meant a launch that spelled it differently — or two filing
+    # entities that share a display name — either lost the row or shared one.
+    # Nullable because rows written before this existed have no id, and because
+    # a launch URL does not always carry one.
+    entity_id = models.CharField(max_length=120, null=True, blank=True, unique=True, db_index=True)
+    entity_name = models.CharField(max_length=200, db_index=True)
     item_type = models.CharField(max_length=80, blank=True, default='')
     procurement_item = models.BooleanField(null=True, blank=True)
     sales_item = models.BooleanField(null=True, blank=True)
     measurement_unit = models.CharField(max_length=80, blank=True, default='')
     item_code_rule = models.JSONField(default=dict, blank=True)
+    # The Settings panel verbatim. The typed columns above are what the server
+    # applies to rows itself; this is everything else the panel holds — the
+    # copy / join / if-else item code modes, the rows-to-update choice, the
+    # pinned column rules — which used to live only in the browser.
+    ui_defaults = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

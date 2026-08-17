@@ -5,6 +5,8 @@ export const ROLE_FIELDS = [
   { key: 'description', label: 'Description / item name' },
   { key: 'quantity', label: 'Quantity' },
   { key: 'uom', label: 'UOM' },
+  { key: 'notes', label: 'Notes' },
+  { key: 'internalNotes', label: 'Internal notes' },
   { key: 'level', label: 'BOM level' },
   { key: 'parent', label: 'Parent / group key' },
 ];
@@ -171,8 +173,8 @@ export const ALTERNATE_LAYOUT_OPTIONS = [
   },
   {
     value: 'already_separate_rows',
-    label: 'Each source row is already one BOM row',
-    description: 'Use this when pipe-separated values should stay in the same row instead of becoming alternates.',
+    label: 'Each row is already a final BOM row',
+    description: 'Use this when every source row should stay as its own output row. The normalizer will not group nearby rows as alternates.',
     example: {
       caption: 'Every row stays as its OWN BOM line — no alternates created.',
       rows: [
@@ -185,8 +187,8 @@ export const ALTERNATE_LAYOUT_OPTIONS = [
   },
   {
     value: 'same_group_rows',
-    label: 'Rows with the same group key are alternates',
-    description: 'Use this when each row has one MPN/MFR pair, but repeated item/group details mean the later rows are alternates of the first row.',
+    label: 'Same group key means alternates',
+    description: 'Use this when rows with the same parent/group/item key are the same part: first row is Primary, later rows become alternates.',
     example: {
       caption: 'Same CPN repeated → first row is primary, rest are alternates.',
       rows: [
@@ -200,7 +202,7 @@ export const ALTERNATE_LAYOUT_OPTIONS = [
   {
     value: 'following_rows',
     label: 'Alternates are in following rows',
-    description: 'Use this when alternate values appear in rows below the main BOM row, often in a different column.',
+    description: 'Use this when a main BOM row is followed by one or more alternate rows, often in a separate column such as Niv.',
     example: {
       caption: 'Row with a Level = primary. Blank-Level rows below it = alternates of that primary.',
       rows: [
@@ -208,6 +210,19 @@ export const ALTERNATE_LAYOUT_OPTIONS = [
         [{ text: '1', role: 'key' }, { text: 'RC0805FR-0710KL', role: 'primary' }, { text: 'YAGEO', role: 'primary' }],
         [{ text: '', role: 'plain' }, { text: 'CR21-0100F-T', role: 'alt' }, { text: 'AVX', role: 'alt' }],
         [{ text: '', role: 'plain' }, { text: 'CRCW08050100F', role: 'alt' }, { text: 'VISHAY', role: 'alt' }],
+      ],
+    },
+  },
+  {
+    value: 'following_item_rows',
+    label: 'Alternates are following item rows',
+    description: 'Use this when a main item row is followed by sparse rows whose selected item/MPN/MFR values are alternates for that item.',
+    example: {
+      caption: 'Item row = primary. Sparse rows below (item code blank) = alternates.',
+      rows: [
+        [{ text: 'Item code', role: 'header' }, { text: 'MPN', role: 'header' }, { text: 'Manufacturer', role: 'header' }],
+        [{ text: 'A1002779', role: 'key' }, { text: 'RC0805FR-0710KL', role: 'primary' }, { text: 'YAGEO', role: 'primary' }],
+        [{ text: '', role: 'plain' }, { text: 'CR21-0100F-T', role: 'alt' }, { text: 'AVX', role: 'alt' }],
       ],
     },
   },

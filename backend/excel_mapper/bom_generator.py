@@ -209,6 +209,59 @@ def group_normalized_rows(records):
     return ordered, ungrouped
 
 
+def drop_redundant_alternates(primary_code, alternates):
+    """Remove alternates that repeat the primary, or each other.
+
+    An alternate names a DIFFERENT manufacturer's part that may be substituted.
+    One carrying the same item code as the primary says "you may substitute this
+    part with itself" — no information at all, and FactWise rejects the file for
+    it (``alternate_is_primary``). The same code in two alternate slots is the
+    same statement made twice (``alternate_duplicate``).
+
+    Both are dropped rather than reported, because neither is ambiguous. That is
+    the difference from two rows disagreeing about what a part IS, where only
+    the user knows which is right and blocking is correct: here there is nothing
+    to decide and nothing to lose.
+
+    Identity is the item code when there is one. Codes are generated later than
+    this in some flows, so a blank one falls back to (MPN, manufacturer) — the
+    pair an alternate actually varies.
+
+    Returns ``(kept, dropped_count)``.
+    """
+    def identity(record):
+        code = _text(record.get(F_ITEM_CODE))
+        if code:
+            return ('code', code.lower())
+        mpn = _text(record.get(F_MPN)).lower()
+        manufacturer = _text(record.get(F_MANUFACTURER)).lower()
+        if mpn or manufacturer:
+            return ('pair', mpn, manufacturer)
+        return None
+
+    seen = set()
+    primary_key = _text(primary_code).lower()
+    if primary_key:
+        seen.add(('code', primary_key))
+
+    kept = []
+    dropped = 0
+    for alternate in alternates or []:
+        key = identity(alternate)
+        # No identity at all — keep it. An empty alternate slot is a different
+        # complaint with its own message, and silently eating rows here would
+        # hide it.
+        if key is None:
+            kept.append(alternate)
+            continue
+        if key in seen:
+            dropped += 1
+            continue
+        seen.add(key)
+        kept.append(alternate)
+    return kept, dropped
+
+
 def generate_item_rows(records):
     """One item row per normalized row — each is a distinct buyable part.
 
@@ -289,6 +342,7 @@ def generate_flat_bom(records, bom_header):
     built = []
     max_alternates = 0
     unknown_relations = 0
+    redundant_alternates = 0
 
     for key, rows in groups.items():
         primary = None
@@ -314,10 +368,24 @@ def generate_flat_bom(records, bom_header):
                 'message': 'No row marked Primary in group "%s"; used the first row.' % key,
             })
 
+        # Before the width is measured, so a dropped alternate does not leave an
+        # empty group of columns on every row of the sheet.
+        alternates, redundant = drop_redundant_alternates(
+            primary.get(F_ITEM_CODE), alternates
+        )
+        redundant_alternates += redundant
+
         max_alternates = max(max_alternates, len(alternates))
         built.append((primary, alternates))
 
     result.bom_headers = build_bom_headers(max_alternates)
+    if redundant_alternates:
+        result.warnings.append({
+            'type': 'redundant_alternates',
+            'count': redundant_alternates,
+            'message': ('Dropped %d alternate(s) that repeated their own primary '
+                        'or another alternate.' % redundant_alternates),
+        })
 
     for primary, alternates in built:
         row = OrderedDict((header, '') for header in result.bom_headers)
@@ -466,9 +534,28 @@ def generate_multi_level_bom(tree, bom_header, alternates_of=None, records=None,
     for code in tree.nodes:
         resolved.setdefault(code, code)
 
+    # Counted per parentKey, not per call: `alternates_for` runs twice for every
+    # child — once to measure the sheet's width, once to write the cells — so
+    # incrementing a plain counter would report double.
+    groups_with_redundant = set()
+
     def alternates_for(row):
         key = _text((row.get('source') or {}).get(F_PARENT_KEY))
-        return alternates_of.get(key, []) if key else []
+        if not key:
+            return []
+        # Filtered here rather than at the two call sites, because those two
+        # must agree: drop an alternate in one and not the other and the sheet
+        # carries an empty group of columns on every row.
+        #
+        # Compared against the child's own RESOLVED code — the same string that
+        # lands in Raw material code / Sub BOM ID — so "alternate equals
+        # primary" is judged on exactly what the sheet will say, including any
+        # rename the user made in the structure gate.
+        primary_code = resolved.get(row['code'], row['code'])
+        kept, dropped = drop_redundant_alternates(primary_code, alternates_of.get(key, []))
+        if dropped:
+            groups_with_redundant.add(key)
+        return kept
 
     max_alternates = 0
     for block in tree.blocks:
@@ -634,6 +721,14 @@ def generate_multi_level_bom(tree, bom_header, alternates_of=None, records=None,
             'Item type': node.get('item_type') or ('Raw material' if node.get('is_leaf', True) else 'Finished good'),
             'Measurement unit': node.get('uom') or '',
             'Manufacturer': _text(source.get(F_MANUFACTURER)),
+        })
+
+    if groups_with_redundant:
+        tree.warnings.append({
+            'type': 'redundant_alternates',
+            'count': len(groups_with_redundant),
+            'message': ('Dropped alternates that repeated their own primary on %d BOM '
+                        'line(s).' % len(groups_with_redundant)),
         })
 
     result.item_headers = item_headers

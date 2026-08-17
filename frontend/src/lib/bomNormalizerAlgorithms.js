@@ -18,6 +18,8 @@ export const BASE_NORMALIZED_EXPORT_COLUMNS = [
   'manufacturer',
   'quantity',
   'uom',
+  'Notes',
+  'Internal notes',
   'Item code',
   'rule',
   'confidence',

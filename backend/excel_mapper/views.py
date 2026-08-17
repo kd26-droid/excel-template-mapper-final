@@ -2417,11 +2417,41 @@ def apply_sheet_join(request):
                 return unique_id_pattern.replace('{base}', base_value).replace('{detail}', detail_value).strip('_- ')
             return f'{base_value}_{detail_value}'.strip('_- ')
 
+        # Detail rows that are identical across every column being brought over
+        # are collapsed to one.
+        #
+        # A manufacturer sheet is usually keyed per (assembly, part), not per
+        # part: a part used in two assemblies is listed twice with the SAME
+        # manufacturer part. Joining on part number then hands that part two
+        # "manufacturers" which are the same manufacturer, so the second becomes
+        # an alternate of the first — the part offered as a substitute for
+        # itself, which FactWise rejects with "alternate is primary".
+        #
+        # Compared on the joined columns ONLY. Two rows differing just in a
+        # column nobody is bringing over (the assembly they belong to) are the
+        # same fact repeated; two rows differing in a joined column are genuine
+        # alternates and both survive. Applied's MFG sheet: 98 rows, exactly one
+        # redundant pair.
         detail_lookup = defaultdict(list)
+        detail_seen = defaultdict(set)
+        duplicate_detail_rows = 0
         for _, detail_row in detail_df.iterrows():
             key = norm_key(detail_row.get(detail_key, ''))
-            if key:
-                detail_lookup[key].append(detail_row)
+            if not key:
+                continue
+            signature = tuple(norm_key(detail_row.get(col, '')) for col in detail_columns)
+            # An all-blank detail row carries nothing, so collapsing repeats of
+            # it is right too — but only against other all-blank rows.
+            if signature in detail_seen[key]:
+                duplicate_detail_rows += 1
+                continue
+            detail_seen[key].add(signature)
+            detail_lookup[key].append(detail_row)
+        if duplicate_detail_rows:
+            logger.info(
+                f"SHEET JOIN: collapsed {duplicate_detail_rows} duplicate detail row(s) "
+                f"— identical across the joined columns"
+            )
 
         output_headers = list(base_headers)
         unique_id_col = 'Generated Row ID'
@@ -2875,28 +2905,49 @@ def get_headers(request, session_id):
         customer_id_pairs_count = info.get('customer_id_pairs_count', 1)
         
         # Helper functions for robust special-column detection (case/trim tolerant)
-        # FIXED: Only match NUMBERED dynamic columns (Tag_1, etc.), not user's original columns
+        # Match a numbered dynamic column in EITHER spelling.
+        #
+        # One column, two names: the template workbook writes 'Tag (1)', the
+        # grid writes 'Tag_1'. The regeneration below removes the dynamic
+        # columns and re-adds a fresh set, so a spelling these predicates do not
+        # recognise is kept AND then added again.
+        #
+        # They used to match `^tag_\d+$` against a bare lower() — the internal
+        # spelling only. The SFO template ships the label spelling, so its 14
+        # dynamic columns survived the filter and 14 internal ones were appended
+        # on top: 38 template columns became 54, with two columns claiming the
+        # name Tag_1 (which is where the 'Tag_1__2' keys came from).
+        #
+        # `build_sfo_clustered_headers` already accepts both spellings; these
+        # were the half of the same pipeline left behind when the header shape
+        # moved internal, so the two disagreed about what a tag column is.
         import re
+
         def _norm(h: str) -> str:
+            """Lower-cased, with '_' and punctuation flattened to spaces.
+
+            'Tag_1' and 'Tag (1)' both become 'tag 1', so one pattern covers
+            both spellings.
+            """
             try:
-                return str(h or '').strip().lower()
+                text = _strip_pandas_duplicate_suffix(str(h or '').strip().lower())
+                return re.sub(r'[^a-z0-9]+', ' ', text).strip()
             except Exception:
                 return ''
+
+        def _is_numbered(h: str, base: str) -> bool:
+            return bool(re.match(rf'^{base} \d+$', _norm(h)))
+
         def _is_tag(h: str) -> bool:
-            # Only match Tag_N pattern where N is a number
-            return bool(re.match(r'^tag_\d+$', _norm(h)))
+            return _is_numbered(h, 'tag')
         def _is_spec_name(h: str) -> bool:
-            # Only match Specification_Name_N pattern
-            return bool(re.match(r'^specification_name_\d+$', _norm(h)))
+            return _is_numbered(h, 'specification name')
         def _is_spec_value(h: str) -> bool:
-            # Only match Specification_Value_N pattern
-            return bool(re.match(r'^specification_value_\d+$', _norm(h)))
+            return _is_numbered(h, 'specification value')
         def _is_cust_name(h: str) -> bool:
-            # Only match Custom_Identification_Name_N pattern
-            return bool(re.match(r'^custom_identification_name_\d+$', _norm(h)))
+            return _is_numbered(h, 'custom identification name')
         def _is_cust_value(h: str) -> bool:
-            # Only match Custom_Identification_Value_N pattern
-            return bool(re.match(r'^custom_identification_value_\d+$', _norm(h)))
+            return _is_numbered(h, 'custom identification value')
 
         # Prefer enhanced headers if present to preserve dynamically added columns (e.g., Tag_4)
         if enhanced_headers and isinstance(enhanced_headers, list) and len(enhanced_headers) > 0:
@@ -3460,6 +3511,13 @@ def save_mappings(request):
                 session_id=session_id
             )
             logger.info(f"✅ Column mappings applied in save_mappings: {len(mapping_result.get('headers', []))} headers, {len(mapping_result.get('data', []))} rows")
+
+            # A Review from Column Mapping is a new mapped-grid boundary. Any
+            # editor snapshots from a previous Review must not win over the
+            # freshly applied mappings, otherwise a deleted edge can still look
+            # populated in the editor (for example Notes -> Notes).
+            for stale_grid_key in ("edited_data", "enhanced_data", "formula_enhanced_data"):
+                info.pop(stale_grid_key, None)
 
             # Store mapped data as both mapped_data and formula_enhanced_data
             info["mapped_data"] = mapping_result['data']
@@ -5874,14 +5932,25 @@ def _append_authored_finished_good(info, rows, headers):
     # Keying on Item code alone therefore saw no match and appended a second
     # row for the same item.
     cpn_index = index_of('CPN Code')
+    # Both row shapes. The stored grid holds lists, but a page assembled for the
+    # editor holds dicts — and skipping those made `existing` empty, so the
+    # helper concluded the finished good was missing and appended a SECOND one.
+    # The row was right in the data and duplicated only on screen, which is a
+    # confusing way to be wrong.
+    code_header = headers[code_index] if 0 <= code_index < len(headers) else None
+    cpn_header = headers[cpn_index] if 0 <= cpn_index < len(headers) else None
     existing = set()
     for row in rows or []:
-        if not isinstance(row, list):
-            continue
-        if code_index < len(row):
-            existing.add(str(row[code_index] or '').strip())
-        if 0 <= cpn_index < len(row):
-            existing.add(str(row[cpn_index] or '').strip())
+        if isinstance(row, list):
+            if code_index < len(row):
+                existing.add(str(row[code_index] or '').strip())
+            if 0 <= cpn_index < len(row):
+                existing.add(str(row[cpn_index] or '').strip())
+        elif isinstance(row, dict):
+            for header in (code_header, cpn_header):
+                if header is not None:
+                    existing.add(str(row.get(header) or '').strip())
+    existing.discard('')
 
     constants = _constant_column_values(rows, headers)
 
@@ -6734,16 +6803,42 @@ def download_file(request, session_id=None):
             # Convert dict format to list format for consistency
             converted_rows = []
             output_keys = _positional_row_keys(all_headers)
-            for row_dict in transformed_rows:
-                row_list = []
-                for key, header in zip(output_keys, all_headers):
-                    # Fall back to the plain header for rows written by a step
-                    # that never saw a duplicate (single-slot sheets).
-                    value = row_dict.get(key)
-                    if value is None:
-                        value = row_dict.get(header, "")
-                    row_list.append(value)
-                converted_rows.append(row_list)
+            # `actual_headers` was read off row 0 alone, so this loop used to
+            # assume every row had the same shape as the first. A grid can hold
+            # BOTH: rows that came through the normalizer are dicts, and a row
+            # added later in the editor is a plain list. One list row among 113
+            # dicts crashed the whole export with "'list' object has no
+            # attribute 'get'" — a message naming a Python type and nothing
+            # else, with no traceback, on an action as ordinary as editing a
+            # cell.
+            source_keys = _positional_row_keys(actual_headers)
+            for row in transformed_rows:
+                if isinstance(row, dict):
+                    row_list = []
+                    for key, header in zip(output_keys, all_headers):
+                        # Fall back to the plain header for rows written by a
+                        # step that never saw a duplicate (single-slot sheets).
+                        value = row.get(key)
+                        if value is None:
+                            value = row.get(header, "")
+                        row_list.append(value)
+                    converted_rows.append(row_list)
+                    continue
+                # A list row is positional against `actual_headers`, so it is
+                # re-indexed into the requested order rather than passed through
+                # — appending it as-is would silently shift every cell whenever
+                # the two orders differ.
+                by_header = {}
+                for position, header in enumerate(actual_headers):
+                    if position < len(row):
+                        by_header.setdefault(header, row[position])
+                for position, key in enumerate(source_keys):
+                    if position < len(row):
+                        by_header.setdefault(key, row[position])
+                converted_rows.append([
+                    by_header.get(key, by_header.get(header, ""))
+                    for key, header in zip(output_keys, all_headers)
+                ])
             transformed_rows = converted_rows
         
         # Strip BOM structure columns here rather than from the requested column
@@ -6944,7 +7039,11 @@ def download_file(request, session_id=None):
         return response
         
     except Exception as e:
-        logger.error(f"Error in download_file: {e}")
+        # With the traceback. "Download failed: 'list' object has no attribute
+        # 'get'" names a Python type and nothing else — not the column, not the
+        # row, not the step — so the only way to find it was to guess. The
+        # message the user sees is unchanged; this is for the log.
+        logger.error(f"Error in download_file: {e}", exc_info=True)
         return Response({
             'success': False,
             'error': f'Download failed: {str(e)}'
@@ -11235,7 +11334,11 @@ def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
 
         if operator == 'is_empty':
             return value == ''
-        if operator == 'not_empty':
+        # 'is_not_empty' is what the Settings rule builder used to send; an
+        # unknown operator falls through to False, so those rules matched
+        # nothing at all. Accepted as an alias rather than dropped, so rules
+        # already saved with it start working instead of staying dead.
+        if operator in ('not_empty', 'is_not_empty'):
             return value != ''
         if operator == 'equals':
             return any(lowered == c for c in compares)
@@ -11244,6 +11347,12 @@ def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
             return all(lowered != c for c in compares)
         if operator == 'contains':
             return any(c in lowered for c in compares)
+        # Offered by the rule builder since it shipped, but never implemented
+        # here, so both silently matched nothing.
+        if operator == 'starts_with':
+            return any(lowered.startswith(c) for c in compares)
+        if operator == 'ends_with':
+            return any(lowered.endswith(c) for c in compares)
         return False
 
     # Resolve the lock once: which rows are protected, for this target column.
@@ -13462,6 +13571,11 @@ def cleanup_grid_rows(request):
         return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+# What identifies a grid row well enough to delete it by position. Used to check
+# that the row the editor pointed at is still the row sitting there.
+ROW_IDENTITY_COLUMNS = ('Item code', 'CPN Code', 'MPN Code', 'Item name')
+
+
 @api_view(['POST'])
 def delete_rows_conditional(request):
     """Delete rows from the current grid where a column meets a condition.
@@ -13469,15 +13583,35 @@ def delete_rows_conditional(request):
     Request: { session_id, column, operator, compare }
       operator: is_empty | not_empty | equals | not_equals | contains
     e.g. delete every row where "MPN Code" is_empty.
+
+    Or, to delete one named row outright: { session_id, rows, row_values }
+      rows        1-based position in the grid, as the editor numbers the row
+      row_values  that row's cells as the caller sees them, keyed by header
+
+    The editor's per-row delete button takes the second form. It is the same
+    deletion — same BOM guard, same write, same response — selected by position
+    instead of by condition, so there is one place where a grid row can be
+    removed rather than two that can drift apart.
+
+    ``row_values`` is the safety interlock, and a position alone is NOT enough
+    to delete on. The editor's row list does not always come from the same
+    snapshot this endpoint reads: ``data_view`` serves ``enhanced_data`` when
+    one is active, while ``read_session_grid`` prefers ``edited_data``, and the
+    two can differ in length. Position 40 of one is then not position 40 of the
+    other, and deleting by number alone would take the wrong row. So the row at
+    that position has to still hold the values the user was looking at, on every
+    header the two sides share, or the delete is refused.
     """
     try:
         session_id = request.data.get('session_id')
         column = str(request.data.get('column') or '').strip()
         operator = str(request.data.get('operator') or 'is_empty')
         compare = '' if request.data.get('compare') is None else str(request.data.get('compare')).strip().lower()
+        raw_positions = request.data.get('rows')
+        by_position = isinstance(raw_positions, list) and len(raw_positions) > 0
         if not session_id:
             return Response({'success': False, 'error': 'session_id required'}, status=status.HTTP_400_BAD_REQUEST)
-        if not column:
+        if not column and not by_position:
             return Response({'success': False, 'error': 'column required'}, status=status.HTTP_400_BAD_REQUEST)
 
         info = get_session_consistent(session_id)
@@ -13486,11 +13620,77 @@ def delete_rows_conditional(request):
         headers, rows = read_session_grid(session_id, info)
         if not headers or rows is None:
             return Response({'success': False, 'error': 'No grid for this session'}, status=status.HTTP_400_BAD_REQUEST)
-        if column not in headers:
+        if not by_position and column not in headers:
             return Response({'success': False, 'error': f'Column "{column}" is not in the grid', 'headers': headers},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        idx = headers.index(column)
+        idx = headers.index(column) if column in headers else -1
+
+        positions = set()
+        if by_position:
+            for value in raw_positions:
+                try:
+                    position = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= position <= len(rows):
+                    positions.add(position)
+            if not positions:
+                return Response({
+                    'success': False,
+                    'error': ('That row is no longer in this sheet. Refresh the page and '
+                              'try again.'),
+                    'stale': True,
+                }, status=status.HTTP_409_CONFLICT)
+
+            # Confirm the row still holds what the user was looking at. See the
+            # note in the docstring: the editor's row numbering and this grid can
+            # come from different snapshots, so the number alone can point at a
+            # different row.
+            #
+            # Only the identity columns are compared, not the whole row. The
+            # question being asked is "is this still the row the user clicked",
+            # not "are the two snapshots byte-identical" — and they are not: a
+            # descriptive column can hold a value in one and be blank in the
+            # other, which says nothing about whether this is the same part.
+            # Comparing everything turned every such row into a false "refresh
+            # and try again" the user could do nothing about.
+            header_counts = Counter(str(h) for h in headers)
+            row_values = request.data.get('row_values') or {}
+            compared = 0
+            if isinstance(row_values, dict):
+                for position in sorted(positions):
+                    row = rows[position - 1]
+                    for name in ROW_IDENTITY_COLUMNS:
+                        if name not in row_values or header_counts.get(name, 0) != 1:
+                            continue
+                        column_index = _grid_column_index(headers, name)
+                        if column_index < 0:
+                            continue
+                        actual = row[column_index] if column_index < len(row) else ''
+                        expected = row_values.get(name)
+                        if not str(actual or '').strip() and not str(expected or '').strip():
+                            continue
+                        compared += 1
+                        if str(actual or '').strip() != str(expected or '').strip():
+                            return Response({
+                                'success': False,
+                                'error': ('This sheet has changed since the page was loaded, so '
+                                          'the row you picked is no longer the row at that '
+                                          'position. Refresh and try again.'),
+                                'stale': True,
+                            }, status=status.HTTP_409_CONFLICT)
+            if not compared:
+                # Nothing identified the row, so there is no way to tell whether
+                # the position still means what the caller thinks. Deleting on
+                # the number alone is how the wrong row gets removed.
+                return Response({
+                    'success': False,
+                    'error': ('This row has no item code, part number or name to identify it '
+                              'by, so it cannot be deleted individually. Use Tools → Delete '
+                              'rows by condition instead.'),
+                    'unidentifiable': True,
+                }, status=status.HTTP_400_BAD_REQUEST)
 
         def matches(cell):
             c = str(cell or '').strip()
@@ -13506,6 +13706,11 @@ def delete_rows_conditional(request):
             if operator == 'contains':
                 return compare in cl
             return False
+
+        def selected(position, row):
+            if by_position:
+                return position in positions
+            return matches(row[idx] if idx < len(row) else '')
 
         # The BOM's own rows survive any condition.
         #
@@ -13533,11 +13738,11 @@ def delete_rows_conditional(request):
                         return True
             return False
 
-        # Keep rows that DON'T match the delete condition, plus any the BOM needs.
+        # Keep rows that weren't selected for deletion, plus any the BOM needs.
         kept = []
         protected = 0
-        for r in rows:
-            if not matches(r[idx] if idx < len(r) else ''):
+        for position, r in enumerate(rows, start=1):
+            if not selected(position, r):
                 kept.append(r)
             elif is_locked(r):
                 kept.append(r)
@@ -13551,9 +13756,11 @@ def delete_rows_conditional(request):
         else:
             new_version = info.get('template_version')
 
+        criterion = (f"rows {sorted(positions)}" if by_position
+                     else f"\"{column}\" {operator} {compare!r}")
         logger.info(f"🗑️ delete_rows_conditional on {session_id}: removed {removed} rows where "
-                    f"\"{column}\" {operator} {compare!r} ({len(rows)} → {len(kept)}); "
-                    f"kept {protected} BOM row(s) the condition also matched")
+                    f"{criterion} ({len(rows)} → {len(kept)}); "
+                    f"kept {protected} BOM row(s) the selection also matched")
         # `protected` is reported, not swallowed: the user asked for those rows
         # to go and they did not, so the count has to be visible or the tool
         # looks like it silently under-deleted.

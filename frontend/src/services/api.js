@@ -185,16 +185,20 @@ const api = {
     }, { timeout: 30000 });
   },
 
-  getEditorDefaultSettings: (entityName) => {
+  // entity_id is the key the server resolves on; entity_name is sent alongside
+  // because a launch URL does not always carry an id, and it keeps the row
+  // readable.
+  getEditorDefaultSettings: (entityName, entityId = '') => {
     return axios.get(`${API_URL}/settings/editor-defaults/`, {
-      params: { entity_name: entityName },
+      params: { entity_name: entityName, ...(entityId ? { entity_id: entityId } : {}) },
       timeout: 30000
     });
   },
 
-  saveEditorDefaultSettings: (entityName, settings = {}) => {
+  saveEditorDefaultSettings: (entityName, settings = {}, entityId = '') => {
     return axios.post(`${API_URL}/settings/editor-defaults/`, {
       entity_name: entityName,
+      ...(entityId ? { entity_id: entityId } : {}),
       ...settings
     }, { timeout: 30000 });
   },
@@ -1530,6 +1534,25 @@ const api = {
       column,
       operator,
       compare,
+    }, { timeout: 120000 });
+  },
+
+  /**
+   * Delete one grid row by its 1-based position — the editor's per-row delete
+   * button. Same endpoint and same deletion as deleteRowsConditional above,
+   * including its refusal to remove a finished good or sub-assembly the BOM is
+   * built from; only the way the row is picked differs.
+   *
+   * `rowValues` is that row's cells as the editor shows them. The server checks
+   * the row still holds them before deleting, because the editor's row list and
+   * the grid this endpoint writes do not always come from the same snapshot —
+   * a position on its own can point at a different row.
+   */
+  deleteGridRowByPosition: (sessionId, rowNumber, rowValues) => {
+    return axios.post(`${API_URL}/transforms/delete-rows/`, {
+      session_id: sessionId,
+      rows: [rowNumber],
+      row_values: rowValues || {},
     }, { timeout: 120000 });
   },
 
