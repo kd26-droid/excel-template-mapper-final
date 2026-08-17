@@ -362,6 +362,15 @@ export const CLEANUP_OPTIONS = [
     label: 'Ignore deleted/red rows',
     description: 'Skips rows marked Deleted, red text, or strikethrough in the source workbook.',
   },
+  // Not a skip like the others - it changes how rows are read rather than
+  // whether they are read. It lives here because this is where options that the
+  // sheet itself triggers are shown, and it only appears when paths are found.
+  {
+    key: 'parentPathLevels',
+    label: 'Read levels and part numbers from the parent path',
+    description: 'The parent column holds a full trail (">E36047BB01>F1288042"). Its depth is the BOM level, and its last segment is the row\'s own part number — filled into the CPN column only where that column is blank. Both are more reliable than the sheet\'s own columns, which may number documents by the part they belong to. Turn off to use the sheet\'s level and CPN columns exactly as written.',
+    defaultOn: true,
+  },
 ];
 
 export const KNOWN_MANUFACTURERS = [
