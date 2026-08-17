@@ -1458,6 +1458,15 @@ const splitByExplicitDelimiter = (value, delimiter) => {
   return splitTopLevelDelimited(text, [delimiter]);
 };
 
+const splitSpacedSlashManufacturerParts = (value) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ');
+  if (!text || !/\s\/\s/.test(text)) return [];
+  return text
+    .split(/\s+\/\s+/)
+    .map(fmt)
+    .filter(Boolean);
+};
+
 const stripVendorPrefix = (value) => {
   const text = stripCircledNumberMarkers(value).replace(/\s+/g, ' ');
   return text
@@ -2269,6 +2278,9 @@ const splitManufacturerCell = (value, expectedCount, config = {}) => {
   const explicitParts = splitByExplicitDelimiter(text, delimiter);
   if (explicitParts.length > 1) return mergeManufacturerSuffixParts(explicitParts).map(canonicalForManufacturer);
 
+  const slashParts = splitSpacedSlashManufacturerParts(text);
+  if (slashParts.length > 1) return mergeManufacturerSuffixParts(slashParts).map(canonicalForManufacturer);
+
   const knownPhrases = [
     ...directoryNames,
     ...Object.keys(directoryAliases),
@@ -2314,6 +2326,27 @@ const splitManufacturerCell = (value, expectedCount, config = {}) => {
 };
 
 const getCell = (row, header) => (header ? fmt(row[header]) : '');
+
+const pairMpnsWithManufacturers = (mpns = [], manufacturers = [], rawManufacturer = '') => {
+  const cleanMpns = mpns.map(stripVendorPrefix).map(fmt).filter(Boolean);
+  const cleanManufacturers = manufacturers.map(fmt).filter(Boolean);
+  if (!cleanMpns.length && !cleanManufacturers.length) return [];
+
+  if (cleanMpns.length === 1 && cleanManufacturers.length > 1) {
+    return cleanManufacturers.map((manufacturer) => ({
+      mpn: cleanMpns[0],
+      manufacturer,
+      metadata: {},
+    }));
+  }
+
+  const count = Math.max(cleanMpns.length, cleanManufacturers.length || 0);
+  return Array.from({ length: count }).map((_, index) => ({
+    mpn: cleanMpns[index] || cleanMpns[0] || '',
+    manufacturer: cleanManufacturers[index] || cleanManufacturers[0] || rawManufacturer || '',
+    metadata: {},
+  })).filter((pair) => pair.mpn || pair.manufacturer);
+};
 
 const isPlaceholderCell = (value) => {
   const text = fmt(value).replace(/\u00a0/g, ' ').trim().toLowerCase();
@@ -3234,11 +3267,7 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
 
     const pairs = packedPairs.length
       ? packedPairs
-      : mpns.map((mpn, index) => ({
-        mpn,
-        manufacturer: manufacturers[index] || (!index ? primaryManufacturer : ''),
-        metadata: {},
-      }));
+      : pairMpnsWithManufacturers(mpns, manufacturers, primaryManufacturer);
 
     if (!pairs.length && rawMpn && !looksLikeHierarchyPath(rawMpn)) {
       output.push(withSourceColumns({
@@ -3342,6 +3371,7 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
   const itemColumn = config.followingItemRowsItemColumn || roles.cpn || '';
   const mpnColumn = config.followingItemRowsMpnColumn || roles.mpn || '';
   const manufacturerColumn = config.followingItemRowsManufacturerColumn || roles.manufacturer || '';
+  const strictContextMarker = Boolean(contextColumn);
   let currentGroup = null;
 
   const splitParts = (row) => {
@@ -3354,13 +3384,7 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
 
     const mpns = splitMpnCell(rawMpn, config);
     const manufacturers = splitManufacturerCell(rawManufacturer, mpns.length || null, config);
-    if (mpns.length) {
-      return mpns.map((mpn, index) => ({
-        mpn,
-        manufacturer: manufacturers[index] || manufacturers[0] || rawManufacturer || '',
-        metadata: {},
-      }));
-    }
+    if (mpns.length) return pairMpnsWithManufacturers(mpns, manufacturers, rawManufacturer);
     if (rawMpn || rawManufacturer) {
       return [{
         mpn: stripVendorPrefix(rawMpn),
@@ -3371,13 +3395,15 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
     return [];
   };
 
-  const hasPrimaryContext = (row) => Boolean(
-    (contextColumn && getCell(row, contextColumn)) ||
-    getCell(row, roles.parent) ||
-    getCell(row, roles.description) ||
-    getCell(row, roles.quantity) ||
-    getCell(row, roles.uom)
-  );
+  const hasPrimaryContext = (row) => {
+    if (strictContextMarker) return Boolean(getCell(row, contextColumn));
+    return Boolean(
+      getCell(row, roles.parent) ||
+      getCell(row, roles.description) ||
+      getCell(row, roles.quantity) ||
+      getCell(row, roles.uom)
+    );
+  };
 
   const groupFromRow = (row, rowIndex) => {
     const sourceRow = row.__sourceRow || rowIndex + 1;
@@ -3405,7 +3431,9 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
     const itemValue = getCell(row, itemColumn);
     const parts = splitParts(row).filter((pair) => pair?.mpn || pair?.manufacturer);
     const isContextRow = hasPrimaryContext(row);
-    const canAttachAsAlternate = Boolean(currentGroup && !isContextRow && (itemValue || parts.length));
+    const canAttachAsAlternate = Boolean(currentGroup && !isContextRow && (
+      strictContextMarker ? parts.length : (itemValue || parts.length)
+    ));
 
     if (canAttachAsAlternate) {
       const pairs = parts.length ? parts : [{ mpn: '', manufacturer: '', metadata: {} }];
@@ -3417,7 +3445,7 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
           parent: currentGroup.parent,
           relation: relationIndex === 0 ? 'Primary' : `Alternate ${relationIndex}`,
           level: currentGroup.level,
-          cpn: itemValue || currentGroup.cpn,
+          cpn: strictContextMarker ? currentGroup.cpn : (itemValue || currentGroup.cpn),
           description: currentGroup.description,
           mpn: pair.mpn,
           manufacturer: pair.manufacturer,
@@ -3437,6 +3465,9 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
 
     const group = groupFromRow(row, rowIndex);
     currentGroup = group;
+    if (strictContextMarker && isContextRow && !parts.length) {
+      return;
+    }
     const pairs = parts.length ? parts : [{ mpn: '', manufacturer: '', metadata: {} }];
     pairs.forEach((pair, pairIndex) => {
       output.push(withSourceColumns({
@@ -4267,7 +4298,7 @@ const analyzeMpnManufacturerPairing = (rows, headers, roles, config) => {
       const mfrCount = scenario.manufacturers.length;
       if (mpnCount <= 1 && mfrCount <= 1) return;
       checkedRows += 1;
-      if (mpnCount === mfrCount) {
+      if (mpnCount === mfrCount || (mpnCount === 1 && mfrCount > 1)) {
         matchedRows += 1;
         return;
       }
@@ -11366,7 +11397,7 @@ const BomNormalizer = () => {
                     {config.alternateLayout === 'following_item_rows' && !bomLayoutActive && (
                       <>
                         {[
-                          ['followingItemRowsContextColumn', 'Primary/context marker', 'Optional. A filled value starts a new primary group.'],
+                          ['followingItemRowsContextColumn', 'Primary/context marker', 'A filled value starts a new group; following rows inherit CPN, quantity, and UOM.'],
                           ['followingItemRowsItemColumn', 'Alternate item column', 'The identifier to show on alternate rows, such as CPN or Part No.'],
                           ['followingItemRowsMpnColumn', 'Alternate MPN column', 'MPN value from the following sparse rows.'],
                           ['followingItemRowsManufacturerColumn', 'Alternate MFR column', 'Manufacturer value from the following sparse rows.'],
