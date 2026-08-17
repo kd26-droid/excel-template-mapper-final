@@ -566,6 +566,8 @@ export default function FactwiseProjectExportDialog({
   }, [modeDraft, nameDraft, pickedTemplate, pickedProject, parsedReviseTargets,
       primaryReviseTarget, reviseNoProjectIntent]);
 
+  // Duplicate policy is silent by default (aggregate_per_level applied server-side).
+  // User overrides via the editor's duplicate-handling banner, not this dialog.
   const handleStart = useCallback(() => {
     runFromCheckpoint(buildRunPayload());
   }, [runFromCheckpoint, buildRunPayload]);

@@ -15090,14 +15090,24 @@ def _generate_hierarchical_bom(records, answer, bom_header):
     ), None
 
 
-def _generate_bom_for_session(session_id):
+def _generate_bom_for_session(session_id, apply_dup_policy=True):
     """Resolve a session's BOM answers and generate its sheets.
 
     Returns (result, bom_header, error_response). Exactly one of result /
     error_response is set. Flat versus hierarchical is decided by the answers
     captured in the BOM structure gate, so every caller routes identically.
+
+    ``apply_dup_policy`` (default True) applies the session's stored
+    ``bom_duplicate_policy`` (if any) to ``result.bom_rows`` before returning.
+    The dup-policy detection endpoint calls this with ``apply_dup_policy=False``
+    to see the RAW duplicate groups; every download / import / project-attach
+    caller leaves it True so the policy is honoured.
     """
-    from .bom_generator import generate_flat_bom
+    from .bom_generator import (
+        generate_flat_bom,
+        apply_records_duplicate_policy,
+        VALID_DUP_POLICIES,
+    )
 
     info = get_session_consistent(session_id)
     if not info:
@@ -15233,6 +15243,30 @@ def _generate_bom_for_session(session_id):
                 }, status=status.HTTP_400_BAD_REQUEST)
             records = source_records
 
+    # Apply the duplicate-handling policy on the normalized records — AFTER
+    # the grid ↔ source merge has succeeded, BEFORE tree derivation. Doing it
+    # here (not on the raw grid) preserves the positional grid↔source join,
+    # which needs the row counts to match; and doing it before the tree
+    # builder prevents its own opportunistic same-parent same-code collapse
+    # from hiding the same-level duplicates the user is trying to reshape.
+    #
+    # Default: aggregate_per_level. It's the only policy that produces a
+    # correct BOM without needing a per-group target level pick — same-level
+    # dups collapse into one summed row, across-level rows stay separate.
+    if apply_dup_policy and records:
+        stored_policy = (info.get('bom_duplicate_policy') or {})
+        policy_name = stored_policy.get('policy')
+        if policy_name not in VALID_DUP_POLICIES:
+            policy_name = 'aggregate_per_level'
+        per_group_levels = stored_policy.get('per_group_target_level') or {}
+        try:
+            records = apply_records_duplicate_policy(
+                records, policy_name,
+                per_group_target_level=per_group_levels,
+            )
+        except Exception as dup_err:
+            logger.warning('Records duplicate policy application failed: %s', dup_err)
+
     if is_hierarchical:
         result, error_response = _generate_hierarchical_bom(records, answer, bom_header)
         if error_response is not None:
@@ -15272,6 +15306,128 @@ def generate_bom_sheet(request, session_id):
         'item_rows': result.item_rows,
         'stats': result.stats,
         'warnings': result.warnings,
+    })
+
+
+@api_view(['GET', 'POST', 'DELETE'])
+def bom_duplicate_policy(request, session_id):
+    """Detect duplicate BOM rows across / within levels, and store the user's
+    chosen policy for how to handle them.
+
+    A "duplicate" here is two or more BOM rows that describe the same physical
+    part (identical on every column EXCEPT Level and Quantity). Same-level
+    duplicates are usually a data error; across-level duplicates are usually
+    a real modelling choice (a screw consumed in two sub-assemblies) that
+    still deserves a deliberate collapse strategy.
+
+    GET   -> returns { success, groups: [...], policy: {...} } where groups
+             is the raw detection (unaffected by any stored policy). Empty
+             list means nothing to ask the user.
+    POST  -> body: { policy, per_group_target_level? }. Stores the choice on
+             the session; every subsequent BOM download / import / project
+             attach applies it via _generate_bom_for_session.
+    DELETE -> clears the stored policy, so exports fall back to the raw sheet.
+    """
+    from .bom_generator import find_records_duplicate_groups, VALID_DUP_POLICIES
+
+    info = get_session(session_id)
+    if not info:
+        return Response({'success': False, 'error': 'Invalid session'},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'DELETE':
+        if 'bom_duplicate_policy' in info:
+            info.pop('bom_duplicate_policy', None)
+            save_session(session_id, info)
+        return Response({'success': True, 'policy': None})
+
+    if request.method == 'POST':
+        body = request.data or {}
+        policy = str(body.get('policy') or '').strip()
+        if policy not in VALID_DUP_POLICIES:
+            return Response({
+                'success': False,
+                'error': ('Unknown policy %r. Expected one of: %s'
+                          % (policy, ', '.join(sorted(VALID_DUP_POLICIES)))),
+            }, status=status.HTTP_400_BAD_REQUEST)
+        per_group = body.get('per_group_target_level') or {}
+        if not isinstance(per_group, dict):
+            return Response({
+                'success': False,
+                'error': 'per_group_target_level must be an object of {signature_id: level}.',
+            }, status=status.HTTP_400_BAD_REQUEST)
+        # Coerce every value to a string so the applier's ``==`` compares
+        # cleanly regardless of whether the FE sent numbers or strings.
+        info['bom_duplicate_policy'] = {
+            'policy': policy,
+            'per_group_target_level': {str(k): str(v) for k, v in per_group.items()},
+        }
+        save_session(session_id, info)
+        return Response({'success': True, 'policy': info['bom_duplicate_policy']})
+
+    # GET: detect duplicates on the SAME records list the BOM generator will
+    # see. That way signature_ids returned to the FE line up byte-for-byte
+    # with what apply_records_duplicate_policy will act on.
+    #
+    # We call the generator with apply_dup_policy=False so the returned
+    # ``result`` reflects the raw un-deduped tree. We then re-derive the
+    # records list from the same session inputs the generator uses. Doing
+    # this via the generator (rather than duplicating the grid ↔ source join
+    # logic) keeps detection and application on the exact same shape.
+    from .bom_generator import find_records_duplicate_groups as _detect
+    result, _bh, error_response = _generate_bom_for_session(
+        session_id, apply_dup_policy=False
+    )
+    if error_response is not None:
+        # Generation failed (missing BOM structure, header, etc.) — no dup
+        # groups to report. Return empty so the banner just stays hidden.
+        return Response({
+            'success': True,
+            'groups': [],
+            'policy': info.get('bom_duplicate_policy') or None,
+        })
+    # Rebuild the records list the generator saw. Cheapest way is to
+    # re-derive from the session grid the same way _generate_bom_for_session
+    # does — the generator doesn't return the intermediate records list.
+    headers, rows = read_session_grid(session_id, info)
+    from .bom_generator import (
+        find_records_duplicate_groups,  # explicit import for clarity
+    )
+    # authored-FG filter mirrors _generate_bom_for_session so the record
+    # list here matches what the generator ends up with.
+    authored_codes = {
+        str(good['code']).strip() for good in _authored_finished_goods(info)
+    }
+    authored_codes.discard('')
+    if authored_codes and headers:
+        code_index = _grid_column_index(headers, 'Item code')
+        cpn_index = _grid_column_index(headers, 'CPN Code')
+        if code_index >= 0:
+            def _is_appended(row):
+                if not isinstance(row, list) or code_index >= len(row):
+                    return False
+                if str(row[code_index] or '').strip() not in authored_codes:
+                    return False
+                if cpn_index < 0:
+                    return True
+                return not str(
+                    row[cpn_index] if cpn_index < len(row) else ''
+                ).strip()
+            rows = [r for r in (rows or []) if not _is_appended(r)]
+    records = _normalized_records_from_grid(headers or [], rows or [])
+    if not _has_normalizer_columns(records):
+        source_headers, source_rows = _read_normalized_source_table(info)
+        source_records = _normalized_records_from_grid(source_headers, source_rows)
+        if _has_normalizer_columns(source_records):
+            source_records, _join = _merge_grid_values_into_records(
+                source_records, headers or [], rows or []
+            )
+            records = source_records
+    groups = find_records_duplicate_groups(records or [])
+    return Response({
+        'success': True,
+        'groups': groups,
+        'policy': info.get('bom_duplicate_policy') or None,
     })
 
 

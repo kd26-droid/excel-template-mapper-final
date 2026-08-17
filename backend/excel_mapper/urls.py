@@ -47,6 +47,7 @@ from .views import (
     generate_bom_sheet,
     bom_tree,
     bom_revision_handoff,
+    bom_duplicate_policy,
     download_bom_sheet,
     validate_bom_sheet,
     demo_bom_tree,
@@ -228,6 +229,8 @@ urlpatterns = [
     path('bom/tree/<str:session_id>/', bom_tree, name='bom-tree'),
     # GET: what a caller needs to finish a revision this session started.
     # POST: the browser handing back the bulk-import result.
+    path('bom/duplicate-policy/<str:session_id>/', bom_duplicate_policy,
+         name='bom-duplicate-policy'),
     path('bom/revision-handoff/<str:session_id>/', bom_revision_handoff,
          name='bom-revision-handoff'),
     path('bom/download/<str:session_id>/', download_bom_sheet, name='download-bom-sheet'),

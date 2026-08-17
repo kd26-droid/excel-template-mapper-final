@@ -1579,6 +1579,31 @@ const api = {
   getBomRevisionHandoff: (sessionId) =>
     axios.get(`${API_URL}/bom/revision-handoff/${sessionId}/`, { timeout: 30000 }),
 
+  /**
+   * Detect duplicate BOM rows across / within levels for a session. Returns
+   *   { success, groups: [{ signature_id, raw_material_code, description,
+   *                          kind: 'same_level'|'across_level'|'both',
+   *                          levels: [str], occurrences: [{row_index, level, quantity}] }],
+   *     policy: { policy, per_group_target_level } | null }
+   * Empty groups list = nothing to ask the user about.
+   */
+  detectBomDuplicatePolicy: (sessionId) =>
+    axios.get(`${API_URL}/bom/duplicate-policy/${sessionId}/`, { timeout: 120000 }),
+
+  /**
+   * Store a duplicate-handling policy on the session. Applied automatically
+   * by every subsequent BOM download / import / project attach.
+   * Body: { policy: 'ignore_other_levels' | 'keep_at_all_levels' |
+   *                 'aggregate_per_level' | 'aggregate_all_to_one_level',
+   *         per_group_target_level: { [signature_id]: level } }
+   */
+  setBomDuplicatePolicy: (sessionId, body) =>
+    axios.post(`${API_URL}/bom/duplicate-policy/${sessionId}/`, body, { timeout: 30000 }),
+
+  /** Clear any stored duplicate-handling policy for this session. */
+  clearBomDuplicatePolicy: (sessionId) =>
+    axios.delete(`${API_URL}/bom/duplicate-policy/${sessionId}/`, { timeout: 30000 }),
+
   /** Import an edited export back into the SAME session (keeps mappings/tags/MPN). */
   importEditedSheet: (sessionId, file) => {
     const form = new FormData();

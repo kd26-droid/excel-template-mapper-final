@@ -23,6 +23,8 @@ import {
   Checkbox,
   CircularProgress,
   ListItemText,
+  Radio,
+  RadioGroup,
   TextField,
   Typography
 } from '@mui/material';
@@ -297,6 +299,87 @@ const normalizeItemCodeConditionalBranches = (defaults = {}) => {
     outputValue: defaults.itemCodeConditionDefaultValue || '',
     outputColumn: defaults.itemCodeConditionValueColumn || '',
   }];
+};
+
+// Global default for BOM duplicate handling. Stored in localStorage so the
+// choice survives across sessions. The editor's BomDuplicatePolicyBanner
+// seeds this into a fresh session's server-side policy on first open when
+// the session has none of its own — that way exports honour the user's
+// preferred default without a manual click per session.
+//
+// Options limited to the two that don't need per-group target levels
+// (those are session-specific by nature — you can't pick a target Level
+// globally without knowing what levels the session actually has). The
+// per-session picker in the editor still exposes all four.
+const GLOBAL_DUP_POLICY_KEY = 'fw_bom_default_dup_policy';
+const GLOBAL_DUP_POLICY_DEFAULT = 'aggregate_per_level';
+const GLOBAL_DUP_POLICY_OPTIONS = [
+  {
+    value: 'aggregate_per_level',
+    label: 'Aggregate quantity at each level',
+    detail: 'Same code at the same level is summed into one row. Same code across levels stays as separate rows per level. Recommended.',
+  },
+  {
+    value: 'keep_at_all_levels',
+    label: 'Keep at every level (only sum same-level dups)',
+    detail: 'One row per level as-is. Multiple rows at the SAME level still get summed (a same-level dup is never valid as two rows).',
+  },
+];
+
+const BomDuplicatePolicyDefaultSection = ({ t, panelSx, sectionHeaderSx }) => {
+  const [selected, setSelected] = React.useState(() => {
+    try {
+      const stored = window.localStorage.getItem(GLOBAL_DUP_POLICY_KEY);
+      if (GLOBAL_DUP_POLICY_OPTIONS.some((o) => o.value === stored)) return stored;
+    } catch (_) { /* localStorage disabled — fall through */ }
+    return GLOBAL_DUP_POLICY_DEFAULT;
+  });
+  const [savedAt, setSavedAt] = React.useState(0);
+  const handleChange = (event) => {
+    const value = event.target.value;
+    setSelected(value);
+    try { window.localStorage.setItem(GLOBAL_DUP_POLICY_KEY, value); } catch (_) { /* ignore */ }
+    setSavedAt(Date.now());
+  };
+  return (
+    <Paper elevation={0} sx={panelSx}>
+      <Box sx={sectionHeaderSx}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
+          <Box sx={{ width: 36, height: 36, borderRadius: '12px', display: 'grid', placeItems: 'center', bgcolor: t.state.infoBg, color: t.color.info }}>
+            <TableChartIcon fontSize="small" />
+          </Box>
+          <Box>
+            <Typography sx={{ fontSize: 16, fontWeight: 700, color: t.text.heading }}>BOM duplicate handling</Typography>
+            <Typography sx={{ fontSize: 12.5, color: t.text.secondary }}>
+              Default policy applied when a sheet has the same item on more than one BOM row. Per-session overrides live in the editor.
+            </Typography>
+          </Box>
+        </Box>
+      </Box>
+      <Box sx={{ p: 2.5 }}>
+        <RadioGroup value={selected} onChange={handleChange}>
+          {GLOBAL_DUP_POLICY_OPTIONS.map((option) => (
+            <FormControlLabel
+              key={option.value}
+              value={option.value}
+              control={<Radio />}
+              sx={{ alignItems: 'flex-start', mr: 0, mb: 1, '.MuiRadio-root': { pt: 0.5 } }}
+              label={
+                <Box>
+                  <Typography variant="body2" sx={{ fontWeight: 600, color: t.text.heading }}>{option.label}</Typography>
+                  <Typography variant="caption" sx={{ color: t.text.secondary }}>{option.detail}</Typography>
+                </Box>
+              }
+            />
+          ))}
+        </RadioGroup>
+        <Typography variant="caption" sx={{ color: t.text.secondary, display: 'block', mt: 1 }}>
+          {savedAt ? 'Saved. Applies to sheets you open from now on.' : 'Change to update immediately — no save button.'}
+          {' '}For per-sheet overrides (or the two policies that need a target level pick), use the banner above the grid in the editor.
+        </Typography>
+      </Box>
+    </Paper>
+  );
 };
 
 const Settings = () => {
@@ -1872,6 +1955,10 @@ const Settings = () => {
                 )}
               </Box>
             </Paper>
+          </Grid>
+
+          <Grid item xs={12}>
+            <BomDuplicatePolicyDefaultSection t={t} panelSx={panelSx} sectionHeaderSx={sectionHeaderSx} />
           </Grid>
 
           <Grid item xs={12}>

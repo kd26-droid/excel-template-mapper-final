@@ -180,6 +180,8 @@ export default function FactwiseBomDirectoryExportDialog({
   // Path B (fresh-create duplicate). No project fields — this dialog is
   // BOM-directory-only. confirmRevisionDiff's hasProjectAttach check
   // will fall to DONE cleanly since no projectId + no reviseBomModuleIds.
+  // Duplicate policy is silent by default (aggregate_per_level applied server-side).
+  // User overrides via the editor's duplicate-handling banner, not this dialog.
   const handleStart = useCallback(() => {
     runFromCheckpoint({
       stopAfterBom: true,

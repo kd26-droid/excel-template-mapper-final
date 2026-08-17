@@ -94,6 +94,7 @@ import { uploadFileToFactwiseBulkImport } from '../services/factwiseApi';
 import { useFactwise, postToFactwiseParent, openInFactwise } from '../contexts/FactwiseContext';
 import FactwiseProjectExportDialog from './FactwiseProjectExportDialog';
 import FactwiseBomDirectoryExportDialog from './FactwiseBomDirectoryExportDialog';
+import BomDuplicatePolicyBanner from './BomDuplicatePolicyBanner';
 import * as XLSX from 'xlsx';
 import BomTreePreview from './BomTreePreview';
 import ColumnParser from './ColumnParser/ColumnParser';
@@ -7709,6 +7710,7 @@ const EnhancedDataEditor = () => {
           ref={scrollContainerRef}
         >
           <Box sx={{ p: 1.5, height: '100%', display: 'flex', flexDirection: 'column', gap: 1.25 }}>
+            <BomDuplicatePolicyBanner sessionId={sessionId} refreshKey={totalRows} />
             {dupHighlight && (
               <Alert
                 severity="warning"
