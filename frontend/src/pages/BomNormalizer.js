@@ -2948,6 +2948,14 @@ const getConsumedSourceHeaders = (roles = {}, config = {}, headers = []) => {
   if (config.alternateLayout === 'following_rows' && config.followingRowAlternateColumn) {
     consumed.add(normalizeKey(config.followingRowAlternateColumn));
   }
+  if (config.alternateLayout === 'following_item_rows') {
+    [
+      config.followingItemRowsContextColumn,
+      config.followingItemRowsItemColumn,
+      config.followingItemRowsMpnColumn,
+      config.followingItemRowsManufacturerColumn,
+    ].filter(Boolean).forEach((header) => consumed.add(normalizeKey(header)));
+  }
   if (effectiveStructure(config) === 'assembly_quantity_matrix') {
     const matrix = detectAssemblyQuantityMatrix(headers, [], roles) || config.assemblyMatrix;
     (matrix?.assemblyColumns || []).forEach((header) => consumed.add(normalizeKey(header)));
@@ -3235,6 +3243,129 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
     if (hasPrimaryContextWithoutPart(row)) {
       currentGroup = emitContextPrimary(row, rowIndex);
     }
+  });
+
+  return output;
+};
+
+const normalizeFollowingItemRows = (rows, roles, config = {}) => {
+  const output = [];
+  const contextColumn = config.followingItemRowsContextColumn || '';
+  const itemColumn = config.followingItemRowsItemColumn || roles.cpn || '';
+  const mpnColumn = config.followingItemRowsMpnColumn || roles.mpn || '';
+  const manufacturerColumn = config.followingItemRowsManufacturerColumn || roles.manufacturer || '';
+  let currentGroup = null;
+
+  const splitParts = (row) => {
+    const rawMpn = getCell(row, mpnColumn);
+    const rawManufacturer = getCell(row, manufacturerColumn);
+    const packedPairs = mpnColumn && mpnColumn === manufacturerColumn
+      ? getPatternAwarePackedPairs(row, mpnColumn, rawMpn, config)
+      : [];
+    if (packedPairs.length) return packedPairs;
+
+    const mpns = splitMpnCell(rawMpn, config);
+    const manufacturers = splitManufacturerCell(rawManufacturer, mpns.length || null, config);
+    if (mpns.length) {
+      return mpns.map((mpn, index) => ({
+        mpn,
+        manufacturer: manufacturers[index] || manufacturers[0] || rawManufacturer || '',
+        metadata: {},
+      }));
+    }
+    if (rawMpn || rawManufacturer) {
+      return [{
+        mpn: stripVendorPrefix(rawMpn),
+        manufacturer: rawManufacturer,
+        metadata: {},
+      }];
+    }
+    return [];
+  };
+
+  const hasPrimaryContext = (row) => Boolean(
+    (contextColumn && getCell(row, contextColumn)) ||
+    getCell(row, roles.parent) ||
+    getCell(row, roles.description) ||
+    getCell(row, roles.quantity) ||
+    getCell(row, roles.uom)
+  );
+
+  const groupFromRow = (row, rowIndex) => {
+    const sourceRow = row.__sourceRow || rowIndex + 1;
+    const level = getCell(row, roles.level) || '1';
+    const cpn = getCell(row, roles.cpn) || getCell(row, itemColumn);
+    const description = getCell(row, roles.description);
+    const parent = hierarchyParent(row, roles);
+    const contextValue = contextColumn ? getCell(row, contextColumn) : '';
+    const identity = contextValue || cpn || description || `Source row ${sourceRow}`;
+    return {
+      sourceRow,
+      parentKey: parent ? `${parent}␟${identity}` : `L${level}␟${identity}`,
+      parent,
+      level,
+      cpn,
+      description,
+      quantity: getCell(row, roles.quantity),
+      uom: getCell(row, roles.uom),
+      relationCount: 0,
+    };
+  };
+
+  rows.forEach((row, rowIndex) => {
+    const sourceRow = row.__sourceRow || rowIndex + 1;
+    const itemValue = getCell(row, itemColumn);
+    const parts = splitParts(row).filter((pair) => pair?.mpn || pair?.manufacturer);
+    const isContextRow = hasPrimaryContext(row);
+    const canAttachAsAlternate = Boolean(currentGroup && !isContextRow && (itemValue || parts.length));
+
+    if (canAttachAsAlternate) {
+      const pairs = parts.length ? parts : [{ mpn: '', manufacturer: '', metadata: {} }];
+      pairs.forEach((pair) => {
+        const relationIndex = Number(currentGroup.relationCount || 0);
+        output.push(withSourceColumns({
+          sourceRow,
+          parentKey: currentGroup.parentKey,
+          parent: currentGroup.parent,
+          relation: relationIndex === 0 ? 'Primary' : `Alternate ${relationIndex}`,
+          level: currentGroup.level,
+          cpn: itemValue || currentGroup.cpn,
+          description: currentGroup.description,
+          mpn: pair.mpn,
+          manufacturer: pair.manufacturer,
+          quantity: currentGroup.quantity,
+          uom: currentGroup.uom,
+          rule: 'following_item_rows_alternate',
+          confidence: Math.min(confidenceForRow(pair.mpn, pair.manufacturer, 'following_rows') + 8, 96),
+          discardedText: '',
+          ...pair.metadata,
+        }, row, config));
+        currentGroup.relationCount = relationIndex + 1;
+      });
+      return;
+    }
+
+    if (!isContextRow && !itemValue && !parts.length) return;
+
+    const group = groupFromRow(row, rowIndex);
+    currentGroup = group;
+    const pairs = parts.length ? parts : [{ mpn: '', manufacturer: '', metadata: {} }];
+    pairs.forEach((pair, pairIndex) => {
+      output.push(withSourceColumns({
+        ...group,
+        relation: pairIndex === 0 ? 'Primary' : `Alternate ${pairIndex}`,
+        cpn: group.cpn || itemValue,
+        mpn: pair.mpn,
+        manufacturer: pair.manufacturer,
+        rule: 'following_item_rows_primary',
+        confidence: pair.mpn || pair.manufacturer
+          ? confidenceForRow(pair.mpn, pair.manufacturer, 'following_rows')
+          : 62,
+        discardedText: '',
+        ...pair.metadata,
+      }, row, config));
+    });
+    currentGroup.relationCount = Math.max(1, pairs.length);
   });
 
   return output;
@@ -3888,6 +4019,7 @@ const normalizeRows = (rows, headers, roles, config) => {
   if (layoutStructure === 'multi_block_assembly') {
     return normalizeMultiBlockAssembly(rows, roles, configWithSourceHeaders);
   }
+  if (config.alternateLayout === 'following_item_rows') return normalizeFollowingItemRows(rows, roles, configWithSourceHeaders);
   if (config.alternateLayout === 'following_rows') return normalizeFollowingRows(rows, roles, configWithSourceHeaders);
   // Every structure option describes how MPN/MFR pairs are laid out. With
   // neither column present they are all meaningless, and the default would emit
@@ -6541,6 +6673,10 @@ const BomNormalizer = () => {
     alternateColumnGroups: [],
     followingRowAlternateColumn: '',
     includeInsideCellAlternatesWithFollowingRows: true,
+    followingItemRowsContextColumn: '',
+    followingItemRowsItemColumn: '',
+    followingItemRowsMpnColumn: '',
+    followingItemRowsManufacturerColumn: '',
   });
   const [normalizedRows, setNormalizedRows] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -6948,6 +7084,8 @@ const BomNormalizer = () => {
       if (config.includeInsideCellAlternatesWithFollowingRows !== false) {
         rules.push('3. Also split multi-entry values in the selected MPN/MFR cells when detected');
       }
+    } else if (config.alternateLayout === 'following_item_rows') {
+      rules.push(`2. Attach sparse following rows from ${config.followingItemRowsItemColumn || 'the selected item column'} as alternates for the nearest previous item row`);
     } else if (config.structure === 'same_cell' || config.structure === 'separate_cells') {
       rules.push('2. Split alternates on ^, then split each pair on the first valid comma');
     } else {
@@ -9796,6 +9934,10 @@ const BomNormalizer = () => {
       alternateColumnGroups: [],
       followingRowAlternateColumn: '',
       includeInsideCellAlternatesWithFollowingRows: true,
+      followingItemRowsContextColumn: '',
+      followingItemRowsItemColumn: '',
+      followingItemRowsMpnColumn: '',
+      followingItemRowsManufacturerColumn: '',
     });
     setNormalizedRows([]);
     setCurrentStep(0);
@@ -9893,6 +10035,10 @@ const BomNormalizer = () => {
       alternateColumnGroups: [],
       followingRowAlternateColumn: '',
       includeInsideCellAlternatesWithFollowingRows: true,
+      followingItemRowsContextColumn: '',
+      followingItemRowsItemColumn: '',
+      followingItemRowsMpnColumn: '',
+      followingItemRowsManufacturerColumn: '',
     });
     setNormalizedRows([]);
     setCurrentStep(0);
@@ -11047,6 +11193,15 @@ const BomNormalizer = () => {
                               followingRowAlternateColumn: nextLayout === 'following_rows'
                                 ? (prev.followingRowAlternateColumn || roles.level || '')
                                 : prev.followingRowAlternateColumn,
+                              followingItemRowsItemColumn: nextLayout === 'following_item_rows'
+                                ? (prev.followingItemRowsItemColumn || roles.cpn || '')
+                                : prev.followingItemRowsItemColumn,
+                              followingItemRowsMpnColumn: nextLayout === 'following_item_rows'
+                                ? (prev.followingItemRowsMpnColumn || roles.mpn || '')
+                                : prev.followingItemRowsMpnColumn,
+                              followingItemRowsManufacturerColumn: nextLayout === 'following_item_rows'
+                                ? (prev.followingItemRowsManufacturerColumn || roles.manufacturer || '')
+                                : prev.followingItemRowsManufacturerColumn,
                             }));
                           }}
                         >
@@ -11108,6 +11263,41 @@ const BomNormalizer = () => {
                           </Select>
                         </FormControl>
                       </Grid>
+                    )}
+                    {config.alternateLayout === 'following_item_rows' && !bomLayoutActive && (
+                      <>
+                        {[
+                          ['followingItemRowsContextColumn', 'Primary/context marker', 'Optional. A filled value starts a new primary group.'],
+                          ['followingItemRowsItemColumn', 'Alternate item column', 'The identifier to show on alternate rows, such as CPN or Part No.'],
+                          ['followingItemRowsMpnColumn', 'Alternate MPN column', 'MPN value from the following sparse rows.'],
+                          ['followingItemRowsManufacturerColumn', 'Alternate MFR column', 'Manufacturer value from the following sparse rows.'],
+                        ].map(([key, label, helper]) => (
+                          <Grid item xs={12} md={3} key={key}>
+                            <FormControl fullWidth size="small">
+                              <InputLabel>{label}</InputLabel>
+                              <Select
+                                value={config[key] || ''}
+                                label={label}
+                                onChange={(event) => {
+                                  setParserTouched(true);
+                                  setConfig((prev) => ({
+                                    ...prev,
+                                    [key]: event.target.value,
+                                  }));
+                                }}
+                              >
+                                <MenuItem value="">{key === 'followingItemRowsContextColumn' ? 'Auto from item context' : 'Select column'}</MenuItem>
+                                {visibleSourceHeaders.map((header) => (
+                                  <MenuItem key={`${key}-${header}`} value={header}>{header}</MenuItem>
+                                ))}
+                              </Select>
+                              <Typography sx={{ mt: 0.35, fontSize: 11.5, color: normalizerTheme.muted }}>
+                                {helper}
+                              </Typography>
+                            </FormControl>
+                          </Grid>
+                        ))}
+                      </>
                     )}
                     {config.alternateLayout === 'following_rows' && followingRowsInsideCellAlternateInfo && !bomLayoutActive && (
                       <Grid item xs={12} md={3}>
@@ -11453,6 +11643,17 @@ const BomNormalizer = () => {
                     <Alert severity="warning" sx={{ mt: 1 }}>
                       Select the column where alternate values appear in the rows below the main BOM line.
                     </Alert>
+                  )}
+                  {config.alternateLayout === 'following_item_rows' && !bomLayoutActive && (
+                    (!config.followingItemRowsItemColumn || !config.followingItemRowsMpnColumn || !config.followingItemRowsManufacturerColumn) ? (
+                      <Alert severity="warning" sx={{ mt: 1 }}>
+                        Select the alternate item, MPN, and MFR columns for following item rows.
+                      </Alert>
+                    ) : (
+                      <Alert severity="info" sx={{ mt: 1 }}>
+                        Sparse following rows using {config.followingItemRowsItemColumn}, {config.followingItemRowsMpnColumn}, and {config.followingItemRowsManufacturerColumn} will attach to the nearest previous item row with context.
+                      </Alert>
+                    )
                   )}
                   {detectedCleanupOptions.length > 0 && (
                     <Box sx={{ mt: 1.5 }}>

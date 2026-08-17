@@ -98,6 +98,11 @@ export const ALTERNATE_LAYOUT_OPTIONS = [
     label: 'Alternates are in following rows',
     description: 'Use this when a main BOM row is followed by one or more alternate rows, often in a separate column such as Niv.',
   },
+  {
+    value: 'following_item_rows',
+    label: 'Alternates are following item rows',
+    description: 'Use this when a main item row is followed by sparse rows whose selected item/MPN/MFR values are alternates for that item.',
+  },
 ];
 
 export const QTY_OPTIONS = [
