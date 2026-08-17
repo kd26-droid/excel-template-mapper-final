@@ -964,10 +964,10 @@ export default function FactwiseProjectExportDialog({
                           routes through the handoff + revision-preview
                           diff and lets FactWise move the slot in place. */}
                       {revisableBoms.length === 0 ? (
-                        <Typography variant="caption" sx={{ color: 'error.main', ml: 4 }}>
+                        <Typography variant="caption" sx={{ color: 'text.secondary', ml: 4 }}>
                           {projectBoms.length
-                            ? 'No BOM in this project can be revised by this sheet. Pick a different project, or open the source BOM in FactWise first.'
-                            : 'This project has no BOMs to revise. Exporting into an existing project requires revising one of its BOMs — pick a different project or create a new one instead.'}
+                            ? 'No BOM in this project can be revised by this sheet. Click Start export to attach the mapper\'s BOM as a fresh new BOM in this project instead.'
+                            : 'This project has no BOMs to revise. Click Start export to attach the mapper\'s BOM as a fresh new BOM in this project.'}
                         </Typography>
                       ) : (
                         revisableBoms.map((b) => {
@@ -1022,11 +1022,7 @@ export default function FactwiseProjectExportDialog({
               ? 'Click "Start export" to send items, BOM, and create the project.'
               : reviseTargetKeys.length
                 ? `Click "Start export" to send items and revise ${reviseTargetKeys.length === 1 ? 'the picked BOM' : `the ${reviseTargetKeys.length} picked BOMs`} inside this project.`
-                // The old "attach as a new module" fallback used to live here
-                // — deleted with the "Create new BOM in this project" option.
-                // Existing-project exports must revise a BOM now, so this
-                // branch prompts the user to make that choice instead.
-                : 'Pick which BOM in this project to revise, then click "Start export".')}
+                : 'Click "Start export" to attach the mapper\'s BOM as a fresh new BOM in this project.')}
         </Typography>
 
         {/* Progress summary */}

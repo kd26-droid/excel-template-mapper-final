@@ -1337,24 +1337,11 @@ export function useFactwiseProjectExport({ sessionId, getColumnOrder, refreshHos
       }
       // Existing-project exports MUST route through a revision. The old
       // behaviour — creating a brand new BOM under the same FG and adding
-      // it alongside — was wrong: it produced a duplicate BOM record with
-      // the same finished good rather than updating the one already in the
-      // project. Force the user back to pick a revise target instead. The
-      // revise flow (Path A in runBomStep) then routes through Aditya's
-      // preview API and the handoff, and FactWise moves the slot itself.
-      if (
-        effectiveMode === PROJECT_MODES.EXISTING
-        && !(reviseEnterpriseBomId || cur.reviseEnterpriseBomId)
-      ) {
-        patch({
-          lastError:
-            'Exporting into an existing project must revise one of its BOMs. '
-            + 'Open the BOM step and pick "Revise: <BOM code>" for the BOM you '
-            + 'want this sheet to update — creating a new BOM under the same '
-            + 'finished good is no longer allowed.',
-        });
-        return;
-      }
+      // Historically this hard-errored EXISTING mode without a revise target
+      // to force the user to pick one. That block was removed 2026-08-17
+      // per user request: EXISTING mode without a revise target is now a
+      // valid "attach as fresh new BOM to this project" flow, and
+      // runAttachBomStep's no-revise-slots branch handles it directly.
     }
 
     // Persist config first so later steps can read from checkpoint.
