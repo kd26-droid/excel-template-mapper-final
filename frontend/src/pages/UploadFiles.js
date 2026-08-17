@@ -1895,10 +1895,34 @@ const UploadFiles = () => {
       return `${baseValue}_${detailValue}`.replace(/^[_-\s]+|[_-\s]+$/g, '');
     };
 
+    // Detail rows identical across every column being brought over collapse to
+    // one.
+    //
+    // A manufacturer sheet is keyed per (assembly, part), not per part: a part
+    // used in two assemblies is listed twice with the SAME manufacturer part.
+    // Joining on part number then gives that part two "manufacturers" which are
+    // the same manufacturer, so the second becomes an alternate of the first —
+    // the part offered as a substitute for itself, which FactWise rejects with
+    // "alternate is primary". On Applied's file that doubled two legitimate
+    // placements into four rows, and deleting one of an identical pair is
+    // ambiguous, so there was no way out of it in the editor either.
+    //
+    // Compared on the SELECTED columns only. Two rows differing just in a
+    // column nobody is bringing over — the assembly they belong to — are the
+    // same fact repeated; differ in a selected column and they are genuine
+    // alternates, so both survive.
     const detailLookup = new Map();
+    const detailSeen = new Map();
+    let collapsedDetailRows = 0;
     detailRows.forEach(row => {
       const key = normalizeSheetJoinKey(row[cleanConfig.detailKey]);
       if (!key) return;
+      const signature = selectedDetailColumns
+        .map(column => normalizeSheetJoinKey(row[column]))
+        .join('␟');
+      if (!detailSeen.has(key)) detailSeen.set(key, new Set());
+      if (detailSeen.get(key).has(signature)) { collapsedDetailRows += 1; return; }
+      detailSeen.get(key).add(signature);
       if (!detailLookup.has(key)) detailLookup.set(key, []);
       detailLookup.get(key).push(row);
     });
@@ -2112,6 +2136,9 @@ const UploadFiles = () => {
         unmatchedBaseRows,
         expandedRows,
         orphanDetailKeys,
+        // Reported rather than silent: a row disappearing from the join is
+        // worth seeing, even when dropping it is right.
+        collapsedDetailRows,
         groupedDetailEnabled,
         groupedDetailGroups: groupedDetailEnabled ? groupedLookup.size : 0,
         outputRows: rows.length

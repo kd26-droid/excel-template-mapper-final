@@ -50,6 +50,8 @@ import { useFactwise } from '../contexts/FactwiseContext';
 import {
   FACTWISE_TEMPLATE_COLUMNS,
   ITEM_DIRECTORY_DEFAULTS,
+  isFilledAutoColumnRule,
+  normalizeAutoColumnRules,
   readItemDirectoryColumnOptions,
   readItemDirectoryDefaults,
   writeItemDirectoryDefaults,
@@ -121,27 +123,52 @@ const cleanText = (value) => String(value ?? '').trim();
 
 const serverSettingsToItemDirectoryDefaults = (settings, currentDefaults = {}) => {
   const rule = settings?.item_code_rule || {};
+  // The whole panel as it was last saved. This is the authority when present:
+  // the browser copy is a cache, and a new machine — or a deploy on a new
+  // origin — has no cache at all. `base` falls back to the browser copy only
+  // for rows saved before `ui_defaults` existed.
+  const savedUi = settings?.ui_defaults && typeof settings.ui_defaults === 'object'
+    ? settings.ui_defaults
+    : {};
+  const hasSavedUi = Object.keys(savedUi).length > 0;
+  const base = { ...currentDefaults, ...savedUi };
+  // Blank typed columns no longer wipe the panel: with ui_defaults saved, a
+  // cleared field is blank in `base` too, so an intentional clear still sticks.
+  const preferServer = (serverValue, fallback) => cleanText(serverValue) || cleanText(fallback);
+  const serverBool = (serverValue, fallback) => (
+    serverValue === null || serverValue === undefined
+      ? cleanText(fallback)
+      : (serverValue ? 'TRUE' : 'FALSE')
+  );
   return {
-    ...currentDefaults,
-    procurementEntityName: cleanText(settings?.entity_name) || currentDefaults.procurementEntityName || '',
-    itemType: cleanText(settings?.item_type),
-    procurementItem: settings?.procurement_item === null || settings?.procurement_item === undefined
-      ? ''
-      : (settings.procurement_item ? 'TRUE' : 'FALSE'),
-    salesItem: settings?.sales_item === null || settings?.sales_item === undefined
-      ? ''
-      : (settings.sales_item ? 'TRUE' : 'FALSE'),
-    measurementUnit: cleanText(settings?.measurement_unit),
-    itemCodePrefix: cleanText(rule.prefix),
-    itemCodeContentType: rule.mode === 'fixed' ? 'fixed' : (currentDefaults.itemCodeContentType || 'serial'),
-    itemCodeRowsToUpdate: currentDefaults.itemCodeRowsToUpdate || 'fill_empty',
-    itemCodeDefaultValue: cleanText(rule.value) || currentDefaults.itemCodeDefaultValue || '',
-    itemCodeBlankStrategy: rule.prefix || rule.value ? 'prefix_sequence' : (currentDefaults.itemCodeBlankStrategy || 'prefix_sequence'),
-    itemCodeDuplicateStrategy: currentDefaults.itemCodeDuplicateStrategy || 'leave',
-    itemCodeSeparator: currentDefaults.itemCodeSeparator ?? '-',
-    itemCodeStart: String(rule.start ?? currentDefaults.itemCodeStart ?? '1'),
-    itemCodePadding: String(rule.padding ?? currentDefaults.itemCodePadding ?? '3'),
-    itemCodeIncrement: rule.increment === undefined ? (currentDefaults.itemCodeIncrement ?? true) : rule.increment !== false,
+    ...base,
+    procurementEntityName: preferServer(settings?.entity_name, base.procurementEntityName),
+    itemType: preferServer(settings?.item_type, base.itemType),
+    procurementItem: serverBool(settings?.procurement_item, base.procurementItem),
+    salesItem: serverBool(settings?.sales_item, base.salesItem),
+    measurementUnit: preferServer(settings?.measurement_unit, base.measurementUnit),
+    itemCodePrefix: preferServer(rule.prefix, base.itemCodePrefix),
+    // Only the two modes the typed column can express are inferred from it.
+    // Anything else — copy, join, if / else — comes back from ui_defaults, and
+    // an unknown mode stays unset rather than being guessed into 'serial'.
+    itemCodeContentType: hasSavedUi
+      ? (savedUi.itemCodeContentType || '')
+      // No ui_defaults means a row saved before the panel was stored whole, so
+      // the browser copy knows more than the server does: it is the only place
+      // a copy / join / if-else mode ever lived. Infer from the typed rule only
+      // when there is nothing local to keep.
+      : (currentDefaults.itemCodeContentType
+        || (rule.mode === 'fixed' ? 'fixed' : (rule.mode === 'prefix_sequence' ? 'serial' : ''))),
+    itemCodeRowsToUpdate: base.itemCodeRowsToUpdate || 'fill_empty',
+    itemCodeDefaultValue: preferServer(rule.value, base.itemCodeDefaultValue),
+    itemCodeBlankStrategy: hasSavedUi
+      ? (savedUi.itemCodeBlankStrategy || 'leave')
+      : (rule.prefix || rule.value ? 'prefix_sequence' : (currentDefaults.itemCodeBlankStrategy || 'leave')),
+    itemCodeDuplicateStrategy: base.itemCodeDuplicateStrategy || 'leave',
+    itemCodeSeparator: base.itemCodeSeparator ?? '-',
+    itemCodeStart: String(rule.start ?? base.itemCodeStart ?? '1'),
+    itemCodePadding: String(rule.padding ?? base.itemCodePadding ?? '3'),
+    itemCodeIncrement: rule.increment === undefined ? (base.itemCodeIncrement ?? true) : rule.increment !== false,
   };
 };
 
@@ -150,6 +177,12 @@ const itemDirectoryDefaultsToServerSettings = (defaults) => {
   const contentType = cleanText(defaults.itemCodeContentType);
   const fixedValue = cleanText(defaults.itemCodeDefaultValue);
   return {
+    // The typed fields below are the ones the server applies to rows on its
+    // own. This carries the rest of the panel — the item code modes the typed
+    // rule cannot express, and the pinned column rules — so a fresh browser
+    // gets everything back, not the handful of columns the table happens to
+    // have.
+    ui_defaults: defaults,
     item_type: cleanText(defaults.itemType),
     procurement_item: cleanText(defaults.procurementItem) || null,
     sales_item: cleanText(defaults.salesItem) || null,
@@ -176,6 +209,8 @@ const itemDirectoryDefaultsToServerSettings = (defaults) => {
 
 const normalizeItemDirectoryDefaultsForSave = (defaults) => ({
   ...defaults,
+  // A row added but never filled in is not a rule — it should not survive Save.
+  autoColumnRules: normalizeAutoColumnRules(defaults).filter(isFilledAutoColumnRule),
   // Saved as chosen. Defaulting to 'serial' here is what made an untouched
   // install generate item codes.
   itemCodeContentType: defaults.itemCodeContentType || '',
@@ -317,6 +352,10 @@ const Settings = () => {
         return true;
       });
   }, [itemDirectoryColumnOptions, itemDirectoryDefaults, itemCodeConditionalBranches]);
+  const autoColumnRules = useMemo(
+    () => normalizeAutoColumnRules(itemDirectoryDefaults),
+    [itemDirectoryDefaults]
+  );
 
   // ─── SAVED COLUMN RULES ───────────────────────────────────────────────────
   // Same builder the editor's Fill / Create Column dialog uses; saving one
@@ -387,6 +426,7 @@ const Settings = () => {
   const {
     isEmbedded: isFactwiseEmbedded,
     entityName: factwiseEntityName,
+    entityId: factwiseEntityId,
     entities: factwiseEntities = [],
     entityChangedAtLaunch,
     chooseEntity,
@@ -421,27 +461,31 @@ const Settings = () => {
       'measurementUnit',
     ]
       .some(key => String(itemDirectoryDefaults[key] || '').trim())
+      || normalizeAutoColumnRules(itemDirectoryDefaults).some(isFilledAutoColumnRule)
   ), [itemDirectoryDefaults]);
 
   useEffect(() => {
     const cleanEntityName = String(factwiseEntityName || '').trim();
-    if (!cleanEntityName) return;
+    const cleanEntityId = String(factwiseEntityId || '').trim();
+    // An id alone is enough now — FactWise does not always send the name, and
+    // waiting for one meant the saved panel was never fetched on those launches.
+    if (!cleanEntityName && !cleanEntityId) return;
     let cancelled = false;
     setItemDirectoryDefaults(prev => {
-      if (prev.procurementEntityName === cleanEntityName) return prev;
+      if (!cleanEntityName || prev.procurementEntityName === cleanEntityName) return prev;
       const next = { ...prev, procurementEntityName: cleanEntityName };
       writeItemDirectoryDefaults(next);
       return next;
     });
     const loadEditorDefaults = async () => {
       try {
-        const response = await api.getEditorDefaultSettings(cleanEntityName);
+        const response = await api.getEditorDefaultSettings(cleanEntityName, cleanEntityId);
         if (cancelled || !response.data?.success) return;
         const existingDefaults = readItemDirectoryDefaults();
         const hasServerSettings = Boolean(response.data.settings?.updated_at);
         const next = hasServerSettings
           ? serverSettingsToItemDirectoryDefaults(response.data.settings, existingDefaults)
-          : { ...existingDefaults, procurementEntityName: cleanEntityName };
+          : { ...existingDefaults, procurementEntityName: cleanEntityName || existingDefaults.procurementEntityName || '' };
         setItemDirectoryDefaults(next);
         writeItemDirectoryDefaults(next);
 
@@ -461,6 +505,7 @@ const Settings = () => {
             await api.saveEditorDefaultSettings(
               cleanEntityName,
               itemDirectoryDefaultsToServerSettings(normalizeItemDirectoryDefaultsForSave(next)),
+              cleanEntityId,
             );
           } catch (_) {
             // Non-fatal: the browser copy still drives the editor.
@@ -481,7 +526,7 @@ const Settings = () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [factwiseEntityName, entityChangedAtLaunch]);
+  }, [factwiseEntityName, factwiseEntityId, entityChangedAtLaunch]);
 
   useEffect(() => {
     const refreshColumnOptions = () => setItemDirectoryColumnOptions(readItemDirectoryColumnOptions());
@@ -711,8 +756,36 @@ const Settings = () => {
     }));
   };
 
+  const writeAutoColumnRules = (nextRules) => {
+    setItemDirectoryDefaults(prev => ({ ...prev, autoColumnRules: nextRules }));
+  };
+
+  const addAutoColumnRule = () => {
+    writeAutoColumnRules([...autoColumnRules, { ruleId: '', ruleName: '', targetColumn: '' }]);
+  };
+
+  const updateAutoColumnRule = (index, patch) => {
+    writeAutoColumnRules(autoColumnRules.map((entry, i) => (i === index ? { ...entry, ...patch } : entry)));
+  };
+
+  const removeAutoColumnRule = (index) => {
+    writeAutoColumnRules(autoColumnRules.filter((_, i) => i !== index));
+  };
+
+  // Picking a rule carries its own destination across, so pinning "Tag (2)" to
+  // a rule already written against Tag_2 needs one choice, not two.
+  const pickAutoColumnRule = (index, ruleId) => {
+    const match = columnRules.find(rule => String(rule.id) === String(ruleId));
+    updateAutoColumnRule(index, {
+      ruleId,
+      ruleName: match?.name || '',
+      targetColumn: autoColumnRules[index]?.targetColumn || match?.rule?.target_column || '',
+    });
+  };
+
   const handleClearItemDirectoryDefaults = () => {
     const cleared = Object.fromEntries(ITEM_DIRECTORY_DEFAULTS.map(item => [item.key, '']));
+    cleared.autoColumnRules = [];
     const cleanEntityName = String(factwiseEntityName || '').trim();
     if (cleanEntityName) {
       cleared.procurementEntityName = cleanEntityName;
@@ -748,11 +821,13 @@ const Settings = () => {
         window.localStorage.setItem(VALIDATION_PROVIDERS_KEY, JSON.stringify(selectedProviders));
       }
       const cleanEntityName = String(factwiseEntityName || itemDirectoryDefaults.procurementEntityName || '').trim();
+      const cleanEntityId = String(factwiseEntityId || '').trim();
       const defaultsToSave = normalizeItemDirectoryDefaultsForSave(itemDirectoryDefaults);
-      if (cleanEntityName) {
+      if (cleanEntityName || cleanEntityId) {
         const response = await api.saveEditorDefaultSettings(
           cleanEntityName,
-          itemDirectoryDefaultsToServerSettings(defaultsToSave)
+          itemDirectoryDefaultsToServerSettings(defaultsToSave),
+          cleanEntityId
         );
         if (response.data?.settings) {
           const next = serverSettingsToItemDirectoryDefaults(response.data.settings, {
@@ -1622,6 +1697,75 @@ const Settings = () => {
                           </>
                         )}
                       </Grid>
+                    </Paper>
+                  </Grid>
+
+                  <Grid item xs={12}>
+                    <Paper elevation={0} sx={{ p: 2.25, borderRadius: '14px', border: `1px solid ${t.border.subtle}`, bgcolor: t.surface.panel }}>
+                      <Typography sx={{ fontSize: 16, fontWeight: 400, color: t.text.heading }}>
+                        Prefill columns with a saved rule
+                      </Typography>
+                      <Typography sx={{ mt: 0.5, mb: 2, fontSize: 12.5, color: t.text.secondary }}>
+                        Pin a rule from Column Rules below to a column — Tag (2), Tag (3), anything
+                        — and it runs on every sheet as it opens, instead of being re-applied by hand
+                        from Fill / Create Column. A rule is skipped on sheets that do not carry its column.
+                      </Typography>
+
+                      {autoColumnRules.length === 0 && (
+                        <Typography sx={{ fontSize: 12.5, color: t.text.secondary, mb: 1.5 }}>
+                          {columnRules.length === 0
+                            ? 'No rules saved yet — create one under Column Rules below, then pin it here.'
+                            : 'Nothing pinned yet.'}
+                        </Typography>
+                      )}
+
+                      {autoColumnRules.map((entry, index) => (
+                        <Box
+                          key={index}
+                          sx={{ display: 'flex', gap: 1, alignItems: 'center', mb: 1.25, flexWrap: 'wrap' }}
+                        >
+                          <TextField
+                            select
+                            size="small"
+                            label="Saved rule"
+                            value={columnRules.some(rule => String(rule.id) === String(entry.ruleId)) ? entry.ruleId : ''}
+                            onChange={(event) => pickAutoColumnRule(index, event.target.value)}
+                            helperText={!entry.ruleId && entry.ruleName ? `"${entry.ruleName}" no longer exists` : ''}
+                            sx={{ ...fieldSx, minWidth: 240, flex: 1 }}
+                          >
+                            {columnRules.map(rule => (
+                              <MenuItem key={rule.id} value={rule.id}>{rule.name}</MenuItem>
+                            ))}
+                          </TextField>
+                          <TextField
+                            select
+                            size="small"
+                            label="Column to fill"
+                            value={itemCodeSourceColumnOptions.includes(entry.targetColumn) ? entry.targetColumn : ''}
+                            onChange={(event) => updateAutoColumnRule(index, { targetColumn: event.target.value })}
+                            sx={{ ...fieldSx, minWidth: 240, flex: 1 }}
+                          >
+                            {itemCodeSourceColumnOptions.map(column => (
+                              <MenuItem key={column} value={column}>
+                                {displayHeaderName(column, itemCodeSourceColumnOptions)}
+                              </MenuItem>
+                            ))}
+                          </TextField>
+                          <IconButton size="small" onClick={() => removeAutoColumnRule(index)}>
+                            <DeleteIcon fontSize="small" />
+                          </IconButton>
+                        </Box>
+                      ))}
+
+                      <Button
+                        size="small"
+                        startIcon={<AddIcon />}
+                        onClick={addAutoColumnRule}
+                        disabled={columnRules.length === 0}
+                        sx={{ textTransform: 'none' }}
+                      >
+                        Add a rule
+                      </Button>
                     </Paper>
                   </Grid>
 

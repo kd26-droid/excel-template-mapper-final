@@ -53,6 +53,15 @@ def _entity_from_request(request):
     )
 
 
+def _entity_id_from_request(request):
+    data = getattr(request, 'data', {}) or {}
+    return (
+        _clean(data.get('entity_id'))
+        or _clean(request.GET.get('entity_id'))
+        or _clean(request.headers.get('X-Entity-Id'))
+    )
+
+
 def _column_index(headers, target):
     target_key = _key(target)
     for index, header in enumerate(headers or []):
@@ -78,21 +87,36 @@ def _row_set(row, index, header, value):
 
 def serialize_editor_defaults(settings_obj):
     return {
+        'entity_id': settings_obj.entity_id or '',
         'entity_name': settings_obj.entity_name,
         'item_type': settings_obj.item_type or '',
         'procurement_item': settings_obj.procurement_item,
         'sales_item': settings_obj.sales_item,
         'measurement_unit': settings_obj.measurement_unit or '',
         'item_code_rule': settings_obj.item_code_rule or {},
+        'ui_defaults': settings_obj.ui_defaults or {},
         'updated_at': settings_obj.updated_at.isoformat() if settings_obj.updated_at else None,
     }
 
 
-def get_editor_defaults_for_entity(entity_name):
+def get_editor_defaults_for_entity(entity_name, entity_id=None):
+    """Find a row by entity_id first, then by name.
+
+    The name lookup is case-insensitive and stays as a fallback for two
+    reasons: rows written before entity_id existed carry no id, and a launch
+    URL does not always carry one either. It is a fallback and not the key —
+    an exact, case-sensitive name match is what made a differently-spelled
+    launch look like the settings had been wiped.
+    """
+    entity_id = _clean(entity_id)
+    if entity_id:
+        found = EditorDefaultSettings.objects.filter(entity_id=entity_id).first()
+        if found:
+            return found
     entity_name = _clean(entity_name)
     if not entity_name:
         return None
-    return EditorDefaultSettings.objects.filter(entity_name=entity_name).first()
+    return EditorDefaultSettings.objects.filter(entity_name__iexact=entity_name).first()
 
 
 def _sanitize_item_code_rule(raw_rule):
@@ -129,27 +153,38 @@ def _sanitize_item_code_rule(raw_rule):
     return rule
 
 
-def upsert_editor_defaults(entity_name, payload):
+def upsert_editor_defaults(entity_name, payload, entity_id=None):
     entity_name = _clean(entity_name)
-    if not entity_name:
-        raise ValueError('entity_name is required until login entity context is wired in.')
+    entity_id = _clean(entity_id)
+    if not entity_name and not entity_id:
+        raise ValueError('entity_id or entity_name is required to save editor defaults.')
 
-    defaults = {}
+    settings_obj = get_editor_defaults_for_entity(entity_name, entity_id)
+    if settings_obj is None:
+        settings_obj = EditorDefaultSettings(entity_name=entity_name)
+
+    # A row found by name under a known id adopts that id, so the next launch
+    # resolves it directly and a rename no longer strands it.
+    if entity_id:
+        settings_obj.entity_id = entity_id
+    if entity_name:
+        settings_obj.entity_name = entity_name
+
     if 'item_type' in payload:
-        defaults['item_type'] = _clean(payload.get('item_type'))
+        settings_obj.item_type = _clean(payload.get('item_type'))
     if 'procurement_item' in payload:
-        defaults['procurement_item'] = _truthy_or_none(payload.get('procurement_item'))
+        settings_obj.procurement_item = _truthy_or_none(payload.get('procurement_item'))
     if 'sales_item' in payload:
-        defaults['sales_item'] = _truthy_or_none(payload.get('sales_item'))
+        settings_obj.sales_item = _truthy_or_none(payload.get('sales_item'))
     if 'measurement_unit' in payload:
-        defaults['measurement_unit'] = _clean(payload.get('measurement_unit'))
+        settings_obj.measurement_unit = _clean(payload.get('measurement_unit'))
     if 'item_code_rule' in payload:
-        defaults['item_code_rule'] = _sanitize_item_code_rule(payload.get('item_code_rule'))
+        settings_obj.item_code_rule = _sanitize_item_code_rule(payload.get('item_code_rule'))
+    if 'ui_defaults' in payload:
+        raw_ui = payload.get('ui_defaults')
+        settings_obj.ui_defaults = raw_ui if isinstance(raw_ui, dict) else {}
 
-    settings_obj, _created = EditorDefaultSettings.objects.update_or_create(
-        entity_name=entity_name,
-        defaults=defaults,
-    )
+    settings_obj.save()
     return settings_obj
 
 
@@ -259,27 +294,30 @@ def apply_editor_defaults_to_rows(headers, rows, settings_obj, sequence_offset=0
 @api_view(['GET', 'POST'])
 def editor_default_settings(request):
     entity_name = _entity_from_request(request)
-    if not entity_name:
+    entity_id = _entity_id_from_request(request)
+    if not entity_name and not entity_id:
         return Response({
             'success': False,
-            'error': 'entity_name is required until login entity context is wired in.',
+            'error': 'entity_id or entity_name is required until login entity context is wired in.',
         }, status=status.HTTP_400_BAD_REQUEST)
 
     if request.method == 'GET':
-        settings_obj = get_editor_defaults_for_entity(entity_name)
+        settings_obj = get_editor_defaults_for_entity(entity_name, entity_id)
         payload = serialize_editor_defaults(settings_obj) if settings_obj else {
+            'entity_id': entity_id,
             'entity_name': entity_name,
             'item_type': '',
             'procurement_item': None,
             'sales_item': None,
             'measurement_unit': '',
             'item_code_rule': {},
+            'ui_defaults': {},
             'updated_at': None,
         }
         return Response({'success': True, 'settings': payload})
 
     try:
-        settings_obj = upsert_editor_defaults(entity_name, request.data or {})
+        settings_obj = upsert_editor_defaults(entity_name, request.data or {}, entity_id)
     except ValueError as exc:
         return Response({'success': False, 'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     return Response({'success': True, 'settings': serialize_editor_defaults(settings_obj)})
@@ -288,7 +326,7 @@ def editor_default_settings(request):
 @api_view(['POST'])
 def editor_default_apply_preview(request):
     entity_name = _entity_from_request(request)
-    settings_obj = get_editor_defaults_for_entity(entity_name)
+    settings_obj = get_editor_defaults_for_entity(entity_name, _entity_id_from_request(request))
     if not settings_obj:
         return Response({
             'success': False,

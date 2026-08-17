@@ -100,7 +100,7 @@ import ColumnParser from './ColumnParser/ColumnParser';
 import { LoaderCard } from './LoaderOverlay';
 import { getDataSynchronizer, cleanupSynchronizer } from '../utils/DataSynchronizer';
 import { useThemeContext } from '../utils/ThemeContext';
-import { readItemDirectoryDefaults, writeItemDirectoryColumnOptions } from '../utils/itemDirectoryDefaults';
+import { loadItemDirectoryDefaultsForEntity, normalizeAutoColumnRules, readItemDirectoryDefaults, writeItemDirectoryColumnOptions } from '../utils/itemDirectoryDefaults';
 import { displayHeaderName } from '../utils/columnHeaderNames';
 
 // Keep the arrangement-specific row expansion implementation dormant while a
@@ -395,7 +395,7 @@ const EnhancedDataEditor = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const { isDarkMode, tokens: themeTokens } = useThemeContext();
-  const { isEmbedded: isFactwiseEmbedded, entityName: factwiseEntityName } = useFactwise();
+  const { isEmbedded: isFactwiseEmbedded, entityName: factwiseEntityName, entityId: factwiseEntityId } = useFactwise();
   const synchronizer = useRef(null);
   const scrollContainerRef = useRef(null);
   const [mousePos, setMousePos] = useState({ x: 50, y: 50 });
@@ -784,6 +784,8 @@ const EnhancedDataEditor = () => {
   const [delOp, setDelOp] = useState('is_empty'); // is_empty|not_empty|equals|not_equals|contains
   const [delCompare, setDelCompare] = useState('');
   const [delBusy, setDelBusy] = useState(false);
+  // Which row's delete button is mid-flight, so only that row shows a spinner.
+  const [deletingRowIndex, setDeletingRowIndex] = useState(null);
   // Export BOM preview → "Export Sheet" (hardcoded download) or "Export to FactWise" (mock).
   const [exportBomOpen, setExportBomOpen] = useState(false);
   const [exportBomBusy, setExportBomBusy] = useState(false);
@@ -1412,7 +1414,7 @@ const EnhancedDataEditor = () => {
     itemDirectoryDefaultsAppliedRef.current[sessionId] = true;
 
     try {
-      const savedDefaults = readItemDirectoryDefaults();
+      const savedDefaults = await loadItemDirectoryDefaultsForEntity(factwiseEntityName, factwiseEntityId);
       const headerSet = new Set(headers);
       const defaults = {};
       const addDefault = (column, value) => {
@@ -1534,6 +1536,32 @@ const EnhancedDataEditor = () => {
         }
       }
 
+      // Column Rules pinned in Settings. The same rules the Fill / Create Column
+      // dialog applies by hand, run here so a sheet arrives with Tag (2), Tag (3)
+      // and the like already filled.
+      const autoRules = normalizeAutoColumnRules(savedDefaults);
+      if (autoRules.length > 0) {
+        const savedRules = (await api.getColumnRules())?.data?.rules || [];
+        for (const entry of autoRules) {
+          const match = savedRules.find(rule => String(rule.id) === String(entry.ruleId))
+            || savedRules.find(rule => rule.name === entry.ruleName);
+          const target = entry.targetColumn || match?.rule?.target_column || '';
+          // Only columns the sheet already carries. Creating one here would
+          // append it after every mapped column and change the export order.
+          if (!match?.rule || !headerSet.has(target)) continue;
+          const resp = await api.fillOrCreateColumn(sessionId, {
+            ...match.rule,
+            target_mode: 'existing',
+            target_column: target,
+            write_mode: match.rule.write_mode || 'fill_empty',
+          });
+          if (!resp.data?.success) {
+            throw new Error(resp.data?.error || `Could not apply saved rule "${match.name}"`);
+          }
+          changed = changed || Number(resp.data?.changed || 0) > 0;
+        }
+      }
+
       if (changed) {
         setDefaultValues(prev => ({ ...prev, ...defaults }));
         showSnackbar('Applied saved Item Directory defaults to blank editor cells.', 'success');
@@ -1549,7 +1577,7 @@ const EnhancedDataEditor = () => {
       delete itemDirectoryDefaultsAppliedRef.current[sessionId];
       throw error;
     }
-  }, [sessionId, showSnackbar]);
+  }, [sessionId, showSnackbar, factwiseEntityName, factwiseEntityId]);
 
   // The defaults run during the load below, which is right when the sheet
   // already has its values. Coming from the BOM Normalizer it may not: MPN and
@@ -5311,6 +5339,68 @@ const EnhancedDataEditor = () => {
     }
   }, [delCol, delOp, delCompare, sessionId, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage, recordPostMappingAction]);
 
+  // The delete button beside a row. Deliberately the SAME server-side deletion
+  // as the condition tool above — the row is handed over by position instead of
+  // matched by a condition — so the BOM guard, the grid write and the version
+  // bump cannot drift between a "delete these rows" and a "delete this row".
+  //
+  // Not recorded via recordPostMappingAction, unlike the condition delete: "row
+  // 40" is not a rule, and replaying it against the next file would remove
+  // whatever happened to land in that position.
+  const handleDeleteSingleRow = useCallback(async (rowIndex) => {
+    if (delBusy) return;
+    const row = rowData[rowIndex];
+    if (!row) return;
+    setDelBusy(true);
+    setDeletingRowIndex(rowIndex);
+    try {
+      // The row's own cells go with the request. The server deletes by position
+      // but only after confirming the row still holds these — the editor's row
+      // list and the grid the server writes are not guaranteed to be the same
+      // snapshot, so a position on its own can name a different row.
+      const rowValues = {};
+      Object.keys(row).forEach((header) => {
+        if (header === '__row_number__') return;
+        const value = row[header];
+        rowValues[header] = value == null ? '' : String(value);
+      });
+      const resp = await api.deleteGridRowByPosition(sessionId, rowIndex + 1, rowValues);
+      if (!resp.data?.success) throw new Error(resp.data?.error || 'Delete failed');
+      // The server keeps a finished good or sub-assembly whatever is asked of
+      // it: a BOM references those rows, and removing one leaves the BOM
+      // pointing at an item the sheet no longer has. Nothing was deleted, so
+      // say why rather than reporting a successful delete of zero rows.
+      if ((resp.data.removed || 0) === 0 && (resp.data.protected || 0) > 0) {
+        showSnackbar(
+          'This row is a finished good / sub-assembly that the BOM is built from. '
+          + 'Deleting it would break the BOM structure, so the row was kept.',
+          'warning'
+        );
+        return;
+      }
+      showSnackbar(`Deleted row ${rowIndex + 1} — ${resp.data.remaining} remaining.`, 'success');
+      await fetchDataSynchronized();
+    } catch (e) {
+      // Two failures the server words better than any generic message can: the
+      // grid moved under the page (reload, don't re-click), and the row has
+      // nothing to identify it by (use the condition tool instead).
+      const data = e?.response?.data;
+      if (data?.stale) {
+        showSnackbar(data.error, 'warning');
+        await fetchDataSynchronized();
+        return;
+      }
+      if (data?.unidentifiable) {
+        showSnackbar(data.error, 'warning');
+        return;
+      }
+      showSnackbar(getFriendlyErrorMessage(e, 'Could not delete this row.'), 'error');
+    } finally {
+      setDelBusy(false);
+      setDeletingRowIndex(null);
+    }
+  }, [delBusy, sessionId, rowData, showSnackbar, fetchDataSynchronized, getFriendlyErrorMessage]);
+
   // DEMO: export the pre-made "golden" BOM sheet for this input.
   const handleExportBomSheet = useCallback(async () => {
     setExportBomBusy(true);
@@ -7880,7 +7970,48 @@ const EnhancedDataEditor = () => {
                               fontWeight: (isDupHighlighted || isInvalidMpn) ? '700' : (isUnknown ? '500' : 'normal'),
                               width: `${columnWidths[col.field] || (col.field === '__row_number__' ? 80 : 180)}px`
                             }}>
-                              {col.field === 'datasheet' && cellValue.startsWith('http') ? (
+                              {col.field === '__row_number__' ? (
+                                // This column was rendering an empty text input:
+                                // its number comes from an ag-Grid valueGetter
+                                // that this hand-rolled table never ran. It is
+                                // the row's own gutter, so the number and the
+                                // row's delete button both belong here.
+                                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 0.5 }}>
+                                  <span style={{ color: t.text.secondary, fontWeight: 600 }}>{rowIndex + 1}</span>
+                                  <Tooltip
+                                    title={delBusy ? 'Deleting…' : 'Delete this row — permanent, no undo'}
+                                    arrow
+                                    placement="right"
+                                  >
+                                    {/* span so the tooltip still shows while disabled */}
+                                    <span>
+                                      <IconButton
+                                        size="small"
+                                        disabled={delBusy}
+                                        onClick={() => handleDeleteSingleRow(rowIndex)}
+                                        sx={{
+                                          p: 0.25,
+                                          color: t.color.danger,
+                                          // Dimmed rather than hidden. One click
+                                          // and the row is gone, so it should not
+                                          // shout — but a control nobody can find
+                                          // until they happen to hover the right
+                                          // 20 pixels is a control nobody uses.
+                                          opacity: deletingRowIndex === rowIndex ? 1 : 0.45,
+                                          transition: 'opacity 120ms ease',
+                                          'tr:hover &': { opacity: 1 },
+                                          '&:hover': { opacity: 1 },
+                                          '&:focus-visible': { opacity: 1 }
+                                        }}
+                                      >
+                                        {deletingRowIndex === rowIndex
+                                          ? <CircularProgress size={14} />
+                                          : <DeleteIcon sx={{ fontSize: 16 }} />}
+                                      </IconButton>
+                                    </span>
+                                  </Tooltip>
+                                </Box>
+                              ) : col.field === 'datasheet' && cellValue.startsWith('http') ? (
                                 <a href={cellValue} target="_blank" rel="noopener noreferrer" style={{ color: t.color.primarySoftText }}>{cellValue}</a>
                               ) : (
                                 <input

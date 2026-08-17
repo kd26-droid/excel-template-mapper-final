@@ -1,3 +1,5 @@
+import api from '../services/api';
+
 // v2 drops every browser copy written by the old built-in defaults, which
 // stored itemCodeContentType:'serial' + blankStrategy:'prefix_sequence' without
 // anyone choosing them — indistinguishable from a real choice, and the reason
@@ -249,7 +251,33 @@ export const ITEM_DIRECTORY_DEFAULTS = [
     type: 'measurementUnit',
     placeholder: 'Example: EA',
   },
+  {
+    // Saved Column Rules pinned to a column, replayed on every sheet that opens
+    // in the editor. Entries are { ruleId, ruleName, targetColumn }.
+    key: 'autoColumnRules',
+    field: '',
+    label: 'Auto-applied column rules',
+    type: 'array',
+    defaultValue: [],
+  },
 ];
+
+// Clearing the panel writes '' over every key, so the stored value is not
+// always the array it was saved as.
+//
+// Empty rows are kept: this also backs the Settings list, and a row the user
+// has just added has nothing chosen in it yet. Dropping the unfilled ones is
+// `isFilledAutoColumnRule`'s job, at save and apply time.
+export const normalizeAutoColumnRules = (defaults = {}) => (
+  (Array.isArray(defaults?.autoColumnRules) ? defaults.autoColumnRules : [])
+    .map(entry => ({
+      ruleId: entry?.ruleId ?? '',
+      ruleName: String(entry?.ruleName ?? '').trim(),
+      targetColumn: String(entry?.targetColumn ?? '').trim(),
+    }))
+);
+
+export const isFilledAutoColumnRule = (entry) => Boolean(entry?.ruleId || entry?.ruleName);
 
 // Nothing here carries a working default. A value only exists once the user
 // has entered and saved it, so an untouched install never rewrites a sheet.
@@ -277,6 +305,32 @@ export const writeItemDirectoryDefaults = (defaults) => {
     ...emptyItemDirectoryDefaults,
     ...(defaults || {}),
   }));
+};
+
+// The browser copy is a cache, not the record. A new machine, a new deploy
+// origin, or cleared site data all leave it empty while the entity's saved
+// panel is sitting on the server — so read the server first and refresh the
+// cache from it. Falls back to whatever is local when the call fails, which is
+// what keeps the editor working offline of the settings API.
+export const loadItemDirectoryDefaultsForEntity = async (entityName, entityId) => {
+  const cleanName = String(entityName || '').trim();
+  const cleanId = String(entityId || '').trim();
+  const local = readItemDirectoryDefaults();
+  if (!cleanName && !cleanId) return local;
+  try {
+    const response = await api.getEditorDefaultSettings(cleanName, cleanId);
+    const settings = response?.data?.settings;
+    if (!response?.data?.success || !settings?.updated_at) return local;
+    const savedUi = settings.ui_defaults && typeof settings.ui_defaults === 'object'
+      ? settings.ui_defaults
+      : {};
+    if (Object.keys(savedUi).length === 0) return local;
+    const merged = { ...local, ...savedUi };
+    writeItemDirectoryDefaults(merged);
+    return merged;
+  } catch (_) {
+    return local;
+  }
 };
 
 export const normalizeItemDirectoryColumnOptions = (columns = []) => {

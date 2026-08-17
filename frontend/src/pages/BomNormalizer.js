@@ -2306,27 +2306,32 @@ const rowLooksLikeSectionTitle = (row, headers, roles) => {
 // level-only sheets already relied on - checked against a real THALES export,
 // where keying on part number produces exactly the same groups.
 const alternatesKey = (row, roles, sourceRow) => {
-  // WHAT the part is.
+  // WHAT the part is — the CUSTOMER's part number.
   //
-  // Prefer MPN + manufacturer (the pair the FactWise ID rule builds the item
-  // code from later, so this is item identity at normalization time). Rows
-  // with different MPN or different manufacturer therefore stay as separate
-  // BOM lines — an AML sheet listing three approved suppliers for one
-  // position no longer collapses into "one line + two alternates", it
-  // becomes three lines, one per approved MPN.
+  // CPN, not MPN+manufacturer. The manufacturer part is precisely what an
+  // alternate VARIES, so keying on it guarantees alternates can never group:
+  // an AML position with three approved suppliers produces three keys, three
+  // "primary" rows, and three sibling BOM lines under one assembly. FactWise
+  // then rejects the file — one assembly may not list the same child twice —
+  // and there is no way to fix it in the editor, because the three lines are
+  // genuinely one position.
   //
-  // Fall back to CPN or description when neither MPN nor manufacturer is
-  // present (assembly parents, sub-BOM rows, notes rows). Only rows that
-  // are byte-identical on (parent, mpn, manufacturer) — or on (parent, cpn)
-  // when MPN is missing — collapse now, which is the shape the user asked
-  // for 2026-08-17.
+  // Keying on CPN puts those three in one group: one BOM line, two alternates,
+  // which is the shape the import accepts.
+  //
+  // The trade-off is real and documented in MPN_MFR_VS_CPN.md: a sheet that
+  // reuses one CPN for parts that are NOT interchangeable will now merge them.
+  // Read that before changing this back.
+  //
+  // MPN+manufacturer remains the fallback for rows with no CPN, then
+  // description, then the row number — an assembly parent or a notes row has
+  // no part number of its own.
   const mpn = getCell(row, roles.mpn);
   const manufacturer = getCell(row, roles.manufacturer);
-  const identity = (mpn || manufacturer)
-    ? `${mpn}|${manufacturer}`
-    : (getCell(row, roles.cpn)
-      || getCell(row, roles.description)
-      || `Source row ${sourceRow}`);
+  const identity = getCell(row, roles.cpn)
+    || ((mpn || manufacturer) ? `${mpn}|${manufacturer}` : '')
+    || getCell(row, roles.description)
+    || `Source row ${sourceRow}`;
 
   // ...and WHERE it sits. A BOM line is identified by both, and keying on either
   // one alone collapses rows that are not the same line:

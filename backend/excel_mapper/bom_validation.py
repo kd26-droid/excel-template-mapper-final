@@ -144,6 +144,8 @@ def validate_bom(bom_headers, bom_rows, item_rows=None, bom_row_grid_rows=None):
     block_children = defaultdict(list)
     known_bom_ids = set()
     referenced_codes = set()
+    # (Sub BOM ID, row) pairs — checked against known_bom_ids, not items.
+    referenced_sub_boms = set()
     # Deferred so they can be folded into `item_code_blank`, which is the same
     # fact seen from the other side. See where they are emitted below.
     rows_without_child = []
@@ -263,8 +265,19 @@ def validate_bom(bom_headers, bom_rows, item_rows=None, bom_row_grid_rows=None):
         child = raw_code or sub_bom
         if bom_id and child:
             block_children[bom_id].append((child, line))
-        if child:
-            referenced_codes.add(child)
+        # Only a RAW MATERIAL code is a reference to an item. A Sub BOM ID
+        # references a BOM, and the two are no longer the same string: a
+        # sub-assembly now carries its own item code AND its own BOM code, so
+        # its part can keep the number the sheet gave it while its BOM takes a
+        # free one. Checking a Sub BOM ID against the item directory reported
+        # the BOM code missing as an item, which it is supposed to be.
+        #
+        # Sub BOM IDs are checked below against `known_bom_ids` instead — a
+        # sub-BOM must exist as a BOM, which is the real requirement.
+        if raw_code:
+            referenced_codes.add(raw_code)
+        elif sub_bom:
+            referenced_sub_boms.add((sub_bom, line))
 
         # 6b - the alternate block. Unique to the BOM sheet: the item directory
         # has no concept of a substitute part, so nothing else can check this.
@@ -340,6 +353,31 @@ def validate_bom(bom_headers, bom_rows, item_rows=None, bom_row_grid_rows=None):
 
     # 9 - no node may be reachable from itself
     _detect_cycles(block_children, errors)
+
+    # 10a - a Sub BOM ID must name a BOM built in this same file.
+    #
+    # Checked against BOM IDs, NOT the item directory. A sub-assembly now
+    # carries its own item code AND its own BOM code, so its part can keep the
+    # number the sheet gave it while its BOM takes a free one. Treating a Sub
+    # BOM ID as an item reference reported the BOM code missing as an item —
+    # which it is supposed to be.
+    #
+    # Outside the `item_rows is not None` block below: this needs no item
+    # directory, and nesting it there would skip it whenever one is absent.
+    dangling_sub_boms = sorted(
+        {code for code, _line in referenced_sub_boms if code and code not in known_bom_ids}
+    )
+    if dangling_sub_boms:
+        errors.append({
+            'rule': 'sub_bom_not_found',
+            'codes': dangling_sub_boms[:20],
+            'count': len(dangling_sub_boms),
+            'message': ('%d Sub BOM ID(s) do not match any BOM in this sheet: %s. '
+                        'A sub-BOM must be built somewhere in the same file.'
+                        % (len(dangling_sub_boms),
+                           ', '.join(dangling_sub_boms[:5])
+                           + ('...' if len(dangling_sub_boms) > 5 else ''))),
+        })
 
     # 10 - referential integrity against the item directory
     item_codes = set()
