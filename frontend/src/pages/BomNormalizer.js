@@ -3589,8 +3589,17 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
       if (normalizeKey(contextColumn) === normalizeKey(mpnColumn) && !hasContextDetail) return false;
       return true;
     }
+    // A mapped parent column IS the marker, so it decides alone. It names the
+    // assembly a row belongs to, and only a real item row carries one — the
+    // sparse rows below it are blank there by definition.
+    //
+    // Letting description vote alongside it broke every sheet whose ALTERNATE
+    // rows carry a description of their own: THALES' Y2 export repeats the part
+    // name on each approved manufacturer, so all 2244 of them read as new items
+    // rather than alternates, arriving with no parent, no quantity and the
+    // manufacturer's own code as their CPN.
+    if (roles.parent) return Boolean(getCell(row, roles.parent));
     return Boolean(
-      getCell(row, roles.parent) ||
       getCell(row, roles.description) ||
       getCell(row, roles.quantity) ||
       getCell(row, roles.uom)
@@ -3604,7 +3613,17 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
     const description = getCell(row, roles.description);
     const parent = hierarchyParent(row, roles);
     const contextValue = contextColumn ? getCell(row, contextColumn) : '';
-    const identity = contextValue || cpn || description || `Source row ${sourceRow}`;
+    // The marker column answers "does this row start a new item?" - by being
+    // filled rather than blank. It does NOT answer "which item is this?", and
+    // leading with it here made it do both. A marker whose value repeats then
+    // becomes one identity for every row under it: a THALES sheet marking new
+    // items with the ASSEMBLY code put all 726 of its parts on a single BOM
+    // line, 725 of them arriving as "alternates" of whichever came first.
+    //
+    // So the part number leads. The marker stays as the fallback for sheets that
+    // mark items with a line number and carry no separate code - there `cpn` is
+    // blank, so those read exactly as before.
+    const identity = cpn || contextValue || description || `Source row ${sourceRow}`;
     return {
       sourceRow,
       parentKey: parent ? `${parent}␟${identity}` : `L${level}␟${identity}`,
@@ -3618,6 +3637,37 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
     };
   };
 
+  // A marked row carrying no MPN/MFR of its own is normally just the header of a
+  // group whose parts arrive on the rows below, so emitting it too would double
+  // every line. But nothing guarantees those rows exist: a part a customer makes
+  // themselves - a bare PCB, firmware, a sub-assembly - has no external
+  // manufacturer to list. Discarding the header outright dropped 11 real parts
+  // from one THALES BOM, the sub-assembly among them, which is why that BOM came
+  // out with no second level.
+  //
+  // So the header is held rather than dropped, and emitted with a blank
+  // manufacturer only once the next group starts (or the sheet ends) without one
+  // having turned up.
+  let pendingContext = null;
+
+  const flushPendingContext = () => {
+    if (!pendingContext) return;
+    const { group, row, rowIndex } = pendingContext;
+    pendingContext = null;
+    output.push(withSourceColumns({
+      ...group,
+      sourceRow: row.__sourceRow || rowIndex + 1,
+      relation: 'Primary',
+      cpn: group.cpn || getCell(row, itemColumn),
+      mpn: '',
+      manufacturer: '',
+      rule: 'following_item_rows_primary_without_manufacturer',
+      confidence: 62,
+      discardedText: '',
+    }, row, config));
+    group.relationCount = Math.max(1, Number(group.relationCount || 0));
+  };
+
   rows.forEach((row, rowIndex) => {
     const sourceRow = row.__sourceRow || rowIndex + 1;
     const itemValue = getCell(row, itemColumn);
@@ -3628,6 +3678,9 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
     ));
 
     if (canAttachAsAlternate) {
+      // The manufacturer row this group was waiting for. It becomes the primary,
+      // so the held header must not also be emitted.
+      if (pendingContext && pendingContext.group === currentGroup) pendingContext = null;
       const pairs = parts.length ? parts : [{ mpn: '', manufacturer: '', metadata: {} }];
       pairs.forEach((pair) => {
         if (!shouldEmitPartForGroup(currentGroup, pair)) return;
@@ -3656,8 +3709,29 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
 
     if (!isContextRow && !itemValue && !parts.length) return;
 
+    // Any previous header still waiting has now run out of rows to be followed
+    // by, so settle it before this row takes over as the current group.
+    flushPendingContext();
+
     const group = groupFromRow(row, rowIndex);
     currentGroup = group;
+    // Held, not dropped: a marked row with no MPN/MFR is usually the header of a
+    // group whose parts arrive below, but nothing guarantees they will. A part
+    // the customer makes themselves - a bare PCB, firmware, a sub-assembly - has
+    // no external manufacturer to list, and discarding those took 11 real parts
+    // out of one THALES BOM, its sub-assembly among them. flushPendingContext
+    // emits it only once the next group starts without a manufacturer showing up.
+    // A mapped parent column marks a real item row just as an explicit context
+    // column does, and this must not depend on which of the two the sheet uses:
+    // gating the hold on the marker alone meant that once that control went
+    // away, every customer-made part - one with no external manufacturer to
+    // list - fell through to the drop below and vanished again.
+    if (isContextRow && !parts.length && (strictContextMarker || getCell(row, roles.parent))) {
+      pendingContext = { group, row, rowIndex };
+      return;
+    }
+    // Outside the marked case this stays a plain drop, as the Safran work made
+    // it. A row with no marker AND no part is not a line anyone stated.
     if (!parts.length) {
       return;
     }
@@ -3682,6 +3756,9 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
     });
     currentGroup.relationCount = Math.max(1, emittedPairCount);
   });
+
+  // The last group in the sheet has no following row to settle it.
+  flushPendingContext();
 
   return output;
 };
@@ -4451,7 +4528,67 @@ const unpackParentPaths = (rows, roles, config = {}) => {
   return rows;
 };
 
-// Both passes below walk the WHOLE sheet to decide what they write, so they run
+// How deep each row sits, worked out by following parent to parent.
+//
+// A sheet can state its tree in three ways, and only two of them were being
+// read. A level column says the depth outright. A breadcrumb path says it in its
+// segment count. But a plain parent column says it only IMPLICITLY: a code that
+// appears as somebody's child sits one tier below whoever owns it.
+//
+// Left underived, every row defaults to level 1 and the tiers become
+// indistinguishable — a THALES sheet whose sub-assembly is listed as a component
+// of the root computed both to the same level, so the structure gate could not
+// offer the sub-assembly as a BOM and 726 parts came out flat under the root.
+//
+// Stamped under the same key the path reading uses, since both answer the same
+// question; a row that already carries one is left alone.
+const stampParentChainDepth = (rows, roles) => {
+  if (!rows?.length || !roles?.parent) return rows;
+  // A level column already answers this, and it is the sheet's own statement.
+  if (roles.level) return rows;
+  const codeRole = roles.cpn || roles.description;
+  if (!codeRole) return rows;
+
+  // Whose child is each code? Read off the row that carries the code itself.
+  const parentOf = new Map();
+  rows.forEach((row) => {
+    const code = getCell(row, codeRole);
+    if (!code || parentOf.has(code)) return;
+    const parent = hierarchyParent(row, roles);
+    if (parent && parent !== code) parentOf.set(code, parent);
+  });
+
+  // Depth of a code: 1 when nobody owns it, otherwise one below its owner. The
+  // seen-set is a cycle guard — a sheet that lists A inside B inside A would
+  // otherwise recurse forever.
+  const depthCache = new Map();
+  const depthOf = (code) => {
+    if (depthCache.has(code)) return depthCache.get(code);
+    let depth = 1;
+    let current = code;
+    const seen = new Set([code]);
+    while (parentOf.has(current)) {
+      const next = parentOf.get(current);
+      if (seen.has(next)) break;
+      seen.add(next);
+      current = next;
+      depth += 1;
+    }
+    depthCache.set(code, depth);
+    return depth;
+  };
+
+  rows.forEach((row) => {
+    if (row[PATH_DEPTH_KEY]) return;
+    const parent = hierarchyParent(row, roles);
+    if (!parent) return;
+    // The row sits one tier below the assembly holding it.
+    row[PATH_DEPTH_KEY] = depthOf(parent) + 1;
+  });
+  return rows;
+};
+
+// Every pass below walks the WHOLE sheet to decide what it writes, so they run
 // once over every row before anything is split up. `prepared` is how the chunked
 // caller says it has already done that: re-running them on a 50-row slice clears
 // the sheet-wide answer and replaces it with whatever that slice can see on its
@@ -4462,6 +4599,7 @@ const normalizeRows = (rows, headers, roles, config, prepared = false) => {
   if (!prepared) {
     stampInferredParents(rows, roles);
     unpackParentPaths(rows, roles, config);
+    stampParentChainDepth(rows, roles);
   }
   const layoutStructure = effectiveStructure(config);
   const assemblyMatrix = layoutStructure === 'assembly_quantity_matrix'
@@ -4513,6 +4651,9 @@ const normalizeRowsChunked = async (rows, headers, roles, config, onProgress) =>
   // parents against every code on the sheet, and a 50-row window does not hold
   // enough of them to tell a working reading from a dangling one.
   unpackParentPaths(rows, roles, config);
+  // And the same again: the chain runs the length of the sheet, so a chunk that
+  // holds a child but not its parent would call that child a root.
+  stampParentChainDepth(rows, roles);
   const layoutStructure = effectiveStructure(config);
   if (config.structure === 'grouped_rows' || layoutStructure === 'multi_block_assembly') {
     const dataRows = [];
