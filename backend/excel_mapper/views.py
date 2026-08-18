@@ -5358,32 +5358,53 @@ def save_data(request):
             rows_payload = []
 
         # Ensure headers are preserved; prefer existing enhanced headers, else derive canonical/keys
-        enhanced_headers = info.get('enhanced_headers') or info.get('current_template_headers') or info.get('template_headers') or []
+        enhanced_headers = list(
+            info.get('enhanced_headers')
+            or info.get('current_template_headers')
+            or info.get('template_headers')
+            or []
+        )
         if not enhanced_headers and rows_payload and isinstance(rows_payload[0], dict):
             enhanced_headers = list(rows_payload[0].keys())
+
+        # The editor keys its rows by internal names (Tag_1, Specification_Name_2,
+        # "Preferred vendor code__2" for a repeated header); this list holds display
+        # headers (Tag (1), Specification name (2)). They are the same columns under
+        # two names, matched by POSITION via make_unique_field_headers -- not by
+        # string equality. Treating an internal name as an unknown display header
+        # appended a phantom column per slot on every save, and the edited values
+        # then landed in the phantom instead of the real column.
+        field_keys = make_unique_field_headers(enhanced_headers)
         if rows_payload and isinstance(rows_payload[0], dict):
-            header_set = set(enhanced_headers)
+            known = set(enhanced_headers) | set(field_keys)
             for row in rows_payload:
                 if not isinstance(row, dict):
                     continue
                 for key in row.keys():
-                    if key and key not in header_set:
+                    if key and key not in known:
                         enhanced_headers.append(key)
-                        header_set.add(key)
-        cleanup_empty_spec_pairs(enhanced_headers, rows_payload)
+                        known.add(key)
+            field_keys = make_unique_field_headers(enhanced_headers)
 
-        # Save edited data to session (as a list of row dicts)
-        info["edited_data"] = rows_payload
+        # Rows stay positional, aligned to enhanced_headers -- the shape every other
+        # grid writer uses (see write_session_grid). Keying by name would merge the
+        # two "Preferred vendor code" columns into one.
+        row_lists = []
+        for row in rows_payload:
+            if isinstance(row, dict):
+                row_lists.append([
+                    row.get(field, row.get(header, ''))
+                    for field, header in zip(field_keys, enhanced_headers)
+                ])
+            elif isinstance(row, list):
+                row_lists.append([
+                    row[idx] if idx < len(row) else ''
+                    for idx in range(len(enhanced_headers))
+                ])
+        cleanup_empty_spec_pairs(enhanced_headers, row_lists)
 
-        # Ensure Data Editor uses these rows immediately
-        info["formula_enhanced_data"] = rows_payload
-        info["enhanced_data"] = {
-            "headers": enhanced_headers,
-            "data": rows_payload,
-        }
-
-        info['enhanced_headers'] = enhanced_headers
-        info['current_template_headers'] = enhanced_headers
+        write_session_grid(session_id, info, enhanced_headers, row_lists)
+        info["formula_enhanced_data"] = row_lists
 
         # Bypass cleanup/mapping; prefer edited data immediately
         info['uploaded_via_correction'] = True
