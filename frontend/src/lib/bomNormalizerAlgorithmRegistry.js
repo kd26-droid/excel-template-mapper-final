@@ -9,6 +9,12 @@ export const ROLE_FIELDS = [
   { key: 'internalNotes', label: 'Internal notes' },
   { key: 'level', label: 'BOM level' },
   { key: 'parent', label: 'Parent / group key' },
+  // Names the column that says WHAT a row is - part, sub-assembly, drawing,
+  // spec. Which of its values mean "not a BOM line" is picked by the user in
+  // documentTypeValues rather than guessed from a word list, because every
+  // customer writes them differently: THALES ships Doc.Ass./Doc.Def., and the
+  // next export will say something else in another language.
+  { key: 'rowType', label: 'Row type (part / document)' },
 ];
 
 export const STRUCTURE_OPTIONS = [

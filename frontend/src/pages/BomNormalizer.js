@@ -2480,6 +2480,27 @@ const rowLooksLikeDoNotPopulate = (row, headers) => {
   return /\b(do\s*not\s*populate|not\s*populate|dnp|dni|not\s*fitted|no\s*fit)\b/.test(text);
 };
 
+// Values a row-type column is likely to use for a document. Only ever used to
+// PRE-TICK the boxes when the column is first mapped - the user sees every
+// distinct value with its row count and decides. Missing a word here costs a
+// tick, not a wrong BOM.
+const DOCUMENT_TYPE_HINT_RE = /^(doc\.?\s*(ass|def|assembly|definition)?\.?|document|drawing|dessin|plan|spec|specification)$/i;
+
+const suggestDocumentTypeValues = (values) => (
+  (values || []).filter((value) => DOCUMENT_TYPE_HINT_RE.test(String(value).trim()))
+);
+
+// A row the user has declared to be a document rather than a consumed part.
+// Both halves must be present - a mapped column and at least one ticked value -
+// so this can never fire on a sheet where the question was not answered.
+const isDocumentRowByType = (row, roles, config) => {
+  const column = roles?.rowType;
+  const flagged = config?.documentTypeValues;
+  if (!column || !flagged || !flagged.length) return false;
+  const value = getCell(row, column).trim();
+  return Boolean(value) && flagged.includes(value);
+};
+
 const rowLooksLikeDeleted = (row, headers) => {
   if (row.__deletedRowStyle || row.__redRowStyle || row.__strikeRowStyle) return true;
   return false;
@@ -2677,6 +2698,11 @@ const shouldSkipSourceRow = (row, headers, roles, config) => {
   if (config.skipRepeatedHeaders && rowLooksLikeRepeatedHeader(row, headers)) return true;
   if (config.skipDoNotPopulate && rowLooksLikeDoNotPopulate(row, headers)) return true;
   if (config.skipDeletedRows && rowLooksLikeDeleted(row, headers)) return true;
+  // Documents. Not a guess: the user named the column and ticked the values, so
+  // this drops exactly what they said and nothing else. Placed before the
+  // section-title guess below, which cannot tell a drawing from a heading and on
+  // the THALES export deleted a real sub-assembly along with one.
+  if (isDocumentRowByType(row, roles, config)) return true;
   const layoutStructure = effectiveStructure(config);
   if (layoutStructure === 'assembly_quantity_matrix') return false;
   if (layoutStructure === 'multi_block_assembly') return false;
@@ -7499,6 +7525,7 @@ const BomNormalizer = () => {
     skipRepeatedHeaders: true,
     skipDoNotPopulate: false,
     skipDeletedRows: true,
+    documentTypeValues: [],
     parentPathLevels: true,
     alternateColumnGroups: [],
     followingRowAlternateColumn: '',
@@ -8792,6 +8819,42 @@ const BomNormalizer = () => {
     });
     return detections;
   }, [headers, roles, sourceDataRows]);
+
+  // Every distinct value in the mapped row-type column, commonest first, with
+  // how many rows carry it. This is what the user ticks against - the whole
+  // point of the role is that nothing is dropped they have not seen.
+  const rowTypeValues = useMemo(() => {
+    if (!roles.rowType) return [];
+    const counts = new Map();
+    sourceDataRows.forEach((row) => {
+      const value = getCell(row, roles.rowType).trim();
+      if (value) counts.set(value, (counts.get(value) || 0) + 1);
+    });
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([value, count]) => ({ value, count }));
+  }, [roles.rowType, sourceDataRows]);
+
+  // Pre-tick the obvious ones the first time a column is mapped, then leave the
+  // list alone - re-suggesting on every render would undo the user's own ticks.
+  const suggestedForColumn = useRef(null);
+  useEffect(() => {
+    if (!roles.rowType || !rowTypeValues.length) return;
+    if (suggestedForColumn.current === roles.rowType) return;
+    suggestedForColumn.current = roles.rowType;
+    const suggested = suggestDocumentTypeValues(rowTypeValues.map((entry) => entry.value));
+    setConfig((prev) => (
+      (prev.documentTypeValues || []).length ? prev : { ...prev, documentTypeValues: suggested }
+    ));
+  }, [roles.rowType, rowTypeValues]);
+
+  const documentRowCount = useMemo(() => {
+    const flagged = config.documentTypeValues || [];
+    if (!roles.rowType || !flagged.length) return 0;
+    return rowTypeValues
+      .filter((entry) => flagged.includes(entry.value))
+      .reduce((total, entry) => total + entry.count, 0);
+  }, [config.documentTypeValues, roles.rowType, rowTypeValues]);
 
   const detectedCleanupOptions = useMemo(
     () => CLEANUP_OPTIONS.filter((option) => cleanupDetections[option.key] > 0),
@@ -10784,6 +10847,7 @@ const BomNormalizer = () => {
       skipRepeatedHeaders: true,
       skipDoNotPopulate: false,
       skipDeletedRows: true,
+      documentTypeValues: [],
       parentPathLevels: true,
       alternateColumnGroups: [],
       followingRowAlternateColumn: '',
@@ -10887,6 +10951,7 @@ const BomNormalizer = () => {
       skipRepeatedHeaders: true,
       skipDoNotPopulate: false,
       skipDeletedRows: true,
+      documentTypeValues: [],
       parentPathLevels: true,
       alternateColumnGroups: [],
       followingRowAlternateColumn: '',
@@ -12605,6 +12670,41 @@ const BomNormalizer = () => {
                         Sparse rows using {config.followingItemRowsMpnColumn} and {config.followingItemRowsManufacturerColumn} will attach to the nearest previous item. CPN will {config.followingItemRowsCpnMode === 'column' ? 'come from the mapped CPN column when available' : 'copy from the primary item'}.
                       </Alert>
                     )
+                  )}
+                  {roles.rowType && rowTypeValues.length > 0 && (
+                    <Box sx={{ mt: 1.5 }}>
+                      <Typography sx={{ fontSize: 13, fontWeight: 800 }}>
+                        Which "{roles.rowType}" values are documents, not parts?
+                      </Typography>
+                      <Typography sx={{ fontSize: 12, color: '#66717f', mb: 0.75 }}>
+                        A document is attached to a part, not consumed by one, so it is not a BOM
+                        line. Ticked values are dropped before the BOM is built
+                        {documentRowCount > 0 ? ` — ${documentRowCount} rows` : ''}.
+                      </Typography>
+                      <Stack direction="row" flexWrap="wrap" gap={0.75}>
+                        {rowTypeValues.map(({ value, count }) => {
+                          const ticked = (config.documentTypeValues || []).includes(value);
+                          return (
+                            <Chip
+                              key={value}
+                              size="small"
+                              label={`${value} (${count})`}
+                              color={ticked ? 'warning' : 'default'}
+                              variant={ticked ? 'filled' : 'outlined'}
+                              onClick={() => setConfig((prev) => {
+                                const current = prev.documentTypeValues || [];
+                                return {
+                                  ...prev,
+                                  documentTypeValues: current.includes(value)
+                                    ? current.filter((entry) => entry !== value)
+                                    : [...current, value],
+                                };
+                              })}
+                            />
+                          );
+                        })}
+                      </Stack>
+                    </Box>
                   )}
                   {detectedCleanupOptions.length > 0 && (
                     <Box sx={{ mt: 1.5 }}>
