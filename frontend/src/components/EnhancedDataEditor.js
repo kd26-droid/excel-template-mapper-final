@@ -95,6 +95,7 @@ import { useFactwise, postToFactwiseParent, openInFactwise } from '../contexts/F
 import FactwiseProjectExportDialog from './FactwiseProjectExportDialog';
 import FactwiseBomDirectoryExportDialog from './FactwiseBomDirectoryExportDialog';
 import BomDuplicatePolicyBanner from './BomDuplicatePolicyBanner';
+import NonEnglishLanguageBanner from './NonEnglishLanguageBanner';
 import * as XLSX from 'xlsx';
 import BomTreePreview from './BomTreePreview';
 import ColumnParser from './ColumnParser/ColumnParser';
@@ -7789,6 +7790,10 @@ const EnhancedDataEditor = () => {
           ref={scrollContainerRef}
         >
           <Box sx={{ p: 1.5, height: '100%', display: 'flex', flexDirection: 'column', gap: 1.25 }}>
+            <NonEnglishLanguageBanner
+              headers={(columnDefs || []).map(c => c.headerName || c.field)}
+              rows={(rowData || []).map(r => (columnDefs || []).map(c => r?.[c.field]))}
+            />
             <BomDuplicatePolicyBanner sessionId={sessionId} refreshKey={totalRows} />
             {dupHighlight && (
               <Alert
@@ -10049,8 +10054,8 @@ const EnhancedDataEditor = () => {
               },
               {
                 key: 'bom',
-                title: 'Export to BOM Directory',
-                helper: 'Fix required BOM fields, preview the BOM export, then download.',
+                title: 'Export sheet',
+                helper: 'Preview the BOM diagram and download the sheet.',
                 icon: <AccountTreeIcon sx={{ color: '#16a34a' }} />
               }
             ].map(option => (
@@ -10272,30 +10277,34 @@ const EnhancedDataEditor = () => {
           >
             {factwisePreviewDownloading === 'excel' ? 'Preparing…' : 'Export Sheet'}
           </Button>
-          {/* Hands off to Factwise: BOM → the 2-step (items → BOM) orchestrator
-              dialog; Item → Factwise's own bulk-import page. Mock when the tool
-              runs standalone. */}
-          <Button
-            variant="contained"
-            onClick={() => handleDirectoryExport(factwisePreviewType)}
-            disabled={Boolean(factwisePreviewDownloading)}
-            startIcon={<FolderOpenIcon />}
-            sx={{
-              textTransform: 'none',
-              borderRadius: '999px',
-              fontWeight: 700,
-              px: 3,
-              minHeight: 38,
-              bgcolor: '#2563eb',
-              boxShadow: '0 14px 28px -18px rgba(37, 99, 235, 0.9)',
-              '&:hover': {
+          {/* Hands off to Factwise. Hidden for the BOM preview (renamed
+              "Export sheet" in the chooser) so that path is download-only —
+              user asked 2026-08-18 to keep BOM as diagram + sheet download,
+              no direct FactWise hand-off from this preview. Kept for Item so
+              the existing bulk-import route is unchanged. */}
+          {factwisePreviewType !== 'bom' && (
+            <Button
+              variant="contained"
+              onClick={() => handleDirectoryExport(factwisePreviewType)}
+              disabled={Boolean(factwisePreviewDownloading)}
+              startIcon={<FolderOpenIcon />}
+              sx={{
+                textTransform: 'none',
+                borderRadius: '999px',
+                fontWeight: 700,
+                px: 3,
+                minHeight: 38,
                 bgcolor: '#2563eb',
-                boxShadow: '0 14px 28px -18px rgba(37, 99, 235, 0.9)'
-              }
-            }}
-          >
-            Export to FactWise
-          </Button>
+                boxShadow: '0 14px 28px -18px rgba(37, 99, 235, 0.9)',
+                '&:hover': {
+                  bgcolor: '#2563eb',
+                  boxShadow: '0 14px 28px -18px rgba(37, 99, 235, 0.9)'
+                }
+              }}
+            >
+              Export to FactWise
+            </Button>
+          )}
         </DialogActions>
       </Dialog>
 

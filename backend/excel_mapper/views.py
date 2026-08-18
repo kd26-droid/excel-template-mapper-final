@@ -589,11 +589,22 @@ def internal_name_for_slot_label(header: str) -> str:
 
 
 def derive_sfo_column_counts(headers: list) -> dict:
-    """Derive dynamic group counts from SFO-style repeated destination headers."""
+    """Derive dynamic group counts from SFO-style repeated destination headers.
+
+    Counted from the headers, not assumed. This returned the constants 3/3/1
+    whatever it was passed, which meant the destination template could not
+    change shape: build_sfo_clustered_headers rebuilds each group from the
+    count, so adding a fourth "Tag (4)" column to the template had it stripped
+    straight back out again on upload.
+
+    A template with no dynamic columns at all still needs one slot of each -
+    the mapping canvas has to offer somewhere to put a tag - so the floor is 1.
+    """
+    counted = derive_sfo_column_counts_from_headers(headers or [])
     return {
-        "tags_count": 3,
-        "spec_pairs_count": 3,
-        "customer_id_pairs_count": 1,
+        "tags_count": max(counted["tags_count"], 1),
+        "spec_pairs_count": max(counted["spec_pairs_count"], 1),
+        "customer_id_pairs_count": max(counted["customer_id_pairs_count"], 1),
     }
 
 
