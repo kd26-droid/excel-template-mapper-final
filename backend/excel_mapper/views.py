@@ -5732,14 +5732,41 @@ def _sub_assembly_codes_from_grid(info, headers, rows):
     if cpn_index < 0 or code_index < 0:
         return []
 
-    codes = []
+    # An Item code shared by several CPNs names a GROUP, not a part, so it
+    # cannot stand in for one sub-assembly. The ID rule builds from MPN +
+    # manufacturer, and a placeholder MPN ("TO SPECIFICATION") collapses every
+    # row carrying it onto a single code — 132 rows over 62 distinct parts in
+    # the sheet that produced this. One of those rows was a real sub-assembly,
+    # so returning its code put the shared string into the assembly set, and the
+    # Item-code fallback below then matched all 62 leaves and typed them
+    # Finished good. A code that does not identify a row cannot resolve one.
+    # The answer names ONE part, so it may only resolve to ONE item code, and
+    # that code may only belong to that part. Both directions are checked
+    # because both have failed: a placeholder MPN ("TO SPECIFICATION") collapses
+    # every row carrying it onto one code, and a CPN column mapped to a
+    # near-constant puts every row under one part number. Either way a single
+    # real sub-assembly would otherwise hand its whole group to the caller,
+    # which types all of them Finished good.
+    cpns_of_code = {}
+    codes_of_cpn = {}
     for row in rows or []:
         if not isinstance(row, list) or max(cpn_index, code_index) >= len(row):
             continue
-        if str(row[cpn_index] or '').strip() in part_numbers:
-            code = str(row[code_index] or '').strip()
-            if code:
-                codes.append(code)
+        code = str(row[code_index] or '').strip()
+        if not code:
+            continue
+        cpn = str(row[cpn_index] or '').strip()
+        cpns_of_code.setdefault(code, set()).add(cpn)
+        if cpn in part_numbers:
+            codes_of_cpn.setdefault(cpn, set()).add(code)
+
+    codes = []
+    for found in codes_of_cpn.values():
+        if len(found) != 1:
+            continue
+        code = next(iter(found))
+        if len(cpns_of_code.get(code) or ()) == 1:
+            codes.append(code)
     return codes
 
 
@@ -5798,6 +5825,18 @@ def _type_authored_assemblies(info, headers, rows):
     if not codes:
         return 0
 
+    # On a hierarchical sheet the answers name EVERY block, so a row they do not
+    # claim is not an assembly — and saying so out loud is what lets a wrong
+    # value heal. Without it `Finished good` is write-once: a stamp applied by a
+    # bad match survives the fix to whatever caused it, because nothing ever
+    # writes the type back down. Only an explicit `Finished good` is reverted;
+    # blank is left for the editor defaults to fill.
+    authoritative = any(
+        answer.get('hasLevels')
+        for answer in (((info or {}).get('bom_structure') or {}).get('sheets') or {}).values()
+        if isinstance(answer, dict)
+    )
+
     code_index = _grid_column_index(headers, 'Item code')
     type_index = _grid_column_index(headers, 'Item type')
     cpn_index = _grid_column_index(headers, 'CPN Code')
@@ -5822,6 +5861,9 @@ def _type_authored_assemblies(info, headers, rows):
                 existing_code if existing_code in codes else ''
             )
             if matched not in codes:
+                if authoritative and read(type_index) == 'Finished good':
+                    row[type_index] = 'Raw material'
+                    changed += 1
                 continue
             while len(row) <= max(type_index, code_index):
                 row.append('')
@@ -5852,6 +5894,9 @@ def _type_authored_assemblies(info, headers, rows):
                 existing_code if existing_code in codes else ''
             )
             if matched not in codes:
+                if authoritative and str(row.get(type_key) or '').strip() == 'Finished good':
+                    row[type_key] = 'Raw material'
+                    changed += 1
                 continue
             if str(row.get(type_key) or '').strip() != 'Finished good':
                 row[type_key] = 'Finished good'
