@@ -511,6 +511,11 @@ const EnhancedDataEditor = () => {
   const [createColumnSeparator, setCreateColumnSeparator] = useState(' ');
   const [createColumnSeparatorMode, setCreateColumnSeparatorMode] = useState('space');
   const [createColumnCustomSeparator, setCreateColumnCustomSeparator] = useState('');
+  // A serial can be numbered off a column instead of a typed prefix, giving
+  // "<column value>_1, <column value>_2" — the usual way to split duplicates.
+  const [createColumnSerialPrefixSource, setCreateColumnSerialPrefixSource] = useState('text');
+  const [createColumnSerialPrefixColumn, setCreateColumnSerialPrefixColumn] = useState('');
+  const [createColumnSerialSeparator, setCreateColumnSerialSeparator] = useState('_');
   const [createColumnMode, setCreateColumnMode] = useState('fill_empty');
   const [createColumnSaving, setCreateColumnSaving] = useState(false);
   // Rules saved in Settings, replayable against this sheet.
@@ -2895,6 +2900,10 @@ const EnhancedDataEditor = () => {
       showSnackbar('Select a source column', 'warning');
       return;
     }
+    if (createColumnContentType === 'serial' && createColumnSerialPrefixSource === 'column' && !createColumnSerialPrefixColumn) {
+      showSnackbar('Select the column the prefix comes from', 'warning');
+      return;
+    }
     if (createColumnContentType === 'conditional' && conditionalBranches.some(branch => !branch.column)) {
       showSnackbar('Select a source column for every condition', 'warning');
       return;
@@ -2977,6 +2986,9 @@ const EnhancedDataEditor = () => {
         serial_start: factwiseSerialStart,
         serial_padding: factwiseSerialPadding,
         serial_increment: effectiveSerialIncrement,
+        serial_prefix_source: createColumnSerialPrefixSource,
+        serial_prefix_column: createColumnSerialPrefixColumn,
+        serial_separator: createColumnSerialSeparator,
       };
       const response = await api.fillOrCreateColumn(sessionId, rule);
       if (!response.data?.success) throw new Error(response.data?.error || 'Column update failed');
@@ -3018,6 +3030,10 @@ const EnhancedDataEditor = () => {
     factwiseSerialStart,
     factwiseSerialPadding,
     factwiseSerialIncrement,
+    effectiveSerialIncrement,
+    createColumnSerialPrefixSource,
+    createColumnSerialPrefixColumn,
+    createColumnSerialSeparator,
     sessionId,
     showSnackbar,
     fetchDataSynchronized,
@@ -3484,10 +3500,22 @@ const EnhancedDataEditor = () => {
       action: 'This is a generation problem rather than a data one — re-check the BOM setup.',
     },
     duplicate_item_codes: {
-      title: 'Rows were collapsed into one item',
-      rule: 'Rows sharing an item code become a single item in the directory.',
+      column: 'Item code',
+      title: 'Rows sharing an item code were merged',
+      rule: 'Rows sharing an item code become a single item in the directory. The message '
+           + 'says how many codes were involved and how many rows they cost.',
       action: 'Correct if these are genuinely different parts that happen to share a code. '
              + 'If they are the same part listed twice, nothing needs doing.',
+    },
+    duplicates_consolidated: {
+      // No `column`: the fix is the duplicate-handling setting, not a cell, so
+      // offering to fill a column here would aim the user at the wrong thing.
+      title: 'Repeated parts are being consolidated',
+      rule: 'The duplicate setting decides what happens when one part is listed more than '
+           + 'once. Merged lines have their quantities added together, so rows that '
+           + 'disagreed on quantity end up as one figure.',
+      action: 'Nothing is wrong with the export. Open the duplicate-handling banner above '
+             + 'the grid if these lines should stay separate instead.',
     },
     document_rows: {
       title: 'Rows were excluded as documents',
@@ -3556,9 +3584,13 @@ const EnhancedDataEditor = () => {
       try {
         const resp = await api.validateBomSheet(sessionId);
         const issues = resp?.data?.errors || [];
-        if (issues.length > 0) {
+        const warnings = resp?.data?.warnings || [];
+        // Warnings alone used to be fetched and dropped, because the dialog only
+        // opened for errors. That is how a duplicate consolidation — quantities
+        // summed into one line — reached the export without ever being shown.
+        if (issues.length > 0 || warnings.length > 0) {
           setBomValidationIssues(issues);
-          setBomValidationWarnings(resp?.data?.warnings || []);
+          setBomValidationWarnings(warnings);
           pendingExportRef.current = exportFn;
           setBomValidationOpen(true);
           return;
@@ -6654,9 +6686,52 @@ const EnhancedDataEditor = () => {
 
             {createColumnContentType === 'serial' && (
               <>
-                <Grid item xs={12} sm={4}>
-                  <TextField fullWidth size="small" label="Prefix" value={factwiseSerialPrefix} onChange={(e) => setFactwiseSerialPrefix(e.target.value)} />
+                <Grid item xs={12} sm={createColumnSerialPrefixSource === 'column' ? 4 : 6}>
+                  <FormControl fullWidth size="small">
+                    <InputLabel>Prefix</InputLabel>
+                    <Select
+                      label="Prefix"
+                      value={createColumnSerialPrefixSource}
+                      onChange={(e) => {
+                        const source = e.target.value;
+                        setCreateColumnSerialPrefixSource(source);
+                        // Numbering off the column being filled is the common
+                        // case (splitting duplicate codes apart), so start there.
+                        if (source === 'column' && !createColumnSerialPrefixColumn) {
+                          setCreateColumnSerialPrefixColumn(createColumnTab === 0 ? createColumnTarget : (dataColumnFields[0] || ''));
+                        }
+                      }}
+                    >
+                      <MenuItem value="text">Type a fixed prefix</MenuItem>
+                      <MenuItem value="column">Take it from a column</MenuItem>
+                    </Select>
+                  </FormControl>
                 </Grid>
+                {createColumnSerialPrefixSource === 'column' ? (
+                  <>
+                    <Grid item xs={12} sm={5}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel>Prefix column</InputLabel>
+                        <Select label="Prefix column" value={createColumnSerialPrefixColumn} onChange={(e) => setCreateColumnSerialPrefixColumn(e.target.value)}>
+                          {columnDefs.filter(c => c.field && c.field !== '__row_number__').map(c => (
+                            <MenuItem key={c.field} value={c.field}>{columnLabel(c.field, c.headerName)}</MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                    <Grid item xs={12} sm={3}>
+                      <TextField
+                        fullWidth size="small" label="Separator"
+                        value={createColumnSerialSeparator}
+                        onChange={(e) => setCreateColumnSerialSeparator(e.target.value)}
+                      />
+                    </Grid>
+                  </>
+                ) : (
+                  <Grid item xs={12} sm={6}>
+                    <TextField fullWidth size="small" label="Prefix text" value={factwiseSerialPrefix} onChange={(e) => setFactwiseSerialPrefix(e.target.value)} />
+                  </Grid>
+                )}
                 <Grid item xs={6} sm={4}>
                   <TextField fullWidth size="small" type="number" label="Start at" value={factwiseSerialStart} onChange={(e) => setFactwiseSerialStart(e.target.value)} />
                 </Grid>
@@ -6680,6 +6755,16 @@ const EnhancedDataEditor = () => {
                     </Typography>
                   )}
                 </Grid>
+                {createColumnSerialPrefixSource === 'column' && createColumnSerialPrefixColumn && (
+                  <Grid item xs={12}>
+                    <Alert severity="info">
+                      Each row takes its {columnLabel(createColumnSerialPrefixColumn, createColumnSerialPrefixColumn)} value, then
+                      {' '}{createColumnSerialSeparator || 'no separator'} and a number that restarts for every distinct value — e.g.{' '}
+                      {`ABC-123${createColumnSerialSeparator}${String(Number(factwiseSerialStart) || 1).padStart(Math.max(0, Number(factwiseSerialPadding) || 0), '0')}`},{' '}
+                      {`ABC-123${createColumnSerialSeparator}${String((Number(factwiseSerialStart) || 1) + 1).padStart(Math.max(0, Number(factwiseSerialPadding) || 0), '0')}`}.
+                    </Alert>
+                  </Grid>
+                )}
               </>
             )}
           </Grid>
@@ -6717,6 +6802,7 @@ const EnhancedDataEditor = () => {
               !(createColumnTab === 0 ? createColumnTarget : createColumnNewName.trim()) ||
               (createColumnTab === 1 && dataColumnFields.includes(createColumnNewName.trim())) ||
               (createColumnContentType === 'concat' && (!createColumnFirst || !createColumnSecond)) ||
+              (createColumnContentType === 'serial' && createColumnSerialPrefixSource === 'column' && !createColumnSerialPrefixColumn) ||
               (createColumnContentType === 'saved_rule' && !selectedColumnRuleId)
             }
             startIcon={createColumnSaving ? <CircularProgress size={16} /> : <AutoAwesomeIcon />}
@@ -11007,11 +11093,11 @@ const EnhancedDataEditor = () => {
           borderBottom: isDarkMode ? '1px solid rgba(148, 163, 184, 0.16)' : '1px solid #e2e8f0',
         }}>
           <Typography variant="h6" sx={{ fontWeight: 850, letterSpacing: 0, color: t.text.heading }}>
-            BOM import errors
+            {bomErrorGroups.length === 0 ? 'Before this BOM exports' : 'BOM import errors'}
           </Typography>
           <Typography variant="body2" sx={{ color: t.text.secondary, mt: 0.25 }}>
             {bomErrorGroups.length === 0
-              ? 'This BOM has nothing blocking the FactWise import.'
+              ? `Nothing blocks the FactWise import. ${bomWarningGroups.length} thing${bomWarningGroups.length === 1 ? '' : 's'} changed on the way out — check ${bomWarningGroups.length === 1 ? 'it' : 'them'}, then continue.`
               : `${bomErrorGroups.length} problem${bomErrorGroups.length === 1 ? '' : 's'} would make this BOM fail the FactWise import. You can still export the sheet to look at it.`}
           </Typography>
         </DialogTitle>
@@ -11283,7 +11369,7 @@ const EnhancedDataEditor = () => {
               '&:hover': { bgcolor: '#1d4ed8', boxShadow: 'none' },
             }}
           >
-            Export anyway
+            {bomErrorGroups.length === 0 ? 'Continue export' : 'Export anyway'}
           </Button>
         </DialogActions>
       </Dialog>

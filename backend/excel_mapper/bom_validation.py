@@ -427,15 +427,24 @@ def validate_bom(bom_headers, bom_rows, item_rows=None, bom_row_grid_rows=None):
             # Rows that merely repeat the same item are collapsed on the way out
             # and never reach here. What is left is a code whose rows disagree,
             # which is a real conflict: two different parts are claiming it.
+            #
+            # The list holds one entry per REPEAT, so counting it reports neither
+            # the number of codes nor the number of rows. Both are stated: one
+            # code shared by five rows and five codes shared by two are the same
+            # length of list and completely different problems.
+            distinct_duplicate_codes = sorted(set(duplicate_item_codes))
+            duplicate_row_count = len(duplicate_item_codes) + len(distinct_duplicate_codes)
             errors.append({
                 'rule': 'item_code_duplicate',
-                'codes': duplicate_item_codes[:10],
-                'count': len(duplicate_item_codes),
-                'message': ('%d item code(s) are shared by rows that describe different parts, '
-                            'so BOM references to them are ambiguous. Either give the rows '
-                            'different item codes, or make them match exactly if they are the '
-                            'same part. Deleting a row also removes it from the BOM.'
-                            % len(duplicate_item_codes)),
+                'codes': distinct_duplicate_codes[:10],
+                'count': duplicate_row_count,
+                'items': len(distinct_duplicate_codes),
+                'rows_affected': duplicate_row_count,
+                'message': ('%d item code(s) are shared by %d rows that describe different '
+                            'parts, so BOM references to them are ambiguous. Either give the '
+                            'rows different item codes, or make them match exactly if they '
+                            'are the same part. Deleting a row also removes it from the BOM.'
+                            % (len(distinct_duplicate_codes), duplicate_row_count)),
             })
 
         # Finished goods sit at the top of their BOM, so they are never a child

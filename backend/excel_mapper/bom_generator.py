@@ -302,6 +302,34 @@ def generate_item_rows(records):
     return headers, rows, duplicates
 
 
+def summarize_duplicate_item_codes(duplicate_codes):
+    """Turn the repeat list from ``generate_item_rows`` into a countable warning.
+
+    ``duplicate_codes`` holds one entry per REPEAT, so five codes on five rows
+    each is twenty entries and none of those numbers is the one to report. The
+    message used to say "collapsed into one item" whatever the shape of the
+    problem, which read as a single merge when it was five — the user cannot
+    judge whether that matters without knowing how many items and how many rows
+    are involved.
+    """
+    codes = sorted({code for code in duplicate_codes if code})
+    items = len(codes)
+    # Each code lost (occurrences - 1) rows, so adding the codes back gives the
+    # total number of rows that shared a code.
+    rows = len(duplicate_codes) + items
+    message = ('%d rows shared %d item code%s and were collapsed into %d item%s.'
+               % (rows, items, '' if items == 1 else 's',
+                  items, '' if items == 1 else 's'))
+    return {
+        'type': 'duplicate_item_codes',
+        'count': rows,
+        'items': items,
+        'rows_affected': rows,
+        'codes': codes[:10],
+        'message': message,
+    }
+
+
 def generate_flat_bom(records, bom_header):
     """Generate a single-level BOM: one block, one row per parentKey group.
 
@@ -440,13 +468,7 @@ def generate_flat_bom(records, bom_header):
     result.item_rows = item_rows
 
     if duplicate_codes:
-        result.warnings.append({
-            'type': 'duplicate_item_codes',
-            'count': len(duplicate_codes),
-            'codes': duplicate_codes[:10],
-            'message': '%d rows shared an item code and were collapsed into one item.'
-                       % len(duplicate_codes),
-        })
+        result.warnings.append(summarize_duplicate_item_codes(duplicate_codes))
     if ungrouped:
         result.warnings.append({
             'type': 'missing_parent_key',
@@ -734,13 +756,7 @@ def generate_multi_level_bom(tree, bom_header, alternates_of=None, records=None,
     result.item_headers = item_headers
     result.item_rows = item_rows
     if duplicate_codes:
-        tree.warnings.append({
-            'type': 'duplicate_item_codes',
-            'count': len(duplicate_codes),
-            'codes': duplicate_codes[:10],
-            'message': '%d rows shared an item code and were collapsed into one item.'
-                       % len(duplicate_codes),
-        })
+        tree.warnings.append(summarize_duplicate_item_codes(duplicate_codes))
     result.warnings = list(tree.warnings)
     result.errors = list(tree.errors)
 
@@ -1269,6 +1285,64 @@ VALID_DUP_POLICIES = {
     POLICY_AGGREGATE_ALL_TO_ONE_LEVEL,
     POLICY_KEEP_DUPLICATES,
 }
+
+
+# How each policy resolves a duplicate group, in the user's terms. Used by the
+# consolidation warning so the message names what is about to happen rather
+# than the policy's internal id.
+_DUP_POLICY_EFFECT = {
+    POLICY_AGGREGATE_PER_LEVEL: 'merged into one line per level, with their quantities summed',
+    POLICY_KEEP_AT_ALL_LEVELS: 'merged into one line per level, with their quantities summed',
+    POLICY_AGGREGATE_ALL_TO_ONE_LEVEL: 'merged into a single line, with their quantities summed',
+    POLICY_IGNORE_OTHER_LEVELS: 'kept at one level only — rows at the other levels are dropped',
+}
+
+
+def describe_duplicate_consolidation(groups, policy):
+    """Warn about what the duplicate policy is about to merge, before it runs.
+
+    Consolidation is silent by design — the export succeeds and validation has
+    nothing to object to, because the duplicates are gone by the time it looks.
+    That silence is the problem: rows whose quantities disagree are summed into
+    one line and nothing on screen says so. Returns None when there is nothing
+    to consolidate, or under ``keep_duplicates``, where validation reports the
+    surviving duplicates itself.
+    """
+    if not groups or policy == POLICY_KEEP_DUPLICATES:
+        return None
+
+    items = len(groups)
+    rows = sum(len(group.get('occurrences') or []) for group in groups)
+    differing = [
+        group for group in groups
+        if len({str(occ.get('quantity') or '').strip()
+                for occ in (group.get('occurrences') or [])}) > 1
+    ]
+    codes = [str(group.get('raw_material_code') or '').strip()
+             for group in groups if group.get('raw_material_code')]
+
+    message = ('%d item%s appear%s on %d rows and will be %s.'
+               % (items, '' if items == 1 else 's',
+                  's' if items == 1 else '',
+                  rows, _DUP_POLICY_EFFECT.get(policy, 'consolidated')))
+    if differing:
+        # Dropping a row and summing it are not the same outcome, so the policy
+        # that discards rows must not claim their quantities were added in.
+        fate = ('only the figure at the level that is kept survives'
+                if policy == POLICY_IGNORE_OTHER_LEVELS
+                else 'those figures are added together into one')
+        message += (' %d of them ha%s rows with DIFFERENT quantities, so %s.'
+                    % (len(differing), 's' if len(differing) == 1 else 've', fate))
+    return {
+        'type': 'duplicates_consolidated',
+        'count': rows,
+        'items': items,
+        'rows_affected': rows,
+        'quantity_conflicts': len(differing),
+        'policy': policy,
+        'codes': codes[:10],
+        'message': message,
+    }
 
 
 def _num(value):
