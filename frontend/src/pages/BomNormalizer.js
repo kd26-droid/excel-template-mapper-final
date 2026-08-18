@@ -2360,6 +2360,7 @@ const findKnownManufacturerMatches = (text, phrases, canonicalForManufacturer) =
 const splitManufacturerCell = (value, expectedCount, config = {}) => {
   const text = fmt(value).replace(/\u00a0/g, ' ');
   if (!text) return [];
+  const keepSingleManufacturerCell = config.manufacturerCellMode === 'single_cell';
   const directory = config.manufacturerDirectory || {};
   const directoryNames = Array.isArray(directory.names) ? directory.names : [];
   const directoryAliases = directory.aliases || {};
@@ -2379,24 +2380,28 @@ const splitManufacturerCell = (value, expectedCount, config = {}) => {
 
   const delimiter = selectedDelimiter(config);
   const explicitParts = splitByExplicitDelimiter(text, delimiter);
-  if (explicitParts.length > 1) return mergeManufacturerSuffixParts(explicitParts).map(canonicalForManufacturer);
+  if (!keepSingleManufacturerCell && explicitParts.length > 1) return mergeManufacturerSuffixParts(explicitParts).map(canonicalForManufacturer);
 
   const slashParts = splitSpacedSlashManufacturerParts(text);
-  if (slashParts.length > 1) return mergeManufacturerSuffixParts(slashParts).map(canonicalForManufacturer);
+  if (!keepSingleManufacturerCell && slashParts.length > 1) return mergeManufacturerSuffixParts(slashParts).map(canonicalForManufacturer);
 
   const knownPhrases = [
     ...directoryNames,
     ...Object.keys(directoryAliases),
     ...KNOWN_MANUFACTURERS,
   ];
-  const knownMatches = findKnownManufacturerMatches(text, knownPhrases, canonicalForManufacturer);
-  if (knownMatches.length >= Math.min(expectedCount || 1, 2)) return knownMatches;
+  if (!keepSingleManufacturerCell) {
+    const knownMatches = findKnownManufacturerMatches(text, knownPhrases, canonicalForManufacturer);
+    if (knownMatches.length >= Math.min(expectedCount || 1, 2)) return knownMatches;
+  }
 
   const colonSegments = parseColonSegments(text);
-  if (colonSegments.length > 1) return colonSegments.map((segment) => canonicalForManufacturer(segment.label));
+  if (!keepSingleManufacturerCell && colonSegments.length > 1) return colonSegments.map((segment) => canonicalForManufacturer(segment.label));
 
   const delimited = mergeManufacturerSuffixParts(splitDelimited(text));
-  if (delimited.length > 1) return delimited.map(canonicalForManufacturer);
+  if (!keepSingleManufacturerCell && delimited.length > 1) return delimited.map(canonicalForManufacturer);
+
+  if (keepSingleManufacturerCell) return [canonicalForManufacturer(text)];
 
   if (!expectedCount || expectedCount <= 1) return [text];
 
@@ -2473,6 +2478,27 @@ const rowLooksLikeRepeatedHeader = (row, headers) => {
 const rowLooksLikeDoNotPopulate = (row, headers) => {
   const text = rowValues(row, headers).join(' ').toLowerCase();
   return /\b(do\s*not\s*populate|not\s*populate|dnp|dni|not\s*fitted|no\s*fit)\b/.test(text);
+};
+
+// Values a row-type column is likely to use for a document. Only ever used to
+// PRE-TICK the boxes when the column is first mapped - the user sees every
+// distinct value with its row count and decides. Missing a word here costs a
+// tick, not a wrong BOM.
+const DOCUMENT_TYPE_HINT_RE = /^(doc\.?\s*(ass|def|assembly|definition)?\.?|document|drawing|dessin|plan|spec|specification)$/i;
+
+const suggestDocumentTypeValues = (values) => (
+  (values || []).filter((value) => DOCUMENT_TYPE_HINT_RE.test(String(value).trim()))
+);
+
+// A row the user has declared to be a document rather than a consumed part.
+// Both halves must be present - a mapped column and at least one ticked value -
+// so this can never fire on a sheet where the question was not answered.
+const isDocumentRowByType = (row, roles, config) => {
+  const column = roles?.rowType;
+  const flagged = config?.documentTypeValues;
+  if (!column || !flagged || !flagged.length) return false;
+  const value = getCell(row, column).trim();
+  return Boolean(value) && flagged.includes(value);
 };
 
 const rowLooksLikeDeleted = (row, headers) => {
@@ -2634,9 +2660,13 @@ const statedParent = (row, roles) => (
 // every stage that needs it.
 const hierarchyParent = (row, roles) => statedParent(row, roles) || row?.[LEVEL_PARENT_KEY] || '';
 
-// The level this row sits at. A depth read off the row's own path outranks the
-// sheet's level column, because the path counts tiers and the column may not.
-const rowLevel = (row, roles) => String(row?.[PATH_DEPTH_KEY] ?? '') || getCell(row, roles.level);
+// The visible level should only show a level the sheet explicitly stated:
+// a mapped level column, or a breadcrumb path depth. Parent-chain depth is still
+// useful internally for hierarchy, but showing it as "Level 2/3" misleads users
+// on sheets where they never selected a BOM level.
+const PARENT_CHAIN_DEPTH_KEY = '__parentChainDepth';
+const rowLevel = (row, roles) => String(row?.[PATH_DEPTH_KEY] ?? row?.[PARENT_CHAIN_DEPTH_KEY] ?? '') || getCell(row, roles.level);
+const outputRowLevel = (row, roles) => String(row?.[PATH_DEPTH_KEY] ?? '') || getCell(row, roles.level);
 
 // Whether this row's parent cell reads as a trail rather than a plain code.
 // Only used to decide whether to OFFER the option - a separator alone does not
@@ -2672,6 +2702,11 @@ const shouldSkipSourceRow = (row, headers, roles, config) => {
   if (config.skipRepeatedHeaders && rowLooksLikeRepeatedHeader(row, headers)) return true;
   if (config.skipDoNotPopulate && rowLooksLikeDoNotPopulate(row, headers)) return true;
   if (config.skipDeletedRows && rowLooksLikeDeleted(row, headers)) return true;
+  // Documents. Not a guess: the user named the column and ticked the values, so
+  // this drops exactly what they said and nothing else. Placed before the
+  // section-title guess below, which cannot tell a drawing from a heading and on
+  // the THALES export deleted a real sub-assembly along with one.
+  if (isDocumentRowByType(row, roles, config)) return true;
   const layoutStructure = effectiveStructure(config);
   if (layoutStructure === 'assembly_quantity_matrix') return false;
   if (layoutStructure === 'multi_block_assembly') return false;
@@ -3527,6 +3562,8 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
   const itemColumn = config.followingItemRowsItemColumn || roles.cpn || '';
   const mpnColumn = config.followingItemRowsMpnColumn || roles.mpn || '';
   const manufacturerColumn = config.followingItemRowsManufacturerColumn || roles.manufacturer || '';
+  const parserConfig = { ...config, manufacturerCellMode: 'single_cell' };
+  const cpnAutofillMode = config.followingItemRowsCpnMode || 'primary';
   const strictContextMarker = Boolean(contextColumn);
   let currentGroup = null;
   const emittedPartsByGroup = new WeakMap();
@@ -3555,8 +3592,8 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
       : [];
     if (packedPairs.length) return packedPairs;
 
-    const mpns = splitMpnCell(rawMpn, config);
-    const manufacturers = splitManufacturerCell(rawManufacturer, mpns.length || null, config);
+    const mpns = splitMpnCell(rawMpn, parserConfig);
+    const manufacturers = splitManufacturerCell(rawManufacturer, mpns.length || null, parserConfig);
     if (mpns.length) return pairMpnsWithManufacturers(mpns, manufacturers, rawManufacturer);
     if (rawMpn || rawManufacturer) {
       return [{
@@ -3582,8 +3619,17 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
       if (normalizeKey(contextColumn) === normalizeKey(mpnColumn) && !hasContextDetail) return false;
       return true;
     }
+    // A mapped parent column IS the marker, so it decides alone. It names the
+    // assembly a row belongs to, and only a real item row carries one — the
+    // sparse rows below it are blank there by definition.
+    //
+    // Letting description vote alongside it broke every sheet whose ALTERNATE
+    // rows carry a description of their own: THALES' Y2 export repeats the part
+    // name on each approved manufacturer, so all 2244 of them read as new items
+    // rather than alternates, arriving with no parent, no quantity and the
+    // manufacturer's own code as their CPN.
+    if (roles.parent) return Boolean(getCell(row, roles.parent));
     return Boolean(
-      getCell(row, roles.parent) ||
       getCell(row, roles.description) ||
       getCell(row, roles.quantity) ||
       getCell(row, roles.uom)
@@ -3592,17 +3638,28 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
 
   const groupFromRow = (row, rowIndex) => {
     const sourceRow = row.__sourceRow || rowIndex + 1;
-    const level = rowLevel(row, roles) || '1';
+    const internalLevel = rowLevel(row, roles) || '1';
+    const displayLevel = outputRowLevel(row, roles);
     const cpn = getCell(row, roles.cpn) || getCell(row, itemColumn);
     const description = getCell(row, roles.description);
     const parent = hierarchyParent(row, roles);
     const contextValue = contextColumn ? getCell(row, contextColumn) : '';
-    const identity = contextValue || cpn || description || `Source row ${sourceRow}`;
+    // The marker column answers "does this row start a new item?" - by being
+    // filled rather than blank. It does NOT answer "which item is this?", and
+    // leading with it here made it do both. A marker whose value repeats then
+    // becomes one identity for every row under it: a THALES sheet marking new
+    // items with the ASSEMBLY code put all 726 of its parts on a single BOM
+    // line, 725 of them arriving as "alternates" of whichever came first.
+    //
+    // So the part number leads. The marker stays as the fallback for sheets that
+    // mark items with a line number and carry no separate code - there `cpn` is
+    // blank, so those read exactly as before.
+    const identity = cpn || contextValue || description || `Source row ${sourceRow}`;
     return {
       sourceRow,
-      parentKey: parent ? `${parent}␟${identity}` : `L${level}␟${identity}`,
+      parentKey: parent ? `${parent}␟${identity}` : `L${internalLevel}␟${identity}`,
       parent,
-      level,
+      level: displayLevel,
       cpn,
       description,
       quantity: getCell(row, roles.quantity),
@@ -3611,16 +3668,56 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
     };
   };
 
+  // A marked row carrying no MPN/MFR of its own is normally just the header of a
+  // group whose parts arrive on the rows below, so emitting it too would double
+  // every line. But nothing guarantees those rows exist: a part a customer makes
+  // themselves - a bare PCB, firmware, a sub-assembly - has no external
+  // manufacturer to list. Discarding the header outright dropped 11 real parts
+  // from one THALES BOM, the sub-assembly among them, which is why that BOM came
+  // out with no second level.
+  //
+  // So the header is held rather than dropped, and emitted with a blank
+  // manufacturer only once the next group starts (or the sheet ends) without one
+  // having turned up.
+  let pendingContext = null;
+
+  const flushPendingContext = () => {
+    if (!pendingContext) return;
+    const { group, row, rowIndex } = pendingContext;
+    pendingContext = null;
+    output.push(withSourceColumns({
+      ...group,
+      sourceRow: row.__sourceRow || rowIndex + 1,
+      relation: 'Primary',
+      cpn: group.cpn || getCell(row, itemColumn),
+      mpn: '',
+      manufacturer: '',
+      rule: 'following_item_rows_primary_without_manufacturer',
+      confidence: 62,
+      discardedText: '',
+    }, row, config));
+    group.relationCount = Math.max(1, Number(group.relationCount || 0));
+  };
+
   rows.forEach((row, rowIndex) => {
     const sourceRow = row.__sourceRow || rowIndex + 1;
     const itemValue = getCell(row, itemColumn);
     const parts = splitParts(row).filter((pair) => pair?.mpn || pair?.manufacturer);
     const isContextRow = hasPrimaryContext(row);
-    const canAttachAsAlternate = Boolean(currentGroup && !isContextRow && (
+    const isPendingSparsePartRow = Boolean(
+      pendingContext?.group === currentGroup &&
+      parts.length &&
+      !getCell(row, roles.quantity) &&
+      !getCell(row, roles.uom)
+    );
+    const canAttachAsAlternate = Boolean(currentGroup && (!isContextRow || isPendingSparsePartRow) && (
       strictContextMarker ? parts.length : (itemValue || parts.length)
     ));
 
     if (canAttachAsAlternate) {
+      // The manufacturer row this group was waiting for. It becomes the primary,
+      // so the held header must not also be emitted.
+      if (pendingContext && pendingContext.group === currentGroup) pendingContext = null;
       const pairs = parts.length ? parts : [{ mpn: '', manufacturer: '', metadata: {} }];
       pairs.forEach((pair) => {
         if (!shouldEmitPartForGroup(currentGroup, pair)) return;
@@ -3631,7 +3728,7 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
           parent: currentGroup.parent,
           relation: relationIndex === 0 ? 'Primary' : `Alternate ${relationIndex}`,
           level: currentGroup.level,
-          cpn: strictContextMarker ? currentGroup.cpn : (itemValue || currentGroup.cpn),
+          cpn: cpnAutofillMode === 'column' ? (itemValue || currentGroup.cpn) : currentGroup.cpn,
           description: currentGroup.description,
           mpn: pair.mpn,
           manufacturer: pair.manufacturer,
@@ -3649,9 +3746,30 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
 
     if (!isContextRow && !itemValue && !parts.length) return;
 
+    // Any previous header still waiting has now run out of rows to be followed
+    // by, so settle it before this row takes over as the current group.
+    flushPendingContext();
+
     const group = groupFromRow(row, rowIndex);
     currentGroup = group;
-    if (strictContextMarker && isContextRow && !parts.length) {
+    // Held, not dropped: a marked row with no MPN/MFR is usually the header of a
+    // group whose parts arrive below, but nothing guarantees they will. A part
+    // the customer makes themselves - a bare PCB, firmware, a sub-assembly - has
+    // no external manufacturer to list, and discarding those took 11 real parts
+    // out of one THALES BOM, its sub-assembly among them. flushPendingContext
+    // emits it only once the next group starts without a manufacturer showing up.
+    // A mapped parent column marks a real item row just as an explicit context
+    // column does, and this must not depend on which of the two the sheet uses:
+    // gating the hold on the marker alone meant that once that control went
+    // away, every customer-made part - one with no external manufacturer to
+    // list - fell through to the drop below and vanished again.
+    if (isContextRow && !parts.length && (strictContextMarker || getCell(row, roles.parent))) {
+      pendingContext = { group, row, rowIndex };
+      return;
+    }
+    // Outside the marked case this stays a plain drop, as the Safran work made
+    // it. A row with no marker AND no part is not a line anyone stated.
+    if (!parts.length) {
       return;
     }
     const pairs = parts.length ? parts : [{ mpn: '', manufacturer: '', metadata: {} }];
@@ -3661,7 +3779,7 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
       output.push(withSourceColumns({
         ...group,
         relation: emittedPairCount === 0 ? 'Primary' : `Alternate ${emittedPairCount}`,
-        cpn: group.cpn || itemValue,
+        cpn: cpnAutofillMode === 'column' ? (itemValue || group.cpn) : group.cpn,
         mpn: pair.mpn,
         manufacturer: pair.manufacturer,
         rule: 'following_item_rows_primary',
@@ -3675,6 +3793,9 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
     });
     currentGroup.relationCount = Math.max(1, emittedPairCount);
   });
+
+  // The last group in the sheet has no following row to settle it.
+  flushPendingContext();
 
   return output;
 };
@@ -4444,7 +4565,68 @@ const unpackParentPaths = (rows, roles, config = {}) => {
   return rows;
 };
 
-// Both passes below walk the WHOLE sheet to decide what they write, so they run
+// How deep each row sits, worked out by following parent to parent.
+//
+// A sheet can state its tree in three ways, and only two of them were being
+// read. A level column says the depth outright. A breadcrumb path says it in its
+// segment count. But a plain parent column says it only IMPLICITLY: a code that
+// appears as somebody's child sits one tier below whoever owns it.
+//
+// Left underived, every row defaults to level 1 and the tiers become
+// indistinguishable — a THALES sheet whose sub-assembly is listed as a component
+// of the root computed both to the same level, so the structure gate could not
+// offer the sub-assembly as a BOM and 726 parts came out flat under the root.
+//
+// Stamped under the same key the path reading uses, since both answer the same
+// question; a row that already carries one is left alone.
+const stampParentChainDepth = (rows, roles) => {
+  rows?.forEach((row) => { delete row[PARENT_CHAIN_DEPTH_KEY]; });
+  if (!rows?.length || !roles?.parent) return rows;
+  // A level column already answers this, and it is the sheet's own statement.
+  if (roles.level) return rows;
+  const codeRole = roles.cpn || roles.description;
+  if (!codeRole) return rows;
+
+  // Whose child is each code? Read off the row that carries the code itself.
+  const parentOf = new Map();
+  rows.forEach((row) => {
+    const code = getCell(row, codeRole);
+    if (!code || parentOf.has(code)) return;
+    const parent = hierarchyParent(row, roles);
+    if (parent && parent !== code) parentOf.set(code, parent);
+  });
+
+  // Depth of a code: 1 when nobody owns it, otherwise one below its owner. The
+  // seen-set is a cycle guard — a sheet that lists A inside B inside A would
+  // otherwise recurse forever.
+  const depthCache = new Map();
+  const depthOf = (code) => {
+    if (depthCache.has(code)) return depthCache.get(code);
+    let depth = 1;
+    let current = code;
+    const seen = new Set([code]);
+    while (parentOf.has(current)) {
+      const next = parentOf.get(current);
+      if (seen.has(next)) break;
+      seen.add(next);
+      current = next;
+      depth += 1;
+    }
+    depthCache.set(code, depth);
+    return depth;
+  };
+
+  rows.forEach((row) => {
+    if (row[PATH_DEPTH_KEY]) return;
+    const parent = hierarchyParent(row, roles);
+    if (!parent) return;
+    // The row sits one tier below the assembly holding it.
+    row[PARENT_CHAIN_DEPTH_KEY] = depthOf(parent) + 1;
+  });
+  return rows;
+};
+
+// Every pass below walks the WHOLE sheet to decide what it writes, so they run
 // once over every row before anything is split up. `prepared` is how the chunked
 // caller says it has already done that: re-running them on a 50-row slice clears
 // the sheet-wide answer and replaces it with whatever that slice can see on its
@@ -4455,6 +4637,7 @@ const normalizeRows = (rows, headers, roles, config, prepared = false) => {
   if (!prepared) {
     stampInferredParents(rows, roles);
     unpackParentPaths(rows, roles, config);
+    stampParentChainDepth(rows, roles);
   }
   const layoutStructure = effectiveStructure(config);
   const assemblyMatrix = layoutStructure === 'assembly_quantity_matrix'
@@ -4506,6 +4689,9 @@ const normalizeRowsChunked = async (rows, headers, roles, config, onProgress) =>
   // parents against every code on the sheet, and a 50-row window does not hold
   // enough of them to tell a working reading from a dangling one.
   unpackParentPaths(rows, roles, config);
+  // And the same again: the chain runs the length of the sheet, so a chunk that
+  // holds a child but not its parent would call that child a root.
+  stampParentChainDepth(rows, roles);
   const layoutStructure = effectiveStructure(config);
   if (config.structure === 'grouped_rows' || layoutStructure === 'multi_block_assembly') {
     const dataRows = [];
@@ -4822,6 +5008,15 @@ const getWorkbookFileText = (workbook, path) => {
   return '';
 };
 
+const workbookCfbFileContent = (workbook, fileName) => {
+  const file = workbook?.cfb?.FileIndex?.find((entry) => entry?.name === fileName);
+  const content = file?.content;
+  if (!content) return null;
+  if (content instanceof Uint8Array) return content;
+  if (Array.isArray(content)) return new Uint8Array(content);
+  return null;
+};
+
 const parseXmlAttributes = (raw = '') => {
   const attrs = {};
   String(raw).replace(/([\w:.-]+)\s*=\s*"([^"]*)"/g, (_, key, value) => {
@@ -4911,6 +5106,122 @@ const attachWorkbookStrikeMetadata = (workbook) => {
   return workbook;
 };
 
+const readUInt16LE = (bytes, offset) => {
+  if (!bytes || offset < 0 || offset + 1 >= bytes.length) return 0;
+  return bytes[offset] | (bytes[offset + 1] << 8);
+};
+
+const readUInt32LE = (bytes, offset) => (
+  readUInt16LE(bytes, offset) | (readUInt16LE(bytes, offset + 2) << 16)
+);
+
+const forEachBiffRecord = (bytes, startOffset, endOffset, callback) => {
+  let offset = Math.max(0, startOffset || 0);
+  const limit = Math.min(bytes?.length || 0, endOffset || bytes?.length || 0);
+  while (offset + 4 <= limit) {
+    const type = readUInt16LE(bytes, offset);
+    const length = readUInt16LE(bytes, offset + 2);
+    const dataOffset = offset + 4;
+    if (dataOffset + length > limit) break;
+    callback({ type, length, dataOffset });
+    offset = dataOffset + length;
+    if (type === 0x000A) break;
+  }
+};
+
+const readBiffSheetName = (bytes, offset, charCount, flags) => {
+  const isUtf16 = Boolean(flags & 0x01);
+  const length = Math.max(0, Number(charCount || 0));
+  const byteLength = isUtf16 ? length * 2 : length;
+  if (!length || offset + byteLength > bytes.length) return '';
+  if (!isUtf16) {
+    return Array.from(bytes.slice(offset, offset + byteLength))
+      .map((code) => String.fromCharCode(code))
+      .join('');
+  }
+  const chars = [];
+  for (let index = 0; index < byteLength; index += 2) {
+    chars.push(String.fromCharCode(readUInt16LE(bytes, offset + index)));
+  }
+  return chars.join('');
+};
+
+const attachLegacyXlsStrikeMetadata = (workbook) => {
+  const bytes = workbookCfbFileContent(workbook, 'Workbook') || workbookCfbFileContent(workbook, 'Book');
+  if (!bytes?.length || !workbook?.Sheets) return workbook;
+
+  const fonts = [];
+  const xfs = [];
+  const sheets = [];
+
+  forEachBiffRecord(bytes, 0, bytes.length, ({ type, dataOffset, length }) => {
+    if (type === 0x0031) {
+      const options = readUInt16LE(bytes, dataOffset + 2);
+      fonts.push({ strike: Boolean(options & 0x0008) });
+      return;
+    }
+    if (type === 0x00E0) {
+      const fontIndex = readUInt16LE(bytes, dataOffset);
+      xfs.push({ strike: Boolean(fonts[fontIndex]?.strike) });
+      return;
+    }
+    if (type === 0x0085 && length >= 8) {
+      const offset = readUInt32LE(bytes, dataOffset);
+      const charCount = bytes[dataOffset + 6];
+      const flags = bytes[dataOffset + 7];
+      const name = readBiffSheetName(bytes, dataOffset + 8, charCount, flags);
+      if (name) sheets.push({ name, offset });
+    }
+  });
+
+  const isStrikeXf = (xfIndex) => Boolean(xfs[xfIndex]?.strike);
+  const markCell = (sheetName, row, column, xfIndex) => {
+    if (!isStrikeXf(xfIndex)) return;
+    const worksheet = workbook.Sheets[sheetName];
+    if (!worksheet) return;
+    const address = XLSX.utils.encode_cell({ r: row, c: column });
+    const cell = worksheet[address];
+    if (!cell) return;
+    cell.__styleInfo = {
+      ...(cell.__styleInfo || {}),
+      strike: true,
+    };
+  };
+
+  sheets.forEach((sheet, sheetIndex) => {
+    const nextOffset = sheets[sheetIndex + 1]?.offset || bytes.length;
+    forEachBiffRecord(bytes, sheet.offset, nextOffset, ({ type, dataOffset, length }) => {
+      if ([0x00FD, 0x0204, 0x00D6, 0x0203, 0x027E, 0x0201, 0x0205, 0x0006].includes(type) && length >= 6) {
+        markCell(sheet.name, readUInt16LE(bytes, dataOffset), readUInt16LE(bytes, dataOffset + 2), readUInt16LE(bytes, dataOffset + 4));
+        return;
+      }
+      if (type === 0x00BD && length >= 10) {
+        const row = readUInt16LE(bytes, dataOffset);
+        const firstColumn = readUInt16LE(bytes, dataOffset + 2);
+        const lastColumn = readUInt16LE(bytes, dataOffset + 4);
+        for (let column = firstColumn; column <= lastColumn; column += 1) {
+          const rkOffset = dataOffset + 6 + ((column - firstColumn) * 6);
+          if (rkOffset + 5 >= dataOffset + length) break;
+          markCell(sheet.name, row, column, readUInt16LE(bytes, rkOffset));
+        }
+        return;
+      }
+      if (type === 0x00BE && length >= 8) {
+        const row = readUInt16LE(bytes, dataOffset);
+        const firstColumn = readUInt16LE(bytes, dataOffset + 2);
+        const lastColumn = readUInt16LE(bytes, dataOffset + 4);
+        for (let column = firstColumn; column <= lastColumn; column += 1) {
+          const xfOffset = dataOffset + 6 + ((column - firstColumn) * 2);
+          if (xfOffset + 1 >= dataOffset + length) break;
+          markCell(sheet.name, row, column, readUInt16LE(bytes, xfOffset));
+        }
+      }
+    });
+  });
+
+  return workbook;
+};
+
 const readWorkbookSafely = (buffer, fileName = 'workbook') => {
   if (!XLSX || !XLSX.read || !XLSX.utils) {
     throw new Error('Spreadsheet parser is not ready. Please refresh the page and try uploading again.');
@@ -4926,7 +5237,7 @@ const readWorkbookSafely = (buffer, fileName = 'workbook') => {
   for (const attempt of attempts) {
     try {
       const workbook = attempt();
-      if (workbook?.SheetNames?.length) return attachWorkbookStrikeMetadata(workbook);
+      if (workbook?.SheetNames?.length) return attachLegacyXlsStrikeMetadata(attachWorkbookStrikeMetadata(workbook));
     } catch (err) {
       lastError = err;
     }
@@ -6400,6 +6711,8 @@ const NORMALIZED_TABLE_BASE_COLUMNS = [
   { key: 'manufacturer', label: 'Manufacturer', editable: true, width: 180 },
   { key: 'quantity', label: 'Qty', editable: true, width: 80 },
   { key: 'uom', label: 'UOM', editable: true, width: 90 },
+  { key: 'Notes', label: 'Notes', editable: true, width: 190 },
+  { key: 'Internal notes', label: 'Internal notes', editable: true, width: 190 },
   { key: 'Item code', label: 'Item code', editable: true, width: 170 },
   { key: 'rule', label: 'Rule', editable: false, width: 190 },
   { key: 'confidence', label: 'Confidence', editable: false, width: 105 },
@@ -6471,6 +6784,8 @@ const buildNormalizerSuggestedMappings = (columns = [], rows = []) => {
     { source: 'description', targets: ['Item name', 'Description', 'SAP Description'] },
     { source: 'quantity', targets: ['Quantity', 'Qty'] },
     { source: 'uom', targets: ['Measurement unit', 'UOM', 'Unit of measure'] },
+    { source: 'Notes', targets: ['Notes'] },
+    { source: 'Internal notes', targets: ['Internal notes'] },
     { source: 'level', targets: ['Level', 'BOM level'] },
     { source: 'Item code', targets: ['Item code'] },
     { source: 'parentKey', targets: ['Parent / group key', 'Parent group key', 'Sub BOM ID', 'BOM ID'] },
@@ -6633,6 +6948,19 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
   useEffect(() => {
     setAllRowsPage(0);
   }, [filteredRows.length, visibleColumnKeys.join('|')]);
+
+  useEffect(() => {
+    const noteColumnsWithValues = ['Notes', 'Internal notes']
+      .filter((column) => rows.some((row) => fmt(row?.[column])));
+    if (!noteColumnsWithValues.length) return;
+    setVisibleColumnKeys((current) => {
+      const next = [...current];
+      noteColumnsWithValues.forEach((column) => {
+        if (!next.includes(column)) next.push(column);
+      });
+      return next.length === current.length ? current : next;
+    });
+  }, [rows]);
 
   const handleCellChange = (rowIndex, key, value) => {
     if (!onRowsChange) return;
@@ -7351,6 +7679,7 @@ const BomNormalizer = () => {
     skipRepeatedHeaders: true,
     skipDoNotPopulate: false,
     skipDeletedRows: true,
+    documentTypeValues: [],
     parentPathLevels: true,
     alternateColumnGroups: [],
     followingRowAlternateColumn: '',
@@ -7359,6 +7688,7 @@ const BomNormalizer = () => {
     followingItemRowsItemColumn: '',
     followingItemRowsMpnColumn: '',
     followingItemRowsManufacturerColumn: '',
+    followingItemRowsCpnMode: 'primary',
   });
   const [normalizedRows, setNormalizedRows] = useState([]);
   const [busy, setBusy] = useState(false);
@@ -7767,7 +8097,9 @@ const BomNormalizer = () => {
         rules.push('3. Also split multi-entry values in the selected MPN/MFR cells when detected');
       }
     } else if (config.alternateLayout === 'following_item_rows') {
-      rules.push(`2. Attach sparse following rows from ${config.followingItemRowsItemColumn || 'the selected item column'} as alternates for the nearest previous item row`);
+      rules.push('2. Attach sparse following rows as alternates for the nearest previous item row');
+      rules.push(`3. CPN values ${config.followingItemRowsCpnMode === 'column' ? 'come from the selected CPN column when available' : 'are copied from the primary item'}`);
+      rules.push('4. Treat each manufacturer cell as one manufacturer value');
     } else if (config.structure === 'same_cell' || config.structure === 'separate_cells') {
       rules.push('2. Split alternates on ^, then split each pair on the first valid comma');
     } else {
@@ -8641,6 +8973,42 @@ const BomNormalizer = () => {
     });
     return detections;
   }, [headers, roles, sourceDataRows]);
+
+  // Every distinct value in the mapped row-type column, commonest first, with
+  // how many rows carry it. This is what the user ticks against - the whole
+  // point of the role is that nothing is dropped they have not seen.
+  const rowTypeValues = useMemo(() => {
+    if (!roles.rowType) return [];
+    const counts = new Map();
+    sourceDataRows.forEach((row) => {
+      const value = getCell(row, roles.rowType).trim();
+      if (value) counts.set(value, (counts.get(value) || 0) + 1);
+    });
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([value, count]) => ({ value, count }));
+  }, [roles.rowType, sourceDataRows]);
+
+  // Pre-tick the obvious ones the first time a column is mapped, then leave the
+  // list alone - re-suggesting on every render would undo the user's own ticks.
+  const suggestedForColumn = useRef(null);
+  useEffect(() => {
+    if (!roles.rowType || !rowTypeValues.length) return;
+    if (suggestedForColumn.current === roles.rowType) return;
+    suggestedForColumn.current = roles.rowType;
+    const suggested = suggestDocumentTypeValues(rowTypeValues.map((entry) => entry.value));
+    setConfig((prev) => (
+      (prev.documentTypeValues || []).length ? prev : { ...prev, documentTypeValues: suggested }
+    ));
+  }, [roles.rowType, rowTypeValues]);
+
+  const documentRowCount = useMemo(() => {
+    const flagged = config.documentTypeValues || [];
+    if (!roles.rowType || !flagged.length) return 0;
+    return rowTypeValues
+      .filter((entry) => flagged.includes(entry.value))
+      .reduce((total, entry) => total + entry.count, 0);
+  }, [config.documentTypeValues, roles.rowType, rowTypeValues]);
 
   const detectedCleanupOptions = useMemo(
     () => CLEANUP_OPTIONS.filter((option) => cleanupDetections[option.key] > 0),
@@ -10287,7 +10655,7 @@ const BomNormalizer = () => {
     // user staged plus the auto-detected parse for the patterns they left alone.
     const committed = commitStagedPatternEdits();
     const runHeaders = committed.headers;
-    const runRows = filterRowsByEndRow(committed.rows, sourceEndRow);
+    const runRows = filterRowsByQuantityVariant(filterRowsByEndRow(committed.rows, sourceEndRow), normalizerConfig);
     const runConfig = { ...normalizerConfig, patternParserOverrides: committed.overrides };
 
     setBusy(true);
@@ -10312,7 +10680,7 @@ const BomNormalizer = () => {
     } finally {
       setBusy(false);
     }
-  }, [commitNormalizedResult, commitStagedPatternEdits, dataRows, headers, normalizerConfig, roles, sourceEndRow]);
+  }, [commitNormalizedResult, commitStagedPatternEdits, dataRows.length, normalizerConfig, roles, sourceEndRow]);
 
   const handleNormalize = useCallback(async () => {
     setParsingLogicOpen(true);
@@ -10633,6 +11001,7 @@ const BomNormalizer = () => {
       skipRepeatedHeaders: true,
       skipDoNotPopulate: false,
       skipDeletedRows: true,
+      documentTypeValues: [],
       parentPathLevels: true,
       alternateColumnGroups: [],
       followingRowAlternateColumn: '',
@@ -10641,6 +11010,7 @@ const BomNormalizer = () => {
       followingItemRowsItemColumn: '',
       followingItemRowsMpnColumn: '',
       followingItemRowsManufacturerColumn: '',
+      followingItemRowsCpnMode: 'primary',
     });
     setNormalizedRows([]);
     setCurrentStep(0);
@@ -10735,6 +11105,7 @@ const BomNormalizer = () => {
       skipRepeatedHeaders: true,
       skipDoNotPopulate: false,
       skipDeletedRows: true,
+      documentTypeValues: [],
       parentPathLevels: true,
       alternateColumnGroups: [],
       followingRowAlternateColumn: '',
@@ -10743,6 +11114,7 @@ const BomNormalizer = () => {
       followingItemRowsItemColumn: '',
       followingItemRowsMpnColumn: '',
       followingItemRowsManufacturerColumn: '',
+      followingItemRowsCpnMode: 'primary',
     });
     setNormalizedRows([]);
     setCurrentStep(0);
@@ -11928,6 +12300,9 @@ const BomNormalizer = () => {
                               followingItemRowsManufacturerColumn: nextLayout === 'following_item_rows'
                                 ? (prev.followingItemRowsManufacturerColumn || roles.manufacturer || '')
                                 : prev.followingItemRowsManufacturerColumn,
+                              followingItemRowsCpnMode: nextLayout === 'following_item_rows'
+                                ? (prev.followingItemRowsCpnMode || 'primary')
+                                : prev.followingItemRowsCpnMode,
                             }));
                           }}
                         >
@@ -12002,11 +12377,31 @@ const BomNormalizer = () => {
                     )}
                     {config.alternateLayout === 'following_item_rows' && !bomLayoutActive && (
                       <>
+                        <Grid item xs={12} md={3}>
+                          <FormControl fullWidth size="small">
+                            <InputLabel>CPN autofilling rule</InputLabel>
+                            <Select
+                              value={config.followingItemRowsCpnMode || 'primary'}
+                              label="CPN autofilling rule"
+                              onChange={(event) => {
+                                setParserTouched(true);
+                                setConfig((prev) => ({
+                                  ...prev,
+                                  followingItemRowsCpnMode: event.target.value,
+                                }));
+                              }}
+                            >
+                              <MenuItem value="primary">Autofill from primary</MenuItem>
+                              <MenuItem value="column">Autofill from CPN column</MenuItem>
+                            </Select>
+                            <Typography sx={{ mt: 0.35, fontSize: 11.5, color: normalizerTheme.muted }}>
+                              Use primary for sparse alternate rows; use CPN column when alternate rows carry their own CPN.
+                            </Typography>
+                          </FormControl>
+                        </Grid>
                         {[
-                          ['followingItemRowsContextColumn', 'Primary/context marker', 'A filled value starts a new group; following rows inherit CPN, quantity, and UOM.'],
-                          ['followingItemRowsItemColumn', 'Alternate item column', 'The identifier to show on alternate rows, such as CPN or Part No.'],
-                          ['followingItemRowsMpnColumn', 'Alternate MPN column', 'MPN value from the following sparse rows.'],
-                          ['followingItemRowsManufacturerColumn', 'Alternate MFR column', 'Manufacturer value from the following sparse rows.'],
+                          ['followingItemRowsMpnColumn', 'MPN column for following rows', 'MPN value from the sparse rows below each main item.'],
+                          ['followingItemRowsManufacturerColumn', 'MFR column for following rows', 'Manufacturer value from the sparse rows below each main item.'],
                         ].map(([key, label, helper]) => (
                           <Grid item xs={12} md={3} key={key}>
                             <FormControl fullWidth size="small">
@@ -12022,7 +12417,7 @@ const BomNormalizer = () => {
                                   }));
                                 }}
                               >
-                                <MenuItem value="">{key === 'followingItemRowsContextColumn' ? 'Auto from item context' : 'Select column'}</MenuItem>
+                                <MenuItem value="">Select column</MenuItem>
                                 {visibleSourceHeaders.map((header) => (
                                   <MenuItem key={`${key}-${header}`} value={header}>{header}</MenuItem>
                                 ))}
@@ -12154,12 +12549,6 @@ const BomNormalizer = () => {
                               quantityMode: ['assembly_quantity_matrix', 'multi_block_assembly'].includes(nextLayout)
                                 ? 'every_row'
                                 : prev.quantityMode,
-                              quantityVariant: nextLayout === 'assembly_quantity_matrix'
-                                ? QUANTITY_VARIANT_ALL
-                                : prev.quantityVariant || QUANTITY_VARIANT_ALL,
-                              quantityVariantByBlock: nextLayout === 'assembly_quantity_matrix'
-                                ? {}
-                                : prev.quantityVariantByBlock || {},
                             }));
                           }}
                         >
@@ -12169,65 +12558,6 @@ const BomNormalizer = () => {
                         </Select>
                       </FormControl>
                     </Grid>
-                    {showAssemblyQuantityVariantSelector && (
-                      <Grid item xs={12} md={3}>
-                        <FormControl fullWidth size="small">
-                          <InputLabel>Quantity variant</InputLabel>
-                          <Select
-                            value={config.quantityVariant || QUANTITY_VARIANT_ALL}
-                            label="Quantity variant"
-                            onChange={(event) => {
-                              setParserTouched(true);
-                              setConfig((prev) => ({
-                                ...prev,
-                                quantityVariant: event.target.value,
-                              }));
-                              setNormalizedRows([]);
-                            setNormalizationSummary(null);
-                          }}
-                        >
-                          <MenuItem value={QUANTITY_VARIANT_ALL}>All variants</MenuItem>
-                            {assemblyQuantityVariantOptions.map((variant) => (
-                              <MenuItem key={variant} value={variant}>{variant}</MenuItem>
-                            ))}
-                          </Select>
-                        </FormControl>
-                      </Grid>
-                    )}
-                    {showMultiBlockQuantityVariantSelectors && multiBlockQuantityVariantGroups.map((group) => (
-                      <Grid item xs={12} md={3} key={group.key}>
-                        <FormControl fullWidth size="small">
-                          <InputLabel>{`Quantity variant - ${group.label || 'BOM table'}`}</InputLabel>
-                          <Select
-                            value={(config.quantityVariantByBlock || {})[group.key] || QUANTITY_VARIANT_ALL}
-                            label={`Quantity variant - ${group.label || 'BOM table'}`}
-                            onChange={(event) => {
-                              const nextValue = event.target.value;
-                              setParserTouched(true);
-                              setConfig((prev) => {
-                                const nextByBlock = { ...(prev.quantityVariantByBlock || {}) };
-                                if (!nextValue || nextValue === QUANTITY_VARIANT_ALL) {
-                                  delete nextByBlock[group.key];
-                                } else {
-                                  nextByBlock[group.key] = nextValue;
-                                }
-                                return {
-                                  ...prev,
-                                  quantityVariantByBlock: nextByBlock,
-                                };
-                              });
-                              setNormalizedRows([]);
-                              setNormalizationSummary(null);
-                            }}
-                          >
-                            <MenuItem value={QUANTITY_VARIANT_ALL}>All variants</MenuItem>
-                            {group.variants.map((variant) => (
-                              <MenuItem key={`${group.key}-${variant}`} value={variant}>{variant}</MenuItem>
-                            ))}
-                          </Select>
-                        </FormControl>
-                      </Grid>
-                    ))}
                     <Grid item xs={12} md={3}>
                       <FormControl fullWidth size="small">
                         <InputLabel>Known delimiter</InputLabel>
@@ -12420,15 +12750,50 @@ const BomNormalizer = () => {
                     </Alert>
                   )}
                   {config.alternateLayout === 'following_item_rows' && !bomLayoutActive && (
-                    (!config.followingItemRowsItemColumn || !config.followingItemRowsMpnColumn || !config.followingItemRowsManufacturerColumn) ? (
+                    (!config.followingItemRowsMpnColumn || !config.followingItemRowsManufacturerColumn) ? (
                       <Alert severity="warning" sx={{ mt: 1 }}>
-                        Select the alternate item, MPN, and MFR columns for following item rows.
+                        Select the MPN and MFR columns used by the following sparse rows.
                       </Alert>
                     ) : (
                       <Alert severity="info" sx={{ mt: 1 }}>
-                        Sparse following rows using {config.followingItemRowsItemColumn}, {config.followingItemRowsMpnColumn}, and {config.followingItemRowsManufacturerColumn} will attach to the nearest previous item row with context.
+                        Sparse rows using {config.followingItemRowsMpnColumn} and {config.followingItemRowsManufacturerColumn} will attach to the nearest previous item. CPN will {config.followingItemRowsCpnMode === 'column' ? 'come from the mapped CPN column when available' : 'copy from the primary item'}.
                       </Alert>
                     )
+                  )}
+                  {roles.rowType && rowTypeValues.length > 0 && (
+                    <Box sx={{ mt: 1.5 }}>
+                      <Typography sx={{ fontSize: 13, fontWeight: 800 }}>
+                        Which "{roles.rowType}" values are documents, not parts?
+                      </Typography>
+                      <Typography sx={{ fontSize: 12, color: '#66717f', mb: 0.75 }}>
+                        A document is attached to a part, not consumed by one, so it is not a BOM
+                        line. Ticked values are dropped before the BOM is built
+                        {documentRowCount > 0 ? ` — ${documentRowCount} rows` : ''}.
+                      </Typography>
+                      <Stack direction="row" flexWrap="wrap" gap={0.75}>
+                        {rowTypeValues.map(({ value, count }) => {
+                          const ticked = (config.documentTypeValues || []).includes(value);
+                          return (
+                            <Chip
+                              key={value}
+                              size="small"
+                              label={`${value} (${count})`}
+                              color={ticked ? 'warning' : 'default'}
+                              variant={ticked ? 'filled' : 'outlined'}
+                              onClick={() => setConfig((prev) => {
+                                const current = prev.documentTypeValues || [];
+                                return {
+                                  ...prev,
+                                  documentTypeValues: current.includes(value)
+                                    ? current.filter((entry) => entry !== value)
+                                    : [...current, value],
+                                };
+                              })}
+                            />
+                          );
+                        })}
+                      </Stack>
+                    </Box>
                   )}
                   {detectedCleanupOptions.length > 0 && (
                     <Box sx={{ mt: 1.5 }}>

@@ -169,6 +169,40 @@ const detectRootFromRecords = (records = [], levelColumn = '', headers = []) => 
   return tops[0];
 };
 
+// The root as stated by the PARENT column: the assembly whose children sit
+// shallower than anyone else's.
+//
+// detectRootFromRecords above looks for the finished good's own ROW, and a sheet
+// that never lists its top assembly as a component of anything has no such row —
+// the assembly appears only in the parent column, as the thing everything else
+// belongs to. THALES' Y2 export is this shape: 17 rows name P034210-9 as their
+// parent and not one row IS P034210-9. The popup then declared the root "not
+// found in the sheet", asked for a name, and pushed the real root down into a
+// Level 2 slot; whatever the user invented became the root and all 17 of those
+// rows reported parent_not_found against a code nothing carried.
+//
+// Returns null unless exactly ONE assembly sits at that shallowest tier — the
+// same rule the row-based detector uses. Several tops is a forest, and which of
+// them is "the" finished good is the user's call, not a guess worth making.
+const detectRootFromParents = (records = [], levelColumn = '') => {
+  const stated = assembliesFromParents(records, levelColumn);
+  if (!stated || !stated.shallowestChild.size) return null;
+
+  let shallowest = null;
+  stated.shallowestChild.forEach((childLevel) => {
+    if (shallowest === null || childLevel < shallowest) shallowest = childLevel;
+  });
+  const tops = [];
+  stated.shallowestChild.forEach((childLevel, code) => {
+    if (childLevel === shallowest) tops.push(code);
+  });
+  if (tops.length !== 1) return null;
+  // One assembly holding the entire sheet is a flat list, not a hierarchy — the
+  // thing it builds is still unnamed and the user has to supply it.
+  if (stated.shallowestChild.size === 1) return null;
+  return { code: tops[0], name: '', uom: '' };
+};
+
 const detectRootFromPreamble = (preambleRows = []) => {
   for (let index = 0; index < preambleRows.length - 1; index += 1) {
     const labels = (preambleRows[index] || []).map(cell => String(cell ?? '').trim());
@@ -806,8 +840,12 @@ const BomStructureDialog = ({
         // demoted the real finished good and put its own child above it.
         const preambleReader = getSheetPreambleRowsRef.current;
         const preamble = typeof preambleReader === 'function' ? preambleReader(sheetName) : [];
+        // Parent column last: it is an inference like the shallowest row, but a
+        // weaker one — it names the assembly everything hangs off without ever
+        // seeing its row — so anything the sheet states outright wins first.
         const root = detectRootFromPreamble(preamble)
-          || detectRootFromRecords(records || [], detected, headers);
+          || detectRootFromRecords(records || [], detected, headers)
+          || detectRootFromParents(records || [], detected);
         // Nothing detected means nothing prefilled — a wrong guess the user
         // does not notice is worse than an empty required field. Note this
         // clears blankBomHeader's sheet-name guess, which is exactly the guess

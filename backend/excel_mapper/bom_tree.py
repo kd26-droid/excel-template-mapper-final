@@ -419,10 +419,21 @@ def derive_tree(records, level_column, code_column,
         # A row naming itself as its own parent is how these exports mark a root
         # (AMAT writes PARENT_PART == PART_NUMBER on the assembly line).
         known = {row['code'] for row in rows}
+        # The authored root has no row of its own - that is the whole reason it
+        # was authored - so it is absent from `known` and every row naming it
+        # read as dangling. A THALES sheet whose top assembly appears only as a
+        # parent reported parent_not_found on all 17 of its root lines while the
+        # answer sat in `root` the entire time.
+        root_code = str((root or {}).get('code') or '').strip()
         for row in rows:
             parent = row['stated_parent']
             row['depth'] = row['level'] - min_level
             if not parent or parent == row['code']:
+                row['parent'] = None
+                continue
+            # Naming the root means "top level", and top level is expressed as
+            # no parent — the root is adopted below, once, for all of them.
+            if root_code and parent == root_code:
                 row['parent'] = None
                 continue
             if parent not in known:

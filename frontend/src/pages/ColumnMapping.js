@@ -3200,7 +3200,11 @@ export default function ColumnMapping() {
 
   useEffect(() => {
     if (normalizerSuggestedMappingsAppliedRef.current) return;
-    const suggestedMappings = location.state?.normalizerSuggestedMappings;
+    const suggestedMappings = [
+      ...(location.state?.normalizerSuggestedMappings || []),
+      { source: 'Notes', targets: ['Notes'] },
+      { source: 'Internal notes', targets: ['Internal notes'] },
+    ];
     if (!location.state?.fromBomNormalizer || !Array.isArray(suggestedMappings) || suggestedMappings.length === 0) return;
     if (loading || clientHeaders.length === 0 || templateHeaders.length === 0 || nodes.length === 0) return;
 
