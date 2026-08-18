@@ -12,7 +12,7 @@ export const ITEM_DIRECTORY_COLUMN_OPTIONS_KEY = 'factwise.itemDirectoryColumnOp
 // field names a session's grid actually carries (Tag_2, Specification_Value_1).
 // `displayHeaderName` turns them into the '(n)' labels shown everywhere else.
 //
-// 36, not 38: the workbook lists 'Preferred vendor code' and 'Alternate Item
+// 38, not 40: the workbook lists 'Preferred vendor code' and 'Alternate Item
 // Name for Preferred Vendor' twice, for a second preferred vendor. Offering the
 // same name twice in a dropdown is a choice nobody can make meaningfully, and
 // pandas renames the repeat to `…__2` on read anyway.
@@ -31,6 +31,7 @@ export const FACTWISE_TEMPLATE_COLUMNS = [
   'Measurement unit',
   'Alternate UoM 1',
   'Notes',
+  'Internal notes',
   'SAP Description',
   'Specification_Name_1', 'Specification_Value_1', 'Specification_UOM_1',
   'Specification_Name_2', 'Specification_Value_2', 'Specification_UOM_2',
@@ -40,7 +41,7 @@ export const FACTWISE_TEMPLATE_COLUMNS = [
   'Procurement item price currency code',
   'Procurement item price',
   'Sales item',
-  'Tag_1', 'Tag_2', 'Tag_3',
+  'Tag_1', 'Tag_2', 'Tag_3', 'Tag_4',
   'Level',
   'Quantity',
   'Base BOM Qty',
