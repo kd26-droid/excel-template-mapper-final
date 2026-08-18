@@ -2666,21 +2666,7 @@ const hierarchyParent = (row, roles) => statedParent(row, roles) || row?.[LEVEL_
 // on sheets where they never selected a BOM level.
 const PARENT_CHAIN_DEPTH_KEY = '__parentChainDepth';
 const rowLevel = (row, roles) => String(row?.[PATH_DEPTH_KEY] ?? row?.[PARENT_CHAIN_DEPTH_KEY] ?? '') || getCell(row, roles.level);
-// What the emitted row carries as its level.
-//
-// This is NOT a display value. It leaves the normalizer, is mapped to the BOM
-// level, and derive_tree builds the tiers from it - a row whose level does not
-// parse is SKIPPED there, not merely shown oddly. So a depth worked out from the
-// parent chain has to travel with the row; blanking it here to avoid a
-// misleading label in the grid also removes the hierarchy, and a multi-level BOM
-// comes out flat under its root.
-//
-// The concern the blanking was reaching for is real and is answered where it
-// belongs: the grid marks the Level column as derived whenever no level column
-// was mapped, so nobody reads it as the sheet's own statement.
-const outputRowLevel = (row, roles) => (
-  String(row?.[PATH_DEPTH_KEY] ?? row?.[PARENT_CHAIN_DEPTH_KEY] ?? '') || getCell(row, roles.level)
-);
+const outputRowLevel = (row, roles) => String(row?.[PATH_DEPTH_KEY] ?? '') || getCell(row, roles.level);
 
 // Whether this row's parent cell reads as a trail rather than a plain code.
 // Only used to decide whether to OFFER the option - a separator alone does not
@@ -3695,27 +3681,10 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
   // having turned up.
   let pendingContext = null;
 
-  // ...but only when the sheet states that the assembly CONSUMES it. A context
-  // row carrying a code, a description and no quantity at all is a drawing, a
-  // specification or a definition-data line - the sheet is naming a document,
-  // not a part - and emitting it produced a Primary with no manufacturer, no
-  // quantity and no unit that the user never asked for. Safran's export opens
-  // with nine of them (ICD, HDD, SCHEMA ELECTRIQUE, test-bench specs) before the
-  // first real line.
-  //
-  // Quantity is the test rather than the row's position or its code, because
-  // that is the same thing the export itself uses to tell a part from a document.
-  // The customer-made parts this hold exists for - the bare PCB, the firmware,
-  // the sub-assembly - all state one, so they survive it.
-  const contextRowStatesConsumption = (row) => Boolean(
-    getCell(row, roles.quantity) || getCell(row, roles.uom)
-  );
-
   const flushPendingContext = () => {
     if (!pendingContext) return;
     const { group, row, rowIndex } = pendingContext;
     pendingContext = null;
-    if (!contextRowStatesConsumption(row)) return;
     output.push(withSourceColumns({
       ...group,
       sourceRow: row.__sourceRow || rowIndex + 1,
@@ -6936,13 +6905,7 @@ const mergeExistingMappingsWithNormalizer = (existingMappings = [], normalizerMa
   return Array.from(byTarget.values());
 };
 
-// `levelDerived` says the sheet had no level column, so the levels shown were
-// worked out from each row's parent. It arrives as a prop because the roles
-// live in the page's state, which this component is declared above and cannot
-// see - reading `roles` here threw "roles is not defined" the moment the level
-// column was visible, taking the whole normalized table down with it.
-const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenceOnlyChange,
-                          levelDerived = false }) => {
+const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenceOnlyChange }) => {
   const { isDarkMode, tokens: themeTokens } = useThemeContext();
   const tableTone = {
     bg: themeTokens.table?.background || (isDarkMode ? 'rgba(6, 12, 24, 0.82)' : '#ffffff'),
@@ -7204,19 +7167,6 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
                     <Tooltip title={CONFIDENCE_HELP_TEXT} arrow>
                       <InfoOutlinedIcon sx={{ fontSize: 16, color: tableTone.muted }} />
                     </Tooltip>
-                  </Stack>
-                ) : (column.key === 'level' && levelDerived) ? (
-                  <Stack direction="row" alignItems="center" gap={0.5}>
-                    <span>{column.label}</span>
-                    <Tooltip
-                      title={'This sheet has no level column, so these levels were worked out from each row’s parent. They are used to build the BOM — the sheet did not state them.'}
-                      arrow
-                    >
-                      <InfoOutlinedIcon sx={{ fontSize: 16, color: tableTone.muted }} />
-                    </Tooltip>
-                    <Typography component="span" sx={{ fontSize: 10.5, fontWeight: 700, color: tableTone.muted }}>
-                      derived
-                    </Typography>
                   </Stack>
                 ) : column.label}
               </TableCell>
@@ -13095,7 +13045,6 @@ const BomNormalizer = () => {
                   onRowsChange={setNormalizedRows}
                   lowConfidenceOnly={lowConfidenceOnly}
                   onLowConfidenceOnlyChange={setLowConfidenceOnly}
-                  levelDerived={!roles.level}
                 />
                 <Stack direction="row" justifyContent="space-between" sx={{ mt: 2 }}>
                   <Button variant="outlined" onClick={() => setCurrentStep(2)} disabled={busy}>Back to configure</Button>

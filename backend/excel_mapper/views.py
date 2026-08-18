@@ -11424,18 +11424,6 @@ def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
     except (TypeError, ValueError):
         serial_padding = 0
     serial_increment = str(rule.get('serial_increment', True)).lower() not in {'false', '0', 'no', 'off'}
-    # The prefix can be typed once for the whole sheet, or taken per row from a
-    # column — "<part number>_1, <part number>_2". With a column prefix the
-    # counter restarts for every distinct value, which is what makes it a way to
-    # split duplicates apart instead of renumbering the sheet end to end.
-    serial_prefix_index = -1
-    serial_separator = '_' if rule.get('serial_separator') is None else str(rule.get('serial_separator'))
-    serial_group_numbers = {}
-    if value_mode == 'serial' and str(rule.get('serial_prefix_source') or 'text') == 'column':
-        serial_prefix_column = str(rule.get('serial_prefix_column') or '').strip()
-        serial_prefix_index = _grid_column_index(output_headers, serial_prefix_column)
-        if serial_prefix_index < 0:
-            raise ValueError(f'Prefix column "{serial_prefix_column}" is not in the grid')
     write_mode = str(rule.get('write_mode') or 'fill_empty')
     changed = 0
 
@@ -11545,16 +11533,8 @@ def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
             values = [str(row[index] or '').strip() for index in source_indexes]
             generated = str(rule.get('separator') or '').join(value for value in values if value)
         elif value_mode == 'serial':
-            group_key = None
-            if serial_prefix_index >= 0:
-                # Read before the write, so a column that is also the target
-                # still contributes its original value.
-                group_key = str(row[serial_prefix_index] or '').strip()
-                prefix = f"{group_key}{serial_separator}" if group_key else ''
-                number = serial_group_numbers.get(group_key, serial_start) if serial_increment else serial_start
-            else:
-                prefix = rule.get('serial_prefix', '') or ''
-                number = serial_start + row_index if serial_increment else serial_start
+            prefix = rule.get('serial_prefix', '') or ''
+            number = serial_start + row_index if serial_increment else serial_start
 
             def serial_at(value):
                 suffix = str(value).zfill(serial_padding) if serial_padding else str(value)
@@ -11568,8 +11548,6 @@ def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
                 while generated in reserved_values and number < limit:
                     number += 1
                     generated = serial_at(number)
-                if group_key is not None:
-                    serial_group_numbers[group_key] = number + 1
             reserved_values.add(generated)
         elif value_mode == 'conditional':
             matching_branch = next(
@@ -15261,8 +15239,6 @@ def _generate_bom_for_session(session_id, apply_dup_policy=True):
     from .bom_generator import (
         generate_flat_bom,
         apply_records_duplicate_policy,
-        describe_duplicate_consolidation,
-        find_records_duplicate_groups,
         VALID_DUP_POLICIES,
     )
 
@@ -15410,7 +15386,6 @@ def _generate_bom_for_session(session_id, apply_dup_policy=True):
     # Default: aggregate_per_level. It's the only policy that produces a
     # correct BOM without needing a per-group target level pick — same-level
     # dups collapse into one summed row, across-level rows stay separate.
-    consolidation_warning = None
     if apply_dup_policy and records:
         stored_policy = (info.get('bom_duplicate_policy') or {})
         policy_name = stored_policy.get('policy')
@@ -15419,12 +15394,6 @@ def _generate_bom_for_session(session_id, apply_dup_policy=True):
         per_group_levels = stored_policy.get('per_group_target_level') or {}
         per_group_qty = stored_policy.get('per_group_quantity') or {}
         try:
-            # Captured BEFORE the merge: afterwards the duplicates are gone and
-            # neither generation nor validation has anything left to report, so
-            # rows summed into one line would pass by unmentioned.
-            consolidation_warning = describe_duplicate_consolidation(
-                find_records_duplicate_groups(records), policy_name
-            )
             records = apply_records_duplicate_policy(
                 records, policy_name,
                 per_group_target_level=per_group_levels,
@@ -15439,9 +15408,6 @@ def _generate_bom_for_session(session_id, apply_dup_policy=True):
             return None, None, error_response
     else:
         result = generate_flat_bom(records, bom_header)
-
-    if consolidation_warning:
-        result.warnings.append(consolidation_warning)
 
     if not result.is_valid:
         return None, None, Response({
