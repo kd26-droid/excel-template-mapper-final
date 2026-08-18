@@ -5008,6 +5008,15 @@ const getWorkbookFileText = (workbook, path) => {
   return '';
 };
 
+const workbookCfbFileContent = (workbook, fileName) => {
+  const file = workbook?.cfb?.FileIndex?.find((entry) => entry?.name === fileName);
+  const content = file?.content;
+  if (!content) return null;
+  if (content instanceof Uint8Array) return content;
+  if (Array.isArray(content)) return new Uint8Array(content);
+  return null;
+};
+
 const parseXmlAttributes = (raw = '') => {
   const attrs = {};
   String(raw).replace(/([\w:.-]+)\s*=\s*"([^"]*)"/g, (_, key, value) => {
@@ -5097,6 +5106,122 @@ const attachWorkbookStrikeMetadata = (workbook) => {
   return workbook;
 };
 
+const readUInt16LE = (bytes, offset) => {
+  if (!bytes || offset < 0 || offset + 1 >= bytes.length) return 0;
+  return bytes[offset] | (bytes[offset + 1] << 8);
+};
+
+const readUInt32LE = (bytes, offset) => (
+  readUInt16LE(bytes, offset) | (readUInt16LE(bytes, offset + 2) << 16)
+);
+
+const forEachBiffRecord = (bytes, startOffset, endOffset, callback) => {
+  let offset = Math.max(0, startOffset || 0);
+  const limit = Math.min(bytes?.length || 0, endOffset || bytes?.length || 0);
+  while (offset + 4 <= limit) {
+    const type = readUInt16LE(bytes, offset);
+    const length = readUInt16LE(bytes, offset + 2);
+    const dataOffset = offset + 4;
+    if (dataOffset + length > limit) break;
+    callback({ type, length, dataOffset });
+    offset = dataOffset + length;
+    if (type === 0x000A) break;
+  }
+};
+
+const readBiffSheetName = (bytes, offset, charCount, flags) => {
+  const isUtf16 = Boolean(flags & 0x01);
+  const length = Math.max(0, Number(charCount || 0));
+  const byteLength = isUtf16 ? length * 2 : length;
+  if (!length || offset + byteLength > bytes.length) return '';
+  if (!isUtf16) {
+    return Array.from(bytes.slice(offset, offset + byteLength))
+      .map((code) => String.fromCharCode(code))
+      .join('');
+  }
+  const chars = [];
+  for (let index = 0; index < byteLength; index += 2) {
+    chars.push(String.fromCharCode(readUInt16LE(bytes, offset + index)));
+  }
+  return chars.join('');
+};
+
+const attachLegacyXlsStrikeMetadata = (workbook) => {
+  const bytes = workbookCfbFileContent(workbook, 'Workbook') || workbookCfbFileContent(workbook, 'Book');
+  if (!bytes?.length || !workbook?.Sheets) return workbook;
+
+  const fonts = [];
+  const xfs = [];
+  const sheets = [];
+
+  forEachBiffRecord(bytes, 0, bytes.length, ({ type, dataOffset, length }) => {
+    if (type === 0x0031) {
+      const options = readUInt16LE(bytes, dataOffset + 2);
+      fonts.push({ strike: Boolean(options & 0x0008) });
+      return;
+    }
+    if (type === 0x00E0) {
+      const fontIndex = readUInt16LE(bytes, dataOffset);
+      xfs.push({ strike: Boolean(fonts[fontIndex]?.strike) });
+      return;
+    }
+    if (type === 0x0085 && length >= 8) {
+      const offset = readUInt32LE(bytes, dataOffset);
+      const charCount = bytes[dataOffset + 6];
+      const flags = bytes[dataOffset + 7];
+      const name = readBiffSheetName(bytes, dataOffset + 8, charCount, flags);
+      if (name) sheets.push({ name, offset });
+    }
+  });
+
+  const isStrikeXf = (xfIndex) => Boolean(xfs[xfIndex]?.strike);
+  const markCell = (sheetName, row, column, xfIndex) => {
+    if (!isStrikeXf(xfIndex)) return;
+    const worksheet = workbook.Sheets[sheetName];
+    if (!worksheet) return;
+    const address = XLSX.utils.encode_cell({ r: row, c: column });
+    const cell = worksheet[address];
+    if (!cell) return;
+    cell.__styleInfo = {
+      ...(cell.__styleInfo || {}),
+      strike: true,
+    };
+  };
+
+  sheets.forEach((sheet, sheetIndex) => {
+    const nextOffset = sheets[sheetIndex + 1]?.offset || bytes.length;
+    forEachBiffRecord(bytes, sheet.offset, nextOffset, ({ type, dataOffset, length }) => {
+      if ([0x00FD, 0x0204, 0x00D6, 0x0203, 0x027E, 0x0201, 0x0205, 0x0006].includes(type) && length >= 6) {
+        markCell(sheet.name, readUInt16LE(bytes, dataOffset), readUInt16LE(bytes, dataOffset + 2), readUInt16LE(bytes, dataOffset + 4));
+        return;
+      }
+      if (type === 0x00BD && length >= 10) {
+        const row = readUInt16LE(bytes, dataOffset);
+        const firstColumn = readUInt16LE(bytes, dataOffset + 2);
+        const lastColumn = readUInt16LE(bytes, dataOffset + 4);
+        for (let column = firstColumn; column <= lastColumn; column += 1) {
+          const rkOffset = dataOffset + 6 + ((column - firstColumn) * 6);
+          if (rkOffset + 5 >= dataOffset + length) break;
+          markCell(sheet.name, row, column, readUInt16LE(bytes, rkOffset));
+        }
+        return;
+      }
+      if (type === 0x00BE && length >= 8) {
+        const row = readUInt16LE(bytes, dataOffset);
+        const firstColumn = readUInt16LE(bytes, dataOffset + 2);
+        const lastColumn = readUInt16LE(bytes, dataOffset + 4);
+        for (let column = firstColumn; column <= lastColumn; column += 1) {
+          const xfOffset = dataOffset + 6 + ((column - firstColumn) * 2);
+          if (xfOffset + 1 >= dataOffset + length) break;
+          markCell(sheet.name, row, column, readUInt16LE(bytes, xfOffset));
+        }
+      }
+    });
+  });
+
+  return workbook;
+};
+
 const readWorkbookSafely = (buffer, fileName = 'workbook') => {
   if (!XLSX || !XLSX.read || !XLSX.utils) {
     throw new Error('Spreadsheet parser is not ready. Please refresh the page and try uploading again.');
@@ -5112,7 +5237,7 @@ const readWorkbookSafely = (buffer, fileName = 'workbook') => {
   for (const attempt of attempts) {
     try {
       const workbook = attempt();
-      if (workbook?.SheetNames?.length) return attachWorkbookStrikeMetadata(workbook);
+      if (workbook?.SheetNames?.length) return attachLegacyXlsStrikeMetadata(attachWorkbookStrikeMetadata(workbook));
     } catch (err) {
       lastError = err;
     }
@@ -6586,6 +6711,8 @@ const NORMALIZED_TABLE_BASE_COLUMNS = [
   { key: 'manufacturer', label: 'Manufacturer', editable: true, width: 180 },
   { key: 'quantity', label: 'Qty', editable: true, width: 80 },
   { key: 'uom', label: 'UOM', editable: true, width: 90 },
+  { key: 'Notes', label: 'Notes', editable: true, width: 190 },
+  { key: 'Internal notes', label: 'Internal notes', editable: true, width: 190 },
   { key: 'Item code', label: 'Item code', editable: true, width: 170 },
   { key: 'rule', label: 'Rule', editable: false, width: 190 },
   { key: 'confidence', label: 'Confidence', editable: false, width: 105 },
@@ -6657,6 +6784,8 @@ const buildNormalizerSuggestedMappings = (columns = [], rows = []) => {
     { source: 'description', targets: ['Item name', 'Description', 'SAP Description'] },
     { source: 'quantity', targets: ['Quantity', 'Qty'] },
     { source: 'uom', targets: ['Measurement unit', 'UOM', 'Unit of measure'] },
+    { source: 'Notes', targets: ['Notes'] },
+    { source: 'Internal notes', targets: ['Internal notes'] },
     { source: 'level', targets: ['Level', 'BOM level'] },
     { source: 'Item code', targets: ['Item code'] },
     { source: 'parentKey', targets: ['Parent / group key', 'Parent group key', 'Sub BOM ID', 'BOM ID'] },
@@ -6819,6 +6948,19 @@ const NormalizedTable = ({ rows, onRowsChange, lowConfidenceOnly, onLowConfidenc
   useEffect(() => {
     setAllRowsPage(0);
   }, [filteredRows.length, visibleColumnKeys.join('|')]);
+
+  useEffect(() => {
+    const noteColumnsWithValues = ['Notes', 'Internal notes']
+      .filter((column) => rows.some((row) => fmt(row?.[column])));
+    if (!noteColumnsWithValues.length) return;
+    setVisibleColumnKeys((current) => {
+      const next = [...current];
+      noteColumnsWithValues.forEach((column) => {
+        if (!next.includes(column)) next.push(column);
+      });
+      return next.length === current.length ? current : next;
+    });
+  }, [rows]);
 
   const handleCellChange = (rowIndex, key, value) => {
     if (!onRowsChange) return;
@@ -10513,7 +10655,7 @@ const BomNormalizer = () => {
     // user staged plus the auto-detected parse for the patterns they left alone.
     const committed = commitStagedPatternEdits();
     const runHeaders = committed.headers;
-    const runRows = filterRowsByEndRow(committed.rows, sourceEndRow);
+    const runRows = filterRowsByQuantityVariant(filterRowsByEndRow(committed.rows, sourceEndRow), normalizerConfig);
     const runConfig = { ...normalizerConfig, patternParserOverrides: committed.overrides };
 
     setBusy(true);
@@ -10538,7 +10680,7 @@ const BomNormalizer = () => {
     } finally {
       setBusy(false);
     }
-  }, [commitNormalizedResult, commitStagedPatternEdits, dataRows, headers, normalizerConfig, roles, sourceEndRow]);
+  }, [commitNormalizedResult, commitStagedPatternEdits, dataRows.length, normalizerConfig, roles, sourceEndRow]);
 
   const handleNormalize = useCallback(async () => {
     setParsingLogicOpen(true);
@@ -12407,12 +12549,6 @@ const BomNormalizer = () => {
                               quantityMode: ['assembly_quantity_matrix', 'multi_block_assembly'].includes(nextLayout)
                                 ? 'every_row'
                                 : prev.quantityMode,
-                              quantityVariant: nextLayout === 'assembly_quantity_matrix'
-                                ? QUANTITY_VARIANT_ALL
-                                : prev.quantityVariant || QUANTITY_VARIANT_ALL,
-                              quantityVariantByBlock: nextLayout === 'assembly_quantity_matrix'
-                                ? {}
-                                : prev.quantityVariantByBlock || {},
                             }));
                           }}
                         >
@@ -12422,65 +12558,6 @@ const BomNormalizer = () => {
                         </Select>
                       </FormControl>
                     </Grid>
-                    {showAssemblyQuantityVariantSelector && (
-                      <Grid item xs={12} md={3}>
-                        <FormControl fullWidth size="small">
-                          <InputLabel>Quantity variant</InputLabel>
-                          <Select
-                            value={config.quantityVariant || QUANTITY_VARIANT_ALL}
-                            label="Quantity variant"
-                            onChange={(event) => {
-                              setParserTouched(true);
-                              setConfig((prev) => ({
-                                ...prev,
-                                quantityVariant: event.target.value,
-                              }));
-                              setNormalizedRows([]);
-                            setNormalizationSummary(null);
-                          }}
-                        >
-                          <MenuItem value={QUANTITY_VARIANT_ALL}>All variants</MenuItem>
-                            {assemblyQuantityVariantOptions.map((variant) => (
-                              <MenuItem key={variant} value={variant}>{variant}</MenuItem>
-                            ))}
-                          </Select>
-                        </FormControl>
-                      </Grid>
-                    )}
-                    {showMultiBlockQuantityVariantSelectors && multiBlockQuantityVariantGroups.map((group) => (
-                      <Grid item xs={12} md={3} key={group.key}>
-                        <FormControl fullWidth size="small">
-                          <InputLabel>{`Quantity variant - ${group.label || 'BOM table'}`}</InputLabel>
-                          <Select
-                            value={(config.quantityVariantByBlock || {})[group.key] || QUANTITY_VARIANT_ALL}
-                            label={`Quantity variant - ${group.label || 'BOM table'}`}
-                            onChange={(event) => {
-                              const nextValue = event.target.value;
-                              setParserTouched(true);
-                              setConfig((prev) => {
-                                const nextByBlock = { ...(prev.quantityVariantByBlock || {}) };
-                                if (!nextValue || nextValue === QUANTITY_VARIANT_ALL) {
-                                  delete nextByBlock[group.key];
-                                } else {
-                                  nextByBlock[group.key] = nextValue;
-                                }
-                                return {
-                                  ...prev,
-                                  quantityVariantByBlock: nextByBlock,
-                                };
-                              });
-                              setNormalizedRows([]);
-                              setNormalizationSummary(null);
-                            }}
-                          >
-                            <MenuItem value={QUANTITY_VARIANT_ALL}>All variants</MenuItem>
-                            {group.variants.map((variant) => (
-                              <MenuItem key={`${group.key}-${variant}`} value={variant}>{variant}</MenuItem>
-                            ))}
-                          </Select>
-                        </FormControl>
-                      </Grid>
-                    ))}
                     <Grid item xs={12} md={3}>
                       <FormControl fullWidth size="small">
                         <InputLabel>Known delimiter</InputLabel>
