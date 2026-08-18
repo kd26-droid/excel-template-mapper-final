@@ -2660,9 +2660,13 @@ const statedParent = (row, roles) => (
 // every stage that needs it.
 const hierarchyParent = (row, roles) => statedParent(row, roles) || row?.[LEVEL_PARENT_KEY] || '';
 
-// The level this row sits at. A depth read off the row's own path outranks the
-// sheet's level column, because the path counts tiers and the column may not.
-const rowLevel = (row, roles) => String(row?.[PATH_DEPTH_KEY] ?? '') || getCell(row, roles.level);
+// The visible level should only show a level the sheet explicitly stated:
+// a mapped level column, or a breadcrumb path depth. Parent-chain depth is still
+// useful internally for hierarchy, but showing it as "Level 2/3" misleads users
+// on sheets where they never selected a BOM level.
+const PARENT_CHAIN_DEPTH_KEY = '__parentChainDepth';
+const rowLevel = (row, roles) => String(row?.[PATH_DEPTH_KEY] ?? row?.[PARENT_CHAIN_DEPTH_KEY] ?? '') || getCell(row, roles.level);
+const outputRowLevel = (row, roles) => String(row?.[PATH_DEPTH_KEY] ?? '') || getCell(row, roles.level);
 
 // Whether this row's parent cell reads as a trail rather than a plain code.
 // Only used to decide whether to OFFER the option - a separator alone does not
@@ -3634,7 +3638,8 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
 
   const groupFromRow = (row, rowIndex) => {
     const sourceRow = row.__sourceRow || rowIndex + 1;
-    const level = rowLevel(row, roles) || '1';
+    const internalLevel = rowLevel(row, roles) || '1';
+    const displayLevel = outputRowLevel(row, roles);
     const cpn = getCell(row, roles.cpn) || getCell(row, itemColumn);
     const description = getCell(row, roles.description);
     const parent = hierarchyParent(row, roles);
@@ -3652,9 +3657,9 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
     const identity = cpn || contextValue || description || `Source row ${sourceRow}`;
     return {
       sourceRow,
-      parentKey: parent ? `${parent}␟${identity}` : `L${level}␟${identity}`,
+      parentKey: parent ? `${parent}␟${identity}` : `L${internalLevel}␟${identity}`,
       parent,
-      level,
+      level: displayLevel,
       cpn,
       description,
       quantity: getCell(row, roles.quantity),
@@ -3699,7 +3704,13 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
     const itemValue = getCell(row, itemColumn);
     const parts = splitParts(row).filter((pair) => pair?.mpn || pair?.manufacturer);
     const isContextRow = hasPrimaryContext(row);
-    const canAttachAsAlternate = Boolean(currentGroup && !isContextRow && (
+    const isPendingSparsePartRow = Boolean(
+      pendingContext?.group === currentGroup &&
+      parts.length &&
+      !getCell(row, roles.quantity) &&
+      !getCell(row, roles.uom)
+    );
+    const canAttachAsAlternate = Boolean(currentGroup && (!isContextRow || isPendingSparsePartRow) && (
       strictContextMarker ? parts.length : (itemValue || parts.length)
     ));
 
@@ -4569,6 +4580,7 @@ const unpackParentPaths = (rows, roles, config = {}) => {
 // Stamped under the same key the path reading uses, since both answer the same
 // question; a row that already carries one is left alone.
 const stampParentChainDepth = (rows, roles) => {
+  rows?.forEach((row) => { delete row[PARENT_CHAIN_DEPTH_KEY]; });
   if (!rows?.length || !roles?.parent) return rows;
   // A level column already answers this, and it is the sheet's own statement.
   if (roles.level) return rows;
@@ -4609,7 +4621,7 @@ const stampParentChainDepth = (rows, roles) => {
     const parent = hierarchyParent(row, roles);
     if (!parent) return;
     // The row sits one tier below the assembly holding it.
-    row[PATH_DEPTH_KEY] = depthOf(parent) + 1;
+    row[PARENT_CHAIN_DEPTH_KEY] = depthOf(parent) + 1;
   });
   return rows;
 };
