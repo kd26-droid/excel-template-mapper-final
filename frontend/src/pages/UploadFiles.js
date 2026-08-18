@@ -637,6 +637,16 @@ const canonicalPdfAssemblyMatrixHeader = (header) => {
   return asText(header);
 };
 
+const isGeneratedPdfColumnHeader = (header) => /^column(?:[_\s]*\d+|\.\d+)?$/i.test(asText(header));
+
+const joinPdfOcrFragments = (values = []) => values
+  .map(asText)
+  .filter(Boolean)
+  .join(' ')
+  .replace(/\s+([,.;:])/g, '$1')
+  .replace(/\s+/g, ' ')
+  .trim();
+
 const isPdfMatrixQuantityLikeValue = (value) => {
   const text = asText(value).replace(/\u00a0/g, ' ').trim();
   if (!text) return true;
@@ -702,11 +712,114 @@ const promotePdfHeaderRowFromData = (headers = [], rawRows = []) => {
   };
 };
 
+const findPdfAssemblyHeaderIndexes = (headers = [], structuralStart = headers.length) => (
+  headers
+    .map((header, index) => ({ header, index }))
+    .filter(({ header, index }) => index < structuralStart && isPdfAssemblyMatrixHeaderCandidate(canonicalPdfAssemblyMatrixHeader(header)))
+    .map(({ index }) => index)
+);
+
+const repairAssemblyMatrixPdfExtraction = (headers = [], rawRows = []) => {
+  const sourceHeaders = headers.map(asText);
+  if (sourceHeaders.length < 5 || !Array.isArray(rawRows) || !rawRows.length) {
+    return { headers: sourceHeaders, rows: rawRows };
+  }
+
+  const rowArrays = rawRows.map((row) => (
+    sourceHeaders.map((header, index) => asText(Array.isArray(row) ? row[index] : row?.[header]))
+  ));
+
+  const headerKeys = sourceHeaders.map(normalizeHeaderKey);
+  const findIndex = sourceHeaders.findIndex(isPdfAssemblyMatrixFindHeader);
+  let partIndexes = [];
+  const exactPartIndex = sourceHeaders.findIndex(isPdfAssemblyMatrixPartHeader);
+  if (exactPartIndex >= 0 && headerKeys[exactPartIndex] !== 'part') {
+    partIndexes = [exactPartIndex];
+  } else {
+    const partOnlyIndex = headerKeys.findIndex((key) => key === 'part');
+    if (partOnlyIndex >= 0 && ['no', 'num', 'number', 'nbr'].includes(headerKeys[partOnlyIndex + 1])) {
+      partIndexes = [partOnlyIndex, partOnlyIndex + 1];
+    } else if (exactPartIndex >= 0) {
+      partIndexes = [exactPartIndex];
+    }
+  }
+
+  const descriptionIndex = sourceHeaders.findIndex(isPdfAssemblyMatrixDescriptionHeader);
+  const structuralIndexes = [findIndex, ...partIndexes, descriptionIndex].filter((index) => index >= 0);
+  const structuralStart = structuralIndexes.length ? Math.min(...structuralIndexes) : -1;
+  if (structuralStart <= 0 || !partIndexes.length) {
+    return { headers: sourceHeaders, rows: rawRows };
+  }
+
+  let assemblyIndexes = findPdfAssemblyHeaderIndexes(sourceHeaders, structuralStart);
+  let headerRowsToDrop = new Set();
+  if (assemblyIndexes.length < 2) {
+    const nearbyHeaderRow = rowArrays
+      .slice(0, 12)
+      .map((row, index) => ({ row, index, indexes: findPdfAssemblyHeaderIndexes(row, structuralStart) }))
+      .filter((candidate) => candidate.indexes.length >= 2)
+      .sort((a, b) => b.indexes.length - a.indexes.length)[0];
+    if (nearbyHeaderRow) {
+      assemblyIndexes = nearbyHeaderRow.indexes;
+      sourceHeaders.splice(0, sourceHeaders.length, ...sourceHeaders.map((header, index) => (
+        assemblyIndexes.includes(index) ? canonicalPdfAssemblyMatrixHeader(nearbyHeaderRow.row[index]) : header
+      )));
+      headerRowsToDrop.add(nearbyHeaderRow.index);
+    }
+  }
+
+  if (assemblyIndexes.length < 2) {
+    return { headers: sourceHeaders, rows: rawRows };
+  }
+
+  let descriptionIndexes = [];
+  if (descriptionIndex >= 0) {
+    descriptionIndexes = [descriptionIndex];
+    for (let index = descriptionIndex + 1; index < sourceHeaders.length; index += 1) {
+      if (isGeneratedPdfColumnHeader(sourceHeaders[index])) descriptionIndexes.push(index);
+    }
+  } else {
+    const afterPartIndex = Math.max(...partIndexes) + 1;
+    descriptionIndexes = sourceHeaders
+      .map((header, index) => ({ header, index }))
+      .filter(({ header, index }) => index >= afterPartIndex && (isGeneratedPdfColumnHeader(header) || !isPdfAssemblyMatrixHeaderCandidate(header)))
+      .map(({ index }) => index);
+  }
+
+  if (!descriptionIndexes.length) {
+    return { headers: sourceHeaders, rows: rawRows };
+  }
+
+  const nextHeaders = [
+    ...assemblyIndexes.map((index) => canonicalPdfAssemblyMatrixHeader(sourceHeaders[index])),
+    ...(findIndex >= 0 ? ['FIND NO.'] : []),
+    'PART NO.',
+    'DESCRIPTION',
+  ];
+
+  const labelRowPattern = /^(?:assembly\s*part\s*number|\(?\s*quantity\s*required|empty\s*cells\s*denote|quantity\s*zero\)?)/i;
+  const nextRows = rowArrays
+    .filter((row, rowIndex) => !headerRowsToDrop.has(rowIndex) && !row.some((cell) => labelRowPattern.test(asText(cell))))
+    .map((row) => [
+      ...assemblyIndexes.map((index) => row[index] || ''),
+      ...(findIndex >= 0 ? [row[findIndex] || ''] : []),
+      joinPdfOcrFragments(partIndexes.map((index) => row[index])),
+      joinPdfOcrFragments(descriptionIndexes.map((index) => row[index])),
+    ])
+    .filter((row) => row.some((cell) => asText(cell)));
+
+  return {
+    headers: makeUniqueHeaders(nextHeaders),
+    rows: nextRows,
+  };
+};
+
 const normalizePdfRowsForWorkbook = (payload, sourceFile) => {
   const rawRows = Array.isArray(payload?.data) ? payload.data : [];
   const promoted = promotePdfHeaderRowFromData(payload?.headers || [], rawRows);
-  const pdfHeaders = makeUniqueHeaders(promoted.headers || []);
-  const pdfRows = Array.isArray(promoted.rows) ? promoted.rows : rawRows;
+  const repaired = repairAssemblyMatrixPdfExtraction(promoted.headers || [], promoted.rows || rawRows);
+  const pdfHeaders = makeUniqueHeaders(repaired.headers || []);
+  const pdfRows = Array.isArray(repaired.rows) ? repaired.rows : rawRows;
   const decision = payload?.decision;
   const decisionLabel = typeof decision === 'string'
     ? decision

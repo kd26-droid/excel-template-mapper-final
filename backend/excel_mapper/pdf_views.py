@@ -162,6 +162,87 @@ def _pdf_values_look_like_data_row(values) -> bool:
     return has_part_number or (has_description and quantity_like_count >= 1)
 
 
+def _pdf_assembly_matrix_code(cell: str) -> str:
+    text = _pdf_text(cell).upper().replace(' ', '')
+    if re.fullmatch(r'[0ODQ]{1,3}\d{1,3}', text) and re.search(r'[ODQ]', text):
+        fixed = re.sub(r'[ODQ]', '0', text)
+        return fixed.zfill(3) if len(fixed) <= 3 else fixed
+    if re.fullmatch(r'0*\d{1,4}', text):
+        return text.zfill(3) if len(text) <= 3 else text
+    match = re.fullmatch(r'(?:ASSY|ASSEMBLY|BOM)[\s_-]*0*(\d{1,4})', _pdf_text(cell), flags=re.IGNORECASE)
+    if match:
+        return match.group(1).zfill(3)
+    return ''
+
+
+def _pdf_structural_column_start(values) -> int:
+    cells = [_pdf_text(value) for value in list(values or [])]
+    indexes = []
+    for index, cell in enumerate(cells):
+        key = re.sub(r'[^a-z0-9]+', ' ', cell.lower()).strip()
+        if (
+            re.search(r'\bfind\s*(?:no|num|number|nbr)?\b', key)
+            or re.search(r'\bpart\s*(?:no|num|number|nbr)\b', key)
+            or re.search(r'\bdescription\b|\bdesc\b', key)
+        ):
+            indexes.append(index)
+    return min(indexes) if indexes else -1
+
+
+def _pdf_assembly_header_indexes(values, structural_start: int) -> list:
+    cells = [_pdf_text(value) for value in list(values or [])]
+    limit = structural_start if structural_start >= 0 else len(cells)
+    return [
+        index for index, cell in enumerate(cells[:limit])
+        if _pdf_assembly_matrix_code(cell)
+    ]
+
+
+def _pdf_instruction_row(values) -> bool:
+    text = ' '.join(_pdf_text(value) for value in list(values or []) if _pdf_text(value)).lower()
+    return bool(re.search(
+        r'\bassembly\s*part\s*number\b|\bquantity\s*required\b|\bempty\s*cells\s*denote\b|\bquantity\s*zero\b',
+        text,
+    ))
+
+
+def _pdf_repair_stacked_assembly_headers(header_values, rows):
+    """Merge split matrix headers such as 001..006 above FIND/PART/DESC.
+
+    Some PDF extractors return the structural labels and assembly-number labels
+    as separate rows. Keep this generic: only repair when a structural row exists
+    and a nearby row provides at least two assembly-code columns before it.
+    """
+    headers = [_pdf_text(value) for value in list(header_values or [])]
+    row_values = [[_pdf_text(value) for value in list(row or [])] for row in list(rows or [])]
+    structural_start = _pdf_structural_column_start(headers)
+    if structural_start <= 0:
+        return headers, row_values
+
+    assembly_indexes = _pdf_assembly_header_indexes(headers, structural_start)
+    drop_row_indexes = set()
+    if len(assembly_indexes) < 2:
+        candidates = []
+        for index, row in enumerate(row_values[:12]):
+            indexes = _pdf_assembly_header_indexes(row, structural_start)
+            if len(indexes) >= 2:
+                candidates.append((len(indexes), index, indexes, row))
+        if candidates:
+            _count, row_index, assembly_indexes, assembly_row = max(candidates, key=lambda item: item[0])
+            for column_index in assembly_indexes:
+                headers[column_index] = _pdf_assembly_matrix_code(assembly_row[column_index]) or assembly_row[column_index]
+            drop_row_indexes.add(row_index)
+
+    if len(assembly_indexes) < 2:
+        return headers, row_values
+
+    repaired_rows = [
+        row for index, row in enumerate(row_values)
+        if index not in drop_row_indexes and not _pdf_instruction_row(row)
+    ]
+    return headers, repaired_rows
+
+
 def repair_pdf_dataframe_headers(df: pd.DataFrame, context: str = '') -> pd.DataFrame:
     """Promote a real table header row from data when PDF extraction shifts it.
 
@@ -194,7 +275,6 @@ def repair_pdf_dataframe_headers(df: pd.DataFrame, context: str = '') -> pd.Data
     header_values = [_pdf_text(value) for value in df.loc[best_index].tolist()]
     width = max(len(header_values), len(current_headers))
     header_values = (header_values + [''] * (width - len(header_values)))[:width]
-    new_headers = _pdf_make_unique_headers(header_values)
 
     repaired_rows = []
     if _pdf_values_look_like_data_row(current_headers):
@@ -210,6 +290,9 @@ def repair_pdf_dataframe_headers(df: pd.DataFrame, context: str = '') -> pd.Data
 
     if not repaired_rows:
         return df
+
+    header_values, repaired_rows = _pdf_repair_stacked_assembly_headers(header_values, repaired_rows)
+    new_headers = _pdf_make_unique_headers(header_values)
 
     logger.info(
         "PDF header repair applied%s: promoted data row %s as header | old_headers=%s | new_headers=%s",

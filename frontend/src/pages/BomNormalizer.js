@@ -6158,6 +6158,13 @@ const promotePdfHeaderRowFromData = (headers = [], rawRows = []) => {
   };
 };
 
+const findAssemblyHeaderIndexes = (headers = [], structuralStart = headers.length) => (
+  headers
+    .map((header, index) => ({ header, index }))
+    .filter(({ header, index }) => index < structuralStart && isAssemblyMatrixHeaderCandidate(canonicalAssemblyMatrixHeader(header)))
+    .map(({ index }) => index)
+);
+
 const repairAssemblyMatrixPdfExtraction = (headers = [], rawRows = []) => {
   const sourceHeaders = headers.map(fmt);
   if (sourceHeaders.length < 5 || !Array.isArray(rawRows) || !rawRows.length) {
@@ -6193,10 +6200,22 @@ const repairAssemblyMatrixPdfExtraction = (headers = [], rawRows = []) => {
     return { headers: sourceHeaders, rows: rawRows };
   }
 
-  const assemblyIndexes = sourceHeaders
-    .map((header, index) => ({ header, index }))
-    .filter(({ header, index }) => index < structuralStart && isAssemblyMatrixHeaderCandidate(canonicalAssemblyMatrixHeader(header)))
-    .map(({ index }) => index);
+  let assemblyIndexes = findAssemblyHeaderIndexes(sourceHeaders, structuralStart);
+  const headerRowsToDrop = new Set();
+  if (assemblyIndexes.length < 2) {
+    const nearbyHeaderRow = rowArrays
+      .slice(0, 12)
+      .map((row, index) => ({ row, index, indexes: findAssemblyHeaderIndexes(row, structuralStart) }))
+      .filter((candidate) => candidate.indexes.length >= 2)
+      .sort((a, b) => b.indexes.length - a.indexes.length)[0];
+    if (nearbyHeaderRow) {
+      assemblyIndexes = nearbyHeaderRow.indexes;
+      nearbyHeaderRow.indexes.forEach((index) => {
+        sourceHeaders[index] = canonicalAssemblyMatrixHeader(nearbyHeaderRow.row[index]);
+      });
+      headerRowsToDrop.add(nearbyHeaderRow.index);
+    }
+  }
 
   if (assemblyIndexes.length < 2) {
     return { headers: sourceHeaders, rows: rawRows };
@@ -6228,6 +6247,7 @@ const repairAssemblyMatrixPdfExtraction = (headers = [], rawRows = []) => {
   ];
 
   const nextRows = rowArrays
+    .filter((row, rowIndex) => !headerRowsToDrop.has(rowIndex) && !row.some((cell) => /^(?:assembly\s*part\s*number|\(?\s*quantity\s*required|empty\s*cells\s*denote|quantity\s*zero\)?)/i.test(fmt(cell))))
     .map((row) => [
       ...assemblyIndexes.map((index) => row[index] || ''),
       ...(findIndex >= 0 ? [row[findIndex] || ''] : []),
