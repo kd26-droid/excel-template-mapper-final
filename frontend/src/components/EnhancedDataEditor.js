@@ -667,9 +667,9 @@ const EnhancedDataEditor = () => {
   const [producerMfrCols, setProducerMfrCols] = useState([]);
   const [manufacturerRulesExpanded, setManufacturerRulesExpanded] = useState(false);
   const [mpnSplitOptions, setMpnSplitOptions] = useState({
-    stripAlphaPrefix: true,
+    stripAlphaPrefix: false,
     alphaPrefixMinLength: 5,
-    stripNumericPrefix: true,
+    stripNumericPrefix: false,
     numericPrefixLength: 5,
     extraPrefixes: 'AGILE',
     manufacturerAliases: 'NIC=NIC COMPONENTS\nCOMPONENTS=',
@@ -4936,7 +4936,7 @@ const EnhancedDataEditor = () => {
     const gridCols = columnDefs.filter(c => c.field && c.field !== '__row_number__');
     const label = (f) => { const c = gridCols.find(x => x.field === f); return (c && c.headerName) || f; };
     const mpnSample = String(sampleForField(mpnCol) || '');
-    const hasPrefixes = /(^|[\s,;])(AGILE|[A-Za-z]{5,}|\d{5,})[-\s]/i.test(mpnSample);
+    const hasPrefixes = /(^|[\s,;])AGILE[-\s:]/i.test(mpnSample);
 
     // BOM 2 style: manufacturer + parts written together in one cell, labelled
     // with a colon ("Murata: GRM188; TDK: C1608"). This is AUTHORITATIVE — a

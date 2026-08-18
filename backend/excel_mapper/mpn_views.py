@@ -104,9 +104,9 @@ def detect_mpn_header(headers: List[str]) -> Optional[str]:
 
 
 DEFAULT_MPN_SPLIT_OPTIONS = {
-    'strip_alpha_prefix': True,
+    'strip_alpha_prefix': False,
     'alpha_prefix_min_length': 5,
-    'strip_numeric_prefix': True,
+    'strip_numeric_prefix': False,
     'numeric_prefix_length': 5,
     'extra_prefixes': ['AGILE'],
 }

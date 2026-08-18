@@ -405,10 +405,10 @@ const getCellStyleInfo = (cell = {}) => {
     htmlLooksStruck(cell?.h) ||
     htmlLooksStruck(cell?.r)
   );
-  return { red, strike };
+  return { red, strike, richStrikeRemoved: Boolean(cell.__styleInfo?.richStrikeRemoved) };
 };
 
-const hasCellStyleInfo = (styleInfo = {}) => Boolean(styleInfo.red || styleInfo.strike);
+const hasCellStyleInfo = (styleInfo = {}) => Boolean(styleInfo.red || styleInfo.strike || styleInfo.richStrikeRemoved);
 
 const looksLikeStackedPartIdentifierLine = (value) => {
   const text = fmt(value).replace(/\u00a0/g, ' ').trim();
@@ -500,7 +500,7 @@ const worksheetToCompactRows = (worksheet, options = {}) => {
 
   cells.forEach((cellAddress) => {
     const cell = worksheet[cellAddress];
-    const value = fmt(cell?.w ?? cell?.v);
+    const value = fmt(cell?.__sanitizedText ?? cell?.w ?? cell?.v);
     if (!value) return;
     const position = XLSX.utils.decode_cell(cellAddress);
     maxRow = Math.max(maxRow, position.r);
@@ -676,6 +676,11 @@ const stripTrailingStatusRefBlocks = (value) => {
   return { core, blocks };
 };
 
+const cleanPackedMpnMfrSource = (value) => fmt(value)
+  .replace(/\u00a0/g, ' ')
+  .replace(/\s*"+\s*$/g, '')
+  .trim();
+
 const popTrailingParenthesizedSegment = (value) => {
   const text = fmt(value);
   if (!text.endsWith(')')) return null;
@@ -746,7 +751,7 @@ const joinAtQualifiedMpn = (value) => {
   if (!text.includes('@')) return stripTrailingMpnSeparator(text);
   const atIndex = text.indexOf('@');
   const before = fmt(text.slice(0, atIndex)).replace(/\s+$/g, '');
-  const after = fmt(text.slice(atIndex + 1)).replace(/\s+/g, ' ');
+  const after = fmt(text.slice(atIndex + 1)).replace(/\s+/g, ' ').replace(/^@+/, '');
   if (!after) return before.trim();
   if (before.endsWith('-') && after.startsWith('-')) return `${before}${after.slice(1)}`.trim();
   return `${before}${after}`.trim();
@@ -765,7 +770,7 @@ const splitAtQualifiedMpnPieces = (value) => {
   }
 
   const before = fmt(text.slice(0, atIndex)).replace(/\s+$/g, '');
-  const after = fmt(text.slice(atIndex + 1)).replace(/\s+/g, ' ');
+  const after = fmt(text.slice(atIndex + 1)).replace(/\s+/g, ' ').replace(/^@+/, '');
   return {
     hasAt: true,
     before,
@@ -778,33 +783,38 @@ const qualifierTokensForAtMpn = (value) => {
   const text = fmt(value).replace(/\u00a0/g, ' ');
   const slashTokens = parseSlashSuffixVariantGroup(text);
   if (slashTokens.length) return slashTokens;
+  const parenthesizedTokens = text.match(/\([^)]*\)/g);
+  if (parenthesizedTokens?.length) {
+    const tokens = parenthesizedTokens
+      .flatMap((token) => parseSlashSuffixVariantGroup(token.slice(1, -1)))
+      .filter(Boolean);
+    if (tokens.length) return tokens;
+  }
   if (!text || text.includes('/') || /\s/.test(text)) return [];
   return /^[A-Z0-9._-]{1,16}$/i.test(text) ? [text] : [];
 };
 
-const insertAtQualifierBeforeText = (afterText, suffixes = []) => {
-  const after = fmt(afterText).replace(/\s+/g, '');
-  if (!after) return true;
-  if (/^\d/.test(after)) return true;
-  if (suffixes.length === 1 && /^[A-Z]+$/i.test(after)) return true;
-  return false;
-};
-
 const combineAtQualifiedMpnVariant = ({ before, after }, suffix) => {
-  const cleanBefore = fmt(before).replace(/\s+$/g, '');
+  const cleanBefore = fmt(before).replace(/[,\s;]+$/g, '');
   const cleanAfter = fmt(after).replace(/\s+/g, ' ');
   const cleanSuffix = fmt(suffix);
-  const suffixBeforeText = insertAtQualifierBeforeText(cleanAfter, [cleanSuffix]);
-  if (suffixBeforeText) {
-    if (cleanBefore.endsWith('-') && cleanSuffix.startsWith('-')) {
-      return `${cleanBefore}${cleanSuffix.slice(1)}${cleanAfter}`.trim();
-    }
-    return `${cleanBefore}${cleanSuffix}${cleanAfter}`.trim();
+  if (!cleanSuffix) return `${cleanBefore}${cleanAfter}`.trim();
+  if (cleanBefore.endsWith('-') && cleanSuffix.startsWith('-')) {
+    return `${cleanBefore}${cleanSuffix.slice(1)}${cleanAfter}`.trim();
   }
-  if (cleanBefore.endsWith('-') && cleanAfter.startsWith('-')) {
-    return `${cleanBefore}${cleanAfter.slice(1)}${cleanSuffix}`.trim();
+  if (cleanSuffix.endsWith('-') && cleanAfter.startsWith('-')) {
+    return `${cleanBefore}${cleanSuffix}${cleanAfter.slice(1)}`.trim();
   }
-  return `${cleanBefore}${cleanAfter}${cleanSuffix}`.trim();
+  return `${cleanBefore}${cleanSuffix}${cleanAfter}`.trim();
+};
+
+const slashSuffixCombinationTokens = (suffixes = []) => {
+  const tokens = suffixes.map(fmt).filter(Boolean);
+  if (tokens.length < 2) return [];
+  const packagingToken = /^(?:TR|T[0-9]*|PBF|PB|RL|REEL|TAPE|CT|CUT|DKR)$/i;
+  if (!tokens.every((token) => packagingToken.test(token))) return [];
+  if (!tokens.some((token) => token.length > 1)) return [];
+  return [tokens.join('')];
 };
 
 const expandAtQualifiedMpnVariants = (mpnSide, qualifierText) => {
@@ -813,14 +823,18 @@ const expandAtQualifiedMpnVariants = (mpnSide, qualifierText) => {
   if (!pieces.hasAt || !suffixes.length) return null;
 
   const startsWithSlash = fmt(qualifierText).trim().startsWith('/');
+  const expandedSuffixes = [...new Set([
+    ...suffixes,
+    ...(!startsWithSlash ? slashSuffixCombinationTokens(suffixes) : []),
+  ])];
   const variants = startsWithSlash
-    ? [pieces.base, ...suffixes.map((suffix) => `${pieces.base}${suffix}`)]
-    : suffixes.map((suffix) => combineAtQualifiedMpnVariant(pieces, suffix));
+    ? [pieces.base, ...expandedSuffixes.map((suffix) => combineAtQualifiedMpnVariant(pieces, suffix))]
+    : expandedSuffixes.map((suffix) => combineAtQualifiedMpnVariant(pieces, suffix));
 
   const mpns = [...new Set(variants.map((mpn) => fmt(mpn)).filter(Boolean))];
   return mpns.length ? {
     baseMpn: pieces.base,
-    suffixes,
+    suffixes: expandedSuffixes,
     includeBaseMpn: startsWithSlash,
     mpns,
   } : null;
@@ -1067,7 +1081,7 @@ const splitStructuredMpnMfrEntries = (value) => {
 const describePatternShape = (shape = '') => {
   const rules = ['Extract every <MPN> and <MFR> pair from values matching this shape.'];
   if (shape.includes(' @')) rules.push('Ignore @ as a separator before reading the manufacturer bracket.');
-  if (shape.includes('@<TEXT>')) rules.push('Treat text after @ as ignored package/variant text.');
+  if (shape.includes('@<TEXT>')) rules.push('Use @ as the MPN insertion point for detected package/variant suffixes.');
   if (shape.includes('/<SUFFIX>')) rules.push('Slash suffix variants can be expanded into primary plus alternate MPNs when selected.');
   if (shape.includes('<QUALIFIER>')) rules.push('Treat qualifier brackets before the manufacturer as ignored package/variant text.');
   if (shape.includes('^')) rules.push('Treat ^ as a repeated alternate separator.');
@@ -1573,7 +1587,6 @@ const splitSpacedSlashManufacturerParts = (value) => {
 const stripVendorPrefix = (value) => {
   const text = stripCircledNumberMarkers(value).replace(/\s+/g, ' ');
   return text
-    .replace(/^(?:[A-Za-z]{5,}|\d{5})\s*(?:-\s*|\s+)/, '')
     .replace(/^AGILE\s*(?:-\s*|:\s*|\s+)/i, '')
     .trim();
 };
@@ -1601,7 +1614,7 @@ const splitMpnCell = (value, config = {}) => {
     return normalizeMpnParts(connectorParts);
   }
 
-  const prefixPattern = '(?:AGILE|[A-Za-z]{5,}|\\d{5})';
+  const prefixPattern = '(?:AGILE)';
   const starts = [];
   const regex = new RegExp(`(?=(?:^|\\s)${prefixPattern}\\s*(?:-| )\\s*)`, 'gi');
   let match = regex.exec(text);
@@ -1949,7 +1962,7 @@ const looksLikeParenthesizedMpn = (value) => {
 };
 
 const parseParenthesizedMpnManufacturerPairs = (value, config = {}) => {
-  const text = fmt(value).replace(/\u00a0/g, ' ');
+  const text = cleanPackedMpnMfrSource(value);
   if (!text || !/[()]/.test(text)) return [];
 
   const delimiter = selectedDelimiter(config);
@@ -2021,7 +2034,7 @@ const parseParenthesizedMpnManufacturerPairs = (value, config = {}) => {
 };
 
 const parseTrailingParenthesizedMpnManufacturerPair = (value) => {
-  const text = fmt(value).replace(/\u00a0/g, ' ');
+  const text = cleanPackedMpnMfrSource(value);
   if (!text || !/[()]/.test(text)) return [];
 
   const extraMatch = text.match(/\s*(\{[^}]*\}\s*\[[^\]]*\])\s*$/);
@@ -2063,7 +2076,7 @@ const parseTrailingParenthesizedMpnManufacturerPair = (value) => {
 };
 
 const parsePackedMpnManufacturerPairs = (value, config = {}) => {
-  const text = fmt(value).replace(/\u00a0/g, ' ');
+  const text = cleanPackedMpnMfrSource(value);
   if (!text) return [];
 
   const caretPairs = parseCaretMpnManufacturerPairs(text);
@@ -2270,7 +2283,7 @@ const getManualPatternParse = (row, sourceHeader, config = {}) => {
 
 const getPatternAwarePackedPairs = (row, sourceHeader, value, config = {}) => {
   const manual = getManualPatternParse(row, sourceHeader, config);
-  if (manual) return manual.pairs;
+  if (manual?.pairs?.length) return manual.pairs;
   return parsePackedMpnManufacturerPairs(value, config);
 };
 
@@ -3286,6 +3299,7 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
   const levelColumns = followingMfgPartsLayout?.levelColumns || [];
   const hierarchyStack = [];
   let currentGroup = null;
+  let pendingContext = null;
   const configuredMfgPartsColumn = alternateColumn && findMfgPartsHeader([alternateColumn]) === alternateColumn;
   const useMfgPartsAsFollowingSource = Boolean(
     alternateColumn &&
@@ -3303,12 +3317,12 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
 
   const parseAlternateText = (row, value) => {
     if (looksLikeHierarchyPath(value)) return [];
-    const mfgPartsPairs = parseManufacturerPartsBlockLine(value);
-    if (mfgPartsPairs.length) return mfgPartsPairs;
     const manualParse = getManualPatternParse(row, alternateColumn, config);
-    if (manualParse) return manualParse.pairs;
+    if (manualParse?.pairs?.length) return manualParse.pairs;
     const packedPairs = getPatternAwarePackedPairs(row, alternateColumn, value, config);
     if (packedPairs.length) return packedPairs;
+    const mfgPartsPairs = parseManufacturerPartsBlockLine(value);
+    if (mfgPartsPairs.length) return mfgPartsPairs;
     return splitMpnCell(value, config)
       .map(stripVendorPrefix)
       .filter((mpn) => looksLikeMpnToken(mpn))
@@ -3421,12 +3435,12 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
     );
   };
 
-  const emitContextPrimary = (row, rowIndex) => {
+  const emitContextPrimary = (row, rowIndex, options = {}) => {
     const group = groupValuesFromContext(row, rowIndex);
     const shouldDeferPrimaryToMfgParts = useMfgPartsAsFollowingSource &&
       isManufacturerPartsBlockHeader(getCell(row, alternateColumn));
 
-    if (shouldDeferPrimaryToMfgParts) {
+    if (shouldDeferPrimaryToMfgParts || options.defer) {
       return { ...group, relationCount: 0 };
     }
 
@@ -3441,6 +3455,13 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
     }, row, config));
 
     return { ...group, relationCount: 1 };
+  };
+
+  const flushPendingContext = () => {
+    if (!pendingContext) return;
+    const { row, rowIndex } = pendingContext;
+    pendingContext = null;
+    currentGroup = emitContextPrimary(row, rowIndex);
   };
 
   const emitPrimaryParts = (row, rowIndex) => {
@@ -3517,6 +3538,9 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
       if (sameRowAlternateGroup) {
         currentGroup = sameRowAlternateGroup;
       }
+      if (pendingContext && pendingContext.group === currentGroup) {
+        pendingContext = null;
+      }
       followingAlternatePairs.forEach((pair) => {
         const relationIndex = Number.isFinite(Number(currentGroup.relationCount))
           ? Number(currentGroup.relationCount)
@@ -3544,14 +3568,19 @@ const normalizeFollowingRows = (rows, roles, config = {}) => {
     }
 
     if (rowHasNormalPart) {
+      flushPendingContext();
       currentGroup = emitPrimaryParts(row, rowIndex);
       return;
     }
 
     if (hasPrimaryContextWithoutPart(row)) {
-      currentGroup = emitContextPrimary(row, rowIndex);
+      flushPendingContext();
+      currentGroup = emitContextPrimary(row, rowIndex, { defer: true });
+      pendingContext = { group: currentGroup, row, rowIndex };
     }
   });
+
+  flushPendingContext();
 
   return output;
 };
@@ -5115,6 +5144,15 @@ const readUInt32LE = (bytes, offset) => (
   readUInt16LE(bytes, offset) | (readUInt16LE(bytes, offset + 2) << 16)
 );
 
+const BIFF_RESERVED_FONT_INDEX = 4;
+
+const biffFontAtIndex = (fonts = [], fontIndex = 0) => {
+  const index = Number(fontIndex);
+  if (!Number.isFinite(index) || index < 0) return null;
+  if (index === BIFF_RESERVED_FONT_INDEX) return null;
+  return fonts[index > BIFF_RESERVED_FONT_INDEX ? index - 1 : index] || null;
+};
+
 const forEachBiffRecord = (bytes, startOffset, endOffset, callback) => {
   let offset = Math.max(0, startOffset || 0);
   const limit = Math.min(bytes?.length || 0, endOffset || bytes?.length || 0);
@@ -5146,6 +5184,149 @@ const readBiffSheetName = (bytes, offset, charCount, flags) => {
   return chars.join('');
 };
 
+class BiffRecordReader {
+  constructor(records = [], firstOffset = 0) {
+    this.records = records;
+    this.recordIndex = 0;
+    this.offset = firstOffset;
+  }
+
+  get current() {
+    return this.records[this.recordIndex] || null;
+  }
+
+  ensure(size = 1) {
+    while (this.current && this.offset + size > this.current.length) {
+      this.recordIndex += 1;
+      this.offset = 0;
+    }
+    return Boolean(this.current && this.offset + size <= this.current.length);
+  }
+
+  readByte() {
+    if (!this.ensure(1)) return 0;
+    const value = this.current[this.offset];
+    this.offset += 1;
+    return value;
+  }
+
+  readUInt16() {
+    const low = this.readByte();
+    const high = this.readByte();
+    return low | (high << 8);
+  }
+
+  readUInt32() {
+    return this.readUInt16() | (this.readUInt16() << 16);
+  }
+
+  readChars(charCount, isUtf16) {
+    let wide = Boolean(isUtf16);
+    const chars = [];
+    for (let index = 0; index < charCount; index += 1) {
+      const size = wide ? 2 : 1;
+      if (!this.current) break;
+      if (this.offset + size > this.current.length) {
+        this.recordIndex += 1;
+        this.offset = 0;
+        if (!this.current) break;
+        // Character arrays in BIFF8 CONTINUE records start with a fresh
+        // compression flag. Consume it only while reading text bytes.
+        wide = Boolean(this.readByte() & 0x01);
+      }
+      if (wide) {
+        chars.push(String.fromCharCode(this.readUInt16()));
+      } else {
+        chars.push(String.fromCharCode(this.readByte()));
+      }
+    }
+    return chars.join('');
+  }
+
+  skip(byteCount = 0) {
+    for (let index = 0; index < byteCount; index += 1) this.readByte();
+  }
+}
+
+const collectBiffSstPayloadRecords = (bytes) => {
+  const records = [];
+  let collecting = false;
+  forEachBiffRecord(bytes, 0, bytes.length, ({ type, dataOffset, length }) => {
+    if (type === 0x00FC) {
+      records.push(bytes.slice(dataOffset, dataOffset + length));
+      collecting = true;
+      return;
+    }
+    if (collecting && type === 0x003C) {
+      records.push(bytes.slice(dataOffset, dataOffset + length));
+      return;
+    }
+    if (collecting) collecting = false;
+  });
+  return records;
+};
+
+const cleanRichTextAfterStrikeRemoval = (value = '') => fmt(value)
+  .split(/\r?\n/)
+  .map((line) => line.replace(/[ \t]+$/g, ''))
+  .filter((line) => fmt(line))
+  .join('\n')
+  .trim();
+
+const removeStruckRichTextRuns = (text = '', runs = [], fonts = []) => {
+  if (!text || !runs.length) return text;
+  const sortedRuns = [...runs]
+    .filter((run) => Number.isFinite(run.start) && run.start >= 0)
+    .sort((a, b) => a.start - b.start);
+  if (!sortedRuns.length) return text;
+  const segments = [];
+  for (let index = 0; index < sortedRuns.length; index += 1) {
+    const run = sortedRuns[index];
+    const start = Math.min(run.start, text.length);
+    const end = Math.min(sortedRuns[index + 1]?.start ?? text.length, text.length);
+    if (start >= end) continue;
+    const struck = Boolean(biffFontAtIndex(fonts, run.fontIndex)?.strike);
+    if (!struck) segments.push(text.slice(start, end));
+  }
+  const sanitized = cleanRichTextAfterStrikeRemoval(segments.join(''));
+  return sanitized === text ? text : sanitized;
+};
+
+const parseLegacySharedStringSanitizers = (bytes, fonts = []) => {
+  const sstRecords = collectBiffSstPayloadRecords(bytes);
+  if (!sstRecords.length) return new Map();
+  const reader = new BiffRecordReader(sstRecords, 8);
+  const uniqueCount = readUInt32LE(sstRecords[0], 4);
+  const sanitizedByIndex = new Map();
+
+  for (let stringIndex = 0; stringIndex < uniqueCount; stringIndex += 1) {
+    if (!reader.current) break;
+    const charCount = reader.readUInt16();
+    const flags = reader.readByte();
+    const hasRichText = Boolean(flags & 0x08);
+    const hasExtendedText = Boolean(flags & 0x04);
+    const isUtf16 = Boolean(flags & 0x01);
+    const runCount = hasRichText ? reader.readUInt16() : 0;
+    const extendedSize = hasExtendedText ? reader.readUInt32() : 0;
+    const text = reader.readChars(charCount, isUtf16);
+    const runs = [];
+    for (let runIndex = 0; runIndex < runCount; runIndex += 1) {
+      runs.push({
+        start: reader.readUInt16(),
+        fontIndex: reader.readUInt16(),
+      });
+    }
+    if (extendedSize) reader.skip(extendedSize);
+
+    if (hasRichText && runs.length) {
+      const sanitized = removeStruckRichTextRuns(text, runs, fonts);
+      if (sanitized !== text) sanitizedByIndex.set(stringIndex, { original: text, sanitized });
+    }
+  }
+
+  return sanitizedByIndex;
+};
+
 const attachLegacyXlsStrikeMetadata = (workbook) => {
   const bytes = workbookCfbFileContent(workbook, 'Workbook') || workbookCfbFileContent(workbook, 'Book');
   if (!bytes?.length || !workbook?.Sheets) return workbook;
@@ -5162,7 +5343,7 @@ const attachLegacyXlsStrikeMetadata = (workbook) => {
     }
     if (type === 0x00E0) {
       const fontIndex = readUInt16LE(bytes, dataOffset);
-      xfs.push({ strike: Boolean(fonts[fontIndex]?.strike) });
+      xfs.push({ strike: Boolean(biffFontAtIndex(fonts, fontIndex)?.strike) });
       return;
     }
     if (type === 0x0085 && length >= 8) {
@@ -5174,6 +5355,7 @@ const attachLegacyXlsStrikeMetadata = (workbook) => {
     }
   });
 
+  const sanitizedSharedStrings = parseLegacySharedStringSanitizers(bytes, fonts);
   const isStrikeXf = (xfIndex) => Boolean(xfs[xfIndex]?.strike);
   const markCell = (sheetName, row, column, xfIndex) => {
     if (!isStrikeXf(xfIndex)) return;
@@ -5187,10 +5369,36 @@ const attachLegacyXlsStrikeMetadata = (workbook) => {
       strike: true,
     };
   };
+  const sanitizeCell = (sheetName, row, column, stringIndex) => {
+    if (!sanitizedSharedStrings.has(stringIndex)) return;
+    const worksheet = workbook.Sheets[sheetName];
+    if (!worksheet) return;
+    const address = XLSX.utils.encode_cell({ r: row, c: column });
+    const cell = worksheet[address];
+    if (!cell) return;
+    const entry = sanitizedSharedStrings.get(stringIndex);
+    const originalCellText = fmt(cell.w ?? cell.v);
+    if (fmt(entry.original) !== originalCellText) return;
+    const sanitized = entry.sanitized;
+    cell.__sanitizedText = sanitized;
+    cell.__styleInfo = {
+      ...(cell.__styleInfo || {}),
+      richStrikeRemoved: true,
+    };
+    cell.w = sanitized;
+    cell.v = sanitized;
+  };
 
   sheets.forEach((sheet, sheetIndex) => {
     const nextOffset = sheets[sheetIndex + 1]?.offset || bytes.length;
     forEachBiffRecord(bytes, sheet.offset, nextOffset, ({ type, dataOffset, length }) => {
+      if (type === 0x00FD && length >= 10) {
+        const row = readUInt16LE(bytes, dataOffset);
+        const column = readUInt16LE(bytes, dataOffset + 2);
+        markCell(sheet.name, row, column, readUInt16LE(bytes, dataOffset + 4));
+        sanitizeCell(sheet.name, row, column, readUInt32LE(bytes, dataOffset + 6));
+        return;
+      }
       if ([0x00FD, 0x0204, 0x00D6, 0x0203, 0x027E, 0x0201, 0x0205, 0x0006].includes(type) && length >= 6) {
         markCell(sheet.name, readUInt16LE(bytes, dataOffset), readUInt16LE(bytes, dataOffset + 2), readUInt16LE(bytes, dataOffset + 4));
         return;
@@ -5198,10 +5406,10 @@ const attachLegacyXlsStrikeMetadata = (workbook) => {
       if (type === 0x00BD && length >= 10) {
         const row = readUInt16LE(bytes, dataOffset);
         const firstColumn = readUInt16LE(bytes, dataOffset + 2);
-        const lastColumn = readUInt16LE(bytes, dataOffset + 4);
+        const lastColumn = readUInt16LE(bytes, dataOffset + length - 2);
         for (let column = firstColumn; column <= lastColumn; column += 1) {
-          const rkOffset = dataOffset + 6 + ((column - firstColumn) * 6);
-          if (rkOffset + 5 >= dataOffset + length) break;
+          const rkOffset = dataOffset + 4 + ((column - firstColumn) * 6);
+          if (rkOffset + 5 >= dataOffset + length - 2) break;
           markCell(sheet.name, row, column, readUInt16LE(bytes, rkOffset));
         }
         return;
@@ -5209,10 +5417,10 @@ const attachLegacyXlsStrikeMetadata = (workbook) => {
       if (type === 0x00BE && length >= 8) {
         const row = readUInt16LE(bytes, dataOffset);
         const firstColumn = readUInt16LE(bytes, dataOffset + 2);
-        const lastColumn = readUInt16LE(bytes, dataOffset + 4);
+        const lastColumn = readUInt16LE(bytes, dataOffset + length - 2);
         for (let column = firstColumn; column <= lastColumn; column += 1) {
-          const xfOffset = dataOffset + 6 + ((column - firstColumn) * 2);
-          if (xfOffset + 1 >= dataOffset + length) break;
+          const xfOffset = dataOffset + 4 + ((column - firstColumn) * 2);
+          if (xfOffset + 1 >= dataOffset + length - 2) break;
           markCell(sheet.name, row, column, readUInt16LE(bytes, xfOffset));
         }
       }
@@ -5288,7 +5496,13 @@ const splitDelimitedLineSafely = (line, delimiter, groupAware = true) => {
         index += 1;
         continue;
       }
-      inQuotes = !inQuotes;
+      // Treat quotes as CSV structure only when they start a cell or close an
+      // already quoted cell. THALES CSV exports contain stray trailing quotes in
+      // unquoted alternate rows (`... [1126658]"`); letting those toggle quote
+      // mode merged the next several physical rows into one logical record.
+      if (inQuotes || !fmt(current)) {
+        inQuotes = !inQuotes;
+      }
       current += char;
       continue;
     }
@@ -5857,6 +6071,15 @@ const getBlockColumnMap = (headerRow = []) => {
 };
 
 const cellAtIndex = (row = [], index = -1) => (index >= 0 ? fmt(row[index]) : '');
+const cellStyleAtIndex = (row = [], index = -1) => (index >= 0 ? row.__cellMeta?.[index] || null : null);
+const cellLooksDeletedAtIndex = (row = [], index = -1) => {
+  const styleInfo = cellStyleAtIndex(row, index);
+  if (styleInfo?.richStrikeRemoved) return false;
+  return Boolean(styleInfo?.red || styleInfo?.strike);
+};
+const activeCellAtIndex = (row = [], index = -1) => (
+  cellLooksDeletedAtIndex(row, index) ? '' : cellAtIndex(row, index)
+);
 
 const buildMultiBlockRowsForSheet = (currentWorkbook, currentSheetName) => {
   const worksheet = currentWorkbook.Sheets[currentSheetName];
@@ -5897,21 +6120,21 @@ const buildMultiBlockRowsForSheet = (currentWorkbook, currentSheetName) => {
       const row = rows[rowIndex] || [];
       if (!row.some((cell) => fmt(cell))) continue;
       if (rowLooksLikeMultiBlockHeader(row)) continue;
-      const remarks = cellAtIndex(row, columnMap.remarks);
-      const rawManufacturer = cellAtIndex(row, columnMap.manufacturer);
-      const rawMpn = cellAtIndex(row, columnMap.mpn);
+      const remarks = activeCellAtIndex(row, columnMap.remarks);
+      const rawManufacturer = activeCellAtIndex(row, columnMap.manufacturer);
+      const rawMpn = activeCellAtIndex(row, columnMap.mpn);
       const alignedMpn = removeLeadingUnnumberedLineWhenCompanionIsNumbered(rawMpn, rawManufacturer);
 
       const baseValues = {
         'Source sheet': currentSheetName,
         'BOM block': block.name,
         'Block codes': block.codes.join(', '),
-        Item: cellAtIndex(row, columnMap.item),
-        'Reference D/N': stripCircledNumberMarkers(cleanStackedPartIdentifierCell(cellAtIndex(row, columnMap.reference))),
-        Description: cellAtIndex(row, columnMap.description),
-        Specification: cellAtIndex(row, columnMap.specification),
-        'Other specification:HKK Request': cellAtIndex(row, columnMap.otherSpecification),
-        'Part number': cellAtIndex(row, columnMap.partNumber),
+        Item: activeCellAtIndex(row, columnMap.item),
+        'Reference D/N': stripCircledNumberMarkers(cleanStackedPartIdentifierCell(activeCellAtIndex(row, columnMap.reference))),
+        Description: activeCellAtIndex(row, columnMap.description),
+        Specification: activeCellAtIndex(row, columnMap.specification),
+        'Other specification:HKK Request': activeCellAtIndex(row, columnMap.otherSpecification),
+        'Part number': activeCellAtIndex(row, columnMap.partNumber),
         'Parts Maker': removeDeletedCircledSegments(rawManufacturer, remarks),
         'Parts Name': removeDeletedCircledSegments(alignedMpn, remarks),
         Remarks: remarks,
@@ -5926,7 +6149,7 @@ const buildMultiBlockRowsForSheet = (currentWorkbook, currentSheetName) => {
         ? columnMap.quantityColumns
         : [{ header: 'Quantity', index: -1 }];
       quantityColumns.forEach((quantityColumn) => {
-        const quantityValue = quantityColumn.index >= 0 ? cellAtIndex(row, quantityColumn.index) : '';
+        const quantityValue = quantityColumn.index >= 0 ? activeCellAtIndex(row, quantityColumn.index) : '';
         if (quantityColumn.index >= 0 && !isMultiBlockQuantityPresent(quantityValue)) return;
         dataRows.push({
           ...baseValues,
@@ -8537,7 +8760,7 @@ const BomNormalizer = () => {
       } : null,
       rules: [
         'Slash suffix variant expansion applied.',
-        'Base MPN stays Primary; generated suffix MPNs become alternates.',
+        'Generated MPNs replace the @ marker with each detected suffix option.',
         `Configured variants: ${summary}.`,
       ],
       summary,
@@ -14278,7 +14501,12 @@ const BomNormalizer = () => {
                       ))}
                       {(example.pairs || []).map((pair, pairIndex) => (
                         <React.Fragment key={`${selectedParsingPattern.key}-${pairIndex}-${pair.mpn}-${pair.manufacturer}`}>
-                          <Chip size="small" color="success" label={`MPN: ${pair.mpn}`} sx={{ fontWeight: 650 }} />
+                          <Chip
+                            size="small"
+                            color="success"
+                            label={`${pairIndex === 0 ? 'Primary MPN' : `Alt ${pairIndex}`}: ${pair.mpn}`}
+                            sx={{ fontWeight: 650 }}
+                          />
                           <Chip size="small" color="info" label={`MFR: ${pair.manufacturer}`} sx={{ fontWeight: 650 }} />
                           {pair.discarded && <Chip size="small" variant="outlined" label={`Ignore: ${pair.discarded}`} sx={{ fontWeight: 600, color: normalizerTheme.muted }} />}
                         </React.Fragment>

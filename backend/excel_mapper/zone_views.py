@@ -549,18 +549,42 @@ def _zone_table_header_score(row):
     then loses a real BOM line, so table mode only promotes a row to headers
     when it has header-like labels.
     """
+    def plain(text):
+        text = re.sub(r'\s+', ' ', str(text or '')).strip().lower()
+        return (
+            text.replace('é', 'e')
+                .replace('è', 'e')
+                .replace('ê', 'e')
+                .replace('à', 'a')
+                .replace('ç', 'c')
+                .replace('ù', 'u')
+        )
+
     cells = [re.sub(r'\s+', ' ', str(cell or '')).strip() for cell in (row or [])]
     non_blank = [cell for cell in cells if cell]
     if len(non_blank) < 2:
         return 0
 
-    joined = ' '.join(non_blank).lower()
+    joined = plain(' '.join(non_blank))
     keyword_hits = sum(
         1 for pattern in (
             r'\bfind\s*(?:no|num|number|nbr)?\.?\b',
+            r'\brepere\b',
+            r'\bitem\s*(?:no|num|number)?\.?\b',
             r'\bpart\s*(?:no|num|number|nbr)?\.?\b',
             r'\bdescription\b',
             r'\bdesc\b',
+            r'\bfabricant\b',
+            r'\bmanufacturer\b',
+            r'\breference\b',
+            r'\bcaracteristiques?\b',
+            r'\bcharacteristics?\b',
+            r'\bquantite\b',
+            r'\bquantity\b',
+            r'\blongueur\b',
+            r'\blength\b',
+            r'\bindice\b',
+            r'\bindex\b',
             r'\bassy\b',
             r'\bassembly\b',
             r'\bbom\b',
@@ -573,7 +597,12 @@ def _zone_table_header_score(row):
     )
     long_data_hits = sum(
         1 for cell in non_blank
-        if len(cell) > 18 and not re.search(r'\b(description|part|find|assy|assembly|bom)\b', cell, flags=re.IGNORECASE)
+        if len(cell) > 18 and not re.search(
+            r'\b(description|part|find|assy|assembly|bom|fabricant|manufacturer|reference|'
+            r'caracteristiques?|characteristics?|quantite|quantity|longueur|length)\b',
+            plain(cell),
+            flags=re.IGNORECASE,
+        )
     )
     part_number_hits = sum(
         1 for cell in non_blank
@@ -718,7 +747,11 @@ def process_column_zones(request, session_id):
                     (str(header_row[i]).strip() if i < len(header_row) and str(header_row[i]).strip() else f'Column_{i + 1}')
                     for i in range(n_cols)
                 ]
-                rows = rows[:header_index] + rows[header_index + 1:]
+                header_rows_to_drop = {header_index}
+                for nearby_index in (header_index - 1, header_index + 1):
+                    if 0 <= nearby_index < len(rows) and _zone_table_header_score(rows[nearby_index]) >= 35:
+                        header_rows_to_drop.add(nearby_index)
+                rows = [row for index, row in enumerate(rows) if index not in header_rows_to_drop]
             else:
                 headers = [f'Column_{i + 1}' for i in range(n_cols)]
         else:
