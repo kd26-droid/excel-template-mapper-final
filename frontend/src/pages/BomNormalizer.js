@@ -6737,6 +6737,36 @@ const NORMALIZED_ISSUE_FILTERS = [
 
 const hasManufacturerValues = (rows = []) => rows.some((row) => fmt(row?.manufacturer));
 
+const hydrateNormalizerNoteColumns = (rows = [], roles = {}, sourceRows = []) => {
+  const noteRoleMap = [
+    { output: 'Notes', source: roles?.notes },
+    { output: 'Internal notes', source: roles?.internalNotes },
+  ].filter((item) => item.source);
+
+  if (!noteRoleMap.length) return rows;
+
+  const sourceByRowNumber = new Map();
+  (sourceRows || []).forEach((row, index) => {
+    const sourceRowNumber = row?.__sourceRow || index + 1;
+    sourceByRowNumber.set(String(sourceRowNumber), row);
+  });
+
+  return (rows || []).map((row, index) => {
+    const sourceRow = sourceByRowNumber.get(String(row?.sourceRow || '')) || sourceRows[index] || {};
+    let next = row;
+
+    noteRoleMap.forEach(({ output, source }) => {
+      if (fmt(next?.[output])) return;
+      const value = sourceRow?.[source];
+      if (value === undefined || value === null || fmt(value) === '') return;
+      if (next === row) next = { ...row };
+      next[output] = value;
+    });
+
+    return next;
+  });
+};
+
 const buildBomMappingRowsFromNormalizedRows = (rows = [], baseColumns = getNormalizedExportColumns(rows)) => {
   const columns = [...baseColumns];
 
@@ -9898,8 +9928,9 @@ const BomNormalizer = () => {
       setError('Run normalization before continuing to BOM Mapping.');
       return;
     }
-    const baseColumns = getNormalizedExportColumns(normalizedRows);
-    const { columns, rows } = buildBomMappingRowsFromNormalizedRows(normalizedRows, baseColumns);
+    const handoffRows = hydrateNormalizerNoteColumns(normalizedRows, roles, dataRows);
+    const baseColumns = getNormalizedExportColumns(handoffRows);
+    const { columns, rows } = buildBomMappingRowsFromNormalizedRows(handoffRows, baseColumns);
     const suggestedMappings = buildNormalizerSuggestedMappings(columns, rows);
     const file = createWorkbookFileFromRows(rows, columns, 'normalized-bom-for-mapping.xlsx', 'Normalized BOM');
     const formData = new FormData();
@@ -9912,7 +9943,7 @@ const BomNormalizer = () => {
       formData.append('bomStructure', JSON.stringify(answers || location.state.bomStructure));
     }
     const returnSnapshotKey = saveReturnSnapshot('normalized-results');
-    const returnSnapshot = buildNormalizedResultsSnapshot(normalizedRows);
+    const returnSnapshot = buildNormalizedResultsSnapshot(handoffRows);
 
     setBusy(true);
     setError('');
@@ -9922,7 +9953,7 @@ const BomNormalizer = () => {
         if (!sessionId) throw new Error('Upload response missing session id.');
 
         const uploadSource = location.state?.uploadSource || null;
-        const workflow = buildNormalizerWorkflowRecipe('normalized-results', normalizedRows);
+        const workflow = buildNormalizerWorkflowRecipe('normalized-results', handoffRows);
         const nextUploadSource = uploadSource ? {
           ...uploadSource,
           processingPath: 'normalize',
@@ -9985,7 +10016,7 @@ const BomNormalizer = () => {
               mappingBackState: {
                 route: '/bom-normalizer',
                 bomNormalizerReturnKey: returnSnapshotKey,
-                bomNormalizerReturnRows: normalizedRows,
+                bomNormalizerReturnRows: handoffRows,
                 bomNormalizerReturnSnapshot: returnSnapshot,
               },
             },
@@ -10002,7 +10033,7 @@ const BomNormalizer = () => {
             mappingBackState: {
               route: '/bom-normalizer',
               bomNormalizerReturnKey: returnSnapshotKey,
-              bomNormalizerReturnRows: normalizedRows,
+              bomNormalizerReturnRows: handoffRows,
               bomNormalizerReturnSnapshot: returnSnapshot,
             },
           },
@@ -10016,6 +10047,7 @@ const BomNormalizer = () => {
     buildNormalizedResultsSnapshot,
     buildNormalizerWorkflowRecipe,
     config,
+    dataRows,
     factwiseConfig,
     fileName,
     headerRowIndex,

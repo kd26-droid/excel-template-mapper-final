@@ -3408,6 +3408,42 @@ def save_mappings(request):
         elif isinstance(mappings, dict):
             # old format {target: source} -> new format list
             normalized = { 'mappings': [ {'source': src, 'target': tgt} for tgt, src in mappings.items() ] }
+
+        if isinstance(normalized, dict) and 'mappings' in normalized:
+            def _same_name_header(headers, wanted):
+                wanted_key = _template_label_key(wanted)
+                for header in headers or []:
+                    if _template_label_key(header) == wanted_key:
+                        return str(header)
+                return ''
+
+            client_headers_for_identity = info.get('client_headers') or []
+            template_headers_for_identity = (
+                info.get('enhanced_headers')
+                or info.get('current_template_headers')
+                or info.get('template_headers')
+                or []
+            )
+            mapped_source_keys = {
+                _template_label_key(mapping.get('source'))
+                for mapping in normalized.get('mappings', [])
+                if isinstance(mapping, dict)
+            }
+            mapped_target_keys = {
+                _template_label_key(mapping.get('target'))
+                for mapping in normalized.get('mappings', [])
+                if isinstance(mapping, dict)
+            }
+            for identity_column in ('Notes', 'Internal notes'):
+                source_header = _same_name_header(client_headers_for_identity, identity_column)
+                target_header = _same_name_header(template_headers_for_identity, identity_column)
+                source_key = _template_label_key(source_header)
+                target_key = _template_label_key(target_header)
+                if source_header and target_header and source_key not in mapped_source_keys and target_key not in mapped_target_keys:
+                    normalized['mappings'].append({'source': source_header, 'target': target_header})
+                    mapped_source_keys.add(source_key)
+                    mapped_target_keys.add(target_key)
+                    logger.info(f"SAVE_MAPPINGS: Added default identity mapping '{source_header}' -> '{target_header}'")
         
         # Convert external column names to internal names for mapping storage
         # Use centralized conversion functions to ensure consistency

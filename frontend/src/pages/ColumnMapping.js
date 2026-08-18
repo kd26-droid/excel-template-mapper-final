@@ -3199,22 +3199,35 @@ export default function ColumnMapping() {
   }, [clientHeaders, templateHeaders, findHeaderByCandidates, setEdges, setNodes, showSnackbar]);
 
   useEffect(() => {
-    if (normalizerSuggestedMappingsAppliedRef.current) return;
-    const suggestedMappings = [
-      ...(location.state?.normalizerSuggestedMappings || []),
+    const noteIdentityMappings = [
       { source: 'Notes', targets: ['Notes'] },
       { source: 'Internal notes', targets: ['Internal notes'] },
     ];
-    if (!location.state?.fromBomNormalizer || !Array.isArray(suggestedMappings) || suggestedMappings.length === 0) return;
+    const suggestedMappings = [
+      ...(location.state?.fromBomNormalizer ? (location.state?.normalizerSuggestedMappings || []) : []),
+      ...noteIdentityMappings,
+    ];
+    if (!Array.isArray(suggestedMappings) || suggestedMappings.length === 0) return;
     if (loading || clientHeaders.length === 0 || templateHeaders.length === 0 || nodes.length === 0) return;
 
     const timer = setTimeout(() => {
-      applyNormalizerSuggestedMappings(suggestedMappings);
-      normalizerSuggestedMappingsAppliedRef.current = true;
+      const headerSignature = `${clientHeaders.join('|')}=>${templateHeaders.join('|')}`;
+      if (normalizerSuggestedMappingsAppliedRef.current === headerSignature) return;
+      const appliedCount = applyNormalizerSuggestedMappings(suggestedMappings);
+      if (appliedCount > 0) {
+        normalizerSuggestedMappingsAppliedRef.current = headerSignature;
+      }
     }, 250);
 
     return () => clearTimeout(timer);
-  }, [location.state, loading, clientHeaders.length, templateHeaders.length, nodes.length, applyNormalizerSuggestedMappings]);
+  }, [
+    location.state,
+    loading,
+    clientHeaders,
+    templateHeaders,
+    nodes.length,
+    applyNormalizerSuggestedMappings,
+  ]);
 
   // initializeNodes function is hoisted above as function declaration to avoid TDZ
 
