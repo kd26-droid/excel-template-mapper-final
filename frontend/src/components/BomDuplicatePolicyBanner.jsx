@@ -1,6 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Alert, Button, Chip, Stack, Typography } from '@mui/material';
+import {
+  Alert, Box, Button, Chip, Dialog, DialogContent, DialogTitle, Stack, Typography,
+} from '@mui/material';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
+import WarningAmberOutlinedIcon from '@mui/icons-material/WarningAmberOutlined';
 import api from '../services/api';
 import BomDuplicatePolicyDialog from './BomDuplicatePolicyDialog';
 
@@ -47,6 +50,12 @@ const BomDuplicatePolicyBanner = ({ sessionId, refreshKey }) => {
   const [policy, setPolicy] = useState(null);
   const [loading, setLoading] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
+  // Codes that two different parts are claiming. Not a duplicate GROUP - those
+  // merge on export - but a conflict only the user can settle, and until now it
+  // surfaced for the first time at the export gate.
+  const [conflicts, setConflicts] = useState([]);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [applying, setApplying] = useState('');
 
   const refresh = useCallback(async () => {
     if (!sessionId) return;
@@ -79,19 +88,62 @@ const BomDuplicatePolicyBanner = ({ sessionId, refreshKey }) => {
       }
       setGroups(rawGroups);
       setPolicy(effectivePolicy);
+
+      // Same report the export gate uses, so the banner cannot disagree with it.
+      try {
+        const report = await api.validateBomSheet(sessionId);
+        const errors = report?.data?.errors || [];
+        const clash = errors.find((e) => e?.rule === 'item_code_duplicate');
+        setConflicts(Array.isArray(clash?.conflicts) ? clash.conflicts : []);
+      } catch (_) {
+        setConflicts([]);
+      }
     } catch {
       // Silent — the banner is a hint, not a blocker. Failure to detect
       // (backend restart, transient 500) just hides the banner this render.
       setGroups([]);
       setPolicy(null);
+      setConflicts([]);
     } finally {
       setLoading(false);
     }
   }, [sessionId]);
 
+  // Settle one disagreement by writing the value the user picked onto every row
+  // carrying that item code. A conditional rule with NO 'else' branch touches
+  // only the matching rows - everything else keeps what it has. Once the rows
+  // agree they are the same item, so they collapse and their quantities add up.
+  const useValue = useCallback(async (code, column, value) => {
+    setApplying(`${code}|${column}|${value}`);
+    try {
+      await api.fillOrCreateColumn(sessionId, {
+        type: 'column_value',
+        target_mode: 'existing',
+        target_column: column,
+        value_mode: 'conditional',
+        write_mode: 'overwrite',
+        source_columns: [],
+        separator: '_',
+        condition: {
+          branches: [{
+            column: 'Item code',
+            operator: 'equals',
+            compare: [code],
+            output_value: value,
+          }],
+        },
+      });
+      await refresh();
+    } catch (_) {
+      // The row simply stays as it was; the banner still names the conflict.
+    } finally {
+      setApplying('');
+    }
+  }, [sessionId, refresh]);
+
   useEffect(() => { refresh(); }, [refresh, refreshKey]);
 
-  if (loading || groups.length === 0) return null;
+  if (loading || (groups.length === 0 && conflicts.length === 0)) return null;
 
   const activePolicy = policy || DEFAULT_POLICY;
   const isDefault = !policy;
@@ -108,18 +160,30 @@ const BomDuplicatePolicyBanner = ({ sessionId, refreshKey }) => {
   return (
     <>
       <Alert
-        severity="info"
-        icon={<InfoOutlinedIcon fontSize="small" />}
+        /* Blue means "handled on export". Anything needing a human decision has
+           to look different, or it reads as handled and is met for the first
+           time at the export gate. */
+        severity={conflicts.length > 0 ? 'warning' : 'info'}
+        icon={conflicts.length > 0
+          ? <WarningAmberOutlinedIcon fontSize="small" />
+          : <InfoOutlinedIcon fontSize="small" />}
         variant="outlined"
         sx={{ mb: 1.5, py: 0.5, '.MuiAlert-message': { py: 0.5, flex: 1 } }}
         action={
-          <Button
-            size="small"
-            variant="text"
-            onClick={() => setDialogOpen(true)}
-          >
-            {isDefault ? 'Change' : 'Change setting'}
-          </Button>
+          <Stack direction="row" gap={1}>
+            {conflicts.length > 0 && (
+              <Button size="small" variant="text" onClick={() => setReviewOpen(true)}>
+                Review
+              </Button>
+            )}
+            <Button
+              size="small"
+              variant="text"
+              onClick={() => setDialogOpen(true)}
+            >
+              {isDefault ? 'Change' : 'Change setting'}
+            </Button>
+          </Stack>
         }
       >
         <Stack direction="row" alignItems="center" gap={1} flexWrap="wrap">
@@ -135,8 +199,77 @@ const BomDuplicatePolicyBanner = ({ sessionId, refreshKey }) => {
             color={isDefault ? 'default' : 'primary'}
             variant="outlined"
           />
+          {conflicts.length > 0 && (
+            <Chip
+              size="small"
+              color="warning"
+              label={`${conflicts.length} need your decision`}
+            />
+          )}
         </Stack>
       </Alert>
+      <Dialog open={reviewOpen} onClose={() => setReviewOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle sx={{ pb: 0.5 }}>
+          <Typography variant="h6" sx={{ fontWeight: 800 }}>
+            One item code, two different parts
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            These codes are shared by rows that disagree, so every BOM line using
+            them is ambiguous. Pick a value to make the rows match - they then
+            merge into one item and their quantities add up. If they really are
+            different parts, give them different item codes in the grid instead.
+            Do not delete a row: that removes its BOM line too.
+          </Typography>
+        </DialogTitle>
+        <DialogContent dividers>
+          <Stack gap={1.5}>
+            {conflicts.map((conflict) => (
+              <Box key={conflict.code}>
+                <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                  {conflict.code}
+                  <Box component="span" sx={{ fontWeight: 400, opacity: 0.7 }}>
+                    {` — ${conflict.rows} rows`}
+                  </Box>
+                </Typography>
+                {(conflict.fields || []).length > 0 ? (
+                  (conflict.fields || []).map((field) => (
+                    <Stack
+                      key={field.column}
+                      direction="row"
+                      alignItems="center"
+                      gap={0.75}
+                      flexWrap="wrap"
+                      sx={{ pl: 1.5, mt: 0.25 }}
+                    >
+                      <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                        {`differs on ${field.column}:`}
+                      </Typography>
+                      {(field.values || []).map((v) => (
+                        <Button
+                          key={`${field.column}|${v}`}
+                          size="small"
+                          variant="outlined"
+                          disabled={Boolean(applying)}
+                          onClick={() => useValue(conflict.code, field.column, v)}
+                          sx={{ textTransform: 'none', py: 0, minWidth: 0, fontFamily: 'monospace' }}
+                        >
+                          {applying === `${conflict.code}|${field.column}|${v}`
+                            ? 'applying…'
+                            : `use ${v === '' ? '(blank)' : v}`}
+                        </Button>
+                      ))}
+                    </Stack>
+                  ))
+                ) : (
+                  <Typography variant="caption" sx={{ display: 'block', pl: 1.5 }} color="text.secondary">
+                    rows match — they merge into one item automatically
+                  </Typography>
+                )}
+              </Box>
+            ))}
+          </Stack>
+        </DialogContent>
+      </Dialog>
       <BomDuplicatePolicyDialog
         open={dialogOpen}
         sessionId={sessionId}

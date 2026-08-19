@@ -2143,6 +2143,15 @@ const EnhancedDataEditor = () => {
           if (rule.target_mode === 'new' && currentFields.has(rule.target_column)) {
             continue;
           }
+          // A REPLAY fills gaps; it never rewrites a stored value. The rule ran
+          // once with the write mode the user chose - that was the decision.
+          // Everything after it is a replay on data they may since have edited
+          // by hand, and honouring 'overwrite' there silently undoes the edit:
+          // an Item code rule joining MPN + Tag_1 blanked 29 rows that have no
+          // MPN on every page load, so a value typed into them never survived a
+          // refresh. Same reasoning as the fill-only replay in views.py's
+          // required-fields report.
+          rule.write_mode = 'fill_empty';
           const resp = await api.fillOrCreateColumn(sessionId, rule);
           if (!resp.data?.success) throw new Error(resp.data?.error || 'Column action failed');
           currentFields.add(rule.target_column);
@@ -3817,7 +3826,7 @@ const EnhancedDataEditor = () => {
       // without this, generator warnings render under a bare "other" heading.
       const rule = issue.rule || issue.type || 'other';
       if (!groups.has(rule)) {
-        groups.set(rule, { rule, severity, count: 0, rows: [], codes: [], values: [], messages: [] });
+        groups.set(rule, { rule, severity, count: 0, rows: [], codes: [], values: [], messages: [], conflicts: [] });
       }
       const group = groups.get(rule);
       // `count` on an issue means it already speaks for several rows — the
@@ -3829,6 +3838,13 @@ const EnhancedDataEditor = () => {
       rows.forEach(row => { if (!group.rows.includes(row)) group.rows.push(row); });
       (issue.codes || []).forEach(code => {
         if (!group.codes.includes(code)) group.codes.push(code);
+      });
+      // What actually differs between rows sharing a code. Carried through so
+      // the card can name the column instead of leaving the user to diff rows.
+      (issue.conflicts || []).forEach(conflict => {
+        if (!group.conflicts.some(existing => existing.code === conflict.code)) {
+          group.conflicts.push(conflict);
+        }
       });
       // The exact cell contents that failed, so a fix can target just them.
       const offending = String(issue.value ?? '').trim();
@@ -11091,7 +11107,47 @@ const EnhancedDataEditor = () => {
                     <Typography variant="body2" color="text.secondary">
                       <strong>Fix:</strong> {guidance.action || 'Check the affected rows in the grid.'}
                     </Typography>
-                    {group.codes.length > 0 && (
+                    {group.conflicts.length > 0 ? (
+                      /* One line per shared code naming the column that
+                         disagrees and what each row says. "Different parts" is
+                         only actionable once you can see WHAT differs. */
+                      <Box sx={{ display: 'grid', gap: 0.5, mt: 0.25 }}>
+                        {group.conflicts.slice(0, 6).map(conflict => (
+                          <Box key={conflict.code} sx={{ display: 'grid', gap: 0.25 }}>
+                            <Typography variant="caption" sx={{ color: t.text.primary, fontWeight: 700 }}>
+                              {conflict.code}
+                              <Box component="span" sx={{ fontWeight: 500, opacity: 0.75 }}>
+                                {` — ${conflict.rows} rows`}
+                              </Box>
+                            </Typography>
+                            {(conflict.fields || []).length > 0 ? (
+                              (conflict.fields || []).slice(0, 4).map(field => (
+                                <Typography
+                                  key={field.column}
+                                  variant="caption"
+                                  color="text.secondary"
+                                  sx={{ pl: 1.25 }}
+                                >
+                                  {`differs on ${field.column}: `}
+                                  <Box component="span" sx={{ fontFamily: 'monospace' }}>
+                                    {(field.values || []).map(v => (v === '' ? '(blank)' : v)).join('  /  ')}
+                                  </Box>
+                                </Typography>
+                              ))
+                            ) : (
+                              <Typography variant="caption" color="text.secondary" sx={{ pl: 1.25 }}>
+                                rows match — they will be merged into one item
+                              </Typography>
+                            )}
+                          </Box>
+                        ))}
+                        {group.conflicts.length > 6 && (
+                          <Typography variant="caption" color="text.secondary">
+                            {`+${group.conflicts.length - 6} more`}
+                          </Typography>
+                        )}
+                      </Box>
+                    ) : group.codes.length > 0 && (
                       <Typography variant="caption" color="text.secondary">
                         Codes: {group.codes.slice(0, 8).join(', ')}
                         {group.codes.length > 8 ? ` +${group.codes.length - 8} more` : ''}

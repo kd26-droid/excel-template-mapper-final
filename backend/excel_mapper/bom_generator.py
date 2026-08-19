@@ -992,6 +992,20 @@ def apply_records_duplicate_policy(records, policy, per_group_target_level=None,
         gid, target_level = row_to_group[index]
         row_level = str(record.get(F_LEVEL) or '').strip()
         row_qty = _num(record.get(F_QUANTITY))
+        # WHICH LINE this row is, as opposed to which ITEM it is.
+        #
+        # 'parent' is kept out of the identity signature on purpose - the same
+        # screw under two assemblies has to be recognised as one item. But a BOM
+        # line is a parent+child pair, so merging on identity alone collapses
+        # lines belonging to different assemblies: one THALES spec document
+        # referenced by three label assemblies came out as a single line under
+        # the first of them at quantity 3, and the other two lost the line
+        # entirely. Bucketing by parent still merges a real duplicate (one
+        # parent listing the same child twice) and leaves shared parts alone.
+        #
+        # Sheets that state no parent leave this blank on every row, so they
+        # bucket exactly as they did before.
+        row_parent = str(record.get('parent') or '').strip()
 
         def write(target_record, qty=None, level=None):
             if qty is not None:
@@ -1004,7 +1018,7 @@ def apply_records_duplicate_policy(records, policy, per_group_target_level=None,
         # about one group is not overridden by a global "leave things alone".
         override = chosen_quantity(gid, row_level)
         if override is not None:
-            bucket = (gid, row_level)
+            bucket = (gid, row_parent, row_level)
             if bucket in per_bucket_written:
                 continue  # already written at this level; this row is absorbed
             new_row = dict(record)
@@ -1018,7 +1032,7 @@ def apply_records_duplicate_policy(records, policy, per_group_target_level=None,
             output.append(dict(record))
 
         elif policy == POLICY_KEEP_AT_ALL_LEVELS:
-            bucket = (gid, row_level)
+            bucket = (gid, row_parent, row_level)
             per_bucket_qty[bucket] = per_bucket_qty.get(bucket, 0.0) + row_qty
             if bucket in per_bucket_written:
                 write(output[per_bucket_written[bucket]], qty=per_bucket_qty[bucket])
@@ -1031,7 +1045,7 @@ def apply_records_duplicate_policy(records, policy, per_group_target_level=None,
         elif policy == POLICY_IGNORE_OTHER_LEVELS:
             if row_level != target_level:
                 continue
-            bucket = (gid, row_level)
+            bucket = (gid, row_parent, row_level)
             per_bucket_qty[bucket] = per_bucket_qty.get(bucket, 0.0) + row_qty
             if bucket in per_bucket_written:
                 write(output[per_bucket_written[bucket]], qty=per_bucket_qty[bucket])
@@ -1042,7 +1056,7 @@ def apply_records_duplicate_policy(records, policy, per_group_target_level=None,
             output.append(new_row)
 
         elif policy == POLICY_AGGREGATE_PER_LEVEL:
-            bucket = (gid, row_level)
+            bucket = (gid, row_parent, row_level)
             per_bucket_qty[bucket] = per_bucket_qty.get(bucket, 0.0) + row_qty
             if bucket in per_bucket_written:
                 write(output[per_bucket_written[bucket]], qty=per_bucket_qty[bucket])
@@ -1053,13 +1067,14 @@ def apply_records_duplicate_policy(records, policy, per_group_target_level=None,
             output.append(new_row)
 
         elif policy == POLICY_AGGREGATE_ALL_TO_ONE_LEVEL:
-            per_group_qty_total[gid] = per_group_qty_total.get(gid, 0.0) + row_qty
-            if gid in per_group_written:
-                write(output[per_group_written[gid]], qty=per_group_qty_total[gid])
+            gkey = (gid, row_parent)
+            per_group_qty_total[gkey] = per_group_qty_total.get(gkey, 0.0) + row_qty
+            if gkey in per_group_written:
+                write(output[per_group_written[gkey]], qty=per_group_qty_total[gkey])
                 continue
             new_row = dict(record)
-            write(new_row, qty=per_group_qty_total[gid], level=target_level)
-            per_group_written[gid] = len(output)
+            write(new_row, qty=per_group_qty_total[gkey], level=target_level)
+            per_group_written[gkey] = len(output)
             output.append(new_row)
 
     return output

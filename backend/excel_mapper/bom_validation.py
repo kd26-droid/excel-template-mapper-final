@@ -383,6 +383,7 @@ def validate_bom(bom_headers, bom_rows, item_rows=None, bom_row_grid_rows=None):
     item_codes = set()
     blank_item_codes = 0
     duplicate_item_codes = []
+    rows_by_code = {}
     if item_rows is not None:
         seen_items = set()
         for item in item_rows:
@@ -393,6 +394,8 @@ def validate_bom(bom_headers, bom_rows, item_rows=None, bom_row_grid_rows=None):
             if code in seen_items:
                 duplicate_item_codes.append(code)
             seen_items.add(code)
+            if isinstance(item, dict):
+                rows_by_code.setdefault(code, []).append(item)
         item_codes = seen_items
 
         missing = sorted(code for code in referenced_codes if code and code not in item_codes)
@@ -431,6 +434,13 @@ def validate_bom(bom_headers, bom_rows, item_rows=None, bom_row_grid_rows=None):
                 'rule': 'item_code_duplicate',
                 'codes': duplicate_item_codes[:10],
                 'count': len(duplicate_item_codes),
+                # WHICH column disagrees, and what it says on each row. Without
+                # this the user is told a code is shared by "different parts"
+                # and left to find the difference by hand across the whole
+                # sheet - on a real THALES file that is six codes hidden in
+                # 1,486 rows, and the difference was one column.
+                'conflicts': _describe_code_conflicts(
+                    duplicate_item_codes, rows_by_code),
                 'message': ('%d item code(s) are shared by rows that describe different parts, '
                             'so BOM references to them are ambiguous. Either give the rows '
                             'different item codes, or make them match exactly if they are the '
@@ -488,6 +498,35 @@ def validate_bom(bom_headers, bom_rows, item_rows=None, bom_row_grid_rows=None):
         },
     }
 
+
+
+def _describe_code_conflicts(codes, rows_by_code, limit=25):
+    """For each shared item code, the columns whose values disagree.
+
+    Answers "what actually makes these rows different parts?" so the caller can
+    show it rather than asking the user to diff the rows themselves. Columns
+    that agree are omitted - they are not the problem.
+    """
+    described = []
+    for code in list(dict.fromkeys(codes))[:limit]:
+        rows = rows_by_code.get(code) or []
+        if len(rows) < 2:
+            continue
+        columns = []
+        for column in sorted({k for row in rows for k in row}):
+            values = []
+            for row in rows:
+                value = _text(row.get(column))
+                if value not in values:
+                    values.append(value)
+            if len(values) > 1:
+                columns.append({'column': column, 'values': values[:6]})
+        described.append({
+            'code': code,
+            'rows': len(rows),
+            'fields': columns,
+        })
+    return described
 
 def _detect_cycles(block_children, errors):
     children_of = {bom_id: [child for child, _line in children]

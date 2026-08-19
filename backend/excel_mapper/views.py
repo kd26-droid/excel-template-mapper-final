@@ -15871,7 +15871,12 @@ def download_bom_sheet(request, session_id):
 
 
 def _exported_item_rows(session_id):
-    """The item rows the user would actually download, as [{'Item code': ...}].
+    """The item rows the user would actually download, keyed by column name.
+
+    Carries every exported column, not just the code. Validation needs the code
+    to check references, but when two rows share a code it also has to say WHICH
+    column disagrees - projecting to {'Item code': ...} threw that away and left
+    the user told their rows "describe different parts" with no way to see how.
 
     Reads the same grid the item export writes, then adds the authored finished
     good exactly as the export does, so validation and the shipped file agree.
@@ -15905,8 +15910,19 @@ def _exported_item_rows(session_id):
         if code_index < 0:
             return None
 
+        # A grid may legitimately repeat a header, so later duplicates are
+        # suffixed rather than silently overwriting the first.
+        keys = []
+        seen_headers = {}
+        for header in headers:
+            label = str(header or '').strip() or 'Column'
+            seen_headers[label] = seen_headers.get(label, 0) + 1
+            keys.append(label if seen_headers[label] == 1
+                        else '%s #%d' % (label, seen_headers[label]))
+
         return [
-            {'Item code': str(row[code_index] or '').strip()}
+            {key: str(row[position] or '').strip()
+             for position, key in enumerate(keys) if position < len(row)}
             for row in rows
             if isinstance(row, list) and code_index < len(row)
         ]
