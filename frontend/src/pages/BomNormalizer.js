@@ -2932,9 +2932,12 @@ const PATH_PARENT_KEY = '__pathParent';
 //            so the number is sitting right there.
 const PATH_DEPTH_KEY = '__pathDepth';
 const PATH_CODE_KEY = '__pathCode';
-// Set on rows whose blank CPN cell we filled from the path, so a re-run can put
-// it back rather than treating our own fill as the sheet's data.
+// Set on rows whose CPN cell we wrote from the path, so a re-run can put it back
+// rather than treating our own writing as the sheet's data.
 const PATH_CODE_FILLED_KEY = '__pathCodeFilled';
+// What that cell said before we wrote it, so the undo above restores the sheet's
+// value instead of blanking a cell that was never empty.
+const PATH_CODE_REPLACED_KEY = '__pathCodeReplaced';
 
 // What the sheet states this row's parent to be, as a plain code. A breadcrumb
 // path (">E36047BB01>F1288042") is not a code and matches nothing, so the
@@ -4801,8 +4804,9 @@ const unpackParentPaths = (rows, roles, config = {}) => {
     delete row[PATH_DEPTH_KEY];
     delete row[PATH_CODE_KEY];
     if (row[PATH_CODE_FILLED_KEY]) {
-      if (codeRoleForClear) row[codeRoleForClear] = '';
+      if (codeRoleForClear) row[codeRoleForClear] = row[PATH_CODE_REPLACED_KEY] || '';
       delete row[PATH_CODE_FILLED_KEY];
+      delete row[PATH_CODE_REPLACED_KEY];
     }
   });
   if (!roles?.parent) return rows;
@@ -4868,10 +4872,17 @@ const unpackParentPaths = (rows, roles, config = {}) => {
     row[PATH_CODE_KEY] = segments[segments.length - 1];
     if (!usePathHierarchy) return;
     row[PATH_DEPTH_KEY] = segments.length;
-    // Fill only what the sheet left empty. A code the sheet DID state stands,
-    // even where it disagrees with the path — overruling it here would silently
-    // re-identify parts on every sheet that writes both.
-    if (!getCell(row, codeRole)) {
+    // Fill what the sheet left empty, and overrule a code that names this row's
+    // own parent. Nothing is its own parent, so such a code is not this row's
+    // identity — THALES writes the assembly's part number on every drawing row
+    // belonging to it, which lands 36 separate documents on one code and makes
+    // each of them a BOM line pointing at its own parent. Any OTHER disagreement
+    // stands: the sheet stated it, and overruling would silently re-identify
+    // real parts on every sheet that writes both a code and a path.
+    const statedCode = getCell(row, codeRole);
+    const statedParent = segments.length > 1 ? segments[segments.length - 2] : '';
+    if (!statedCode || (statedParent && statedCode === statedParent)) {
+      row[PATH_CODE_REPLACED_KEY] = statedCode;
       row[codeRole] = row[PATH_CODE_KEY];
       row[PATH_CODE_FILLED_KEY] = true;
     }
