@@ -5358,32 +5358,53 @@ def save_data(request):
             rows_payload = []
 
         # Ensure headers are preserved; prefer existing enhanced headers, else derive canonical/keys
-        enhanced_headers = info.get('enhanced_headers') or info.get('current_template_headers') or info.get('template_headers') or []
+        enhanced_headers = list(
+            info.get('enhanced_headers')
+            or info.get('current_template_headers')
+            or info.get('template_headers')
+            or []
+        )
         if not enhanced_headers and rows_payload and isinstance(rows_payload[0], dict):
             enhanced_headers = list(rows_payload[0].keys())
+
+        # The editor keys its rows by internal names (Tag_1, Specification_Name_2,
+        # "Preferred vendor code__2" for a repeated header); this list holds display
+        # headers (Tag (1), Specification name (2)). They are the same columns under
+        # two names, matched by POSITION via make_unique_field_headers -- not by
+        # string equality. Treating an internal name as an unknown display header
+        # appended a phantom column per slot on every save, and the edited values
+        # then landed in the phantom instead of the real column.
+        field_keys = make_unique_field_headers(enhanced_headers)
         if rows_payload and isinstance(rows_payload[0], dict):
-            header_set = set(enhanced_headers)
+            known = set(enhanced_headers) | set(field_keys)
             for row in rows_payload:
                 if not isinstance(row, dict):
                     continue
                 for key in row.keys():
-                    if key and key not in header_set:
+                    if key and key not in known:
                         enhanced_headers.append(key)
-                        header_set.add(key)
-        cleanup_empty_spec_pairs(enhanced_headers, rows_payload)
+                        known.add(key)
+            field_keys = make_unique_field_headers(enhanced_headers)
 
-        # Save edited data to session (as a list of row dicts)
-        info["edited_data"] = rows_payload
+        # Rows stay positional, aligned to enhanced_headers -- the shape every other
+        # grid writer uses (see write_session_grid). Keying by name would merge the
+        # two "Preferred vendor code" columns into one.
+        row_lists = []
+        for row in rows_payload:
+            if isinstance(row, dict):
+                row_lists.append([
+                    row.get(field, row.get(header, ''))
+                    for field, header in zip(field_keys, enhanced_headers)
+                ])
+            elif isinstance(row, list):
+                row_lists.append([
+                    row[idx] if idx < len(row) else ''
+                    for idx in range(len(enhanced_headers))
+                ])
+        cleanup_empty_spec_pairs(enhanced_headers, row_lists)
 
-        # Ensure Data Editor uses these rows immediately
-        info["formula_enhanced_data"] = rows_payload
-        info["enhanced_data"] = {
-            "headers": enhanced_headers,
-            "data": rows_payload,
-        }
-
-        info['enhanced_headers'] = enhanced_headers
-        info['current_template_headers'] = enhanced_headers
+        write_session_grid(session_id, info, enhanced_headers, row_lists)
+        info["formula_enhanced_data"] = row_lists
 
         # Bypass cleanup/mapping; prefer edited data immediately
         info['uploaded_via_correction'] = True
@@ -5711,14 +5732,41 @@ def _sub_assembly_codes_from_grid(info, headers, rows):
     if cpn_index < 0 or code_index < 0:
         return []
 
-    codes = []
+    # An Item code shared by several CPNs names a GROUP, not a part, so it
+    # cannot stand in for one sub-assembly. The ID rule builds from MPN +
+    # manufacturer, and a placeholder MPN ("TO SPECIFICATION") collapses every
+    # row carrying it onto a single code — 132 rows over 62 distinct parts in
+    # the sheet that produced this. One of those rows was a real sub-assembly,
+    # so returning its code put the shared string into the assembly set, and the
+    # Item-code fallback below then matched all 62 leaves and typed them
+    # Finished good. A code that does not identify a row cannot resolve one.
+    # The answer names ONE part, so it may only resolve to ONE item code, and
+    # that code may only belong to that part. Both directions are checked
+    # because both have failed: a placeholder MPN ("TO SPECIFICATION") collapses
+    # every row carrying it onto one code, and a CPN column mapped to a
+    # near-constant puts every row under one part number. Either way a single
+    # real sub-assembly would otherwise hand its whole group to the caller,
+    # which types all of them Finished good.
+    cpns_of_code = {}
+    codes_of_cpn = {}
     for row in rows or []:
         if not isinstance(row, list) or max(cpn_index, code_index) >= len(row):
             continue
-        if str(row[cpn_index] or '').strip() in part_numbers:
-            code = str(row[code_index] or '').strip()
-            if code:
-                codes.append(code)
+        code = str(row[code_index] or '').strip()
+        if not code:
+            continue
+        cpn = str(row[cpn_index] or '').strip()
+        cpns_of_code.setdefault(code, set()).add(cpn)
+        if cpn in part_numbers:
+            codes_of_cpn.setdefault(cpn, set()).add(code)
+
+    codes = []
+    for found in codes_of_cpn.values():
+        if len(found) != 1:
+            continue
+        code = next(iter(found))
+        if len(cpns_of_code.get(code) or ()) == 1:
+            codes.append(code)
     return codes
 
 
@@ -5777,6 +5825,18 @@ def _type_authored_assemblies(info, headers, rows):
     if not codes:
         return 0
 
+    # On a hierarchical sheet the answers name EVERY block, so a row they do not
+    # claim is not an assembly — and saying so out loud is what lets a wrong
+    # value heal. Without it `Finished good` is write-once: a stamp applied by a
+    # bad match survives the fix to whatever caused it, because nothing ever
+    # writes the type back down. Only an explicit `Finished good` is reverted;
+    # blank is left for the editor defaults to fill.
+    authoritative = any(
+        answer.get('hasLevels')
+        for answer in (((info or {}).get('bom_structure') or {}).get('sheets') or {}).values()
+        if isinstance(answer, dict)
+    )
+
     code_index = _grid_column_index(headers, 'Item code')
     type_index = _grid_column_index(headers, 'Item type')
     cpn_index = _grid_column_index(headers, 'CPN Code')
@@ -5801,6 +5861,9 @@ def _type_authored_assemblies(info, headers, rows):
                 existing_code if existing_code in codes else ''
             )
             if matched not in codes:
+                if authoritative and read(type_index) == 'Finished good':
+                    row[type_index] = 'Raw material'
+                    changed += 1
                 continue
             while len(row) <= max(type_index, code_index):
                 row.append('')
@@ -5831,6 +5894,9 @@ def _type_authored_assemblies(info, headers, rows):
                 existing_code if existing_code in codes else ''
             )
             if matched not in codes:
+                if authoritative and str(row.get(type_key) or '').strip() == 'Finished good':
+                    row[type_key] = 'Raw material'
+                    changed += 1
                 continue
             if str(row.get(type_key) or '').strip() != 'Finished good':
                 row[type_key] = 'Finished good'
