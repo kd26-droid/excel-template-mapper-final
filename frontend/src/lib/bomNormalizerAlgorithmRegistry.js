@@ -436,6 +436,8 @@ export const MPN_NOISE_RE = /(%|ppm\b|ohm\b|pf\b|nf\b|uf\b|\u00b5f\b|mh\b|mm\b|h
 export const MPN_CONNECTOR_WORDS = new Set([
   'and',
   'or',
+  'ou',
+  'o\u00f9',
   'andor',
   'oror',
   'alt',

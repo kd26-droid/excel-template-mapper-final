@@ -1454,6 +1454,29 @@ const isConnectorOnlyMpnPart = (value) => {
   return !compact || MPN_CONNECTOR_WORDS.has(compact);
 };
 
+const ALTERNATE_CONNECTOR_SPLIT_RE = /\s+(?:and\/or|and|or|ou|o\u00f9)\s+/i;
+const ALTERNATE_CONNECTOR_OR_AMP_SPLIT_RE = /\s+(?:and\/or|and|or|ou|o\u00f9|&)\s+/i;
+const LEADING_ALTERNATE_CONNECTOR_RE = /^(?:and\/or|and|or|ou|o\u00f9)\s+/i;
+const TRAILING_ALTERNATE_CONNECTOR_RE = /\s+(?:and\/or|and|or|ou|o\u00f9)$/i;
+const LOOSE_FRENCH_MANUFACTURER_CONNECTOR_RE = /\s+(?:ou|o\u00f9|0u)(?=\s+|[A-Z])/i;
+
+const splitAlternateConnectorText = (value, {
+  includeAmp = false,
+  allowLooseFrenchManufacturerConnector = false,
+} = {}) => {
+  const text = fmt(value).replace(/\u00a0/g, ' ');
+  if (!text) return [];
+  const primaryParts = text
+    .split(includeAmp ? ALTERNATE_CONNECTOR_OR_AMP_SPLIT_RE : ALTERNATE_CONNECTOR_SPLIT_RE)
+    .map(fmt)
+    .filter(Boolean);
+  if (primaryParts.length > 1 || !allowLooseFrenchManufacturerConnector) return primaryParts;
+  return text
+    .split(LOOSE_FRENCH_MANUFACTURER_CONNECTOR_RE)
+    .map(fmt)
+    .filter(Boolean);
+};
+
 const CIRCLED_NUMBER_RE = /[\u2460-\u2473]/g;
 
 const circledNumberIndex = (marker) => {
@@ -1571,7 +1594,10 @@ const cleanTrailingMpnBracketNote = (value) => fmt(value)
 const normalizeMpnParts = (parts) => parts
   .map(stripVendorPrefix)
   .map(cleanTrailingMpnBracketNote)
-  .map((part) => fmt(part).replace(/^(?:and|or|and\/or)\s+/i, '').replace(/\s+(?:and|or|and\/or)$/i, '').trim())
+  .map((part) => fmt(part)
+    .replace(LEADING_ALTERNATE_CONNECTOR_RE, '')
+    .replace(TRAILING_ALTERNATE_CONNECTOR_RE, '')
+    .trim())
   .filter((part) => part && !isConnectorOnlyMpnPart(part));
 
 const splitTopLevelDelimited = (value, delimiters = [';', '|', '\n', ',']) => {
@@ -1699,7 +1725,7 @@ const splitMpnCell = (value, config = {}) => {
     return normalizeMpnParts(explicitParts);
   }
 
-  const connectorParts = text.split(/\s+(?:and\/or|and|or)\s+/i);
+  const connectorParts = splitAlternateConnectorText(text);
   if (connectorParts.length > 1 && connectorParts.filter((part) => /\d/.test(part)).length >= 2) {
     return normalizeMpnParts(connectorParts);
   }
@@ -1903,7 +1929,7 @@ const mpnsFromColonManufacturerValue = (value) => {
     text = text.slice(text.lastIndexOf(':') + 1).trim();
   }
 
-  const connectorParts = text.split(/\s+(?:and\/or|and|or)\s+/i);
+  const connectorParts = splitAlternateConnectorText(text);
   const candidates = connectorParts.length > 1 && connectorParts.filter((part) => /\d/.test(part)).length >= 2
     ? connectorParts.flatMap(cleanColonMpnCandidate)
     : cleanColonMpnCandidate(text);
@@ -2029,7 +2055,7 @@ const splitSharedMpnCandidates = (value, config = {}) => {
   const text = cleanCaretMpn(value);
   if (!text) return [];
 
-  const connectorParts = text.split(/\s+(?:and\/or|and|or|&)\s+/i);
+  const connectorParts = splitAlternateConnectorText(text, { includeAmp: true });
   const candidates = connectorParts.length > 1 ? connectorParts : splitMpnCell(text, config);
   return normalizeMpnParts(candidates.length > 1 ? candidates : [text])
     .filter((mpn) => {
@@ -2681,6 +2707,18 @@ const splitManufacturerCell = (value, expectedCount, config = {}) => {
   const slashParts = splitSpacedSlashManufacturerParts(text);
   if (!keepSingleManufacturerCell && slashParts.length > 1) return mergeManufacturerSuffixParts(slashParts).map(canonicalForManufacturer);
 
+  const connectorParts = splitAlternateConnectorText(text, {
+    allowLooseFrenchManufacturerConnector: true,
+  });
+  if (
+    !keepSingleManufacturerCell &&
+    connectorParts.length > 1 &&
+    expectedCount > 1 &&
+    connectorParts.length <= expectedCount
+  ) {
+    return mergeManufacturerSuffixParts(connectorParts).map(canonicalForManufacturer);
+  }
+
   const knownPhrases = [
     ...directoryNames,
     ...Object.keys(directoryAliases),
@@ -3051,10 +3089,19 @@ const normalizeSeparateCells = (rows, roles, config) => {
     const sourceRow = row.__sourceRow || rowIndex + 1;
     const rawMpn = getCell(row, roles.mpn);
     const rawManufacturer = getCell(row, roles.manufacturer);
+    const hasSeparateMpnManufacturerColumns = Boolean(
+      roles.mpn &&
+      roles.manufacturer &&
+      roles.mpn !== roles.manufacturer
+    );
     const manufacturerManualParse = getManualPatternParse(row, roles.manufacturer, config);
     const mpnManualParse = rawManufacturer ? null : getManualPatternParse(row, roles.mpn, config);
-    const manufacturerPackedPairs = getPatternAwarePackedPairs(row, roles.manufacturer, rawManufacturer, config);
-    const mpnPackedPairs = getPatternAwarePackedPairs(row, roles.mpn, rawMpn, config);
+    const manufacturerPackedPairs = hasSeparateMpnManufacturerColumns
+      ? []
+      : getPatternAwarePackedPairs(row, roles.manufacturer, rawManufacturer, config);
+    const mpnPackedPairs = hasSeparateMpnManufacturerColumns
+      ? []
+      : getPatternAwarePackedPairs(row, roles.mpn, rawMpn, config);
     const packedPairs = manufacturerPackedPairs.length ? manufacturerPackedPairs : mpnPackedPairs;
     const mpns = splitMpnCell(rawMpn, config);
     const explicitDelimiterUsed = Boolean(selectedDelimiter(config)) && mpns.length > 1;
@@ -5001,7 +5048,12 @@ const normalizeRows = (rows, headers, roles, config, prepared = false) => {
   if (config.alternateLayout === 'same_group_rows') return normalizeSameGroupRows(rows, roles, configWithSourceHeaders);
   if (config.alternateLayout === 'already_separate_rows') return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
   if (config.structure === 'same_cell') return normalizeSameCell(rows, roles, configWithSourceHeaders);
-  if (config.structure === 'one_per_row') return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
+  if (config.structure === 'one_per_row') {
+    if (config.alternateLayout === 'inside_selected_mpn_columns' && roles.mpn) {
+      return normalizeSeparateCells(rows, roles, configWithSourceHeaders);
+    }
+    return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
+  }
   return normalizeSeparateCells(rows, roles, configWithSourceHeaders);
 };
 
@@ -8822,6 +8874,11 @@ const BomNormalizer = () => {
     };
 
     const primarySourceHeader = roles.mpn || roles.manufacturer;
+    const hasSeparateMpnManufacturerColumns = Boolean(
+      roles.mpn &&
+      roles.manufacturer &&
+      roles.mpn !== roles.manufacturer
+    );
     const readsCombinedPrimary = Boolean(
       primarySourceHeader &&
       roles.mpn &&
@@ -8829,7 +8886,7 @@ const BomNormalizer = () => {
       roles.mpn === roles.manufacturer &&
       config.structure === 'same_cell'
     );
-    const selectedMpnColumnHasPackedPairs = Boolean(roles.mpn && dataRows.some((row) => {
+    const selectedMpnColumnHasPackedPairs = !hasSeparateMpnManufacturerColumns && Boolean(roles.mpn && dataRows.some((row) => {
       const source = getCell(row, roles.mpn);
       return source && parsePackedMpnManufacturerPairs(source, normalizerConfig)
         .some((pair) => pair?.mpn && pair?.manufacturer);
@@ -8868,6 +8925,7 @@ const BomNormalizer = () => {
     if (config.alternateLayout === 'separate_columns') {
       const groups = cleanAlternateColumnGroups(config.alternateColumnGroups || [], headers);
       groups.forEach((group, index) => {
+        if (group.mpn && group.mfr && group.mpn !== group.mfr) return;
         const section = buildSourceSection({
           id: `alternate-column-${index + 1}`,
           title: `Alternate column group ${index + 1}`,
@@ -12862,6 +12920,9 @@ const BomNormalizer = () => {
                             setParserTouched(true);
                             setConfig((prev) => ({
                               ...prev,
+                              structure: nextLayout === 'inside_selected_mpn_columns' && prev.structure === 'one_per_row'
+                                ? 'separate_cells'
+                                : prev.structure,
                               alternateLayout: nextLayout,
                               alternateColumnGroups: nextLayout === 'separate_columns' && !(prev.alternateColumnGroups || []).length
                                 ? [suggestAlternateColumnGroup()]
