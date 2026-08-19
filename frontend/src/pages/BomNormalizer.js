@@ -1004,6 +1004,71 @@ const detectSlashSuffixVariantExpansion = (value) => {
   };
 };
 
+const MPN_VALUE_COLON_LABEL_RE = /^(?:model|mpn|mfr\s*(?:part|p\/?n|pn|number|no\.?)?|manufacturer\s*(?:part|p\/?n|pn|number|no\.?)?|part\s*(?:number|no\.?|p\/?n|pn)?|p\/?n|pn)$/i;
+
+const isMpnValueColonLabel = (value) => {
+  const label = fmt(value).split('^').pop()
+    .replace(/^(\*+\s*)+/, '')
+    .replace(/\s+/g, ' ')
+    .replace(/^[,;:\s]+|[,;:\s]+$/g, '')
+    .trim();
+  return MPN_VALUE_COLON_LABEL_RE.test(label);
+};
+
+const parseMpnValueColonLabelPairs = (value, config = {}) => {
+  const text = decodeBasicHtmlEntities(value).replace(/\u00a0/g, ' ').trim();
+  const colonIndex = text.indexOf(':');
+  if (colonIndex <= 0) return [];
+
+  const rawLeft = fmt(text.slice(0, colonIndex));
+  const rawValue = fmt(text.slice(colonIndex + 1));
+  if (!isMpnValueColonLabel(rawLeft)) return [];
+
+  const candidates = splitTopLevelDelimited(rawValue, ['^', ';', '|', '\n']);
+  const valueParts = candidates.length ? candidates : [rawValue];
+  const parsed = valueParts.flatMap((part) => {
+    const trailingPair = parseTrailingParenthesizedMpnManufacturerPair(part);
+    if (trailingPair.length) return trailingPair;
+    return parseParenthesizedMpnManufacturerPairs(part, config);
+  });
+  return parsed.filter((pair) => pair?.mpn && pair?.manufacturer);
+};
+
+const parseSupplierContactMpnManufacturerPair = (value) => {
+  const text = decodeBasicHtmlEntities(value)
+    .replace(/\u00a0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!/\bATTN(?:ENTION)?\s*:/i.test(text)) return [];
+
+  const beforeContact = fmt(text.split(/\bATTN(?:ENTION)?\s*:/i)[0])
+    .split('^')
+    .map((part) => fmt(part).replace(/^(\*+\s*)+/, '').trim())
+    .filter(Boolean)
+    .pop() || '';
+  const match = beforeContact.match(/^(.+?)\s+(\d{3,}[-/]\d{3,}(?:[-/]\d+)*)\s*$/);
+  if (!match) return [];
+
+  const manufacturer = cleanCaretManufacturer(match[1]);
+  const mpn = stripVendorPrefix(match[2]);
+  if (!manufacturer || !mpn || !looksLikeMpnToken(mpn)) return [];
+
+  const discardedText = fmt(text.slice(text.search(/\bATTN(?:ENTION)?\s*:/i)))
+    .replace(/\^/g, ' ')
+    .replace(/\s+/g, ' ');
+  return [{
+    mpn,
+    manufacturer,
+    metadata: discardedText ? { discardedText } : {},
+  }];
+};
+
+const parseTrustedStructuralMpnManufacturerPairs = (value, config = {}) => {
+  const mpnLabelPairs = parseMpnValueColonLabelPairs(value, config);
+  if (mpnLabelPairs.length) return mpnLabelPairs;
+  return parseSupplierContactMpnManufacturerPair(value);
+};
+
 const buildParsedPatternShape = (value, pairs = []) => {
   const source = fmt(value).replace(/\u00a0/g, ' ');
   if (!source || !pairs.length) return '';
@@ -1016,6 +1081,13 @@ const buildParsedPatternShape = (value, pairs = []) => {
     const colonIndex = source.indexOf(':');
     const left = fmt(source.slice(0, colonIndex));
     const right = fmt(source.slice(colonIndex + 1));
+    if (isMpnValueColonLabel(left)) {
+      const label = left.split('^').pop().replace(/^(\*+\s*)+/, '').trim().toUpperCase();
+      return `${label || '<MPN LABEL>'}: <MPN> (<MFR>)${pairs.length > 1 ? ' repeated' : ''}`;
+    }
+    if (/\bATTN(?:ENTION)?\s*:/i.test(source)) {
+      return '<MFR> <MPN> ATTN:<TEXT>';
+    }
     const firstPair = pairs[0] || {};
     const mpnKey = fmt(firstPair.mpn).toUpperCase();
     const leftHasMpn = mpnKey && left.toUpperCase().includes(mpnKey);
@@ -1085,6 +1157,7 @@ const describePatternShape = (shape = '') => {
   if (shape.includes('/<SUFFIX>')) rules.push('Slash suffix variants can be expanded into primary plus alternate MPNs when selected.');
   if (shape.includes('<QUALIFIER>')) rules.push('Treat qualifier brackets before the manufacturer as ignored package/variant text.');
   if (shape.includes('^')) rules.push('Treat ^ as a repeated alternate separator.');
+  if (shape.includes('<MPN LABEL>') || /^MODEL: <MPN>/i.test(shape)) rules.push('Treat the label before : as a field name, then read the value as MPN with manufacturer in (...).');
   if (shape.includes('<MFR>') && shape.includes(': <MPN>')) rules.push('Read text before : as Manufacturer and text after : as MPN.');
   if (shape.includes(',')) rules.push('Use comma-separated segments only when they form valid MPN/MFR pairs.');
   if (shape.includes('/ <TEXT>')) rules.push('Keep slash-separated material text on the MPN side.');
@@ -1535,7 +1608,7 @@ const splitTopLevelDelimited = (value, delimiters = [';', '|', '\n', ',']) => {
       continue;
     }
 
-    if (char === '"' || char === "'") {
+    if ((char === '"' || char === "'") && text.indexOf(char, index + 1) !== -1) {
       quote = char;
       current += char;
       continue;
@@ -1742,7 +1815,11 @@ const cleanCaretManufacturer = (value) => decodeBasicHtmlEntities(value)
   .replace(/\bsee\s+note\s+above\b/ig, ' ')
   .replace(/\bnew\s+rev\s+next\s+buy\b/ig, ' ')
   .replace(/\bstd\s+pkg\s+\d[\d,]*\b/ig, ' ')
+  .replace(/\b(?:dist|distributor|rep)\s*:\s*.*$/ig, ' ')
   .replace(/\bnote\s*:[^,;^]*$/ig, ' ')
+  .replace(/\s*:\s*(?:loose(?:\s+(?:piece|pieces|pcs))?|strip(?:\s+form)?|bulk|reel|tape)\b.*$/ig, ' ')
+  .replace(/,\s*\d+(?:'\s*)?\s+or\s+\d+(?:'\s*)?\s+spools?\b.*$/ig, ' ')
+  .replace(/\s+or\s+equal\b.*$/ig, ' ')
   .replace(/[@*]+/g, ' ')
   .replace(/\s+/g, ' ')
   .replace(/^[,;:\s]+|[,;:\s]+$/g, '')
@@ -1750,9 +1827,27 @@ const cleanCaretManufacturer = (value) => decodeBasicHtmlEntities(value)
 
 const cleanCaretMpn = (value) => decodeBasicHtmlEntities(value)
   .replace(/\((?:[^()]*(?:bulk|pkg|package|pack|purchase|spool|discontinued|inactive|note)[^()]*)\)/ig, ' ')
+  .replace(/\((?:[^()]*(?:type|wide)[^()]*)\)/ig, ' ')
+  .replace(/\s+#\s*\S+\s*$/g, ' ')
   .replace(/[@*]+$/g, ' ')
   .replace(/\s+/g, ' ')
   .trim();
+
+const isGenericManufacturerText = (value) => (
+  /^(?:any\s+approved\s+(?:supplier|source)|any\s+supplier)(?:\b|$)/i.test(fmt(value))
+);
+
+const looksLikeContextMpnCandidate = (value) => {
+  const token = fmt(value).replace(/[;,|]+$/g, '');
+  const compact = token.replace(/[^A-Za-z0-9]/g, '');
+  if (compact.length < 3) return false;
+  if (!/[0-9]/.test(compact)) return false;
+  return /^[A-Za-z0-9._/#,+%"-]+(?:\s+[A-Za-z0-9._/#,+%"-]+){0,3}$/.test(token);
+};
+
+const isDateRevisionNote = (value) => (
+  /^\s*\d{1,2}\/\d{1,2}\/\d{2,4}\b.*(?:rev|quote|buy|\$)/i.test(fmt(value))
+);
 
 const COLON_MFR_NOTE_LABEL_RE = /^(?:alt(?:ernate|ernative)?|alternatively|obsolete|obsoleted|preferred|preferable|otherwise)$/i;
 
@@ -1826,7 +1921,9 @@ const knownManufacturerKeySet = new Set(KNOWN_COLON_MANUFACTURERS.map((name) => 
 const looksLikeColonMpnSide = (value) => {
   const text = fmt(value);
   if (!text || knownManufacturerKeySet.has(normalizeKey(text).toUpperCase())) return false;
-  return looksLikeMpnToken(text) || looksLikeParenthesizedMpn(text) || looksLikeManufacturerPartsMpn(text);
+  return looksLikeMpnToken(text) ||
+    (looksLikeParenthesizedMpn(text) && !/\s/.test(text)) ||
+    looksLikeManufacturerPartsMpn(text);
 };
 
 const cleanColonManufacturerValue = (value) => {
@@ -1843,6 +1940,12 @@ const parseColonManufacturerMpnPart = (value, config = {}) => {
 
   const rawLeft = fmt(text.slice(0, colonIndex));
   const rawValue = fmt(text.slice(colonIndex + 1));
+  const mpnLabelPairs = parseMpnValueColonLabelPairs(text, config);
+  if (mpnLabelPairs.length) return mpnLabelPairs;
+
+  const supplierContactPairs = parseSupplierContactMpnManufacturerPair(text);
+  if (supplierContactPairs.length) return supplierContactPairs;
+
   if (looksLikeColonMpnSide(rawLeft)) {
     const manufacturer = cleanColonManufacturerValue(rawValue);
     if (manufacturer && /[A-Za-z]/.test(manufacturer)) {
@@ -1904,7 +2007,7 @@ const findTopLevelCommaIndex = (value) => {
       if (char === quote) quote = '';
       continue;
     }
-    if (char === '"' || char === "'") {
+    if ((char === '"' || char === "'") && text.indexOf(char, index + 1) !== -1) {
       quote = char;
       continue;
     }
@@ -1922,7 +2025,158 @@ const findTopLevelCommaIndex = (value) => {
   return -1;
 };
 
-const parseCaretMpnManufacturerPairs = (value) => {
+const splitSharedMpnCandidates = (value, config = {}) => {
+  const text = cleanCaretMpn(value);
+  if (!text) return [];
+
+  const connectorParts = text.split(/\s+(?:and\/or|and|or|&)\s+/i);
+  const candidates = connectorParts.length > 1 ? connectorParts : splitMpnCell(text, config);
+  return normalizeMpnParts(candidates.length > 1 ? candidates : [text])
+    .filter((mpn) => {
+      const validationMpn = mpn.replace(/\([^()]*\)/g, '').replace(/\[[^\]]*\]/g, '').trim();
+      return looksLikeMpnToken(mpn) ||
+        looksLikeMpnToken(validationMpn) ||
+        looksLikeManufacturerPartsMpn(mpn) ||
+        looksLikeContextMpnCandidate(mpn);
+    });
+};
+
+const uniqueParsedMpnManufacturerPairs = (pairs = []) => {
+  const seen = new Set();
+  return pairs.filter((pair) => {
+    const key = `${fmt(pair?.mpn).toUpperCase()}||${fmt(pair?.manufacturer).toUpperCase()}`;
+    if (!pair?.mpn || !pair?.manufacturer || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+const manufacturerFromCommaField = (value) => {
+  const manufacturer = cleanCaretManufacturer(value);
+  if (!manufacturer || isGenericManufacturerText(manufacturer)) return '';
+  if (/^(?:or|and|and\/or)\b/i.test(manufacturer)) return '';
+  if (looksLikeMpnToken(manufacturer) || looksLikeContextMpnCandidate(manufacturer)) return '';
+  return manufacturer;
+};
+
+const parsePackagedOrMpnManufacturerChunk = (value, config = {}) => {
+  const part = fmt(value).replace(/^(\*+\s*)+/, '').trim();
+  if (!/\bor\b/i.test(part)) return [];
+
+  const fields = splitTopLevelDelimited(part, [',']).map(fmt).filter(Boolean);
+  if (fields.length < 3) return [];
+
+  const primaryMpns = splitSharedMpnCandidates(fields[0], config);
+  if (!primaryMpns.length) return [];
+
+  const fieldManufacturers = fields
+    .map((field, index) => ({ index, manufacturer: manufacturerFromCommaField(field) }))
+    .filter((entry) => entry.manufacturer);
+  const trailingManufacturer = fieldManufacturers[fieldManufacturers.length - 1]?.manufacturer || '';
+  const primaryManufacturer = fieldManufacturers.find((entry) => entry.index === 1)?.manufacturer || trailingManufacturer;
+  if (!primaryManufacturer) return [];
+
+  const altMpns = fields
+    .flatMap((field) => {
+      const match = field.match(/\bor\b\s+(.+)$/i);
+      if (!match) return [];
+      return splitSharedMpnCandidates(match[1], config);
+    })
+    .filter((mpn) => !primaryMpns.some((primary) => normalizeKey(primary) === normalizeKey(mpn)));
+
+  if (!altMpns.length) return [];
+
+  return uniqueParsedMpnManufacturerPairs([
+    ...primaryMpns.map((mpn) => ({
+      mpn: stripVendorPrefix(mpn),
+      manufacturer: primaryManufacturer,
+      metadata: {},
+    })),
+    ...altMpns.map((mpn) => ({
+      mpn: stripVendorPrefix(mpn),
+      manufacturer: trailingManufacturer || primaryManufacturer,
+      metadata: {},
+    })),
+  ]);
+};
+
+const parseCommaMpnManufacturerChunk = (value, config = {}) => {
+  const part = fmt(value).replace(/^(\*+\s*)+/, '').trim();
+  if (isDateRevisionNote(part)) return [];
+
+  const packagedOrPairs = parsePackagedOrMpnManufacturerChunk(part, config);
+  if (packagedOrPairs.length) return packagedOrPairs;
+
+  const commaIndex = findTopLevelCommaIndex(part);
+  if (commaIndex <= 0) return [];
+
+  const rawMpnSide = part.slice(0, commaIndex).replace(/^(\*+\s*)+/, '');
+  const manufacturer = cleanCaretManufacturer(part.slice(commaIndex + 1));
+  if (!manufacturer || isGenericManufacturerText(manufacturer)) return [];
+
+  const mpns = splitSharedMpnCandidates(rawMpnSide, config);
+  if (!mpns.length) return [];
+
+  return uniqueParsedMpnManufacturerPairs(mpns.map((mpn) => ({
+    mpn: stripVendorPrefix(mpn),
+    manufacturer,
+    metadata: {},
+  })));
+};
+
+const parseFallbackMpnManufacturerChunk = (value, config = {}) => {
+  const part = fmt(value).replace(/^(\*+\s*)+/, '').trim();
+  if (!part || /^(?:any\s+approved\s+(?:supplier|source)|any\s+supplier)$/i.test(part)) return [];
+  if (isDateRevisionNote(part) || /^\d{1,2}\/\d{1,2}\/\d{2,4}\b/i.test(part)) return [];
+  if (/\b(?:material\s+description|approved\s+manufacturer)\b/i.test(part)) return [];
+
+  const commaPairs = parseCommaMpnManufacturerChunk(part, config);
+  if (commaPairs.length) return commaPairs;
+
+  const dashMatch = part.match(/^(.+?)\s+-\s+([A-Za-z][A-Za-z0-9&.,' /-]*)$/);
+  if (dashMatch) {
+    const mpns = splitSharedMpnCandidates(dashMatch[1], config);
+    const manufacturer = cleanCaretManufacturer(dashMatch[2]);
+    if (mpns.length && manufacturer) {
+      return mpns.map((mpn) => ({
+        mpn: stripVendorPrefix(mpn),
+        manufacturer,
+        metadata: {},
+      }));
+    }
+  }
+
+  const tokens = part.split(/\s+/).filter(Boolean);
+  if (tokens.length < 2) return [];
+
+  const firstToken = tokens[0];
+  const trailingManufacturer = cleanCaretManufacturer(tokens.slice(1).join(' '));
+  if (
+    trailingManufacturer &&
+    /[A-Za-z]/.test(trailingManufacturer) &&
+    (looksLikeMpnToken(firstToken) || looksLikeManufacturerPartsMpn(firstToken) || looksLikeContextMpnCandidate(firstToken))
+  ) {
+    return [{
+      mpn: stripVendorPrefix(firstToken),
+      manufacturer: trailingManufacturer,
+      metadata: {},
+    }];
+  }
+
+  const lastToken = tokens[tokens.length - 1];
+  if (!looksLikeMpnToken(lastToken) && !looksLikeParenthesizedMpn(lastToken)) return [];
+
+  const manufacturer = cleanCaretManufacturer(tokens.slice(0, -1).join(' '));
+  if (!manufacturer || !/[A-Za-z]/.test(manufacturer) || isGenericManufacturerText(manufacturer)) return [];
+
+  return [{
+    mpn: stripVendorPrefix(lastToken),
+    manufacturer,
+    metadata: {},
+  }];
+};
+
+const parseCaretMpnManufacturerPairs = (value, config = {}) => {
   const text = decodeBasicHtmlEntities(value).replace(/\u00a0/g, ' ');
   if (!text || !text.includes('^')) return [];
 
@@ -1943,24 +2197,26 @@ const parseCaretMpnManufacturerPairs = (value) => {
     .split('^')
     .map((part) => fmt(part).replace(/^(\*+\s*)+/, '').trim())
     .slice(firstSupplierIndex >= 0 ? firstSupplierIndex + 1 : 0)
-    .map((part) => {
-      const commaIndex = findTopLevelCommaIndex(part);
-      if (commaIndex <= 0) return null;
-
-      const rawMpn = cleanCaretMpn(part.slice(0, commaIndex).replace(/^(\*+\s*)+/, ''));
-      const manufacturer = cleanCaretManufacturer(part.slice(commaIndex + 1));
-      const validationMpn = rawMpn.replace(/\([^()]*\)/g, '').replace(/\[[^\]]*\]/g, '').trim();
-      if (!rawMpn || !manufacturer || (!looksLikeMpnToken(rawMpn) && !looksLikeMpnToken(validationMpn))) return null;
-
-      return {
-        mpn: stripVendorPrefix(rawMpn),
-        manufacturer,
-        metadata: {},
-      };
-    })
+    .flatMap((part) => parseCommaMpnManufacturerChunk(part, config))
     .filter(Boolean);
 
-  return parsed.length ? parsed : [];
+  const uniqueParsed = uniqueParsedMpnManufacturerPairs(parsed);
+  return uniqueParsed.length ? uniqueParsed : [];
+};
+
+const parseFallbackMpnManufacturerPairs = (value, config = {}) => {
+  const text = decodeBasicHtmlEntities(value).replace(/\u00a0/g, ' ');
+  if (!text) return [];
+
+  const segments = text
+    .split('^')
+    .map((part) => fmt(part).replace(/^(\*+\s*)+/, '').trim())
+    .filter(Boolean)
+    .filter((part) => !/^(?:material\s+description|approved\s+manufacturer)$/i.test(part));
+
+  const candidates = segments.length ? segments : [text];
+  const pairs = candidates.flatMap((part) => parseFallbackMpnManufacturerChunk(part, config));
+  return pairs.filter((pair) => pair?.mpn && pair?.manufacturer);
 };
 
 // looksLikeMpnToken caps an MPN at four whitespace-separated tokens, which is right when
@@ -2096,8 +2352,14 @@ const parsePackedMpnManufacturerPairs = (value, config = {}) => {
   const text = cleanPackedMpnMfrSource(value);
   if (!text) return [];
 
-  const caretPairs = parseCaretMpnManufacturerPairs(text);
+  const caretPairs = parseCaretMpnManufacturerPairs(text, config);
   if (caretPairs.length) return caretPairs;
+
+  const mpnLabelPairs = parseMpnValueColonLabelPairs(text, config);
+  if (mpnLabelPairs.length) return mpnLabelPairs;
+
+  const supplierContactPairs = parseSupplierContactMpnManufacturerPair(text);
+  if (supplierContactPairs.length) return supplierContactPairs;
 
   const structuredEntries = splitStructuredMpnMfrEntries(text);
   if (structuredEntries.length > 1) {
@@ -2116,7 +2378,7 @@ const parsePackedMpnManufacturerPairs = (value, config = {}) => {
   const parenthesizedPairs = parseParenthesizedMpnManufacturerPairs(text, config);
   if (parenthesizedPairs.length) return parenthesizedPairs;
 
-  if (!text.includes(':')) return [];
+  if (!text.includes(':')) return parseFallbackMpnManufacturerPairs(text, config);
 
   const delimiter = selectedDelimiter(config);
   const candidates = splitByExplicitDelimiter(text, delimiter);
@@ -2139,7 +2401,9 @@ const parsePackedMpnManufacturerPairs = (value, config = {}) => {
     };
   }).filter(Boolean);
 
-  return parsed.length >= 1 && parsed.length === parts.length ? parsed : [];
+  if (parsed.length >= 1 && parsed.length === parts.length) return parsed;
+
+  return parseFallbackMpnManufacturerPairs(text, config);
 };
 
 const slashVariantExpansionsInSource = (value) => {
@@ -2299,6 +2563,8 @@ const getManualPatternParse = (row, sourceHeader, config = {}) => {
 };
 
 const getPatternAwarePackedPairs = (row, sourceHeader, value, config = {}) => {
+  const trustedPairs = parseTrustedStructuralMpnManufacturerPairs(value, config);
+  if (trustedPairs.length) return trustedPairs;
   const manual = getManualPatternParse(row, sourceHeader, config);
   if (manual?.pairs?.length) return manual.pairs;
   return parsePackedMpnManufacturerPairs(value, config);
@@ -2785,7 +3051,7 @@ const normalizeSeparateCells = (rows, roles, config) => {
     const manufacturerManualParse = getManualPatternParse(row, roles.manufacturer, config);
     const mpnManualParse = rawManufacturer ? null : getManualPatternParse(row, roles.mpn, config);
     const manufacturerPackedPairs = getPatternAwarePackedPairs(row, roles.manufacturer, rawManufacturer, config);
-    const mpnPackedPairs = rawManufacturer ? [] : getPatternAwarePackedPairs(row, roles.mpn, rawMpn, config);
+    const mpnPackedPairs = getPatternAwarePackedPairs(row, roles.mpn, rawMpn, config);
     const packedPairs = manufacturerPackedPairs.length ? manufacturerPackedPairs : mpnPackedPairs;
     const mpns = splitMpnCell(rawMpn, config);
     const explicitDelimiterUsed = Boolean(selectedDelimiter(config)) && mpns.length > 1;
@@ -8431,8 +8697,10 @@ const BomNormalizer = () => {
       rows.forEach((row, rowIndex) => {
         const source = getCell(row, sourceHeader);
         if (!source) return;
-        const manualParse = getManualPatternParse(row, sourceHeader, normalizerConfig);
-        const pairs = (manualParse ? manualParse.pairs : parsePackedMpnManufacturerPairs(source, normalizerConfig))
+        const trustedPairs = parseTrustedStructuralMpnManufacturerPairs(source, normalizerConfig);
+        const savedManualParse = getManualPatternParse(row, sourceHeader, normalizerConfig);
+        const manualParse = trustedPairs.length ? null : savedManualParse;
+        const pairs = (trustedPairs.length ? trustedPairs : (manualParse ? manualParse.pairs : parsePackedMpnManufacturerPairs(source, normalizerConfig)))
           .filter((pair) => pair?.mpn && pair?.manufacturer);
         const sourceRow = rowSourceNumber(row, rowIndex);
         if (!pairs.length && !manualParse) {
@@ -8445,7 +8713,7 @@ const BomNormalizer = () => {
           return;
         }
 
-        const shape = manualParse?.patternShape || buildParsedPatternShape(source, pairs);
+        const shape = trustedPairs.length ? buildParsedPatternShape(source, pairs) : (manualParse?.patternShape || buildParsedPatternShape(source, pairs));
         if (!shape) {
           if (includeUnmatched) {
             unmatched.count += 1;
@@ -8502,7 +8770,7 @@ const BomNormalizer = () => {
             examplePairs,
             previewPairs,
           });
-          current.examples.push(manualExample || !pairs.length ? {
+          current.examples.push(!trustedPairs.length && (manualExample || !pairs.length) ? {
             sourceRow,
             source: exampleSource,
             rawSource: source,
@@ -8550,9 +8818,14 @@ const BomNormalizer = () => {
       roles.mpn === roles.manufacturer &&
       config.structure === 'same_cell'
     );
+    const selectedMpnColumnHasPackedPairs = Boolean(roles.mpn && dataRows.some((row) => {
+      const source = getCell(row, roles.mpn);
+      return source && parsePackedMpnManufacturerPairs(source, normalizerConfig)
+        .some((pair) => pair?.mpn && pair?.manufacturer);
+    }));
 
     const sections = [];
-    if (readsCombinedPrimary) {
+    if (readsCombinedPrimary || selectedMpnColumnHasPackedPairs) {
       const primarySection = buildSourceSection({
         id: 'primary',
         title: 'Primary MPN/MFR source',
