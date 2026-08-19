@@ -423,16 +423,41 @@ const readHeadersAtRow = (workbook, sheetName, headerRow) => {
   return getUsableColumnDescriptors(rows, headerIndex).map(column => column.header);
 };
 
-const normalizeSheetJoinKey = value => String(value ?? '')
-  .normalize('NFKC')
-  .replace(/[\u200B-\u200D\uFEFF]/g, '')
-  .replace(/\u00a0/g, ' ')
-  .replace(/[‐‑‒–—−]/g, '-')
-  .replace(/^'/, '')
-  .replace(/\.0+$/, '')
-  .replace(/\s+/g, ' ')
-  .trim()
-  .toLowerCase();
+// Punctuation one sheet writes and the other does not. Which of these is
+// formatting and which is identity depends on the customer's part numbering, so
+// it is asked rather than assumed: "ABC 123" and "ABC123" are the same part in
+// most catalogues, while a hyphen can be the only thing telling two variants
+// apart. Spaces default on because sheets disagree about them constantly;
+// everything else stays off until the user says otherwise.
+export const SHEET_JOIN_IGNORE_OPTIONS = [
+  { key: 'space', label: 'Spaces', sample: 'ABC 123', pattern: /\s+/g },
+  { key: 'hyphen', label: 'Hyphens', sample: 'ABC-123', pattern: /-/g },
+  { key: 'comma', label: 'Commas', sample: 'ABC,123', pattern: /,/g },
+  { key: 'semicolon', label: 'Semicolons', sample: 'ABC;123', pattern: /;/g },
+  { key: 'apostrophe', label: 'Apostrophes', sample: "ABC'123", pattern: /['‘’`]/g },
+  { key: 'dot', label: 'Dots', sample: 'ABC.123', pattern: /\./g },
+  { key: 'slash', label: 'Slashes', sample: 'ABC/123', pattern: /[/\\]/g },
+  { key: 'underscore', label: 'Underscores', sample: 'ABC_123', pattern: /_/g },
+];
+
+export const DEFAULT_SHEET_JOIN_IGNORE = ['space'];
+
+const normalizeSheetJoinKey = (value, ignoreKeys = DEFAULT_SHEET_JOIN_IGNORE) => {
+  const ignore = new Set(Array.isArray(ignoreKeys) ? ignoreKeys : []);
+  let text = String(value ?? '')
+    .normalize('NFKC')
+    .replace(/[​-‍﻿]/g, '')
+    .replace(/ /g, ' ')
+    .replace(/[‐‑‒–—−]/g, '-')
+    .replace(/^'/, '')
+    .replace(/\.0+$/, '');
+  SHEET_JOIN_IGNORE_OPTIONS.forEach(option => {
+    if (ignore.has(option.key)) text = text.replace(option.pattern, '');
+  });
+  // Spaces that stay are still normalised - one space or three is never identity.
+  if (!ignore.has('space')) text = text.replace(/\s+/g, ' ').trim();
+  return text.toLowerCase();
+};
 
 const cleanSheetJoinValue = value => String(value ?? '').trim();
 
@@ -1294,6 +1319,7 @@ const UploadFiles = () => {
     detailHeaderRow: 1,
     baseKey: '',
     detailKey: '',
+    ignoreChars: DEFAULT_SHEET_JOIN_IGNORE,
     relationshipName: '',
     outputMode: 'expanded',
     detailColumns: [],
@@ -1897,17 +1923,24 @@ const UploadFiles = () => {
     if (!cleanConfig.baseKey || !cleanConfig.detailKey) return null;
 
     const baseRows = getSheetRecords(cleanConfig.baseSheet, cleanConfig.baseHeaderRow, cleanConfig.baseSourceId);
-    const baseKeys = new Set(baseRows.map(row => normalizeSheetJoinKey(row[cleanConfig.baseKey])).filter(Boolean));
+    const baseKeys = new Set(baseRows.map(row => normalizeSheetJoinKey(row[cleanConfig.baseKey], cleanConfig.ignoreChars)).filter(Boolean));
     if (!baseKeys.size) return null;
 
     const detailRows = getSheetRecordsWithMeta(cleanConfig.detailSheet, cleanConfig.detailHeaderRow, cleanConfig.detailSourceId);
-    const candidateColumns = cleanConfig.detailHeaders.filter(header => header !== cleanConfig.detailKey);
+    // Only the columns the user asked to bring across. Scanning every header in
+    // the sheet meant the question could be about a column they never selected -
+    // and a provenance column like "Source file", filled on every single row,
+    // outscores everything on count and won every time. If nothing they chose
+    // looks grouped, there is nothing to ask about.
+    const selected = (cleanConfig.detailColumns || []).filter(Boolean);
+    const searchable = selected.length ? selected : cleanConfig.detailHeaders;
+    const candidateColumns = searchable.filter(header => header !== cleanConfig.detailKey);
     if (!candidateColumns.length) return null;
 
     const groups = [];
     let currentGroup = null;
     detailRows.forEach(({ record, rowNumber }) => {
-      const key = normalizeSheetJoinKey(record[cleanConfig.detailKey]);
+      const key = normalizeSheetJoinKey(record[cleanConfig.detailKey], cleanConfig.ignoreChars);
       const hasCandidateValue = candidateColumns.some(column => cleanSheetJoinValue(record[column]));
       if (key) {
         currentGroup = {
@@ -1934,9 +1967,15 @@ const UploadFiles = () => {
         column,
         childCount: childValues.length,
         parentCount: parentValues.length,
+        // Detail lines vary - that is what makes them separate children. A
+        // column repeating one value down every child row is a file name or a
+        // status, not a list of parts.
+        distinctChildValues: new Set(childValues.map(value => value.toLowerCase())).size,
         sampleValues: childValues.slice(0, 8),
       };
-    }).sort((a, b) => (b.childCount - a.childCount) || (b.parentCount - a.parentCount));
+    })
+      .filter(score => score.distinctChildValues > 1)
+      .sort((a, b) => (b.childCount - a.childCount) || (b.parentCount - a.parentCount));
 
     const bestColumn = columnScores[0];
     if (!bestColumn || bestColumn.childCount < 2) return null;
@@ -2028,10 +2067,10 @@ const UploadFiles = () => {
     const detailSeen = new Map();
     let collapsedDetailRows = 0;
     detailRows.forEach(row => {
-      const key = normalizeSheetJoinKey(row[cleanConfig.detailKey]);
+      const key = normalizeSheetJoinKey(row[cleanConfig.detailKey], cleanConfig.ignoreChars);
       if (!key) return;
       const signature = selectedDetailColumns
-        .map(column => normalizeSheetJoinKey(row[column]))
+        .map(column => normalizeSheetJoinKey(row[column], cleanConfig.ignoreChars))
         .join('␟');
       if (!detailSeen.has(key)) detailSeen.set(key, new Set());
       if (detailSeen.get(key).has(signature)) { collapsedDetailRows += 1; return; }
@@ -2045,7 +2084,7 @@ const UploadFiles = () => {
       const candidateColumns = detailHeaders.filter(header => header !== cleanConfig.detailKey);
       let currentGroup = null;
       detailRowsWithMeta.forEach(({ record }) => {
-        const key = normalizeSheetJoinKey(record[cleanConfig.detailKey]);
+        const key = normalizeSheetJoinKey(record[cleanConfig.detailKey], cleanConfig.ignoreChars);
         const hasCandidateValue = candidateColumns.some(column => cleanSheetJoinValue(record[column]));
         if (key) {
           currentGroup = { key, parent: record, children: [] };
@@ -2135,7 +2174,7 @@ const UploadFiles = () => {
     let expandedRows = 0;
 
     baseRows.forEach(baseRow => {
-      const baseKey = normalizeSheetJoinKey(baseRow[cleanConfig.baseKey]);
+      const baseKey = normalizeSheetJoinKey(baseRow[cleanConfig.baseKey], cleanConfig.ignoreChars);
       const matches = detailLookup.get(baseKey) || [];
       if (matches.length) {
         matchedBaseRows += 1;
@@ -2232,8 +2271,8 @@ const UploadFiles = () => {
       }
     });
 
-    const baseKeys = new Set(baseRows.map(row => normalizeSheetJoinKey(row[cleanConfig.baseKey])).filter(Boolean));
-    const detailKeys = new Set(detailRows.map(row => normalizeSheetJoinKey(row[cleanConfig.detailKey])).filter(Boolean));
+    const baseKeys = new Set(baseRows.map(row => normalizeSheetJoinKey(row[cleanConfig.baseKey], cleanConfig.ignoreChars)).filter(Boolean));
+    const detailKeys = new Set(detailRows.map(row => normalizeSheetJoinKey(row[cleanConfig.detailKey], cleanConfig.ignoreChars)).filter(Boolean));
     const orphanDetailKeys = [...detailKeys].filter(key => !baseKeys.has(key)).length;
 
     return {
@@ -2898,14 +2937,17 @@ const UploadFiles = () => {
       ? detectGroupedDetailSuggestion(cleanConfig)
       : null;
     if (groupedSuggestion) {
+      // A question, not a decision. This used to write the guessed column into
+      // detailColumns and uniqueIdDetailColumn before the dialog opened, so the
+      // user found a column ticked that they had just unticked - and "Keep
+      // simple merge" never took it back out, so a provenance column the
+      // detector liked ended up in the merged output. The suggestion now lives
+      // on sheetJoinGroupedSuggestion, which is what the dialog reads, and is
+      // applied only if it is accepted.
       const suggestedConfig = {
         ...cleanConfig,
-        outputMode: 'expanded',
-        detailColumns: Array.from(new Set([groupedSuggestion.detailColumn, ...cleanConfig.detailColumns])),
-        uniqueIdDetailColumn: groupedSuggestion.detailColumn,
         groupedDetail: {
           ...cleanConfig.groupedDetail,
-          enabled: true,
           detailColumn: groupedSuggestion.detailColumn,
           delimiterMode: groupedSuggestion.delimiterMode || 'auto',
           firstLineMode: 'auto',
@@ -2946,8 +2988,17 @@ const UploadFiles = () => {
   };
 
   const handleApplyGroupedSheetJoin = () => {
+    // Accepting is what puts the detail column into the selection - expanding
+    // grouped rows needs that column carried across, so it is added here rather
+    // than silently while the question was still on screen.
+    const detailColumn = sheetJoinConfig.groupedDetail?.detailColumn || '';
     const nextConfig = {
       ...sheetJoinConfig,
+      outputMode: 'expanded',
+      detailColumns: detailColumn
+        ? Array.from(new Set([detailColumn, ...(sheetJoinConfig.detailColumns || [])]))
+        : (sheetJoinConfig.detailColumns || []),
+      uniqueIdDetailColumn: detailColumn || sheetJoinConfig.uniqueIdDetailColumn,
       groupedDetail: {
         ...(sheetJoinConfig.groupedDetail || {}),
         enabled: true,
@@ -3182,6 +3233,9 @@ const UploadFiles = () => {
         detail_header_row: sheetJoinSetup.detailHeaderRow,
         base_key: sheetJoinSetup.baseKey,
         detail_key: sheetJoinSetup.detailKey,
+        // The backend rebuilds the same keys server-side; if it strips a
+        // different set the preview and the applied join disagree.
+        ignore_chars: sheetJoinSetup.ignoreChars || DEFAULT_SHEET_JOIN_IGNORE,
         relationship_name: sheetJoinSetup.relationshipName,
         output_mode: sheetJoinSetup.outputMode,
         detail_columns: sheetJoinSetup.detailColumns,
@@ -5650,6 +5704,41 @@ const UploadFiles = () => {
                     ))}
                   </Select>
                 </FormControl>
+              </Grid>
+              <Grid item xs={12}>
+                {/* Asked, not assumed: whether a space or a hyphen is part of a
+                    part number differs per customer, and getting it wrong either
+                    misses real matches or merges two genuinely different parts. */}
+                <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5, color: isDarkMode ? '#e2e8f0' : '#0f172a' }}>
+                  Ignore these when matching
+                </Typography>
+                <Typography variant="caption" sx={{ display: 'block', mb: 0.75, color: isDarkMode ? '#94a3b8' : '#64748b' }}>
+                  Characters ticked here are stripped from both columns before they are compared, so "ABC 123" can match "ABC123".
+                </Typography>
+                <Stack direction="row" flexWrap="wrap" gap={0.75}>
+                  {SHEET_JOIN_IGNORE_OPTIONS.map(option => {
+                    const selected = (sheetJoinConfig.ignoreChars || []).includes(option.key);
+                    return (
+                      <Chip
+                        key={option.key}
+                        size="small"
+                        label={`${option.label}  ${option.sample}`}
+                        color={selected ? 'primary' : 'default'}
+                        variant={selected ? 'filled' : 'outlined'}
+                        onClick={() => setSheetJoinConfig(prev => {
+                          const current = prev.ignoreChars || [];
+                          return {
+                            ...prev,
+                            ignoreChars: current.includes(option.key)
+                              ? current.filter(key => key !== option.key)
+                              : [...current, option.key],
+                          };
+                        })}
+                        sx={{ fontFamily: 'monospace' }}
+                      />
+                    );
+                  })}
+                </Stack>
               </Grid>
             </Grid>
           )}

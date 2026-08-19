@@ -2274,6 +2274,21 @@ def apply_sheet_join(request):
         detail_sheet = request.data.get('detail_sheet')
         base_key = request.data.get('base_key')
         detail_key = request.data.get('detail_key')
+        # Kept in sync with SHEET_JOIN_IGNORE_OPTIONS in UploadFiles.js.
+        raw_ignore = request.data.get('ignore_chars')
+        ignore_chars = set(raw_ignore if isinstance(raw_ignore, list) else ['space'])
+        ignore_patterns = [
+            pattern for key, pattern in (
+                ('space', r'\s+'),
+                ('hyphen', r'-'),
+                ('comma', r','),
+                ('semicolon', r';'),
+                ('apostrophe', r"['\u2018\u2019`]"),
+                ('dot', r'\.'),
+                ('slash', r'[/\\\\]'),
+                ('underscore', r'_'),
+            ) if key in ignore_chars
+        ]
         detail_columns = request.data.get('detail_columns') or []
         output_mode = request.data.get('output_mode') or 'grouped'
         relationship_name = str(request.data.get('relationship_name') or '').strip()
@@ -2395,8 +2410,16 @@ def apply_sheet_join(request):
             text = re.sub(r'[‐‑‒–—−]', '-', text)
             text = re.sub(r"^'", '', text)
             text = re.sub(r'\.0+$', '', text)
-            text = re.sub(r'\s+', ' ', text)
-            return text.strip().lower()
+            # The user says which punctuation is formatting and which is
+            # identity - a space usually the former, a hyphen often the only
+            # thing separating two variants. Must strip exactly the set the
+            # UI stripped when it built the preview, or the applied join
+            # matches a different set of rows than the one shown.
+            for pattern in ignore_patterns:
+                text = re.sub(pattern, '', text)
+            if 'space' not in ignore_chars:
+                text = re.sub(r'\s+', ' ', text).strip()
+            return text.lower()
 
         def clean_value(value):
             if pd.isna(value):

@@ -425,9 +425,28 @@ def derive_tree(records, level_column, code_column,
         # parent reported parent_not_found on all 17 of its root lines while the
         # answer sat in `root` the entire time.
         root_code = str((root or {}).get('code') or '').strip()
+        # Naming yourself as your own parent means "root" only when nothing else
+        # in the sheet gives you a real one. THALES files a part's own drawing
+        # under the part's number, so the drawing row states itself as parent
+        # while the part it belongs to already has a proper parent elsewhere.
+        # Reading those as roots handed them to the top assembly, which put
+        # F1285729, F1520486 and F1524171 on level 1 - where the sheet never
+        # puts them - and gave F1287950, F1288446 and F1289289 a second line
+        # beside their real one, which the import rejects as a duplicate child.
+        # A part cannot contain itself, so the self-reference is dropped rather
+        # than re-homed. AMAT's genuine root markers have no other parent and
+        # still come through as roots.
+        parented_elsewhere = {
+            row['code'] for row in rows
+            if row['stated_parent'] and row['stated_parent'] != row['code']
+        }
+        self_referencing = []
         for row in rows:
             parent = row['stated_parent']
             row['depth'] = row['level'] - min_level
+            if parent and parent == row['code'] and row['code'] in parented_elsewhere:
+                self_referencing.append(row)
+                continue
             if not parent or parent == row['code']:
                 row['parent'] = None
                 continue
@@ -449,6 +468,7 @@ def derive_tree(records, level_column, code_column,
                 continue
             row['parent'] = parent
     else:
+        self_referencing = []
         # Level inference. `open_at` holds the most recent code seen at each
         # level, so a row's parent is whatever is currently open one level above
         # it. Deeper entries are discarded on the way back up, which is what
@@ -476,6 +496,19 @@ def derive_tree(records, level_column, code_column,
             open_at[level] = row['code']
             for deeper in [key for key in open_at if key > level]:
                 del open_at[deeper]
+
+    if stated and self_referencing:
+        dropped = {id(row) for row in self_referencing}
+        rows = [row for row in rows if id(row) not in dropped]
+        warnings.append({
+            'type': 'self_referencing_rows',
+            'count': len(self_referencing),
+            'codes': [row['code'] for row in self_referencing][:10],
+            'message': ('%d row(s) name themselves as their own parent while the '
+                        'same code already hangs elsewhere in the tree, so they '
+                        'were dropped: a part cannot contain itself.'
+                        % len(self_referencing)),
+        })
 
     # Leaf classification. A row is an assembly when something names it as a
     # parent, not when the row after it happens to sit deeper.
