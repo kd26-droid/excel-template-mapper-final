@@ -1361,6 +1361,17 @@ const looksLikeMpnToken = (value) => {
   return /^[A-Za-z0-9._/#,+-]+(?:\s+[A-Za-z0-9._/#,+-]+){0,3}$/.test(token);
 };
 
+const looksLikeAlphabeticMpnToken = (value) => {
+  const token = fmt(value).replace(/[;,|]+$/g, '');
+  const compact = token.replace(/[^A-Za-z0-9]/g, '');
+  if (compact.length < 4) return false;
+  if (/[0-9]/.test(compact)) return false;
+  if (MPN_NOISE_RE.test(token)) return false;
+  if (/\s/.test(token)) return false;
+  if (!/[._/#,+-]/.test(token)) return false;
+  return /^[A-Za-z._/#,+-]+$/.test(token);
+};
+
 const isConnectorOnlyMpnPart = (value) => {
   const compact = fmt(value)
     .replace(/\u00a0/g, ' ')
@@ -1479,8 +1490,14 @@ const removeDeletedCircledSegments = (value, remarks) => {
   return keptSegments.map((segment) => `${segment.marker || ''}${segment.value}`).join('\n');
 };
 
+const cleanTrailingMpnBracketNote = (value) => fmt(value)
+  .replace(/\s+\(([^()]*)\)(?=\S)/g, '($1)')
+  .replace(/\s+\([^()]*\)\s*$/g, '')
+  .trim();
+
 const normalizeMpnParts = (parts) => parts
   .map(stripVendorPrefix)
+  .map(cleanTrailingMpnBracketNote)
   .map((part) => fmt(part).replace(/^(?:and|or|and\/or)\s+/i, '').replace(/\s+(?:and|or|and\/or)$/i, '').trim())
   .filter((part) => part && !isConnectorOnlyMpnPart(part));
 
@@ -1647,7 +1664,7 @@ const splitMpnCell = (value, config = {}) => {
   // Deliberately NOT gated on looksLikeMpnToken: that also caps length at four tokens
   // and bans ':' and '()', which would drop real parts like
   // "DOWSIL RTV 3140 TUBE 90 ML" and "114-RX8900SA:UB0PURESNCT-ND".
-  if (!/[0-9]/.test(text)) return [];
+  if (!/[0-9]/.test(text) && !looksLikeAlphabeticMpnToken(text)) return [];
 
   return normalizeMpnParts([text]);
 };
