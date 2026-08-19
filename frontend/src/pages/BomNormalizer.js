@@ -3756,15 +3756,17 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
       !getCell(row, roles.quantity) &&
       !getCell(row, roles.uom)
     );
-    const canAttachAsAlternate = Boolean(currentGroup && (!isContextRow || isPendingSparsePartRow) && (
-      strictContextMarker ? parts.length : (itemValue || parts.length)
-    ));
+    const canAttachAsAlternate = Boolean(
+      currentGroup &&
+      parts.length &&
+      (!isContextRow || isPendingSparsePartRow)
+    );
 
     if (canAttachAsAlternate) {
       // The manufacturer row this group was waiting for. It becomes the primary,
       // so the held header must not also be emitted.
       if (pendingContext && pendingContext.group === currentGroup) pendingContext = null;
-      const pairs = parts.length ? parts : [{ mpn: '', manufacturer: '', metadata: {} }];
+      const pairs = parts;
       pairs.forEach((pair) => {
         if (!shouldEmitPartForGroup(currentGroup, pair)) return;
         const relationIndex = Number(currentGroup.relationCount || 0);
@@ -3790,7 +3792,7 @@ const normalizeFollowingItemRows = (rows, roles, config = {}) => {
       return;
     }
 
-    if (!isContextRow && !itemValue && !parts.length) return;
+    if (!isContextRow && !parts.length) return;
 
     // Any previous header still waiting has now run out of rows to be followed
     // by, so settle it before this row takes over as the current group.
