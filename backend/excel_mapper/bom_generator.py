@@ -854,9 +854,19 @@ def _record_identity(record):
 #
 # sourceRow / __grid_row__ are per-row unique ids that always differ.
 # rule / confidence / discardedText are normalizer diagnostics.
+#
+# description / Notes / Internal notes are free text ABOUT the item, not what
+# the item IS - the code above already answers that. Keeping them in the
+# signature let prose split a part from itself: THALES files a part's own
+# drawing under the part's number, so the pair differed only by Notes ('PRD' vs
+# 'Doc.Def.', which is just the source's row-type column) and never formed a
+# duplicate group - leaving the assembly listing the same child twice, which
+# the import rejects. Two rows with one item code are one item; if their text
+# disagrees that is a data inconsistency, not two different parts.
 _RECORD_IDENTITY_SKIP = {
     F_LEVEL, F_QUANTITY, F_SOURCE_ROW,
     F_PARENT_KEY, 'parent',
+    F_DESCRIPTION, 'Notes', 'Internal notes',
     '__grid_row__',
     'rule', 'confidence', 'discardedText',
 }
