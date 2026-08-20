@@ -6,6 +6,7 @@ Optimized for smooth Excel to Excel mapping functionality.
 import os
 import uuid
 import logging
+import csv
 import math
 from pathlib import Path
 from datetime import datetime, timedelta, timezone as datetime_timezone
@@ -370,6 +371,259 @@ def _non_empty_cells(row_values):
         if text:
             cells.append((index, text))
     return cells
+
+
+def _read_physical_rows(file_path, sheet_name=None):
+    """One dataframe row per physical line, with no rejoining of any kind.
+
+    The ordinary reader tries to repair wrapped lines while parsing, which is
+    right for a merely wrapped file and wrong for one whose fields are shifted:
+    it merged 139 of the THALES export's 959 lines across record boundaries
+    before anything could see where the boundaries were. The repair below has to
+    decide that itself, so it reads the lines as written.
+    """
+    path_text = str(file_path).lower()
+    if not (path_text.endswith('.csv') or _looks_like_delimited_text_file(file_path)):
+        raw = pd.read_excel(file_path, sheet_name=sheet_name, header=None,
+                            dtype=str, keep_default_na=False)
+        if isinstance(raw, dict):
+            return raw.get(sheet_name) if sheet_name in raw else next(iter(raw.values()), None)
+        return raw
+    for encoding in ('utf-8-sig', 'utf-8', 'latin-1'):
+        try:
+            with open(file_path, encoding=encoding, newline='') as handle:
+                rows = list(csv.reader(handle))
+            break
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    else:
+        return None
+    if not rows:
+        return None
+    width = max(len(row) for row in rows)
+    return pd.DataFrame([row + [''] * (width - len(row)) for row in rows])
+
+
+def _maybe_repair_spilled_rows_upload(client_path, sheet_name, header_row):
+    """
+    Rejoin rows a converter split because one column held several values.
+
+    An XML/CSV conversion that treats a REPEATING element as a single scalar
+    writes the first value in its column and drops each extra onto a line of its
+    own. The extra lands in column 0 - not the column it belongs to - and on the
+    last of them the record's remaining columns resume, shifted left by the width
+    of everything before that column. THALES exports arrive this way: 613 of 958
+    lines were fragments, 49 manufacturer part numbers were read as levels, and
+    export-control codes ended up in the Quantity column.
+
+    Nothing here knows the customer or the headers. A row is a fragment when the
+    column that starts a record is empty on it, and the shift is found by asking
+    which offset puts a fragment's trailing values back under a column where the
+    intact rows carry those same values. A file with no fragments scores nothing
+    and is returned untouched.
+    """
+    try:
+        raw = _read_physical_rows(client_path, sheet_name)
+        if raw is None or raw.empty:
+            return None
+
+        header_index = max(0, int(header_row or 1) - 1)
+        if header_index >= len(raw.index):
+            return None
+
+        headers = [str(value or '').strip() for value in raw.iloc[header_index].tolist()]
+        width = len(headers)
+        if width < 4:
+            return None
+
+        body = [
+            [('' if pd.isna(cell) else str(cell).strip()) for cell in row]
+            for row in raw.iloc[header_index + 1:].values.tolist()
+        ]
+        body = [row + [''] * (width - len(row)) for row in body]
+        if len(body) < 4:
+            return None
+
+        def filled(row):
+            return [index for index, cell in enumerate(row) if cell]
+
+        density = [
+            sum(1 for row in body if row[index]) / float(len(body))
+            for index in range(width)
+        ]
+
+        # The column that says "a record starts here". Density alone cannot find
+        # it: when most lines are fragments, even a mandatory column looks sparse
+        # (Parents sits at 0.30 on the THALES file). The densest column after the
+        # first is the one every real record fills, and a fragment is a line that
+        # has a value in column 0 while that column is empty.
+        ranked = sorted(range(1, width), key=lambda index: density[index], reverse=True)
+        anchors = [ranked[0]] if ranked and density[ranked[0]] > 0 else []
+        if not anchors:
+            return None
+
+        def is_fragment(row):
+            return bool(row[0]) and not any(row[index] for index in anchors)
+
+        fragments = [index for index, row in enumerate(body) if is_fragment(row)]
+        if len(fragments) < max(3, len(body) * 0.05):
+            return None
+
+        # Where the spilled value belongs, measured by VALUE rather than by
+        # "lands on something non-empty". Any shift can drop a cell onto a
+        # populated column by luck - on the THALES file that scored a shift of 2
+        # as highly as the true 25 - but only the real one puts "EAR99" back
+        # under Re-export_Regl1, where the intact records also say EAR99.
+        column_values = [set() for _ in range(width)]
+        fragment_set = set(fragments)
+        for row_index, row in enumerate(body):
+            if row_index in fragment_set:
+                continue
+            for index in filled(row):
+                column_values[index].add(row[index])
+
+        best_shift, best_hits = 0, 0
+        for shift in range(1, width):
+            hits = 0
+            for row_index in fragments:
+                row = body[row_index]
+                for index in filled(row):
+                    if index == 0:
+                        continue
+                    destination = index + shift
+                    if destination < width and row[index] in column_values[destination]:
+                        hits += 1
+            if hits > best_hits:
+                best_shift, best_hits = shift, hits
+        if best_shift <= 0 or best_hits < 1:
+            return None
+
+        merged = []
+        spilled_values = 0
+        realigned_cells = 0
+        for row in body:
+            if not is_fragment(row) or not merged:
+                merged.append(list(row))
+                continue
+            target = merged[-1]
+            value = row[0]
+            if value:
+                existing = target[best_shift]
+                target[best_shift] = (existing + '\n' + value) if existing else value
+                spilled_values += 1
+            for index in filled(row):
+                if index == 0:
+                    continue
+                destination = index + best_shift
+                if destination < width and not target[destination]:
+                    target[destination] = row[index]
+                    realigned_cells += 1
+
+        if len(merged) == len(body):
+            return None
+
+        repaired = pd.DataFrame(merged, columns=headers)
+        upload_dir = getattr(hybrid_file_manager, 'local_upload_dir', Path(settings.BASE_DIR) / 'uploaded_files')
+        upload_dir = Path(upload_dir)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        repaired_path = upload_dir / f"{uuid.uuid4()}_spilled_rows_repaired.xlsx"
+        repaired.to_excel(repaired_path, index=False, sheet_name='Repaired')
+
+        logger.info(
+            "Repaired spilled-row upload %s: %s fragments folded into %s records "
+            "(column %s, %s realigned cells)",
+            client_path, len(fragments), len(merged), best_shift, realigned_cells,
+        )
+        return {
+            'client_path': str(repaired_path),
+            'sheet_name': 'Repaired',
+            'header_row': 1,
+            'client_headers': headers,
+            'source_transform': {
+                'type': 'spilled_row_repair',
+                'original_path': str(client_path),
+                'fragments': len(fragments),
+                'rows_before': len(body),
+                'rows_after': len(merged),
+                'target_column_index': best_shift,
+                'target_column': headers[best_shift] if best_shift < width else '',
+                'values_rejoined': spilled_values,
+                'cells_realigned': realigned_cells,
+            }
+        }
+    except Exception as exc:
+        logger.warning("Spilled-row repair skipped for %s: %s", client_path, exc)
+        return None
+
+
+@api_view(['POST'])
+@parser_classes([MultiPartParser, FormParser])
+def repair_spilled_rows(request):
+    """Repair a file whose rows were split by a bad export, without a session.
+
+    The BOM Normalizer parses the file in the browser, so the upload-time repair
+    never sees it - by the time anything reaches the server the damage has been
+    baked into a well-formed workbook. This lets the normalizer hand the ORIGINAL
+    bytes over first and read back a repaired sheet.
+
+    Returns the repaired .xlsx on 200, or 204 when the file needs nothing. Any
+    failure is a 204 as well: the caller must be able to carry on with the file
+    the user chose, so this can never be the reason an upload stops working.
+    """
+    upload = request.FILES.get('clientFile') or request.FILES.get('file')
+    if not upload:
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    temp_path = None
+    try:
+        upload_dir = Path(getattr(hybrid_file_manager, 'local_upload_dir',
+                                  Path(settings.BASE_DIR) / 'uploaded_files'))
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        suffix = Path(str(upload.name or 'upload.csv')).suffix or '.csv'
+        temp_path = upload_dir / f"{uuid.uuid4()}_repair_probe{suffix}"
+        with open(temp_path, 'wb') as handle:
+            for chunk in upload.chunks():
+                handle.write(chunk)
+
+        sheet_name = (request.data.get('sheetName') or '').strip() or None
+        try:
+            header_row = int(request.data.get('headerRow') or 1)
+        except (TypeError, ValueError):
+            header_row = 1
+
+        transform = _maybe_repair_spilled_rows_upload(str(temp_path), sheet_name, header_row)
+        if not transform:
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        note = transform['source_transform']
+        logger.info(
+            "Normalizer pre-upload repair on %s: %s -> %s rows into %r",
+            upload.name, note['rows_before'], note['rows_after'], note['target_column'],
+        )
+        response = FileResponse(
+            open(transform['client_path'], 'rb'),
+            as_attachment=True,
+            filename='repaired.xlsx',
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        # Read by the caller so it can tell the user what was changed.
+        response['X-Repair-Applied'] = '1'
+        response['X-Repair-Rows-Before'] = str(note['rows_before'])
+        response['X-Repair-Rows-After'] = str(note['rows_after'])
+        response['X-Repair-Target-Column'] = str(note['target_column'])
+        response['Access-Control-Expose-Headers'] = (
+            'X-Repair-Applied, X-Repair-Rows-Before, X-Repair-Rows-After, X-Repair-Target-Column'
+        )
+        return response
+    except Exception as exc:
+        logger.warning("Spilled-row probe failed for %s: %s", getattr(upload, 'name', '?'), exc)
+        return Response(status=status.HTTP_204_NO_CONTENT)
+    finally:
+        try:
+            if temp_path and Path(temp_path).exists():
+                Path(temp_path).unlink()
+        except Exception:
+            pass
 
 
 def _maybe_expand_packed_cell_upload(client_path, sheet_name, header_row):
@@ -1876,6 +2130,19 @@ def upload_files(request):
             sheet_name = packed_cell_transform['sheet_name']
             header_row = packed_cell_transform['header_row']
             client_headers = packed_cell_transform['client_headers']
+
+        # Runs after the packed-cell pass so a file suffering both is handled in
+        # the order it broke: split into columns first, then rejoined into rows.
+        spilled_row_transform = _maybe_repair_spilled_rows_upload(
+            hybrid_file_manager.get_file_path(client_path),
+            sheet_name,
+            header_row
+        )
+        if spilled_row_transform:
+            client_path = spilled_row_transform['client_path']
+            sheet_name = spilled_row_transform['sheet_name']
+            header_row = spilled_row_transform['header_row']
+            client_headers = spilled_row_transform['client_headers']
 
         template_packed_cell_transform = None
         if template_file:
@@ -7265,10 +7532,14 @@ def download_original_file(request, session_id=None):
                 'error': 'Invalid session'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        SESSION_STORE[session_id] = info
-        SESSION_STORE[session_id] = info
-        SESSION_STORE[session_id] = info
-        info = SESSION_STORE[session_id]
+        # Three stray 'SESSION_STORE[session_id] = info' lines sat here, using
+        # info before it was assigned, so every call died with UnboundLocalError.
+        info = get_session_consistent(session_id)
+        if not info:
+            return Response({
+                'success': False,
+                'error': 'Invalid session'
+            }, status=status.HTTP_400_BAD_REQUEST)
         client_path = info["client_path"]
         original_name = info["original_client_name"]
         

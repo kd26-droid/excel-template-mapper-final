@@ -10,6 +10,7 @@ from .views import (
     session_status,
     rebuild_template,
     upload_files,
+    repair_spilled_rows,
     apply_sheet_join,
     cleanup_rows,
     get_headers,
@@ -183,6 +184,7 @@ urlpatterns = [
 
     # File upload & cleanup
     path('upload/', upload_files, name='upload-files'),
+    path('repair-spilled-rows/', repair_spilled_rows, name='repair-spilled-rows'),
     path('sheet-join/apply/', apply_sheet_join, name='apply-sheet-join'),
     path('cleanup-rows/', cleanup_rows, name='cleanup-rows'),
 

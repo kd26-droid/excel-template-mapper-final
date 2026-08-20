@@ -6079,7 +6079,37 @@ const readCsvWorkbookSafely = async (file) => {
   throw new Error(`Could not read "${file.name}". ${lastError?.message || 'The CSV appears to be unsupported or empty.'}`);
 };
 
-const readUploadedWorkbookSafely = async (file) => {
+// Some exports split one record across several lines, leaving part numbers in
+// the level column and shifting the rest. The server can put those back, but it
+// only ever saw the workbook this page had already built from its own parse, so
+// the damage was baked in before anything could act on it. Hand it the original
+// bytes first and parse whatever comes back.
+//
+// Deliberately incapable of stopping an upload: no repair needed, a failed call,
+// a slow one, an unreadable answer - every path returns the file the user chose,
+// which is exactly what this function did before.
+const repairedFileOrOriginal = async (file) => {
+  try {
+    const formData = new FormData();
+    formData.append('clientFile', file);
+    const response = await api.repairSpilledRows(formData);
+    if (response?.status !== 200 || !response.data || !response.data.size) return file;
+    const repaired = new File([response.data], 'repaired.xlsx', {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    const before = response.headers?.['x-repair-rows-before'];
+    const after = response.headers?.['x-repair-rows-after'];
+    if (before && after) {
+      console.info(`Rejoined split rows in ${file.name}: ${before} lines -> ${after} records`);
+    }
+    return repaired;
+  } catch (_) {
+    return file;
+  }
+};
+
+const readUploadedWorkbookSafely = async (originalFile) => {
+  const file = await repairedFileOrOriginal(originalFile);
   if (String(file?.name || '').toLowerCase().endsWith('.csv')) return readCsvWorkbookSafely(file);
   const buffer = await file.arrayBuffer();
   return readWorkbookSafely(buffer, file.name);

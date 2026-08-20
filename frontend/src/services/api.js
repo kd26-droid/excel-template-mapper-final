@@ -107,6 +107,15 @@ const api = {
    * Upload files without template with retry logic and validation
    * @param {FormData} formData - File upload data
    */
+  // Ask the backend whether a file needs its rows rejoined before we parse it.
+  // Resolves to null whenever nothing is wrong, the call fails, or it takes too
+  // long - the caller then uses the file exactly as the user gave it.
+  repairSpilledRows: (formData) =>
+    axios.post(`${API_URL}/repair-spilled-rows/`, formData, {
+      responseType: 'blob',
+      timeout: 60000,
+    }),
+
   uploadFiles: async (formData) => {
     const maxRetries = 3;
     let lastError;
