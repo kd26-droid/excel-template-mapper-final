@@ -2737,34 +2737,7 @@ const splitManufacturerCell = (value, expectedCount, config = {}) => {
 
   if (keepSingleManufacturerCell) return [canonicalForManufacturer(text)];
 
-  if (!expectedCount || expectedCount <= 1) return [text];
-
-  const tokens = text.split(/\s+/).filter(Boolean);
-  const manufacturers = [];
-  let index = 0;
-  while (index < tokens.length && manufacturers.length < expectedCount) {
-    const remainingSlots = expectedCount - manufacturers.length;
-    const remainingTokens = tokens.length - index;
-    let current = tokens[index];
-    index += 1;
-
-    while (
-      index < tokens.length &&
-      remainingTokens > remainingSlots &&
-      MANUFACTURER_SUFFIX_WORDS.has(tokens[index].toUpperCase())
-    ) {
-      current += ` ${tokens[index]}`;
-      index += 1;
-    }
-
-    manufacturers.push(current);
-  }
-
-  if (index < tokens.length && manufacturers.length) {
-    manufacturers[manufacturers.length - 1] = `${manufacturers[manufacturers.length - 1]} ${tokens.slice(index).join(' ')}`;
-  }
-
-  return manufacturers;
+  return [canonicalForManufacturer(text)];
 };
 
 const getCell = (row, header) => (header ? fmt(row[header]) : '');
@@ -2997,6 +2970,17 @@ const statedParent = (row, roles) => (
 // every stage that needs it.
 const hierarchyParent = (row, roles) => statedParent(row, roles) || row?.[LEVEL_PARENT_KEY] || '';
 
+const splitStructuredAlternateRoleValue = (value, expectedCount = 0, options = {}) => {
+  const parts = splitAlternateConnectorText(value, options);
+  if (parts.length <= 1) return [];
+  if (!expectedCount || expectedCount <= 1) return parts;
+  return parts.length <= expectedCount ? parts : [];
+};
+
+const pairedStructuredRoleValue = (parts, rawValue, index) => (
+  parts[index] || parts[0] || rawValue || ''
+);
+
 // The visible level should only show a level the sheet explicitly stated:
 // a mapped level column, or a breadcrumb path depth. Parent-chain depth is still
 // useful internally for hierarchy, but showing it as "Level 2/3" misleads users
@@ -3115,6 +3099,8 @@ const normalizeSeparateCells = (rows, roles, config) => {
     const level = rowLevel(row, roles) || '1';
     const rule = explicitDelimiterUsed ? 'separate_cells_user_delimiter' : 'separate_cells_position_pairing';
     const cpn = getCell(row, roles.cpn);
+    const cpnParts = splitStructuredAlternateRoleValue(cpn, mpns.length || manufacturers.length);
+    const parentParts = splitStructuredAlternateRoleValue(parent, mpns.length || manufacturers.length);
 
     if (packedPairs.length) {
       packedPairs.forEach((pair, partIndex) => {
@@ -3201,18 +3187,20 @@ const normalizeSeparateCells = (rows, roles, config) => {
       return;
     }
 
-    const partCount = Math.max(mpns.length, manufacturers.length || 0);
+    const partCount = Math.max(mpns.length, manufacturers.length || 0, cpnParts.length, parentParts.length);
     Array.from({ length: partCount }).forEach((_, partIndex) => {
       const isPrimary = partIndex === 0;
       const mpn = mpns[partIndex] || mpns[0] || '';
       const manufacturer = manufacturers[partIndex] || (!isPrimary && config.manufacturerMode === 'inherit_blank' ? primaryManufacturer : '');
+      const pairedCpn = pairedStructuredRoleValue(cpnParts, cpn, partIndex);
+      const pairedParent = pairedStructuredRoleValue(parentParts, parent, partIndex);
       output.push(withSourceColumns({
         sourceRow,
         parentKey,
-        parent,
+        parent: pairedParent,
         relation: isPrimary ? 'Primary' : `Alternate ${partIndex}`,
         level,
-        cpn,
+        cpn: pairedCpn,
         description,
         mpn,
         manufacturer,
@@ -5123,7 +5111,7 @@ const getRawPairingParts = (row, roles, config) => {
   const rawMpn = getCell(row, roles.mpn);
   const rawManufacturer = getCell(row, roles.manufacturer);
   const mpns = splitMpnCell(rawMpn, config);
-  const manufacturers = splitManufacturerCell(rawManufacturer, null, config).filter(Boolean);
+  const manufacturers = splitManufacturerCell(rawManufacturer, mpns.length || null, config).filter(Boolean);
   return { mpns, manufacturers, rawMpn, rawManufacturer };
 };
 
