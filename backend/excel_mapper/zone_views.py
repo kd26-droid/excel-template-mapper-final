@@ -591,9 +591,13 @@ def _zone_table_header_score(row):
         )
         if re.search(pattern, joined)
     )
-    assembly_hits = sum(
+    assembly_column_hits = sum(
         1 for cell in non_blank
-        if re.fullmatch(r'(?:ass(?:y|embly)?\s*)?\d{1,4}', cell, flags=re.IGNORECASE)
+        if re.fullmatch(r'(?:a|assy|assembly)\s*\d{1,2}', cell, flags=re.IGNORECASE)
+    )
+    numeric_only_hits = sum(
+        1 for cell in non_blank
+        if re.fullmatch(r'\d{1,4}', cell)
     )
     long_data_hits = sum(
         1 for cell in non_blank
@@ -608,8 +612,26 @@ def _zone_table_header_score(row):
         1 for cell in non_blank
         if re.search(r'[A-Z]?\d{4,}[-/][A-Z0-9-]+', cell, flags=re.IGNORECASE)
     )
+    labelish_hits = sum(
+        1 for cell in non_blank
+        if re.search(r'[A-Za-z]', cell) and len(cell) <= 28 and not re.search(r'[+\-/]\d|%', cell)
+    )
 
-    return keyword_hits * 25 + min(assembly_hits, 8) * 4 - long_data_hits * 8 - part_number_hits * 15
+    score = (
+        keyword_hits * 25
+        + min(assembly_column_hits, 8) * 8
+        + min(labelish_hits, 8) * 3
+        - numeric_only_hits * 10
+        - long_data_hits * 8
+        - part_number_hits * 15
+    )
+    # Rows just above the real table header often contain revision/assembly
+    # numbers plus one real-looking label (for example "5 52 4 42 ... PART NO.").
+    # They are metadata, not column headers, and should not beat the row below
+    # with actual labels such as A6/A5/.../PART NO./DESCRIPTION.
+    if keyword_hits < 2 and numeric_only_hits >= 2 and assembly_column_hits == 0:
+        score -= 35
+    return score
 
 
 @api_view(['POST'])
