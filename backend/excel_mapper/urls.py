@@ -53,6 +53,12 @@ from .views import (
     validate_bom_sheet,
     demo_bom_tree,
     expand_alternate_columns,
+    bom_role_inference,
+    bom_field_pattern_inference,
+    bom_field_pattern_learning,
+    bom_field_pattern_teaching,
+    bom_field_pattern_apply,
+    bom_normalize,
 
     # Unified Template + Formula views (MappingTemplate based)
     save_mapping_template,
@@ -150,6 +156,11 @@ from .bom_workflow_templates import (
     bom_workflow_templates,
     bom_workflow_template_detail,
 )
+from .bom_structure_patterns import (
+    bom_structure_patterns,
+    bom_structure_match,
+    bom_structure_profile,
+)
 from .processing_templates import (
     processing_templates,
     processing_template_detail,
@@ -237,6 +248,15 @@ urlpatterns = [
          name='bom-revision-handoff'),
     path('bom/download/<str:session_id>/', download_bom_sheet, name='download-bom-sheet'),
     path('bom/validate/<str:session_id>/', validate_bom_sheet, name='validate-bom-sheet'),
+    path('bom/roles/infer/', bom_role_inference, name='bom-role-inference'),
+    path('bom/field-patterns/infer/', bom_field_pattern_inference, name='bom-field-pattern-inference'),
+    path('bom/field-patterns/teach/', bom_field_pattern_teaching, name='bom-field-pattern-teaching'),
+    path('bom/field-patterns/learn/', bom_field_pattern_learning, name='bom-field-pattern-learning'),
+    path('bom/field-patterns/apply/', bom_field_pattern_apply, name='bom-field-pattern-apply'),
+    path('bom/normalize/', bom_normalize, name='bom-normalize'),
+    path('bom/structures/', bom_structure_patterns, name='bom-structure-patterns'),
+    path('bom/structures/match/', bom_structure_match, name='bom-structure-match'),
+    path('bom/structures/profile/', bom_structure_profile, name='bom-structure-profile'),
 
     # Dashboard
     path('dashboard/', dashboard_view, name='dashboard'),

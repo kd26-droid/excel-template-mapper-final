@@ -3,6 +3,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from .models import BomWorkflowTemplate
+from .services.bom_structure_patterns import learn_bom_structure
 
 
 def _clean_name(value):
@@ -38,10 +39,28 @@ def bom_workflow_templates(request):
             'workflow': workflow,
         },
     )
+
+    learned_structure = None
+    source_signature = template.source_signature or {}
+    headers = source_signature.get('headers') if isinstance(source_signature.get('headers'), list) else []
+    rows = source_signature.get('rowSample') if isinstance(source_signature.get('rowSample'), list) else []
+    if headers:
+        structure, _ = learn_bom_structure(
+            name=template.name,
+            headers=headers,
+            rows=rows,
+            roles=workflow.get('roles') if isinstance(workflow.get('roles'), dict) else {},
+            config=workflow.get('config') if isinstance(workflow.get('config'), dict) else {},
+            source_signature=source_signature,
+            workflow=workflow,
+            confidence=1.0,
+        )
+        learned_structure = structure.to_dict()
     return Response({
         'success': True,
         'created': created,
         'template': template.to_dict(),
+        'learned_structure': learned_structure,
         'message': f'Workflow template "{template.name}" saved successfully',
     }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 

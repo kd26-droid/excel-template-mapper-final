@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import {
   Alert,
+  Autocomplete,
   Box,
   Button,
   Card,
@@ -60,6 +61,7 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import api from '../services/api';
 import BomStructureDialog, { reconcileSavedBomStructure } from '../components/BomStructureDialog';
 import ColumnParser from '../components/ColumnParser/ColumnParser';
+import { Button as ShadcnButton } from '../components/ui/button';
 import {
   createFactwiseIds,
   createTagColumn,
@@ -71,23 +73,212 @@ import {
   ALTERNATE_LAYOUT_OPTIONS,
   BOM_LAYOUT_OPTIONS,
   CLEANUP_OPTIONS,
-  DELIMITER_OPTIONS,
-  GROUP_HEADER_OPTIONS,
+  IDENTITY_LAYOUT_OPTIONS,
   KNOWN_MANUFACTURERS,
-  MANUFACTURER_INHERIT_OPTIONS,
   MANUFACTURER_SUFFIX_WORDS,
   MPN_CONNECTOR_WORDS,
   MPN_NOISE_RE,
-  QTY_OPTIONS,
+  ROW_PLACEMENT_OPTIONS,
   ROLE_FIELDS,
   STRUCTURE_OPTIONS,
 } from '../lib/bomNormalizerAlgorithmRegistry';
+import {
+  VISUAL_TEACH_NO_SPLIT,
+  fieldPatternSampleKey,
+  fieldPatternSampleForWorkflowStep,
+  normalizeVisualTeachEntries,
+  shouldRepeatVisualTeachGroupSeparator,
+  visualTeachTagsFromInterpretationSpans,
+} from '../lib/visualTeachParser';
 import { useThemeContext } from '../utils/ThemeContext';
 
 const emptyRoles = ROLE_FIELDS.reduce((acc, field) => {
   acc[field.key] = '';
   return acc;
 }, {});
+
+const ALTERNATE_INHERIT_FIELD_OPTIONS = [
+  { value: 'cpn', label: 'CPN / customer part number' },
+  { value: 'description', label: 'Description / item name' },
+  { value: 'quantity', label: 'Quantity' },
+  { value: 'uom', label: 'UOM' },
+  { value: 'level', label: 'BOM level' },
+  { value: 'parent', label: 'Parent / group key' },
+  { value: 'notes', label: 'Notes' },
+  { value: 'internalNotes', label: 'Internal notes' },
+];
+
+const DEFAULT_ALTERNATE_INHERIT_FIELDS = [];
+const ALTERNATE_INHERIT_SELECT_ALL_VALUE = '__select_all_alternate_inherit_fields__';
+const MAX_ALTERNATE_COLUMN_GROUPS = 20;
+
+const FIELD_PATTERN_DELIMITER_OPTIONS = [
+  { value: 'none', label: 'No split' },
+  { value: 'auto', label: 'Auto-detect' },
+  { value: '/', label: 'Slash (/)' },
+  { value: ',', label: 'Comma (,)' },
+  { value: ';', label: 'Semicolon (;)' },
+  { value: '|', label: 'Pipe (|)' },
+  { value: '^', label: 'Caret (^)' },
+  { value: '~', label: 'Tilde (~)' },
+  { value: '\\n', label: 'New line' },
+  { value: 'custom', label: 'Custom' },
+];
+
+const FIELD_PATTERN_COMBO_DELIMITER_OPTIONS = [
+  { value: 'auto', label: 'Auto-detect' },
+  { value: 'none', label: 'No split' },
+  { value: ':', label: 'Colon (:)' },
+  { value: '^', label: 'Caret (^)' },
+  { value: 'colon_caret', label: 'Colon + caret (: and ^)' },
+  { value: ',', label: 'Comma (,)' },
+  { value: ';', label: 'Semicolon (;)' },
+  { value: '|', label: 'Pipe (|)' },
+  { value: '/', label: 'Slash (/)' },
+  { value: '~', label: 'Tilde (~)' },
+  { value: '\\n', label: 'New line' },
+  { value: 'custom', label: 'Custom' },
+];
+
+const FIELD_PATTERN_RULE_FIELDS = [
+  { key: 'cpn', label: 'CPN', prefix: false },
+  { key: 'mpn', label: 'MPN', prefix: true },
+  { key: 'manufacturer', label: 'Manufacturer', prefix: true },
+];
+
+const TEACH_PATTERN_ROLE_LABELS = {
+  cpn: 'CPN',
+  mpn: 'MPN',
+  manufacturer: 'Manufacturer',
+  description: 'Description',
+  quantity: 'Quantity',
+  uom: 'UOM',
+  level: 'Level',
+  parent: 'Parent / group key',
+  notes: 'Notes',
+  internalNotes: 'Internal notes',
+};
+
+const readableFieldList = (labels = []) => {
+  const values = labels.filter(Boolean);
+  if (values.length <= 1) return values[0] || 'mapped fields';
+  if (values.length === 2) return `${values[0]} and ${values[1]}`;
+  return `${values.slice(0, -1).join(', ')}, and ${values[values.length - 1]}`;
+};
+
+const sameCellIdentityGroupsFromRoles = (roles = {}) => {
+  const groupsByHeader = {};
+  ['cpn', 'mpn', 'manufacturer'].forEach((role) => {
+    const header = fmt(roles?.[role]);
+    if (!header) return;
+    groupsByHeader[header] = groupsByHeader[header] || [];
+    groupsByHeader[header].push(role);
+  });
+  return Object.entries(groupsByHeader)
+    .filter(([, groupRoles]) => groupRoles.length >= 2)
+    .map(([header, groupRoles]) => ({ header, roles: groupRoles }));
+};
+
+const identityGroupRuleKey = (group = {}) => `${fmt(group.header || group.sourceColumn || group.source_column)}::${[...(group.roles || [])].map(fmt).filter(Boolean).sort().join('+')}`;
+
+const mergeIdentityGroupRules = (baseGroups = [], overrideGroups = []) => {
+  const mergedGroups = [];
+  const positionsByKey = new Map();
+
+  (Array.isArray(baseGroups) ? baseGroups : []).forEach((group) => {
+    if (!group || typeof group !== 'object') return;
+    const key = identityGroupRuleKey(group);
+    if (key) positionsByKey.set(key, mergedGroups.length);
+    mergedGroups.push({ ...group });
+  });
+
+  (Array.isArray(overrideGroups) ? overrideGroups : []).forEach((group) => {
+    if (!group || typeof group !== 'object') return;
+    const key = identityGroupRuleKey(group);
+    if (key && positionsByKey.has(key)) {
+      const index = positionsByKey.get(key);
+      mergedGroups[index] = { ...mergedGroups[index], ...group };
+      return;
+    }
+    if (key) positionsByKey.set(key, mergedGroups.length);
+    mergedGroups.push({ ...group });
+  });
+
+  return mergedGroups;
+};
+
+const expansionRuleKey = (rule = {}) => [
+  fmt(rule.type),
+  fmt(rule.role || rule.sourceRole || rule.source_role),
+  fmt(rule.anchor),
+  fmt(rule.suffixDelimiter || rule.suffix_delimiter || rule.delimiter),
+  fmt(rule.suffixGroupIndex || rule.suffix_group_index),
+].join('::');
+
+const mergeExpansionRules = (baseRules = [], overrideRules = []) => {
+  const mergedRules = [];
+  const positionsByKey = new Map();
+
+  (Array.isArray(baseRules) ? baseRules : []).forEach((rule) => {
+    if (!rule || typeof rule !== 'object') return;
+    const key = expansionRuleKey(rule);
+    if (key) positionsByKey.set(key, mergedRules.length);
+    mergedRules.push({ ...rule });
+  });
+
+  (Array.isArray(overrideRules) ? overrideRules : []).forEach((rule) => {
+    if (!rule || typeof rule !== 'object') return;
+    const key = expansionRuleKey(rule);
+    if (key && positionsByKey.has(key)) {
+      const index = positionsByKey.get(key);
+      mergedRules[index] = { ...mergedRules[index], ...rule };
+      return;
+    }
+    if (key) positionsByKey.set(key, mergedRules.length);
+    mergedRules.push({ ...rule });
+  });
+
+  return mergedRules;
+};
+
+const findIdentityGroupRule = (rule = {}, identityGroup = {}) => {
+  const targetHeader = fmt(identityGroup.header);
+  const targetRoles = new Set(identityGroup.roles || []);
+  return (rule.identityGroups || []).find((item) => {
+    const itemHeader = fmt(item.header || item.sourceColumn || item.source_column);
+    const itemRoles = new Set(item.roles || []);
+    if (itemHeader && itemHeader !== targetHeader) return false;
+    if (itemRoles.size && itemRoles.size !== targetRoles.size) return false;
+    return !itemRoles.size || [...targetRoles].every((role) => itemRoles.has(role));
+  }) || {};
+};
+
+const orderedIdentityRoleOptions = (roles = []) => {
+  if (roles.length <= 1) return [roles];
+  const result = [];
+  const visit = (remaining, prefix = []) => {
+    if (!remaining.length) {
+      result.push(prefix);
+      return;
+    }
+    remaining.forEach((role, index) => {
+      visit([
+        ...remaining.slice(0, index),
+        ...remaining.slice(index + 1),
+      ], [...prefix, role]);
+    });
+  };
+  visit(roles);
+  return result;
+};
+
+const alternateInheritFieldsFromConfig = (config = {}) => {
+  if (Array.isArray(config.alternateInheritFields)) {
+    const allowed = new Set(ALTERNATE_INHERIT_FIELD_OPTIONS.map((option) => option.value));
+    return config.alternateInheritFields.filter((field) => allowed.has(field));
+  }
+  return [];
+};
 
 const SUPPORTED_SOURCE_EXTENSIONS = ['.xlsx', '.xls', '.xlsm', '.csv', '.pdf'];
 
@@ -109,16 +300,563 @@ const uniqueHeaderName = (baseName, existingHeaders = []) => {
   return `${baseName} ${index}`;
 };
 
-const LEARNED_ROLE_HEADERS_KEY = 'bomNormalizer.learnedRoleHeaders.v1';
 const BOM_NORMALIZER_RETURN_PREFIX = 'bomNormalizer.returnSnapshot.';
 const BOM_NORMALIZER_LATEST_RESULTS_KEY = 'bomNormalizer.latestResultsSnapshot';
+const BOM_NORMALIZER_WORKSPACE_KEY = 'bomNormalizer.workspaceSnapshot.v1';
+
+const parseStoredJson = (raw) => {
+  try {
+    return raw ? JSON.parse(raw) : null;
+  } catch (_) {
+    return null;
+  }
+};
+
+const clearBomNormalizerWorkspace = () => {
+  try {
+    window.sessionStorage.removeItem(BOM_NORMALIZER_WORKSPACE_KEY);
+  } catch (_) {
+    // Workspace persistence is best-effort.
+  }
+};
+
+const makePersistableWorkbook = (currentWorkbook) => {
+  if (!currentWorkbook?.SheetNames?.length || !currentWorkbook?.Sheets) return null;
+  return {
+    SheetNames: currentWorkbook.SheetNames,
+    Sheets: currentWorkbook.Sheets,
+  };
+};
+
+const makePersistableCombineItem = (item = {}) => ({
+  id: item.id,
+  fileName: item.fileName,
+  type: item.type,
+  status: item.file ? `${item.status || 'Ready'} (refresh restored parsed workbook only)` : item.status,
+  scope: item.scope,
+  sheetName: item.sheetName,
+  selectedSheetNames: item.selectedSheetNames || [],
+  headerRowIndex: item.headerRowIndex || 0,
+  rowCount: item.rowCount || 0,
+  error: item.error || '',
+  pageCount: item.pageCount,
+  extractedSourceCount: item.extractedSourceCount,
+  isMergedBase: Boolean(item.isMergedBase),
+  workbook: makePersistableWorkbook(item.workbook),
+});
 
 const fmt = (value) => {
   if (value === null || value === undefined) return '';
   return String(value).trim();
 };
 
-const normalizeKey = (value) => fmt(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+const excelColumnLabel = (index = 0) => {
+  let value = Math.max(0, Number(index) || 0) + 1;
+  let label = '';
+  while (value > 0) {
+    const remainder = (value - 1) % 26;
+    label = String.fromCharCode(65 + remainder) + label;
+    value = Math.floor((value - 1) / 26);
+  }
+  return label || 'A';
+};
+
+const clampNumber = (value, min, max) => Math.min(max, Math.max(min, value));
+
+const textLines = (value) => {
+  const text = fmt(value);
+  if (!text) return [''];
+  return text.split(/\r?\n/);
+};
+
+const estimateWorksheetColumnWidth = (header, value) => {
+  const longestLine = Math.max(
+    ...textLines(header).map((line) => line.length),
+    ...textLines(value).map((line) => line.length),
+    6
+  );
+  return clampNumber(Math.round(longestLine * 7.1 + 22), 78, 320);
+};
+
+const widthFromWorksheetColumn = (worksheet, columnIndex, fallbackWidth) => {
+  const column = worksheet?.['!cols']?.[columnIndex];
+  const rawWidth = Number(column?.wpx)
+    || (Number(column?.wch) ? Number(column.wch) * 7 + 5 : 0)
+    || (Number(column?.width) ? Number(column.width) * 7 + 5 : 0);
+  if (!Number.isFinite(rawWidth) || rawWidth <= 0) return fallbackWidth;
+  return clampNumber(Math.round(rawWidth), 78, 360);
+};
+
+const buildWorksheetPreviewCells = ({
+  sample = {},
+  headers = [],
+  sheetRows = [],
+  headerRowIndex = 0,
+  worksheet = null,
+}) => {
+  const sampleColumns = Array.isArray(sample.left) ? sample.left : [];
+  const headerRow = sheetRows[headerRowIndex] || [];
+  const sourceRowIndex = Number(sample.sourceRow) - 1;
+  const sourceRow = Number.isFinite(sourceRowIndex) ? (sheetRows[sourceRowIndex] || []) : [];
+  return sampleColumns.map((item, index) => {
+    const headerPosition = headers.indexOf(item.column);
+    const columnIndex = headerPosition >= 0 ? headerPosition : index;
+    const rawHeader = fmt(headerRow[columnIndex]) || fmt(item.column);
+    const rawValue = fmt(sourceRow[columnIndex]) || fmt(item.value);
+    const fallbackWidth = estimateWorksheetColumnWidth(rawHeader, rawValue);
+    return {
+      key: `${item.column || index}-${columnIndex}`,
+      columnIndex,
+      columnLabel: excelColumnLabel(columnIndex),
+      header: rawHeader,
+      value: rawValue,
+      width: widthFromWorksheetColumn(worksheet, columnIndex, fallbackWidth),
+      styleInfo: sourceRow.__cellMeta?.[columnIndex] || null,
+    };
+  });
+};
+
+const WorksheetSamplePreview = ({
+  sample,
+  headers,
+  sheetRows,
+  headerRowIndex,
+  worksheet,
+  theme,
+  height,
+}) => {
+  const cells = buildWorksheetPreviewCells({
+    sample,
+    headers,
+    sheetRows,
+    headerRowIndex,
+    worksheet,
+  });
+  const rowHeaderWidth = 42;
+  const columnWidths = cells.map((cell) => `${cell.width}px`).join(' ');
+  const gridTemplateColumns = `${rowHeaderWidth}px ${columnWidths || '1fr'}`;
+  const sampleLineCount = Math.max(1, ...cells.map((cell) => textLines(cell.value).length));
+  const sampleRowHeight = clampNumber(sampleLineCount * 17 + 18, 38, 420);
+  const minWidth = rowHeaderWidth + cells.reduce((sum, cell) => sum + cell.width, 0);
+  const borderColor = '#d9e2ef';
+
+  return (
+    <Box
+      sx={{
+        border: `1px solid ${borderColor}`,
+        bgcolor: '#fff',
+        height: height || 'auto',
+        maxWidth: '100%',
+        overflow: 'auto',
+        boxShadow: 'inset 0 0 0 1px rgba(15, 23, 42, 0.02)',
+      }}
+    >
+      <Box
+        sx={{
+          minWidth,
+          display: 'grid',
+          gridTemplateColumns,
+          fontFamily: '"Aptos", "Calibri", "Arial", sans-serif',
+          fontSize: 11,
+          color: theme.text,
+        }}
+      >
+        <Box
+          sx={{
+            height: 22,
+            borderRight: `1px solid ${borderColor}`,
+            borderBottom: `1px solid ${borderColor}`,
+            bgcolor: '#f3f6fb',
+          }}
+        />
+        {cells.map((cell) => (
+          <Box
+            key={`col-${cell.key}`}
+            title={cell.columnLabel}
+            sx={{
+              height: 22,
+              px: 0.75,
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              borderRight: `1px solid ${borderColor}`,
+              borderBottom: `1px solid ${borderColor}`,
+              bgcolor: '#f3f6fb',
+              fontWeight: 700,
+              color: '#475569',
+            }}
+          >
+            {cell.columnLabel}
+          </Box>
+        ))}
+
+        <Box
+          sx={{
+            minHeight: 28,
+            px: 0.6,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            borderRight: `1px solid ${borderColor}`,
+            borderBottom: `1px solid ${borderColor}`,
+            bgcolor: '#f8fafc',
+            fontWeight: 700,
+            color: '#64748b',
+          }}
+        >
+          {Number(headerRowIndex) + 1}
+        </Box>
+        {cells.map((cell) => (
+          <Box
+            key={`header-${cell.key}`}
+            title={cell.header}
+            sx={{
+              minHeight: 28,
+              px: 0.8,
+              py: 0.45,
+              display: 'flex',
+              alignItems: 'center',
+              borderRight: `1px solid ${borderColor}`,
+              borderBottom: `1px solid ${borderColor}`,
+              bgcolor: '#fff',
+              fontWeight: 700,
+              whiteSpace: 'pre-wrap',
+              overflow: 'hidden',
+              lineHeight: '16px',
+            }}
+          >
+            {cell.header || '-'}
+          </Box>
+        ))}
+
+        <Box
+          sx={{
+            minHeight: sampleRowHeight,
+            px: 0.6,
+            display: 'flex',
+            alignItems: 'flex-start',
+            justifyContent: 'center',
+            pt: 0.7,
+            borderRight: `1px solid ${borderColor}`,
+            bgcolor: '#f8fafc',
+            fontWeight: 700,
+            color: '#64748b',
+          }}
+        >
+          {sample.sourceRow || ''}
+        </Box>
+        {cells.map((cell) => (
+          <Box
+            key={`value-${cell.key}`}
+            title={cell.value}
+            sx={{
+              minHeight: sampleRowHeight,
+              px: 0.8,
+              py: 0.7,
+              borderRight: `1px solid ${borderColor}`,
+              bgcolor: cell.styleInfo?.red ? '#fff1f2' : '#fff',
+              color: cell.styleInfo?.red ? '#b91c1c' : theme.text,
+              textDecoration: cell.styleInfo?.strike ? 'line-through' : 'none',
+              whiteSpace: 'pre-wrap',
+              overflowWrap: 'anywhere',
+              lineHeight: '17px',
+              verticalAlign: 'top',
+            }}
+          >
+            {cell.value || ''}
+          </Box>
+        ))}
+      </Box>
+    </Box>
+  );
+};
+
+const truncateMiddle = (value, maxLength = 72) => {
+  const text = fmt(value);
+  if (text.length <= maxLength) return text;
+  const keep = Math.max(8, Math.floor((maxLength - 3) / 2));
+  return `${text.slice(0, keep)}...${text.slice(-keep)}`;
+};
+
+const formatPatternGroupPreviewValue = (value, maxLength = 120) => {
+  const text = fmt(value)
+    .replace(/\s*\r?\n\s*/g, ' / ')
+    .replace(/\s{2,}/g, ' ');
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 3)}...`;
+};
+
+const getPatternGroupExampleValues = (group = {}, limit = 6) => {
+  const samples = Array.isArray(group.samples) ? group.samples : [];
+  const shape = fmt(group.shape);
+  const nonBlankItems = (sample) => (
+    (sample?.left || [])
+      .map((item) => ({
+        column: fmt(item.column),
+        value: fmt(item.value),
+        isShapeColumn: shape.includes(`@${fmt(item.column)}=`),
+      }))
+      .filter((item) => item.column && item.value && item.value !== '-')
+  );
+  const sample = samples.find((item) => nonBlankItems(item).some((value) => value.isShapeColumn)) ||
+    samples.find((item) => nonBlankItems(item).length) ||
+    samples[0];
+  const items = nonBlankItems(sample).sort((a, b) => Number(b.isShapeColumn) - Number(a.isShapeColumn));
+  return items.slice(0, limit);
+};
+
+const PATTERN_DELIMITER_LABELS = {
+  slash: ' / ',
+  '/': ' / ',
+  backslash: ' \\ ',
+  '\\': ' \\ ',
+  pipe: ' | ',
+  pipe_like_i: ' | ',
+  '|': ' | ',
+  colon: ' : ',
+  ':': ' : ',
+  semicolon: ' ; ',
+  ';': ' ; ',
+  comma: ' , ',
+  ',': ' , ',
+  caret: ' ^ ',
+  '^': ' ^ ',
+  tilde: ' ~ ',
+  '~': ' ~ ',
+  dash: ' - ',
+  '-': ' - ',
+  percent: ' % ',
+  '%': ' % ',
+  equals: ' = ',
+  '=': ' = ',
+  hash: ' # ',
+  '#': ' # ',
+  at: ' @ ',
+  '@': ' @ ',
+  plus: ' + ',
+  '+': ' + ',
+  amp: ' & ',
+  '&': ' & ',
+  '\\n': ' [new line] ',
+  newline: ' [new line] ',
+  '\\t': ' [tab] ',
+  tab: ' [tab] ',
+};
+
+const patternDelimiterLabel = (delimiter, rawValue = '', fieldKey = '') => {
+  const mode = fmt(delimiter);
+  if (PATTERN_DELIMITER_LABELS[mode]) return PATTERN_DELIMITER_LABELS[mode];
+  if (mode && mode !== 'auto' && mode !== 'none') return ` ${mode} `;
+  const text = String(rawValue || '');
+  if (fieldKey === 'mpn' && /\r?\n/.test(text)) return ' ';
+  if (/\s+\/\s+/.test(text)) return ' / ';
+  if (text.includes('|')) return ' | ';
+  if (text.includes(';')) return ' ; ';
+  if (text.includes('^')) return ' ^ ';
+  if (text.includes('~')) return ' ~ ';
+  if (text.includes(',')) return ' , ';
+  if (text.includes('\n') || text.includes('\r')) return ' [new line] ';
+  return ' ';
+};
+
+const identityComboDelimiterLabel = (rule = {}) => {
+  const delimiter = fmt(rule.delimiter || rule.comboDelimiter);
+  if (delimiter === 'colon_caret') return [' : ', ' ^ '];
+  if (PATTERN_DELIMITER_LABELS[delimiter]) return [PATTERN_DELIMITER_LABELS[delimiter]];
+  if (delimiter && delimiter !== 'auto' && delimiter !== 'none' && delimiter !== 'custom') return [` ${delimiter} `];
+  if (delimiter === 'custom' && fmt(rule.customDelimiter)) return [` ${fmt(rule.customDelimiter)} `];
+  return [' '];
+};
+
+const rolePatternToken = (role, rule = {}) => {
+  if (role === 'manufacturer') return '<MFR>';
+  if (role === 'mpn') return '<MPN>';
+  if (role === 'cpn') return '<CPN>';
+  return `<${(TEACH_PATTERN_ROLE_LABELS[role] || role || 'Value').toUpperCase()}>`;
+};
+
+const buildRepeatedPattern = (token, separator, repeatCount = 2) => {
+  const count = Math.max(1, Math.min(Number(repeatCount) || 2, 3));
+  const pattern = Array.from({ length: count }, () => token).join(separator);
+  return repeatCount > count ? `${pattern} ...` : pattern;
+};
+
+const parsePatternShapePart = (shapePart = '') => {
+  const match = fmt(shapePart).match(/^([^@=]+)@([^=]+)=(.+)$/);
+  if (!match) return null;
+  const scopeAndRoles = fmt(match[1]);
+  const source = fmt(match[2]);
+  const signature = fmt(match[3]);
+  const [scope = 'primary', rolesText = ''] = scopeAndRoles.includes('.')
+    ? scopeAndRoles.split(/\.(.+)/)
+    : ['primary', scopeAndRoles];
+  const roles = rolesText.split('+').map(fmt).filter(Boolean);
+  const tokenText = fmt((signature.match(/tokens=([^:|]+)/) || [])[1] || '1');
+  const tokenCount = /^\d+$/.test(tokenText) ? Number(tokenText) : null;
+  const sequenceText = fmt((signature.match(/seq=([^|]+)/) || [])[1]);
+  const sequence = sequenceText && sequenceText !== 'none'
+    ? sequenceText.split('>').map((item) => patternDelimiterLabel(item)).filter(Boolean)
+    : [];
+  return { scope: fmt(scope), roles, source, tokenCount, tokenText, sequence };
+};
+
+const roleLabelForPattern = (role) => (
+  role === 'manufacturer'
+    ? 'MFR'
+    : (TEACH_PATTERN_ROLE_LABELS[role] || role || 'Value')
+);
+
+const patternLabelForShapePart = (shapePart = {}) => {
+  const label = (shapePart.roles || []).map(roleLabelForPattern).join(' + ') || 'Pattern';
+  const altMatch = fmt(shapePart.scope).match(/^alt(\d+)$/i);
+  return altMatch ? `Alt ${altMatch[1]} ${label}` : label;
+};
+
+const orderedRolesForShapePart = (shapePart = {}, groupRule = {}) => {
+  const shapeRoles = (shapePart.roles || []).filter(Boolean);
+  if (shapeRoles.length <= 1) return shapeRoles;
+  const identityRule = (groupRule.identityGroups || []).find((rule) => {
+    const ruleRoles = Array.isArray(rule.roles) ? rule.roles : [];
+    return ruleRoles.length === shapeRoles.length && shapeRoles.every((role) => ruleRoles.includes(role));
+  });
+  const configuredOrder = Array.isArray(identityRule?.order) ? identityRule.order.filter((role) => shapeRoles.includes(role)) : [];
+  return configuredOrder.length === shapeRoles.length ? configuredOrder : shapeRoles;
+};
+
+const patternForShapePart = (shapePart = {}, groupRule = {}, group = {}) => {
+  const roles = orderedRolesForShapePart(shapePart, groupRule);
+  const inferredCount = shapePart.tokenCount || (shapePart.tokenText === 'multi' ? Number(group.alternateEntryCount || 0) + 1 : 1);
+  const tokenCount = Math.max(1, Math.min(Number(inferredCount) || 1, 9));
+  const sequence = shapePart.sequence || [];
+  const tokens = [];
+  for (let index = 0; index < tokenCount; index += 1) {
+    const role = roles[index % Math.max(roles.length, 1)] || roles[0] || 'value';
+    const rule = groupRule.fields?.[role] || {};
+    const separator = index === 0 ? '' : (sequence[index - 1] || sequence[sequence.length - 1] || ' ');
+    tokens.push(`${separator}${rolePatternToken(role, rule)}`);
+  }
+  return tokens.join('') + ((Number(inferredCount) || 1) > tokenCount ? ' ...' : '');
+};
+
+const buildPatternRowsFromShape = (group = {}, groupRule = {}) => {
+  const shapeParts = fmt(group.shape)
+    .split(/\s+\|\s+/)
+    .map(parsePatternShapePart)
+    .filter(Boolean);
+  return shapeParts.map((shapePart, index) => ({
+    key: `shape-${index}-${shapePart.source}`,
+    label: patternLabelForShapePart(shapePart),
+    source: shapePart.source,
+    roles: shapePart.roles,
+    pattern: patternForShapePart(shapePart, groupRule, group),
+  }));
+};
+
+const buildFieldPatternGrammarRows = (group = {}, groupRule = {}, roles = {}) => {
+  const rows = buildPatternRowsFromShape(group, groupRule);
+  const firstSample = (Array.isArray(group.samples) ? group.samples : [])[0] || {};
+  const sampleValues = new Map((firstSample.left || []).map((item) => [fmt(item.column), item.value]));
+  const entryCount = Math.max(1, Number(group.alternateEntryCount || 0) + 1);
+  const consumedSameCellRoles = new Set();
+
+  sameCellIdentityGroupsFromRoles(roles).forEach((identityGroup) => {
+    const hasShapeRow = rows.some((row) => (
+      row.source === identityGroup.header &&
+      identityGroup.roles.every((role) => (row.roles || []).includes(role))
+    ));
+    if (hasShapeRow) return;
+    const rule = findIdentityGroupRule(groupRule, identityGroup);
+    const delimiter = fmt(rule.delimiter || rule.comboDelimiter);
+    if (!delimiter || delimiter === 'none') return;
+    const order = (Array.isArray(rule.order) && rule.order.length ? rule.order : identityGroup.roles)
+      .filter((role) => identityGroup.roles.includes(role));
+    if (order.length < 2) return;
+    const delimiters = identityComboDelimiterLabel(rule);
+    const pattern = order.map((role, index) => {
+      const fieldRule = groupRule.fields?.[role] || {};
+      const prefix = index === 0 ? '' : (delimiters[index - 1] || delimiters[0] || ' ');
+      return `${prefix}${rolePatternToken(role, fieldRule)}`;
+    }).join('');
+    rows.push({
+      key: `identity-${identityGroupRuleKey(identityGroup)}`,
+      label: `${identityGroup.roles.map((role) => TEACH_PATTERN_ROLE_LABELS[role] || role).join(' + ')}`,
+      source: identityGroup.header,
+      pattern,
+    });
+    order.forEach((role) => consumedSameCellRoles.add(role));
+  });
+
+  FIELD_PATTERN_RULE_FIELDS.forEach((field) => {
+    if (consumedSameCellRoles.has(field.key)) return;
+    const source = fmt(roles?.[field.key]);
+    if (!source) return;
+    const hasShapeRow = rows.some((row) => row.source === source && (row.roles || []).includes(field.key));
+    if (hasShapeRow) return;
+    const rule = groupRule.fields?.[field.key] || {};
+    const delimiter = fmt(rule.delimiter || rule.delimiterMode || rule.delimiter_mode || 'none');
+    const hasPrefix = fmt(rule.stripPrefix || rule.strip_prefix || rule.prefix);
+    const shouldRepeat = field.key === 'manufacturer' || field.key === 'mpn' || delimiter !== 'none';
+    const token = rolePatternToken(field.key, rule);
+    const pattern = shouldRepeat
+      ? buildRepeatedPattern(token, patternDelimiterLabel(delimiter, sampleValues.get(source), field.key), entryCount)
+      : token;
+    rows.push({
+      key: field.key,
+      label: field.label,
+      source,
+      pattern: hasPrefix && field.key === 'mpn' ? pattern : pattern,
+    });
+  });
+
+  return rows;
+};
+
+const FIELD_PATTERN_CORE_FIELD_KEYS = new Set(['cpn', 'mpn', 'manufacturer', 'description', 'quantity', 'uom']);
+
+const FIELD_PATTERN_FALLBACK_FACTWISE_FIELDS = [
+  { key: 'cpn', label: 'CPN' },
+  { key: 'mpn', label: 'MPN', required: true },
+  { key: 'manufacturer', label: 'Manufacturer' },
+  { key: 'description', label: 'Description' },
+  { key: 'quantity', label: 'Quantity' },
+  { key: 'uom', label: 'UOM' },
+  { key: 'level', label: 'Level' },
+  { key: 'parent', label: 'Parent / group key' },
+  { key: 'notes', label: 'Notes' },
+  { key: 'internalNotes', label: 'Internal notes' },
+];
+
+const visibleFactwiseFieldsForPatternSample = (fieldList = [], entries = [], sample = {}, roles = {}) => {
+  const fields = fieldList.length ? fieldList : FIELD_PATTERN_FALLBACK_FACTWISE_FIELDS;
+  const selectedColumns = new Set((sample.left || []).map((item) => fmt(item.column)).filter(Boolean));
+  const visibleKeys = new Set(FIELD_PATTERN_CORE_FIELD_KEYS);
+
+  fields.forEach((field) => {
+    const roleSource = fmt(roles?.[field.key]);
+    if (roleSource && selectedColumns.has(roleSource)) {
+      visibleKeys.add(field.key);
+    }
+  });
+
+  (entries || []).forEach((entry) => {
+    fields.forEach((field) => {
+      const value = fmt(entry?.fields?.[field.key]);
+      const sourceColumn = fmt(entry?.sourceColumns?.[field.key]);
+      if (value || (sourceColumn && selectedColumns.has(sourceColumn))) {
+        visibleKeys.add(field.key);
+      }
+    });
+  });
+
+  return fields.filter((field) => visibleKeys.has(field.key));
+};
+
+const normalizeKey = (value) => fmt(value)
+  .normalize('NFKD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .toLowerCase()
+  .replace(/[^a-z0-9]+/g, ' ')
+  .trim();
 
 const compactHeaderKey = (value) => normalizeKey(value).replace(/\s+/g, '');
 
@@ -163,16 +901,30 @@ const resolveSavedRoleMap = (savedRoles = {}, currentHeaders = []) => (
   }, {})
 );
 
+const sanitizeRoleMap = (savedRoles = {}) => (
+  Object.keys(emptyRoles).reduce((acc, key) => {
+    acc[key] = savedRoles?.[key] || '';
+    return acc;
+  }, {})
+);
+
+const sanitizeNormalizerConfig = (savedConfig = {}) => {
+  const rest = { ...(savedConfig || {}) };
+  delete rest.documentTypeValues;
+  return rest;
+};
+
 const resolveSavedAlternateGroups = (groups = [], currentHeaders = []) => (
   (Array.isArray(groups) ? groups : [])
     .map((group) => ({
       ...group,
+      cpn: resolveSavedHeader(group?.cpn, currentHeaders),
       mpn: resolveSavedHeader(group?.mpn, currentHeaders),
       mfr: resolveSavedHeader(group?.mfr, currentHeaders),
       qty: resolveSavedHeader(group?.qty, currentHeaders),
       uom: resolveSavedHeader(group?.uom, currentHeaders),
     }))
-    .filter((group) => group.mpn || group.mfr)
+    .filter((group) => group.mpn || group.mfr || group.cpn)
 );
 
 const getProcessingTemplateMappingId = (template = {}) => {
@@ -201,34 +953,6 @@ const pickBestNormalizerSnapshot = (snapshots = []) => (
     .filter(Boolean)
     .sort((a, b) => getSnapshotRowCount(b) - getSnapshotRowCount(a))[0] || null
 );
-
-const getLearnedRoleHeaders = () => {
-  try {
-    const raw = window.localStorage.getItem(LEARNED_ROLE_HEADERS_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch (err) {
-    return {};
-  }
-};
-
-const rememberRoleHeader = (role, header) => {
-  if (!role || !header) return;
-  try {
-    const learned = getLearnedRoleHeaders();
-    const values = Array.isArray(learned[role]) ? learned[role] : [];
-    const normalizedHeader = normalizeKey(header);
-    const nextValues = [
-      header,
-      ...values.filter((value) => normalizeKey(value) !== normalizedHeader),
-    ].slice(0, 20);
-    window.localStorage.setItem(LEARNED_ROLE_HEADERS_KEY, JSON.stringify({
-      ...learned,
-      [role]: nextValues,
-    }));
-  } catch (err) {
-    // Learning is optional; ignore storage failures.
-  }
-};
 
 const makeUniqueHeaders = (row) => {
   const seen = {};
@@ -595,12 +1319,36 @@ const looksLikeCodeColumn = (values) => {
 const columnValues = (header, headers, dataRows) => {
   const index = headers.indexOf(header);
   if (index < 0) return [];
-  return dataRows.slice(0, 60).map((row) => (Array.isArray(row) ? row[index] : row?.[header]));
+  return dataRows.slice(0, 500).map((row) => (Array.isArray(row) ? row[index] : row?.[header]));
 };
 
 const roleSampleValues = (values) => values.map(fmt).filter(Boolean);
 
 const hasUsefulRoleValues = (values, minimum = 1) => roleSampleValues(values).length >= minimum;
+
+const BOOLEAN_ROLE_TOKENS = new Set(['TRUE', 'FALSE', 'YES', 'NO', 'Y', 'N', 'OUI', 'NON', '1', '0']);
+
+const looksLikeBooleanFlagColumn = (values) => {
+  const samples = roleSampleValues(values);
+  if (!samples.length) return false;
+  const normalized = samples.map((value) => normalizeKey(value).toUpperCase());
+  const booleanCount = normalized.filter((value) => BOOLEAN_ROLE_TOKENS.has(value)).length;
+  return booleanCount / samples.length >= 0.85 && new Set(normalized).size <= 4;
+};
+
+const looksLikeAuxiliaryFlagHeader = (header) => (
+  /\b(image|picture|photo|icon|flag|checkbox|checked|corrected|corrige|ignored|ignore|valid|visible|phase|cycle|vie|life|lifecycle|status|statut|state|approval|approved|approuve|disqualifie|obsolete)\b/.test(normalizeKey(header))
+);
+
+const looksLikeNonBomRoleHeader = (header) => (
+  /^(item type|type article|tag|preferred vendor code|procurement entity name|procurement item|sales item)$/.test(normalizeKey(header)) ||
+  /^tag\b/.test(normalizeKey(header)) ||
+  /\b(phase|cycle|vie|life|lifecycle|status|statut|state|approval|approved|approuve|disqualifie|obsolete)\b/.test(normalizeKey(header))
+);
+
+const looksLikeDescriptionOrObservationHeader = (header) => (
+  /\b(description|designation|observation|observations|remark|remarks|remarque|remarques|comment|comments|achat|controle|quality|qualite)\b/.test(normalizeKey(header))
+);
 
 const looksLikeHierarchyColumn = (values) => {
   const samples = roleSampleValues(values);
@@ -612,6 +1360,71 @@ const looksLikeHierarchyColumn = (values) => {
 const looksLikeDocumentHeader = (header) => (
   /\b(doc|document|lien|link|date|status|statut|revision|indice|security|securite)\b/.test(normalizeKey(header))
 );
+
+const stripIdentifierArtifacts = (value) => fmt(value).replace(/\u00a0/g, ' ').replace(/^[\s"'`#]+|[\s"'`#]+$/g, '');
+
+const stripTrailingPercentAnnotation = (value) => {
+  const text = stripIdentifierArtifacts(value);
+  const stripped = text.replace(/\s*[\(\[\{]\s*[+-]?\d+(?:\.\d+)?\s*%\s*[\)\]\}]\s*$/g, '').trim();
+  return stripped || text;
+};
+
+const isPureDimensionString = (value) => {
+  let text = stripIdentifierArtifacts(value).trim().toUpperCase();
+  text = text.replace(/^[\(\[\{]\s*(.*?)\s*[\)\]\}]\s*((?:MM|CM|M|IN|INCH|INCHES)?)$/g, '$1$2');
+  text = text.replace(/^[()[\]{} ]+|[()[\]{} ]+$/g, '');
+  return /^\d+(?:\.\d+)?(?:\s*[X*]\s*\d+(?:\.\d+)?){1,4}\s*(?:MM|CM|M|IN|INCH|INCHES)?$/.test(text);
+};
+
+const hasSpelledPowerFraction = (value) => /\b1\s*\/\s*(?:2|4|8|10|16|20|32)\s*(?:W|WATT)?(?![\d.])/i.test(fmt(value));
+
+const hasLiteralPercentSpec = (value) => fmt(value).includes('%');
+
+const looksLikeGenericSpecDesignator = (value) => {
+  const text = stripTrailingPercentAnnotation(value);
+  if (!text) return false;
+  const upper = text.toUpperCase();
+  const normalized = upper.replace(/[^A-Z0-9%+./-]+/g, ' ');
+
+  const hasTolerance = hasLiteralPercentSpec(upper) || upper.includes('+/-');
+  const hasResistance = /(\d+(?:\.\d+)?\s*(?:R|K|M)(?:OHM)?\b|\b(?:OHM|KOHM|MOHM)\b)/.test(normalized);
+  const hasCapacitance = /\d+(?:\.\d+)?\s*(?:PF|NF|UF|MF)\b/.test(normalized);
+  const hasPower = /(\b\d+\s*\/\s*\d+\b|\b\d+(?:\.\d+)?\s*W\b|\bWATT\b)/.test(normalized);
+  const hasVoltage = /\d+(?:\.\d+)?\s*(?:VAC|VDC|KV|V)\b/.test(normalized);
+  const hasPackage = /\b(0201|0402|0603|0805|1206|1210|1812|2010|2512|SMD|SMT)\b/.test(normalized);
+  const specSignalCount = [hasTolerance, hasResistance, hasCapacitance, hasPower, hasVoltage, hasPackage]
+    .filter(Boolean).length;
+
+  if (hasTolerance && (hasResistance || hasCapacitance || hasPower || hasVoltage)) return true;
+  if (specSignalCount >= 3 && /[_/ ]/.test(upper)) return true;
+  if (/^[0-9.]+\s*[RKM]\s*\/\s*\d+%\s*\/\s*\d+(?:\.\d+)?W$/.test(upper)) return true;
+  return false;
+};
+
+const assessMpnText = (value) => {
+  const text = stripIdentifierArtifacts(value);
+  const candidateText = stripTrailingPercentAnnotation(text);
+  const compact = candidateText.replace(/[^A-Za-z0-9]+/g, '');
+  const hardReasons = [];
+  const reviewReasons = [];
+
+  if (!candidateText) hardReasons.push('blank');
+  if (compact && compact.length <= 2) hardReasons.push('too short');
+  if (isPureDimensionString(candidateText)) hardReasons.push('pure dimension string');
+  if (looksLikeGenericSpecDesignator(candidateText)) hardReasons.push('generic spec/designator text');
+  else if (hasLiteralPercentSpec(candidateText)) hardReasons.push('literal percent spec');
+  if (hasSpelledPowerFraction(candidateText)) hardReasons.push('spelled-out power fraction');
+  if (candidateText !== text) reviewReasons.push('trailing percent annotation stripped');
+
+  return {
+    text,
+    candidateText,
+    hardReject: hardReasons.length > 0,
+    hardReasons,
+    needsReview: reviewReasons.length > 0,
+    reviewReasons,
+  };
+};
 
 const parseStructuredMpnMfrValue = (value) => {
   const text = fmt(value).replace(/\u00a0/g, ' ');
@@ -1166,9 +1979,30 @@ const describePatternShape = (shape = '') => {
   return rules;
 };
 
+const buildRawFieldPatternShape = (value = '') => {
+  const text = fmt(value).replace(/\u00a0/g, ' ');
+  if (!text) return '';
+  const delimiterMatches = text.match(/[:^|;,/\\]+/g) || [];
+  if (!delimiterMatches.length) return '';
+  const delimiters = delimiterMatches
+    .map((delimiter) => delimiter.trim())
+    .filter(Boolean)
+    .slice(0, 8);
+  if (!delimiters.length) return '';
+  return ['<FIELD>', ...delimiters.flatMap((delimiter) => [delimiter, '<FIELD>'])].join(' ');
+};
+
+const describeFieldPatternShape = (shape = '') => {
+  const rules = ['Split the full cell into named BOM fields such as CPN, MPN, MFR, Description, Quantity, and UOM.'];
+  if (shape.includes(':')) rules.push('Use : as a structural separator when assigning fields.');
+  if (shape.includes('^')) rules.push('Use ^ as a structural separator when assigning fields.');
+  if (/[|;,/\\]/.test(shape)) rules.push('Map each separated segment to the correct BOM field, or discard it.');
+  return rules;
+};
+
 const scoreStructuredMpnMfrColumn = (header, values) => {
   const samples = roleSampleValues(values);
-  if (!samples.length || looksLikeHierarchyColumn(samples)) return 0;
+  if (!samples.length || looksLikeHierarchyColumn(samples) || looksLikeAuxiliaryFlagHeader(header) || looksLikeBooleanFlagColumn(samples)) return 0;
   const parsed = samples.map(parseStructuredMpnMfrValue).filter(Boolean);
   if (parsed.length < 2) return 0;
   const key = normalizeKey(header);
@@ -1197,6 +2031,30 @@ const MFR_HEADER_PATTERNS = [
 ];
 
 const MFR_HEADER_EXCLUDES = [/equivalent/, /part/, /\bmpn\b/, /\bpn\b/];
+
+const isManufacturerReferenceHeader = (header) => {
+  const key = normalizeKey(header);
+  const compact = compactHeaderKey(header);
+  const hasManufacturerReferenceSignal = (
+    /(?:reference|ref)\s+fabricant/.test(key) ||
+    /(?:reference|ref)\s+fab\s+fabricant/.test(key) ||
+    /\bref\s+fab\b/.test(key) ||
+    /fabricant\s+(?:reference|ref)/.test(key) ||
+    /(?:reference|ref)\s+(?:manufacturer|mfr|mfg)/.test(key) ||
+    /(?:manufacturer|mfr|mfg)\s+(?:reference|ref)/.test(key) ||
+    compact.includes('referencefabricant') ||
+    compact.includes('reffabricant') ||
+    compact.includes('reffabfabricant') ||
+    compact.includes('rfrencefabricant')
+  );
+  if (!key || !hasManufacturerReferenceSignal) {
+    return false;
+  }
+  if (/\b(phase|cycle|vie|life)\b/.test(key)) return false;
+  if (/\b(contact|identificateur|identifier|unique)\b/.test(key)) return false;
+  if (/\b(statut|status)\b/.test(key) && !/\bref\s+fab\b/.test(key) && !compact.includes('reffabfabricant')) return false;
+  return true;
+};
 
 const isPlausibleManufacturerPhrase = (value) => {
   const text = fmt(value);
@@ -1255,7 +2113,13 @@ const matchesManufacturerPhrase = (value, lookup, lookupList = null) => {
 };
 
 const scoreManufacturerDirectoryColumn = (header, values, directory = {}, phraseLookup = null) => {
-  if (looksLikeDocumentHeader(header) || looksLikeHierarchyColumn(values)) return 0;
+  if (
+    looksLikeDocumentHeader(header) ||
+    looksLikeHierarchyColumn(values) ||
+    looksLikeAuxiliaryFlagHeader(header) ||
+    looksLikeNonBomRoleHeader(header) ||
+    looksLikeBooleanFlagColumn(values)
+  ) return 0;
   const samples = roleSampleValues(values);
   if (!samples.length) return 0;
   const key = normalizeKey(header);
@@ -1286,7 +2150,13 @@ const looksLikePartCodeValue = (value) => {
 };
 
 const scoreCpnColumn = (header, values) => {
-  if (looksLikeDocumentHeader(header) || looksLikeHierarchyColumn(values)) return 0;
+  if (
+    looksLikeDocumentHeader(header) ||
+    looksLikeHierarchyColumn(values) ||
+    looksLikeAuxiliaryFlagHeader(header) ||
+    looksLikeNonBomRoleHeader(header) ||
+    looksLikeBooleanFlagColumn(values)
+  ) return 0;
   const samples = roleSampleValues(values);
   if (!samples.length) return 0;
   const key = normalizeKey(header);
@@ -1297,6 +2167,115 @@ const scoreCpnColumn = (header, values) => {
   const partLike = samples.filter(looksLikePartCodeValue).length / samples.length;
   score += partLike * 35;
   if (score && /(manufacturer|mfr|mfg|fabricant|supplier|vendor)/.test(key)) score -= 60;
+  return Math.max(0, score);
+};
+
+const MPN_DETECTION_TOKEN_RE = /[A-Za-z0-9][A-Za-z0-9./_+\-@()]{2,49}[A-Za-z0-9)]/g;
+
+const candidateMpnTokensFromText = (value) => {
+  const text = stripIdentifierArtifacts(value);
+  if (!text) return [];
+
+  const candidates = [];
+  const add = (raw) => {
+    const token = stripIdentifierArtifacts(raw).replace(/^[\s[\]{}<>.,;:|]+|[\s[\]{}<>.,;:|]+$/g, '');
+    if (!token || token.length < 4 || token.length > 50) return;
+    if (!/[0-9]/.test(token)) return;
+    if (!/[A-Za-z]/.test(token) && !/[./_+\-@]/.test(token)) return;
+    candidates.push(token);
+  };
+
+  const structured = parseStructuredMpnMfrValue(text);
+  if (structured?.mpn) add(structured.mpn);
+
+  const withoutMetadata = text
+    .replace(/\{[^}]*\}/g, ' ')
+    .replace(/\[[^\]]*\]/g, ' ');
+  withoutMetadata.split(/[:;|,\n\r\t]+/).forEach(add);
+
+  MPN_DETECTION_TOKEN_RE.lastIndex = 0;
+  let match = MPN_DETECTION_TOKEN_RE.exec(withoutMetadata);
+  while (match) {
+    add(match[0]);
+    match = MPN_DETECTION_TOKEN_RE.exec(withoutMetadata);
+  }
+
+  const seen = new Set();
+  return candidates.filter((candidate) => {
+    const key = candidate.toUpperCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+const scoreMpnValueForRoleDetection = (value) => {
+  const text = stripIdentifierArtifacts(value);
+  if (!text || text.includes('>')) return 0;
+  const assessment = assessMpnText(text);
+  if (assessment.hardReject) return 0;
+
+  const structured = parseStructuredMpnMfrValue(text);
+  if (structured?.mpn && structured?.manufacturer) return 1;
+
+  const tokens = candidateMpnTokensFromText(assessment.candidateText);
+  if (!tokens.length) return 0;
+
+  const hasManufacturerContext = /\([A-Za-z][A-Za-z0-9 .&/+,-]{1,40}\)/.test(text);
+  const hasDocumentContext = /\b(?:dwg|drawing|document|doc|sheet|rev|revision|eco|ecn)\b/i.test(text);
+
+  const best = tokens.reduce((maxScore, token) => {
+    const compact = token.replace(/[^A-Za-z0-9]/g, '');
+    const hasLetter = /[A-Za-z]/.test(compact);
+    const hasDigit = /[0-9]/.test(compact);
+    const hasSymbol = /[./_+\-@]/.test(token);
+    let score = 0.35;
+    if (hasLetter && hasDigit) score += 0.25;
+    if (hasSymbol) score += 0.12;
+    if (token.length >= 5 && token.length <= 32) score += 0.10;
+    if (hasManufacturerContext) score += 0.18;
+    if (!hasLetter && !hasManufacturerContext) score -= 0.25;
+    return Math.max(maxScore, score);
+  }, 0);
+
+  return Math.max(0, Math.min(1, best - (hasDocumentContext && !hasManufacturerContext ? 0.25 : 0)));
+};
+
+const scoreMpnColumn = (header, values, manufacturerPhraseLookup = null) => {
+  if (looksLikeHierarchyColumn(values) || looksLikeAuxiliaryFlagHeader(header) || looksLikeBooleanFlagColumn(values)) return 0;
+  const samples = roleSampleValues(values);
+  if (!samples.length) return 0;
+
+  const key = normalizeKey(header);
+  const scores = samples.map(scoreMpnValueForRoleDetection);
+  const averageScore = scores.reduce((sum, score) => sum + score, 0) / scores.length;
+  const matchRate = scores.filter((score) => score >= 0.55).length / scores.length;
+  const structuredRate = samples.filter((value) => parseStructuredMpnMfrValue(value)).length / samples.length;
+  const manufacturerContextRate = samples.filter((value) => /\([A-Za-z][A-Za-z0-9 .&/+,-]{1,40}\)/.test(fmt(value))).length / samples.length;
+  const knownManufacturerContextRate = manufacturerPhraseLookup?.size
+    ? samples.filter((value) => candidateMpnTokensFromText(value).length && matchesManufacturerPhrase(value, manufacturerPhraseLookup)).length / samples.length
+    : 0;
+
+  let score = (averageScore * 70) + (matchRate * 35) + (structuredRate * 25) + (manufacturerContextRate * 10) + (knownManufacturerContextRate * 20);
+
+  if (isManufacturerReferenceHeader(header)) score += 25;
+  else if (/\b(mpn|manufacturer part|mfr part|mfg part)\b/.test(key)) score += 20;
+
+  if (/\b(ref article|article ref|reference article|item code|cpn|customer part|internal part)\b/.test(key)) score -= 60;
+  if (/^code$|^part number$|^part no$|^part$/.test(key)) score -= 35;
+  if (
+    /(manufacturer|mfr|mfg|fabricant|supplier|vendor)/.test(key) &&
+    !isManufacturerReferenceHeader(header) &&
+    Math.max(manufacturerContextRate, knownManufacturerContextRate, structuredRate) < 0.2
+  ) {
+    score -= 45;
+  }
+
+  if (manufacturerPhraseLookup?.size && !isManufacturerReferenceHeader(header)) {
+    const manufacturerOnlyRate = samples.filter((value) => matchesManufacturerPhrase(value, manufacturerPhraseLookup)).length / samples.length;
+    if (manufacturerOnlyRate > 0.5 && matchRate < 0.5) score -= 50;
+  }
+
   return Math.max(0, score);
 };
 
@@ -1311,118 +2290,22 @@ const bestScoredHeader = (headers, dataRows, scorer, minScore = 1) => {
   return ranked[0]?.header || '';
 };
 
-const inferRoles = (headers, dataRows = [], options = {}) => {
-  const learnedHeaders = getLearnedRoleHeaders();
-  const manufacturerDirectory = options.manufacturerDirectory || {};
-  const manufacturerPhraseLookup = buildManufacturerPhraseLookup(manufacturerDirectory);
-  const findLearnedHeader = (role) => {
-    const learned = Array.isArray(learnedHeaders[role]) ? learnedHeaders[role] : [];
-    const learnedKeys = learned.map(normalizeKey);
-    return headers.find((header) => learnedKeys.includes(normalizeKey(header))) || '';
-  };
-  const findHeader = (patterns, excludePatterns = []) => headers.find((header) => {
-    const normalized = normalizeKey(header);
-    return patterns.some((pattern) => pattern.test(normalized)) &&
-      !excludePatterns.some((pattern) => pattern.test(normalized));
-  }) || '';
-  const exactMpnHeader = findHeader([
-    /^mpn$/,
-    /^mfg\s*part$/,
-    /^mfr\s*part$/,
-    /^manufacturer\s*part(?:\s*number)?$/,
-    /^manufacturer\s*pn$/,
-    /^part\s*number$/,
-    /^part\s*no$/,
-  ]);
-  const strongMpnHeader = findHeader([
-    /^approved\s*manufacturer$/,
-    /\bmpn\b/,
-    /manufacturer equivalent/,
-    /manufacturer part/,
-    /manufacturing part/,
-    /\bmfr part/,
-    /\bmfg part/,
-    /producer/,
-    /^po\s*text$/,
-    /^potext$/,
-  ]);
-  const genericPartHeader = findHeader([/^part number$/, /^part no$/, /^part$/, /^partno$/], [/manufacturer/, /\bmpn\b/, /\bmfr\b/, /\bmfg\b/]);
-  const learnedMpn = findLearnedHeader('mpn');
-  const learnedCpn = findLearnedHeader('cpn');
-  const structuredMpnMfrHeader = bestScoredHeader(headers, dataRows, scoreStructuredMpnMfrColumn, 70);
-  const scoredCpnHeader = bestScoredHeader(headers, dataRows, scoreCpnColumn, 65);
-  const mpnHeader = exactMpnHeader || learnedMpn || strongMpnHeader || structuredMpnMfrHeader ||
-    findHeader([/^approved\s*manufacturer$/, /manufacturer equivalent/, /manufacturer part/, /\bmpn\b/, /producer/, /^po\s*text$/, /^potext$/, /part number/]);
-  const cpnHeader = scoredCpnHeader || learnedCpn || findHeader([/\bcpn\b/, /customer part/, /client part/, /internal part/, /part code/, /ref article/, /\barticle\b/]) ||
-    (genericPartHeader && genericPartHeader !== mpnHeader ? genericPartHeader : '');
-
-  // A header the user has taught us wins outright. Otherwise a name match still has to
-  // survive the values: see looksLikeCodeColumn.
-  const namedManufacturer = findHeader(MFR_HEADER_PATTERNS, MFR_HEADER_EXCLUDES) ||
-    findHeader([/manufacturer/, /\bmfr\b/, /\bmfg\b/, /\bmfgr\b/, /fabricant/, /maker/, /brand/, /supplier/, /vendor/], [/equivalent/, /part/, /\bmpn\b/, /\bpn\b/]);
-  const learnedManufacturer = findLearnedHeader('manufacturer');
-  const scoredManufacturerHeader = bestScoredHeader(
-    headers.filter((header) => header !== mpnHeader && header !== cpnHeader),
-    dataRows,
-    (header, values) => scoreManufacturerDirectoryColumn(header, values, manufacturerDirectory, manufacturerPhraseLookup),
-    70
-  );
-  const learnedManufacturerSafe = learnedManufacturer &&
-    learnedManufacturer !== mpnHeader &&
-    learnedManufacturer !== cpnHeader &&
-    hasUsefulRoleValues(columnValues(learnedManufacturer, headers, dataRows)) &&
-    !looksLikeCodeColumn(columnValues(learnedManufacturer, headers, dataRows))
-    ? learnedManufacturer
-    : '';
-  const namedManufacturerSafe = namedManufacturer &&
-    namedManufacturer !== mpnHeader &&
-    namedManufacturer !== cpnHeader &&
-    hasUsefulRoleValues(columnValues(namedManufacturer, headers, dataRows)) &&
-    !looksLikeCodeColumn(columnValues(namedManufacturer, headers, dataRows))
-    ? namedManufacturer
-    : '';
-  const manufacturerHeader = namedManufacturerSafe || learnedManufacturerSafe || scoredManufacturerHeader ||
-    (structuredMpnMfrHeader && structuredMpnMfrHeader === mpnHeader ? structuredMpnMfrHeader : '');
-  const internalNotesHeader = findLearnedHeader('internalNotes') || findHeader([
-    /^internal\s+notes?$/,
-    /^internal\s+remarks?$/,
-    /^internal\s+comments?$/,
-    /^private\s+notes?$/,
-    /^engineering\s+notes?$/,
-  ]);
-  const notesHeader = findLearnedHeader('notes') || findHeader([
-    /^notes?$/,
-    /^remarks?$/,
-    /^comments?$/,
-    /^comment$/,
-    /customer\s+notes?/,
-    /bom\s+notes?/,
-  ], [/internal/, /private/]);
-  const followingMfgPartsLayout = detectFollowingRowMfgPartsLayout(headers, dataRows.slice(0, 120), {
-    description: findLearnedHeader('description') || findHeader([/description/, /item name/, /\bname\b/]),
+const sanitizeRestoredRolesForValues = (savedRoles = {}, currentHeaders = [], currentRows = []) => {
+  const next = sanitizeRoleMap(savedRoles);
+  Object.keys(next).forEach((role) => {
+    const header = next[role];
+    if (!header) return;
+    const values = columnValues(header, currentHeaders, currentRows);
+    if (
+      looksLikeAuxiliaryFlagHeader(header) ||
+      looksLikeNonBomRoleHeader(header) ||
+      looksLikeBooleanFlagColumn(values) ||
+      (['cpn', 'mpn', 'manufacturer'].includes(role) && looksLikeDescriptionOrObservationHeader(header))
+    ) {
+      next[role] = '';
+    }
   });
-
-  return {
-    cpn: cpnHeader,
-    mpn: followingMfgPartsLayout ? followingMfgPartsLayout.mfgPartsHeader : mpnHeader,
-    manufacturer: followingMfgPartsLayout ? followingMfgPartsLayout.mfgPartsHeader : manufacturerHeader,
-    description: findLearnedHeader('description') || findHeader([/description/, /item name/, /\bname\b/]),
-    quantity: findLearnedHeader('quantity') || findHeader([/quantity/, /\bqty\b/, /\bqnty\b/, /^count$/, /\bcount\b/]),
-    uom: findLearnedHeader('uom') || findHeader([/\buom\b/, /measurement unit/, /\bunit\b/]),
-    notes: notesHeader,
-    internalNotes: internalNotesHeader,
-    level: headers.find((header) => normalizeKey(header).startsWith(normalizeKey(EXCEL_OUTLINE_LEVEL_HEADER)))
-      || (findLearnedHeader('level') || findHeader([/\blevel\b/])),
-    // `parent` must not match this app's OWN `parentKey` column. That is the
-    // grouping key for a part and its alternates — `${parent}␟${identity}` —
-    // not a BOM parent, and a bare /parent/ matches it. Re-running on a
-    // normalized or merged sheet then adopted it as the hierarchy parent, so
-    // every assembly came back named "0043-13591␟0043-13591". Same conflation
-    // the note above parentKeyFor warns about, arriving through auto-detection
-    // instead of through a user's mapping.
-    parent: findLearnedHeader('parent')
-      || findHeader([/parent(?!\s*key)/, /finished good/, /bom id/, /item code/, /assembly/]),
-  };
+  return next;
 };
 
 const looksLikeMpnToken = (value) => {
@@ -2787,27 +3670,6 @@ const rowLooksLikeDoNotPopulate = (row, headers) => {
   return /\b(do\s*not\s*populate|not\s*populate|dnp|dni|not\s*fitted|no\s*fit)\b/.test(text);
 };
 
-// Values a row-type column is likely to use for a document. Only ever used to
-// PRE-TICK the boxes when the column is first mapped - the user sees every
-// distinct value with its row count and decides. Missing a word here costs a
-// tick, not a wrong BOM.
-const DOCUMENT_TYPE_HINT_RE = /^(doc\.?\s*(ass|def|assembly|definition)?\.?|document|drawing|dessin|plan|spec|specification)$/i;
-
-const suggestDocumentTypeValues = (values) => (
-  (values || []).filter((value) => DOCUMENT_TYPE_HINT_RE.test(String(value).trim()))
-);
-
-// A row the user has declared to be a document rather than a consumed part.
-// Both halves must be present - a mapped column and at least one ticked value -
-// so this can never fire on a sheet where the question was not answered.
-const isDocumentRowByType = (row, roles, config) => {
-  const column = roles?.rowType;
-  const flagged = config?.documentTypeValues;
-  if (!column || !flagged || !flagged.length) return false;
-  const value = getCell(row, column).trim();
-  return Boolean(value) && flagged.includes(value);
-};
-
 const rowLooksLikeDeleted = (row, headers) => {
   if (row.__deletedRowStyle || row.__redRowStyle || row.__strikeRowStyle) return true;
   return false;
@@ -3023,11 +3885,6 @@ const shouldSkipSourceRow = (row, headers, roles, config) => {
   if (config.skipRepeatedHeaders && rowLooksLikeRepeatedHeader(row, headers)) return true;
   if (config.skipDoNotPopulate && rowLooksLikeDoNotPopulate(row, headers)) return true;
   if (config.skipDeletedRows && rowLooksLikeDeleted(row, headers)) return true;
-  // Documents. Not a guess: the user named the column and ticked the values, so
-  // this drops exactly what they said and nothing else. Placed before the
-  // section-title guess below, which cannot tell a drawing from a heading and on
-  // the THALES export deleted a real sub-assembly along with one.
-  if (isDocumentRowByType(row, roles, config)) return true;
   const layoutStructure = effectiveStructure(config);
   if (layoutStructure === 'assembly_quantity_matrix') return false;
   if (layoutStructure === 'multi_block_assembly') return false;
@@ -3065,6 +3922,48 @@ const withSourceColumns = (normalizedRow, sourceRow, config = {}) => {
     carried[header] = sourceRow?.[header] ?? '';
   });
   return carried;
+};
+
+const applyAlternatePrimaryInheritance = (normalizedRows = [], config = {}) => {
+  if (!Array.isArray(normalizedRows) || !normalizedRows.length) return normalizedRows;
+  if (!config.alternateLayout || config.alternateLayout === 'already_separate_rows') return normalizedRows;
+
+  const inheritFields = alternateInheritFieldsFromConfig(config);
+  if (!inheritFields.length) return normalizedRows;
+  const shouldCopy = (field) => inheritFields.includes(field);
+
+  const primaryByGroup = new Map();
+  let lastPrimary = null;
+
+  return normalizedRows.map((row) => {
+    const relation = fmt(row?.relation).toLowerCase();
+    const groupKey = normalizeKey(row?.parentKey || row?.parent || row?.cpn || '');
+
+    if (relation === 'primary') {
+      lastPrimary = row;
+      if (groupKey) primaryByGroup.set(groupKey, row);
+      return row;
+    }
+
+    if (!relation.startsWith('alternate')) return row;
+
+    const primary = (groupKey && primaryByGroup.get(groupKey)) || lastPrimary;
+    if (!primary) return row;
+
+    const next = { ...row };
+    if (shouldCopy('cpn')) next.cpn = primary.cpn ?? '';
+    if (shouldCopy('description')) next.description = primary.description ?? '';
+    if (shouldCopy('quantity')) next.quantity = primary.quantity ?? '';
+    if (shouldCopy('uom')) next.uom = primary.uom ?? '';
+    if (shouldCopy('level')) next.level = primary.level ?? '';
+    if (shouldCopy('parent')) {
+      next.parentKey = primary.parentKey ?? '';
+      next.parent = primary.parent ?? '';
+    }
+    if (shouldCopy('notes')) next.Notes = primary.Notes ?? '';
+    if (shouldCopy('internalNotes')) next['Internal notes'] = primary['Internal notes'] ?? '';
+    return next;
+  });
 };
 
 const normalizeSeparateCells = (rows, roles, config) => {
@@ -3212,7 +4111,7 @@ const normalizeSeparateCells = (rows, roles, config) => {
       }, row, config));
     });
   });
-  return output;
+  return applyAlternatePrimaryInheritance(output, config);
 };
 
 const normalizeSameCell = (rows, roles, config) => {
@@ -3374,20 +4273,63 @@ const normalizeSameCell = (rows, roles, config) => {
       return null;
     });
   });
-  return output;
+  return applyAlternatePrimaryInheritance(output, config);
 };
 
-const findAlternateColumnGroups = (headers) => {
+const getAlternateColumnHeaderInfo = (header) => {
+  const normalized = normalizeKey(header);
+  const compact = normalized.replace(/\s+/g, '');
+  if (!normalized) return null;
+
+  const explicitAltSlot = normalized.match(/\b(?:alt|alternate)\s*(\d{1,2})\b/);
+  const trailingSlot = compact.match(/(\d{1,2})$/);
+  const slot = explicitAltSlot?.[1] || trailingSlot?.[1] || '';
+  const hasAltWord = /\b(?:alt|alternate)\b/.test(normalized);
+
+  let kind = '';
+  if (/\b(qty|quantity|qte|menge)\b/.test(normalized)) {
+    kind = 'qty';
+  } else if (/\b(uom|unit|unite|einheit|me)\b/.test(normalized)) {
+    kind = 'uom';
+  } else if (
+    /\b(cpn|customer\s*part|customer\s*pn|item\s*code|customer\s*code)\b/.test(normalized) ||
+    /(customerpart|customerpn|itemcode|customercode)/.test(compact)
+  ) {
+    kind = 'cpn';
+  } else {
+    const hasManufacturerWord = (
+      /\b(mfg|mfgr|mfr|manufacturer|fabricant|maker|vendor|supplier)\b/.test(normalized) ||
+      /(mfg|mfgr|mfr|manufacturer|fabricant|maker|vendor|supplier)/.test(compact)
+    );
+    const hasPartWord = (
+      /\b(part|pn|mpn|ref|reference|code)\b/.test(normalized) ||
+      /(part|mpn|pn|ref|reference|code)/.test(compact)
+    );
+    const hasNameWord = (
+      /\b(name|nom|maker|vendor|supplier|fabricant|manufacturer)\b/.test(normalized) ||
+      /(name|nom|maker|vendor|supplier|fabricant|manufacturer)/.test(compact)
+    );
+
+    if (hasManufacturerWord && hasPartWord) kind = 'mpn';
+    else if (hasManufacturerWord && hasNameWord) kind = 'mfr';
+    else if (hasManufacturerWord && slot) kind = 'mfr';
+    else if (/\bmpn\b/.test(normalized) || /mpn/.test(compact)) kind = 'mpn';
+    else if (hasAltWord && /\bmfr\b|\bmanufacturer\b/.test(normalized)) kind = 'mfr';
+  }
+
+  if (!kind) return null;
+  return { slot, kind };
+};
+
+const findAlternateColumnGroups = (headers, excludedColumns = []) => {
+  const excluded = new Set(Array.from(excludedColumns || []).filter(Boolean));
   const groups = [];
   headers.forEach((header) => {
-    const normalized = normalizeKey(header);
-    const match = normalized.match(/(?:alt|alternate)\s*(\d*)\s*(mpn|mfr|manufacturer|qty|quantity|uom|unit)/);
-    if (!match) return;
-    const slot = match[1] || `${groups.length + 1}`;
-    let type = match[2];
-    if (type === 'manufacturer') type = 'mfr';
-    if (type === 'quantity') type = 'qty';
-    if (type === 'unit') type = 'uom';
+    if (excluded.has(header)) return;
+    const info = getAlternateColumnHeaderInfo(header);
+    if (!info) return;
+    const slot = info.slot || `${groups.length + 1}`;
+    const type = info.kind;
     const existing = groups.find((group) => group.slot === slot);
     if (existing) {
       existing[type] = header;
@@ -3395,12 +4337,20 @@ const findAlternateColumnGroups = (headers) => {
       groups.push({ slot, [type]: header });
     }
   });
-  return groups.filter((group) => group.mpn);
+  return groups
+    .filter((group) => group.mpn)
+    .sort((left, right) => {
+      const leftSlot = Number.parseInt(left.slot, 10);
+      const rightSlot = Number.parseInt(right.slot, 10);
+      if (Number.isFinite(leftSlot) && Number.isFinite(rightSlot)) return leftSlot - rightSlot;
+      return String(left.slot).localeCompare(String(right.slot));
+    });
 };
 
 const cleanAlternateColumnGroups = (groups = [], headers = []) => groups
   .map((group, index) => ({
     slot: group.slot || `${index + 1}`,
+    cpn: headers.includes(group.cpn) ? group.cpn : '',
     mpn: headers.includes(group.mpn) ? group.mpn : '',
     mfr: headers.includes(group.mfr) ? group.mfr : '',
     qty: headers.includes(group.qty) ? group.qty : '',
@@ -3587,7 +4537,7 @@ const getConsumedSourceHeaders = (roles = {}, config = {}, headers = []) => {
     ...(config.alternateLayout === 'separate_columns' ? findAlternateColumnGroups(headers) : []),
   ];
   alternateGroups.forEach((group) => {
-    ['mpn', 'mfr', 'qty', 'uom'].forEach((field) => {
+    ['cpn', 'mpn', 'mfr', 'qty', 'uom'].forEach((field) => {
       if (group?.[field]) consumed.add(normalizeKey(group[field]));
     });
   });
@@ -4157,6 +5107,8 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
   const manualGroups = cleanAlternateColumnGroups(config.alternateColumnGroups || [], headers);
   const alternateGroups = manualGroups.length ? manualGroups : findAlternateColumnGroups(headers);
   const useManufacturerColumns = Boolean(roles.manufacturer) && !String(config.structure || '').startsWith('mpn_only');
+  const inheritFields = alternateInheritFieldsFromConfig(config);
+  const shouldInherit = (field) => inheritFields.includes(field);
   rows.forEach((row, rowIndex) => {
     const sourceRow = row.__sourceRow || rowIndex + 1;
     const primaryMpn = getCell(row, roles.mpn);
@@ -4176,6 +5128,8 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
     const emitPartsFromCells = ({
       mpnValue,
       manufacturerValue,
+      cpnValue,
+      descriptionValue,
       quantity,
       uom,
       rule,
@@ -4198,8 +5152,8 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
           parent,
           relation: relationCount === 0 ? 'Primary' : `Alternate ${relationCount}`,
           level,
-          cpn,
-          description,
+          cpn: cpnValue,
+          description: descriptionValue,
           mpn: stripVendorPrefix(mpn),
           manufacturer,
           quantity,
@@ -4217,6 +5171,8 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
       emitPartsFromCells({
         mpnValue: primaryMpn,
         manufacturerValue: primaryManufacturer,
+        cpnValue: cpn,
+        descriptionValue: description,
         quantity: primaryQty,
         uom: primaryUom,
         rule: 'alternate_columns_primary',
@@ -4232,8 +5188,10 @@ const normalizeAlternateColumns = (rows, headers, roles, config) => {
       emitPartsFromCells({
         mpnValue: mpn,
         manufacturerValue: manufacturer,
-        quantity: config.quantityMode === 'alternate_columns' ? getCell(row, group.qty) || primaryQty : primaryQty,
-        uom: config.quantityMode === 'alternate_columns' ? getCell(row, group.uom) || primaryUom : primaryUom,
+        cpnValue: getCell(row, group.cpn) || (shouldInherit('cpn') ? cpn : ''),
+        descriptionValue: shouldInherit('description') ? description : '',
+        quantity: getCell(row, group.qty) || (shouldInherit('quantity') ? primaryQty : ''),
+        uom: getCell(row, group.uom) || (shouldInherit('uom') ? primaryUom : ''),
         rule: 'alternate_columns_unpivot',
       });
     });
@@ -5013,36 +5971,37 @@ const normalizeRows = (rows, headers, roles, config, prepared = false) => {
     },
     consumedSourceHeaders: getConsumedSourceHeaders(roles, { ...config, assemblyMatrix }, headers),
   };
+  const finish = (normalized) => applyAlternatePrimaryInheritance(normalized, configWithSourceHeaders);
   if (layoutStructure === 'assembly_quantity_matrix') {
-    return normalizeAssemblyQuantityMatrix(rows, headers, roles, configWithSourceHeaders);
+    return finish(normalizeAssemblyQuantityMatrix(rows, headers, roles, configWithSourceHeaders));
   }
   if (layoutStructure === 'multi_block_assembly') {
-    return normalizeMultiBlockAssembly(rows, roles, configWithSourceHeaders);
+    return finish(normalizeMultiBlockAssembly(rows, roles, configWithSourceHeaders));
   }
-  if (config.alternateLayout === 'following_item_rows') return normalizeFollowingItemRows(rows, roles, configWithSourceHeaders);
-  if (config.alternateLayout === 'following_rows') return normalizeFollowingRows(rows, roles, configWithSourceHeaders);
+  if (config.alternateLayout === 'following_item_rows') return finish(normalizeFollowingItemRows(rows, roles, configWithSourceHeaders));
+  if (config.alternateLayout === 'following_rows') return finish(normalizeFollowingRows(rows, roles, configWithSourceHeaders));
   // Every structure option describes how MPN/MFR pairs are laid out. With
   // neither column present they are all meaningless, and the default would emit
   // nothing — so pass rows through, keeping level, code, quantity, description.
   if (!roles.mpn && !roles.manufacturer) {
-    return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
+    return finish(normalizeOnePerRow(rows, roles, configWithSourceHeaders));
   }
-  if (config.structure === 'grouped_rows') return normalizeGroupedRows(rows, roles, configWithSourceHeaders);
-  if (config.alternateLayout === 'separate_columns') return normalizeAlternateColumns(rows, headers, roles, configWithSourceHeaders);
-  if (config.structure === 'mpn_only_same_cell') return normalizeSeparateCells(rows, roles, configWithSourceHeaders);
-  if (config.structure === 'mpn_only_rows') return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
-  if (config.structure === 'mfr_only_same_cell') return normalizeManufacturerOnly(rows, roles, configWithSourceHeaders, true);
-  if (config.structure === 'mfr_only_rows') return normalizeManufacturerOnly(rows, roles, configWithSourceHeaders, false);
-  if (config.alternateLayout === 'same_group_rows') return normalizeSameGroupRows(rows, roles, configWithSourceHeaders);
-  if (config.alternateLayout === 'already_separate_rows') return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
-  if (config.structure === 'same_cell') return normalizeSameCell(rows, roles, configWithSourceHeaders);
+  if (config.structure === 'grouped_rows') return finish(normalizeGroupedRows(rows, roles, configWithSourceHeaders));
+  if (config.alternateLayout === 'separate_columns') return finish(normalizeAlternateColumns(rows, headers, roles, configWithSourceHeaders));
+  if (config.structure === 'mpn_only_same_cell') return finish(normalizeSeparateCells(rows, roles, configWithSourceHeaders));
+  if (config.structure === 'mpn_only_rows') return finish(normalizeOnePerRow(rows, roles, configWithSourceHeaders));
+  if (config.structure === 'mfr_only_same_cell') return finish(normalizeManufacturerOnly(rows, roles, configWithSourceHeaders, true));
+  if (config.structure === 'mfr_only_rows') return finish(normalizeManufacturerOnly(rows, roles, configWithSourceHeaders, false));
+  if (config.alternateLayout === 'same_group_rows') return finish(normalizeSameGroupRows(rows, roles, configWithSourceHeaders));
+  if (config.alternateLayout === 'already_separate_rows') return finish(normalizeOnePerRow(rows, roles, configWithSourceHeaders));
+  if (config.structure === 'same_cell') return finish(normalizeSameCell(rows, roles, configWithSourceHeaders));
   if (config.structure === 'one_per_row') {
     if (config.alternateLayout === 'inside_selected_mpn_columns' && roles.mpn) {
-      return normalizeSeparateCells(rows, roles, configWithSourceHeaders);
+      return finish(normalizeSeparateCells(rows, roles, configWithSourceHeaders));
     }
-    return normalizeOnePerRow(rows, roles, configWithSourceHeaders);
+    return finish(normalizeOnePerRow(rows, roles, configWithSourceHeaders));
   }
-  return normalizeSeparateCells(rows, roles, configWithSourceHeaders);
+  return finish(normalizeSeparateCells(rows, roles, configWithSourceHeaders));
 };
 
 const normalizeRowsChunked = async (rows, headers, roles, config, onProgress) => {
@@ -5104,7 +6063,7 @@ const normalizeRowsChunked = async (rows, headers, roles, config, onProgress) =>
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
 
-  return output;
+  return applyAlternatePrimaryInheritance(output, config);
 };
 
 const getRawPairingParts = (row, roles, config) => {
@@ -6201,6 +7160,7 @@ const nextConfigForDetectedStructure = (previousConfig, detectedStructure, detec
       ...previousConfig,
       structure: 'separate_cells',
       alternateLayout: 'separate_columns',
+      alternateInheritFields: alternateInheritFieldsFromConfig(previousConfig),
     };
   }
 
@@ -6212,6 +7172,9 @@ const nextConfigForDetectedStructure = (previousConfig, detectedStructure, detec
       followingRowAlternateColumn: followingMfgPartsLayout?.mfgPartsHeader || previousConfig.followingRowAlternateColumn,
       manufacturerMode: followingMfgPartsLayout ? 'never' : previousConfig.manufacturerMode,
       quantityMode: followingMfgPartsLayout ? 'inherit_primary' : previousConfig.quantityMode,
+      alternateInheritFields: followingMfgPartsLayout
+        ? DEFAULT_ALTERNATE_INHERIT_FIELDS
+        : alternateInheritFieldsFromConfig(previousConfig),
       delimiterMode: followingMfgPartsLayout ? 'auto' : previousConfig.delimiterMode,
     };
   }
@@ -6223,6 +7186,7 @@ const nextConfigForDetectedStructure = (previousConfig, detectedStructure, detec
       bomLayout: 'assembly_quantity_matrix',
       alternateLayout: 'already_separate_rows',
       quantityMode: 'every_row',
+      alternateInheritFields: [],
       quantityVariant: QUANTITY_VARIANT_ALL,
       quantityVariantByBlock: {},
       assemblyMatrix: assemblyMatrix || previousConfig.assemblyMatrix,
@@ -6236,6 +7200,7 @@ const nextConfigForDetectedStructure = (previousConfig, detectedStructure, detec
       bomLayout: 'multi_block_assembly',
       alternateLayout: 'inside_selected_mpn_columns',
       quantityMode: 'every_row',
+      alternateInheritFields: [],
       quantityVariant: QUANTITY_VARIANT_ALL,
       quantityVariantByBlock: {},
       delimiterMode: 'auto',
@@ -6249,6 +7214,9 @@ const nextConfigForDetectedStructure = (previousConfig, detectedStructure, detec
     alternateLayout: ['one_per_row', 'mpn_only_rows', 'mfr_only_rows'].includes(detectedStructure)
       ? 'already_separate_rows'
       : 'inside_selected_mpn_columns',
+    alternateInheritFields: ['one_per_row', 'mpn_only_rows', 'mfr_only_rows'].includes(detectedStructure)
+      ? []
+      : alternateInheritFieldsFromConfig(previousConfig),
   };
 };
 
@@ -6273,34 +7241,56 @@ const guessDelimiter = (rows, roles) => {
   return best.score >= 2 ? best.delimiter : 'auto';
 };
 
-const getStructureOptionsForRoles = (roles, config = {}) => {
-  const sameColumnFollowingBlock = roles.mpn &&
-    roles.manufacturer &&
-    roles.mpn === roles.manufacturer &&
-    config.alternateLayout === 'following_rows' &&
-    config.followingRowAlternateColumn === roles.mpn;
+const getIdentityLayoutOptions = () => IDENTITY_LAYOUT_OPTIONS;
 
-  if (sameColumnFollowingBlock) {
-    return STRUCTURE_OPTIONS.filter((option) => ['grouped_rows', 'same_cell'].includes(option.value));
+const structureForIdentityLayout = (identityLayout, config = {}) => {
+  const alternateLayout = config.alternateLayout || 'inside_selected_mpn_columns';
+  const packedAlternates = alternateLayout === 'inside_selected_mpn_columns';
+
+  if (identityLayout === 'mpn_only') {
+    return packedAlternates ? 'mpn_only_same_cell' : 'mpn_only_rows';
+  }
+  if (
+    identityLayout === 'mpn_mfr_same' ||
+    identityLayout === 'mpn_mfr_cpn_same' ||
+    identityLayout === 'mpn_mfr_same_cpn_separate'
+  ) {
+    return 'same_cell';
+  }
+  if (identityLayout === 'mpn_mfr_separate') {
+    return packedAlternates ? 'separate_cells' : 'one_per_row';
+  }
+  if (
+    identityLayout === 'mpn_cpn_same' ||
+    identityLayout === 'mpn_cpn_separate'
+  ) {
+    return packedAlternates ? 'mpn_only_same_cell' : 'mpn_only_rows';
+  }
+  return packedAlternates ? 'separate_cells' : 'one_per_row';
+};
+
+const identityLayoutFromRoles = (roles = {}, config = {}) => {
+  if (config.identityLayout) return config.identityLayout;
+  const hasMpn = Boolean(roles.mpn);
+  const hasMfr = Boolean(roles.manufacturer);
+  const hasCpn = Boolean(roles.cpn);
+  const mpnMfrSame = hasMpn && hasMfr && roles.mpn === roles.manufacturer;
+  const mpnCpnSame = hasMpn && hasCpn && roles.mpn === roles.cpn;
+  const mfrCpnSame = hasMfr && hasCpn && roles.manufacturer === roles.cpn;
+
+  if (hasMpn && !hasMfr && !hasCpn) return 'mpn_only';
+  if (hasMpn && hasMfr && !hasCpn) return mpnMfrSame ? 'mpn_mfr_same' : 'mpn_mfr_separate';
+  if (hasMpn && !hasMfr && hasCpn) return mpnCpnSame ? 'mpn_cpn_same' : 'mpn_cpn_separate';
+  if (hasMpn && hasMfr && hasCpn) {
+    if (mpnMfrSame && mpnCpnSame) return 'mpn_mfr_cpn_same';
+    if (mpnMfrSame) return 'mpn_mfr_same_cpn_separate';
+    if (mpnCpnSame) return 'mpn_cpn_same_mfr_separate';
+    if (mfrCpnSame) return 'mfr_cpn_same_mpn_separate';
+    return 'mpn_mfr_cpn_separate';
   }
 
-  if (roles.mpn && roles.manufacturer && roles.mpn === roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => ['same_cell'].includes(option.value));
-  }
-
-  if (roles.mpn && !roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => ['mpn_only_same_cell', 'mpn_only_rows', 'grouped_rows'].includes(option.value));
-  }
-
-  if (!roles.mpn && roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => ['mfr_only_same_cell', 'mfr_only_rows', 'grouped_rows'].includes(option.value));
-  }
-
-  if (roles.mpn && roles.manufacturer) {
-    return STRUCTURE_OPTIONS.filter((option) => ['separate_cells', 'same_cell', 'one_per_row', 'grouped_rows'].includes(option.value));
-  }
-
-  return STRUCTURE_OPTIONS;
+  if (!hasMpn && hasMfr && hasCpn && mfrCpnSame) return 'mfr_cpn_same_mpn_separate';
+  return 'mpn_mfr_cpn_separate';
 };
 
 const findStrongMpnHeader = (headers = []) => {
@@ -6311,11 +7301,18 @@ const findStrongMpnHeader = (headers = []) => {
     /\bmanufacturing part\b/,
     /\bmfr part\b/,
     /\bmfg part\b/,
+    /\bref\s+fab\b/,
+    /(?:reference|ref)\s+fab\s+fabricant/,
+    /(?:reference|ref)\s+fabricant/,
+    /fabricant\s+(?:reference|ref)/,
+    /(?:reference|ref)\s+(?:manufacturer|mfr|mfg)/,
+    /(?:manufacturer|mfr|mfg)\s+(?:reference|ref)/,
     /producer/,
   ];
   return headers.find((header) => {
     const normalized = normalizeKey(header);
     if (/(?:^|\s)(?:mfg|manufacturer)\s+parts(?:\s|$)/.test(normalized)) return false;
+    if (isManufacturerReferenceHeader(header)) return true;
     return patterns.some((pattern) => pattern.test(normalized));
   }) || '';
 };
@@ -8077,6 +9074,8 @@ const applyParserResultToSheet = ({ result, scope, headers, sourceRows, headerRo
   return {
     nextHeaders,
     nextRows,
+    parserHeaders,
+    parserHeaderMap,
     override,
     scopedCount: scopedSourceRows?.length || 0,
   };
@@ -8090,6 +9089,14 @@ const NORMALIZED_FIELD_BY_PARSER_TARGET = {
   description: 'description',
   quantity: 'quantity',
   uom: 'uom',
+  level: 'level',
+  'bom level': 'level',
+  notes: 'Notes',
+  'internal notes': 'Internal notes',
+  'parent group key': 'parentKey',
+  'parent / group key': 'parentKey',
+  'sub bom id': 'parentKey',
+  'bom id': 'parentKey',
   'item code': 'Item code',
 };
 
@@ -8098,8 +9105,21 @@ const NORMALIZED_FIELD_BY_PARSER_TARGET = {
 // and manufacturer inheritance - overwriting them here would undo all of that.
 const PARSER_PROTECTED_NORMALIZED_FIELDS = new Set([
   'mpn', 'manufacturer', 'discardedText',
-  'sourceRow', 'parentKey', 'parent', 'relation', 'level', 'rule', 'confidence',
+  'sourceRow', 'parent', 'relation', 'rule', 'confidence',
 ]);
+
+const FACTWISE_PARSE_FIELDS = [
+  { key: 'cpn', label: 'CPN', aliases: ['cpn', 'customer part number', 'customer part no', 'customer pn', 'item code'] },
+  { key: 'mpn', label: 'MPN', aliases: ['mpn', 'mfr part number', 'manufacturer part number', 'manufacturer pn', 'part number'] },
+  { key: 'manufacturer', label: 'Manufacturer', aliases: ['mfr', 'manufacturer', 'manufacturer name', 'maker'] },
+  { key: 'description', label: 'Description', aliases: ['description', 'item name', 'einkaufbestelltexte'] },
+  { key: 'quantity', label: 'Quantity', aliases: ['quantity', 'qty'] },
+  { key: 'uom', label: 'UOM', aliases: ['uom', 'unit', 'measurement unit'] },
+  { key: 'level', label: 'Level', aliases: ['level', 'bom level'] },
+  { key: 'parent', label: 'Parent / group key', aliases: ['parent', 'parent group key', 'parent / group key', 'sub bom id', 'bom id'] },
+  { key: 'notes', label: 'Notes', aliases: ['notes', 'note'] },
+  { key: 'internalNotes', label: 'Internal notes', aliases: ['internal notes', 'internal note'] },
+];
 
 // Write the parsed values onto the rows normalization produced. A source row
 // expands into one output row per entry, in order, so entry N fills output N -
@@ -8136,6 +9156,337 @@ const applyPatternOutputsToNormalizedRows = (rows, overrides = []) => {
     });
     return next;
   });
+};
+
+const NORMALIZED_FIELD_BY_FACTWISE_KEY = {
+  cpn: 'cpn',
+  mpn: 'mpn',
+  manufacturer: 'manufacturer',
+  description: 'description',
+  quantity: 'quantity',
+  uom: 'uom',
+  level: 'level',
+  parent: 'parentKey',
+  notes: 'Notes',
+  internalNotes: 'Internal notes',
+};
+
+const emptyFactwiseFieldValues = () => FACTWISE_PARSE_FIELDS.reduce((acc, field) => {
+  acc[field.key] = '';
+  return acc;
+}, {});
+
+const fieldValuesFromBackendFields = (fields = {}, fieldList = FACTWISE_PARSE_FIELDS) => {
+  const values = {};
+  fieldList.forEach((field) => {
+    values[field.key] = fields?.[field.key]?.value || '';
+  });
+  return values;
+};
+
+const sourceColumnsFromBackendFields = (fields = {}, fieldList = FACTWISE_PARSE_FIELDS) => {
+  const sourceColumns = {};
+  fieldList.forEach((field) => {
+    sourceColumns[field.key] = fields?.[field.key]?.sourceColumn || '';
+  });
+  return sourceColumns;
+};
+
+const fieldPatternRuleKey = (group = {}) => fmt(group.patternKey || group.shape || group.id);
+
+const fieldPatternRuleForGroup = (rules = {}, group = {}) => (
+  rules[fieldPatternRuleKey(group)] || { fields: {} }
+);
+
+const expandFieldPatternReviewRows = (group = {}) => {
+  const reviewRows = Array.isArray(group.samples) ? [...group.samples] : [];
+  const existingSampleKeys = new Set(reviewRows.map(fieldPatternSampleKey));
+  (group.interpretations || []).forEach((interpretation) => {
+    const sampleKey = fieldPatternSampleKey(interpretation);
+    if (!sampleKey || existingSampleKeys.has(sampleKey)) return;
+    const entries = Array.isArray(interpretation.entries) ? interpretation.entries : [];
+    const sourceColumn = fmt(interpretation.sourceColumn);
+    reviewRows.push({
+      sourceRow: interpretation.sourceRow,
+      left: Array.isArray(interpretation.left) && interpretation.left.length
+        ? interpretation.left
+        : (sourceColumn ? [{ column: sourceColumn, value: interpretation.rawValue || '' }] : []),
+      sourceFragment: {
+        id: interpretation.occurrenceId,
+        sourceRow: interpretation.sourceRow,
+        sourceColumn: interpretation.sourceColumn,
+        start: interpretation.start,
+        end: interpretation.end,
+        rawValue: interpretation.rawValue,
+        patternKey: group.patternKey,
+      },
+      entries,
+      fields: entries[0]?.fields || {},
+      interpretationSpansByColumn: sourceColumn
+        ? { [sourceColumn]: interpretation.interpretationSpans || [] }
+        : {},
+      patternRows: group.patternRows || [],
+      primaryPatternRow: group.primaryPatternRow || null,
+    });
+    existingSampleKeys.add(sampleKey);
+  });
+  Object.values(group.rowEntries || {}).forEach((rowEntry) => {
+    const sampleKey = fieldPatternSampleKey(rowEntry);
+    if (!sampleKey || existingSampleKeys.has(sampleKey)) return;
+    const entries = Array.isArray(rowEntry.entries) ? rowEntry.entries : [];
+    reviewRows.push({
+      sourceRow: rowEntry.sourceRow,
+      left: rowEntry.left || [],
+      entries,
+      fields: entries[0]?.fields || {},
+      interpretationSpansByColumn: rowEntry.interpretationSpansByColumn || {},
+      patternRows: rowEntry.patternRows || [],
+      primaryPatternRow: rowEntry.primaryPatternRow || null,
+    });
+    existingSampleKeys.add(sampleKey);
+  });
+  return reviewRows;
+};
+
+const areSimilarFieldPatternGroups = (sourceGroup = {}, targetGroup = {}) => {
+  const sourceColumns = (sourceGroup.selectedColumns || []).map(normalizeKey).filter(Boolean).sort();
+  const targetColumns = (targetGroup.selectedColumns || []).map(normalizeKey).filter(Boolean).sort();
+  if (!sourceColumns.length || sourceColumns.length !== targetColumns.length) return false;
+  return sourceColumns.every((column, index) => column === targetColumns[index]);
+};
+
+const updateFieldPatternRuleFieldValue = (rules = {}, group = {}, fieldKey, patch = {}) => {
+  const key = fieldPatternRuleKey(group);
+  if (!key || !fieldKey) return rules;
+  const current = rules[key] || { fields: {} };
+  return {
+    ...rules,
+    [key]: {
+      ...current,
+      patternKey: group.patternKey || current.patternKey || '',
+      shape: group.shape || current.shape || '',
+      fields: {
+        ...(current.fields || {}),
+        [fieldKey]: {
+          ...((current.fields || {})[fieldKey] || {}),
+          ...patch,
+        },
+      },
+    },
+  };
+};
+
+const updateFieldPatternIdentityGroupRuleValue = (rules = {}, group = {}, identityGroup = {}, patch = {}) => {
+  const key = fieldPatternRuleKey(group);
+  const identityKey = identityGroupRuleKey(identityGroup);
+  if (!key || !identityKey) return rules;
+
+  const current = rules[key] || { fields: {} };
+  const currentGroups = Array.isArray(current.identityGroups) ? current.identityGroups : [];
+  const existingIndex = currentGroups.findIndex((item) => identityGroupRuleKey({
+    header: item.header || item.sourceColumn || item.source_column,
+    roles: item.roles || identityGroup.roles,
+  }) === identityKey);
+  const base = existingIndex >= 0 ? currentGroups[existingIndex] : {
+    header: identityGroup.header,
+    roles: identityGroup.roles,
+    delimiter: 'auto',
+    order: identityGroup.roles,
+  };
+  const nextIdentityGroup = {
+    ...base,
+    header: identityGroup.header,
+    roles: identityGroup.roles,
+    ...patch,
+  };
+  const nextGroups = existingIndex >= 0
+    ? currentGroups.map((item, index) => (index === existingIndex ? nextIdentityGroup : item))
+    : [...currentGroups, nextIdentityGroup];
+
+  return {
+    ...rules,
+    [key]: {
+      ...current,
+      patternKey: group.patternKey || current.patternKey || '',
+      shape: group.shape || current.shape || '',
+      fields: {
+        ...(current.fields || {}),
+      },
+      identityGroups: nextGroups,
+    },
+  };
+};
+
+const mergeSuggestedFieldPatternRules = (baseRules = {}, groups = []) => {
+  const nextRules = { ...(baseRules || {}) };
+  (groups || []).forEach((group) => {
+    const key = fieldPatternRuleKey(group);
+    const suggested = group?.suggestedRule;
+    if (!key || !suggested) return;
+    const current = nextRules[key] || { fields: {} };
+    const currentFields = current.fields || {};
+    const mergedFields = { ...currentFields };
+    Object.entries(suggested.fields).forEach(([fieldKey, suggestion]) => {
+      const existing = currentFields[fieldKey] || {};
+      const nextFieldRule = {
+        ...suggestion,
+        ...existing,
+        delimiter: existing.delimiter || suggestion.delimiter || 'auto',
+      };
+      if (existing.delimiter === 'none') {
+        if (!Object.prototype.hasOwnProperty.call(existing, 'stripPrefix')) delete nextFieldRule.stripPrefix;
+        if (!Object.prototype.hasOwnProperty.call(existing, 'prefixMode')) delete nextFieldRule.prefixMode;
+      }
+      mergedFields[fieldKey] = nextFieldRule;
+    });
+    nextRules[key] = {
+      ...current,
+      patternKey: group.patternKey || current.patternKey || '',
+      shape: group.shape || current.shape || '',
+      fields: mergedFields,
+      identityGroups: mergeIdentityGroupRules(suggested.identityGroups, current.identityGroups),
+      expansions: mergeExpansionRules(suggested.expansions, current.expansions),
+    };
+  });
+  return nextRules;
+};
+
+const filterFactwiseEntriesForConfig = (entries = [], config = {}) => {
+  const rawEntries = Array.isArray(entries) ? entries : [];
+  const filtered = rawEntries.filter((entry, index) => (
+    index === 0 ||
+    config.alternateLayout !== 'separate_columns' ||
+    Boolean(fmt(typeof entry?.fields?.mpn === 'object' ? entry.fields.mpn?.value : entry?.fields?.mpn))
+  ));
+  return (filtered.length ? filtered : rawEntries.slice(0, 1)).map((entry, index) => ({
+    ...entry,
+    relation: index === 0 ? 'Primary' : `Alternate ${index}`,
+  }));
+};
+
+const VISUAL_TEACH_FIELD_STYLES = {
+  cpn: { color: '#7c3aed', bg: '#ede9fe' },
+  mpn: { color: '#2563eb', bg: '#dbeafe' },
+  manufacturer: { color: '#a16207', bg: '#fef3c7' },
+  description: { color: '#0369a1', bg: '#e0f2fe' },
+  quantity: { color: '#047857', bg: '#d1fae5' },
+  uom: { color: '#0f766e', bg: '#ccfbf1' },
+  level: { color: '#9a3412', bg: '#ffedd5' },
+  parent: { color: '#9f1239', bg: '#ffe4e6' },
+  notes: { color: '#4338ca', bg: '#e0e7ff' },
+  internalNotes: { color: '#6b21a8', bg: '#f3e8ff' },
+};
+
+const VISUAL_TEACH_STRUCTURAL_ROLES = [
+  { key: 'alternateList', label: 'Alternate list', color: '#0f766e', bg: '#ccfbf1' },
+  { key: 'groupSeparator', label: 'Group separator', color: '#b91c1c', bg: '#fee2e2' },
+  { key: 'ignore', label: 'Ignore', color: '#64748b', bg: '#f1f5f9' },
+];
+
+const VISUAL_TEACH_ROLE_STYLE_BY_KEY = [
+  ...FACTWISE_PARSE_FIELDS.map((field) => ({
+    ...field,
+    ...(VISUAL_TEACH_FIELD_STYLES[field.key] || { color: '#334155', bg: '#f1f5f9' }),
+  })),
+  ...VISUAL_TEACH_STRUCTURAL_ROLES,
+].reduce((acc, role) => {
+  acc[role.key] = role;
+  return acc;
+}, {});
+
+const visualTeachSourceItemForSample = (group = {}, sample = {}, roles = {}) => {
+  const left = Array.isArray(sample.left) ? sample.left : [];
+  const byColumn = new Map(left.map((item) => [fmt(item.column), item]));
+  const candidates = [
+    group.primaryPatternRow?.source,
+    ...(Array.isArray(group.patternRows) ? group.patternRows.map((row) => row.source) : []),
+    roles.mpn,
+    roles.manufacturer,
+    roles.cpn,
+    ...(group.selectedColumns || []),
+  ].map(fmt).filter(Boolean);
+  for (const candidate of candidates) {
+    const item = byColumn.get(candidate);
+    if (fmt(item?.value)) return item;
+  }
+  return left.find((item) => fmt(item?.value)) || null;
+};
+
+const visualTeachTaggedSpans = (tags = []) => {
+  const spans = [];
+  let index = 0;
+  while (index < tags.length) {
+    const role = tags[index] || '';
+    if (!role) {
+      index += 1;
+      continue;
+    }
+    let end = index + 1;
+    while (end < tags.length && tags[end] === role) end += 1;
+    spans.push({ start: index, end, role });
+    index = end;
+  }
+  return spans;
+};
+
+const applyFactwiseValuesToRow = (row, fields = {}) => {
+  const next = { ...row };
+  Object.entries(fields || {}).forEach(([fieldKey, value]) => {
+    const target = NORMALIZED_FIELD_BY_FACTWISE_KEY[fieldKey] || fieldKey;
+    if (!target || ['sourceRow', 'relation', 'rule', 'confidence'].includes(target)) return;
+    const cleanValue = fmt(value);
+    if (!cleanValue) return;
+    next[target] = cleanValue;
+  });
+  return next;
+};
+
+const applyFactwiseFieldOverridesToNormalizedRows = (rows, overrides = {}) => {
+  const rowsBySourceRow = overrides?.rows || {};
+  if (!rowsBySourceRow || !Object.keys(rowsBySourceRow).length) return rows;
+
+  const countsBySourceRow = new Map();
+  rows.forEach((row) => {
+    const key = String(row?.sourceRow ?? '');
+    if (!key) return;
+    countsBySourceRow.set(key, (countsBySourceRow.get(key) || 0) + 1);
+  });
+
+  const positionBySourceRow = new Map();
+  const output = [];
+  rows.forEach((row) => {
+    const key = String(row?.sourceRow ?? '');
+    const override = rowsBySourceRow[key];
+    if (!override || typeof override !== 'object') {
+      output.push(row);
+      return;
+    }
+
+    const legacyFlat = !Array.isArray(override.entries) && !override.fields;
+    const entries = Array.isArray(override.entries) && override.entries.length
+      ? override.entries
+      : [{ relation: row.relation || 'Primary', fields: legacyFlat ? override : (override.fields || {}) }];
+    const position = positionBySourceRow.get(key) || 0;
+    positionBySourceRow.set(key, position + 1);
+
+    const entry = entries[Math.min(position, entries.length - 1)] || entries[0];
+    const next = applyFactwiseValuesToRow(row, entry.fields || {});
+    if (entry.relation) next.relation = position === 0 ? 'Primary' : entry.relation;
+    output.push(next);
+
+    const existingCount = countsBySourceRow.get(key) || 1;
+    if (position === existingCount - 1 && entries.length > existingCount) {
+      entries.slice(existingCount).forEach((extraEntry, extraIndex) => {
+        const clone = applyFactwiseValuesToRow({
+          ...row,
+          relation: extraEntry.relation || `Alternate ${existingCount + extraIndex}`,
+          rule: 'taught_field_pattern_alternate',
+        }, extraEntry.fields || {});
+        output.push(clone);
+      });
+    }
+  });
+  return output;
 };
 
 // Replace any edit already staged for the same pattern — re-editing a shape
@@ -8304,6 +9655,7 @@ const BomNormalizer = () => {
   const [roles, setRoles] = useState(emptyRoles);
   const [config, setConfig] = useState({
     structure: 'separate_cells',
+    rowPlacement: 'same_row',
     bomLayout: 'none',
     alternateLayout: 'inside_selected_mpn_columns',
     delimiterMode: 'auto',
@@ -8311,6 +9663,7 @@ const BomNormalizer = () => {
     groupHeaderMode: 'auto',
     manufacturerMode: 'inherit_blank',
     quantityMode: 'inherit_primary',
+    alternateInheritFields: DEFAULT_ALTERNATE_INHERIT_FIELDS,
     quantityVariant: QUANTITY_VARIANT_ALL,
     quantityVariantByBlock: {},
     inheritLevels: true,
@@ -8318,7 +9671,6 @@ const BomNormalizer = () => {
     skipRepeatedHeaders: true,
     skipDoNotPopulate: false,
     skipDeletedRows: true,
-    documentTypeValues: [],
     parentPathLevels: true,
     alternateColumnGroups: [],
     followingRowAlternateColumn: '',
@@ -8393,6 +9745,38 @@ const BomNormalizer = () => {
   const [configureParserTitle, setConfigureParserTitle] = useState('Split into Columns');
   const [configureParserScope, setConfigureParserScope] = useState(null);
   const [patternParserOverrides, setPatternParserOverrides] = useState([]);
+  const [fieldPatternReviewOpen, setFieldPatternReviewOpen] = useState(false);
+  const [fieldPatternLoading, setFieldPatternLoading] = useState(false);
+  const [fieldPatternGroups, setFieldPatternGroups] = useState([]);
+  const [fieldPatternFields, setFieldPatternFields] = useState([]);
+  const [selectedFieldPatternId, setSelectedFieldPatternId] = useState('');
+  const [fieldPatternSampleIndexes, setFieldPatternSampleIndexes] = useState({});
+  const [fieldPatternConfirmed, setFieldPatternConfirmed] = useState({});
+  const [fieldPatternEdits, setFieldPatternEdits] = useState({});
+  const [fieldPatternRuleDrafts, setFieldPatternRuleDrafts] = useState({});
+  const [fieldPatternRulesDirty, setFieldPatternRulesDirty] = useState(false);
+  const [fieldPatternReviewWorkflow, setFieldPatternReviewWorkflow] = useState({ steps: [], nextStep: null });
+  const [fieldPatternWorkflowLaunchRevision, setFieldPatternWorkflowLaunchRevision] = useState(0);
+  const [fieldSplitReviewOpen, setFieldSplitReviewOpen] = useState(false);
+  const [fieldSplitSelectedField, setFieldSplitSelectedField] = useState('');
+  const [fieldSplitRuleDrafts, setFieldSplitRuleDrafts] = useState({});
+  const [visualTeachOpen, setVisualTeachOpen] = useState(false);
+  const [visualTeachContext, setVisualTeachContext] = useState(null);
+  const [visualTeachTags, setVisualTeachTags] = useState([]);
+  const [visualTeachSelection, setVisualTeachSelection] = useState(null);
+  const [visualTeachDrag, setVisualTeachDrag] = useState(null);
+  const [visualTeachDelimiter, setVisualTeachDelimiter] = useState('/');
+  const [visualTeachAltMode, setVisualTeachAltMode] = useState('append');
+  const [visualTeachEntryOverrides, setVisualTeachEntryOverrides] = useState({});
+  const [visualTeachBackendPreview, setVisualTeachBackendPreview] = useState(null);
+  const [visualTeachPreviewLoading, setVisualTeachPreviewLoading] = useState(false);
+  const [visualTeachPreviewRevision, setVisualTeachPreviewRevision] = useState(0);
+  const visualTeachPreviewRequestRef = useRef(0);
+  const visualTeachPreviewProcessedRef = useRef(0);
+  const visualTeachBackendEntriesRef = useRef([]);
+  const fieldPatternInferenceCacheRef = useRef({ key: '', data: null });
+  const fieldPatternInferenceInFlightRef = useRef({ key: '', promise: null });
+  const fieldPatternAutoOpenedStepIdRef = useRef('');
   // Parse Fields edits wait here until Run normalization. Applying them the
   // moment Apply is clicked rewrote the sheet before the user had walked the
   // remaining patterns, which made a review step that changes nothing on its own
@@ -8434,10 +9818,15 @@ const BomNormalizer = () => {
   const [workflowTemplateSaving, setWorkflowTemplateSaving] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
   const [error, setError] = useState('');
+  const [restoreInferenceNonce, setRestoreInferenceNonce] = useState(0);
   const initialFileSeededRef = useRef('');
+  const uploadReturnFileRef = useRef(null);
   const restoredReturnSnapshotRef = useRef('');
+  const workspaceRestoredRef = useRef(false);
   const autoReplayTemplateRef = useRef('');
   const restoreInFlightRef = useRef(false);
+  const backendRoleInferenceKeyRef = useRef('');
+  const backendSuggestedConfigRef = useRef(null);
 
   useEffect(() => {
     const handleMouseMove = (event) => {
@@ -8474,6 +9863,89 @@ const BomNormalizer = () => {
   const dataRows = useMemo(() => (
     filterRowsByEndRow(sourceDataRows, sourceEndRow)
   ), [sourceDataRows, sourceEndRow]);
+
+  const inferNormalizerRoles = useCallback(async (nextHeaders, nextRows = []) => {
+    const safeHeaders = Array.isArray(nextHeaders) ? nextHeaders : [];
+    const safeRows = Array.isArray(nextRows) ? nextRows : [];
+
+    try {
+      const response = await api.inferBomRoles({
+        headers: safeHeaders,
+        rows: safeRows.slice(0, 250),
+        sourceSignature: {
+          fileName,
+          sheetName,
+          sheetScope,
+          selectedSheetNames,
+          headerRowIndex,
+          headers: safeHeaders,
+        },
+        sampleSize: Math.min(Math.max(safeRows.length, 25), 250),
+      });
+      backendSuggestedConfigRef.current = response.data?.config
+        ? sanitizeNormalizerConfig(response.data.config)
+        : null;
+      const backendRoles = sanitizeRoleMap(response.data?.roles || {});
+      const resolvedRoles = Object.keys(emptyRoles).reduce((acc, key) => {
+        const header = backendRoles[key];
+        acc[key] = header && safeHeaders.includes(header) ? header : '';
+        return acc;
+      }, {});
+      return rolesForMultiBlockAssembly(safeHeaders, resolvedRoles);
+    } catch (err) {
+      backendSuggestedConfigRef.current = null;
+      console.warn('Backend BOM role inference failed; leaving role mappings empty.', err);
+      return rolesForMultiBlockAssembly(safeHeaders, emptyRoles);
+    }
+  }, [fileName, headerRowIndex, selectedSheetNames, sheetName, sheetScope]);
+
+  useEffect(() => {
+    if (currentStep > 2 || restoreInFlightRef.current) return undefined;
+    if (!headers.length || !dataRows.length) return undefined;
+
+    const inferenceKey = [
+      sheetScope,
+      sheetName,
+      headerRowIndex,
+      sourceEndRow || '',
+      headers.join('\u001f'),
+      dataRows.length,
+      restoreInferenceNonce,
+    ].join('\u001e');
+    if (backendRoleInferenceKeyRef.current === inferenceKey) return undefined;
+
+    let cancelled = false;
+    backendRoleInferenceKeyRef.current = inferenceKey;
+    inferNormalizerRoles(headers, dataRows).then((nextRoles) => {
+      if (cancelled) return;
+      setRoles((prev) => {
+        const same = Object.keys(emptyRoles).every((key) => (prev[key] || '') === (nextRoles[key] || ''));
+        return same ? prev : nextRoles;
+      });
+      if (!parserTouched) {
+        const backendConfig = backendSuggestedConfigRef.current;
+        setConfig((prev) => {
+          if (backendConfig) {
+            const savedConfig = sanitizeNormalizerConfig(backendConfig);
+            return {
+              ...prev,
+              ...savedConfig,
+              alternateColumnGroups: resolveSavedAlternateGroups(savedConfig.alternateColumnGroups || [], headers),
+            };
+          }
+          return nextConfigForDetectedStructure(prev, detectBestStructure(headers, nextRoles, dataRows.slice(0, 40)), {
+            headers,
+            rows: dataRows.slice(0, 120),
+            roles: nextRoles,
+          });
+        });
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentStep, dataRows, headerRowIndex, headers, inferNormalizerRoles, parserTouched, restoreInferenceNonce, sheetName, sheetScope, sourceEndRow]);
 
   const sourceRowsExcludedByLimit = Math.max(0, sourceDataRows.length - dataRows.length);
   const sourceLimitActive = Boolean(sourceEndRow && sourceRowsExcludedByLimit > 0);
@@ -8551,9 +10023,19 @@ const BomNormalizer = () => {
     };
   }, [normalizedRows]);
 
+  const currentIdentityLayout = useMemo(
+    () => identityLayoutFromRoles(roles, config),
+    [config, roles]
+  );
+
   const selectedStructureOption = useMemo(
-    () => STRUCTURE_OPTIONS.find((option) => option.value === config.structure),
-    [config.structure]
+    () => IDENTITY_LAYOUT_OPTIONS.find((option) => option.value === currentIdentityLayout),
+    [currentIdentityLayout]
+  );
+
+  const selectedRowPlacementOption = useMemo(
+    () => ROW_PLACEMENT_OPTIONS.find((option) => option.value === (config.rowPlacement || 'same_row')),
+    [config.rowPlacement]
   );
 
   const selectedAlternateOption = useMemo(
@@ -8602,21 +10084,55 @@ const BomNormalizer = () => {
     };
   }, [config.alternateLayout, config.followingRowAlternateColumn, dataRows, normalizerConfig, roles.manufacturer, roles.mpn]);
 
-  const selectedDelimiterOption = useMemo(
-    () => DELIMITER_OPTIONS.find((option) => option.value === config.delimiterMode),
-    [config.delimiterMode]
+  const selectedAlternateInheritFields = useMemo(
+    () => alternateInheritFieldsFromConfig(config),
+    [config.alternateInheritFields, config.quantityMode]
   );
-
-  const selectedQuantityOption = useMemo(
-    () => QTY_OPTIONS.find((option) => option.value === config.quantityMode),
-    [config.quantityMode]
+  const allAlternateInheritFieldValues = useMemo(
+    () => ALTERNATE_INHERIT_FIELD_OPTIONS.map((option) => option.value),
+    []
   );
+  const allAlternateInheritFieldsSelected = selectedAlternateInheritFields.length === allAlternateInheritFieldValues.length;
+  const someAlternateInheritFieldsSelected = selectedAlternateInheritFields.length > 0 && !allAlternateInheritFieldsSelected;
+  const selectedAlternateInheritLabels = useMemo(() => (
+    selectedAlternateInheritFields
+      .map((field) => ALTERNATE_INHERIT_FIELD_OPTIONS.find((option) => option.value === field)?.label)
+      .filter(Boolean)
+  ), [selectedAlternateInheritFields]);
   const selectedBomLayoutOption = useMemo(
     () => BOM_LAYOUT_OPTIONS.find((option) => option.value === (config.bomLayout || 'none')),
     [config.bomLayout]
   );
   const activeBomLayout = selectedBomLayout(config);
   const bomLayoutActive = Boolean(activeBomLayout);
+  const showAlternateInheritanceControl = Boolean(
+    config.alternateLayout &&
+    config.alternateLayout !== 'already_separate_rows' &&
+    !bomLayoutActive
+  );
+  const teachPatternColumnOptions = useMemo(() => {
+    const usedHeaders = new Set();
+    const roleOptions = Object.entries(TEACH_PATTERN_ROLE_LABELS)
+      .map(([role, label]) => {
+        const header = roles[role];
+        if (!header || !headers.includes(header) || usedHeaders.has(header)) return null;
+        usedHeaders.add(header);
+        return {
+          value: header,
+          label: `${label} - ${header}`,
+        };
+      })
+      .filter(Boolean);
+
+    const rawOptions = headers
+      .filter((header) => header && !usedHeaders.has(header))
+      .map((header) => ({
+        value: header,
+        label: `Source - ${header}`,
+      }));
+
+    return [...roleOptions, ...rawOptions];
+  }, [headers, roles]);
   const hasMultiBlockRows = Boolean(multiBlockSummary);
   const assemblyQuantityVariantOptions = useMemo(() => (
     activeBomLayout === 'assembly_quantity_matrix'
@@ -8745,6 +10261,13 @@ const BomNormalizer = () => {
       rules.push('2. Group repeated part rows as primary plus alternates');
     }
 
+    if (config.alternateLayout !== 'already_separate_rows') {
+      const inheritLabels = alternateInheritFieldsFromConfig(config)
+        .map((field) => ALTERNATE_INHERIT_FIELD_OPTIONS.find((option) => option.value === field)?.label)
+        .filter(Boolean);
+      rules.push(`${rules.length + 1}. Copy selected primary-row fields onto alternate rows${inheritLabels.length ? `: ${inheritLabels.join(', ')}` : ': none selected'}`);
+    }
+
     rules.push(`${rules.length + 1}. Remove status notes from MFR names, keep only clean MPN/MFR output`);
     return rules;
   }, [config, roles.manufacturer, roles.mpn]);
@@ -8770,6 +10293,8 @@ const BomNormalizer = () => {
       rows = dataRows,
       description = '',
       includeUnmatched = true,
+      allowRawPatterns = false,
+      sampleUnit = 'group',
     }) => {
       if (!sourceHeader) return null;
       const patternMap = new Map();
@@ -8784,7 +10309,8 @@ const BomNormalizer = () => {
         const pairs = (trustedPairs.length ? trustedPairs : (manualParse ? manualParse.pairs : parsePackedMpnManufacturerPairs(source, normalizerConfig)))
           .filter((pair) => pair?.mpn && pair?.manufacturer);
         const sourceRow = rowSourceNumber(row, rowIndex);
-        if (!pairs.length && !manualParse) {
+        const rawShape = allowRawPatterns ? buildRawFieldPatternShape(source) : '';
+        if (!pairs.length && !manualParse && !rawShape) {
           if (includeUnmatched) {
             unmatched.count += 1;
             if (unmatched.examples.length < 1) {
@@ -8794,7 +10320,9 @@ const BomNormalizer = () => {
           return;
         }
 
-        const shape = trustedPairs.length ? buildParsedPatternShape(source, pairs) : (manualParse?.patternShape || buildParsedPatternShape(source, pairs));
+        const shape = trustedPairs.length
+          ? buildParsedPatternShape(source, pairs)
+          : (manualParse?.patternShape || buildParsedPatternShape(source, pairs) || rawShape);
         if (!shape) {
           if (includeUnmatched) {
             unmatched.count += 1;
@@ -8811,7 +10339,10 @@ const BomNormalizer = () => {
           examples: [],
           matchedRows: [],
           sourceRows: [],
-          rules: manualParse?.rules?.length ? manualParse.rules : describePatternShape(shape),
+          rules: manualParse?.rules?.length
+            ? manualParse.rules
+            : (pairs.length ? describePatternShape(shape) : describeFieldPatternShape(shape)),
+          sampleUnit,
         };
         current.count += 1;
         current.sourceRows.push(sourceRow);
@@ -8853,7 +10384,7 @@ const BomNormalizer = () => {
           });
           current.examples.push(!trustedPairs.length && (manualExample || !pairs.length) ? {
             sourceRow,
-            source: exampleSource,
+            source: !pairs.length ? source : exampleSource,
             rawSource: source,
             entryIndex: exampleEntryIndex,
             entryCount: sourceEntryCount,
@@ -8888,6 +10419,7 @@ const BomNormalizer = () => {
         unmatched,
         matchingRows,
         patternCount: patterns.length,
+        sampleUnit,
       };
     };
 
@@ -8911,6 +10443,10 @@ const BomNormalizer = () => {
     }));
 
     const sections = [];
+    // Field-pattern grouping is backend-owned. The older client-side raw scan
+    // counted delimiter shapes from every mapped column, which made ordinary
+    // BOMs show dozens of fake patterns.
+
     if (readsCombinedPrimary || selectedMpnColumnHasPackedPairs) {
       const primarySection = buildSourceSection({
         id: 'primary',
@@ -8973,11 +10509,137 @@ const BomNormalizer = () => {
       matchingRows,
       rules: [
         `Detected ${patternCount} distinct parsing pattern${patternCount === 1 ? '' : 's'} across ${orderedSections.length} configured source${orderedSections.length === 1 ? '' : 's'}.`,
-        `Matched ${matchingRows} source value${matchingRows === 1 ? '' : 's'} that can produce clean MPN/MFR output.`,
-        'Apply the matching pattern per row, then send clean MPN/MFR values into normalization.',
+        `Matched ${matchingRows} source value${matchingRows === 1 ? '' : 's'} that can produce parsed BOM fields.`,
+        'Apply the matching pattern per row, then send parsed CPN/MPN/MFR and supporting fields into normalization.',
       ],
     };
-  }, [config, dataRows, headerRowIndex, headers, normalizerConfig, parserLogicRules, roles.manufacturer, roles.mpn]);
+  }, [config, dataRows, headerRowIndex, headers, normalizerConfig, parserLogicRules, roles]);
+
+  const factwiseParseFieldRows = useMemo(() => {
+    const firstNonEmptyFromHeader = (header) => {
+      if (!header) return '';
+      for (const row of dataRows) {
+        const value = getCell(row, header);
+        if (value) return value;
+      }
+      return '';
+    };
+
+    const addUnique = (items, value) => {
+      const clean = fmt(value);
+      if (clean && !items.includes(clean)) items.push(clean);
+    };
+
+    return FACTWISE_PARSE_FIELDS.map((field) => {
+      const sources = [];
+      const methods = [];
+      const roleHeader = roles[field.key] || '';
+      const backendMatches = [];
+
+      fieldPatternGroups.forEach((group) => {
+        (group.samples || []).some((sample) => {
+          const interpreted = sample.fields?.[field.key];
+          if (!interpreted?.value) return false;
+          backendMatches.push({
+            sourceColumn: interpreted.sourceColumn,
+            method: interpreted.method,
+            value: interpreted.value,
+          });
+          return true;
+        });
+      });
+
+      addUnique(sources, roleHeader);
+      backendMatches.forEach((match) => addUnique(sources, match.sourceColumn));
+
+      const alternateCopiesPrimary = selectedAlternateInheritFields.includes(field.key);
+      const directSample = firstNonEmptyFromHeader(roleHeader);
+      let sample = backendMatches.find((match) => match.value)?.value || directSample;
+
+      if (field.key === 'mpn') {
+        if (config.alternateLayout === 'following_item_rows') {
+          addUnique(sources, config.followingItemRowsMpnColumn);
+          methods.push('Primary row plus sparse following rows');
+        } else if (roleHeader) {
+          methods.push('Read selected MPN column');
+        }
+        if (config.alternateLayout === 'following_rows' && config.followingRowAlternateColumn) {
+          addUnique(sources, config.followingRowAlternateColumn);
+          methods.push('Following-row alternates attach to previous item');
+        }
+        if (config.alternateLayout === 'separate_columns') {
+          cleanAlternateColumnGroups(config.alternateColumnGroups || [], headers).forEach((group) => addUnique(sources, group.mpn));
+          methods.push('Alternate MPN columns expand into extra rows');
+        }
+      } else if (field.key === 'cpn' && config.alternateLayout === 'separate_columns') {
+        cleanAlternateColumnGroups(config.alternateColumnGroups || [], headers).forEach((group) => addUnique(sources, group.cpn));
+        if (selectedAlternateInheritFields.includes('cpn') || cleanAlternateColumnGroups(config.alternateColumnGroups || [], headers).some((group) => group.cpn)) {
+          methods.push('Alternate CPN comes from mapped alternate CPN columns, otherwise primary CPN is used');
+        }
+      } else if (field.key === 'manufacturer') {
+        if (config.alternateLayout === 'following_item_rows') {
+          addUnique(sources, config.followingItemRowsManufacturerColumn);
+          methods.push('Primary row plus sparse following rows');
+        } else if (roleHeader) {
+          methods.push('Read selected Manufacturer column');
+        }
+        if (config.alternateLayout === 'following_rows' && config.followingRowAlternateColumn) {
+          addUnique(sources, config.followingRowAlternateColumn);
+          methods.push('Following-row alternates attach to previous item');
+        }
+        if (config.alternateLayout === 'separate_columns') {
+          cleanAlternateColumnGroups(config.alternateColumnGroups || [], headers).forEach((group) => addUnique(sources, group.mfr));
+          methods.push('Alternate manufacturer columns pair with alternate MPN columns');
+        }
+      } else if (field.key === 'quantity' && config.alternateLayout === 'separate_columns') {
+        cleanAlternateColumnGroups(config.alternateColumnGroups || [], headers).forEach((group) => addUnique(sources, group.qty));
+      } else if (field.key === 'uom' && config.alternateLayout === 'separate_columns') {
+        cleanAlternateColumnGroups(config.alternateColumnGroups || [], headers).forEach((group) => addUnique(sources, group.uom));
+      }
+
+      if (backendMatches.length) {
+        const backendMethods = backendMatches.map((match) => match.method).filter(Boolean);
+        methods.unshift(`${backendMatches.length} backend pattern group${backendMatches.length === 1 ? '' : 's'}`);
+        backendMethods.slice(0, 2).forEach((method) => addUnique(methods, method));
+      }
+
+      if (!methods.length && roleHeader) {
+        methods.push('Direct from selected source column');
+      }
+
+      if (alternateCopiesPrimary) {
+        methods.push('Alternate rows copy primary value');
+      }
+
+      if (field.key === 'level' && !sources.length) {
+        methods.push('Blank levels default to 1');
+        sample = '1';
+      }
+
+      if (!sources.length && !methods.length) {
+        return {
+          ...field,
+          source: 'Not selected',
+          method: 'Not mapped yet',
+          sample: '',
+          status: 'not_mapped',
+        };
+      }
+
+      return {
+        ...field,
+        source: sources.length ? sources.join(', ') : 'Default',
+        method: methods.length ? [...new Set(methods)].join('; ') : 'Direct from selected source column',
+        sample,
+        status: sources.length ? 'mapped' : 'default',
+      };
+    });
+  }, [config, dataRows, fieldPatternGroups, headers, roles, selectedAlternateInheritFields]);
+
+  const activeFactwiseParseFieldCount = useMemo(
+    () => factwiseParseFieldRows.filter((field) => field.status !== 'not_mapped').length,
+    [factwiseParseFieldRows]
+  );
 
   const parsingPatternOptions = useMemo(() => (
     (detectedParsingLogic?.sections || []).flatMap((section) => (
@@ -8985,6 +10647,7 @@ const BomNormalizer = () => {
         key: `${section.id}::${pattern.shape || index}`,
         section,
         pattern,
+        sampleUnit: pattern.sampleUnit || section.sampleUnit || 'group',
         label: `${section.title}: ${pattern.shape}`,
       }))
     ))
@@ -9030,6 +10693,94 @@ const BomNormalizer = () => {
     () => stagedEditForPattern(selectedParsingPattern),
     [selectedParsingPattern, stagedEditForPattern]
   );
+  const selectedFieldPatternGroup = useMemo(() => (
+    fieldPatternGroups.find((group) => group.id === selectedFieldPatternId) ||
+    fieldPatternGroups[0] ||
+    null
+  ), [fieldPatternGroups, selectedFieldPatternId]);
+  const fieldPatternWorkflowNextStep = fieldPatternReviewWorkflow?.nextStep || null;
+  const fieldSplitFields = fieldPatternWorkflowNextStep?.type === 'split_fields'
+    ? (fieldPatternWorkflowNextStep.fields || [])
+    : [];
+  const selectedFieldSplitConfig = fieldSplitFields.find(
+    (fieldConfig) => fieldConfig.field === fieldSplitSelectedField
+  ) || fieldSplitFields[0] || null;
+  const selectedFieldSplitRule = selectedFieldSplitConfig
+    ? (fieldSplitRuleDrafts[selectedFieldSplitConfig.field] || { delimiter: 'none', customDelimiter: '' })
+    : { delimiter: 'none', customDelimiter: '' };
+  const selectedFieldSplitPreview = selectedFieldSplitConfig?.previews?.[
+    selectedFieldSplitRule.delimiter || 'none'
+  ] || [];
+  const visualTeachMappedFields = useMemo(() => {
+    const sourceColumn = fmt(visualTeachContext?.sourceColumn);
+    const workflowFields = visualTeachContext?.workflowStep?.mappedFields || [];
+    const roleFields = Object.entries(roles || {})
+      .filter(([, header]) => fmt(header) === sourceColumn)
+      .map(([field]) => field);
+    const requested = new Set(workflowFields.length ? workflowFields : roleFields);
+    return FACTWISE_PARSE_FIELDS.filter((field) => requested.has(field.key));
+  }, [roles, visualTeachContext]);
+  const visualTeachMappedFieldKeys = useMemo(
+    () => visualTeachMappedFields.map((field) => field.key),
+    [visualTeachMappedFields]
+  );
+  const visualTeachDialogTitle = visualTeachBackendPreview?.title ||
+    visualTeachContext?.workflowStep?.title ||
+    'Confirm pattern';
+  const visualTeachAllowAlternates = visualTeachMappedFieldKeys.includes('mpn') &&
+    normalizerConfig.alternateLayout !== 'already_separate_rows';
+  const visualTeachRoleOptions = useMemo(() => [
+    ...visualTeachMappedFields.map((field) => ({
+      ...field,
+      ...(VISUAL_TEACH_FIELD_STYLES[field.key] || { color: '#334155', bg: '#f1f5f9' }),
+    })),
+    ...(visualTeachAllowAlternates ? [VISUAL_TEACH_STRUCTURAL_ROLES[0]] : []),
+    ...VISUAL_TEACH_STRUCTURAL_ROLES.slice(1),
+  ], [visualTeachAllowAlternates, visualTeachMappedFields]);
+  const visualTeachPreparedTags = visualTeachTags;
+  const visualTeachIgnoredFields = useMemo(() => {
+    if (visualTeachMappedFieldKeys.length) return visualTeachMappedFieldKeys;
+    const sourceColumn = fmt(visualTeachContext?.sourceColumn);
+    const sourceColumns = visualTeachContext?.seedEntries?.[0]?.sourceColumns || {};
+    return fieldPatternFields
+      .map((field) => field.key)
+      .filter((field) => fmt(sourceColumns[field]) === sourceColumn);
+  }, [fieldPatternFields, visualTeachContext, visualTeachMappedFieldKeys]);
+  const visualTeachIsIgnoreInterpretation = useMemo(() => (
+    visualTeachPreparedTags.includes('ignore') &&
+    !visualTeachPreparedTags.some((role) => role && role !== 'ignore' && role !== 'groupSeparator')
+  ), [visualTeachPreparedTags]);
+  const visualTeachComputedEntries = useMemo(() => normalizeVisualTeachEntries(
+    visualTeachBackendPreview?.entries || visualTeachContext?.seedEntries || []
+  ), [visualTeachBackendPreview, visualTeachContext]);
+  const visualTeachPreviewEntries = visualTeachComputedEntries;
+  const visualTeachPreviousWorkflowStep = useMemo(() => {
+    const currentStepId = visualTeachContext?.workflowStep?.id;
+    const steps = fieldPatternReviewWorkflow?.steps || [];
+    const currentIndex = steps.findIndex((step) => step.id === currentStepId);
+    if (currentIndex <= 0) return null;
+    for (let index = currentIndex - 1; index >= 0; index -= 1) {
+      if (steps[index]?.type === 'teach_visual') return steps[index];
+    }
+    return null;
+  }, [fieldPatternReviewWorkflow, visualTeachContext]);
+  const visualTeachNextWorkflowStep = useMemo(() => {
+    const currentStepId = visualTeachContext?.workflowStep?.id;
+    const steps = fieldPatternReviewWorkflow?.steps || [];
+    const currentIndex = steps.findIndex((step) => step.id === currentStepId);
+    if (currentIndex < 0) return null;
+    for (let index = currentIndex + 1; index < steps.length; index += 1) {
+      if (steps[index]?.type === 'teach_visual') return steps[index];
+    }
+    return null;
+  }, [fieldPatternReviewWorkflow, visualTeachContext]);
+  const allFieldPatternGroupsConfirmed = useMemo(() => (
+    fieldPatternGroups.length > 0 &&
+    fieldPatternGroups.every((group) => fieldPatternConfirmed[group.id] !== false)
+  ), [fieldPatternConfirmed, fieldPatternGroups]);
+  const pendingFieldPatternConfirmationCount = useMemo(() => (
+    fieldPatternGroups.filter((group) => fieldPatternConfirmed[group.id] === false).length
+  ), [fieldPatternConfirmed, fieldPatternGroups]);
   const selectedSlashVariantStaged = Boolean(
     selectedPatternStagedEdit && String(selectedPatternStagedEdit.summary || '').includes('slash variants')
   );
@@ -9178,19 +10929,9 @@ const BomNormalizer = () => {
     setSelectedParsingDetailsOpen(false);
   }, [parsingLogicOpen, selectedParsingPattern?.key]);
 
-  const showManufacturerInheritanceOption = useMemo(() => (
-    !String(config.structure || '').startsWith('mpn_only') &&
-    (config.structure !== 'one_per_row' || config.alternateLayout !== 'already_separate_rows')
-  ), [config.alternateLayout, config.structure]);
-
   const showAlternateManufacturerGroups = useMemo(() => (
     Boolean(roles.manufacturer) && !String(config.structure || '').startsWith('mpn_only')
   ), [config.structure, roles.manufacturer]);
-
-  const selectedGroupHeaderOption = useMemo(
-    () => GROUP_HEADER_OPTIONS.find((option) => option.value === config.groupHeaderMode),
-    [config.groupHeaderMode]
-  );
 
   const normalizedColumnOptions = useMemo(() => (
     getNormalizedExportColumns(normalizedRows)
@@ -9272,7 +11013,11 @@ const BomNormalizer = () => {
   const canUseWithoutMerge = combineItems.length === 1 && !combineItems[0]?.isMergedBase;
   const displayedStep = !workbook && mergeStage !== 'sources'
     ? 1
-    : (currentStep >= 4 ? 3 : currentStep);
+    : currentStep >= 4
+      ? 2
+      : currentStep >= 1
+        ? 1
+        : 0;
   const sourcePanelTitle = mergeStage === 'preview'
     ? 'Review merged source'
     : mergeStage === 'match' || mergeStage === 'options'
@@ -9330,6 +11075,97 @@ const BomNormalizer = () => {
     sheetScope,
     sourceEndRow,
     tagConfig,
+  ]);
+
+  const buildWorkspaceSnapshot = useCallback(() => ({
+    kind: 'workspace',
+    version: 1,
+    savedAt: Date.now(),
+    workbook: makePersistableWorkbook(workbook),
+    fileName,
+    sheetName,
+    sheetScope,
+    selectedSheetNames,
+    sheetRows,
+    headerRowIndex,
+    sheetHeaderRowOverride,
+    sourceEndRow,
+    preparedHeaders,
+    preparedDataRows,
+    roles,
+    config,
+    patternParserOverrides,
+    stagedPatternEdits,
+    normalizedRows,
+    currentStep,
+    progress,
+    delimiterTouched,
+    parserTouched,
+    skipSourceSetupForMerge,
+    normalizationSummary,
+    lowConfidenceOnly,
+    factwiseConfig,
+    tagConfig,
+    bomStructureAnswers,
+    bomStructureSeed,
+    roleColumnLabelModes,
+    combineItems: combineItems.map(makePersistableCombineItem),
+    combineError,
+    mergeChainMessage,
+    mergeSources,
+    mergeStage,
+    mergeConfig,
+    mergePreview,
+    mergePreviewFilter,
+    mergePreviewSearch,
+    mergePreviewPage,
+    mergeVisibleColumns,
+    mergeColumnWidths,
+    pdfRangeEnabled,
+    pdfRanges,
+  }), [
+    bomStructureAnswers,
+    bomStructureSeed,
+    combineError,
+    combineItems,
+    config,
+    currentStep,
+    delimiterTouched,
+    factwiseConfig,
+    fileName,
+    headerRowIndex,
+    lowConfidenceOnly,
+    mergeChainMessage,
+    mergeColumnWidths,
+    mergeConfig,
+    mergePreview,
+    mergePreviewFilter,
+    mergePreviewPage,
+    mergePreviewSearch,
+    mergeSources,
+    mergeStage,
+    mergeVisibleColumns,
+    normalizedRows,
+    normalizationSummary,
+    parserTouched,
+    patternParserOverrides,
+    pdfRangeEnabled,
+    pdfRanges,
+    preparedDataRows,
+    preparedHeaders,
+    progress,
+    roleColumnLabelModes,
+    roles,
+    selectedSheetNames,
+    sheetHeaderRowOverride,
+    sheetName,
+    sheetRows,
+    sheetScope,
+    skipSourceSetupForMerge,
+    sourceEndRow,
+    stagedPatternEdits,
+    tagConfig,
+    workbook,
   ]);
 
   const buildNormalizerWorkflowRecipe = useCallback((kind = 'normalized-results', rowsOverride = normalizedRows) => {
@@ -9490,16 +11326,9 @@ const BomNormalizer = () => {
     restoreInFlightRef.current = true;
     setTimeout(() => { restoreInFlightRef.current = false; }, 0);
     try {
-      const parseSnapshot = (raw) => {
-        try {
-          return raw ? JSON.parse(raw) : null;
-        } catch (_) {
-          return null;
-        }
-      };
-      const latestSnapshot = parseSnapshot(window.sessionStorage.getItem(BOM_NORMALIZER_LATEST_RESULTS_KEY))
+      const latestSnapshot = parseStoredJson(window.sessionStorage.getItem(BOM_NORMALIZER_LATEST_RESULTS_KEY))
         || window.__bomNormalizerLatestResultsSnapshot;
-      const rawSnapshot = parseSnapshot(snapshotKey ? window.sessionStorage.getItem(snapshotKey) : '');
+      const rawSnapshot = parseStoredJson(snapshotKey ? window.sessionStorage.getItem(snapshotKey) : '');
       const memorySnapshot = snapshotKey ? window.__bomNormalizerReturnSnapshots?.[snapshotKey] : null;
       const routeRowsSnapshot = state.bomNormalizerReturnRows?.length
         ? { ...(state.bomNormalizerReturnSnapshot || {}), kind: 'normalized-results', normalizedRows: state.bomNormalizerReturnRows }
@@ -9563,8 +11392,15 @@ const BomNormalizer = () => {
           : (state.bomNormalizerReturnRows || []);
         setPreparedHeaders(snapshot.preparedHeaders || getNormalizedExportColumns(restoredRows));
         setPreparedDataRows(snapshot.preparedDataRows || []);
-        setRoles((prev) => ({ ...prev, ...(snapshot.roles || {}) }));
-        setConfig((prev) => ({ ...prev, ...(snapshot.config || {}) }));
+        setRoles((prev) => ({
+          ...prev,
+          ...sanitizeRestoredRolesForValues(
+            snapshot.roles || {},
+            snapshot.preparedHeaders || getNormalizedExportColumns(restoredRows),
+            snapshot.preparedDataRows || []
+          ),
+        }));
+        setConfig((prev) => ({ ...prev, ...sanitizeNormalizerConfig(snapshot.config || {}) }));
         setPatternParserOverrides(snapshot.patternParserOverrides || []);
         setNormalizedRows(restoredRows);
         setCurrentStep(snapshot.currentStep || 4);
@@ -9596,17 +11432,188 @@ const BomNormalizer = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.pathname, location.state, navigate]);
 
-  const availableStructureOptions = useMemo(
-    () => getStructureOptionsForRoles(roles, config),
-    [config, roles]
-  );
+  useEffect(() => {
+    if (workspaceRestoredRef.current) return;
 
-  const delimiterLabel = useMemo(() => {
-    if (config.delimiterMode === 'auto') return 'auto delimiter detection';
-    if (config.delimiterMode === 'custom') return config.customDelimiter ? `custom delimiter "${config.customDelimiter}"` : 'custom delimiter';
-    if (config.delimiterMode === '\\n') return 'new line delimiter';
-    return `"${config.delimiterMode}" delimiter`;
-  }, [config.customDelimiter, config.delimiterMode]);
+    const state = location.state || {};
+    const routeIsProvidingSource = Boolean(
+      state.initialFile ||
+      state.fromPdfZone ||
+      state.returnFromMapping ||
+      state.bomNormalizerReturnKey ||
+      state.bomNormalizerReturnSnapshot ||
+      state.autoReplayProcessingTemplate
+    );
+
+    if (routeIsProvidingSource) {
+      workspaceRestoredRef.current = true;
+      return;
+    }
+
+    const snapshot = parseStoredJson(window.sessionStorage.getItem(BOM_NORMALIZER_WORKSPACE_KEY));
+    workspaceRestoredRef.current = true;
+    if (!snapshot || snapshot.kind !== 'workspace') return;
+    if (!snapshot.workbook && !snapshot.combineItems?.length && !snapshot.mergePreview && !snapshot.normalizedRows?.length) return;
+
+    const shouldRefreshAutoRoles = !snapshot.parserTouched && Number(snapshot.currentStep || 0) <= 2;
+    restoreInFlightRef.current = true;
+    setTimeout(() => {
+      restoreInFlightRef.current = false;
+      if (shouldRefreshAutoRoles) {
+        backendRoleInferenceKeyRef.current = '';
+        setRestoreInferenceNonce((value) => value + 1);
+      }
+    }, 0);
+
+    const restoredWorkbook = snapshot.workbook?.SheetNames?.length
+      ? {
+        SheetNames: snapshot.workbook.SheetNames,
+        Sheets: snapshot.workbook.Sheets || {},
+      }
+      : null;
+    const restoredCombineItems = (snapshot.combineItems || [])
+      .filter((item) => item.workbook?.SheetNames?.length)
+      .map((item) => ({
+        ...item,
+        file: null,
+        workbook: {
+          SheetNames: item.workbook.SheetNames,
+          Sheets: item.workbook.Sheets || {},
+        },
+      }));
+    const restoredStep = Number(snapshot.currentStep || 0);
+
+    setWorkbook(restoredWorkbook);
+    setFileName(snapshot.fileName || '');
+    setSheetName(snapshot.sheetName || restoredWorkbook?.SheetNames?.[0] || '');
+    setSheetScope(snapshot.sheetScope || 'single');
+    setSelectedSheetNames(snapshot.selectedSheetNames || (restoredWorkbook?.SheetNames?.length ? [restoredWorkbook.SheetNames[0]] : []));
+    setSheetRows(snapshot.sheetRows || []);
+    setHeaderRowIndex(snapshot.headerRowIndex || 0);
+    setSheetHeaderRowOverride(snapshot.sheetHeaderRowOverride || '');
+    setSourceEndRow(snapshot.sourceEndRow || '');
+    setPreparedHeaders(snapshot.preparedHeaders || []);
+    setPreparedDataRows(snapshot.preparedDataRows || []);
+    setRoles((prev) => ({
+      ...prev,
+      ...sanitizeRestoredRolesForValues(
+        snapshot.roles || {},
+        snapshot.preparedHeaders || [],
+        snapshot.preparedDataRows || []
+      ),
+    }));
+    setConfig((prev) => ({ ...prev, ...sanitizeNormalizerConfig(snapshot.config || {}) }));
+    setPatternParserOverrides(snapshot.patternParserOverrides || []);
+    setStagedPatternEdits(snapshot.stagedPatternEdits || []);
+    setNormalizedRows(snapshot.normalizedRows || []);
+    setCurrentStep(restoredWorkbook
+      ? (restoredStep >= 4 ? 4 : 2)
+      : (restoredStep >= 4 ? 4 : 0));
+    setProgress(snapshot.progress || { processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
+    setDelimiterTouched(Boolean(snapshot.delimiterTouched));
+    setParserTouched(Boolean(snapshot.parserTouched));
+    setSkipSourceSetupForMerge(Boolean(snapshot.skipSourceSetupForMerge));
+    setNormalizationSummary(snapshot.normalizationSummary || null);
+    setLowConfidenceOnly(Boolean(snapshot.lowConfidenceOnly));
+    setFactwiseConfig((prev) => ({ ...prev, ...(snapshot.factwiseConfig || {}) }));
+    setTagConfig((prev) => ({ ...prev, ...(snapshot.tagConfig || {}) }));
+    setBomStructureAnswers(snapshot.bomStructureAnswers || null);
+    setBomStructureSeed(snapshot.bomStructureSeed || null);
+    setRoleColumnLabelModes(snapshot.roleColumnLabelModes || {});
+    setCombineItems(restoredCombineItems);
+    setCombineError(snapshot.combineError || '');
+    setMergeChainMessage(snapshot.mergeChainMessage || '');
+    setMergeSources(snapshot.mergeSources || []);
+    setMergeStage(snapshot.mergeStage || 'sources');
+    setMergeConfig((prev) => ({ ...prev, ...(snapshot.mergeConfig || {}) }));
+    setMergePreview(snapshot.mergePreview || null);
+    setMergePreviewFilter(snapshot.mergePreviewFilter || 'all');
+    setMergePreviewSearch(snapshot.mergePreviewSearch || '');
+    setMergePreviewPage(snapshot.mergePreviewPage || 0);
+    setMergeVisibleColumns(snapshot.mergeVisibleColumns || snapshot.mergePreview?.headers || []);
+    setMergeColumnWidths(snapshot.mergeColumnWidths || {});
+    setPdfRangeEnabled(Boolean(snapshot.pdfRangeEnabled));
+    setPdfRanges(snapshot.pdfRanges?.length ? snapshot.pdfRanges : [
+      { name: 'Section 1', pages: '' },
+      { name: 'Section 2', pages: '' },
+    ]);
+    setError('');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.state]);
+
+  useEffect(() => {
+    if (!workspaceRestoredRef.current || restoreInFlightRef.current) return undefined;
+
+    const hasWorkspace = Boolean(
+      workbook ||
+      combineItems.length ||
+      mergeSources.length ||
+      mergePreview ||
+      normalizedRows.length ||
+      currentStep > 0
+    );
+
+    if (!hasWorkspace) {
+      clearBomNormalizerWorkspace();
+      return undefined;
+    }
+
+    const timeoutId = setTimeout(() => {
+      const snapshot = buildWorkspaceSnapshot();
+      const writeSnapshot = (payload) => {
+        window.sessionStorage.setItem(BOM_NORMALIZER_WORKSPACE_KEY, JSON.stringify(payload));
+      };
+
+      try {
+        writeSnapshot(snapshot);
+      } catch (err) {
+        try {
+          writeSnapshot({
+            ...snapshot,
+            workbook: snapshot.workbook
+              ? { SheetNames: snapshot.workbook.SheetNames, Sheets: {} }
+              : null,
+            combineItems: (snapshot.combineItems || []).map((item) => ({
+              ...item,
+              workbook: item.workbook
+                ? { SheetNames: item.workbook.SheetNames, Sheets: {} }
+                : null,
+            })),
+          });
+        } catch (innerErr) {
+          try {
+            const {
+              sheetRows: _sheetRows,
+              preparedDataRows: _preparedDataRows,
+              normalizedRows: _normalizedRows,
+              ...lean
+            } = snapshot;
+            writeSnapshot({
+              ...lean,
+              workbook: snapshot.workbook
+                ? { SheetNames: snapshot.workbook.SheetNames, Sheets: {} }
+                : null,
+              combineItems: [],
+            });
+          } catch (finalErr) {
+            console.warn('Could not persist BOM normalizer workspace:', finalErr);
+          }
+        }
+      }
+    }, 250);
+
+    return () => clearTimeout(timeoutId);
+  }, [
+    buildWorkspaceSnapshot,
+    combineItems.length,
+    currentStep,
+    mergePreview,
+    mergeSources.length,
+    normalizedRows.length,
+    workbook,
+  ]);
+
+  const availableStructureOptions = useMemo(() => getIdentityLayoutOptions(), []);
 
   const cleanupDetections = useMemo(() => {
     const detections = {
@@ -9625,42 +11632,6 @@ const BomNormalizer = () => {
     });
     return detections;
   }, [headers, roles, sourceDataRows]);
-
-  // Every distinct value in the mapped row-type column, commonest first, with
-  // how many rows carry it. This is what the user ticks against - the whole
-  // point of the role is that nothing is dropped they have not seen.
-  const rowTypeValues = useMemo(() => {
-    if (!roles.rowType) return [];
-    const counts = new Map();
-    sourceDataRows.forEach((row) => {
-      const value = getCell(row, roles.rowType).trim();
-      if (value) counts.set(value, (counts.get(value) || 0) + 1);
-    });
-    return [...counts.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .map(([value, count]) => ({ value, count }));
-  }, [roles.rowType, sourceDataRows]);
-
-  // Pre-tick the obvious ones the first time a column is mapped, then leave the
-  // list alone - re-suggesting on every render would undo the user's own ticks.
-  const suggestedForColumn = useRef(null);
-  useEffect(() => {
-    if (!roles.rowType || !rowTypeValues.length) return;
-    if (suggestedForColumn.current === roles.rowType) return;
-    suggestedForColumn.current = roles.rowType;
-    const suggested = suggestDocumentTypeValues(rowTypeValues.map((entry) => entry.value));
-    setConfig((prev) => (
-      (prev.documentTypeValues || []).length ? prev : { ...prev, documentTypeValues: suggested }
-    ));
-  }, [roles.rowType, rowTypeValues]);
-
-  const documentRowCount = useMemo(() => {
-    const flagged = config.documentTypeValues || [];
-    if (!roles.rowType || !flagged.length) return 0;
-    return rowTypeValues
-      .filter((entry) => flagged.includes(entry.value))
-      .reduce((total, entry) => total + entry.count, 0);
-  }, [config.documentTypeValues, roles.rowType, rowTypeValues]);
 
   const detectedCleanupOptions = useMemo(
     () => CLEANUP_OPTIONS.filter((option) => cleanupDetections[option.key] > 0),
@@ -9717,8 +11688,20 @@ const BomNormalizer = () => {
       roles.uom,
       roles.level,
       roles.parent,
-      ...(config.alternateColumnGroups || []).flatMap((group) => [group.mpn, group.mfr, group.qty, group.uom]),
+      ...(config.alternateColumnGroups || []).flatMap((group) => [group.cpn, group.mpn, group.mfr, group.qty, group.uom]),
     ].filter(Boolean));
+    const detectedGroup = findAlternateColumnGroups(headers, usedColumns)[0];
+    if (detectedGroup) {
+      return {
+        slot: `${(config.alternateColumnGroups || []).length + 1}`,
+        cpn: detectedGroup.cpn || '',
+        mpn: detectedGroup.mpn || '',
+        mfr: shouldSuggestManufacturer ? (detectedGroup.mfr || detectedGroup.manufacturer || '') : '',
+        qty: detectedGroup.qty || '',
+        uom: detectedGroup.uom || '',
+      };
+    }
+
     const candidates = headers.filter((header) => !usedColumns.has(header));
     const findCandidate = (patterns) => candidates.find((header) => {
       const normalized = normalizeKey(header);
@@ -9726,11 +11709,13 @@ const BomNormalizer = () => {
     }) || '';
     const mpn = findCandidate([/\bmpn\b/, /part/, /code/, /column/]) || candidates[0] || '';
     const afterMpn = mpn ? candidates.slice(candidates.indexOf(mpn) + 1) : candidates;
+    const cpn = afterMpn.find((header) => /cpn|customer|item\s*code/i.test(header)) || '';
     const mfr = shouldSuggestManufacturer
       ? afterMpn.find((header) => /mfr|manufacturer|vendor|supplier|column/i.test(header)) || afterMpn[0] || ''
       : '';
     return {
       slot: `${(config.alternateColumnGroups || []).length + 1}`,
+      cpn: cpn === mpn ? '' : cpn,
       mpn,
       mfr: mfr === mpn ? '' : mfr,
       qty: '',
@@ -9739,6 +11724,7 @@ const BomNormalizer = () => {
   }, [config.alternateColumnGroups, config.structure, headers, roles]);
 
   const addAlternateColumnGroup = useCallback(() => {
+    setParserTouched(true);
     setConfig((prev) => ({
       ...prev,
       alternateLayout: 'separate_columns',
@@ -9749,7 +11735,85 @@ const BomNormalizer = () => {
     }));
   }, [suggestAlternateColumnGroup]);
 
+  const setAlternateColumnGroupCount = useCallback((value) => {
+    const parsed = Number.parseInt(value, 10);
+    const targetCount = Number.isFinite(parsed)
+      ? Math.max(0, Math.min(MAX_ALTERNATE_COLUMN_GROUPS, parsed))
+      : 0;
+    const primaryMappedColumns = new Set(Object.values(roles || {}).filter(Boolean));
+
+    setParserTouched(true);
+    setConfig((prev) => {
+      const currentGroups = Array.isArray(prev.alternateColumnGroups) ? prev.alternateColumnGroups : [];
+      const usedColumns = new Set(primaryMappedColumns);
+      const nextGroups = [];
+      const detectedGroups = findAlternateColumnGroups(headers, usedColumns);
+
+      const markUsed = (group) => {
+        [group.cpn, group.mpn, group.mfr, group.qty, group.uom].filter(Boolean).forEach((header) => usedColumns.add(header));
+      };
+
+      const nextDetectedGroup = () => (
+        detectedGroups.find((group) => (
+          [group.cpn, group.mpn, group.mfr, group.qty, group.uom]
+            .filter(Boolean)
+            .every((header) => !usedColumns.has(header))
+        )) || {}
+      );
+      const matchingDetectedGroup = (group) => (
+        detectedGroups.find((detected) => (
+          (group.slot && detected.slot === group.slot) ||
+          (group.mpn && detected.mpn === group.mpn) ||
+          (group.mfr && detected.mfr === group.mfr) ||
+          (group.cpn && detected.cpn === group.cpn)
+        )) || {}
+      );
+
+      currentGroups.slice(0, targetCount).forEach((group, index) => {
+        const suggestion = matchingDetectedGroup(group);
+        const fallbackSuggestion = (!group.mpn || primaryMappedColumns.has(group.mpn))
+          ? nextDetectedGroup()
+          : {};
+        const normalizedGroup = {
+          slot: group.slot || suggestion.slot || fallbackSuggestion.slot || `${index + 1}`,
+          cpn: primaryMappedColumns.has(group.cpn) ? '' : (group.cpn || suggestion.cpn || fallbackSuggestion.cpn || ''),
+          mpn: primaryMappedColumns.has(group.mpn) ? '' : (group.mpn || suggestion.mpn || fallbackSuggestion.mpn || ''),
+          mfr: primaryMappedColumns.has(group.mfr) ? '' : (group.mfr || suggestion.mfr || fallbackSuggestion.mfr || suggestion.manufacturer || fallbackSuggestion.manufacturer || ''),
+          qty: primaryMappedColumns.has(group.qty) ? '' : (group.qty || suggestion.qty || fallbackSuggestion.qty || ''),
+          uom: primaryMappedColumns.has(group.uom) ? '' : (group.uom || suggestion.uom || fallbackSuggestion.uom || ''),
+        };
+        nextGroups.push(normalizedGroup);
+        markUsed(normalizedGroup);
+    });
+
+      while (nextGroups.length < targetCount) {
+        const detected = nextDetectedGroup();
+        const normalizedGroup = {
+          slot: `${nextGroups.length + 1}`,
+          cpn: detected.cpn || '',
+          mpn: detected.mpn || '',
+          mfr: detected.mfr || detected.manufacturer || '',
+          qty: detected.qty || '',
+          uom: detected.uom || '',
+        };
+        nextGroups.push(normalizedGroup);
+        markUsed(normalizedGroup);
+      }
+
+      return {
+        ...prev,
+        alternateLayout: 'separate_columns',
+        alternateColumnGroups: nextGroups,
+      };
+    });
+  }, [headers]);
+
+  const autofillAlternateColumnGroups = useCallback(() => {
+    setAlternateColumnGroupCount(Math.max(1, (config.alternateColumnGroups || []).length));
+  }, [config.alternateColumnGroups, setAlternateColumnGroupCount]);
+
   const updateAlternateColumnGroup = useCallback((index, field, value) => {
+    setParserTouched(true);
     setConfig((prev) => ({
       ...prev,
       alternateColumnGroups: (prev.alternateColumnGroups || []).map((group, groupIndex) => (
@@ -9759,13 +11823,14 @@ const BomNormalizer = () => {
   }, []);
 
   const removeAlternateColumnGroup = useCallback((index) => {
+    setParserTouched(true);
     setConfig((prev) => ({
       ...prev,
       alternateColumnGroups: (prev.alternateColumnGroups || []).filter((_, groupIndex) => groupIndex !== index),
     }));
   }, []);
 
-  const handleWorkbookLoaded = useCallback((nextWorkbook, nextFileName, options = {}) => {
+  const handleWorkbookLoaded = useCallback(async (nextWorkbook, nextFileName, options = {}) => {
     const preferredSheet = options.sheetName && nextWorkbook.SheetNames.includes(options.sheetName)
       ? options.sheetName
       : nextWorkbook.SheetNames[0];
@@ -9782,7 +11847,7 @@ const BomNormalizer = () => {
         ? autoMultiBlock
         : prepareSingleSheet(nextWorkbook, preferredSheet, { headerRow: options.headerRow });
     const nextHeaders = prepared.headers;
-    const nextRoles = rolesForMultiBlockAssembly(nextHeaders, inferRoles(nextHeaders, prepared.dataRows, { manufacturerDirectory }));
+    const nextRoles = await inferNormalizerRoles(nextHeaders, prepared.dataRows);
     const nextStructure = detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40));
     const nextSheetScope = useRequestedSelection
       ? (options.sheetScope === 'all' && requestedSheets.length === nextWorkbook.SheetNames.length ? 'all' : 'selected')
@@ -9810,7 +11875,7 @@ const BomNormalizer = () => {
       roles: nextRoles,
     }));
     setNormalizedRows([]);
-    setCurrentStep(1);
+    setCurrentStep(2);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
     setDelimiterTouched(false);
     setParserTouched(false);
@@ -9818,7 +11883,7 @@ const BomNormalizer = () => {
     setNormalizationSummary(null);
     setConfirmOpen(false);
     setError('');
-  }, [manufacturerDirectory]);
+  }, [inferNormalizerRoles]);
 
   useEffect(() => {
     const state = location.state || {};
@@ -9859,7 +11924,7 @@ const BomNormalizer = () => {
 
         if (!cancelled) {
           const nextWorkbook = createWorkbookFromObjects(normalized.rows, normalized.headers, 'PDF_Zones');
-          handleWorkbookLoaded(nextWorkbook, fileLabel);
+          await handleWorkbookLoaded(nextWorkbook, fileLabel);
           navigate('/bom-normaliser', { replace: true });
         }
       } catch (err) {
@@ -9934,6 +11999,7 @@ const BomNormalizer = () => {
       || restoredReturnSnapshotRef.current) return;
 
     initialFileSeededRef.current = seedKey;
+    uploadReturnFileRef.current = initialFile;
 
     const seedInitialFileAsSource = async () => {
       setCombineBusy(true);
@@ -9952,7 +12018,7 @@ const BomNormalizer = () => {
           await new Promise((resolve) => setTimeout(resolve, 0));
           const nextWorkbook = await readUploadedWorkbookSafely(initialFile);
           const multiSheetSeed = state.initialSheetScope && state.initialSheetScope !== 'single';
-          handleWorkbookLoaded(nextWorkbook, initialFile.name, {
+          await handleWorkbookLoaded(nextWorkbook, initialFile.name, {
             sheetName: state.initialSheetName,
             // The upload screen's header row is auto-detected from whichever
             // sheet it previews, so across a multi-sheet selection it is only
@@ -10012,11 +12078,16 @@ const BomNormalizer = () => {
           throw new Error('This workflow template includes a merge setup. Recreate the merge once, then save the template again after normalization.');
         }
 
-        const resolvedRoles = resolveSavedRoleMap(workflow.roles || {}, preparedHeaders);
+        const resolvedRoles = sanitizeRestoredRolesForValues(
+          resolveSavedRoleMap(workflow.roles || {}, preparedHeaders),
+          preparedHeaders,
+          preparedDataRows
+        );
+        const savedConfig = sanitizeNormalizerConfig(workflow.config || {});
         const resolvedConfig = {
           ...config,
-          ...(workflow.config || {}),
-          alternateColumnGroups: resolveSavedAlternateGroups(workflow.config?.alternateColumnGroups || [], preparedHeaders),
+          ...savedConfig,
+          alternateColumnGroups: resolveSavedAlternateGroups(savedConfig.alternateColumnGroups || [], preparedHeaders),
         };
 
         if (!resolvedRoles.mpn && !resolvedRoles.manufacturer) {
@@ -10033,7 +12104,19 @@ const BomNormalizer = () => {
           setSourceEndRow(workflow.sourceHints.sourceEndRow);
         }
 
-        let replayRows = await normalizeRowsChunked(replaySourceRows, preparedHeaders, resolvedRoles, resolvedConfig, setProgress);
+        const normalizeResponse = await api.normalizeBom({
+          headers: preparedHeaders,
+          rows: replaySourceRows,
+          roles: resolvedRoles,
+          config: { ...resolvedConfig, headerRowIndex },
+        });
+        let replayRows = normalizeResponse.data?.normalizedRows || [];
+        setProgress(normalizeResponse.data?.progress || {
+          processed: replaySourceRows.length,
+          total: replaySourceRows.length,
+          outputRows: replayRows.length,
+          skippedRows: 0,
+        });
         if (workflow.actions?.factwiseId) {
           replayRows = createFactwiseIds(replayRows, workflow.factwiseConfig || {});
         }
@@ -10088,6 +12171,7 @@ const BomNormalizer = () => {
   }, [
     config,
     fileName,
+    headerRowIndex,
     location.state,
     navigate,
     preparedDataRows,
@@ -10098,6 +12182,7 @@ const BomNormalizer = () => {
   const handleCombineFilesChange = useCallback(async (event) => {
     const files = Array.from(event.target.files || []);
     if (!files.length) return;
+    uploadReturnFileRef.current = files[0];
     const hasMergedBase = combineItems.some((item) => item.isMergedBase);
 
     setCombineBusy(true);
@@ -10197,9 +12282,9 @@ const BomNormalizer = () => {
             rows: pdfSources.flatMap((source) => source.rows),
           };
         const nextWorkbook = createWorkbookFromObjects(pdfSource.rows, pdfSource.headers, 'PDF_Source');
-        handleWorkbookLoaded(nextWorkbook, item.fileName);
+        await handleWorkbookLoaded(nextWorkbook, item.fileName);
       } else if (item.workbook) {
-        handleWorkbookLoaded(item.workbook, item.fileName);
+        await handleWorkbookLoaded(item.workbook, item.fileName);
       } else {
         throw new Error('This source is not ready yet.');
       }
@@ -10416,14 +12501,14 @@ const BomNormalizer = () => {
     window.addEventListener('mouseup', handleUp);
   }, [mergeColumnWidths]);
 
-  const handleUseMergePreview = useCallback(() => {
+  const handleUseMergePreview = useCallback(async () => {
     if (!mergePreview) {
       setCombineError('Build the merge preview first.');
       return;
     }
     const { headers: outputHeaders, rows: cleanRows } = getMergePreviewExport(mergePreview, mergeVisibleColumns, mergePreviewFilter);
     const nextWorkbook = createWorkbookFromObjects(cleanRows, outputHeaders, 'Merged');
-    handleWorkbookLoaded(nextWorkbook, `Merged source (${mergePrimarySource?.label || 'primary'} + ${mergeSecondarySource?.label || 'secondary'})`);
+    await handleWorkbookLoaded(nextWorkbook, `Merged source (${mergePrimarySource?.label || 'primary'} + ${mergeSecondarySource?.label || 'secondary'})`);
     setSkipSourceSetupForMerge(true);
     setCurrentStep(2);
     setMergeStage('preview');
@@ -10827,41 +12912,11 @@ const BomNormalizer = () => {
     else if (pending === 'normalized') handleContinueNormalizedToBomMapping(payload);
   }, [pendingBomAction, handleContinueMergePreviewToBomMapping, handleContinueNormalizedToBomMapping]);
 
-  const handleBackFromConfigure = useCallback(() => {
-    if (skipSourceSetupForMerge && mergePreview) {
-      setWorkbook(null);
-      setFileName('');
-      setSheetName('');
-      setSheetScope('single');
-      setSelectedSheetNames([]);
-      setSheetRows([]);
-      setHeaderRowIndex(0);
-      setPreparedHeaders([]);
-      setPreparedDataRows([]);
-      setPatternParserOverrides([]);
-      setStagedPatternEdits([]);
-      setRoles(emptyRoles);
-      setNormalizedRows([]);
-      setCurrentStep(0);
-      setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
-      setDelimiterTouched(false);
-      setParserTouched(false);
-      setSkipSourceSetupForMerge(false);
-      setNormalizationSummary(null);
-      setConfirmOpen(false);
-      setMergeStage('preview');
-      setError('');
-      return;
-    }
-
-    setCurrentStep(1);
-  }, [mergePreview, skipSourceSetupForMerge]);
-
-  const handleSheetChange = useCallback((nextSheetName) => {
+  const handleSheetChange = useCallback(async (nextSheetName) => {
     if (!workbook) return;
     const prepared = prepareSingleSheet(workbook, nextSheetName);
     const nextHeaders = prepared.headers;
-    const nextRoles = rolesForMultiBlockAssembly(nextHeaders, inferRoles(nextHeaders, prepared.dataRows, { manufacturerDirectory }));
+    const nextRoles = await inferNormalizerRoles(nextHeaders, prepared.dataRows);
 
     setSheetName(nextSheetName);
     setSelectedSheetNames([nextSheetName]);
@@ -10878,16 +12933,16 @@ const BomNormalizer = () => {
       roles: nextRoles,
     }));
     setNormalizedRows([]);
-    setCurrentStep(1);
+    setCurrentStep(2);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
     setDelimiterTouched(false);
     setParserTouched(false);
     setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
-  }, [manufacturerDirectory, workbook]);
+  }, [inferNormalizerRoles, workbook]);
 
-  const applySheetSelection = useCallback((scope, names, options = {}) => {
+  const applySheetSelection = useCallback(async (scope, names, options = {}) => {
     if (!workbook) return;
     const safeNames = names.filter((name) => workbook.SheetNames.includes(name));
     const nextNames = scope === 'all'
@@ -10900,7 +12955,7 @@ const BomNormalizer = () => {
     const prepared = scope === 'single'
       ? prepareSingleSheet(workbook, nextNames[0])
       : prepareMultipleSheets(workbook, nextNames, { headerRow });
-    const nextRoles = rolesForMultiBlockAssembly(prepared.headers, inferRoles(prepared.headers, prepared.dataRows, { manufacturerDirectory }));
+    const nextRoles = await inferNormalizerRoles(prepared.headers, prepared.dataRows);
 
     setSheetScope(scope);
     setSheetHeaderRowOverride(scope === 'single' || !headerRow ? '' : String(headerRow));
@@ -10919,14 +12974,14 @@ const BomNormalizer = () => {
       roles: nextRoles,
     }));
     setNormalizedRows([]);
-    setCurrentStep(1);
+    setCurrentStep(2);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
     setDelimiterTouched(false);
     setParserTouched(false);
     setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
-  }, [manufacturerDirectory, sheetHeaderRowOverride, workbook]);
+  }, [inferNormalizerRoles, sheetHeaderRowOverride, workbook]);
 
   const handleSheetScopeChange = useCallback((nextScope) => {
     if (!workbook) return;
@@ -10945,18 +13000,18 @@ const BomNormalizer = () => {
     applySheetSelection('selected', names);
   }, [applySheetSelection]);
 
-  const handleHeaderRowChange = useCallback((value) => {
+  const handleHeaderRowChange = useCallback(async (value) => {
     const nextIndex = Math.max(0, Number(value) - 1);
     const activeSheetName = sheetName || workbook?.SheetNames?.[0] || '';
     // Across several sheets one header row applies to all of them; blank hands
     // each sheet back to its own auto-detection.
     if (workbook && sheetScope !== 'single') {
-      applySheetSelection(sheetScope, selectedSheetNames, { headerRow: value });
+      await applySheetSelection(sheetScope, selectedSheetNames, { headerRow: value });
       return;
     }
     if (workbook && sheetScope === 'single' && activeSheetName) {
       const prepared = prepareSingleSheet(workbook, activeSheetName, { headerRow: nextIndex + 1 });
-      const nextRoles = inferRoles(prepared.headers, prepared.dataRows, { manufacturerDirectory });
+      const nextRoles = await inferNormalizerRoles(prepared.headers, prepared.dataRows);
       setSheetRows(prepared.sheetRows);
       setHeaderRowIndex(prepared.headerRowIndex);
       setPreparedHeaders(prepared.headers);
@@ -10977,19 +13032,26 @@ const BomNormalizer = () => {
     const nextHeaders = columns.length
       ? columns.map((column) => column.header)
       : makeUniqueHeaders(sheetRows[nextIndex] || []);
-    const nextRoles = inferRoles(nextHeaders, sheetRows.slice(nextIndex + 1), { manufacturerDirectory });
-    setHeaderRowIndex(nextIndex);
-    setPreparedHeaders(nextHeaders);
-    setPreparedDataRows(sheetRows
+    const nextRows = sheetRows
       .slice(nextIndex + 1)
       .map((row, rowIndex) => {
         const mapped = {};
-        columns.forEach((column) => {
-          mapped[column.header] = fmt(row[column.index]);
-        });
+        if (columns.length) {
+          columns.forEach((column) => {
+            mapped[column.header] = fmt(row[column.index]);
+          });
+        } else {
+          nextHeaders.forEach((header, index) => {
+            mapped[header] = fmt(row[index]);
+          });
+        }
         mapped.__sourceRow = nextIndex + 2 + rowIndex;
         return mapped;
-      }));
+      });
+    const nextRoles = await inferNormalizerRoles(nextHeaders, nextRows);
+    setHeaderRowIndex(nextIndex);
+    setPreparedHeaders(nextHeaders);
+    setPreparedDataRows(nextRows);
     setPatternParserOverrides([]);
     setSourceEndRow('');
     setRoles(nextRoles);
@@ -10999,11 +13061,14 @@ const BomNormalizer = () => {
     setParserTouched(false);
     setSkipSourceSetupForMerge(false);
     setConfirmOpen(false);
-  }, [applySheetSelection, manufacturerDirectory, selectedSheetNames, sheetName, sheetRows, sheetScope, workbook]);
+  }, [applySheetSelection, inferNormalizerRoles, selectedSheetNames, sheetName, sheetRows, sheetScope, workbook]);
 
   const handleRoleChange = useCallback((role, header) => {
+    setParserTouched(true);
+    setFieldPatternGroups([]);
+    setFieldPatternEdits({});
+    setFieldPatternConfirmed({});
     setRoles((prev) => ({ ...prev, [role]: header }));
-    if (header) rememberRoleHeader(role, header);
   }, []);
 
   const getSourceColumnName = useCallback((header, fallbackIndex = -1) => {
@@ -11070,13 +13135,14 @@ const BomNormalizer = () => {
       const template = response.data.template;
       const workflow = template?.workflow || {};
       const savedRoles = workflow.roles || {};
-      const nextRoles = Object.keys(emptyRoles).reduce((acc, key) => {
+      const resolvedRoles = Object.keys(emptyRoles).reduce((acc, key) => {
         acc[key] = resolveTemplateHeader(savedRoles[key]);
         return acc;
       }, {});
+      const nextRoles = sanitizeRestoredRolesForValues(resolvedRoles, headers, dataRows);
 
       setRoles(nextRoles);
-      setConfig((prev) => ({ ...prev, ...(workflow.config || {}) }));
+        setConfig((prev) => ({ ...prev, ...sanitizeNormalizerConfig(workflow.config || {}) }));
       if (workflow.factwiseConfig) setFactwiseConfig((prev) => ({ ...prev, ...workflow.factwiseConfig }));
       if (workflow.tagConfig) setTagConfig((prev) => ({ ...prev, ...workflow.tagConfig }));
       setParserTouched(true);
@@ -11089,7 +13155,7 @@ const BomNormalizer = () => {
     } catch (err) {
       setError(err.response?.data?.error || err.message || 'Could not apply workflow template.');
     }
-  }, [headers, resolveTemplateHeader, selectedWorkflowTemplateId, workbook]);
+  }, [dataRows, headers, resolveTemplateHeader, selectedWorkflowTemplateId, workbook]);
 
   const saveWorkflowTemplate = useCallback(async () => {
     const name = window.prompt('Name this workflow template');
@@ -11102,6 +13168,7 @@ const BomNormalizer = () => {
       selectedSheetNames,
       headerRowIndex,
       headers,
+      rowSample: dataRows.slice(0, 120),
     };
     const workflow = {
       version: 1,
@@ -11167,11 +13234,74 @@ const BomNormalizer = () => {
     };
   }, [config, dataRows, headers, roles]);
 
-  const commitNormalizedResult = useCallback((rows, pairingCheck = null) => {
+  const persistLearnedStructure = useCallback(({
+    learnedHeaders = headers,
+    learnedRows = dataRows,
+    learnedRoles = roles,
+    learnedConfig = normalizerConfig,
+    kind = 'normalization-run',
+    userConfirmed = false,
+  } = {}) => {
+    const safeHeaders = Array.isArray(learnedHeaders) ? learnedHeaders : [];
+    const safeRows = Array.isArray(learnedRows) ? learnedRows : [];
+    if (!safeHeaders.length || !safeRows.length) return null;
+    const confirmedByUser = Boolean(userConfirmed || parserTouched);
+
+    const sourceSignature = {
+      fileName,
+      sheetName,
+      sheetScope,
+      selectedSheetNames,
+      headerRowIndex,
+      sourceEndRow,
+      headers: safeHeaders,
+      rowSample: safeRows.slice(0, 120),
+      userTouched: confirmedByUser,
+      mappingSource: confirmedByUser ? 'user_confirmed' : 'auto_inferred',
+    };
+    const workflow = {
+      version: 1,
+      kind,
+      userTouched: confirmedByUser,
+      mappingSource: confirmedByUser ? 'user_confirmed' : 'auto_inferred',
+      roles: learnedRoles,
+      config: learnedConfig,
+      sourceHints: {
+        fileName,
+        sheetName,
+        sheetScope,
+        selectedSheetNames,
+        headerRowIndex,
+        sourceEndRow,
+      },
+    };
+
+    return api.saveBomStructure({
+      name: [fileName, sheetName].filter(Boolean).join(' - ') || 'BOM Normalizer structure',
+      headers: safeHeaders,
+      rows: safeRows.slice(0, 120),
+      roles: learnedRoles,
+      config: learnedConfig,
+      sourceSignature,
+      workflow,
+      confidence: 1,
+    }).catch((err) => {
+      console.warn('Could not persist learned BOM structure.', err);
+      if (userConfirmed) throw err;
+      return null;
+    });
+  }, [dataRows, fileName, headerRowIndex, headers, normalizerConfig, parserTouched, roles, selectedSheetNames, sheetName, sheetScope, sourceEndRow]);
+
+  const commitNormalizedResult = useCallback((rows, pairingCheck = null, options = {}) => {
     setNormalizedRows(rows);
     setNormalizationSummary(buildNormalizationSummary(rows, pairingCheck));
     setSummaryParserDetailsOpen(false);
-    setConfirmOpen(true);
+    if (options.openResults === true) {
+      setConfirmOpen(false);
+      setCurrentStep(4);
+    } else {
+      setConfirmOpen(true);
+    }
     setError('');
   }, [buildNormalizationSummary]);
 
@@ -11235,7 +13365,9 @@ const BomNormalizer = () => {
     };
     setPairingReviewOpen(false);
     setPendingNormalization(null);
-    commitNormalizedResult(reviewedRows, pairingCheck);
+    commitNormalizedResult(reviewedRows, pairingCheck, {
+      openResults: pendingNormalization.openResultsAfterReview === true,
+    });
   }, [commitNormalizedResult, pairingReviewRows, pendingNormalization]);
 
   const handleKeepPairingReview = useCallback(() => {
@@ -11250,7 +13382,9 @@ const BomNormalizer = () => {
     };
     setPairingReviewOpen(false);
     setPendingNormalization(null);
-    commitNormalizedResult(reviewedRows, pairingCheck);
+    commitNormalizedResult(reviewedRows, pairingCheck, {
+      openResults: pendingNormalization.openResultsAfterReview === true,
+    });
   }, [commitNormalizedResult, pairingReviewRows, pendingNormalization]);
 
   const commitStagedPatternEdits = useCallback(() => {
@@ -11291,7 +13425,8 @@ const BomNormalizer = () => {
     return { headers, rows: baseRows, overrides: nextOverrides };
   }, [dataRows, headerRowIndex, headers, patternParserOverrides, sourceDataRows, stagedPatternEdits]);
 
-  const runNormalization = useCallback(async () => {
+  const runNormalization = useCallback(async (options = {}) => {
+    const openResults = options?.openResults === true;
     if (!dataRows.length) {
       setError('No data rows found below the selected header row.');
       return;
@@ -11316,25 +13451,45 @@ const BomNormalizer = () => {
     setProgress({ processed: 0, total: runRows.length, outputRows: 0, skippedRows: 0 });
     await new Promise((resolve) => setTimeout(resolve, 0));
     try {
-      const normalized = await normalizeRowsChunked(runRows, runHeaders, roles, runConfig, setProgress);
-      const result = applyPatternOutputsToNormalizedRows(normalized, committed.overrides);
-      const pairingCheck = layoutStructure === 'assembly_quantity_matrix' || layoutStructure === 'multi_block_assembly'
-        ? { checkedRows: 0, matchedRows: 0, issueRows: [] }
-        : analyzeMpnManufacturerPairing(runRows, runHeaders, roles, runConfig);
-      if (pairingCheck.issueRows.length) {
+      const response = await api.normalizeBom({
+        headers: runHeaders,
+        rows: runRows,
+        roles,
+        config: { ...runConfig, headerRowIndex },
+      });
+      const result = response.data?.normalizedRows || [];
+      setProgress(response.data?.progress || {
+        processed: runRows.length,
+        total: runRows.length,
+        outputRows: result.length,
+        skippedRows: 0,
+      });
+      persistLearnedStructure({
+        learnedHeaders: runHeaders,
+        learnedRows: runRows,
+        learnedRoles: roles,
+        learnedConfig: runConfig,
+      });
+      const pairingCheck = response.data?.pairingCheck || { checkedRows: 0, matchedRows: 0, issueRows: [] };
+      if (pairingCheck.issueRows.length && !openResults) {
         setPendingNormalization({ rows: result, pairingCheck });
         setPairingReviewRows(pairingCheck.issueRows);
         setPairingReviewOpen(true);
         setError('');
       } else {
-        commitNormalizedResult(result, pairingCheck);
+        setPendingNormalization(pairingCheck.issueRows.length
+          ? { rows: result, pairingCheck, openResultsAfterReview: true }
+          : null);
+        setPairingReviewRows(pairingCheck.issueRows || []);
+        setPairingReviewOpen(false);
+        commitNormalizedResult(result, pairingCheck, { openResults });
       }
     } catch (err) {
       setError(err.message || 'Normalization failed.');
     } finally {
       setBusy(false);
     }
-  }, [commitNormalizedResult, commitStagedPatternEdits, dataRows.length, normalizerConfig, roles, sourceEndRow]);
+  }, [commitNormalizedResult, commitStagedPatternEdits, dataRows.length, headerRowIndex, normalizerConfig, persistLearnedStructure, roles, sourceEndRow]);
 
   const handleNormalize = useCallback(async () => {
     setParsingLogicOpen(true);
@@ -11386,6 +13541,1152 @@ const BomNormalizer = () => {
       setConfigureParserPreparing(false);
     }
   }, [dataRows, headers]);
+
+  const handleTeachFieldPattern = useCallback(async (ruleOverride = null, options = {}) => {
+    if (!headers.length || !dataRows.length) {
+      setError('Upload a sheet before teaching field patterns.');
+      return;
+    }
+    const activeRuleDrafts = ruleOverride && !ruleOverride?.nativeEvent && !ruleOverride?.currentTarget
+      ? ruleOverride
+      : (Object.keys(fieldPatternRuleDrafts || {}).length ? fieldPatternRuleDrafts : (normalizerConfig.fieldPatternRules || {}));
+
+    const selectedColumns = [...new Set(
+      [
+        ...Object.values(roles),
+        ...(normalizerConfig.alternateColumnGroups || []).flatMap((group) => [
+          group.cpn,
+          group.mpn,
+          group.mfr,
+          group.qty,
+          group.uom,
+        ]),
+      ]
+        .map(fmt)
+        .filter((header) => header && headers.includes(header))
+    )];
+
+    const maxInferRows = 500;
+    const sampleLimitPerGroup = 4;
+    const totalSampleLimit = 64;
+    const discoverySampleLimitPerGroup = 3;
+    const totalDiscoverySampleLimit = 80;
+    const inferenceRows = dataRows.slice(0, maxInferRows).map((row) => {
+      const compactRow = {};
+      selectedColumns.forEach((header) => {
+        compactRow[header] = row?.[header] ?? '';
+      });
+      ['__sourceRow', 'sourceRow', 'Source row'].forEach((key) => {
+        if (row?.[key] !== undefined) compactRow[key] = row[key];
+      });
+      return compactRow;
+    });
+
+    setFieldPatternLoading(true);
+    setError('');
+    try {
+      const inferencePayload = {
+        headers,
+        rows: inferenceRows,
+        roles,
+        config: normalizerConfig,
+        selectedColumns,
+        options: {
+          headerRowIndex,
+          maxRows: maxInferRows,
+          sampleLimitPerGroup,
+          totalSampleLimit,
+          discoverySampleLimitPerGroup,
+          totalDiscoverySampleLimit,
+          fieldPatternRules: activeRuleDrafts,
+          includeAllRows: true,
+          completedReviewStepIds: options.completedReviewStepIds || [],
+        },
+      };
+      const requestKey = JSON.stringify(inferencePayload);
+      let responseData = null;
+      if (options.forceRefresh) {
+        fieldPatternInferenceCacheRef.current = { key: '', data: null };
+        fieldPatternInferenceInFlightRef.current = { key: '', promise: null };
+      }
+
+      if (!options.forceRefresh && fieldPatternInferenceCacheRef.current.key === requestKey) {
+        responseData = fieldPatternInferenceCacheRef.current.data;
+      } else if (
+        !options.forceRefresh &&
+        fieldPatternInferenceInFlightRef.current.key === requestKey &&
+        fieldPatternInferenceInFlightRef.current.promise
+      ) {
+        responseData = await fieldPatternInferenceInFlightRef.current.promise;
+      } else {
+        const requestPromise = api.inferBomFieldPatterns(inferencePayload)
+          .then((response) => response.data || {});
+        fieldPatternInferenceInFlightRef.current = { key: requestKey, promise: requestPromise };
+        try {
+          responseData = await requestPromise;
+          fieldPatternInferenceCacheRef.current = { key: requestKey, data: responseData };
+        } finally {
+          if (fieldPatternInferenceInFlightRef.current.key === requestKey) {
+            fieldPatternInferenceInFlightRef.current = { key: '', promise: null };
+          }
+        }
+      }
+      const groups = (responseData?.patterns || responseData?.groups || []).map((group) => ({
+        ...group,
+        samples: expandFieldPatternReviewRows(group),
+      }));
+      const reviewWorkflow = responseData?.reviewWorkflow || { steps: [], nextStep: null };
+      const fields = responseData?.fields || FACTWISE_PARSE_FIELDS;
+      const nextRuleDrafts = mergeSuggestedFieldPatternRules(activeRuleDrafts, groups);
+      const edits = {};
+      groups.forEach((group) => {
+        edits[group.id] = {};
+        (group.samples || []).forEach((sample) => {
+          const sampleKey = fieldPatternSampleKey(sample);
+          if (!sampleKey) return;
+          const entries = Array.isArray(sample.entries) && sample.entries.length
+            ? sample.entries
+            : [{ index: 0, relation: 'Primary', fields: sample.fields || {} }];
+          const filteredEntries = filterFactwiseEntriesForConfig(entries, normalizerConfig);
+          const convertedEntries = filteredEntries.map((entry, entryIndex) => ({
+              relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
+              fields: fieldValuesFromBackendFields(entry.fields || {}, fields),
+              sourceColumns: sourceColumnsFromBackendFields(entry.fields || {}, fields),
+            }));
+          edits[group.id][sampleKey] = {
+            sourceRow: sample.sourceRow,
+            occurrenceId: sample.sourceFragment?.id || '',
+            entries: convertedEntries,
+            left: sample.left || [],
+          };
+        });
+        Object.values(group.rowEntries || {}).forEach((rowEntry) => {
+          const entries = Array.isArray(rowEntry.entries) && rowEntry.entries.length
+            ? rowEntry.entries
+            : [];
+          if (!entries.length) return;
+          const convertedEntries = filterFactwiseEntriesForConfig(entries, normalizerConfig)
+            .map((entry, entryIndex) => ({
+              relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
+              fields: fieldValuesFromBackendFields(entry.fields || {}, fields),
+              sourceColumns: sourceColumnsFromBackendFields(entry.fields || {}, fields),
+            }));
+          const sampleKey = fieldPatternSampleKey(rowEntry);
+          if (!sampleKey) return;
+          edits[group.id][sampleKey] = {
+            sourceRow: rowEntry.sourceRow,
+            occurrenceId: rowEntry.occurrenceId || '',
+            entries: convertedEntries,
+            left: rowEntry.left || [],
+          };
+        });
+      });
+      const manualEditsByShapeAndRow = new Map();
+      fieldPatternGroups.forEach((previousGroup) => {
+        Object.entries(fieldPatternEdits[previousGroup.id] || {}).forEach(([sampleKey, edit]) => {
+          if (!edit?.manuallyEdited) return;
+          manualEditsByShapeAndRow.set(`${previousGroup.shape}::${edit.occurrenceId || sampleKey}`, edit);
+        });
+      });
+      groups.forEach((group) => {
+        Object.keys(edits[group.id] || {}).forEach((sampleKey) => {
+          const manualEdit = manualEditsByShapeAndRow.get(`${group.shape}::${edits[group.id][sampleKey].occurrenceId || sampleKey}`);
+          if (!manualEdit) return;
+          edits[group.id][sampleKey] = {
+            ...edits[group.id][sampleKey],
+            ...manualEdit,
+            entries: normalizeVisualTeachEntries(manualEdit.entries || []),
+          };
+        });
+      });
+      const focusedGroup = options.focusShape
+        ? groups.find((group) => group.shape === options.focusShape)
+        : null;
+      if (focusedGroup && options.focusSourceRow !== undefined && options.focusSourceRow !== null) {
+        const focusedSourceRow = String(options.focusSourceRow);
+        const focusedSample = (focusedGroup.samples || []).find(
+          (sample) => (
+            options.focusOccurrenceId
+              ? fieldPatternSampleKey(sample) === String(options.focusOccurrenceId)
+              : String(sample.sourceRow) === focusedSourceRow
+          )
+        );
+        if (focusedSample && Array.isArray(options.preservedEntries)) {
+          const focusedSampleKey = fieldPatternSampleKey(focusedSample);
+          edits[focusedGroup.id][focusedSampleKey] = {
+            ...(edits[focusedGroup.id]?.[focusedSampleKey] || {}),
+            sourceRow: focusedSample.sourceRow,
+            occurrenceId: focusedSample.sourceFragment?.id || '',
+            entries: normalizeVisualTeachEntries(options.preservedEntries),
+            left: focusedSample.left || [],
+            visualTeachTags: options.preservedVisualTags || [],
+            visualTeachDelimiter: options.preservedVisualDelimiter || '/',
+            visualTeachAltMode: options.preservedVisualAltMode || 'append',
+            visualTeachEntryOverrides: options.preservedVisualEntryOverrides || {},
+            manuallyEdited: Boolean(Object.keys(options.preservedVisualEntryOverrides || {}).length),
+          };
+        }
+      }
+      setFieldPatternGroups(groups);
+      setFieldPatternFields(fields);
+      fieldPatternAutoOpenedStepIdRef.current = '';
+      setFieldPatternReviewWorkflow(reviewWorkflow);
+      setFieldPatternWorkflowLaunchRevision((revision) => revision + 1);
+      setFieldPatternRuleDrafts(nextRuleDrafts);
+      setFieldPatternEdits(edits);
+      setFieldPatternConfirmed((previous) => {
+        const next = {};
+        groups.forEach((group) => {
+          if (Object.prototype.hasOwnProperty.call(previous, group.id)) {
+            next[group.id] = previous[group.id];
+          }
+        });
+        return next;
+      });
+      const focusedSampleIndex = focusedGroup
+        ? (focusedGroup.samples || []).findIndex(
+          (sample) => (
+            options.focusOccurrenceId
+              ? fieldPatternSampleKey(sample) === String(options.focusOccurrenceId)
+              : String(sample.sourceRow) === String(options.focusSourceRow)
+          )
+        )
+        : -1;
+      setFieldPatternSampleIndexes(
+        focusedGroup && focusedSampleIndex >= 0
+          ? { [focusedGroup.id]: focusedSampleIndex }
+          : {}
+      );
+      setSelectedFieldPatternId(focusedGroup?.id || groups[0]?.id || '');
+      if (reviewWorkflow?.nextStep?.type === 'normalize') {
+        setVisualTeachOpen(false);
+        setFieldSplitReviewOpen(false);
+        setFieldPatternReviewOpen(false);
+        setPatternApplyNotice('No patterns need review. Normalizing with the selected mappings.');
+        await runNormalization({ openResults: true });
+        return responseData;
+      }
+      setFieldPatternReviewOpen(reviewWorkflow?.nextStep?.type === 'preview');
+      setFieldPatternRulesDirty(false);
+      if (!groups.length) {
+        setPatternApplyNotice('No reusable field patterns were detected for the selected customer columns.');
+      }
+      return responseData;
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Could not load field patterns from backend.');
+      if (options.propagateErrors) throw err;
+      return null;
+    } finally {
+      setFieldPatternLoading(false);
+    }
+  }, [dataRows, fieldPatternEdits, fieldPatternGroups, fieldPatternRuleDrafts, headerRowIndex, headers, normalizerConfig, roles, runNormalization]);
+
+  const handleFieldPatternRuleChange = useCallback((group, fieldKey, patch) => {
+    const baseRules = Object.keys(fieldPatternRuleDrafts || {}).length
+      ? fieldPatternRuleDrafts
+      : (normalizerConfig.fieldPatternRules || {});
+    const nextRules = updateFieldPatternRuleFieldValue(baseRules, group, fieldKey, patch);
+    setFieldPatternRuleDrafts(nextRules);
+    setFieldPatternRulesDirty(true);
+    if (group?.id) {
+      setFieldPatternConfirmed((prev) => ({ ...prev, [group.id]: false }));
+    }
+  }, [fieldPatternRuleDrafts, normalizerConfig.fieldPatternRules]);
+
+  const handleFieldPatternIdentityRuleChange = useCallback((group, identityGroup, patch) => {
+    const baseRules = Object.keys(fieldPatternRuleDrafts || {}).length
+      ? fieldPatternRuleDrafts
+      : (normalizerConfig.fieldPatternRules || {});
+    const nextRules = updateFieldPatternIdentityGroupRuleValue(baseRules, group, identityGroup, patch);
+    setFieldPatternRuleDrafts(nextRules);
+    setFieldPatternRulesDirty(true);
+    if (group?.id) {
+      setFieldPatternConfirmed((prev) => ({ ...prev, [group.id]: false }));
+    }
+  }, [fieldPatternRuleDrafts, normalizerConfig.fieldPatternRules]);
+
+  const handleApplyFieldSplitReview = useCallback(async () => {
+    const step = fieldPatternWorkflowNextStep;
+    if (!step || step.type !== 'split_fields' || !step.fields?.length) return;
+    const baseRules = Object.keys(fieldPatternRuleDrafts || {}).length
+      ? fieldPatternRuleDrafts
+      : (normalizerConfig.fieldPatternRules || {});
+    let nextRules = { ...baseRules };
+    const changedGroupIds = new Set();
+    step.fields.forEach((fieldConfig) => {
+      const targetGroupIds = new Set(fieldConfig.groupIds || []);
+      const ruleDraft = fieldSplitRuleDrafts[fieldConfig.field] || { delimiter: 'none', customDelimiter: '' };
+      fieldPatternGroups
+        .filter((group) => !targetGroupIds.size || targetGroupIds.has(group.id))
+        .forEach((group) => {
+          changedGroupIds.add(group.id);
+          nextRules = updateFieldPatternRuleFieldValue(nextRules, group, fieldConfig.field, ruleDraft);
+        });
+      });
+    const completedReviewStepIds = [
+      ...(fieldPatternReviewWorkflow?.completedStepIds || []),
+      step.id,
+    ].filter(Boolean);
+    setFieldSplitReviewOpen(false);
+    setFieldPatternRuleDrafts(nextRules);
+    setFieldPatternRulesDirty(false);
+    setFieldPatternConfirmed((previous) => {
+      const next = { ...previous };
+      changedGroupIds.forEach((groupId) => {
+        next[groupId] = false;
+      });
+      return next;
+    });
+    await handleTeachFieldPattern(nextRules, {
+      forceRefresh: true,
+      completedReviewStepIds,
+      propagateErrors: true,
+    });
+  }, [
+    fieldPatternGroups,
+    fieldPatternReviewWorkflow,
+    fieldPatternRuleDrafts,
+    fieldPatternWorkflowNextStep,
+    fieldSplitRuleDrafts,
+    handleTeachFieldPattern,
+    normalizerConfig.fieldPatternRules,
+  ]);
+
+  const handleApplyFieldPatternRuleToAll = useCallback(async (group) => {
+    if (!group || !fieldPatternGroups.length) return;
+    const baseRules = mergeSuggestedFieldPatternRules(
+      Object.keys(fieldPatternRuleDrafts || {}).length
+        ? fieldPatternRuleDrafts
+        : (normalizerConfig.fieldPatternRules || {}),
+      fieldPatternGroups
+    );
+    const sourceRule = fieldPatternRuleForGroup(baseRules, group);
+    const sourceFields = sourceRule.fields || {};
+    const sourceIdentityGroups = Array.isArray(sourceRule.identityGroups) ? sourceRule.identityGroups : [];
+    const sourceExpansions = Array.isArray(sourceRule.expansions) ? sourceRule.expansions : [];
+    if (!Object.keys(sourceFields).length && !sourceIdentityGroups.length && !sourceExpansions.length) return;
+
+    const nextRules = { ...baseRules };
+    fieldPatternGroups.forEach((targetGroup) => {
+      const key = fieldPatternRuleKey(targetGroup);
+      if (!key) return;
+      nextRules[key] = {
+        ...(nextRules[key] || {}),
+        shape: targetGroup.shape || nextRules[key]?.shape || '',
+        fields: JSON.parse(JSON.stringify(sourceFields)),
+        identityGroups: JSON.parse(JSON.stringify(sourceIdentityGroups)),
+        expansions: JSON.parse(JSON.stringify(sourceExpansions)),
+      };
+    });
+
+    setFieldPatternRuleDrafts(nextRules);
+    setFieldPatternRulesDirty(true);
+    setFieldPatternConfirmed(
+      fieldPatternGroups.reduce((confirmation, targetGroup) => ({
+        ...confirmation,
+        [targetGroup.id]: false,
+      }), {})
+    );
+    await handleTeachFieldPattern(nextRules);
+    setSelectedFieldPatternId(group.id || '');
+  }, [fieldPatternGroups, fieldPatternRuleDrafts, handleTeachFieldPattern, normalizerConfig.fieldPatternRules]);
+
+  const handleRefreshFieldPatternPreview = useCallback(async (group = null) => {
+    const nextSelectedId = group?.id || selectedFieldPatternId;
+    const activeRules = Object.keys(fieldPatternRuleDrafts || {}).length
+      ? fieldPatternRuleDrafts
+      : (normalizerConfig.fieldPatternRules || {});
+    await handleTeachFieldPattern(activeRules, { forceRefresh: true });
+    if (nextSelectedId) {
+      setSelectedFieldPatternId(nextSelectedId);
+    }
+  }, [fieldPatternRuleDrafts, handleTeachFieldPattern, normalizerConfig.fieldPatternRules, selectedFieldPatternId]);
+
+  const handleTeachFieldPatternFromSample = useCallback(async (group, sample) => {
+    if (!group || !sample) return;
+    const sampleEdit = fieldPatternEdits[group.id]?.[fieldPatternSampleKey(sample)] || {};
+    const baseEntries = sampleEdit.entries?.length ? sampleEdit.entries : [{
+      relation: 'Primary',
+      fields: fieldValuesFromBackendFields(sample.fields || {}, fieldPatternFields),
+      sourceColumns: sourceColumnsFromBackendFields(sample.fields || {}, fieldPatternFields),
+    }];
+    const entries = baseEntries;
+    const row = {};
+    (sample.left || []).forEach((item) => {
+      if (item?.column) row[item.column] = item.value ?? '';
+    });
+    row.__sourceRow = sample.sourceRow;
+
+    setFieldPatternLoading(true);
+    setError('');
+    try {
+      const response = await api.teachBomFieldPattern({
+        headers,
+        row,
+        roles,
+        group: {
+          id: group.id,
+          patternKey: group.patternKey || '',
+          shape: group.shape,
+          selectedColumns: group.selectedColumns || [],
+        },
+        entries: entries.map((entry, entryIndex) => ({
+          relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
+          fields: entry.fields || {},
+        })),
+        persist: false,
+      });
+      const taughtRule = response.data?.rule || {};
+      const hasTaughtFields = Object.keys(taughtRule.fields || {}).length > 0;
+      const hasTaughtIdentityGroups = Array.isArray(taughtRule.identityGroups) && taughtRule.identityGroups.length > 0;
+      const hasTaughtExpansions = Array.isArray(taughtRule.expansions) && taughtRule.expansions.length > 0;
+      if (!hasTaughtFields && !hasTaughtIdentityGroups && !hasTaughtExpansions) {
+        setError('Backend could not derive a reusable rule from this correction. Add clearer corrected values or split settings.');
+        return;
+      }
+
+      const baseRules = Object.keys(fieldPatternRuleDrafts || {}).length
+        ? fieldPatternRuleDrafts
+        : (normalizerConfig.fieldPatternRules || {});
+      const nextRules = { ...baseRules };
+      const similarGroups = fieldPatternGroups.filter((targetGroup) => areSimilarFieldPatternGroups(group, targetGroup));
+      similarGroups.forEach((targetGroup) => {
+        const key = fieldPatternRuleKey(targetGroup);
+        if (!key) return;
+        const current = nextRules[key] || { fields: {} };
+        nextRules[key] = {
+          ...current,
+          shape: targetGroup.shape || current.shape || '',
+          fields: {
+            ...(current.fields || {}),
+            ...(taughtRule.fields || {}),
+          },
+          identityGroups: mergeIdentityGroupRules(current.identityGroups, taughtRule.identityGroups),
+          expansions: mergeExpansionRules(current.expansions, taughtRule.expansions),
+        };
+      });
+
+      setFieldPatternRuleDrafts(nextRules);
+      setFieldPatternConfirmed((prev) => {
+        const next = { ...prev };
+        similarGroups.forEach((targetGroup) => {
+          next[targetGroup.id] = false;
+        });
+        return next;
+      });
+      setFieldPatternRulesDirty(false);
+      await handleTeachFieldPattern(nextRules);
+      setSelectedFieldPatternId(group.id || '');
+      setPatternApplyNotice(`Taught this correction to ${similarGroups.length || 1} similar pattern group${(similarGroups.length || 1) === 1 ? '' : 's'}.`);
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Could not teach this field pattern.');
+    } finally {
+      setFieldPatternLoading(false);
+    }
+  }, [
+    fieldPatternEdits,
+    fieldPatternFields,
+    fieldPatternGroups,
+    fieldPatternRuleDrafts,
+    handleTeachFieldPattern,
+    headers,
+    normalizerConfig,
+    roles,
+  ]);
+
+  const handleOpenVisualTeachPattern = useCallback((group, sample, workflowStep = null) => {
+    const workflowSourceColumn = fmt(workflowStep?.sourceColumn);
+    const sourceItem = workflowSourceColumn
+      ? (sample?.left || []).find((item) => fmt(item?.column) === workflowSourceColumn)
+      : visualTeachSourceItemForSample(group, sample, roles);
+    const sampleOccurrenceId = fmt(sample?.sourceFragment?.id);
+    const matchingOccurrence = (workflowStep?.occurrences || []).find((occurrence) => (
+      sampleOccurrenceId
+        ? fmt(occurrence?.id) === sampleOccurrenceId
+        : (
+          String(occurrence?.sourceRow) === String(sample?.sourceRow) &&
+          fmt(occurrence?.sourceColumn) === fmt(sourceItem?.column)
+        )
+    ));
+    const sourceValue = fmt(
+      matchingOccurrence?.rawValue ||
+      sample?.sourceFragment?.rawValue ||
+      sourceItem?.value
+    );
+    if (!group || !sample || !sourceValue) {
+      setError('No customer cell value is available to teach visually for this sample.');
+      return;
+    }
+    const sampleEdit = fieldPatternEdits[group.id]?.[fieldPatternSampleKey(sample)] || {};
+    const backendEntries = Array.isArray(sample.entries) && sample.entries.length
+      ? sample.entries
+      : [{ fields: sample.fields || {} }];
+    const backendManufacturerHints = backendEntries
+      .map((entry) => fmt(entry?.fields?.manufacturer?.value))
+      .filter(Boolean);
+    const baseEntries = sampleEdit.entries?.length ? sampleEdit.entries : [{
+      relation: 'Primary',
+      fields: fieldValuesFromBackendFields(sample.fields || {}, fieldPatternFields),
+      sourceColumns: sourceColumnsFromBackendFields(sample.fields || {}, fieldPatternFields),
+    }];
+    const seedEntries = baseEntries;
+    visualTeachPreviewRequestRef.current += 1;
+    visualTeachBackendEntriesRef.current = seedEntries;
+    setVisualTeachContext({
+      group,
+      sample,
+      sourceColumn: sourceItem.column,
+      sourceValue,
+      seedEntries,
+      backendManufacturerHints,
+      workflowStep,
+      occurrence: matchingOccurrence || sample?.sourceFragment || null,
+    });
+    const backendSpans = sample?.interpretationSpansByColumn?.[sourceItem.column] || [];
+    setVisualTeachBackendPreview({
+      entries: seedEntries,
+      interpretationSpansByColumn: sample?.interpretationSpansByColumn || {},
+      title: workflowStep?.title || '',
+      pattern: workflowStep?.pattern || group?.primaryPatternRow?.pattern || '',
+      rule: group?.suggestedRule || {},
+    });
+    setVisualTeachTags(
+      Array.isArray(sampleEdit.visualTeachTags) && sampleEdit.visualTeachTags.length === sourceValue.length
+        ? sampleEdit.visualTeachTags
+        : visualTeachTagsFromInterpretationSpans(sourceValue, backendSpans)
+    );
+    setVisualTeachSelection(null);
+    setVisualTeachDrag(null);
+    setVisualTeachDelimiter(
+      sampleEdit.visualTeachDelimiter ||
+      group?.suggestedRule?.visualPattern?.alternateDelimiter ||
+      '/'
+    );
+    setVisualTeachAltMode(sampleEdit.visualTeachAltMode || 'append');
+    setVisualTeachEntryOverrides(sampleEdit.visualTeachEntryOverrides || {});
+    setVisualTeachPreviewLoading(false);
+    setVisualTeachOpen(true);
+  }, [fieldPatternEdits, fieldPatternFields, normalizerConfig, roles]);
+
+  const handleOpenVisualTeachWorkflowStep = useCallback((step) => {
+    if (!step || step.type !== 'teach_visual') return;
+    const group = fieldPatternGroups.find((candidate) => candidate.patternKey === step.patternKey) || (step.groupIds || [])
+      .map((groupId) => fieldPatternGroups.find((candidate) => candidate.id === groupId))
+      .find(Boolean) || fieldPatternGroups[0];
+    if (!group) return;
+    const sample = fieldPatternSampleForWorkflowStep(group, step);
+    if (!sample) return;
+    handleOpenVisualTeachPattern(group, sample, step);
+  }, [fieldPatternGroups, handleOpenVisualTeachPattern]);
+
+  useEffect(() => {
+    const step = fieldPatternWorkflowNextStep;
+    if (!step) return;
+    if (fieldPatternAutoOpenedStepIdRef.current === step.id) return;
+    fieldPatternAutoOpenedStepIdRef.current = step.id;
+    if (step.type === 'preview') {
+      setVisualTeachOpen(false);
+      setFieldSplitReviewOpen(false);
+      setFieldPatternReviewOpen(true);
+      return;
+    }
+    if (step.type === 'split_fields') {
+      const fields = step.fields || [];
+      const initialDrafts = fields.reduce((drafts, fieldConfig) => {
+        const suggestedRule = fieldConfig.candidateRules?.[0]?.rule || {};
+        drafts[fieldConfig.field] = {
+          delimiter: suggestedRule.delimiter || 'none',
+          customDelimiter: suggestedRule.customDelimiter || '',
+        };
+        return drafts;
+      }, {});
+      setVisualTeachOpen(false);
+      setFieldPatternReviewOpen(false);
+      setFieldSplitSelectedField(fields[0]?.field || '');
+      setFieldSplitRuleDrafts(initialDrafts);
+      setFieldSplitReviewOpen(true);
+      return;
+    }
+    if (step.type !== 'teach_visual') return;
+
+    setFieldPatternReviewOpen(false);
+    setFieldSplitReviewOpen(false);
+    handleOpenVisualTeachWorkflowStep(step);
+  }, [fieldPatternWorkflowLaunchRevision, fieldPatternWorkflowNextStep, handleOpenVisualTeachWorkflowStep]);
+
+  useEffect(() => {
+    if (!visualTeachOpen || !visualTeachContext?.sourceValue || !visualTeachContext?.sample) return undefined;
+    if (visualTeachPreviewProcessedRef.current === visualTeachPreviewRevision) return undefined;
+    visualTeachPreviewProcessedRef.current = visualTeachPreviewRevision;
+    const taggedSpans = visualTeachTaggedSpans(visualTeachTags);
+    const hasInterpretation = taggedSpans.some(
+      (span) => span.role !== 'groupSeparator'
+    );
+    if (!hasInterpretation) return undefined;
+    const hasManualEdits = Object.values(visualTeachEntryOverrides || {})
+      .some((fieldOverrides) => fieldOverrides && Object.keys(fieldOverrides).length > 0);
+    const requestEntries = hasManualEdits
+      ? normalizeVisualTeachEntries(visualTeachBackendEntriesRef.current).map((entry, index) => ({
+          ...entry,
+          fields: {
+            ...(entry.fields || {}),
+            ...(visualTeachEntryOverrides[index] || {}),
+          },
+        }))
+      : [];
+
+    const requestId = visualTeachPreviewRequestRef.current + 1;
+    visualTeachPreviewRequestRef.current = requestId;
+    const timer = setTimeout(async () => {
+      const row = {};
+      (visualTeachContext.sample.left || []).forEach((item) => {
+        if (item?.column) row[item.column] = item.value ?? '';
+      });
+      row[visualTeachContext.sourceColumn] = visualTeachContext.sourceValue;
+      row.__sourceRow = visualTeachContext.sample.sourceRow;
+      setVisualTeachPreviewLoading(true);
+      try {
+        const response = await api.teachBomFieldPattern({
+          headers,
+          row,
+          roles,
+          group: {
+            id: visualTeachContext.group?.id,
+            patternKey: visualTeachContext.group?.patternKey || visualTeachContext.workflowStep?.patternKey || '',
+            shape: visualTeachContext.group?.shape,
+            selectedColumns: visualTeachContext.group?.selectedColumns || [],
+          },
+          entries: requestEntries,
+          taggedSpans,
+          sourceHeader: visualTeachContext.sourceColumn,
+          alternateDelimiter: visualTeachDelimiter,
+          alternateMode: visualTeachAltMode,
+          ignoredFields: visualTeachIgnoredFields,
+          hasManualEdits,
+          persist: false,
+        });
+        if (visualTeachPreviewRequestRef.current !== requestId) return;
+        const previewEntries = (response.data?.entries || []).map((entry, entryIndex) => ({
+          relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
+          fields: fieldValuesFromBackendFields(entry.fields || {}, fieldPatternFields),
+          sourceColumns: sourceColumnsFromBackendFields(entry.fields || {}, fieldPatternFields),
+        }));
+        const interpretationSpansByColumn = response.data?.interpretationSpansByColumn || {};
+        visualTeachBackendEntriesRef.current = previewEntries;
+        setVisualTeachBackendPreview({
+          entries: previewEntries,
+          interpretationSpansByColumn,
+          title: response.data?.title || '',
+          pattern: response.data?.pattern || '',
+          rule: response.data?.rule || {},
+        });
+        const backendAlternateMode = response.data?.visualPattern?.alternateMode;
+        if (backendAlternateMode && backendAlternateMode !== visualTeachAltMode) {
+          setVisualTeachAltMode(backendAlternateMode);
+        }
+      } catch (err) {
+        if (visualTeachPreviewRequestRef.current === requestId) {
+          setError(err.response?.data?.error || err.message || 'Backend could not preview this interpretation.');
+        }
+      } finally {
+        if (visualTeachPreviewRequestRef.current === requestId) {
+          setVisualTeachPreviewLoading(false);
+        }
+      }
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [
+    fieldPatternFields,
+    headers,
+    roles,
+    visualTeachAltMode,
+    visualTeachContext,
+    visualTeachDelimiter,
+    visualTeachIgnoredFields,
+    visualTeachEntryOverrides,
+    visualTeachOpen,
+    visualTeachPreviewRevision,
+    visualTeachTags,
+  ]);
+
+  const handleVisualTeachMouseDown = useCallback((index) => {
+    setVisualTeachDrag({ start: index, end: index });
+    setVisualTeachSelection({ start: index, end: index });
+  }, []);
+
+  const handleVisualTeachMouseEnter = useCallback((index) => {
+    setVisualTeachDrag((current) => {
+      if (!current) return current;
+      setVisualTeachSelection({ start: current.start, end: index });
+      return { ...current, end: index };
+    });
+  }, []);
+
+  const handleVisualTeachMouseUp = useCallback(() => {
+    setVisualTeachDrag(null);
+  }, []);
+
+  const handleApplyVisualTeachRole = useCallback((role) => {
+    const text = visualTeachContext?.sourceValue || '';
+    if (!text || !visualTeachSelection) return;
+    const start = Math.min(visualTeachSelection.start, visualTeachSelection.end);
+    const end = Math.max(visualTeachSelection.start, visualTeachSelection.end);
+    const selectedText = text.slice(start, end + 1);
+    setVisualTeachTags((current) => {
+      const next = [...current];
+      if (role === 'groupSeparator' && selectedText) {
+        if (shouldRepeatVisualTeachGroupSeparator(selectedText)) {
+          let index = 0;
+          while (index < text.length) {
+            const found = text.indexOf(selectedText, index);
+            if (found < 0) break;
+            for (let offset = 0; offset < selectedText.length; offset += 1) {
+              next[found + offset] = role;
+            }
+            index = found + selectedText.length;
+          }
+        } else {
+          for (let index = start; index <= end; index += 1) {
+            next[index] = role;
+          }
+        }
+        return next;
+      }
+      for (let index = start; index <= end; index += 1) {
+        next[index] = role;
+      }
+      return next;
+    });
+  }, [visualTeachContext, visualTeachSelection]);
+
+  const handleClearVisualTeachTags = useCallback(() => {
+    const text = visualTeachContext?.sourceValue || '';
+    setVisualTeachTags(new Array(text.length).fill(''));
+    visualTeachBackendEntriesRef.current = visualTeachContext?.seedEntries || [];
+    setVisualTeachBackendPreview({
+      entries: visualTeachContext?.seedEntries || [],
+      interpretationSpansByColumn: {},
+      title: visualTeachContext?.workflowStep?.title || '',
+      pattern: '',
+      rule: {},
+    });
+    setVisualTeachSelection(null);
+    setVisualTeachDrag(null);
+  }, [visualTeachContext]);
+
+  const handleApplyVisualTeachPattern = useCallback(async () => {
+    const group = visualTeachContext?.group;
+    const sample = visualTeachContext?.sample;
+    const sourceValue = visualTeachContext?.sourceValue || '';
+    if (!group || !sample || !sourceValue) return;
+
+    const taggedSpans = visualTeachTaggedSpans(visualTeachTags);
+    const isIgnoreInterpretation = visualTeachIsIgnoreInterpretation;
+    const entries = visualTeachPreviewEntries.map((entry, index) => ({
+      ...entry,
+      fields: {
+        ...(entry.fields || {}),
+        ...(visualTeachEntryOverrides[index] || {}),
+      },
+    }));
+    const hasManualEdits = Object.values(visualTeachEntryOverrides || {})
+      .some((fieldOverrides) => fieldOverrides && Object.keys(fieldOverrides).length > 0);
+    const hasMappedTag = taggedSpans.some((span) => visualTeachMappedFieldKeys.includes(span.role));
+    if (!isIgnoreInterpretation && !hasMappedTag) {
+      setError('Tag or enter at least one mapped FactWise value before applying this interpretation.');
+      return;
+    }
+
+    if (!taggedSpans.some((span) => span.role !== 'groupSeparator')) {
+      setError('Mark the base MPN and manufacturer so this pattern can be reused.');
+      return;
+    }
+
+    setFieldPatternEdits((prev) => ({
+      ...prev,
+      [group.id]: {
+        ...(prev[group.id] || {}),
+        [fieldPatternSampleKey(sample)]: {
+          ...(prev[group.id]?.[fieldPatternSampleKey(sample)] || {}),
+          sourceRow: sample.sourceRow,
+          occurrenceId: sample.sourceFragment?.id || '',
+          entries,
+          visualTeachTags,
+          visualTeachDelimiter,
+          visualTeachAltMode,
+          visualTeachEntryOverrides,
+          manuallyEdited: hasManualEdits,
+        },
+      },
+    }));
+    setFieldPatternConfirmed((prev) => ({ ...prev, [group.id]: false }));
+
+    const row = {};
+    (sample.left || []).forEach((item) => {
+      if (item?.column) row[item.column] = item.value ?? '';
+    });
+    row[visualTeachContext.sourceColumn] = sourceValue;
+    row.__sourceRow = sample.sourceRow;
+
+    setFieldPatternLoading(true);
+    setError('');
+    try {
+      const response = await api.teachBomFieldPattern({
+        headers,
+        row,
+        roles,
+        group: {
+          id: group.id,
+          patternKey: group.patternKey || visualTeachContext?.workflowStep?.patternKey || '',
+          shape: group.shape,
+          selectedColumns: group.selectedColumns || [],
+        },
+        entries: hasManualEdits ? entries.map((entry, entryIndex) => ({
+          relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
+          fields: entry.fields || {},
+        })) : [],
+        taggedSpans,
+        sourceHeader: visualTeachContext?.sourceColumn,
+        alternateDelimiter: visualTeachDelimiter,
+        alternateMode: visualTeachAltMode,
+        ignoredFields: visualTeachIgnoredFields,
+        hasManualEdits,
+        persist: false,
+      });
+      const taughtRule = response.data?.rule || {};
+      if (!taughtRule.visualPattern) {
+        throw new Error('Backend did not accept the visual pattern rule.');
+      }
+      const taughtEntries = (response.data?.entries || []).map((entry, entryIndex) => ({
+        relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
+        fields: fieldValuesFromBackendFields(entry.fields || {}, fieldPatternFields),
+        sourceColumns: sourceColumnsFromBackendFields(entry.fields || {}, fieldPatternFields),
+      }));
+      visualTeachBackendEntriesRef.current = taughtEntries;
+      setVisualTeachBackendPreview({
+        entries: taughtEntries,
+        interpretationSpansByColumn: response.data?.interpretationSpansByColumn || {},
+        title: response.data?.title || '',
+        pattern: response.data?.pattern || '',
+        rule: taughtRule,
+      });
+
+      const baseRules = Object.keys(fieldPatternRuleDrafts || {}).length
+        ? fieldPatternRuleDrafts
+        : (normalizerConfig.fieldPatternRules || {});
+      const key = fieldPatternRuleKey(group);
+      const current = baseRules[key] || { fields: {} };
+      const nextRules = {
+        ...baseRules,
+        [key]: {
+          ...current,
+          ...taughtRule,
+          patternKey: group.patternKey || taughtRule.patternKey || current.patternKey || '',
+          shape: group.shape || taughtRule.shape || current.shape || '',
+          fields: {
+            ...(current.fields || {}),
+            ...(taughtRule.fields || {}),
+          },
+          identityGroups: mergeIdentityGroupRules(current.identityGroups, taughtRule.identityGroups),
+          expansions: mergeExpansionRules(current.expansions, taughtRule.expansions),
+          visualPattern: taughtRule.visualPattern,
+        },
+      };
+
+      setFieldPatternRuleDrafts(nextRules);
+      setFieldPatternRulesDirty(false);
+      const completedReviewStepIds = [
+        ...(fieldPatternReviewWorkflow?.completedStepIds || []),
+        visualTeachContext?.workflowStep?.id,
+      ].filter(Boolean);
+      const refreshedPatternData = await handleTeachFieldPattern(nextRules, {
+        forceRefresh: true,
+        includeAllRows: true,
+        focusShape: group.shape,
+        focusSourceRow: sample.sourceRow,
+        focusOccurrenceId: fieldPatternSampleKey(sample),
+        preservedEntries: hasManualEdits ? entries : null,
+        preservedVisualTags: hasManualEdits ? visualTeachTags : null,
+        preservedVisualDelimiter: visualTeachDelimiter,
+        preservedVisualAltMode: visualTeachAltMode,
+        preservedVisualEntryOverrides: hasManualEdits ? visualTeachEntryOverrides : {},
+        completedReviewStepIds,
+        propagateErrors: true,
+      });
+      if (!hasManualEdits) {
+        const refreshedGroup = (refreshedPatternData?.groups || [])
+          .find((candidate) => (
+            (group.patternKey && candidate.patternKey === group.patternKey) ||
+            candidate.shape === group.shape
+          ));
+        const refreshedSample = (refreshedGroup?.samples || [])
+          .find((candidate) => String(candidate.sourceRow) === String(sample.sourceRow));
+        if (refreshedSample) {
+          const refreshedEntries = (refreshedSample.entries || []).map((entry, entryIndex) => ({
+            relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
+            fields: fieldValuesFromBackendFields(entry.fields || {}, fieldPatternFields),
+            sourceColumns: sourceColumnsFromBackendFields(entry.fields || {}, fieldPatternFields),
+          }));
+          setVisualTeachContext((current) => ({
+            ...current,
+            group: refreshedGroup,
+            sample: refreshedSample,
+            seedEntries: refreshedEntries,
+          }));
+          visualTeachBackendEntriesRef.current = refreshedEntries;
+          setVisualTeachEntryOverrides({});
+        }
+      }
+      setPatternApplyNotice(`Interpretation applied to all ${group.occurrenceCount || group.rowCount || 0} matching fragments.`);
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Could not apply this visual pattern to matching fragments.');
+    } finally {
+      setFieldPatternLoading(false);
+    }
+  }, [
+    fieldPatternRuleDrafts,
+    fieldPatternReviewWorkflow,
+    fieldPatternFields,
+    handleTeachFieldPattern,
+    headers,
+    normalizerConfig.fieldPatternRules,
+    roles,
+    visualTeachAltMode,
+    visualTeachContext,
+    visualTeachDelimiter,
+    visualTeachEntryOverrides,
+    visualTeachIgnoredFields,
+    visualTeachMappedFieldKeys,
+    visualTeachPreviewEntries,
+    visualTeachIsIgnoreInterpretation,
+    visualTeachTags,
+  ]);
+
+  const handleStepFieldPatternSample = useCallback((group, direction) => {
+    const groupId = group?.id;
+    const sampleCount = Array.isArray(group?.samples) ? group.samples.length : 0;
+    if (!groupId || sampleCount <= 1) return;
+    setFieldPatternSampleIndexes((prev) => {
+      const current = Math.min(Math.max(Number(prev[groupId] || 0), 0), sampleCount - 1);
+      const next = Math.min(Math.max(current + direction, 0), sampleCount - 1);
+      return { ...prev, [groupId]: next };
+    });
+  }, []);
+
+  const handleFieldPatternValueChange = useCallback((groupId, sampleKey, entryIndex, fieldKey, value) => {
+    setFieldPatternEdits((prev) => ({
+      ...prev,
+      [groupId]: {
+        ...(prev[groupId] || {}),
+        [sampleKey]: {
+          ...(prev[groupId]?.[sampleKey] || {}),
+          entries: (prev[groupId]?.[sampleKey]?.entries || [{ relation: 'Primary', fields: emptyFactwiseFieldValues() }]).map((entry, index) => (
+            index === entryIndex
+              ? {
+                ...entry,
+                fields: {
+                  ...(entry.fields || {}),
+                  [fieldKey]: value,
+                },
+              }
+              : entry
+          )),
+          manuallyEdited: true,
+        },
+      },
+    }));
+    setFieldPatternConfirmed((prev) => ({ ...prev, [groupId]: false }));
+  }, []);
+
+  const handleAddFieldPatternAlternate = useCallback((groupId, sampleKey) => {
+    setFieldPatternEdits((prev) => {
+      const currentEntries = prev[groupId]?.[sampleKey]?.entries || [{ relation: 'Primary', fields: emptyFactwiseFieldValues() }];
+      return {
+        ...prev,
+        [groupId]: {
+          ...(prev[groupId] || {}),
+          [sampleKey]: {
+            ...(prev[groupId]?.[sampleKey] || {}),
+            entries: [
+              ...currentEntries,
+              {
+                relation: `Alternate ${currentEntries.length}`,
+                fields: emptyFactwiseFieldValues(),
+              },
+            ],
+            manuallyEdited: true,
+          },
+        },
+      };
+    });
+    setFieldPatternConfirmed((prev) => ({ ...prev, [groupId]: false }));
+  }, []);
+
+  const handleRemoveFieldPatternEntry = useCallback((groupId, sampleKey, entryIndex) => {
+    if (entryIndex === 0) return;
+    setFieldPatternEdits((prev) => {
+      const currentEntries = prev[groupId]?.[sampleKey]?.entries || [];
+      const nextEntries = currentEntries
+        .filter((_, index) => index !== entryIndex)
+        .map((entry, index) => ({
+          ...entry,
+          relation: index === 0 ? 'Primary' : `Alternate ${index}`,
+        }));
+      return {
+        ...prev,
+        [groupId]: {
+          ...(prev[groupId] || {}),
+          [sampleKey]: {
+            ...(prev[groupId]?.[sampleKey] || {}),
+            entries: nextEntries.length ? nextEntries : [{ relation: 'Primary', fields: emptyFactwiseFieldValues() }],
+            manuallyEdited: true,
+          },
+        },
+      };
+    });
+    setFieldPatternConfirmed((prev) => ({ ...prev, [groupId]: false }));
+  }, []);
+
+  const buildFieldPatternLearningGroup = useCallback((group) => {
+    if (!group) return null;
+    const activeRules = Object.keys(fieldPatternRuleDrafts || {}).length
+      ? fieldPatternRuleDrafts
+      : (normalizerConfig.fieldPatternRules || {});
+    return {
+      id: group.id,
+      shape: group.shape,
+      confirmed: true,
+      rule: {
+        ...(fieldPatternRuleForGroup(activeRules, group) || {}),
+        shape: group.shape,
+      },
+      rows: Object.entries(fieldPatternEdits[group.id] || {}).map(([sampleKey, edit]) => {
+        const sample = (group.samples || []).find((item) => (
+          fieldPatternSampleKey(item) === String(edit.occurrenceId || sampleKey)
+        )) || {
+          sourceRow: edit.sourceRow,
+          left: edit.left || [],
+          fields: {},
+        };
+        const entries = normalizeVisualTeachEntries(edit.entries?.length ? edit.entries : [{
+          relation: 'Primary',
+          fields: fieldValuesFromBackendFields(sample.fields || {}, fieldPatternFields),
+          sourceColumns: sourceColumnsFromBackendFields(sample.fields || {}, fieldPatternFields),
+        }]);
+        return {
+          sourceRow: edit.sourceRow ?? sample.sourceRow,
+          occurrenceId: edit.occurrenceId || sample.sourceFragment?.id || '',
+          entries: entries.map((entry, entryIndex) => ({
+            relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
+            fields: entry.fields || {},
+          })),
+        };
+      }),
+    };
+  }, [fieldPatternEdits, fieldPatternFields, fieldPatternRuleDrafts, normalizerConfig, roles]);
+
+  const handleConfirmFieldPatternGroup = useCallback(async (groupId) => {
+    if (fieldPatternConfirmed[groupId] !== false) return;
+    setFieldPatternConfirmed((prev) => ({ ...prev, [groupId]: true }));
+  }, [fieldPatternConfirmed]);
+
+  const handleApplyFieldPatternReview = useCallback(async () => {
+    const confirmedGroups = fieldPatternGroups.filter((group) => fieldPatternConfirmed[group.id] !== false);
+    if (confirmedGroups.length !== fieldPatternGroups.length) {
+      setError('Confirm every detected pattern before applying field interpretations.');
+      return;
+    }
+
+    const rowsBySourceRow = {};
+    confirmedGroups.forEach((group) => {
+      Object.entries(fieldPatternEdits[group.id] || {}).forEach(([sampleKey, edit]) => {
+        const sample = (group.samples || []).find((item) => (
+          fieldPatternSampleKey(item) === String(edit.occurrenceId || sampleKey)
+        )) || {
+          sourceRow: edit.sourceRow,
+          left: edit.left || [],
+          fields: {},
+        };
+        const entries = normalizeVisualTeachEntries(edit.entries?.length ? edit.entries : [{
+          relation: 'Primary',
+          fields: fieldValuesFromBackendFields(sample.fields || {}, fieldPatternFields),
+          sourceColumns: sourceColumnsFromBackendFields(sample.fields || {}, fieldPatternFields),
+        }]);
+        const sourceRow = edit.sourceRow ?? sample.sourceRow;
+        const existingEntries = rowsBySourceRow[String(sourceRow)]?.entries || [];
+        const normalizedEntries = entries.map((entry, entryIndex) => ({
+          relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
+          fields: entry.fields || {},
+        }));
+        rowsBySourceRow[String(sourceRow)] = {
+          entries: [...existingEntries, ...normalizedEntries].map((entry, entryIndex) => ({
+            ...entry,
+            relation: entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`,
+          })),
+          fields: rowsBySourceRow[String(sourceRow)]?.fields || entries[0]?.fields || {},
+        };
+      });
+    });
+
+    const learningGroups = confirmedGroups
+      .map((group) => buildFieldPatternLearningGroup(group))
+      .filter(Boolean);
+    const appliedConfig = {
+      ...normalizerConfig,
+      fieldPatternOverrides: {
+        source: 'backend_field_pattern_review',
+        confirmedAt: new Date().toISOString(),
+        rules: fieldPatternRuleDrafts,
+        groups: confirmedGroups.map((group) => ({
+          id: group.id,
+          shape: group.shape,
+          rowCount: group.rowCount,
+          selectedColumns: group.selectedColumns || [],
+        })),
+        rows: rowsBySourceRow,
+      },
+      fieldPatternRules: fieldPatternRuleDrafts,
+    };
+
+    setFieldPatternLoading(true);
+    setError('');
+    try {
+      const response = await api.applyBomFieldPatterns({
+        headers,
+        rows: dataRows,
+        roles,
+        config: { ...appliedConfig, headerRowIndex },
+        groups: learningGroups,
+        persist: true,
+      });
+      const normalized = response.data?.normalizedRows || [];
+      const pairingCheck = response.data?.pairingCheck || { checkedRows: 0, matchedRows: 0, issueRows: [] };
+      setProgress(response.data?.progress || {
+        processed: dataRows.length,
+        total: dataRows.length,
+        outputRows: normalized.length,
+        skippedRows: 0,
+      });
+      setConfig(appliedConfig);
+      setParserTouched(true);
+      setFieldPatternReviewOpen(false);
+      setPatternApplyNotice(`${confirmedGroups.length} unique field pattern${confirmedGroups.length === 1 ? '' : 's'} applied by backend.`);
+      setSuccessMessage(`${confirmedGroups.length} unique field pattern${confirmedGroups.length === 1 ? '' : 's'} confirmed and applied.`);
+      if (pairingCheck.issueRows?.length) {
+        setPendingNormalization({ rows: normalized, pairingCheck, openResultsAfterReview: true });
+        setPairingReviewRows(pairingCheck.issueRows);
+        setPairingReviewOpen(false);
+      } else {
+        setPendingNormalization(null);
+        setPairingReviewRows([]);
+      }
+      commitNormalizedResult(normalized, pairingCheck, { openResults: true });
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Backend could not apply the confirmed interpretations.');
+    } finally {
+      setFieldPatternLoading(false);
+    }
+  }, [buildFieldPatternLearningGroup, commitNormalizedResult, dataRows, fieldPatternConfirmed, fieldPatternEdits, fieldPatternFields, fieldPatternGroups, fieldPatternRuleDrafts, headerRowIndex, headers, normalizerConfig, roles]);
 
   const handleApplyConfigureSplitColumns = useCallback((result) => {
     const scope = configureParserScope;
@@ -11451,9 +14752,30 @@ const BomNormalizer = () => {
     const headerSet = new Set(applied.nextHeaders);
     setPreparedHeaders(applied.nextHeaders);
     setPreparedDataRows(applied.nextRows);
-    setRoles((prev) => Object.fromEntries(
-      Object.entries(prev).map(([key, value]) => [key, headerSet.has(value) ? value : ''])
-    ));
+    setRoles((prev) => {
+      const nextRoles = Object.fromEntries(
+        Object.entries(prev).map(([key, value]) => [key, headerSet.has(value) ? value : ''])
+      );
+      const setRoleFromParserOutput = (role, aliases) => {
+        const parserIndex = (applied.parserHeaders || []).findIndex((header) => (
+          aliases.some((alias) => normalizeKey(header) === normalizeKey(alias))
+        ));
+        if (parserIndex < 0) return;
+        const mappedHeader = applied.parserHeaderMap?.[parserIndex];
+        if (mappedHeader && headerSet.has(mappedHeader)) nextRoles[role] = mappedHeader;
+      };
+      setRoleFromParserOutput('mpn', ['MPN', 'Mfr Part Number', 'Manufacturer Part Number', 'Part Number']);
+      setRoleFromParserOutput('manufacturer', ['MFR', 'Manufacturer', 'Manufacturer Name']);
+      setRoleFromParserOutput('cpn', ['CPN', 'Customer part number', 'Item code']);
+      setRoleFromParserOutput('description', ['Description', 'Item name']);
+      setRoleFromParserOutput('quantity', ['Quantity']);
+      setRoleFromParserOutput('uom', ['UOM', 'Measurement unit']);
+      setRoleFromParserOutput('level', ['Level', 'BOM level']);
+      setRoleFromParserOutput('parent', ['Parent / group key', 'Parent group key', 'Sub BOM ID', 'BOM ID']);
+      setRoleFromParserOutput('notes', ['Notes']);
+      setRoleFromParserOutput('internalNotes', ['Internal notes']);
+      return nextRoles;
+    });
     closeParser();
     setSuccessMessage(`Structured split applied. Added ${result.new_headers_count || 0} columns.`);
   }, [configureParserScope, dataRows, headerRowIndex, headers, sourceDataRows]);
@@ -11567,51 +14889,6 @@ const BomNormalizer = () => {
     }
   }, [manufacturerDirectory.loaded]);
 
-  useEffect(() => {
-    if (manufacturerDirectory.loaded) return undefined;
-    let cancelled = false;
-    const loadDirectory = async () => {
-      try {
-        const response = await api.getManufacturerDirectory();
-        if (cancelled) return;
-        setManufacturerDirectory({
-          names: response.data?.names || [],
-          aliases: response.data?.aliases || {},
-          loaded: true,
-          entryCount: response.data?.entry_count || 0,
-          aliasCount: response.data?.alias_count || 0,
-        });
-      } catch (err) {
-        // Header detection still works from synonyms if the directory is unavailable.
-      }
-    };
-    loadDirectory();
-    return () => {
-      cancelled = true;
-    };
-  }, [manufacturerDirectory.loaded]);
-
-  useEffect(() => {
-    if (!manufacturerDirectory.loaded || currentStep > 2 || !headers.length || !dataRows.length) return;
-    const nextRoles = rolesForMultiBlockAssembly(headers, inferRoles(headers, dataRows, { manufacturerDirectory }));
-    setRoles((prev) => {
-      const updates = {};
-      const shouldReplaceManufacturer = !prev.manufacturer ||
-        prev.manufacturer === prev.mpn ||
-        prev.manufacturer === prev.cpn ||
-        !hasUsefulRoleValues(columnValues(prev.manufacturer, headers, dataRows)) ||
-        looksLikeCodeColumn(columnValues(prev.manufacturer, headers, dataRows));
-      if (shouldReplaceManufacturer && nextRoles.manufacturer && nextRoles.manufacturer !== prev.manufacturer) {
-        updates.manufacturer = nextRoles.manufacturer;
-      }
-      const shouldReplaceMpn = !prev.mpn || prev.mpn === prev.manufacturer;
-      if (shouldReplaceMpn && nextRoles.mpn && nextRoles.mpn !== prev.mpn) {
-        updates.mpn = nextRoles.mpn;
-      }
-      return Object.keys(updates).length ? { ...prev, ...updates } : prev;
-    });
-  }, [currentStep, dataRows, headers, manufacturerDirectory]);
-
   const handleApplyManufacturerMatch = useCallback(() => {
     const selectedMap = new Map(
       manufacturerMatchPreview
@@ -11629,6 +14906,7 @@ const BomNormalizer = () => {
   }, [manufacturerMatchPreview, selectedManufacturerMatches]);
 
   const handleReset = useCallback(() => {
+    clearBomNormalizerWorkspace();
     setWorkbook(null);
     setFileName('');
     setSheetName('');
@@ -11641,6 +14919,7 @@ const BomNormalizer = () => {
     setRoles(emptyRoles);
     setConfig({
       structure: 'separate_cells',
+      rowPlacement: 'same_row',
       bomLayout: 'none',
       alternateLayout: 'inside_selected_mpn_columns',
       delimiterMode: 'auto',
@@ -11648,6 +14927,7 @@ const BomNormalizer = () => {
       groupHeaderMode: 'auto',
       manufacturerMode: 'inherit_blank',
       quantityMode: 'inherit_primary',
+      alternateInheritFields: DEFAULT_ALTERNATE_INHERIT_FIELDS,
       quantityVariant: QUANTITY_VARIANT_ALL,
       quantityVariantByBlock: {},
       inheritLevels: true,
@@ -11655,7 +14935,6 @@ const BomNormalizer = () => {
       skipRepeatedHeaders: true,
       skipDoNotPopulate: false,
       skipDeletedRows: true,
-      documentTypeValues: [],
       parentPathLevels: true,
       alternateColumnGroups: [],
       followingRowAlternateColumn: '',
@@ -11724,7 +15003,26 @@ const BomNormalizer = () => {
 
   const handleBackFromSourceSetup = useCallback(() => {
     if (location.state?.uploadSource) {
-      navigate('/upload');
+      const uploadSource = location.state.uploadSource || {};
+      const selectedProcessingTemplateId = uploadSource.selectedProcessingTemplateId
+        || uploadSource.selectedProcessingTemplate?.id
+        || '';
+      navigate('/upload', {
+        state: {
+          fromBomNormalizer: true,
+          returnFromBomNormalizerConfigure: true,
+          wizardStep: 1,
+          processingPath: uploadSource.processingPath || 'normalize',
+          ...(uploadReturnFileRef.current ? { initialClientFile: uploadReturnFileRef.current } : {}),
+          ...(selectedProcessingTemplateId ? { selectedProcessingTemplateId } : {}),
+          ...(uploadSource.selectedProcessingTemplate ? { selectedProcessingTemplate: uploadSource.selectedProcessingTemplate } : {}),
+          initialClientSheetName: sheetName,
+          initialClientHeaderRow: headerRowIndex + 1,
+          initialClientSheetScope: sheetScope,
+          initialSelectedClientSheets: selectedSheetNames,
+          initialClientHeaderRowTouched: true,
+        },
+      });
       return;
     }
 
@@ -11745,6 +15043,7 @@ const BomNormalizer = () => {
     setRoles(emptyRoles);
     setConfig({
       structure: 'separate_cells',
+      rowPlacement: 'same_row',
       bomLayout: 'none',
       alternateLayout: 'inside_selected_mpn_columns',
       delimiterMode: 'auto',
@@ -11752,6 +15051,7 @@ const BomNormalizer = () => {
       groupHeaderMode: 'auto',
       manufacturerMode: 'inherit_blank',
       quantityMode: 'inherit_primary',
+      alternateInheritFields: DEFAULT_ALTERNATE_INHERIT_FIELDS,
       quantityVariant: QUANTITY_VARIANT_ALL,
       quantityVariantByBlock: {},
       inheritLevels: true,
@@ -11759,7 +15059,6 @@ const BomNormalizer = () => {
       skipRepeatedHeaders: true,
       skipDoNotPopulate: false,
       skipDeletedRows: true,
-      documentTypeValues: [],
       parentPathLevels: true,
       alternateColumnGroups: [],
       followingRowAlternateColumn: '',
@@ -11784,7 +15083,7 @@ const BomNormalizer = () => {
     setManufacturerMatchOpen(false);
     setMergeStage('preview');
     setError('');
-  }, [handleReset, location.state, mergePreview, navigate]);
+  }, [handleReset, headerRowIndex, location.state, mergePreview, navigate, selectedSheetNames, sheetName, sheetScope]);
 
   // Changing the source or parser settings invalidates any previous run. Skipped
   // while a restore is applying: that path sets roles/config and currentStep in the
@@ -11828,28 +15127,36 @@ const BomNormalizer = () => {
   useEffect(() => {
     if (currentStep === 4) return;
     if (!availableStructureOptions.length) return;
-    if (availableStructureOptions.some((option) => option.value === config.structure)) return;
-    setConfig((prev) => ({ ...prev, structure: availableStructureOptions[0].value }));
-  }, [availableStructureOptions, config.structure, currentStep]);
+    if (availableStructureOptions.some((option) => option.value === currentIdentityLayout)) return;
+    setConfig((prev) => ({
+      ...prev,
+      identityLayout: availableStructureOptions[0].value,
+      structure: structureForIdentityLayout(availableStructureOptions[0].value, prev),
+    }));
+  }, [availableStructureOptions, currentIdentityLayout, currentStep]);
 
   useEffect(() => {
     if (currentStep === 4 || parserTouched) return;
     const followingMfgPartsLayout = detectFollowingRowMfgPartsLayout(headers, dataRows.slice(0, 120), roles);
     if (!followingMfgPartsLayout) return;
+    const shouldUseMfgPartsAsPrimaryRoles = !roles.mpn && !roles.manufacturer;
     if (
-      roles.mpn === followingMfgPartsLayout.mfgPartsHeader &&
-      roles.manufacturer === followingMfgPartsLayout.mfgPartsHeader &&
+      (!shouldUseMfgPartsAsPrimaryRoles ||
+        (roles.mpn === followingMfgPartsLayout.mfgPartsHeader &&
+          roles.manufacturer === followingMfgPartsLayout.mfgPartsHeader)) &&
       config.structure === 'grouped_rows' &&
       config.alternateLayout === 'following_rows' &&
       config.followingRowAlternateColumn === followingMfgPartsLayout.mfgPartsHeader
     ) {
       return;
     }
-    setRoles((prev) => ({
-      ...prev,
-      mpn: followingMfgPartsLayout.mfgPartsHeader,
-      manufacturer: followingMfgPartsLayout.mfgPartsHeader,
-    }));
+    if (shouldUseMfgPartsAsPrimaryRoles) {
+      setRoles((prev) => ({
+        ...prev,
+        mpn: followingMfgPartsLayout.mfgPartsHeader,
+        manufacturer: followingMfgPartsLayout.mfgPartsHeader,
+      }));
+    }
     setConfig((prev) => ({
       ...prev,
       structure: 'grouped_rows',
@@ -11857,6 +15164,7 @@ const BomNormalizer = () => {
       followingRowAlternateColumn: followingMfgPartsLayout.mfgPartsHeader,
       manufacturerMode: 'never',
       quantityMode: 'inherit_primary',
+      alternateInheritFields: DEFAULT_ALTERNATE_INHERIT_FIELDS,
       delimiterMode: 'auto',
     }));
   }, [config.alternateLayout, config.followingRowAlternateColumn, config.structure, currentStep, dataRows, headers, parserTouched, roles]);
@@ -11866,17 +15174,6 @@ const BomNormalizer = () => {
       setCombineError('');
     }
   }, [canPrepareMerge, combineError]);
-
-  useEffect(() => {
-    if (currentStep === 4) return;
-    if (detectFollowingRowMfgPartsLayout(headers, dataRows.slice(0, 120), roles)) return;
-    const strongMpnHeader = findStrongMpnHeader(headers);
-    if (!strongMpnHeader || roles.mpn === strongMpnHeader) return;
-    if (!roles.mpn || isGenericPartHeader(roles.mpn) || roles.mpn === roles.cpn) {
-      setRoles((prev) => ({ ...prev, mpn: strongMpnHeader }));
-      rememberRoleHeader('mpn', strongMpnHeader);
-    }
-  }, [currentStep, headers, roles.cpn, roles.mpn]);
 
   useEffect(() => {
     if (currentStep === 4) return;
@@ -12118,7 +15415,7 @@ const BomNormalizer = () => {
 
       <Box sx={{ position: 'relative', zIndex: 1, px: { xs: 2, lg: 4 }, py: 3 }}>
         <Stepper activeStep={displayedStep} alternativeLabel sx={{ mb: 3 }}>
-          {['Upload', 'Source', 'Configure', 'Results'].map((label) => (
+          {['Upload', 'Configure', 'Results'].map((label) => (
             <Step key={label}>
               <StepLabel>{label}</StepLabel>
             </Step>
@@ -12184,6 +15481,7 @@ const BomNormalizer = () => {
 
                         <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1} sx={{ pt: 0.5 }}>
                           <Button variant="outlined" onClick={() => {
+                            clearBomNormalizerWorkspace();
                             setCombineItems([]);
                             setCombineError('');
                             setMergeChainMessage('');
@@ -12523,7 +15821,7 @@ const BomNormalizer = () => {
           </Grid>
         ) : (
           <Stack spacing={2.5}>
-            {currentStep === 1 && (
+            {currentStep === -1 && (
               <Paper elevation={0} sx={{ p: 2.5, border: '1px solid #dce2e8' }}>
                 <Typography sx={{ fontSize: 18, fontWeight: 800 }}>Source setup</Typography>
                 <Typography sx={{ mt: 0.5, fontSize: 13, color: '#66717f', wordBreak: 'break-word' }}>{fileName}</Typography>
@@ -12712,9 +16010,16 @@ const BomNormalizer = () => {
                 <Box sx={{ mt: 2 }}>
                   <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1} flexWrap="wrap">
                     <Typography sx={{ fontWeight: 800 }}>Source preview</Typography>
-                    <Button size="small" variant="outlined" startIcon={<VisibilityIcon />} onClick={() => setSourceGridOpen(true)} disabled={!sourceGridRows.length}>
+                    <ShadcnButton
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setSourceGridOpen(true)}
+                      disabled={!sourceGridRows.length}
+                      className="h-8"
+                    >
+                      <VisibilityIcon fontSize="inherit" />
                       View all rows
-                    </Button>
+                    </ShadcnButton>
                   </Stack>
                   {sourceEndRow && (
                     <Alert severity="info" sx={{ mt: 1, mb: 1.25 }}>
@@ -12724,13 +16029,13 @@ const BomNormalizer = () => {
                   <SourcePreview headers={headers} rows={previewDataRows.slice(0, 8)} assemblyMatrix={sourcePreviewAssemblyMatrix} />
                 </Box>
                 <Stack direction="row" justifyContent="space-between" sx={{ mt: 2 }}>
-                  <Button variant="outlined" onClick={handleBackFromSourceSetup} disabled={busy}>Back</Button>
-                  <Button variant="contained" onClick={() => setCurrentStep(2)} disabled={busy}>Next: identify columns</Button>
+                  <ShadcnButton variant="outline" onClick={handleBackFromSourceSetup} disabled={busy}>Back</ShadcnButton>
+                  <ShadcnButton onClick={() => setCurrentStep(2)} disabled={busy}>Next: identify columns</ShadcnButton>
                 </Stack>
               </Paper>
             )}
 
-            {currentStep === 2 && (
+            {(currentStep === 1 || currentStep === 2) && (
               <Paper elevation={0} sx={{ p: 2.5, border: '1px solid #dce2e8' }}>
                 <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', sm: 'flex-start' }} gap={1.5}>
                   <Box>
@@ -12738,19 +16043,183 @@ const BomNormalizer = () => {
                     <Typography sx={{ mt: 0.5, fontSize: 13, color: '#66717f' }}>
                       Pick the important columns first. Parser assumptions update automatically from those choices.
                     </Typography>
+                    <Typography sx={{ mt: 0.5, fontSize: 13, color: '#66717f', wordBreak: 'break-word' }}>{fileName}</Typography>
                   </Box>
                   <Box sx={{ display: 'flex', justifyContent: { xs: 'flex-start', sm: 'flex-end' }, gap: 1, flexWrap: 'wrap' }}>
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      startIcon={<VisibilityIcon />}
+                    <ShadcnButton
+                      size="sm"
+                      variant="outline"
                       onClick={() => setSourceGridOpen(true)}
                       disabled={!sourceGridRows.length}
+                      className="h-8"
                     >
+                      <VisibilityIcon fontSize="inherit" />
                       View all rows
-                    </Button>
+                    </ShadcnButton>
                   </Box>
                 </Stack>
+                {workbook.SheetNames.length > 1 && (
+                  <Alert severity="info" sx={{ mt: 1.5 }}>
+                    This workbook has {workbook.SheetNames.length} sheets. Choose one sheet, selected sheets, or all sheets before continuing.
+                  </Alert>
+                )}
+                <Grid container spacing={1.5} sx={{ mt: 1 }}>
+                  <Grid item xs={12} md={6}>
+                    <FormControl fullWidth size="small">
+                      <InputLabel>Sheet selection</InputLabel>
+                      <Select value={sheetScope} label="Sheet selection" onChange={(event) => handleSheetScopeChange(event.target.value)}>
+                        <MenuItem value="single">Use one sheet</MenuItem>
+                        <MenuItem value="selected" disabled={workbook.SheetNames.length <= 1}>Use selected sheets</MenuItem>
+                        <MenuItem value="all" disabled={workbook.SheetNames.length <= 1}>Use all sheets</MenuItem>
+                      </Select>
+                    </FormControl>
+                  </Grid>
+
+                  {sheetScope === 'single' && (
+                    <Grid item xs={12} md={6}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel>Sheet</InputLabel>
+                        <Select value={sheetName} label="Sheet" onChange={(event) => handleSheetChange(event.target.value)}>
+                          {workbook.SheetNames.map((name) => (
+                            <MenuItem key={name} value={name}>{name}</MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                  )}
+
+                  {sheetScope === 'selected' && (
+                    <Grid item xs={12} md={6}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel>Sheets</InputLabel>
+                        <Select
+                          multiple
+                          value={selectedSheetNames}
+                          label="Sheets"
+                          renderValue={(selected) => selected.join(', ')}
+                          onChange={(event) => handleSelectedSheetsChange(event.target.value)}
+                        >
+                          {workbook.SheetNames.map((name) => (
+                            <MenuItem key={name} value={name}>
+                              <Checkbox checked={selectedSheetNames.includes(name)} />
+                              <ListItemText primary={name} />
+                            </MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                  )}
+
+                  {sheetScope === 'all' && (
+                    <Grid item xs={12} md={6}>
+                      <TextField
+                        fullWidth
+                        size="small"
+                        label="Sheets included"
+                        value={selectedSheetNames.join(', ')}
+                        InputProps={{ readOnly: true }}
+                      />
+                    </Grid>
+                  )}
+
+                  <Grid item xs={12} md={6}>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      type="number"
+                      label="Header row"
+                      value={sheetScope === 'single' ? headerRowIndex + 1 : sheetHeaderRowOverride}
+                      placeholder={sheetScope === 'single' ? '' : 'Auto'}
+                      inputProps={sheetScope === 'single'
+                        ? { min: 1, max: Math.max(sheetRows.length, 1) }
+                        : { min: 1 }}
+                      helperText={sheetScope === 'single'
+                        ? ''
+                        : sheetHeaderRowOverride
+                          ? 'Applied to every selected sheet. Clear it to auto-detect each sheet.'
+                          : 'Header row is auto-detected separately for each selected sheet.'}
+                      onChange={(event) => handleHeaderRowChange(event.target.value)}
+                    />
+                  </Grid>
+
+                  <Grid item xs={12} md={6}>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      type="number"
+                      label="Include data until row"
+                      value={sourceEndRow}
+                      inputProps={{ min: headerRowIndex + 2, max: Math.max(sheetRows.length, headerRowIndex + 2) }}
+                      helperText="Optional. Leave blank to include all detected data rows."
+                      onChange={(event) => {
+                        setSourceEndRow(event.target.value);
+                        setNormalizedRows([]);
+                        setNormalizationSummary(null);
+                      }}
+                    />
+                  </Grid>
+
+                  {showAssemblyQuantityVariantSelector && (
+                    <Grid item xs={12} md={6}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel>Quantity variant</InputLabel>
+                        <Select
+                          value={config.quantityVariant || QUANTITY_VARIANT_ALL}
+                          label="Quantity variant"
+                          onChange={(event) => {
+                            setParserTouched(true);
+                            setConfig((prev) => ({
+                              ...prev,
+                              quantityVariant: event.target.value,
+                            }));
+                            setNormalizedRows([]);
+                            setNormalizationSummary(null);
+                          }}
+                        >
+                          <MenuItem value={QUANTITY_VARIANT_ALL}>All variants</MenuItem>
+                          {assemblyQuantityVariantOptions.map((variant) => (
+                            <MenuItem key={variant} value={variant}>{variant}</MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                  )}
+
+                  {showMultiBlockQuantityVariantSelectors && multiBlockQuantityVariantGroups.map((group) => (
+                    <Grid item xs={12} md={6} key={group.key}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel>{`Quantity variant - ${group.label || 'BOM table'}`}</InputLabel>
+                        <Select
+                          value={(config.quantityVariantByBlock || {})[group.key] || QUANTITY_VARIANT_ALL}
+                          label={`Quantity variant - ${group.label || 'BOM table'}`}
+                          onChange={(event) => {
+                            const nextValue = event.target.value;
+                            setParserTouched(true);
+                            setConfig((prev) => {
+                              const nextByBlock = { ...(prev.quantityVariantByBlock || {}) };
+                              if (!nextValue || nextValue === QUANTITY_VARIANT_ALL) {
+                                delete nextByBlock[group.key];
+                              } else {
+                                nextByBlock[group.key] = nextValue;
+                              }
+                              return {
+                                ...prev,
+                                quantityVariantByBlock: nextByBlock,
+                              };
+                            });
+                            setNormalizedRows([]);
+                            setNormalizationSummary(null);
+                          }}
+                        >
+                          <MenuItem value={QUANTITY_VARIANT_ALL}>All variants</MenuItem>
+                          {group.variants.map((variant) => (
+                            <MenuItem key={`${group.key}-${variant}`} value={variant}>{variant}</MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                  ))}
+                </Grid>
                 <Stack direction="row" gap={1} flexWrap="wrap" sx={{ mt: 1.2 }}>
                   <Chip size="small" label={`${visibleSourceHeaders.length} columns`} />
                   <Chip
@@ -12778,109 +16247,138 @@ const BomNormalizer = () => {
                 <Grid container spacing={1.5} sx={{ mt: 1 }}>
                   {ROLE_FIELDS.map((field) => {
                     const selectedHeader = roles[field.key] || '';
+                    const roleHeaderOptions = ['', ...visibleSourceHeaders];
                     return (
                       <Grid item xs={12} md={6} key={field.key}>
-                        <FormControl fullWidth size="small">
-                          <InputLabel>{field.label}</InputLabel>
-                          <Select
-                            value={selectedHeader}
-                            label={field.label}
-                            renderValue={(selected) => getSourceColumnLabel(selected, field.key)}
-                            onChange={(event) => handleRoleChange(field.key, event.target.value)}
-                          >
-                            <MenuItem value="">None</MenuItem>
-                            {visibleSourceHeaders.map((header, columnIndex) => {
-                              const isSelected = selectedHeader === header;
-                              const columnName = getSourceColumnName(header, columnIndex);
-                              const showColumnLabel = Boolean(roleColumnLabelModes[field.key] && columnName);
+                        <Autocomplete
+                          fullWidth
+                          size="small"
+                          options={roleHeaderOptions}
+                          value={roleHeaderOptions.includes(selectedHeader) ? selectedHeader : ''}
+                          onChange={(_, nextValue) => handleRoleChange(field.key, nextValue || '')}
+                          getOptionLabel={(option) => (
+                            option ? getSourceColumnLabel(option, field.key) : 'None'
+                          )}
+                          isOptionEqualToValue={(option, value) => option === value}
+                          filterOptions={(options, state) => {
+                            const query = normalizeKey(state.inputValue);
+                            if (!query) return options;
+                            return options.filter((option) => {
+                              if (!option) return 'none'.includes(query);
+                              const columnIndex = visibleSourceHeaders.indexOf(option);
+                              const columnName = getSourceColumnName(option, columnIndex);
+                              return normalizeKey(`${option} ${columnName ? `column ${columnName}` : ''}`).includes(query);
+                            });
+                          }}
+                          renderInput={(params) => (
+                            <TextField {...params} label={field.label} />
+                          )}
+                          renderOption={(props, option) => {
+                            if (!option) {
                               return (
-                                <MenuItem key={`${header}-${columnIndex}`} value={header}>
-                                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%', minWidth: 0 }}>
-                                    <Box sx={{ minWidth: 0, maxWidth: isSelected && columnName ? '62%' : '100%' }}>
-                                      <Typography noWrap sx={{ fontSize: 14, fontWeight: isSelected ? 800 : 600 }}>
-                                        {isSelected && showColumnLabel ? `Column ${columnName}` : header}
+                                <Box component="li" {...props}>
+                                  <Typography sx={{ fontSize: 14, fontWeight: 600 }}>None</Typography>
+                                </Box>
+                              );
+                            }
+                            const columnIndex = visibleSourceHeaders.indexOf(option);
+                            const isSelected = selectedHeader === option;
+                            const columnName = getSourceColumnName(option, columnIndex);
+                            const showColumnLabel = Boolean(roleColumnLabelModes[field.key] && columnName);
+                            return (
+                              <Box component="li" {...props}>
+                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%', minWidth: 0 }}>
+                                  <Box sx={{ minWidth: 0, maxWidth: isSelected && columnName ? '62%' : '100%' }}>
+                                    <Typography noWrap sx={{ fontSize: 14, fontWeight: isSelected ? 800 : 600 }}>
+                                      {isSelected && showColumnLabel ? `Column ${columnName}` : option}
+                                    </Typography>
+                                    {isSelected && showColumnLabel && (
+                                      <Typography noWrap sx={{ mt: 0.2, fontSize: 11.5, color: normalizerTheme.muted }}>
+                                        {option}
                                       </Typography>
-                                      {isSelected && showColumnLabel && (
-                                        <Typography noWrap sx={{ mt: 0.2, fontSize: 11.5, color: normalizerTheme.muted }}>
-                                          {header}
-                                        </Typography>
-                                      )}
-                                    </Box>
-                                    {isSelected && columnName && (
-                                      <Box
-                                        onClick={(event) => event.stopPropagation()}
-                                        onMouseDown={(event) => event.stopPropagation()}
-                                        sx={{
-                                          display: 'inline-flex',
-                                          alignItems: 'center',
-                                          gap: 0.55,
-                                          flexShrink: 0,
-                                          px: 0.75,
-                                          py: 0.25,
-                                          borderRadius: 999,
-                                          border: `1px solid ${normalizerTheme.borderStrong}`,
-                                          bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.34)' : 'rgba(248, 250, 252, 0.92)',
-                                        }}
-                                      >
-                                        <Typography sx={{ fontSize: 11, lineHeight: 1, fontWeight: 800, color: normalizerTheme.muted, whiteSpace: 'nowrap' }}>
-                                          Column {columnName}
-                                        </Typography>
-                                        <Switch
-                                          size="small"
-                                          checked={Boolean(roleColumnLabelModes[field.key])}
-                                          onChange={(event) => toggleRoleColumnLabelMode(field.key, event.target.checked)}
-                                          sx={{
-                                            width: 30,
-                                            height: 18,
-                                            p: 0,
-                                            '& .MuiSwitch-switchBase': {
-                                              p: '2px',
-                                              '&.Mui-checked': {
-                                                transform: 'translateX(12px)',
-                                              },
-                                            },
-                                            '& .MuiSwitch-thumb': {
-                                              width: 14,
-                                              height: 14,
-                                            },
-                                            '& .MuiSwitch-track': {
-                                              borderRadius: 999,
-                                            },
-                                          }}
-                                        />
-                                      </Box>
                                     )}
                                   </Box>
-                                </MenuItem>
-                              );
-                            })}
-                          </Select>
-                        </FormControl>
+                                  {isSelected && columnName && (
+                                    <Box
+                                      onClick={(event) => event.stopPropagation()}
+                                      onMouseDown={(event) => event.stopPropagation()}
+                                      sx={{
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: 0.55,
+                                        flexShrink: 0,
+                                        px: 0.75,
+                                        py: 0.25,
+                                        borderRadius: 999,
+                                        border: `1px solid ${normalizerTheme.borderStrong}`,
+                                        bgcolor: isDarkMode ? 'rgba(15, 23, 42, 0.34)' : 'rgba(248, 250, 252, 0.92)',
+                                      }}
+                                    >
+                                      <Typography sx={{ fontSize: 11, lineHeight: 1, fontWeight: 800, color: normalizerTheme.muted, whiteSpace: 'nowrap' }}>
+                                        Column {columnName}
+                                      </Typography>
+                                      <Switch
+                                        size="small"
+                                        checked={Boolean(roleColumnLabelModes[field.key])}
+                                        onChange={(event) => toggleRoleColumnLabelMode(field.key, event.target.checked)}
+                                        sx={{
+                                          width: 30,
+                                          height: 18,
+                                          p: 0,
+                                          '& .MuiSwitch-switchBase': {
+                                            p: '2px',
+                                            '&.Mui-checked': {
+                                              transform: 'translateX(12px)',
+                                            },
+                                          },
+                                          '& .MuiSwitch-thumb': {
+                                            width: 14,
+                                            height: 14,
+                                          },
+                                          '& .MuiSwitch-track': {
+                                            borderRadius: 999,
+                                          },
+                                        }}
+                                      />
+                                    </Box>
+                                  )}
+                                </Box>
+                              </Box>
+                            );
+                          }}
+                        />
                       </Grid>
                     );
                   })}
                 </Grid>
-                <Paper elevation={0} sx={{ mt: 2, p: 1.5, bgcolor: '#f8fafc', border: '1px solid #e1e6ec' }}>
-                  <Typography sx={{ fontSize: 14, fontWeight: 800 }}>Detected setup</Typography>
-                  <Typography sx={{ mt: 0.4, fontSize: 13, color: '#536171' }}>{roleCombinationHint}</Typography>
+                <Paper
+                  elevation={0}
+                  className="rounded-lg border border-slate-200 bg-white shadow-sm"
+                  sx={{ mt: 2, p: 1.5 }}
+                >
+                  <Box sx={{ minWidth: 0 }}>
+                    <Typography sx={{ fontSize: 14, fontWeight: 800 }}>Detected setup</Typography>
+                    <Typography sx={{ mt: 0.4, fontSize: 13, color: '#536171' }}>{roleCombinationHint}</Typography>
+                  </Box>
                   <Grid container spacing={1.5} sx={{ mt: 0.5 }}>
                     <Grid item xs={12} md={3}>
                       <FormControl fullWidth size="small">
-                        <InputLabel>Where are MPN and MFR?</InputLabel>
+                        <InputLabel>Where are MPN, MFR and CPN?</InputLabel>
                         <Select
                           disabled={bomLayoutActive}
-                          value={config.structure}
-                          label="Where are MPN and MFR?"
+                          value={currentIdentityLayout}
+                          label="Where are MPN, MFR and CPN?"
                           renderValue={(selected) => {
-                            const opt = STRUCTURE_OPTIONS.find((o) => o.value === selected);
+                            const opt = IDENTITY_LAYOUT_OPTIONS.find((o) => o.value === selected);
                             return opt?.label || selected;
                           }}
                           onChange={(event) => {
+                            const identityLayout = event.target.value;
                             setParserTouched(true);
                             setConfig((prev) => ({
                               ...prev,
-                              structure: event.target.value,
-                              alternateLayout: ['one_per_row', 'grouped_rows'].includes(event.target.value) ? 'already_separate_rows' : prev.alternateLayout,
+                              identityLayout,
+                              structure: structureForIdentityLayout(identityLayout, prev),
                             }));
                           }}
                         >
@@ -12905,23 +16403,52 @@ const BomNormalizer = () => {
                         </Select>
                       </FormControl>
                     </Grid>
-                    {showManufacturerInheritanceOption && (
-                      <Grid item xs={12} md={3}>
-                        <FormControl fullWidth size="small">
-                          <InputLabel>Alternate manufacturer</InputLabel>
-                          <Select
-                            disabled={bomLayoutActive}
-                            value={config.manufacturerMode || 'inherit_blank'}
-                            label="Alternate manufacturer"
-                            onChange={(event) => setConfig((prev) => ({ ...prev, manufacturerMode: event.target.value }))}
-                          >
-                            {MANUFACTURER_INHERIT_OPTIONS.map((option) => (
-                              <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
-                            ))}
-                          </Select>
-                        </FormControl>
-                      </Grid>
-                    )}
+                    <Grid item xs={12} md={3}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel>Row placement</InputLabel>
+                        <Select
+                          disabled={bomLayoutActive}
+                          value={config.rowPlacement || 'same_row'}
+                          label="Row placement"
+                          renderValue={(selected) => {
+                            const opt = ROW_PLACEMENT_OPTIONS.find((o) => o.value === selected);
+                            return opt?.label || selected;
+                          }}
+                          onChange={(event) => {
+                            setParserTouched(true);
+                            setConfig((prev) => ({
+                              ...prev,
+                              rowPlacement: event.target.value,
+                            }));
+                          }}
+                        >
+                          {ROW_PLACEMENT_OPTIONS.map((option) => (
+                            <MenuItem key={option.value} value={option.value}>
+                              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1, width: '100%', minWidth: 0 }}>
+                                <Box sx={{ minWidth: 0, whiteSpace: 'normal' }}>
+                                  <Typography sx={{ fontSize: 14, fontWeight: 700 }}>
+                                    {option.label}
+                                  </Typography>
+                                  <Typography sx={{ mt: 0.25, fontSize: 11.5, color: normalizerTheme.muted, whiteSpace: 'normal' }}>
+                                    {option.description}
+                                  </Typography>
+                                </Box>
+                                {option.example && (
+                                  <OptionExampleTooltip option={option}>
+                                    <InfoOutlinedIcon
+                                      fontSize="small"
+                                      sx={{ color: 'text.secondary', opacity: 0.7, ml: 1, flexShrink: 0, '&:hover': { opacity: 1 } }}
+                                      onClick={(e) => e.stopPropagation()}
+                                      onMouseDown={(e) => e.stopPropagation()}
+                                    />
+                                  </OptionExampleTooltip>
+                                )}
+                              </Box>
+                            </MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    </Grid>
                     <Grid item xs={12} md={3}>
                       <FormControl fullWidth size="small">
                         <InputLabel>Where are alternates?</InputLabel>
@@ -12938,10 +16465,16 @@ const BomNormalizer = () => {
                             setParserTouched(true);
                             setConfig((prev) => ({
                               ...prev,
-                              structure: nextLayout === 'inside_selected_mpn_columns' && prev.structure === 'one_per_row'
-                                ? 'separate_cells'
-                                : prev.structure,
+                              structure: structureForIdentityLayout(
+                                prev.identityLayout || identityLayoutFromRoles(roles, prev),
+                                { ...prev, alternateLayout: nextLayout }
+                              ),
                               alternateLayout: nextLayout,
+                              alternateInheritFields: nextLayout === 'already_separate_rows'
+                                ? []
+                                : (prev.alternateInheritFields?.length
+                                  ? prev.alternateInheritFields
+                                  : DEFAULT_ALTERNATE_INHERIT_FIELDS),
                               alternateColumnGroups: nextLayout === 'separate_columns' && !(prev.alternateColumnGroups || []).length
                                 ? [suggestAlternateColumnGroup()]
                                 : prev.alternateColumnGroups,
@@ -13032,61 +16565,6 @@ const BomNormalizer = () => {
                         </FormControl>
                       </Grid>
                     )}
-                    {config.alternateLayout === 'following_item_rows' && !bomLayoutActive && (
-                      <>
-                        <Grid item xs={12} md={3}>
-                          <FormControl fullWidth size="small">
-                            <InputLabel>CPN autofilling rule</InputLabel>
-                            <Select
-                              value={config.followingItemRowsCpnMode || 'primary'}
-                              label="CPN autofilling rule"
-                              onChange={(event) => {
-                                setParserTouched(true);
-                                setConfig((prev) => ({
-                                  ...prev,
-                                  followingItemRowsCpnMode: event.target.value,
-                                }));
-                              }}
-                            >
-                              <MenuItem value="primary">Autofill from primary</MenuItem>
-                              <MenuItem value="column">Autofill from CPN column</MenuItem>
-                            </Select>
-                            <Typography sx={{ mt: 0.35, fontSize: 11.5, color: normalizerTheme.muted }}>
-                              Use primary for sparse alternate rows; use CPN column when alternate rows carry their own CPN.
-                            </Typography>
-                          </FormControl>
-                        </Grid>
-                        {[
-                          ['followingItemRowsMpnColumn', 'MPN column for following rows', 'MPN value from the sparse rows below each main item.'],
-                          ['followingItemRowsManufacturerColumn', 'MFR column for following rows', 'Manufacturer value from the sparse rows below each main item.'],
-                        ].map(([key, label, helper]) => (
-                          <Grid item xs={12} md={3} key={key}>
-                            <FormControl fullWidth size="small">
-                              <InputLabel>{label}</InputLabel>
-                              <Select
-                                value={config[key] || ''}
-                                label={label}
-                                onChange={(event) => {
-                                  setParserTouched(true);
-                                  setConfig((prev) => ({
-                                    ...prev,
-                                    [key]: event.target.value,
-                                  }));
-                                }}
-                              >
-                                <MenuItem value="">Select column</MenuItem>
-                                {visibleSourceHeaders.map((header) => (
-                                  <MenuItem key={`${key}-${header}`} value={header}>{header}</MenuItem>
-                                ))}
-                              </Select>
-                              <Typography sx={{ mt: 0.35, fontSize: 11.5, color: normalizerTheme.muted }}>
-                                {helper}
-                              </Typography>
-                            </FormControl>
-                          </Grid>
-                        ))}
-                      </>
-                    )}
                     {config.alternateLayout === 'following_rows' && followingRowsInsideCellAlternateInfo && !bomLayoutActive && (
                       <Grid item xs={12} md={3}>
                         <Box
@@ -13154,40 +16632,73 @@ const BomNormalizer = () => {
                         </Box>
                       </Grid>
                     )}
-                    <Grid item xs={12} md={3}>
-                      <FormControl fullWidth size="small">
-                        <InputLabel>Quantity/UOM handling</InputLabel>
-                        <Select
-                          disabled={bomLayoutActive}
-                          value={config.quantityMode}
-                          label="Quantity/UOM handling"
-                          renderValue={(selected) => {
-                            const opt = QTY_OPTIONS.find((o) => o.value === selected);
-                            return opt?.label || selected;
-                          }}
-                          onChange={(event) => setConfig((prev) => ({ ...prev, quantityMode: event.target.value }))}
-                        >
-                          {QTY_OPTIONS.map((option) => (
-                            <MenuItem
-                              key={option.value}
-                              value={option.value}
-                              sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}
-                            >
-                              <Box sx={{ flex: 1, minWidth: 0, whiteSpace: 'normal' }}>{option.label}</Box>
-                              {option.example && (
-                                <OptionExampleTooltip option={option}>
-                                  <InfoOutlinedIcon
-                                    fontSize="small"
-                                    sx={{ color: 'text.secondary', opacity: 0.7, ml: 1, '&:hover': { opacity: 1 } }}
-                                    onClick={(e) => e.stopPropagation()}
-                                  />
-                                </OptionExampleTooltip>
-                              )}
+                    {showAlternateInheritanceControl && (
+                      <Grid item xs={12} md={3}>
+                        <FormControl fullWidth size="small">
+                          <InputLabel>Autofill from primary</InputLabel>
+                          <Select
+                            multiple
+                            value={selectedAlternateInheritFields}
+                            label="Autofill from primary"
+                            renderValue={(selected) => {
+                              const labels = selected
+                                .map((field) => ALTERNATE_INHERIT_FIELD_OPTIONS.find((option) => option.value === field)?.label)
+                                .filter(Boolean);
+                              if (!labels.length) return 'None';
+                              if (labels.length <= 2) return labels.join(', ');
+                              return `${labels.slice(0, 2).join(', ')} +${labels.length - 2}`;
+                            }}
+                            onChange={(event) => {
+                              const rawFields = typeof event.target.value === 'string'
+                                ? event.target.value.split(',')
+                                : event.target.value;
+                              const shouldToggleAll = rawFields.includes(ALTERNATE_INHERIT_SELECT_ALL_VALUE);
+                              const nextFields = shouldToggleAll
+                                ? (allAlternateInheritFieldsSelected ? [] : allAlternateInheritFieldValues)
+                                : rawFields;
+                              setParserTouched(true);
+                              setConfig((prev) => ({
+                                ...prev,
+                                alternateInheritFields: nextFields,
+                              }));
+                            }}
+                          >
+                            <MenuItem value={ALTERNATE_INHERIT_SELECT_ALL_VALUE}>
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%', minWidth: 0 }}>
+                                <Checkbox
+                                  checked={allAlternateInheritFieldsSelected}
+                                  indeterminate={someAlternateInheritFieldsSelected}
+                                />
+                                <ListItemText
+                                  primary={allAlternateInheritFieldsSelected ? 'Clear all' : 'Select all'}
+                                  sx={{ minWidth: 0 }}
+                                />
+                              </Box>
                             </MenuItem>
-                          ))}
-                        </Select>
-                      </FormControl>
-                    </Grid>
+                            {ALTERNATE_INHERIT_FIELD_OPTIONS.map((option) => (
+                              <MenuItem key={option.value} value={option.value}>
+                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%', minWidth: 0 }}>
+                                  <Checkbox checked={selectedAlternateInheritFields.includes(option.value)} />
+                                  <ListItemText primary={option.label} sx={{ minWidth: 0 }} />
+                                  <Tooltip
+                                    arrow
+                                    placement="right"
+                                    title="Alternate rows use the primary row value for this field."
+                                  >
+                                    <InfoOutlinedIcon
+                                      fontSize="small"
+                                      sx={{ color: 'text.secondary', opacity: 0.7, flexShrink: 0, '&:hover': { opacity: 1 } }}
+                                      onClick={(event) => event.stopPropagation()}
+                                      onMouseDown={(event) => event.stopPropagation()}
+                                    />
+                                  </Tooltip>
+                                </Box>
+                              </MenuItem>
+                            ))}
+                          </Select>
+                        </FormControl>
+                      </Grid>
+                    )}
                     <Grid item xs={12} md={3}>
                       <FormControl fullWidth size="small">
                         <InputLabel>BOM layout</InputLabel>
@@ -13206,6 +16717,9 @@ const BomNormalizer = () => {
                               quantityMode: ['assembly_quantity_matrix', 'multi_block_assembly'].includes(nextLayout)
                                 ? 'every_row'
                                 : prev.quantityMode,
+                              alternateInheritFields: ['assembly_quantity_matrix', 'multi_block_assembly'].includes(nextLayout)
+                                ? []
+                                : (prev.alternateInheritFields?.length ? prev.alternateInheritFields : DEFAULT_ALTERNATE_INHERIT_FIELDS),
                             }));
                           }}
                         >
@@ -13215,158 +16729,103 @@ const BomNormalizer = () => {
                         </Select>
                       </FormControl>
                     </Grid>
-                    <Grid item xs={12} md={3}>
-                      <FormControl fullWidth size="small">
-                        <InputLabel>Known delimiter</InputLabel>
-                        <Select
-                          value={config.delimiterMode}
-                          label="Known delimiter"
-                          onChange={(event) => {
-                            setDelimiterTouched(true);
-                            setParserTouched(true);
-                            setConfig((prev) => ({ ...prev, delimiterMode: event.target.value }));
-                          }}
-                        >
-                          {DELIMITER_OPTIONS.map((option) => (
-                            <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
-                          ))}
-                        </Select>
-                      </FormControl>
-                    </Grid>
-                    {config.delimiterMode === 'custom' && (
-                      <Grid item xs={12} md={3}>
-                        <TextField
-                          fullWidth
-                          size="small"
-                          label="Custom delimiter"
-                          value={config.customDelimiter}
-                          onChange={(event) => setConfig((prev) => ({ ...prev, customDelimiter: event.target.value }))}
-                        />
-                      </Grid>
-                    )}
-                    {config.structure === 'grouped_rows' && !bomLayoutActive && (
-                      <Grid item xs={12} md={3}>
-                        <FormControl fullWidth size="small">
-                          <InputLabel>Group header handling</InputLabel>
-                          <Select
-                            value={config.groupHeaderMode || 'auto'}
-                            label="Group header handling"
-                            renderValue={(selected) => {
-                              const opt = GROUP_HEADER_OPTIONS.find((o) => o.value === selected);
-                              return opt?.label || selected;
-                            }}
-                            onChange={(event) => setConfig((prev) => ({ ...prev, groupHeaderMode: event.target.value }))}
-                          >
-                            {GROUP_HEADER_OPTIONS.map((option) => (
-                              <MenuItem
-                                key={option.value}
-                                value={option.value}
-                                sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}
-                              >
-                                <Box sx={{ flex: 1, minWidth: 0, whiteSpace: 'normal' }}>{option.label}</Box>
-                                {option.example && (
-                                  <OptionExampleTooltip option={option}>
-                                    <InfoOutlinedIcon
-                                      fontSize="small"
-                                      sx={{ color: 'text.secondary', opacity: 0.7, ml: 1, '&:hover': { opacity: 1 } }}
-                                      onClick={(e) => e.stopPropagation()}
-                                    />
-                                  </OptionExampleTooltip>
-                                )}
-                              </MenuItem>
-                            ))}
-                          </Select>
-                        </FormControl>
-                      </Grid>
-                    )}
                   </Grid>
                   {bomLayoutActive && (
                     <Alert severity="info" sx={{ mt: 1.25 }}>
                       BOM layout is controlling row expansion. MPN/MFR arrangement, alternate layout, and quantity handling are locked because changing them would not affect this layout.
                     </Alert>
                   )}
-                  {config.alternateLayout === 'separate_columns' && config.structure !== 'grouped_rows' && !bomLayoutActive && (
+                  {config.alternateLayout === 'separate_columns' && !bomLayoutActive && (
                     <Paper elevation={0} sx={{ mt: 1.5, p: 1.25, border: '1px solid #e1e6ec', bgcolor: '#fff' }}>
                       <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'flex-start', sm: 'center' }} justifyContent="space-between" gap={1}>
                         <Box>
-                          <Typography sx={{ fontSize: 13, fontWeight: 800 }}>Alternate column groups</Typography>
+                          <Typography sx={{ fontSize: 13, fontWeight: 800 }}>Mark alternate columns</Typography>
                           <Typography sx={{ fontSize: 12.5, color: '#66717f' }}>
                             {showAlternateManufacturerGroups
-                              ? 'Add one row for each alternate MPN/MFR pair that lives in separate columns.'
-                              : 'Add one row for each alternate MPN column. Manufacturer is not required for this setup.'}
+                              ? 'Add one group for each alternate set, then choose that alternate CPN, MPN, MFR, Qty, and UOM columns.'
+                              : 'Add one group for each alternate MPN column. CPN, Qty, and UOM can be mapped here or copied from primary.'}
                           </Typography>
                         </Box>
-                        <Button size="small" variant="outlined" onClick={addAlternateColumnGroup}>
-                          Add alternate group
-                        </Button>
+                        <Stack direction="row" gap={1} alignItems="center" flexWrap="wrap" justifyContent={{ xs: 'flex-start', sm: 'flex-end' }}>
+                          <TextField
+                            size="small"
+                            type="number"
+                            label="Alternate groups"
+                            value={(config.alternateColumnGroups || []).length}
+                            onChange={(event) => setAlternateColumnGroupCount(event.target.value)}
+                            inputProps={{ min: 0, max: MAX_ALTERNATE_COLUMN_GROUPS, step: 1 }}
+                            sx={{ width: 150 }}
+                          />
+                          <ShadcnButton size="sm" variant="outline" onClick={autofillAlternateColumnGroups} className="h-8">
+                            Autofill groups
+                          </ShadcnButton>
+                          <ShadcnButton size="sm" variant="outline" onClick={addAlternateColumnGroup} className="h-8">
+                            Add alternate group
+                          </ShadcnButton>
+                        </Stack>
                       </Stack>
                       {(config.alternateColumnGroups || []).length > 0 ? (
                         <Stack spacing={1} sx={{ mt: 1 }}>
                           {(config.alternateColumnGroups || []).map((group, groupIndex) => (
                             <Grid container spacing={1} alignItems="center" key={`alt-group-${groupIndex}`}>
-                              <Grid item xs={12} sm={showAlternateManufacturerGroups ? 3 : 4}>
-                                <FormControl fullWidth size="small">
-                                  <InputLabel>{`Alt ${groupIndex + 1} MPN`}</InputLabel>
-                                  <Select
-                                    label={`Alt ${groupIndex + 1} MPN`}
-                                    value={group.mpn || ''}
-                                    onChange={(event) => updateAlternateColumnGroup(groupIndex, 'mpn', event.target.value)}
-                                  >
-                                    <MenuItem value="">None</MenuItem>
-                                    {visibleSourceHeaders.map((header) => (
-                                      <MenuItem key={header} value={header}>{header}</MenuItem>
-                                    ))}
-                                  </Select>
-                                </FormControl>
+                              <Grid item xs={12} sm={6} md={2}>
+                                <Autocomplete
+                                  size="small"
+                                  options={visibleSourceHeaders}
+                                  value={group.cpn || null}
+                                  onChange={(_, value) => updateAlternateColumnGroup(groupIndex, 'cpn', value || '')}
+                                  renderInput={(params) => (
+                                    <TextField {...params} label={`Alt ${groupIndex + 1} CPN`} placeholder="Use primary" />
+                                  )}
+                                />
+                              </Grid>
+                              <Grid item xs={12} sm={6} md={2.2}>
+                                <Autocomplete
+                                  size="small"
+                                  options={visibleSourceHeaders}
+                                  value={group.mpn || null}
+                                  onChange={(_, value) => updateAlternateColumnGroup(groupIndex, 'mpn', value || '')}
+                                  renderInput={(params) => (
+                                    <TextField {...params} label={`Alt ${groupIndex + 1} MPN`} placeholder="Required" />
+                                  )}
+                                />
                               </Grid>
                               {showAlternateManufacturerGroups && (
-                                <Grid item xs={12} sm={3}>
-                                  <FormControl fullWidth size="small">
-                                    <InputLabel>{`Alt ${groupIndex + 1} MFR`}</InputLabel>
-                                    <Select
-                                      label={`Alt ${groupIndex + 1} MFR`}
-                                      value={group.mfr || ''}
-                                      onChange={(event) => updateAlternateColumnGroup(groupIndex, 'mfr', event.target.value)}
-                                    >
-                                      <MenuItem value="">None</MenuItem>
-                                      {visibleSourceHeaders.map((header) => (
-                                        <MenuItem key={header} value={header}>{header}</MenuItem>
-                                      ))}
-                                    </Select>
-                                  </FormControl>
+                                <Grid item xs={12} sm={6} md={2.2}>
+                                  <Autocomplete
+                                    size="small"
+                                    options={visibleSourceHeaders}
+                                    value={group.mfr || null}
+                                    onChange={(_, value) => updateAlternateColumnGroup(groupIndex, 'mfr', value || '')}
+                                    renderInput={(params) => (
+                                      <TextField {...params} label={`Alt ${groupIndex + 1} MFR`} placeholder="Optional" />
+                                    )}
+                                  />
                                 </Grid>
                               )}
-                              <Grid item xs={12} sm={showAlternateManufacturerGroups ? 2 : 3}>
-                                <FormControl fullWidth size="small">
-                                  <InputLabel>Alt Qty</InputLabel>
-                                  <Select
-                                    label="Alt Qty"
-                                    value={group.qty || ''}
-                                    onChange={(event) => updateAlternateColumnGroup(groupIndex, 'qty', event.target.value)}
-                                  >
-                                    <MenuItem value="">Use primary</MenuItem>
-                                    {visibleSourceHeaders.map((header) => (
-                                      <MenuItem key={header} value={header}>{header}</MenuItem>
-                                    ))}
-                                  </Select>
-                                </FormControl>
+                              <Grid item xs={12} sm={6} md={1.9}>
+                                <Autocomplete
+                                  size="small"
+                                  options={visibleSourceHeaders}
+                                  value={group.qty || null}
+                                  onChange={(_, value) => updateAlternateColumnGroup(groupIndex, 'qty', value || '')}
+                                  renderInput={(params) => (
+                                    <TextField {...params} label="Alt Qty" placeholder="Use primary" />
+                                  )}
+                                />
                               </Grid>
-                              <Grid item xs={12} sm={showAlternateManufacturerGroups ? 2 : 3}>
-                                <FormControl fullWidth size="small">
-                                  <InputLabel>Alt UOM</InputLabel>
-                                  <Select
-                                    label="Alt UOM"
-                                    value={group.uom || ''}
-                                    onChange={(event) => updateAlternateColumnGroup(groupIndex, 'uom', event.target.value)}
-                                  >
-                                    <MenuItem value="">Use primary</MenuItem>
-                                    {visibleSourceHeaders.map((header) => (
-                                      <MenuItem key={header} value={header}>{header}</MenuItem>
-                                    ))}
-                                  </Select>
-                                </FormControl>
+                              <Grid item xs={12} sm={6} md={1.9}>
+                                <Autocomplete
+                                  size="small"
+                                  options={visibleSourceHeaders}
+                                  value={group.uom || null}
+                                  onChange={(_, value) => updateAlternateColumnGroup(groupIndex, 'uom', value || '')}
+                                  renderInput={(params) => (
+                                    <TextField {...params} label="Alt UOM" placeholder="Use primary" />
+                                  )}
+                                />
                               </Grid>
-                              <Grid item xs={12} sm={2}>
+                              <Grid item xs={12} sm={6} md={1.8}>
                                 <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1}>
                                   <Chip size="small" label={group.mpn ? 'Active' : 'Needs MPN'} color={group.mpn ? 'success' : 'default'} />
                                   <IconButton size="small" color="error" onClick={() => removeAlternateColumnGroup(groupIndex)}>
@@ -13379,7 +16838,7 @@ const BomNormalizer = () => {
                         </Stack>
                       ) : (
                         <Alert severity="info" sx={{ mt: 1 }}>
-                          No alternate columns selected yet. Add a group and choose the alternate MPN column{showAlternateManufacturerGroups ? ', plus manufacturer if available' : ''}.
+                          No alternate columns selected yet. Add a group and choose the alternate MPN column, plus alternate CPN and manufacturer if available.
                         </Alert>
                       )}
                       {alternateColumnGroups.length > 0 && (
@@ -13392,8 +16851,6 @@ const BomNormalizer = () => {
                   <Typography sx={{ mt: 1, fontSize: 13, color: '#536171', lineHeight: 1.45 }}>
                     <strong>Detected rule:</strong> {bomLayoutActive ? selectedBomLayoutOption?.description : selectedStructureOption?.description || '-'}
                     {!bomLayoutActive && selectedAlternateOption?.description ? ` ${selectedAlternateOption.description}` : ''}
-                    {!bomLayoutActive && config.structure === 'grouped_rows' && selectedGroupHeaderOption ? ` ${selectedGroupHeaderOption.description}` : ''}
-                    {' '}<strong>Delimiter:</strong> {delimiterLabel}.
                     {' '}Blank BOM levels will be treated as level 1.
                   </Typography>
                   {config.alternateLayout === 'same_group_rows' && !roles.parent && !bomLayoutActive && (
@@ -13407,50 +16864,9 @@ const BomNormalizer = () => {
                     </Alert>
                   )}
                   {config.alternateLayout === 'following_item_rows' && !bomLayoutActive && (
-                    (!config.followingItemRowsMpnColumn || !config.followingItemRowsManufacturerColumn) ? (
-                      <Alert severity="warning" sx={{ mt: 1 }}>
-                        Select the MPN and MFR columns used by the following sparse rows.
-                      </Alert>
-                    ) : (
-                      <Alert severity="info" sx={{ mt: 1 }}>
-                        Sparse rows using {config.followingItemRowsMpnColumn} and {config.followingItemRowsManufacturerColumn} will attach to the nearest previous item. CPN will {config.followingItemRowsCpnMode === 'column' ? 'come from the mapped CPN column when available' : 'copy from the primary item'}.
-                      </Alert>
-                    )
-                  )}
-                  {roles.rowType && rowTypeValues.length > 0 && (
-                    <Box sx={{ mt: 1.5 }}>
-                      <Typography sx={{ fontSize: 13, fontWeight: 800 }}>
-                        Which "{roles.rowType}" values are documents, not parts?
-                      </Typography>
-                      <Typography sx={{ fontSize: 12, color: '#66717f', mb: 0.75 }}>
-                        A document is attached to a part, not consumed by one, so it is not a BOM
-                        line. Ticked values are dropped before the BOM is built
-                        {documentRowCount > 0 ? ` — ${documentRowCount} rows` : ''}.
-                      </Typography>
-                      <Stack direction="row" flexWrap="wrap" gap={0.75}>
-                        {rowTypeValues.map(({ value, count }) => {
-                          const ticked = (config.documentTypeValues || []).includes(value);
-                          return (
-                            <Chip
-                              key={value}
-                              size="small"
-                              label={`${value} (${count})`}
-                              color={ticked ? 'warning' : 'default'}
-                              variant={ticked ? 'filled' : 'outlined'}
-                              onClick={() => setConfig((prev) => {
-                                const current = prev.documentTypeValues || [];
-                                return {
-                                  ...prev,
-                                  documentTypeValues: current.includes(value)
-                                    ? current.filter((entry) => entry !== value)
-                                    : [...current, value],
-                                };
-                              })}
-                            />
-                          );
-                        })}
-                      </Stack>
-                    </Box>
+                    <Alert severity="info" sx={{ mt: 1 }}>
+                      Sparse following rows will attach to the nearest previous item. CPN copies from the primary item.
+                    </Alert>
                   )}
                   {detectedCleanupOptions.length > 0 && (
                     <Box sx={{ mt: 1.5 }}>
@@ -13480,8 +16896,22 @@ const BomNormalizer = () => {
                   )}
                 </Paper>
                 <Stack direction="row" justifyContent="space-between" sx={{ mt: 2 }}>
-                  <Button variant="outlined" onClick={handleBackFromConfigure} disabled={busy}>Back</Button>
-                  <Button variant="contained" startIcon={<PlayArrowIcon />} onClick={handleNormalize} disabled={busy}>Run normalization</Button>
+                  <ShadcnButton variant="outline" onClick={handleBackFromSourceSetup} disabled={busy}>Back</ShadcnButton>
+                  <Stack direction="row" gap={1}>
+                    <ShadcnButton
+                      variant="outline"
+                      disabled={fieldPatternLoading || !headers.length || !dataRows.length}
+                      onClick={() => handleTeachFieldPattern(null, { forceRefresh: true })}
+                      className="border-blue-200 text-blue-700 hover:bg-blue-50"
+                    >
+                      {fieldPatternLoading ? <CircularProgress size={14} /> : <TuneIcon fontSize="inherit" />}
+                      Review patterns
+                    </ShadcnButton>
+                    <ShadcnButton onClick={handleNormalize} disabled={busy} className="bg-blue-600 hover:bg-blue-700">
+                      <PlayArrowIcon fontSize="inherit" />
+                      OLD
+                    </ShadcnButton>
+                  </Stack>
                 </Stack>
               </Paper>
             )}
@@ -13644,6 +17074,24 @@ const BomNormalizer = () => {
                   <Box sx={{ mt: 1.5 }}>
                     <LinearProgress variant="determinate" value={quality.average} sx={{ height: 7, borderRadius: 2 }} />
                   </Box>
+                )}
+                {(normalizationSummary?.pairingIssueRows || 0) > 0 && (
+                  <Alert
+                    severity="warning"
+                    sx={{ mt: 1.5 }}
+                    action={(
+                      <Button
+                        color="inherit"
+                        size="small"
+                        onClick={() => setPairingReviewOpen(true)}
+                        disabled={!pendingNormalization}
+                      >
+                        Review pairing warnings
+                      </Button>
+                    )}
+                  >
+                    {normalizationSummary.pairingIssueRows} normalized row{normalizationSummary.pairingIssueRows === 1 ? '' : 's'} need MPN/manufacturer pairing review.
+                  </Alert>
                 )}
                 <NormalizedTable
                   rows={normalizedRows}
@@ -14612,6 +18060,1340 @@ const BomNormalizer = () => {
       </Dialog>
 
       <Dialog
+        open={fieldPatternReviewOpen}
+        onClose={() => setFieldPatternReviewOpen(false)}
+        maxWidth={false}
+        fullWidth
+        PaperProps={{
+          sx: {
+            width: 'min(1480px, calc(100vw - 32px))',
+            maxWidth: '1480px',
+            height: 'calc(100dvh - 32px)',
+            maxHeight: 'calc(100vh - 32px)',
+            overflow: 'hidden',
+            borderRadius: '8px',
+            bgcolor: isDarkMode ? normalizerTheme.page : '#f5f6f8',
+            boxShadow: '0 24px 70px rgba(15, 23, 42, 0.24)',
+          },
+        }}
+      >
+        <DialogTitle sx={{ px: 2.5, py: 1.7, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center" gap={2}>
+            <Box sx={{ minWidth: 0 }}>
+              <Typography sx={{ fontSize: 18, fontWeight: 780, color: normalizerTheme.text }}>Review detected patterns</Typography>
+              <Typography sx={{ mt: 0.35, fontSize: 12.5, color: normalizerTheme.muted }}>
+                Compare the customer row with the backend interpretation, then correct only the patterns that need help.
+              </Typography>
+            </Box>
+            <Chip
+              size="small"
+              variant="outlined"
+              label={pendingFieldPatternConfirmationCount
+                ? `${pendingFieldPatternConfirmationCount} changed pattern${pendingFieldPatternConfirmationCount === 1 ? '' : 's'} need confirmation`
+                : 'All patterns ready'}
+              sx={{ height: 28, flexShrink: 0, fontSize: 11.5, fontWeight: 800, bgcolor: normalizerTheme.paperSoft }}
+            />
+          </Stack>
+        </DialogTitle>
+        <DialogContent sx={{ flex: 1, minHeight: 0, overflow: 'auto', p: 2 }}>
+          {!fieldPatternGroups.length ? (
+            <Alert severity="info">
+              No review patterns were returned by backend for the selected customer columns.
+            </Alert>
+          ) : (
+            <Grid container spacing={0}>
+              <Grid item xs={12} md={3} sx={{ display: 'none' }}>
+                <Paper elevation={0} sx={{ border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft, maxHeight: 560, overflowY: 'auto' }}>
+                  {fieldPatternGroups.map((group) => {
+                    const selected = selectedFieldPatternGroup?.id === group.id;
+                    const previewValues = getPatternGroupExampleValues(group, 3);
+                    return (
+                      <Box
+                        key={group.id}
+                        onClick={() => setSelectedFieldPatternId(group.id)}
+                        sx={{
+                          p: 1.15,
+                          cursor: 'pointer',
+                          borderBottom: `1px solid ${normalizerTheme.border}`,
+                          bgcolor: selected ? (isDarkMode ? 'rgba(37, 99, 235, 0.18)' : '#eff6ff') : 'transparent',
+                          '&:hover': { bgcolor: normalizerTheme.hover },
+                        }}
+                      >
+                        <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1}>
+                          <Typography sx={{ fontSize: 13, fontWeight: 800, color: normalizerTheme.text }}>
+                            {group.title || group.id}
+                          </Typography>
+                          <Chip
+                            size="small"
+                            color={fieldPatternConfirmed[group.id] ? 'success' : 'default'}
+                            variant={fieldPatternConfirmed[group.id] ? 'filled' : 'outlined'}
+                            label={fieldPatternConfirmed[group.id] ? 'Confirmed' : `${group.rowCount || 0} matching rows`}
+                            sx={{ height: 22, fontSize: 10.5, fontWeight: 800 }}
+                          />
+                        </Stack>
+                        <Typography sx={{ mt: 0.45, fontSize: 11.5, color: normalizerTheme.muted, lineHeight: 1.35 }}>
+                          {(group.selectedColumns || []).join(', ') || 'Selected customer fields'}
+                        </Typography>
+                        {previewValues.length > 0 && (
+                          <Stack gap={0.55} sx={{ mt: 0.75 }}>
+                            {previewValues.map((item) => (
+                              <Box
+                                key={`${group.id}-preview-${item.column}`}
+                                title={`${item.column}: ${item.value}`}
+                                sx={{
+                                  minWidth: 0,
+                                  borderLeft: item.isShapeColumn ? '2px solid #2563eb' : `2px solid ${normalizerTheme.border}`,
+                                  pl: 0.65,
+                                }}
+                              >
+                                <Typography
+                                  sx={{
+                                    fontSize: 10.5,
+                                    color: normalizerTheme.muted,
+                                    fontWeight: 800,
+                                    lineHeight: 1.15,
+                                    whiteSpace: 'nowrap',
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                  }}
+                                >
+                                  {item.column}
+                                </Typography>
+                                <Typography
+                                  sx={{
+                                    mt: 0.15,
+                                    fontSize: 11.4,
+                                    color: item.isShapeColumn ? '#1d4ed8' : normalizerTheme.text,
+                                    fontWeight: item.isShapeColumn ? 800 : 650,
+                                    lineHeight: 1.22,
+                                    display: '-webkit-box',
+                                    WebkitLineClamp: 2,
+                                    WebkitBoxOrient: 'vertical',
+                                    overflow: 'hidden',
+                                    whiteSpace: 'normal',
+                                    wordBreak: 'break-word',
+                                  }}
+                                >
+                                  {formatPatternGroupPreviewValue(item.value)}
+                                </Typography>
+                              </Box>
+                            ))}
+                          </Stack>
+                        )}
+                        {group.alternateEntryCount > 0 && (
+                          <Typography sx={{ mt: 0.4, fontSize: 11.5, color: '#2563eb', fontWeight: 750 }}>
+                            {group.alternateEntryCount} alternate entr{group.alternateEntryCount === 1 ? 'y' : 'ies'}
+                          </Typography>
+                        )}
+                      </Box>
+                    );
+                  })}
+                </Paper>
+              </Grid>
+              <Grid item xs={12} md={12}>
+                {selectedFieldPatternGroup && (() => {
+                  const group = selectedFieldPatternGroup;
+                  const groupSamples = Array.isArray(group.samples) ? group.samples : [];
+                  const currentSampleIndex = Math.min(
+                    Math.max(Number(fieldPatternSampleIndexes[group.id] || 0), 0),
+                    Math.max(groupSamples.length - 1, 0)
+                  );
+                  const samples = groupSamples.length ? [groupSamples[currentSampleIndex]] : [];
+                  const activeRuleDraftsForDialog = Object.keys(fieldPatternRuleDrafts || {}).length
+                    ? fieldPatternRuleDrafts
+                    : (normalizerConfig.fieldPatternRules || {});
+                  const groupRule = fieldPatternRuleForGroup(activeRuleDraftsForDialog, group);
+                  const identityGroups = sameCellIdentityGroupsFromRoles(roles);
+                  const selectedSamplePatternRows = Array.isArray(samples[0]?.patternRows)
+                    ? samples[0].patternRows.filter((row) => fmt(row?.pattern))
+                    : [];
+                  const selectedSamplePrimaryPatternRow = fmt(samples[0]?.primaryPatternRow?.pattern)
+                    ? samples[0].primaryPatternRow
+                    : null;
+                  const backendPatternRows = Array.isArray(group.patternRows)
+                    ? group.patternRows.filter((row) => fmt(row?.pattern))
+                    : [];
+                  const backendPrimaryPatternRow = fmt(group.primaryPatternRow?.pattern)
+                    ? group.primaryPatternRow
+                    : null;
+                  const patternGrammarRows = selectedSamplePatternRows.length
+                    ? selectedSamplePatternRows
+                    : (backendPatternRows.length
+                      ? backendPatternRows
+                      : (selectedSamplePrimaryPatternRow
+                        ? [selectedSamplePrimaryPatternRow]
+                        : (backendPrimaryPatternRow
+                          ? [backendPrimaryPatternRow]
+                          : buildFieldPatternGrammarRows(group, groupRule, roles))));
+                  const identityPatternRows = patternGrammarRows.filter((row) => {
+                    const rowRoles = Array.isArray(row.roles) ? row.roles : [];
+                    return rowRoles.includes('mpn') && rowRoles.includes('manufacturer');
+                  });
+                  const displayedPatternRows = identityPatternRows.length ? identityPatternRows : patternGrammarRows;
+                  const selectedGroupIndex = Math.max(
+                    fieldPatternGroups.findIndex((candidate) => candidate.id === group.id),
+                    0
+                  );
+                  const mappedRolesByColumn = Object.entries(roles || {}).reduce((acc, [role, column]) => {
+                    const sourceColumn = fmt(column);
+                    if (!sourceColumn) return acc;
+                    acc[sourceColumn] = acc[sourceColumn] || [];
+                    acc[sourceColumn].push(role);
+                    return acc;
+                  }, {});
+                  const sharedMappings = Object.entries(mappedRolesByColumn)
+                    .filter(([, mappedRoles]) => mappedRoles.length > 1)
+                    .filter(([sourceColumn]) => !(group.selectedColumns || []).length || (group.selectedColumns || []).includes(sourceColumn));
+                  const reviewModeLabel = sharedMappings.length
+                    ? 'Shared-column interpretation'
+                    : 'One-to-one field interpretation';
+                  return (
+                    <Paper elevation={0} sx={{ border: `1px solid ${normalizerTheme.border}`, borderRadius: '8px', overflow: 'hidden', bgcolor: normalizerTheme.paper }}>
+                      <Stack
+                        direction={{ xs: 'column', sm: 'row' }}
+                        justifyContent="space-between"
+                        alignItems={{ xs: 'stretch', sm: 'center' }}
+                        gap={1.2}
+                        sx={{ px: 1.6, py: 1.15, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}
+                      >
+                        <Stack direction="row" alignItems="center" gap={0.8}>
+                          <Tooltip title="Previous pattern">
+                            <span>
+                              <IconButton
+                                size="small"
+                                disabled={selectedGroupIndex <= 0}
+                                onClick={() => setSelectedFieldPatternId(fieldPatternGroups[selectedGroupIndex - 1]?.id || group.id)}
+                                sx={{ width: 30, height: 30, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}
+                              >
+                                <ChevronLeftIcon fontSize="small" />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
+                          <Chip
+                            size="small"
+                            variant="outlined"
+                            label={`Pattern ${selectedGroupIndex + 1} of ${fieldPatternGroups.length}`}
+                            sx={{ height: 28, fontSize: 11.5, fontWeight: 800, bgcolor: normalizerTheme.paper }}
+                          />
+                          <Tooltip title="Next pattern">
+                            <span>
+                              <IconButton
+                                size="small"
+                                disabled={selectedGroupIndex >= fieldPatternGroups.length - 1}
+                                onClick={() => setSelectedFieldPatternId(fieldPatternGroups[selectedGroupIndex + 1]?.id || group.id)}
+                                sx={{ width: 30, height: 30, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}
+                              >
+                                <ChevronRightIcon fontSize="small" />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
+                        </Stack>
+                        <Stack direction="row" alignItems="center" gap={0.75} flexWrap="wrap">
+                          <Chip size="small" label={reviewModeLabel} sx={{ height: 25, fontSize: 11, fontWeight: 800, bgcolor: '#e4f3f0', color: '#0f6e63' }} />
+                          <Chip size="small" variant="outlined" label={`${group.occurrenceCount || group.rowCount || 0} matching fragments`} sx={{ height: 25, fontSize: 11, fontWeight: 800, bgcolor: normalizerTheme.paper }} />
+                          {fieldPatternConfirmed[group.id] && (
+                            <Chip size="small" label="Confirmed" sx={{ height: 25, fontSize: 11, fontWeight: 800, bgcolor: '#dcfce7', color: '#166534' }} />
+                          )}
+                        </Stack>
+                      </Stack>
+                      <Box sx={{ p: 1.5 }}>
+                      <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1} alignItems={{ xs: 'stretch', sm: 'flex-start' }}>
+                        <Box sx={{ minWidth: 0 }}>
+                          <Typography sx={{ fontSize: 14, fontWeight: 800, color: normalizerTheme.text }}>
+                            {group.title || group.id}
+                          </Typography>
+                          <Stack direction="row" gap={0.65} flexWrap="wrap" sx={{ mt: 0.6 }}>
+                            {group.alternateEntryCount > 0 && (
+                              <Chip size="small" label={`${group.alternateEntryCount} alternate values`} sx={{ height: 22, bgcolor: '#f1eafe', color: '#6d28d9', fontSize: 11, fontWeight: 800 }} />
+                            )}
+                            {(group.selectedColumns || []).slice(0, 4).map((column) => (
+                              <Chip
+                                key={`${group.id}-selected-${column}`}
+                                size="small"
+                                variant="outlined"
+                                label={column}
+                                title={column}
+                                sx={{ height: 22, maxWidth: 180, fontSize: 11, '& .MuiChip-label': { overflow: 'hidden', textOverflow: 'ellipsis' } }}
+                              />
+                            ))}
+                          </Stack>
+                          {displayedPatternRows.length > 0 && (
+                            <Box
+                              sx={{
+                                mt: 1,
+                                p: 1.1,
+                                borderRadius: '7px',
+                                border: `1px solid ${normalizerTheme.borderStrong}`,
+                                borderLeft: '3px solid #0f6e63',
+                                bgcolor: normalizerTheme.paperSoft,
+                              }}
+                            >
+                              <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1} alignItems={{ xs: 'stretch', sm: 'flex-start' }}>
+                                <Box sx={{ minWidth: 0 }}>
+                                  <Typography sx={{ mb: 0.45, fontSize: 11.5, fontWeight: 900, color: '#0f6e63' }}>
+                                    Detected pattern
+                                  </Typography>
+                                  <Stack gap={0.6}>
+                                    {displayedPatternRows.map((patternRow, patternIndex) => (
+                                      <Box key={patternRow.key}>
+                                        <Typography
+                                          title={`${patternRow.source}: ${patternRow.pattern}`}
+                                          sx={{
+                                            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+                                            fontSize: 13,
+                                            fontWeight: 900,
+                                            color: '#0f172a',
+                                            lineHeight: 1.35,
+                                            whiteSpace: 'normal',
+                                            wordBreak: 'break-word',
+                                          }}
+                                        >
+                                          {patternIndex + 1}. {patternRow.pattern}
+                                        </Typography>
+                                        <Typography
+                                          title={patternRow.source}
+                                          sx={{
+                                            mt: 0.15,
+                                            fontSize: 11.4,
+                                            fontWeight: 650,
+                                            color: '#475569',
+                                            whiteSpace: 'nowrap',
+                                            overflow: 'hidden',
+                                            textOverflow: 'ellipsis',
+                                          }}
+                                        >
+                                          {patternRow.source}{(group.occurrenceCount || group.rowCount) ? ` - ${group.occurrenceCount || group.rowCount} matching fragments` : ''}
+                                        </Typography>
+                                      </Box>
+                                    ))}
+                                  </Stack>
+                                </Box>
+                                <ShadcnButton
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={fieldPatternLoading || !samples[0]}
+                                  onClick={() => handleOpenVisualTeachPattern(group, samples[0])}
+                                  className="h-8 shrink-0 border-blue-300 bg-white text-blue-700 hover:bg-blue-50"
+                                >
+                                  Teach visually
+                                </ShadcnButton>
+                              </Stack>
+                            </Box>
+                          )}
+                          <Box
+                            component="details"
+                            sx={{
+                              mt: 1,
+                              border: `1px solid ${normalizerTheme.border}`,
+                              borderRadius: '7px',
+                              bgcolor: normalizerTheme.paperSoft,
+                              '&[open]': { p: 1 },
+                            }}
+                          >
+                            <Box
+                              component="summary"
+                              sx={{
+                                px: 1,
+                                py: 0.85,
+                                cursor: 'pointer',
+                                fontSize: 12.5,
+                                fontWeight: 850,
+                                color: normalizerTheme.text,
+                              }}
+                            >
+                              Parsing and cleanup rules
+                            </Box>
+                            {fieldPatternRulesDirty && (
+                              <Alert severity="warning" sx={{ mb: 0.9 }}>
+                                Parser settings changed. Refresh the backend preview before confirming this pattern.
+                              </Alert>
+                            )}
+                            {identityGroups.length > 0 && (
+                              <Box sx={{ mb: 1 }}>
+                                <Typography sx={{ mb: 0.55, fontSize: 11.5, fontWeight: 850, color: normalizerTheme.text }}>
+                                  Same-cell CPN / MPN / Manufacturer
+                                </Typography>
+                                <Box
+                                  sx={{
+                                    display: 'grid',
+                                    gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
+                                    gap: 0.9,
+                                  }}
+                                >
+                                  {identityGroups.map((identityGroup) => {
+                                    const comboRule = findIdentityGroupRule(groupRule, identityGroup);
+                                    const comboDelimiter = comboRule.delimiter || comboRule.comboDelimiter || 'auto';
+                                    const comboOrder = (comboRule.order && comboRule.order.length ? comboRule.order : identityGroup.roles).join('|');
+                                    const orderOptions = orderedIdentityRoleOptions(identityGroup.roles);
+                                    return (
+                                      <Box
+                                        key={`${group.id}-identity-${identityGroupRuleKey(identityGroup)}`}
+                                        sx={{
+                                          p: 0.85,
+                                          borderRadius: '6px',
+                                          border: `1px solid ${normalizerTheme.border}`,
+                                          bgcolor: normalizerTheme.paper,
+                                        }}
+                                      >
+                                        <Typography
+                                          title={identityGroup.header}
+                                          sx={{
+                                            mb: 0.65,
+                                            fontSize: 11.5,
+                                            fontWeight: 850,
+                                            color: normalizerTheme.text,
+                                            whiteSpace: 'nowrap',
+                                            overflow: 'hidden',
+                                            textOverflow: 'ellipsis',
+                                          }}
+                                        >
+                                          {identityGroup.roles.map((role) => TEACH_PATTERN_ROLE_LABELS[role] || role).join(' + ')}
+                                        </Typography>
+                                        <FormControl size="small" fullWidth>
+                                          <InputLabel>Split fields by</InputLabel>
+                                          <Select
+                                            label="Split fields by"
+                                            value={comboDelimiter}
+                                            onChange={(event) => handleFieldPatternIdentityRuleChange(group, identityGroup, { delimiter: event.target.value })}
+                                          >
+                                            {FIELD_PATTERN_COMBO_DELIMITER_OPTIONS.map((option) => (
+                                              <MenuItem key={option.value} value={option.value}>
+                                                {option.label}
+                                              </MenuItem>
+                                            ))}
+                                          </Select>
+                                        </FormControl>
+                                        {comboDelimiter === 'custom' && (
+                                          <TextField
+                                            fullWidth
+                                            size="small"
+                                            label="Custom delimiter"
+                                            value={comboRule.customDelimiter || ''}
+                                            onChange={(event) => handleFieldPatternIdentityRuleChange(group, identityGroup, { customDelimiter: event.target.value })}
+                                            sx={{ mt: 0.75 }}
+                                          />
+                                        )}
+                                        <FormControl size="small" fullWidth sx={{ mt: 0.75 }}>
+                                          <InputLabel>Field order</InputLabel>
+                                          <Select
+                                            label="Field order"
+                                            value={comboOrder}
+                                            onChange={(event) => handleFieldPatternIdentityRuleChange(group, identityGroup, { order: event.target.value.split('|') })}
+                                          >
+                                            {orderOptions.map((order) => (
+                                              <MenuItem key={order.join('|')} value={order.join('|')}>
+                                                {order.map((role) => TEACH_PATTERN_ROLE_LABELS[role] || role).join(' / ')}
+                                              </MenuItem>
+                                            ))}
+                                          </Select>
+                                        </FormControl>
+                                      </Box>
+                                    );
+                                  })}
+                                </Box>
+                              </Box>
+                            )}
+                            <Box
+                              sx={{
+                                display: 'grid',
+                                gridTemplateColumns: 'repeat(3, minmax(220px, 1fr))',
+                                gap: 0.9,
+                                overflowX: 'auto',
+                              }}
+                            >
+                              {FIELD_PATTERN_RULE_FIELDS.map((field) => {
+                                const rule = groupRule.fields?.[field.key] || {};
+                                const delimiterMode = rule.delimiter || 'none';
+                                return (
+                                  <Box
+                                    key={`${group.id}-rule-${field.key}`}
+                                    sx={{
+                                      minWidth: 220,
+                                      p: 0.85,
+                                      borderRadius: '6px',
+                                      border: `1px solid ${normalizerTheme.border}`,
+                                      bgcolor: normalizerTheme.paper,
+                                    }}
+                                  >
+                                    <Typography sx={{ mb: 0.65, fontSize: 11.5, fontWeight: 850, color: normalizerTheme.text }}>
+                                      {field.label}
+                                    </Typography>
+                                    <FormControl size="small" fullWidth>
+                                      <InputLabel>Split alternates by</InputLabel>
+                                      <Select
+                                        label="Split alternates by"
+                                        value={delimiterMode}
+                                        onChange={(event) => handleFieldPatternRuleChange(group, field.key, { delimiter: event.target.value })}
+                                      >
+                                        {FIELD_PATTERN_DELIMITER_OPTIONS.map((option) => (
+                                          <MenuItem key={option.value} value={option.value}>
+                                            {option.label}
+                                          </MenuItem>
+                                        ))}
+                                      </Select>
+                                    </FormControl>
+                                    {delimiterMode === 'custom' && (
+                                      <TextField
+                                        fullWidth
+                                        size="small"
+                                        label="Custom delimiter"
+                                        value={rule.customDelimiter || ''}
+                                        onChange={(event) => handleFieldPatternRuleChange(group, field.key, { customDelimiter: event.target.value })}
+                                        sx={{ mt: 0.75 }}
+                                      />
+                                    )}
+                                    {field.prefix && (
+                                      <Stack gap={0.75} sx={{ mt: 0.75 }}>
+                                        <TextField
+                                          fullWidth
+                                          size="small"
+                                          label={rule.prefixMode === 'first_n_chars' ? 'Number of characters' : 'Strip prefix'}
+                                          placeholder={rule.prefixMode === 'first_n_chars' ? 'e.g. 5' : (field.key === 'mpn' ? 'e.g. ABC-' : 'e.g. Vendor:')}
+                                          value={rule.stripPrefix || ''}
+                                          onChange={(event) => handleFieldPatternRuleChange(group, field.key, { stripPrefix: event.target.value })}
+                                        />
+                                        <FormControl size="small" fullWidth>
+                                          <InputLabel>Prefix mode</InputLabel>
+                                          <Select
+                                            label="Prefix mode"
+                                            value={rule.prefixMode || 'literal'}
+                                            onChange={(event) => handleFieldPatternRuleChange(group, field.key, { prefixMode: event.target.value })}
+                                          >
+                                            <MenuItem value="literal">Exact prefix text</MenuItem>
+                                            <MenuItem value="first_n_chars">First N characters</MenuItem>
+                                            <MenuItem value="regex">Regex from start</MenuItem>
+                                            <MenuItem value="before_delimiter">Text before delimiter</MenuItem>
+                                          </Select>
+                                        </FormControl>
+                                      </Stack>
+                                    )}
+                                  </Box>
+                                );
+                              })}
+                            </Box>
+                          </Box>
+                        </Box>
+                        <Stack direction="row" gap={0.75} flexWrap="wrap" justifyContent={{ xs: 'flex-start', sm: 'flex-end' }}>
+                          <IconButton
+                            size="small"
+                            aria-label="Previous matching row"
+                            disabled={currentSampleIndex <= 0}
+                            onClick={() => handleStepFieldPatternSample(group, -1)}
+                            sx={{
+                              width: 32,
+                              height: 32,
+                              border: `1px solid ${normalizerTheme.border}`,
+                              bgcolor: normalizerTheme.paper,
+                            }}
+                          >
+                            <ChevronLeftIcon fontSize="small" />
+                          </IconButton>
+                          <Chip
+                            size="small"
+                            variant="outlined"
+                            label={groupSamples.length ? `Example ${currentSampleIndex + 1} of ${groupSamples.length}` : 'No matching fragments'}
+                            sx={{ height: 32, fontSize: 12, fontWeight: 800 }}
+                          />
+                          <IconButton
+                            size="small"
+                            aria-label="Next matching row"
+                            disabled={currentSampleIndex >= groupSamples.length - 1}
+                            onClick={() => handleStepFieldPatternSample(group, 1)}
+                            sx={{
+                              width: 32,
+                              height: 32,
+                              border: `1px solid ${normalizerTheme.border}`,
+                              bgcolor: normalizerTheme.paper,
+                            }}
+                          >
+                            <ChevronRightIcon fontSize="small" />
+                          </IconButton>
+                          <ShadcnButton
+                            size="sm"
+                            variant="outlined"
+                            disabled={fieldPatternLoading}
+                            onClick={() => handleRefreshFieldPatternPreview(group)}
+                            className="h-8"
+                          >
+                            Refresh preview
+                          </ShadcnButton>
+                          <ShadcnButton
+                            size="sm"
+                            variant={fieldPatternConfirmed[group.id] ? 'secondary' : 'default'}
+                            disabled={fieldPatternLoading || fieldPatternRulesDirty || fieldPatternConfirmed[group.id] !== false}
+                            onClick={() => handleConfirmFieldPatternGroup(group.id)}
+                            className={fieldPatternConfirmed[group.id] ? 'h-8 bg-emerald-100 text-emerald-800 hover:bg-emerald-200' : 'h-8'}
+                          >
+                            {fieldPatternConfirmed[group.id] === false
+                              ? 'Confirm changes'
+                              : (fieldPatternConfirmed[group.id] ? 'Confirmed' : 'No changes')}
+                          </ShadcnButton>
+                        </Stack>
+                      </Stack>
+
+                      <Stack gap={1.25} sx={{ mt: 1.4, maxHeight: 500, overflowY: 'auto', pr: 0.5 }}>
+                        {samples.map((sample, sampleIndex) => {
+                          const sampleKey = fieldPatternSampleKey(sample);
+                          const sampleEdit = fieldPatternEdits[group.id]?.[sampleKey] || {};
+                          const entries = sampleEdit.entries?.length
+                            ? sampleEdit.entries
+                            : [{ relation: 'Primary', fields: fieldValuesFromBackendFields(sample.fields || {}, fieldPatternFields) }];
+                          const visibleEntries = filterFactwiseEntriesForConfig(entries, normalizerConfig);
+                          const visibleFactwiseFields = visibleFactwiseFieldsForPatternSample(
+                            fieldPatternFields,
+                            visibleEntries,
+                            sample,
+                            roles
+                          );
+                          const showAddAlternate = normalizerConfig.alternateLayout !== 'already_separate_rows';
+                          return (
+                            <Paper
+                              key={`${group.id}-${sample.sourceRow}-${sampleIndex}`}
+                              elevation={0}
+                              sx={{ p: 1.2, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}
+                            >
+                              <Typography sx={{ mb: 0.9, fontSize: 12, fontWeight: 800, color: normalizerTheme.muted }}>
+                                Source row {sample.sourceRow}
+                              </Typography>
+                              <Box
+                                sx={{
+                                  display: 'grid',
+                                  gridTemplateColumns: {
+                                    xs: '1fr',
+                                    lg: 'minmax(390px, 0.95fr) minmax(520px, 1.05fr)',
+                                  },
+                                  gap: 1.1,
+                                  alignItems: 'start',
+                                }}
+                              >
+                                <Box
+                                  sx={{
+                                    minWidth: 0,
+                                    position: { lg: 'sticky' },
+                                    top: { lg: 8 },
+                                    zIndex: 2,
+                                    alignSelf: 'start',
+                                    bgcolor: normalizerTheme.paperSoft,
+                                    pb: 0.25,
+                                  }}
+                                >
+                                  <Stack direction="row" alignItems="center" sx={{ mb: 0.7, minHeight: 32 }}>
+                                    <Typography sx={{ fontSize: 12.5, fontWeight: 800, color: normalizerTheme.text }}>
+                                      Client file row
+                                    </Typography>
+                                  </Stack>
+                                  <WorksheetSamplePreview
+                                    sample={sample}
+                                    headers={headers}
+                                    sheetRows={sheetRows}
+                                    headerRowIndex={headerRowIndex}
+                                    worksheet={workbook?.Sheets?.[sheetName] || null}
+                                    theme={normalizerTheme}
+                                    height={360}
+                                  />
+                                </Box>
+
+                                <Box sx={{ minWidth: 0 }}>
+                                  <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 0.7, minHeight: 32 }} gap={1}>
+                                    <Typography sx={{ fontSize: 12.5, fontWeight: 800, color: normalizerTheme.text }}>
+                                      FactWise interpretation
+                                    </Typography>
+                                    <Stack direction="row" gap={0.75} flexWrap="wrap" justifyContent="flex-end">
+                                      {showAddAlternate && (
+                                        <ShadcnButton
+                                          size="sm"
+                                          variant="outline"
+                                          onClick={() => handleAddFieldPatternAlternate(group.id, sampleKey)}
+                                          className="h-8 border-blue-300 text-blue-700 hover:bg-blue-50"
+                                        >
+                                          Add alternate
+                                        </ShadcnButton>
+                                      )}
+                                    </Stack>
+                                  </Stack>
+                                  <TableContainer
+                                    sx={{
+                                      border: `1px solid ${normalizerTheme.border}`,
+                                      bgcolor: '#fff',
+                                      height: 360,
+                                      maxHeight: 360,
+                                      overflow: 'auto',
+                                    }}
+                                  >
+                                    <Table
+                                      stickyHeader
+                                      size="small"
+                                      sx={{
+                                        minWidth: 128 + (visibleFactwiseFields.length * 150),
+                                        tableLayout: 'fixed',
+                                        borderCollapse: 'separate',
+                                        borderSpacing: 0,
+                                      }}
+                                    >
+                                      <TableHead>
+                                        <TableRow>
+                                          <TableCell
+                                            sx={{
+                                              width: 104,
+                                              minWidth: 104,
+                                              px: 1,
+                                              py: 0.7,
+                                              position: 'sticky',
+                                              left: 0,
+                                              zIndex: 4,
+                                              bgcolor: '#f3f6fb',
+                                              borderRight: `1px solid ${normalizerTheme.border}`,
+                                              borderBottom: `1px solid ${normalizerTheme.border}`,
+                                              color: '#475569',
+                                              fontSize: 11,
+                                              fontWeight: 850,
+                                            }}
+                                          >
+                                            Type
+                                          </TableCell>
+                                          {visibleFactwiseFields.map((field) => (
+                                            <TableCell
+                                              key={`${sample.sourceRow}-header-${field.key}`}
+                                              title={field.label}
+                                              sx={{
+                                                width: 150,
+                                                minWidth: 150,
+                                                px: 1,
+                                                py: 0.7,
+                                                bgcolor: '#f3f6fb',
+                                                borderRight: `1px solid ${normalizerTheme.border}`,
+                                                borderBottom: `1px solid ${normalizerTheme.border}`,
+                                                color: '#475569',
+                                                fontSize: 11,
+                                                fontWeight: 850,
+                                                whiteSpace: 'nowrap',
+                                                overflow: 'hidden',
+                                                textOverflow: 'ellipsis',
+                                              }}
+                                            >
+                                              {field.label}{field.required ? ' *' : ''}
+                                            </TableCell>
+                                          ))}
+                                          <TableCell
+                                            aria-label="Actions"
+                                            sx={{
+                                              width: 40,
+                                              minWidth: 40,
+                                              p: 0,
+                                              bgcolor: '#f3f6fb',
+                                              borderBottom: `1px solid ${normalizerTheme.border}`,
+                                            }}
+                                          />
+                                        </TableRow>
+                                      </TableHead>
+                                      <TableBody>
+                                        {visibleEntries.map((entry, entryIndex) => {
+                                          const relation = entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`;
+                                          return (
+                                            <TableRow key={`${sample.sourceRow}-entry-${entryIndex}`} hover>
+                                              <TableCell
+                                                sx={{
+                                                  width: 104,
+                                                  minWidth: 104,
+                                                  px: 1,
+                                                  py: 0.85,
+                                                  position: 'sticky',
+                                                  left: 0,
+                                                  zIndex: 2,
+                                                  bgcolor: entryIndex === 0 ? '#f8fafc' : '#eff6ff',
+                                                  borderRight: `1px solid ${normalizerTheme.border}`,
+                                                  borderBottom: `1px solid ${normalizerTheme.border}`,
+                                                  color: entryIndex === 0 ? normalizerTheme.text : '#2563eb',
+                                                  fontSize: 11.5,
+                                                  fontWeight: 850,
+                                                  whiteSpace: 'nowrap',
+                                                }}
+                                              >
+                                                {relation}
+                                              </TableCell>
+                                              {visibleFactwiseFields.map((field) => (
+                                                <TableCell
+                                                  key={`${sample.sourceRow}-${entryIndex}-${field.key}`}
+                                                  sx={{
+                                                    width: 150,
+                                                    minWidth: 150,
+                                                    p: 0,
+                                                    bgcolor: '#fff',
+                                                    borderRight: `1px solid ${normalizerTheme.border}`,
+                                                    borderBottom: `1px solid ${normalizerTheme.border}`,
+                                                    verticalAlign: 'top',
+                                                  }}
+                                                >
+                                                  <TextField
+                                                    fullWidth
+                                                    multiline
+                                                    maxRows={3}
+                                                    variant="standard"
+                                                    value={entry.fields?.[field.key] ?? ''}
+                                                    onChange={(event) => handleFieldPatternValueChange(group.id, sampleKey, entryIndex, field.key, event.target.value)}
+                                                    inputProps={{ 'aria-label': `${relation} ${field.label}` }}
+                                                    InputProps={{ disableUnderline: true }}
+                                                    sx={{
+                                                      '& .MuiInputBase-root': {
+                                                        minHeight: 36,
+                                                        px: 1,
+                                                        py: 0.65,
+                                                        alignItems: 'flex-start',
+                                                        bgcolor: 'transparent',
+                                                      },
+                                                      '& .MuiInputBase-input': {
+                                                        p: 0,
+                                                        fontSize: 12,
+                                                        lineHeight: 1.35,
+                                                      },
+                                                    }}
+                                                  />
+                                                </TableCell>
+                                              ))}
+                                              <TableCell
+                                                align="center"
+                                                sx={{
+                                                  width: 40,
+                                                  minWidth: 40,
+                                                  p: 0.25,
+                                                  bgcolor: '#fff',
+                                                  borderBottom: `1px solid ${normalizerTheme.border}`,
+                                                }}
+                                              >
+                                                {entryIndex > 0 && (
+                                                  <Tooltip title={`Remove ${relation}`}>
+                                                    <IconButton
+                                                      size="small"
+                                                      color="error"
+                                                      aria-label={`Remove ${relation}`}
+                                                      onClick={() => handleRemoveFieldPatternEntry(group.id, sampleKey, entryIndex)}
+                                                      sx={{ width: 28, height: 28 }}
+                                                    >
+                                                      <DeleteOutlineIcon sx={{ fontSize: 17 }} />
+                                                    </IconButton>
+                                                  </Tooltip>
+                                                )}
+                                              </TableCell>
+                                            </TableRow>
+                                          );
+                                        })}
+                                      </TableBody>
+                                    </Table>
+                                  </TableContainer>
+                                </Box>
+                              </Box>
+                            </Paper>
+                          );
+                        })}
+                      </Stack>
+                      </Box>
+                    </Paper>
+                  );
+                })()}
+              </Grid>
+            </Grid>
+          )}
+        </DialogContent>
+        <DialogActions sx={{ px: 2.5, py: 1.35, justifyContent: 'space-between', gap: 1, flexWrap: 'wrap', borderTop: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+          <Button color="inherit" onClick={() => setFieldPatternReviewOpen(false)}>Close</Button>
+          <Stack direction="row" gap={1} alignItems="center">
+            <Button
+              variant="contained"
+              disabled={!allFieldPatternGroupsConfirmed || fieldPatternRulesDirty}
+              onClick={handleApplyFieldPatternReview}
+              sx={{ bgcolor: '#0f6e63', boxShadow: 'none', '&:hover': { bgcolor: '#0b5b53', boxShadow: 'none' } }}
+            >
+              Confirm patterns
+            </Button>
+          </Stack>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={fieldSplitReviewOpen}
+        onClose={() => setFieldSplitReviewOpen(false)}
+        maxWidth="sm"
+        fullWidth
+        PaperProps={{ sx: { width: 'min(760px, calc(100vw - 32px))', borderRadius: '8px' } }}
+      >
+        <DialogTitle sx={{ pb: 1 }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="flex-start" gap={2}>
+            <Box sx={{ minWidth: 0 }}>
+              <Typography sx={{ fontSize: 18, fontWeight: 780, color: normalizerTheme.text }}>
+                Split mapped fields
+              </Typography>
+              <Typography sx={{ mt: 0.35, fontSize: 12.5, color: normalizerTheme.muted }}>
+                Select any mapped field to review its customer column and split rule.
+              </Typography>
+            </Box>
+            <Chip
+              size="small"
+              variant="outlined"
+              label={fieldPatternWorkflowNextStep ? `Step ${fieldPatternWorkflowNextStep.position} of ${fieldPatternWorkflowNextStep.total}` : ''}
+              sx={{ height: 27, flexShrink: 0, fontSize: 11, fontWeight: 800 }}
+            />
+          </Stack>
+        </DialogTitle>
+        <DialogContent sx={{ pt: 1 }}>
+          <Stack gap={1.5}>
+            <Autocomplete
+              size="small"
+              options={fieldSplitFields}
+              value={selectedFieldSplitConfig}
+              onChange={(_, option) => setFieldSplitSelectedField(option?.field || '')}
+              getOptionLabel={(option) => option?.fieldLabel || option?.field || ''}
+              isOptionEqualToValue={(option, value) => option.field === value.field}
+              renderInput={(params) => <TextField {...params} label="FactWise field" />}
+            />
+            <Paper
+              elevation={0}
+              sx={{ border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft, overflow: 'hidden' }}
+            >
+              <Box sx={{ px: 1.5, py: 1.1, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: '#fff' }}>
+                <Typography sx={{ fontSize: 11.5, fontWeight: 850, color: normalizerTheme.muted }}>
+                  Customer column
+                </Typography>
+                <Typography sx={{ mt: 0.25, fontSize: 15, fontWeight: 800, color: normalizerTheme.text, overflowWrap: 'anywhere' }}>
+                  {selectedFieldSplitConfig?.sourceColumn || 'No mapped column'}
+                </Typography>
+              </Box>
+              <Typography sx={{ px: 1.5, pt: 1.1, mb: 0.7, fontSize: 11.5, fontWeight: 850, color: normalizerTheme.muted }}>
+                Sample values
+              </Typography>
+              <Stack gap={0.6} sx={{ px: 1.5, pb: 1.35 }}>
+                {(selectedFieldSplitConfig?.samples || []).map((sample, index) => (
+                  <Typography
+                    key={`${selectedFieldSplitConfig?.field}-sample-${index}`}
+                    sx={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace', fontSize: 12.5, color: normalizerTheme.text, overflowWrap: 'anywhere' }}
+                  >
+                    {sample}
+                  </Typography>
+                ))}
+                {!selectedFieldSplitConfig?.samples?.length && (
+                  <Typography sx={{ fontSize: 12.5, color: normalizerTheme.muted }}>
+                    No non-empty sample values found.
+                  </Typography>
+                )}
+              </Stack>
+            </Paper>
+            <FormControl size="small" fullWidth>
+              <InputLabel>Split values by</InputLabel>
+              <Select
+                label="Split values by"
+                value={selectedFieldSplitRule.delimiter || 'none'}
+                onChange={(event) => {
+                  if (!selectedFieldSplitConfig?.field) return;
+                  setFieldSplitRuleDrafts((current) => ({
+                    ...current,
+                    [selectedFieldSplitConfig.field]: {
+                      ...(current[selectedFieldSplitConfig.field] || {}),
+                      delimiter: event.target.value,
+                    },
+                  }));
+                }}
+              >
+                {(selectedFieldSplitConfig?.delimiterOptions || []).map((option) => (
+                  <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            {selectedFieldSplitRule.delimiter === 'custom' && (
+              <TextField
+                size="small"
+                label="Custom delimiter"
+                value={selectedFieldSplitRule.customDelimiter || ''}
+                onChange={(event) => {
+                  if (!selectedFieldSplitConfig?.field) return;
+                  setFieldSplitRuleDrafts((current) => ({
+                    ...current,
+                    [selectedFieldSplitConfig.field]: {
+                      ...(current[selectedFieldSplitConfig.field] || {}),
+                      customDelimiter: event.target.value,
+                    },
+                  }));
+                }}
+              />
+            )}
+            <Paper
+              elevation={0}
+              sx={{ border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper, overflow: 'hidden' }}
+            >
+              <Box sx={{ px: 1.5, py: 1, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
+                <Typography sx={{ fontSize: 12, fontWeight: 850, color: normalizerTheme.text }}>
+                  Preview
+                </Typography>
+                <Typography sx={{ mt: 0.2, fontSize: 11.5, color: normalizerTheme.muted }}>
+                  Values the backend will produce with this split rule.
+                </Typography>
+              </Box>
+              <Stack gap={0.8} sx={{ p: 1.25, maxHeight: 210, overflowY: 'auto' }}>
+                {selectedFieldSplitPreview.map((preview, index) => (
+                  <Box key={`${selectedFieldSplitConfig?.field}-preview-${index}`}>
+                    <Typography sx={{ fontSize: 11, color: normalizerTheme.muted, overflowWrap: 'anywhere' }}>
+                      {preview.source}
+                    </Typography>
+                    <Stack direction="row" gap={0.6} flexWrap="wrap" sx={{ mt: 0.45 }}>
+                      {(preview.values || []).map((value, valueIndex) => (
+                        <Chip
+                          key={`${value}-${valueIndex}`}
+                          size="small"
+                          label={`${valueIndex + 1}. ${value}`}
+                          sx={{ maxWidth: '100%', height: 'auto', py: 0.3, '& .MuiChip-label': { whiteSpace: 'normal', overflowWrap: 'anywhere' } }}
+                        />
+                      ))}
+                    </Stack>
+                  </Box>
+                ))}
+                {!selectedFieldSplitPreview.length && (
+                  <Typography sx={{ fontSize: 12.5, color: normalizerTheme.muted }}>
+                    {selectedFieldSplitRule.delimiter === 'custom'
+                      ? 'Enter the custom delimiter, then continue to refresh the backend preview.'
+                      : 'No non-empty values are available to preview.'}
+                  </Typography>
+                )}
+              </Stack>
+            </Paper>
+          </Stack>
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'space-between' }}>
+          <Button color="inherit" onClick={() => setFieldSplitReviewOpen(false)}>Cancel</Button>
+          <Button variant="contained" disabled={fieldPatternLoading} onClick={handleApplyFieldSplitReview} endIcon={<ChevronRightIcon />}>
+            Continue
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={visualTeachOpen}
+        onClose={() => setVisualTeachOpen(false)}
+        maxWidth="lg"
+        fullWidth
+        PaperProps={{
+          sx: {
+            width: 'calc(100% - 32px)',
+            maxWidth: '1120px',
+            m: 2,
+            height: 'calc(100dvh - 32px)',
+            maxHeight: 'calc(100vh - 32px)',
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+          },
+        }}
+      >
+        <DialogTitle>
+          <Box>
+            <Stack direction="row" justifyContent="space-between" alignItems="flex-start" gap={2}>
+              <Box sx={{ minWidth: 0, flex: 1 }}>
+                <Typography sx={{ fontSize: 19, fontWeight: 780 }}>{visualTeachDialogTitle}</Typography>
+                {(visualTeachBackendPreview?.pattern || visualTeachContext?.workflowStep?.pattern) && (
+                  <Typography sx={{ mt: 0.45, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace', fontSize: 12.5, fontWeight: 750, color: '#0f6e63', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
+                    {visualTeachBackendPreview?.pattern || visualTeachContext.workflowStep.pattern}
+                  </Typography>
+                )}
+              </Box>
+              {visualTeachContext?.workflowStep && (
+                <Stack direction="row" alignItems="center" gap={0.5} sx={{ flexShrink: 0 }}>
+                <Tooltip title="Previous pattern">
+                  <span>
+                    <IconButton
+                      size="small"
+                      disabled={!visualTeachPreviousWorkflowStep}
+                      onClick={() => handleOpenVisualTeachWorkflowStep(visualTeachPreviousWorkflowStep)}
+                      aria-label="Previous pattern"
+                      sx={{ mt: -0.25 }}
+                    >
+                      <ChevronLeftIcon />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+                <Chip
+                  size="small"
+                  variant="outlined"
+                  label={`Pattern ${visualTeachContext.workflowStep.patternNumberForColumn} of ${visualTeachContext.workflowStep.patternCountForColumn}`}
+                  sx={{ height: 27, flexShrink: 0, fontSize: 11, fontWeight: 800 }}
+                />
+                <Tooltip title="Next pattern">
+                  <span>
+                    <IconButton
+                      size="small"
+                      disabled={!visualTeachNextWorkflowStep}
+                      onClick={() => handleOpenVisualTeachWorkflowStep(visualTeachNextWorkflowStep)}
+                      aria-label="Next pattern"
+                      sx={{ mt: -0.25 }}
+                    >
+                      <ChevronRightIcon />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+                </Stack>
+              )}
+            </Stack>
+            <Typography sx={{ mt: 0.45, fontSize: 13, color: normalizerTheme.muted }}>
+              Mark the exact parts of the customer cell, preview the generated primary and alternate rows, then stage it for this pattern.
+            </Typography>
+          </Box>
+        </DialogTitle>
+        <DialogContent sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+          {visualTeachContext ? (
+            <Grid container spacing={1.5}>
+              <Grid item xs={12} md={5}>
+                <Paper elevation={0} sx={{ p: 1.2, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
+                  <Typography sx={{ mb: 0.75, fontSize: 12.5, fontWeight: 850, color: normalizerTheme.text }}>
+                    Source row {visualTeachContext.sample?.sourceRow || '-'}
+                  </Typography>
+                  <WorksheetSamplePreview
+                    sample={visualTeachContext.sample}
+                    headers={headers}
+                    sheetRows={sheetRows}
+                    headerRowIndex={headerRowIndex}
+                    worksheet={workbook?.Sheets?.[sheetName] || null}
+                    theme={normalizerTheme}
+                  />
+                </Paper>
+              </Grid>
+              <Grid item xs={12} md={7}>
+                <Stack gap={1.1}>
+                  <Paper elevation={0} sx={{ p: 1.2, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+                    <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1} sx={{ mb: 0.8 }}>
+                      <Box sx={{ minWidth: 0 }}>
+                        <Typography sx={{ fontSize: 12.5, fontWeight: 850, color: normalizerTheme.text }}>
+                          Tag cell spans
+                        </Typography>
+                        <Typography
+                          title={visualTeachContext.sourceColumn}
+                          sx={{ mt: 0.15, fontSize: 11.5, color: normalizerTheme.muted, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                        >
+                          {visualTeachContext.sourceColumn}
+                        </Typography>
+                      </Box>
+                      <Button size="small" variant="text" onClick={handleClearVisualTeachTags}>
+                        Clear
+                      </Button>
+                    </Stack>
+                    <Box
+                      onMouseUp={handleVisualTeachMouseUp}
+                      sx={{
+                        p: 1.25,
+                        minHeight: 96,
+                        borderRadius: '8px',
+                        border: `1px solid ${normalizerTheme.border}`,
+                        bgcolor: normalizerTheme.paperSoft,
+                        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+                        fontSize: 13,
+                        lineHeight: 2.25,
+                        whiteSpace: 'pre-wrap',
+                        overflowWrap: 'anywhere',
+                        cursor: 'text',
+                        userSelect: 'none',
+                      }}
+                    >
+                      {(visualTeachContext.sourceValue || '').split('').map((char, index) => {
+                        const role = visualTeachPreparedTags[index];
+                        const roleStyle = VISUAL_TEACH_ROLE_STYLE_BY_KEY[role] || {};
+                        const selected = visualTeachSelection &&
+                          index >= Math.min(visualTeachSelection.start, visualTeachSelection.end) &&
+                          index <= Math.max(visualTeachSelection.start, visualTeachSelection.end);
+                        return (
+                          <Box
+                            key={`${index}-${char}`}
+                            component="span"
+                            onMouseDown={(event) => {
+                              event.preventDefault();
+                              handleVisualTeachMouseDown(index);
+                            }}
+                            onMouseEnter={() => handleVisualTeachMouseEnter(index)}
+                            sx={{
+                              px: role ? 0.1 : 0,
+                              py: 0.1,
+                              borderRadius: role ? '3px' : 0,
+                              bgcolor: roleStyle.bg || 'transparent',
+                              color: roleStyle.color || normalizerTheme.text,
+                              fontWeight: role ? 850 : 600,
+                              outline: selected ? '2px dashed #0f172a' : 'none',
+                              outlineOffset: '-1px',
+                            }}
+                          >
+                            {char}
+                          </Box>
+                        );
+                      })}
+                    </Box>
+                    <Stack direction="row" gap={0.7} flexWrap="wrap" sx={{ mt: 1 }}>
+                      {visualTeachRoleOptions.map((role) => (
+                        <Button
+                          key={role.key}
+                          size="small"
+                          variant="outlined"
+                          disabled={!visualTeachSelection}
+                          onClick={() => handleApplyVisualTeachRole(role.key)}
+                          sx={{
+                            borderColor: role.color,
+                            color: role.color,
+                            bgcolor: role.bg,
+                            fontWeight: 800,
+                            '&:hover': { borderColor: role.color, bgcolor: role.bg },
+                          }}
+                        >
+                          {role.label}
+                        </Button>
+                      ))}
+                    </Stack>
+                    <Typography sx={{ mt: 0.8, fontSize: 11.5, color: normalizerTheme.muted }}>
+                      Punctuation is never removed automatically. Include brackets or commas in a field selection to keep them, or select them and choose Ignore. A group separator is optional.
+                    </Typography>
+                  </Paper>
+
+                  {visualTeachAllowAlternates && (
+                  <Paper elevation={0} sx={{ p: 1.2, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+                    <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ xs: 'stretch', sm: 'center' }}>
+                      <FormControl size="small" sx={{ minWidth: 190 }}>
+                        <InputLabel>Alternate separator</InputLabel>
+                        <Select
+                          label="Alternate separator"
+                          value={visualTeachDelimiter}
+                          onChange={(event) => setVisualTeachDelimiter(event.target.value)}
+                          disabled={!visualTeachAllowAlternates}
+                        >
+                          <MenuItem value="/">Slash (/)</MenuItem>
+                          <MenuItem value=";">Semicolon (;)</MenuItem>
+                          <MenuItem value=",">Comma (,)</MenuItem>
+                          <MenuItem value="|">Pipe (|)</MenuItem>
+                          <MenuItem value="^">Caret (^)</MenuItem>
+                          <MenuItem value="~">Tilde (~)</MenuItem>
+                          <MenuItem value={VISUAL_TEACH_NO_SPLIT}>No split</MenuItem>
+                        </Select>
+                      </FormControl>
+                      <FormControl size="small" sx={{ minWidth: 190 }}>
+                        <InputLabel>Alternate MPN mode</InputLabel>
+                        <Select
+                          label="Alternate MPN mode"
+                          value={visualTeachAltMode}
+                          onChange={(event) => setVisualTeachAltMode(event.target.value)}
+                          disabled={!visualTeachAllowAlternates}
+                        >
+                          <MenuItem value="append">Append to base MPN</MenuItem>
+                          <MenuItem value="complete">Already complete MPNs</MenuItem>
+                          <MenuItem value="replace_suffix_at_marker">Replace suffix at @</MenuItem>
+                        </Select>
+                      </FormControl>
+                    </Stack>
+                  </Paper>
+                  )}
+
+                  <Paper elevation={0} sx={{ p: 1.2, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+                    <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1} sx={{ mb: 0.8 }}>
+                      <Typography sx={{ fontSize: 12.5, fontWeight: 850, color: normalizerTheme.text }}>
+                        Generated FactWise rows
+                      </Typography>
+                      <Stack direction="row" alignItems="center" gap={0.75}>
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          startIcon={<VisibilityIcon />}
+                          disabled={
+                            visualTeachPreviewLoading ||
+                            !visualTeachPreparedTags.some((role) => role && role !== 'groupSeparator')
+                          }
+                          onClick={() => setVisualTeachPreviewRevision((revision) => revision + 1)}
+                          sx={{ minHeight: 26, py: 0.2, fontSize: 11.5, fontWeight: 800 }}
+                        >
+                          Preview
+                        </Button>
+                        <Chip
+                          size="small"
+                          variant="outlined"
+                          label={visualTeachPreviewLoading
+                            ? 'Backend preview...'
+                            : `${visualTeachPreviewEntries.length} row${visualTeachPreviewEntries.length === 1 ? '' : 's'}`}
+                          sx={{ height: 22, fontSize: 11, fontWeight: 800 }}
+                        />
+                      </Stack>
+                    </Stack>
+                    {visualTeachPreviewEntries.length ? (
+                      <TableContainer sx={{ border: `1px solid ${normalizerTheme.border}`, maxHeight: 260 }}>
+                        <Table stickyHeader size="small">
+                          <TableHead>
+                            <TableRow>
+                              <TableCell sx={{ fontWeight: 850, bgcolor: normalizerTheme.tableHeader }}>Row</TableCell>
+                              {visualTeachMappedFields.map((field) => (
+                                <TableCell key={field.key} sx={{ fontWeight: 850, bgcolor: normalizerTheme.tableHeader }}>
+                                  {field.label}
+                                </TableCell>
+                              ))}
+                            </TableRow>
+                          </TableHead>
+                          <TableBody>
+                            {visualTeachPreviewEntries.map((entry, index) => (
+                              <TableRow key={`${entry.relation}-${index}`}>
+                                <TableCell sx={{ fontSize: 12.5, fontWeight: 800 }}>{entry.relation}</TableCell>
+                                {visualTeachMappedFields.map((field) => (
+                                  <TableCell key={field.key} sx={{ minWidth: field.key === 'description' ? 240 : 160 }}>
+                                    <TextField
+                                      fullWidth
+                                      size="small"
+                                      value={visualTeachEntryOverrides[index]?.[field.key] ?? entry.fields?.[field.key] ?? ''}
+                                      onChange={(event) => {
+                                        const value = event.target.value;
+                                        setVisualTeachEntryOverrides((current) => ({
+                                          ...current,
+                                          [index]: {
+                                            ...(current[index] || {}),
+                                            [field.key]: value,
+                                          },
+                                        }));
+                                      }}
+                                      inputProps={{ 'aria-label': `${entry.relation} ${field.label}` }}
+                                      sx={{
+                                        '& .MuiInputBase-input': {
+                                          py: 0.8,
+                                          fontSize: 12.5,
+                                          fontWeight: ['mpn', 'manufacturer'].includes(field.key) ? 750 : 500,
+                                          color: VISUAL_TEACH_FIELD_STYLES[field.key]?.color || normalizerTheme.text,
+                                        },
+                                      }}
+                                    />
+                                  </TableCell>
+                                ))}
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </TableContainer>
+                    ) : visualTeachIsIgnoreInterpretation ? (
+                      <Alert severity="info">This pattern will not populate any of its mapped FactWise fields.</Alert>
+                    ) : (
+                      <Alert severity="info">Tag at least a Base MPN or CPN/Manufacturer to preview generated rows.</Alert>
+                    )}
+                  </Paper>
+                </Stack>
+              </Grid>
+            </Grid>
+          ) : (
+            <Alert severity="info">Select a pattern sample first.</Alert>
+          )}
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'space-between', gap: 1 }}>
+          <Button onClick={() => setVisualTeachOpen(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            disabled={
+              (
+                !visualTeachIsIgnoreInterpretation &&
+                !visualTeachPreparedTags.some((role) => visualTeachMappedFieldKeys.includes(role))
+              ) ||
+              fieldPatternLoading ||
+              visualTeachPreviewLoading
+            }
+            onClick={handleApplyVisualTeachPattern}
+            endIcon={<ChevronRightIcon />}
+          >
+            Use this interpretation
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
         open={parsingLogicOpen}
         onClose={() => {
           setParsingLogicOpen(false);
@@ -14638,7 +19420,7 @@ const BomNormalizer = () => {
             <Chip
               size="small"
               variant="outlined"
-              label={`${detectedParsingLogic?.sections?.length || 0} source column${detectedParsingLogic?.sections?.length === 1 ? '' : 's'}`}
+              label={`${activeFactwiseParseFieldCount}/${FACTWISE_PARSE_FIELDS.length} FactWise fields`}
               sx={{
                 height: 28,
                 px: 0.35,
@@ -14653,7 +19435,7 @@ const BomNormalizer = () => {
             <Chip
               size="small"
               variant="outlined"
-              label={`${parsingPatternOptions.length} MPN/MFR format${parsingPatternOptions.length === 1 ? '' : 's'}`}
+              label={`${parsingPatternOptions.length} field pattern${parsingPatternOptions.length === 1 ? '' : 's'}`}
               sx={{
                 height: 28,
                 px: 0.35,
@@ -14684,6 +19466,60 @@ const BomNormalizer = () => {
               <Chip size="small" color="warning" variant="outlined" label={`${selectedParsingPattern.section.unmatched.count} unmatched`} sx={{ fontWeight: 650 }} />
             )}
           </Stack>
+
+          <Paper elevation={0} sx={{ mb: 1.5, p: 1.35, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+            <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1} alignItems={{ xs: 'stretch', sm: 'center' }}>
+              <Box>
+                <Typography sx={{ fontSize: 14, fontWeight: 760, color: normalizerTheme.text }}>
+                  FactWise columns
+                </Typography>
+                <Typography sx={{ mt: 0.25, fontSize: 12.5, color: normalizerTheme.muted }}>
+                  Output fields and the source/parser rule that will fill each one.
+                </Typography>
+              </Box>
+              <Chip
+                size="small"
+                variant="outlined"
+                label={`${detectedParsingLogic?.matchingRows || 0} parsed source value${detectedParsingLogic?.matchingRows === 1 ? '' : 's'}`}
+                sx={{ fontWeight: 700 }}
+              />
+            </Stack>
+            <TableContainer sx={{ mt: 1, maxHeight: 280, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
+              <Table stickyHeader size="small">
+                <TableHead>
+                  <TableRow>
+                    <TableCell sx={{ minWidth: 145, fontWeight: 800, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text, borderColor: normalizerTheme.border }}>FactWise field</TableCell>
+                    <TableCell sx={{ minWidth: 185, fontWeight: 800, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text, borderColor: normalizerTheme.border }}>Source</TableCell>
+                    <TableCell sx={{ minWidth: 245, fontWeight: 800, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text, borderColor: normalizerTheme.border }}>How it is parsed</TableCell>
+                    <TableCell sx={{ minWidth: 180, fontWeight: 800, bgcolor: normalizerTheme.tableHeader, color: normalizerTheme.text, borderColor: normalizerTheme.border }}>Sample parsed value</TableCell>
+                  </TableRow>
+                </TableHead>
+                <TableBody>
+                  {factwiseParseFieldRows.map((field) => (
+                    <TableRow key={field.key} hover sx={{ opacity: field.status === 'not_mapped' ? 0.68 : 1 }}>
+                      <TableCell sx={{ borderColor: normalizerTheme.border, color: normalizerTheme.text }}>
+                        <Stack direction="row" alignItems="center" gap={0.75} flexWrap="wrap">
+                          <Typography sx={{ fontSize: 12.5, fontWeight: 780 }}>{field.label}</Typography>
+                          {field.status === 'default' && <Chip size="small" label="Default" sx={{ height: 20, fontSize: 10.5, fontWeight: 800 }} />}
+                          {field.status === 'not_mapped' && <Chip size="small" variant="outlined" label="Not mapped" sx={{ height: 20, fontSize: 10.5, fontWeight: 750 }} />}
+                        </Stack>
+                      </TableCell>
+                      <TableCell sx={{ borderColor: normalizerTheme.border, color: field.status === 'not_mapped' ? normalizerTheme.muted : normalizerTheme.text, fontSize: 12.5, wordBreak: 'break-word' }}>
+                        {field.source}
+                      </TableCell>
+                      <TableCell sx={{ borderColor: normalizerTheme.border, color: normalizerTheme.muted, fontSize: 12.5, lineHeight: 1.35 }}>
+                        {field.method}
+                      </TableCell>
+                      <TableCell sx={{ borderColor: normalizerTheme.border, color: field.sample ? normalizerTheme.text : normalizerTheme.muted, fontSize: 12.5, fontWeight: field.sample ? 650 : 500, wordBreak: 'break-word' }}>
+                        {field.sample || '-'}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          </Paper>
+
           <Paper elevation={0} sx={{ p: 1.35, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
             <Grid container spacing={1.5} alignItems="center">
               <Grid item xs={12} md={8}>
@@ -14704,7 +19540,7 @@ const BomNormalizer = () => {
                 <Typography sx={{ mt: 0.2, fontSize: 15, fontWeight: 760, lineHeight: 1.35, color: normalizerTheme.text }} noWrap>
                   {selectedParsingPattern
                     ? `${selectedParsingPatternNumber}. ${selectedParsingPattern.pattern?.shape || 'No pattern detected'}`
-                    : (selectedStructureOption?.label || 'Selected parser')}
+                    : (selectedStructureOption?.label || 'Selected identity layout')}
                 </Typography>
                 {selectedParsingPattern && (
                   <Typography sx={{ mt: 0.25, fontSize: 11.5, color: normalizerTheme.muted }} noWrap>
@@ -14748,11 +19584,12 @@ const BomNormalizer = () => {
                           sourceHeader: selectedParsingPattern.section.sourceHeader || '',
                           patternShape: selectedParsingPattern.pattern.shape,
                           sourceRows: selectedParsingPattern.pattern.sourceRows || [],
+                          sampleUnit: selectedParsingPattern.sampleUnit || 'group',
                         },
                       });
                     }}
                   >
-                    Edit pattern
+                    Teach pattern
                   </Button>
                 </Stack>
               </Grid>
@@ -14772,11 +19609,18 @@ const BomNormalizer = () => {
                 ))}
               </Stack>
               <Stack direction="row" gap={0.75} flexWrap="wrap" sx={{ mt: 1.4 }}>
-                <Chip size="small" variant="outlined" label={`Structure: ${selectedStructureOption?.label || config.structure}`} sx={{ fontWeight: 650 }} />
+                <Chip size="small" variant="outlined" label={`Identity: ${selectedStructureOption?.label || currentIdentityLayout}`} sx={{ fontWeight: 650 }} />
+                <Chip size="small" variant="outlined" label={`Rows: ${selectedRowPlacementOption?.label || config.rowPlacement || 'Same row'}`} sx={{ fontWeight: 650 }} />
                 <Chip size="small" variant="outlined" label={`BOM layout: ${selectedBomLayoutOption?.label || 'None'}`} sx={{ fontWeight: 650 }} />
                 <Chip size="small" variant="outlined" label={`Alternates: ${selectedAlternateOption?.label || config.alternateLayout}`} sx={{ fontWeight: 650 }} />
-                <Chip size="small" variant="outlined" label={`Delimiter: ${selectedDelimiterOption?.label || config.delimiterMode}`} sx={{ fontWeight: 650 }} />
-                <Chip size="small" variant="outlined" label={`Quantity: ${selectedQuantityOption?.label || config.quantityMode}`} sx={{ fontWeight: 650 }} />
+                {config.alternateLayout !== 'already_separate_rows' && (
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label={`Autofill: ${selectedAlternateInheritLabels.length ? selectedAlternateInheritLabels.join(', ') : 'None'}`}
+                    sx={{ fontWeight: 650 }}
+                  />
+                )}
               </Stack>
             </Paper>
           )}
@@ -15028,10 +19872,15 @@ const BomNormalizer = () => {
                   Parser settings used
                 </Typography>
                 <Stack direction="row" gap={0.8} flexWrap="wrap" sx={{ mt: 0.75 }}>
-                  <Chip size="small" label={selectedStructureOption?.label || 'Parser: auto'} />
-                  <Chip size="small" label={`Delimiter: ${delimiterLabel}`} />
+                  <Chip size="small" label={selectedStructureOption?.label || 'Identity: auto'} />
+                  <Chip size="small" label={selectedRowPlacementOption?.label || 'Rows: same row'} />
                   <Chip size="small" label={selectedAlternateOption?.label || 'Alternates: auto'} />
-                  <Chip size="small" label={selectedQuantityOption?.label || 'Quantity/UOM: default'} />
+                  {config.alternateLayout !== 'already_separate_rows' && (
+                    <Chip
+                      size="small"
+                      label={`Autofill: ${selectedAlternateInheritLabels.length ? selectedAlternateInheritLabels.join(', ') : 'None'}`}
+                    />
+                  )}
                   <Chip size="small" label="Blank BOM level: 1" />
                 </Stack>
                 <Typography sx={{ mt: 1.1, fontSize: 12.5, fontWeight: 800, color: normalizerTheme.text }}>
@@ -15046,7 +19895,7 @@ const BomNormalizer = () => {
             )}
           </Box>
           <Typography sx={{ mt: 2, fontSize: 13, color: '#66717f' }}>
-            If these numbers look off, go back and adjust the columns, delimiter, or cleanup options.
+            If these numbers look off, go back and adjust the columns, teach a field pattern, or change cleanup options.
           </Typography>
         </DialogContent>
         <DialogActions>
@@ -15080,10 +19929,10 @@ const BomNormalizer = () => {
           {configureParserSessionId ? (
             <ColumnParser
               sessionId={configureParserSessionId}
-              availableColumns={headers}
+              availableColumns={teachPatternColumnOptions}
               initialColumn={configureParserInitialColumn}
               parseReference={configureParserReference}
-              sampleUnit={configureParserScope?.mode === 'pattern' ? 'group' : 'row'}
+              sampleUnit={configureParserScope?.sampleUnit || (configureParserScope?.mode === 'pattern' ? 'group' : 'row')}
               describeSample={describeParserSample}
               onApply={handleApplyConfigureSplitColumns}
             />

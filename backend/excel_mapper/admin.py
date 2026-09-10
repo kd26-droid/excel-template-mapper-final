@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.utils.html import format_html
-from .models import MappingTemplate, GlobalMpnCache, ProviderCredential, IntermediateArtifact, BomWorkflowTemplate, ProcessingTemplate
+from .models import MappingTemplate, GlobalMpnCache, ProviderCredential, IntermediateArtifact, BomWorkflowTemplate, BomStructurePattern, ProcessingTemplate
 
 @admin.register(MappingTemplate)
 class MappingTemplateAdmin(admin.ModelAdmin):
@@ -84,6 +84,56 @@ class BomWorkflowTemplateAdmin(admin.ModelAdmin):
     search_fields = ('name', 'description')
     readonly_fields = ('created_at', 'updated_at', 'usage_count')
     ordering = ('-updated_at',)
+
+
+@admin.register(BomStructurePattern)
+class BomStructurePatternAdmin(admin.ModelAdmin):
+    list_display = (
+        'name',
+        'structure_type',
+        'mapping_source_display',
+        'user_confirmed_display',
+        'confidence',
+        'usage_count',
+        'sample_count',
+        'created_at',
+        'updated_at',
+    )
+    list_filter = ('structure_type', 'created_at', 'updated_at')
+    search_fields = ('name', 'signature_hash')
+    readonly_fields = (
+        'mapping_source_display',
+        'user_confirmed_display',
+        'created_at',
+        'updated_at',
+        'usage_count',
+        'signature_hash',
+    )
+    ordering = ('-updated_at',)
+
+    def mapping_source_display(self, obj):
+        workflow = obj.workflow or {}
+        source_signature = obj.source_signature or {}
+        return (
+            workflow.get('mappingSource') or
+            source_signature.get('mappingSource') or
+            'legacy/auto'
+        )
+    mapping_source_display.short_description = 'Mapping source'
+
+    def user_confirmed_display(self, obj):
+        workflow = obj.workflow or {}
+        source_signature = obj.source_signature or {}
+        confirmed = (
+            bool(workflow.get('userTouched')) or
+            bool(source_signature.get('userTouched')) or
+            workflow.get('mappingSource') == 'user_confirmed' or
+            source_signature.get('mappingSource') == 'user_confirmed'
+        )
+        if confirmed:
+            return format_html('<span style="color: #4caf50; font-weight: 700;">Yes</span>')
+        return format_html('<span style="color: #9e9e9e;">No</span>')
+    user_confirmed_display.short_description = 'User confirmed'
 
 
 @admin.register(ProcessingTemplate)

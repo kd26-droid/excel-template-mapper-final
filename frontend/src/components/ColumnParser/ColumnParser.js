@@ -78,6 +78,7 @@ const FACTWISE_OUTPUT_COLUMNS = [
   { value: 'UOM', label: 'UOM' },
   { value: 'Reference Designator', label: 'Reference Designator' },
   { value: 'Extra', label: 'Extra' },
+  { value: 'Parent / group key', label: 'Parent / group key' },
 
   { value: 'Item code', label: 'Item code' },
   { value: 'Item name', label: 'Item name' },
@@ -416,12 +417,13 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
         : referenceRowIndex;
       setCurrentSampleIndex(referenceIndex > 0 ? referenceIndex : 0);
       setTotalValues(data.total_values || data.sample_values.length);
-      setGroupSeparator(suggestedSeparator);
-      if (GROUP_SEPARATOR_PRESETS.includes(suggestedSeparator)) {
-        setGroupSeparatorMode(suggestedSeparator);
+      const initialGroupSeparator = sampleUnit === 'group' ? suggestedSeparator : '';
+      setGroupSeparator(initialGroupSeparator);
+      if (GROUP_SEPARATOR_PRESETS.includes(initialGroupSeparator)) {
+        setGroupSeparatorMode(initialGroupSeparator);
       } else {
         setGroupSeparatorMode(CUSTOM_GROUP_SEPARATOR);
-        setCustomGroupSeparator(suggestedSeparator);
+        setCustomGroupSeparator(initialGroupSeparator);
       }
       setCommonDelimiters(data.common_delimiters || []);
       setBoundaries([]);
@@ -678,7 +680,7 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
               renderValue={(selected) => {
                 if (!selected) return '';
                 const labels = {
-                  direct: 'FactWise column',
+                  direct: 'Output field',
                   custom: 'Custom column',
                 };
                 return labels[selected] || selected;
@@ -689,7 +691,7 @@ const ColumnParser = ({ sessionId, onApply, initialColumn = '', availableColumns
                 setPreviewData(null);
               }}
             >
-              <MenuItem value="direct">FactWise column</MenuItem>
+              <MenuItem value="direct">Output field</MenuItem>
               <MenuItem value="custom">Custom column</MenuItem>
             </Select>
           </FormControl>

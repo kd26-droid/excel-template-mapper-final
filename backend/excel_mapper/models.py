@@ -894,6 +894,57 @@ class BomWorkflowTemplate(models.Model):
         }
 
 
+class BomStructurePattern(models.Model):
+    """Learned source-sheet layout used to prefill similar BOM normalizer runs."""
+
+    name = models.CharField(max_length=200, blank=True, default='')
+    structure_type = models.CharField(max_length=80, blank=True, default='')
+    signature_hash = models.CharField(max_length=64, unique=True)
+    source_signature = models.JSONField(default=dict, blank=True)
+    structure_profile = models.JSONField(default=dict, blank=True)
+    roles = models.JSONField(default=dict, blank=True)
+    config = models.JSONField(default=dict, blank=True)
+    workflow = models.JSONField(default=dict, blank=True)
+    confidence = models.FloatField(default=0.0)
+    sample_count = models.IntegerField(default=0)
+    usage_count = models.IntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'excel_mapper_bom_structure_pattern'
+        ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['structure_type', '-updated_at']),
+            models.Index(fields=['signature_hash']),
+        ]
+
+    def __str__(self):
+        return self.name or self.signature_hash
+
+    def increment_usage(self):
+        self.usage_count += 1
+        self.save(update_fields=['usage_count', 'updated_at'])
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'name': self.name or '',
+            'structure_type': self.structure_type or '',
+            'signature_hash': self.signature_hash,
+            'source_signature': self.source_signature or {},
+            'structure_profile': self.structure_profile or {},
+            'roles': self.roles or {},
+            'config': self.config or {},
+            'workflow': self.workflow or {},
+            'confidence': self.confidence,
+            'sample_count': self.sample_count,
+            'usage_count': self.usage_count,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 class ProcessingTemplate(models.Model):
     """Global replayable processing template for an end-to-end upload workflow."""
 

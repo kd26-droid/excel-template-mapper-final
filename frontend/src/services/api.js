@@ -738,6 +738,31 @@ const api = {
       workflow
     }, { timeout: 60000 }),
 
+  getBomStructures: () =>
+    axios.get(`${API_URL}/bom/structures/`, { timeout: 30000 }),
+
+  saveBomStructure: ({ name = '', headers = [], rows = [], roles = {}, config = {}, sourceSignature = {}, workflow = {}, confidence = 1 }) =>
+    axios.post(`${API_URL}/bom/structures/`, {
+      name,
+      headers,
+      rows,
+      roles,
+      config,
+      source_signature: sourceSignature,
+      workflow,
+      confidence
+    }, { timeout: 60000 }),
+
+  matchBomStructures: ({ headers = [], rows = [], roles = {}, config = {}, sourceSignature = {}, limit = 5 }) =>
+    axios.post(`${API_URL}/bom/structures/match/`, {
+      headers,
+      rows,
+      roles,
+      config,
+      source_signature: sourceSignature,
+      limit
+    }, { timeout: 60000 }),
+
   getBomWorkflowTemplate: (templateId) =>
     axios.get(`${API_URL}/bom-workflow-templates/${templateId}/`, { timeout: 30000 }),
 
@@ -1575,6 +1600,86 @@ const api = {
   /** Generated BOM as JSON: headers, rows, item rows, stats, warnings. */
   generateBomSheet: (sessionId) =>
     axios.get(`${API_URL}/bom/generate/${sessionId}/`, { timeout: 120000 }),
+
+  /** Infer BOM normalizer role mappings from headers and sampled rows. */
+  inferBomRoles: ({ headers, rows, options, sampleSize, sourceSignature = {}, config = {} }) =>
+    axios.post(`${API_URL}/bom/roles/infer/`, {
+      headers,
+      rows,
+      options,
+      sampleSize,
+      source_signature: sourceSignature,
+      config,
+    }, { timeout: 120000 }),
+
+  /** Backend-owned pattern groups and FactWise field interpretation for the normalizer teach popup. */
+  inferBomFieldPatterns: ({ headers, rows, roles, config, selectedColumns = [], options = {} }) =>
+    axios.post(`${API_URL}/bom/field-patterns/infer/`, {
+      headers,
+      rows,
+      roles,
+      config,
+      selected_columns: selectedColumns,
+      options,
+    }, { timeout: 120000 }),
+
+  /** Backend-authoritative BOM normalization. */
+  normalizeBom: ({ headers, rows, roles, config }) =>
+    axios.post(`${API_URL}/bom/normalize/`, {
+      headers,
+      rows,
+      roles,
+      config,
+    }, { timeout: 180000 }),
+
+  /** Derive reusable backend parser rules from one corrected teach-popup row. */
+  teachBomFieldPattern: ({
+    headers,
+    row,
+    roles,
+    group,
+    entries = [],
+    visualPattern = {},
+    taggedSpans = null,
+    sourceHeader = '',
+    alternateDelimiter = '/',
+    alternateMode = 'append',
+    ignoredFields = [],
+    hasManualEdits = false,
+    persist = true,
+  }) =>
+    axios.post(`${API_URL}/bom/field-patterns/teach/`, {
+      headers,
+      row,
+      roles,
+      group,
+      entries,
+      visual_pattern: visualPattern,
+      tagged_spans: taggedSpans,
+      source_header: sourceHeader,
+      alternate_delimiter: alternateDelimiter,
+      alternate_mode: alternateMode,
+      ignored_fields: ignoredFields,
+      has_manual_edits: hasManualEdits,
+      persist,
+    }, { timeout: 120000 }),
+
+  /** Learn only user-confirmed MPN/MFR values and pairs from the field-pattern review popup. */
+  learnBomFieldPatterns: ({ groups = [] }) =>
+    axios.post(`${API_URL}/bom/field-patterns/learn/`, {
+      groups,
+    }, { timeout: 120000 }),
+
+  /** Persist confirmed interpretations and return the backend-normalized preview. */
+  applyBomFieldPatterns: ({ headers, rows, roles, config, groups = [], persist = true }) =>
+    axios.post(`${API_URL}/bom/field-patterns/apply/`, {
+      headers,
+      rows,
+      roles,
+      config,
+      groups,
+      persist,
+    }, { timeout: 180000 }),
 
   /**
    * Hand the bulk-import result back so the revision can be finished elsewhere.

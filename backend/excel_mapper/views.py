@@ -42,6 +42,16 @@ from .delimited_reader import (
     read_delimited_text_safely,
 )
 from .bom_header_mapper import BOMHeaderMapper
+from .services.bom_directory_learning import learn_confirmed_bom_field_patterns
+from .services.bom_role_inference import (
+    ROLE_KEYS,
+    build_bom_field_pattern_groups,
+    build_bom_field_pattern_teach_result,
+    infer_bom_roles,
+    normalize_bom_rows,
+    save_bom_field_pattern_rule,
+)
+from .services.bom_structure_patterns import build_structure_profile, match_bom_structures
 from .default_template import (
     get_sfo_template_metadata,
     get_sfo_template_path,
@@ -2034,6 +2044,364 @@ def debug_session(request):
         return Response({'session_data': session_data})
     else:
         return Response({'error': 'Session not found'}, status=404)
+
+
+def _is_user_confirmed_bom_structure(match):
+    if not isinstance(match, dict):
+        return False
+    workflow = match.get('workflow') if isinstance(match.get('workflow'), dict) else {}
+    source_signature = match.get('source_signature') if isinstance(match.get('source_signature'), dict) else {}
+    return (
+        bool(workflow.get('userTouched')) or
+        bool(source_signature.get('userTouched')) or
+        workflow.get('mappingSource') == 'user_confirmed' or
+        source_signature.get('mappingSource') == 'user_confirmed'
+    )
+
+
+def _finalize_bom_inference_with_structure(inferred_result, learned_matches, request_config=None, min_structure_score=0.88):
+    """Return the backend-authoritative roles/config for BOM Normalizer."""
+    inferred_roles = inferred_result.get('roles') if isinstance(inferred_result, dict) else {}
+    inferred_roles = inferred_roles if isinstance(inferred_roles, dict) else {}
+    request_config = request_config if isinstance(request_config, dict) else {}
+    eligible_matches = [
+        match for match in (learned_matches or [])
+        if isinstance(match, dict) and float(match.get('score') or 0) >= min_structure_score
+    ]
+    matched = next(
+        (
+            match for match in eligible_matches
+            if _is_user_confirmed_bom_structure(match)
+        ),
+        eligible_matches[0] if eligible_matches else None,
+    )
+    learned_is_authoritative = _is_user_confirmed_bom_structure(matched)
+    learned_roles = matched.get('resolved_roles') if matched else {}
+    learned_roles = learned_roles if isinstance(learned_roles, dict) else {}
+
+    final_roles = {}
+    role_sources = {}
+    for role in ROLE_KEYS:
+        inferred_header = str(inferred_roles.get(role) or '').strip()
+        learned_header = str(learned_roles.get(role) or '').strip()
+        if learned_is_authoritative and learned_header:
+            final_roles[role] = learned_header
+            role_sources[role] = 'user_confirmed_structure'
+        elif inferred_header:
+            final_roles[role] = inferred_header
+            role_sources[role] = 'inferred'
+        elif learned_header:
+            final_roles[role] = learned_header
+            role_sources[role] = 'learned_structure'
+        else:
+            final_roles[role] = ''
+            role_sources[role] = ''
+
+    learned_config = matched.get('resolved_config') if matched else {}
+    learned_config = learned_config if isinstance(learned_config, dict) else {}
+    final_config = {
+        **learned_config,
+        **request_config,
+    }
+
+    return final_roles, final_config, matched, role_sources
+
+
+@api_view(['POST'])
+def bom_role_inference(request):
+    """Infer BOM normalizer role mappings from headers and sampled row values."""
+    try:
+        headers = request.data.get('headers') or []
+        rows = request.data.get('rows')
+        if rows is None:
+            rows = request.data.get('dataRows')
+        if rows is None:
+            rows = request.data.get('data') or []
+        options = request.data.get('options') or {}
+        if 'sampleSize' in request.data and 'sampleSize' not in options:
+            options = {**options, 'sampleSize': request.data.get('sampleSize')}
+        source_signature = request.data.get('sourceSignature') or request.data.get('source_signature') or {}
+        config = request.data.get('config') or options.get('config') or {}
+
+        if not isinstance(headers, list):
+            return Response({
+                'success': False,
+                'error': 'headers must be a list',
+            }, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(rows, list):
+            return Response({
+                'success': False,
+                'error': 'rows must be a list',
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        result = infer_bom_roles(headers, rows, options=options)
+        request_config = config if isinstance(config, dict) else {}
+        learned_matches = match_bom_structures(
+            headers=headers,
+            rows=rows,
+            roles=result.get('roles') or {},
+            config=request_config,
+            source_signature=source_signature if isinstance(source_signature, dict) else {},
+            limit=3,
+        ).get('matches', [])
+        final_roles, final_config, applied_structure, role_sources = _finalize_bom_inference_with_structure(
+            result,
+            learned_matches,
+            request_config=request_config,
+        )
+        inferred_roles = result.get('roles') or {}
+        structure_profile = build_structure_profile(
+            headers=headers,
+            rows=rows,
+            roles=final_roles,
+            config=final_config,
+            source_signature=source_signature if isinstance(source_signature, dict) else {},
+        )
+        response_payload = {
+            **result,
+            'roles': final_roles,
+            'config': final_config,
+            'inferredRoles': inferred_roles,
+            'roleSources': role_sources,
+            'appliedStructure': applied_structure,
+            'structureProfile': structure_profile,
+            'matchedStructures': learned_matches,
+        }
+        return Response({
+            'success': True,
+            **response_payload,
+        })
+    except Exception as exc:
+        logger.error("BOM role inference failed: %s", exc, exc_info=True)
+        return Response({
+            'success': False,
+            'error': str(exc),
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+def bom_field_pattern_inference(request):
+    """Return backend-owned field pattern groups for the BOM Normalizer teach popup."""
+    try:
+        headers = request.data.get('headers') or []
+        rows = request.data.get('rows')
+        if rows is None:
+            rows = request.data.get('dataRows')
+        if rows is None:
+            rows = request.data.get('data') or []
+        roles = request.data.get('roles') or {}
+        config = request.data.get('config') or {}
+        selected_columns = request.data.get('selectedColumns') or request.data.get('selected_columns') or []
+        options = request.data.get('options') or {}
+
+        if not isinstance(headers, list):
+            return Response({
+                'success': False,
+                'error': 'headers must be a list',
+            }, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(rows, list):
+            return Response({
+                'success': False,
+                'error': 'rows must be a list',
+            }, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(roles, dict):
+            roles = {}
+        if not isinstance(config, dict):
+            config = {}
+        if not isinstance(selected_columns, list):
+            selected_columns = []
+        if not isinstance(options, dict):
+            options = {}
+
+        result = build_bom_field_pattern_groups(
+            headers=headers,
+            rows=rows,
+            roles=roles,
+            config=config,
+            selected_columns=selected_columns,
+            options=options,
+        )
+        return Response({
+            'success': True,
+            **result,
+        })
+    except Exception as exc:
+        logger.error("BOM field pattern inference failed: %s", exc, exc_info=True)
+        return Response({
+            'success': False,
+            'error': str(exc),
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+def bom_normalize(request):
+    """Return backend-authoritative normalized BOM rows."""
+    try:
+        headers = request.data.get('headers') or []
+        rows = request.data.get('rows') or []
+        roles = request.data.get('roles') or {}
+        config = request.data.get('config') or {}
+        if not isinstance(headers, list):
+            return Response({'success': False, 'error': 'headers must be a list'}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(rows, list):
+            return Response({'success': False, 'error': 'rows must be a list'}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(roles, dict):
+            roles = {}
+        if not isinstance(config, dict):
+            config = {}
+        return Response({
+            'success': True,
+            **normalize_bom_rows(headers, rows, roles=roles, config=config),
+        })
+    except Exception as exc:
+        logger.error("Backend BOM normalization failed: %s", exc, exc_info=True)
+        return Response({
+            'success': False,
+            'error': str(exc),
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+def bom_field_pattern_apply(request):
+    """Apply all confirmed semantic patterns and return one normalized preview."""
+    try:
+        headers = request.data.get('headers') or []
+        rows = request.data.get('rows') or []
+        roles = request.data.get('roles') or {}
+        config = request.data.get('config') or {}
+        groups = request.data.get('groups') or request.data.get('patterns') or []
+        persist = request.data.get('persist', True) is not False
+        if not isinstance(headers, list):
+            return Response({'success': False, 'error': 'headers must be a list'}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(rows, list):
+            return Response({'success': False, 'error': 'rows must be a list'}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(roles, dict):
+            roles = {}
+        if not isinstance(config, dict):
+            config = {}
+        if not isinstance(groups, list):
+            return Response({'success': False, 'error': 'groups must be a list'}, status=status.HTTP_400_BAD_REQUEST)
+
+        unresolved = [
+            group.get('patternKey') or group.get('id')
+            for group in groups
+            if isinstance(group, dict) and group.get('confirmed') is False
+        ]
+        if unresolved:
+            return Response({
+                'success': False,
+                'error': 'Every detected pattern must be confirmed before it can be applied.',
+                'unresolvedPatternKeys': unresolved,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        learning = learn_confirmed_bom_field_patterns(groups) if persist else {
+            'success': True,
+            'saved_pattern_rules': [],
+        }
+        normalized = normalize_bom_rows(headers, rows, roles=roles, config=config)
+        return Response({
+            'success': True,
+            **normalized,
+            'learning': learning,
+        })
+    except Exception as exc:
+        logger.error("BOM field pattern apply failed: %s", exc, exc_info=True)
+        return Response({
+            'success': False,
+            'error': str(exc),
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+def bom_field_pattern_learning(request):
+    """Persist user-confirmed MPN/MFR values from the teach popup."""
+    try:
+        groups = request.data.get('groups') or []
+        if not isinstance(groups, list):
+            return Response({
+                'success': False,
+                'error': 'groups must be a list',
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        result = learn_confirmed_bom_field_patterns(groups)
+        return Response(result)
+    except Exception as exc:
+        logger.error("BOM field pattern learning failed: %s", exc, exc_info=True)
+        return Response({
+            'success': False,
+            'error': str(exc),
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+def bom_field_pattern_teaching(request):
+    """Derive reusable parser rules from one user-corrected teach popup row."""
+    try:
+        headers = request.data.get('headers') or []
+        row = request.data.get('row') or {}
+        roles = request.data.get('roles') or {}
+        entries = request.data.get('entries') or []
+        group = request.data.get('group') or {}
+        visual_pattern = request.data.get('visualPattern') or request.data.get('visual_pattern') or {}
+        tagged_spans = request.data.get('taggedSpans') or request.data.get('tagged_spans')
+        source_header = request.data.get('sourceHeader') or request.data.get('source_header') or ''
+        alternate_delimiter = request.data.get('alternateDelimiter') or request.data.get('alternate_delimiter') or '/'
+        alternate_mode = request.data.get('alternateMode') or request.data.get('alternate_mode') or 'append'
+        ignored_fields = request.data.get('ignoredFields') or request.data.get('ignored_fields') or []
+        has_manual_edits = request.data.get('hasManualEdits') is True or request.data.get('has_manual_edits') is True
+        persist = request.data.get('persist', True)
+
+        if not isinstance(headers, list):
+            return Response({
+                'success': False,
+                'error': 'headers must be a list',
+            }, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(row, dict):
+            return Response({
+                'success': False,
+                'error': 'row must be an object',
+            }, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(roles, dict):
+            roles = {}
+        if not isinstance(entries, list):
+            entries = []
+        if not isinstance(group, dict):
+            group = {}
+        if not isinstance(visual_pattern, dict):
+            visual_pattern = {}
+
+        teach_result = build_bom_field_pattern_teach_result(
+            headers=headers,
+            row=row,
+            roles=roles,
+            entries=entries,
+            group=group,
+            tagged_spans=tagged_spans,
+            source_header=source_header,
+            alternate_delimiter=alternate_delimiter,
+            alternate_mode=alternate_mode,
+            ignored_fields=ignored_fields,
+            visual_pattern=visual_pattern,
+            has_manual_edits=has_manual_edits,
+        )
+        rule = teach_result['rule']
+        saved_rule = None
+        if persist:
+            saved_rule = save_bom_field_pattern_rule(
+                rule,
+                description='User-taught BOM field parser pattern',
+            )
+        return Response({
+            'success': True,
+            **teach_result,
+            'saved_rule': saved_rule,
+        })
+    except Exception as exc:
+        logger.error("BOM field pattern teaching failed: %s", exc, exc_info=True)
+        return Response({
+            'success': False,
+            'error': str(exc),
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @api_view(['POST'])

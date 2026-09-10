@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import re
+import unicodedata
 from typing import Dict, List, Optional, Tuple, Any, Union
 from pathlib import Path
 import json
@@ -11,6 +12,8 @@ from .services.mpn_pattern_library import (
     score_column_as_manufacturer,
     score_column_as_mpn,
 )
+
+MAPPING_SAMPLE_ROWS = 500
 
 
 class AdvancedElectronicsSpecificationParser:
@@ -256,7 +259,7 @@ class BOMHeaderMapper:
     def read_sample_data(self, file_path: Union[str, Path], 
                         sheet_name: str = None, 
                         header_row: int = 0, 
-                        sample_rows: int = 5) -> Dict[str, List[str]]:
+                        sample_rows: int = MAPPING_SAMPLE_ROWS) -> Dict[str, List[str]]:
         """Read sample data from file for pattern analysis."""
         try:
             file_path = Path(file_path)
@@ -318,55 +321,139 @@ class BOMHeaderMapper:
         
         return 0.0
 
-    def calculate_pattern_library_boost(self, template_header: str, client_header: str, sample_values: List[str]) -> Tuple[float, str]:
-        """Use bundled MPN/MFR pattern assets as a value-shape signal.
+    def classify_mapping_role(self, header: str) -> str:
+        """Classify headers whose values should participate in mapping decisions."""
+        header_text = unicodedata.normalize("NFKD", str(header or ""))
+        header_text = "".join(char for char in header_text if not unicodedata.combining(char))
+        text = re.sub(r"[\W_]+", " ", header_text.lower()).strip()
+        if not text:
+            return ""
 
-        Header similarity still decides most mappings. This only boosts columns
-        whose values look like known MPN shapes or known manufacturer names, so a
-        random numeric column is less likely to beat the real MPN/MFR column.
+        is_mpn = (
+            "mpn" in text
+            or "manufacturer part" in text
+            or "mfr part" in text
+            or "mfg part" in text
+            or "equivalent part" in text
+            or "ref fab" in text
+            or "ref fabricant" in text
+            or "reference fabricant" in text
+            or "fabricant ref" in text
+            or "fabricant reference" in text
+            or ("part number" in text and ("manufacturer" in text or re.search(r"\bmfr\b", text) or re.search(r"\bmfg\b", text)))
+        )
+        if is_mpn:
+            return "mpn"
+
+        is_cpn = (
+            "cpn" in text
+            or "customer part" in text
+            or "client part" in text
+            or "internal part" in text
+            or "item code" in text
+            or "part code" in text
+            or "ref article" in text
+            or "reference article" in text
+            or text in {"part", "part no", "part number", "pn", "p n"}
+            or ("part number" in text and "customer" in text)
+        )
+        if is_cpn:
+            return "cpn"
+
+        is_mfr = (
+            "manufacturer" in text
+            or re.search(r"\bmfr\b", text)
+            or re.search(r"\bmfg\b", text)
+            or "maker" in text
+            or "brand" in text
+        )
+        if is_mfr:
+            return "manufacturer"
+
+        return ""
+
+    def calculate_value_priority_score(
+        self,
+        template_header: str,
+        client_header: str,
+        sample_values: List[str],
+        header_score: float,
+    ) -> Tuple[float, str]:
+        """Blend header similarity with sampled value shape for MPN/MFR fields.
+
+        MPN-style fields are easy to mis-map from headers alone ("Part Number"
+        could be CPN or MPN), so sampled values now carry the larger share of the
+        score when the destination is MPN/CPN. If no sample values are available,
+        the caller keeps the header-only score.
         """
-        target = re.sub(r"[\W_]+", " ", str(template_header or "").lower()).strip()
-        source = re.sub(r"[\W_]+", " ", str(client_header or "").lower()).strip()
-        if not sample_values:
-            return 0.0, ""
+        target_role = self.classify_mapping_role(template_header)
+        if not target_role or not sample_values:
+            return header_score, ""
 
-        is_mpn_target = (
-            "mpn" in target
-            or "manufacturer part" in target
-            or "mfr part" in target
-            or ("part number" in target and "manufacturer" in target)
-        )
-        is_mfr_target = (
-            "manufacturer" in target
-            or re.search(r"\bmfr\b", target)
-            or "maker" in target
-            or "brand" in target
-        ) and not is_mpn_target
-        is_cpn_target = (
-            "cpn" in target
-            or "customer part" in target
-            or ("part number" in target and "customer" in target)
-        )
+        source_role = self.classify_mapping_role(client_header)
+        role_bonus = 0.05 if source_role == target_role else 0.0
 
-        if is_mpn_target or (("mpn" in source or "mfr part" in source) and "manufacturer" not in source):
-            score = score_column_as_mpn(sample_values)
-            if score["score"] >= 0.45:
-                return min(0.25, score["score"] * 0.25), (
-                    f"MPN pattern library match ({score['match_rate']:.0%} of sampled values)"
-                )
-        if is_mfr_target or "manufacturer" in source or re.search(r"\bmfr\b", source):
-            score = score_column_as_manufacturer(sample_values)
-            if score["score"] >= 0.45:
-                return min(0.25, score["score"] * 0.25), (
-                    f"Manufacturer library match ({score['match_rate']:.0%} of sampled values)"
-                )
-        if is_cpn_target and ("cpn" in source or "customer" in source):
-            score = score_column_as_mpn(sample_values)
-            if score["score"] >= 0.40:
-                return min(0.15, score["score"] * 0.15), (
-                    f"Part-number shape match ({score['match_rate']:.0%} of sampled values)"
-                )
-        return 0.0, ""
+        if target_role == "mpn":
+            value_signal = score_column_as_mpn(sample_values)
+            value_score = value_signal["score"]
+            manufacturer_context_rate = value_signal.get("manufacturer_context_rate", 0.0)
+            label_rate = value_signal.get("label_rate", 0.0)
+            match_rate = value_signal.get("match_rate", 0.0)
+            document_context_rate = value_signal.get("document_context_rate", 0.0)
+
+            value_priority_score = min(
+                1.0,
+                value_score
+                + (manufacturer_context_rate * 0.12)
+                + (label_rate * 0.08)
+            )
+            source_role_bonus = 0.0
+            if source_role == "mpn":
+                source_role_bonus = 0.10
+            elif source_role == "manufacturer" and manufacturer_context_rate >= 0.20:
+                # Headers like "Manufacturer info" often contain "MPN (MFR)"
+                # pairs. In that case the values are the deciding evidence.
+                source_role_bonus = 0.05
+
+            source_penalty = 0.0
+            if source_role == "cpn" and manufacturer_context_rate < 0.15:
+                source_penalty += 0.18
+            if source_role == "manufacturer" and manufacturer_context_rate < 0.20 and label_rate < 0.10:
+                source_penalty += 0.12
+            if document_context_rate >= 0.30:
+                source_penalty += 0.10
+
+            final_score = (value_priority_score * 0.80) + (header_score * 0.20) + source_role_bonus - source_penalty
+            if match_rate < 0.15 and source_role != "mpn":
+                final_score = min(final_score, 0.39)
+            final_score = max(0.0, min(1.0, final_score))
+            explanation = (
+                f"MPN value-first match "
+                f"(values: {match_rate:.0%}, manufacturer context: {manufacturer_context_rate:.0%}, header: {header_score:.2f})"
+            )
+            return final_score, explanation
+
+        if target_role == "cpn":
+            value_signal = score_column_as_mpn(sample_values)
+            value_score = value_signal["score"]
+            final_score = min(1.0, (header_score * 0.45) + (value_score * 0.55) + role_bonus)
+            explanation = (
+                f"Part-number header + value match "
+                f"(values: {value_signal['match_rate']:.0%}, header: {header_score:.2f})"
+            )
+            return final_score, explanation
+
+        if target_role == "manufacturer":
+            value_signal = score_column_as_manufacturer(sample_values)
+            value_score = value_signal["score"]
+            final_score = min(1.0, (header_score * 0.55) + (value_score * 0.45) + role_bonus)
+            explanation = (
+                f"Manufacturer header + value match "
+                f"(values: {value_signal['match_rate']:.0%}, header: {header_score:.2f})"
+            )
+            return final_score, explanation
+
+        return header_score, ""
     
     def map_headers_to_template(self, client_file: str, template_file: str,
                                client_sheet_name: str = None, template_sheet_name: str = None,
@@ -388,7 +475,12 @@ class BOMHeaderMapper:
             client_headers = self.read_excel_headers(client_file, client_sheet_name, client_header_row)
             
             try:
-                client_sample_data = self.read_sample_data(client_file, client_sheet_name, client_header_row)
+                client_sample_data = self.read_sample_data(
+                    client_file,
+                    client_sheet_name,
+                    client_header_row,
+                    sample_rows=MAPPING_SAMPLE_ROWS,
+                )
             except Exception as e:
                 client_sample_data = {header: [] for header in client_headers}
             
@@ -412,26 +504,26 @@ class BOMHeaderMapper:
                     
                     sample_values = client_sample_data.get(client_header, [])
 
-                    # Weighted average
-                    final_score = (
+                    # Header-name score: exact/synonym/fuzzy matching.
+                    header_score = (
                         semantic_score * self.similarity_weights['semantic'] +
                         jaro_score * self.similarity_weights['jaro_winkler'] +
                         token_score * self.similarity_weights['token_sort'] +
                         partial_score * self.similarity_weights['partial_ratio']
                     )
-                    pattern_boost, pattern_explanation = self.calculate_pattern_library_boost(
+                    final_score, value_explanation = self.calculate_value_priority_score(
                         template_header,
                         client_header,
                         sample_values,
+                        header_score,
                     )
-                    final_score = min(1.0, final_score + pattern_boost)
                     
                     if final_score > best_score:
                         best_score = final_score
                         best_match = client_header
                         
-                        if pattern_explanation:
-                            best_explanation = pattern_explanation
+                        if value_explanation:
+                            best_explanation = value_explanation
                         elif semantic_score > 0:
                             best_explanation = f"Semantic match (score: {semantic_score:.2f})"
                         else:

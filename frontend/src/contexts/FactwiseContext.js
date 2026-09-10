@@ -92,10 +92,25 @@ function readInitialContext() {
   const params = new URLSearchParams(window.location.search);
 
   const embeddedParam = params.get('embedded');
+  const hasFactwiseLaunchParams = Boolean(
+    embeddedParam !== null ||
+    params.get('token') ||
+    params.get('refresh_token') ||
+    params.get('api_url') ||
+    params.get('session_id') ||
+    params.get('entity_id') ||
+    params.get('fw_origin')
+  );
+  const localStandaloneWithoutLaunch = (
+    ['localhost', '127.0.0.1'].includes(window.location.hostname) &&
+    !hasFactwiseLaunchParams
+  );
   const isEmbedded =
-    embeddedParam === '1' ||
-    embeddedParam === 'true' ||
-    window.localStorage.getItem(STORAGE_KEYS.embedded) === '1';
+    !localStandaloneWithoutLaunch && (
+      embeddedParam === '1' ||
+      embeddedParam === 'true' ||
+      window.localStorage.getItem(STORAGE_KEYS.embedded) === '1'
+    );
 
   const captured = {
     token: params.get('token'),
@@ -138,6 +153,22 @@ function readInitialContext() {
 
   if (isEmbedded) {
     window.localStorage.setItem(STORAGE_KEYS.embedded, '1');
+  }
+
+  if (localStandaloneWithoutLaunch) {
+    return {
+      isEmbedded: false,
+      entities: [],
+      entityChangedAtLaunch: false,
+      token: null,
+      refreshToken: null,
+      apiEnv: null,
+      apiUrl: null,
+      sessionId: null,
+      entityId: null,
+      entityName: null,
+      fwOrigin: null,
+    };
   }
 
   return {

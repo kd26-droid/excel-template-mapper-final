@@ -24,6 +24,7 @@ logs/
 
 # Test and debug files
 test_*.py
+!excel_mapper/tests/test_bom_role_inference.py
 debug_*.py
 check_*.py
 test_*.sh

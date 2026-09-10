@@ -5,6 +5,7 @@ const STORAGE_KEYS = {
   refreshToken: 'fw_embedded_refresh_token',
   apiUrl: 'fw_api_url',
   entityId: 'fw_entity_id',
+  embedded: 'fw_embedded',
 };
 
 // Custom DOM event fired the first time a FactWise request fails with an
@@ -56,6 +57,30 @@ export function isTokenExpired(token) {
 }
 
 function readCredentials() {
+  const params = new URLSearchParams(window.location.search);
+  const hasFactwiseLaunchParams = Boolean(
+    params.get('embedded') !== null ||
+    params.get('token') ||
+    params.get('refresh_token') ||
+    params.get('api_url') ||
+    params.get('session_id') ||
+    params.get('entity_id') ||
+    params.get('fw_origin')
+  );
+  const localStandaloneWithoutLaunch = (
+    ['localhost', '127.0.0.1'].includes(window.location.hostname) &&
+    !hasFactwiseLaunchParams
+  );
+
+  if (localStandaloneWithoutLaunch) {
+    return {
+      token: null,
+      refreshToken: null,
+      apiUrl: null,
+      entityId: null,
+    };
+  }
+
   return {
     token: window.localStorage.getItem(STORAGE_KEYS.token),
     refreshToken: window.localStorage.getItem(STORAGE_KEYS.refreshToken),

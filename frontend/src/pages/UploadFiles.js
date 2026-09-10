@@ -1270,17 +1270,10 @@ const UploadFiles = () => {
   // Global processing template flow. Mapping templates are only one part of this;
   // this captures the user's overall intent before they enter mapping/normalizing.
   const [processingTemplateMode, setProcessingTemplateMode] = useState('');
-  const [processingTemplateName, setProcessingTemplateName] = useState('');
   const [processingTemplates, setProcessingTemplates] = useState([]);
-  // Name clashes are caught here, beside the field, rather than surfacing
-  // as a toast after the upload has already started.
-  const [newTemplateNameError, setNewTemplateNameError] = useState('');
   const [selectedProcessingTemplateId, setSelectedProcessingTemplateId] = useState('');
   const [processingTemplatesLoading, setProcessingTemplatesLoading] = useState(false);
   const [processingPath, setProcessingPath] = useState('map');
-  const [newTemplateDialogOpen, setNewTemplateDialogOpen] = useState(false);
-  const [newTemplateDraftName, setNewTemplateDraftName] = useState('');
-  const [pendingTemplateAction, setPendingTemplateAction] = useState(null);
 
   // PDF alignment state - Use 'align' to keep exact headers AND align rows across pages
   // 'align' = align rows from different pages to same row level + keep original headers (MFR stays MFR)
@@ -2298,7 +2291,8 @@ const UploadFiles = () => {
     };
   }, [getSheetHeaders, getSheetRecords, getSheetRecordsWithMeta, sanitizeSheetJoinConfig]);
 
-  const onDropUserFile = useCallback(acceptedFiles => {
+  const onDropUserFile = useCallback((acceptedFiles, options = {}) => {
+    const restoreOptions = options && !Array.isArray(options) ? options : {};
     if (acceptedFiles.length > 0) {
       let file = acceptedFiles[0];
       const extension = getFileExtension(file.name);
@@ -2347,6 +2341,50 @@ const UploadFiles = () => {
         return;
       }
 
+      const applyWorkbookSelection = (loadedWorkbook) => {
+        const sheets = loadedWorkbook.SheetNames || [];
+        if (!sheets.length) {
+          setError('The file appears to be empty or has no sheets.');
+          return false;
+        }
+
+        const requestedSheet = restoreOptions.sheetName && sheets.includes(restoreOptions.sheetName)
+          ? restoreOptions.sheetName
+          : sheets[0];
+        const requestedSelectedSheets = Array.isArray(restoreOptions.selectedSheets)
+          ? restoreOptions.selectedSheets.filter(sheet => sheets.includes(sheet))
+          : [];
+        const restoredSheetScope = restoreOptions.sheetScope || 'single';
+        const shouldCombineSheets = restoredSheetScope !== 'single' && requestedSelectedSheets.length > 1;
+        const parsedHeaderRow = Number(restoreOptions.headerRow);
+        const hasRestoredHeaderRow = Number.isFinite(parsedHeaderRow) && parsedHeaderRow > 0;
+        const detectedRow = detectHeaderRow(loadedWorkbook, requestedSheet);
+        const nextHeaderRow = hasRestoredHeaderRow ? parsedHeaderRow : detectedRow;
+        const headerIndex = Math.max(0, nextHeaderRow - 1);
+        const sheetRows = readSheetRows(loadedWorkbook, requestedSheet);
+        const headers = readHeadersAtRow(loadedWorkbook, requestedSheet, nextHeaderRow);
+
+        if (sheetRows.length <= headerIndex || !sheetRows[headerIndex]) {
+          setError('The selected sheet appears to be empty or has no data.');
+          return false;
+        }
+
+        if (headers.length === 0) {
+          setError('No valid column headers found in the file. Please check the file format and ensure it has proper headers.');
+          return false;
+        }
+
+        setClientWorkbook(loadedWorkbook);
+        setClientSheetNames(sheets);
+        setSelectedClientSheet(requestedSheet);
+        setCombineSheetsMode(shouldCombineSheets);
+        setSelectedClientSheets(shouldCombineSheets ? requestedSelectedSheets : []);
+        setClientHeaderRow(nextHeaderRow);
+        setClientHeaderAutoDetected(!hasRestoredHeaderRow && nextHeaderRow > 1);
+        setClientHeaderRowTouched(Boolean(restoreOptions.headerRowTouched || hasRestoredHeaderRow));
+        return true;
+      };
+
       reader.onload = (evt) => {
         try {
           const data = evt.target.result;
@@ -2368,39 +2406,7 @@ const UploadFiles = () => {
             workbook = XLSX.read(data, { type: 'binary' });
           }
           
-          const sheets = workbook.SheetNames;
-          setClientWorkbook(workbook);
-          setClientSheetNames(sheets);
-          setSelectedClientSheet(sheets[0]); // Auto-select first sheet
-          
-          // Extract column headers from the first sheet
-          if (sheets.length > 0) {
-            // A1-anchored read so blank leading rows are counted the same way the
-            // backend (pandas) counts them — otherwise the detected "Header Row"
-            // is off by one and the backend reads a blank row (Unnamed columns).
-            const jsonData = readSheetRows(workbook, sheets[0]);
-
-
-            const detectedRow = detectHeaderRow(workbook, sheets[0]);
-            const headerIndex = Math.max(0, detectedRow - 1);
-            const headers = readHeadersAtRow(workbook, sheets[0], detectedRow);
-
-            if (jsonData.length > headerIndex && jsonData[headerIndex]) {
-              
-              if (headers.length === 0) {
-                console.warn('No valid headers found in the file');
-                setError('No valid column headers found in the file. Please check the file format and ensure it has proper headers.');
-                return;
-              }
-              
-              setClientHeaderRow(detectedRow);
-              setClientHeaderAutoDetected(detectedRow > 1);
-            } else {
-              console.warn('No data found in the file');
-              setError('The file appears to be empty or has no data.');
-              return;
-            }
-          }
+          applyWorkbookSelection(workbook);
         } catch (err) {
           console.error('Error reading file:', err);
           const fileType = file.name.toLowerCase().endsWith('.csv') ? 'CSV' : 'Excel';
@@ -2415,26 +2421,7 @@ const UploadFiles = () => {
                 codepage: 1252 // Windows-1252 (common alternative)
               });
               
-              const fallbackSheets = fallbackWorkbook.SheetNames;
-              setClientWorkbook(fallbackWorkbook);
-              setClientSheetNames(fallbackSheets);
-              setSelectedClientSheet(fallbackSheets[0]);
-              
-              if (fallbackSheets.length > 0) {
-                const fallbackJsonData = readSheetRows(fallbackWorkbook, fallbackSheets[0]);
-                
-                
-                if (fallbackJsonData.length > 0) {
-                  const detectedRow = detectHeaderRow(fallbackWorkbook, fallbackSheets[0]);
-                  const headers = readHeadersAtRow(fallbackWorkbook, fallbackSheets[0], detectedRow);
-                  if (headers.length > 0) {
-                    setClientHeaderRow(detectedRow);
-                    setClientHeaderAutoDetected(detectedRow > 1);
-                    return; // Success with fallback
-                  }
-                }
-              }
-              
+              if (applyWorkbookSelection(fallbackWorkbook)) return; // Success with fallback
               throw new Error('Fallback parsing also failed');
             } catch (fallbackErr) {
               console.error('Fallback CSV reading also failed:', fallbackErr);
@@ -2500,17 +2487,31 @@ const UploadFiles = () => {
     const initialClientFile = location.state?.initialClientFile;
     if (!initialClientFile) return;
 
-    onDropUserFile([initialClientFile]);
+    onDropUserFile([initialClientFile], {
+      sheetName: location.state?.initialClientSheetName,
+      headerRow: location.state?.initialClientHeaderRow,
+      sheetScope: location.state?.initialClientSheetScope,
+      selectedSheets: location.state?.initialSelectedClientSheets,
+      headerRowTouched: location.state?.initialClientHeaderRowTouched,
+    });
     setWizardStep(Number.isFinite(Number(location.state?.wizardStep)) ? Number(location.state.wizardStep) : 1);
     setProcessingPath(location.state?.processingPath || 'map');
-    setSuccess(location.state?.fromBomNormalizer
-      ? 'BOM Normalizer output loaded. Continue with BOM Mapping when ready.'
-      : 'File loaded.');
+    setSuccess(location.state?.returnFromBomNormalizerConfigure
+      ? 'File restored. Select or change a workflow template, then continue.'
+      : location.state?.fromBomNormalizer
+        ? 'BOM Normalizer output loaded. Continue with BOM Mapping when ready.'
+        : 'File loaded.');
 
     const nextState = { ...(location.state || {}) };
     delete nextState.initialClientFile;
     delete nextState.fromBomNormalizer;
+    delete nextState.returnFromBomNormalizerConfigure;
     delete nextState.processingPath;
+    delete nextState.initialClientSheetName;
+    delete nextState.initialClientHeaderRow;
+    delete nextState.initialClientSheetScope;
+    delete nextState.initialSelectedClientSheets;
+    delete nextState.initialClientHeaderRowTouched;
     navigate('/upload', { replace: true, state: nextState });
   }, [location.state, navigate, onDropUserFile]);
 
@@ -2754,42 +2755,6 @@ const UploadFiles = () => {
     setCompatibilityErrorOpen(false);
     setPendingSessionId(null);
     setCompatibilityErrorData(null);
-  };
-
-  const handleConfirmNewProcessingTemplate = () => {
-    const name = newTemplateDraftName.trim();
-    if (!name) {
-      setNewTemplateNameError('Enter a template name to continue.');
-      return;
-    }
-
-    // The backend rejects duplicates with a 409; catching it here means the
-    // user fixes the name before the upload runs rather than after it fails.
-    const clash = processingTemplates.some(
-      template => String(template?.name || '').trim().toLowerCase() === name.toLowerCase()
-    );
-    if (clash) {
-      setNewTemplateNameError('A template with this name already exists. Enter a different name.');
-      return;
-    }
-    setNewTemplateNameError('');
-
-    setProcessingTemplateMode('new');
-    setProcessingTemplateName(name);
-    setNewTemplateDialogOpen(false);
-    const action = pendingTemplateAction;
-    setPendingTemplateAction(null);
-
-    const options = {
-      processingTemplateMode: 'new',
-      processingTemplateName: name,
-    };
-
-    if (action === 'normalize') {
-      handleOpenBomNormalizer(options);
-    } else if (action === 'upload') {
-      handleUpload(options);
-    }
   };
 
   const handleOpenSheetJoinSetup = () => {
@@ -3320,7 +3285,19 @@ const UploadFiles = () => {
     const effectiveMode = overrides.processingTemplateMode || (selectedProcessingTemplateId ? 'use' : 'new');
     const effectiveName = overrides.processingTemplateName !== undefined
       ? overrides.processingTemplateName
-      : processingTemplateName.trim();
+      : '';
+    const sourceRowSample = (() => {
+      if (!userFile) return [];
+      if (sheetJoinSetup?.previewRows?.length) return sheetJoinSetup.previewRows.slice(0, 120);
+      if (combineSheetsMode && selectedClientSheets.length > 1) {
+        const perSheetLimit = Math.max(1, Math.ceil(120 / selectedClientSheets.length));
+        return selectedClientSheets
+          .flatMap(sheet => getSheetRecords(sheet, clientHeaderRow, 'primary').slice(0, perSheetLimit))
+          .slice(0, 120);
+      }
+      const activeSheet = selectedClientSheet || clientSheetNames[0] || '';
+      return activeSheet ? getSheetRecords(activeSheet, clientHeaderRow, 'primary').slice(0, 120) : [];
+    })();
 
     return {
       processingTemplateMode: effectiveMode,
@@ -3340,6 +3317,7 @@ const UploadFiles = () => {
             active_sheet: selectedClientSheet,
             header_row: clientHeaderRow,
             headers: clientHeaderPreview,
+            row_sample: sourceRowSample,
           } : null,
           templateFile ? {
             position: 2,
@@ -3470,23 +3448,9 @@ const UploadFiles = () => {
     }, 800);
   };
 
-  const openNewTemplateDialog = (action) => {
-    const fallbackName = `${userFile?.name ? userFile.name.replace(/\.[^.]+$/, '') : 'BOM'} template`;
-    setNewTemplateDraftName(processingTemplateName.trim() || fallbackName);
-    setPendingTemplateAction(action);
-    setNewTemplateDialogOpen(true);
-    setNewTemplateNameError('');
-    setError(null);
-  };
-
   const handleOpenBomNormalizer = (templateOptions = {}, passedAnswers = null) => {
     if (!userFile) {
       setError('Please select a client file');
-      return;
-    }
-
-    if (!selectedProcessingTemplateId && !templateOptions.processingTemplateName) {
-      openNewTemplateDialog('normalize');
       return;
     }
 
@@ -3559,11 +3523,6 @@ const UploadFiles = () => {
 
     if (templateFile && templateSheetNames.length > 0 && !selectedTemplateSheet) {
       setError('Please select a sheet from your template file');
-      return;
-    }
-
-    if (!selectedProcessingTemplateId && !templateOptions.processingTemplateName) {
-      openNewTemplateDialog('upload');
       return;
     }
 
@@ -4739,18 +4698,6 @@ const UploadFiles = () => {
                     })}
                   </Grid>
 
-                  {false && processingTemplateMode === 'new' && (
-                    <TextField
-                      fullWidth
-                      size="small"
-                      label="Template name"
-                      placeholder="Example: Standard two-source BOM"
-                      value={processingTemplateName}
-                      onChange={(e) => setProcessingTemplateName(e.target.value)}
-                      sx={{ mt: 1.5, '& .MuiOutlinedInput-root': { borderRadius: '8px', fontSize: '13px' } }}
-                    />
-                  )}
-
                   <FormControl fullWidth sx={{ mt: 1.75 }} disabled={processingTemplatesLoading}>
                       <Select
                         value={selectedProcessingTemplateId}
@@ -5021,74 +4968,6 @@ const UploadFiles = () => {
           </Box>
         )}
       </Box>
-
-      <Dialog
-        open={newTemplateDialogOpen}
-        onClose={() => {
-          setNewTemplateDialogOpen(false);
-          setPendingTemplateAction(null);
-        }}
-        maxWidth="xs"
-        fullWidth
-        PaperProps={{
-          sx: {
-            borderRadius: '18px',
-            bgcolor: isDarkMode ? '#0f172a' : '#ffffff',
-            color: Nn.text,
-            border: `1px solid ${Nn.divider}`,
-            boxShadow: Nn.modalShadow,
-          }
-        }}
-      >
-        <DialogTitle sx={{ pb: 0.75 }}>
-          <Typography sx={{ fontSize: 18, fontWeight: 800, color: Nn.text }}>
-            Create New Template
-          </Typography>
-          <Typography sx={{ mt: 0.5, fontSize: 12.5, color: Nn.muted }}>
-            Name this workflow so it can be reused for similar BOM files.
-          </Typography>
-        </DialogTitle>
-        <DialogContent sx={{ pt: 1.5 }}>
-          <TextField
-            autoFocus
-            fullWidth
-            size="small"
-            label="Template name"
-            value={newTemplateDraftName}
-            error={Boolean(newTemplateNameError)}
-            helperText={newTemplateNameError}
-            onChange={(event) => { setNewTemplateDraftName(event.target.value); setNewTemplateNameError(''); }}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') {
-                event.preventDefault();
-                handleConfirmNewProcessingTemplate();
-              }
-            }}
-            sx={{ mt: 1 }}
-          />
-        </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2.5 }}>
-          <Button
-            variant="outlined"
-            onClick={() => {
-              setNewTemplateDialogOpen(false);
-              setPendingTemplateAction(null);
-              setNewTemplateNameError('');
-            }}
-            sx={secondaryPillSx}
-          >
-            Cancel
-          </Button>
-          <Button
-            variant="contained"
-            onClick={handleConfirmNewProcessingTemplate}
-            disabled={!newTemplateDraftName.trim()}
-            sx={{ ...primaryPillSx, px: 2.5 }}
-          >
-            Continue
-          </Button>
-        </DialogActions>
-      </Dialog>
 
       <Dialog
         open={sheetJoinGroupedDialogOpen}

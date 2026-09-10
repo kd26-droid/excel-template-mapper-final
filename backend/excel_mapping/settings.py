@@ -86,6 +86,7 @@ if os.environ.get('DATABASE_URL'):
 
 # REST Framework Configuration
 REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [],
     'DEFAULT_RENDERER_CLASSES': [
         'rest_framework.renderers.JSONRenderer',
     ],
@@ -105,6 +106,11 @@ REST_FRAMEWORK = {
 # Exact origins (comma-separated)
 CORS_ALLOWED_ORIGINS = os.environ.get(
     'CORS_ALLOWED_ORIGINS',
+    'http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001'
+).split(',')
+
+CSRF_TRUSTED_ORIGINS = os.environ.get(
+    'CSRF_TRUSTED_ORIGINS',
     'http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001'
 ).split(',')
 
@@ -147,9 +153,9 @@ LOGGING = {
             'datefmt': '%Y-%m-%d %H:%M:%S'
         },
         'debug': {
-            'format': '[{asctime}] 🔍 {levelname} {name} {funcName}:{lineno} {message}',
+            'format': '[{asctime}] {levelname} {name} {funcName}:{lineno} {message}',
             'style': '{',
-            'datefmt': '%Y-%m-%d %H:%M:%S.%f'
+            'datefmt': '%Y-%m-%d %H:%M:%S'
         }
     },
     'handlers': {

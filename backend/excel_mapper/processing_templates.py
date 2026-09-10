@@ -6,6 +6,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from .models import ProcessingTemplate
+from .services.bom_structure_patterns import learn_bom_structure
 
 
 def _clean_name(value):
@@ -201,6 +202,43 @@ def _extract_post_mapping_actions(metadata, stages):
     return [action for action in actions if isinstance(action, dict) and action.get('type')]
 
 
+def _extract_normalizer_workflow(metadata, stages):
+    if isinstance(metadata, dict) and isinstance(metadata.get('normalizer_workflow'), dict):
+        return metadata.get('normalizer_workflow') or {}
+    if isinstance(stages, list):
+        for stage in stages:
+            if isinstance(stage, dict) and stage.get('type') == 'bom_normalizer' and isinstance(stage.get('workflow'), dict):
+                return stage.get('workflow') or {}
+    return {}
+
+
+def _learn_structure_from_processing_template(template):
+    workflow = _extract_normalizer_workflow(template.metadata or {}, template.stages or [])
+    if not workflow:
+        return None
+    sources = (template.source_requirements or {}).get('sources')
+    if not isinstance(sources, list) or not sources:
+        return None
+    source_signature = sources[0] if isinstance(sources[0], dict) else {}
+    headers = source_signature.get('headers') if isinstance(source_signature.get('headers'), list) else []
+    rows = source_signature.get('row_sample') if isinstance(source_signature.get('row_sample'), list) else []
+    if not rows and isinstance(source_signature.get('rowSample'), list):
+        rows = source_signature.get('rowSample')
+    if not headers:
+        return None
+    structure, _ = learn_bom_structure(
+        name=template.name,
+        headers=headers,
+        rows=rows,
+        roles=workflow.get('roles') if isinstance(workflow.get('roles'), dict) else {},
+        config=workflow.get('config') if isinstance(workflow.get('config'), dict) else {},
+        source_signature=source_signature,
+        workflow=workflow,
+        confidence=1.0,
+    )
+    return structure.to_dict()
+
+
 def _merge_post_mapping_actions(existing_actions, incoming_actions):
     merged = []
     seen = set()
@@ -267,11 +305,13 @@ def processing_templates(request):
             'metadata': incoming_metadata,
         },
     )
+    learned_structure = _learn_structure_from_processing_template(template)
 
     return Response({
         'success': True,
         'created': created,
         'template': template.to_dict(),
+        'learned_structure': learned_structure,
         'message': f'Template "{template.name}" saved successfully',
     }, status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
@@ -319,9 +359,11 @@ def processing_template_detail(request, template_id):
             template.stages = incoming_stages
             template.metadata = incoming_metadata
         template.save()
+        learned_structure = _learn_structure_from_processing_template(template)
         return Response({
             'success': True,
             'template': template.to_dict(),
+            'learned_structure': learned_structure,
             'message': f'Template "{template.name}" updated successfully',
         })
 
