@@ -9198,6 +9198,19 @@ const fieldPatternRuleForGroup = (rules = {}, group = {}) => (
   rules[fieldPatternRuleKey(group)] || { fields: {} }
 );
 
+const fieldSplitRuleTargets = (fieldConfig = {}, groups = []) => {
+  const configuredTargets = (fieldConfig.targetGroups || [])
+    .filter((target) => fmt(target?.shape || target?.patternKey || target?.id));
+  if (configuredTargets.length) return configuredTargets;
+
+  const targetGroupIds = new Set(fieldConfig.groupIds || []);
+  return (groups || []).filter((group) => (
+    !targetGroupIds.size ||
+    targetGroupIds.has(group.id) ||
+    (group.groupIds || []).some((groupId) => targetGroupIds.has(groupId))
+  ));
+};
+
 const expandFieldPatternReviewRows = (group = {}) => {
   const reviewRows = Array.isArray(group.samples) ? [...group.samples] : [];
   const existingSampleKeys = new Set(reviewRows.map(fieldPatternSampleKey));
@@ -9760,6 +9773,7 @@ const BomNormalizer = () => {
   const [fieldSplitReviewOpen, setFieldSplitReviewOpen] = useState(false);
   const [fieldSplitSelectedField, setFieldSplitSelectedField] = useState('');
   const [fieldSplitRuleDrafts, setFieldSplitRuleDrafts] = useState({});
+  const [fieldSplitIdentityGroupDrafts, setFieldSplitIdentityGroupDrafts] = useState({});
   const [visualTeachOpen, setVisualTeachOpen] = useState(false);
   const [visualTeachContext, setVisualTeachContext] = useState(null);
   const [visualTeachTags, setVisualTeachTags] = useState([]);
@@ -10702,12 +10716,23 @@ const BomNormalizer = () => {
   const fieldSplitFields = fieldPatternWorkflowNextStep?.type === 'split_fields'
     ? (fieldPatternWorkflowNextStep.fields || [])
     : [];
+  const fieldSplitIdentityGroups = fieldPatternWorkflowNextStep?.type === 'split_fields'
+    ? (fieldPatternWorkflowNextStep.identityGroups || [])
+    : [];
   const selectedFieldSplitConfig = fieldSplitFields.find(
     (fieldConfig) => fieldConfig.field === fieldSplitSelectedField
   ) || fieldSplitFields[0] || null;
   const selectedFieldSplitRule = selectedFieldSplitConfig
-    ? (fieldSplitRuleDrafts[selectedFieldSplitConfig.field] || { delimiter: 'none', customDelimiter: '' })
-    : { delimiter: 'none', customDelimiter: '' };
+    ? (fieldSplitRuleDrafts[selectedFieldSplitConfig.field] || {
+      delimiter: 'none',
+      customDelimiter: '',
+      stripPrefix: '',
+      prefixMode: 'literal',
+    })
+    : { delimiter: 'none', customDelimiter: '', stripPrefix: '', prefixMode: 'literal' };
+  const selectedFieldSplitRuleDefinition = FIELD_PATTERN_RULE_FIELDS.find(
+    (field) => field.key === selectedFieldSplitConfig?.field
+  );
   const selectedFieldSplitPreview = selectedFieldSplitConfig?.previews?.[
     selectedFieldSplitRule.delimiter || 'none'
   ] || [];
@@ -13814,15 +13839,29 @@ const BomNormalizer = () => {
     let nextRules = { ...baseRules };
     const changedGroupIds = new Set();
     step.fields.forEach((fieldConfig) => {
-      const targetGroupIds = new Set(fieldConfig.groupIds || []);
-      const ruleDraft = fieldSplitRuleDrafts[fieldConfig.field] || { delimiter: 'none', customDelimiter: '' };
-      fieldPatternGroups
-        .filter((group) => !targetGroupIds.size || targetGroupIds.has(group.id))
-        .forEach((group) => {
-          changedGroupIds.add(group.id);
-          nextRules = updateFieldPatternRuleFieldValue(nextRules, group, fieldConfig.field, ruleDraft);
-        });
+      const ruleDraft = fieldSplitRuleDrafts[fieldConfig.field] || {
+        delimiter: 'none',
+        customDelimiter: '',
+        stripPrefix: '',
+        prefixMode: 'literal',
+      };
+      fieldSplitRuleTargets(fieldConfig, fieldPatternGroups).forEach((group) => {
+        if (group.id) changedGroupIds.add(group.id);
+        nextRules = updateFieldPatternRuleFieldValue(nextRules, group, fieldConfig.field, ruleDraft);
       });
+    });
+    (step.identityGroups || []).forEach((identityGroup) => {
+      const draftKey = identityGroupRuleKey(identityGroup);
+      const ruleDraft = fieldSplitIdentityGroupDrafts[draftKey] || {
+        delimiter: 'auto',
+        customDelimiter: '',
+        order: identityGroup.roles || [],
+      };
+      fieldSplitRuleTargets(identityGroup, fieldPatternGroups).forEach((group) => {
+        if (group.id) changedGroupIds.add(group.id);
+        nextRules = updateFieldPatternIdentityGroupRuleValue(nextRules, group, identityGroup, ruleDraft);
+      });
+    });
     const completedReviewStepIds = [
       ...(fieldPatternReviewWorkflow?.completedStepIds || []),
       step.id,
@@ -13847,6 +13886,7 @@ const BomNormalizer = () => {
     fieldPatternReviewWorkflow,
     fieldPatternRuleDrafts,
     fieldPatternWorkflowNextStep,
+    fieldSplitIdentityGroupDrafts,
     fieldSplitRuleDrafts,
     handleTeachFieldPattern,
     normalizerConfig.fieldPatternRules,
@@ -14097,6 +14137,19 @@ const BomNormalizer = () => {
         drafts[fieldConfig.field] = {
           delimiter: suggestedRule.delimiter || 'none',
           customDelimiter: suggestedRule.customDelimiter || '',
+          stripPrefix: suggestedRule.stripPrefix || '',
+          prefixMode: suggestedRule.prefixMode || 'literal',
+        };
+        return drafts;
+      }, {});
+      const initialIdentityGroupDrafts = (step.identityGroups || []).reduce((drafts, identityGroup) => {
+        const suggestedRule = identityGroup.candidateRules?.[0]?.rule || {};
+        drafts[identityGroupRuleKey(identityGroup)] = {
+          delimiter: suggestedRule.delimiter || suggestedRule.comboDelimiter || 'auto',
+          customDelimiter: suggestedRule.customDelimiter || '',
+          order: Array.isArray(suggestedRule.order) && suggestedRule.order.length
+            ? suggestedRule.order
+            : (identityGroup.roles || []),
         };
         return drafts;
       }, {});
@@ -14104,6 +14157,7 @@ const BomNormalizer = () => {
       setFieldPatternReviewOpen(false);
       setFieldSplitSelectedField(fields[0]?.field || '');
       setFieldSplitRuleDrafts(initialDrafts);
+      setFieldSplitIdentityGroupDrafts(initialIdentityGroupDrafts);
       setFieldSplitReviewOpen(true);
       return;
     }
@@ -18912,9 +18966,16 @@ const BomNormalizer = () => {
       <Dialog
         open={fieldSplitReviewOpen}
         onClose={() => setFieldSplitReviewOpen(false)}
-        maxWidth="sm"
+        maxWidth="md"
         fullWidth
-        PaperProps={{ sx: { width: 'min(760px, calc(100vw - 32px))', borderRadius: '8px' } }}
+        PaperProps={{
+          sx: {
+            width: 'min(980px, calc(100vw - 32px))',
+            height: 'min(780px, calc(100dvh - 32px))',
+            maxHeight: 'calc(100dvh - 32px)',
+            borderRadius: '8px',
+          },
+        }}
       >
         <DialogTitle sx={{ pb: 1 }}>
           <Stack direction="row" justifyContent="space-between" alignItems="flex-start" gap={2}>
@@ -18934,7 +18995,7 @@ const BomNormalizer = () => {
             />
           </Stack>
         </DialogTitle>
-        <DialogContent sx={{ pt: 1 }}>
+        <DialogContent sx={{ pt: 1, overflowY: 'auto' }}>
           <Stack gap={1.5}>
             <Autocomplete
               size="small"
@@ -18976,44 +19037,189 @@ const BomNormalizer = () => {
                 )}
               </Stack>
             </Paper>
-            <FormControl size="small" fullWidth>
-              <InputLabel>Split values by</InputLabel>
-              <Select
-                label="Split values by"
-                value={selectedFieldSplitRule.delimiter || 'none'}
-                onChange={(event) => {
-                  if (!selectedFieldSplitConfig?.field) return;
-                  setFieldSplitRuleDrafts((current) => ({
-                    ...current,
-                    [selectedFieldSplitConfig.field]: {
-                      ...(current[selectedFieldSplitConfig.field] || {}),
-                      delimiter: event.target.value,
-                    },
-                  }));
-                }}
-              >
-                {(selectedFieldSplitConfig?.delimiterOptions || []).map((option) => (
-                  <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
-                ))}
-              </Select>
-            </FormControl>
-            {selectedFieldSplitRule.delimiter === 'custom' && (
-              <TextField
-                size="small"
-                label="Custom delimiter"
-                value={selectedFieldSplitRule.customDelimiter || ''}
-                onChange={(event) => {
-                  if (!selectedFieldSplitConfig?.field) return;
-                  setFieldSplitRuleDrafts((current) => ({
-                    ...current,
-                    [selectedFieldSplitConfig.field]: {
-                      ...(current[selectedFieldSplitConfig.field] || {}),
-                      customDelimiter: event.target.value,
-                    },
-                  }));
-                }}
-              />
-            )}
+            <Paper
+              elevation={0}
+              sx={{ p: 1.25, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}
+            >
+              <Typography sx={{ mb: 1, fontSize: 12.5, fontWeight: 850, color: normalizerTheme.text }}>
+                Parsing and cleanup rules
+              </Typography>
+              {fieldSplitIdentityGroups.length > 0 && (
+                <Box sx={{ mb: 1.25 }}>
+                  <Typography sx={{ mb: 0.65, fontSize: 11.5, fontWeight: 850, color: normalizerTheme.muted }}>
+                    Same-cell CPN / MPN / Manufacturer
+                  </Typography>
+                  <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 0.9 }}>
+                    {fieldSplitIdentityGroups.map((identityGroup) => {
+                      const draftKey = identityGroupRuleKey(identityGroup);
+                      const comboRule = fieldSplitIdentityGroupDrafts[draftKey] || {};
+                      const comboDelimiter = comboRule.delimiter || comboRule.comboDelimiter || 'auto';
+                      const comboOrder = (
+                        Array.isArray(comboRule.order) && comboRule.order.length
+                          ? comboRule.order
+                          : (identityGroup.roles || [])
+                      ).join('|');
+                      const orderOptions = orderedIdentityRoleOptions(identityGroup.roles || []);
+                      return (
+                        <Box
+                          key={draftKey}
+                          sx={{ p: 1, borderRadius: '6px', border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}
+                        >
+                          <Typography sx={{ mb: 0.7, fontSize: 12, fontWeight: 850, color: normalizerTheme.text }}>
+                            {(identityGroup.roles || []).map((role) => TEACH_PATTERN_ROLE_LABELS[role] || role).join(' + ')}
+                          </Typography>
+                          <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 0.8 }}>
+                            <FormControl size="small" fullWidth>
+                              <InputLabel>Split fields by</InputLabel>
+                              <Select
+                                label="Split fields by"
+                                value={comboDelimiter}
+                                onChange={(event) => setFieldSplitIdentityGroupDrafts((current) => ({
+                                  ...current,
+                                  [draftKey]: {
+                                    ...(current[draftKey] || {}),
+                                    delimiter: event.target.value,
+                                  },
+                                }))}
+                              >
+                                {FIELD_PATTERN_COMBO_DELIMITER_OPTIONS.map((option) => (
+                                  <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                                ))}
+                              </Select>
+                            </FormControl>
+                            <FormControl size="small" fullWidth>
+                              <InputLabel>Field order</InputLabel>
+                              <Select
+                                label="Field order"
+                                value={comboOrder}
+                                onChange={(event) => setFieldSplitIdentityGroupDrafts((current) => ({
+                                  ...current,
+                                  [draftKey]: {
+                                    ...(current[draftKey] || {}),
+                                    order: event.target.value.split('|'),
+                                  },
+                                }))}
+                              >
+                                {orderOptions.map((order) => (
+                                  <MenuItem key={order.join('|')} value={order.join('|')}>
+                                    {order.map((role) => TEACH_PATTERN_ROLE_LABELS[role] || role).join(' / ')}
+                                  </MenuItem>
+                                ))}
+                              </Select>
+                            </FormControl>
+                          </Box>
+                          {comboDelimiter === 'custom' && (
+                            <TextField
+                              fullWidth
+                              size="small"
+                              label="Custom delimiter"
+                              value={comboRule.customDelimiter || ''}
+                              onChange={(event) => setFieldSplitIdentityGroupDrafts((current) => ({
+                                ...current,
+                                [draftKey]: {
+                                  ...(current[draftKey] || {}),
+                                  customDelimiter: event.target.value,
+                                },
+                              }))}
+                              sx={{ mt: 0.8 }}
+                            />
+                          )}
+                        </Box>
+                      );
+                    })}
+                  </Box>
+                </Box>
+              )}
+              <Typography sx={{ mb: 0.65, fontSize: 11.5, fontWeight: 850, color: normalizerTheme.muted }}>
+                {selectedFieldSplitConfig?.fieldLabel || 'Selected field'}
+              </Typography>
+              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: selectedFieldSplitRuleDefinition?.prefix ? '1fr 1fr' : '1fr' }, gap: 0.8 }}>
+                <FormControl size="small" fullWidth>
+                  <InputLabel>Split alternates by</InputLabel>
+                  <Select
+                    label="Split alternates by"
+                    value={selectedFieldSplitRule.delimiter || 'none'}
+                    onChange={(event) => {
+                      if (!selectedFieldSplitConfig?.field) return;
+                      setFieldSplitRuleDrafts((current) => ({
+                        ...current,
+                        [selectedFieldSplitConfig.field]: {
+                          ...(current[selectedFieldSplitConfig.field] || {}),
+                          delimiter: event.target.value,
+                        },
+                      }));
+                    }}
+                  >
+                    {(selectedFieldSplitConfig?.delimiterOptions || FIELD_PATTERN_DELIMITER_OPTIONS).map((option) => (
+                      <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                {selectedFieldSplitRuleDefinition?.prefix && (
+                  <FormControl size="small" fullWidth>
+                    <InputLabel>Prefix mode</InputLabel>
+                    <Select
+                      label="Prefix mode"
+                      value={selectedFieldSplitRule.prefixMode || 'literal'}
+                      onChange={(event) => {
+                        if (!selectedFieldSplitConfig?.field) return;
+                        setFieldSplitRuleDrafts((current) => ({
+                          ...current,
+                          [selectedFieldSplitConfig.field]: {
+                            ...(current[selectedFieldSplitConfig.field] || {}),
+                            prefixMode: event.target.value,
+                          },
+                        }));
+                      }}
+                    >
+                      <MenuItem value="literal">Exact prefix text</MenuItem>
+                      <MenuItem value="first_n_chars">First N characters</MenuItem>
+                      <MenuItem value="regex">Regex from start</MenuItem>
+                      <MenuItem value="before_delimiter">Text before delimiter</MenuItem>
+                    </Select>
+                  </FormControl>
+                )}
+              </Box>
+              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: selectedFieldSplitRuleDefinition?.prefix && selectedFieldSplitRule.delimiter === 'custom' ? '1fr 1fr' : '1fr' }, gap: 0.8, mt: 0.8 }}>
+                {selectedFieldSplitRule.delimiter === 'custom' && (
+                  <TextField
+                    size="small"
+                    label="Custom delimiter"
+                    value={selectedFieldSplitRule.customDelimiter || ''}
+                    onChange={(event) => {
+                      if (!selectedFieldSplitConfig?.field) return;
+                      setFieldSplitRuleDrafts((current) => ({
+                        ...current,
+                        [selectedFieldSplitConfig.field]: {
+                          ...(current[selectedFieldSplitConfig.field] || {}),
+                          customDelimiter: event.target.value,
+                        },
+                      }));
+                    }}
+                  />
+                )}
+                {selectedFieldSplitRuleDefinition?.prefix && (
+                  <TextField
+                    size="small"
+                    label={selectedFieldSplitRule.prefixMode === 'first_n_chars' ? 'Number of characters' : 'Strip prefix'}
+                    placeholder={selectedFieldSplitRule.prefixMode === 'first_n_chars'
+                      ? 'e.g. 5'
+                      : (selectedFieldSplitConfig?.field === 'mpn' ? 'e.g. ABC-' : 'e.g. Vendor:')}
+                    value={selectedFieldSplitRule.stripPrefix || ''}
+                    onChange={(event) => {
+                      if (!selectedFieldSplitConfig?.field) return;
+                      setFieldSplitRuleDrafts((current) => ({
+                        ...current,
+                        [selectedFieldSplitConfig.field]: {
+                          ...(current[selectedFieldSplitConfig.field] || {}),
+                          stripPrefix: event.target.value,
+                        },
+                      }));
+                    }}
+                  />
+                )}
+              </Box>
+            </Paper>
             <Paper
               elevation={0}
               sx={{ border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper, overflow: 'hidden' }}

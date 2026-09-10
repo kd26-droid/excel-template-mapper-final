@@ -13,6 +13,7 @@ from excel_mapper.services.bom_role_inference import (
     _pattern_shape_for_row,
     _same_cell_parenthesized_patterns_from_entries,
     _semantic_identity_fragments,
+    _build_split_field_review_step,
     _split_field_preview,
     _visual_pattern_identity_pairs,
     _visual_pattern_interpretation_spans,
@@ -392,6 +393,54 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         self.assertEqual(
             previews[0]["values"],
             ["A2017729", "A2018417", "A2019302"],
+        )
+
+    def test_split_review_returns_cleanup_rules_and_backend_shape_targets(self):
+        groups = [{
+            "id": "pattern-1",
+            "shape": "row-shape-1",
+            "samples": [{
+                "left": [
+                    {"column": "CPN", "value": "C-100,C-101"},
+                    {"column": "Combined", "value": "ABC123:KEMET"},
+                ],
+            }],
+            "suggestedRule": {
+                "fields": {
+                    "cpn": {"delimiter": ","},
+                },
+                "identityGroups": [{
+                    "header": "Combined",
+                    "roles": ["mpn", "manufacturer"],
+                    "delimiter": ":",
+                    "order": ["mpn", "manufacturer"],
+                }],
+            },
+        }]
+
+        step = _build_split_field_review_step(
+            [{
+                "sourceColumn": "CPN",
+                "mappedFields": ["cpn"],
+                "relationship": "one_to_one",
+            }],
+            groups,
+            case="2a",
+            shared_identity_units=[{
+                "sourceColumn": "Combined",
+                "mappedFields": ["mpn", "manufacturer"],
+                "relationship": "shared",
+            }],
+        )
+
+        self.assertEqual(step["fields"][0]["targetGroups"], [{
+            "id": "pattern-1",
+            "shape": "row-shape-1",
+        }])
+        self.assertEqual(step["identityGroups"][0]["roles"], ["mpn", "manufacturer"])
+        self.assertEqual(
+            step["identityGroups"][0]["candidateRules"][0]["rule"]["delimiter"],
+            ":",
         )
 
     @patch(

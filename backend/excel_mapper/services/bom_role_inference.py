@@ -7012,8 +7012,15 @@ def _split_field_preview(samples, field, delimiter):
     return previews
 
 
-def _build_split_field_review_step(units, groups, case, require_split_evidence=True):
+def _build_split_field_review_step(
+    units,
+    groups,
+    case,
+    require_split_evidence=True,
+    shared_identity_units=None,
+):
     split_fields = []
+    identity_groups = []
     seen_fields = set()
     delimiter_options = [
         {"value": "none", "label": "No split"},
@@ -7080,6 +7087,11 @@ def _build_split_field_review_step(units, groups, case, require_split_evidence=T
                 "fieldLabel": FACTWISE_FIELD_LABELS.get(field) or ROLE_LABELS.get(field) or field,
                 "samples": samples,
                 "groupIds": [group.get("id") for group in groups or [] if group.get("id")],
+                "targetGroups": [
+                    {"id": group.get("id"), "shape": group.get("shape")}
+                    for group in groups or []
+                    if group.get("shape")
+                ],
                 "candidateRules": candidate_rules,
                 "delimiterOptions": delimiter_options,
                 "previews": {
@@ -7087,6 +7099,55 @@ def _build_split_field_review_step(units, groups, case, require_split_evidence=T
                     for option in delimiter_options
                 },
             })
+
+    for unit in shared_identity_units or []:
+        source_column = clean(unit.get("sourceColumn"))
+        identity_roles = [
+            field
+            for field in (unit.get("mappedFields") or [])
+            if field in {"cpn", "mpn", "manufacturer"}
+        ]
+        if not source_column or len(identity_roles) < 2:
+            continue
+
+        candidate_rules = []
+        identity_key = _identity_group_rule_key({
+            "header": source_column,
+            "roles": identity_roles,
+        })
+        for group in groups or []:
+            suggested_groups = (
+                (group.get("suggestedRule") or {}).get("identityGroups")
+                or (group.get("suggestedRule") or {}).get("identity_groups")
+                or []
+            )
+            rule = next(
+                (
+                    item for item in suggested_groups
+                    if _identity_group_rule_key(item) == identity_key
+                ),
+                None,
+            )
+            if isinstance(rule, dict):
+                candidate_rules.append({
+                    "groupId": group.get("id"),
+                    "shape": group.get("shape"),
+                    "rule": rule,
+                })
+
+        identity_groups.append({
+            "sourceColumn": source_column,
+            "header": source_column,
+            "roles": identity_roles,
+            "groupIds": [group.get("id") for group in groups or [] if group.get("id")],
+            "targetGroups": [
+                {"id": group.get("id"), "shape": group.get("shape")}
+                for group in groups or []
+                if group.get("shape")
+            ],
+            "candidateRules": candidate_rules,
+            "delimiterOptions": delimiter_options,
+        })
 
     if not split_fields:
         return None
@@ -7100,6 +7161,7 @@ def _build_split_field_review_step(units, groups, case, require_split_evidence=T
         "case": case,
         "type": "split_fields",
         "fields": split_fields,
+        "identityGroups": identity_groups,
         "sourceColumns": list(dict.fromkeys(item["sourceColumn"] for item in split_fields)),
         "mappedFields": list(dict.fromkeys(item["field"] for item in split_fields)),
     }
@@ -7325,6 +7387,7 @@ def _build_bom_field_review_workflow(headers, roles, config, groups, patterns=No
             groups,
             case="2a",
             require_split_evidence=True,
+            shared_identity_units=shared_units,
         )
         if split_step:
             steps.append(split_step)
