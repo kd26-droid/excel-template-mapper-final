@@ -131,7 +131,7 @@ SFO_TEMPLATE_REFERENCE_ROWS = [
         'Tag (4)',
         'Level',
         'Quantity',
-        'Base BOM Qty',
+        'BOM Qty',
         'Procurement entity name',
         'Preferred vendor code',
         'Alternate Item Name for Preferred Vendor',

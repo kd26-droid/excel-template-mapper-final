@@ -25,6 +25,8 @@ from rest_framework.decorators import api_view, parser_classes
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.test import APIRequestFactory
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.views.decorators.cache import never_cache
 from openpyxl import Workbook
 from openpyxl import load_workbook
@@ -354,6 +356,702 @@ def _detect_packed_cell_delimiter(header_value):
         if best is None or score > best[0]:
             best = (score, delimiter)
     return best[1] if best else None
+
+
+def _sheet_overview(file_path, sheet_name=None, header_row=None):
+    """What an uploaded sheet declares: its sheets, its header row, its columns.
+
+    The browser has always worked this out by opening the file itself, which is
+    why anything that is not a browser had to send `headerRow=1` and hope. The
+    scoring lives in services/sheet_reader so both callers can share one answer
+    about a file rather than drifting apart.
+
+    Returns {} when the file cannot be read — a caller that only wanted a
+    convenience should not fail because of it.
+    """
+    from .services.sheet_reader import describe_sheet
+
+    try:
+        sheets = _list_upload_sheets(file_path)
+        chosen_sheet = sheet_name or (sheets[0] if sheets else None)
+        table = _read_raw_upload_table(file_path, chosen_sheet)
+        rows = table.values.tolist() if table is not None else []
+        overview = describe_sheet(rows, header_row)
+        overview['sheets'] = sheets
+        overview['sheet_name'] = chosen_sheet
+        return overview
+    except Exception as exc:
+        logger.warning('Could not read sheet overview for %s: %s', file_path, exc)
+        return {}
+
+
+def _list_upload_sheets(file_path):
+    """Sheet names, or [] for a csv (which has exactly one, unnamed)."""
+    path_text = str(file_path).lower()
+    if path_text.endswith('.csv') or _looks_like_delimited_text_file(file_path):
+        return []
+    try:
+        return list(pd.ExcelFile(file_path).sheet_names)
+    except Exception as exc:
+        logger.warning('Could not list sheets for %s: %s', file_path, exc)
+        return []
+
+
+def _normaliser_rows_from_session(session_id):
+    """(headers, rows) for the normaliser, read from the file the session holds.
+
+    The normaliser has always been handed its rows by the browser, which opened
+    the workbook itself. That works for a page and for nothing else: anything
+    without a DOM has to parse Excel just to ask a question about it. The server
+    already has the file and knows which row the header is on, so it can build
+    the same shape - dicts keyed by header, each carrying the 1-based sheet row
+    as ``__sourceRow``, which is what every downstream answer is addressed by.
+    """
+    from .services.sheet_reader import usable_column_descriptors
+
+    info = get_session_consistent(session_id)
+    if not info:
+        return [], []
+    try:
+        path = hybrid_file_manager.get_file_path(info['client_path'])
+        # A session does not always record a sheet name, and pandas reads
+        # `sheet_name=None` as "every sheet" - a dict, not a table - so the
+        # first sheet is named explicitly rather than left to default.
+        sheet_name = info.get('sheet_name')
+        if not sheet_name:
+            sheets = _list_upload_sheets(path)
+            sheet_name = sheets[0] if sheets else None
+        table = _read_raw_upload_table(path, sheet_name)
+        all_rows = table.values.tolist() if table is not None else []
+    except Exception as exc:
+        logger.warning('Normaliser could not read session %s: %s', session_id, exc)
+        return [], []
+
+    header_row = max(1, int(info.get('header_row') or 1))
+    descriptors = usable_column_descriptors(all_rows, header_row - 1)
+    headers = [column['header'] for column in descriptors]
+
+    rows = []
+    for offset, raw in enumerate(all_rows[header_row:]):
+        row = {}
+        for column in descriptors:
+            index = column['index']
+            value = raw[index] if index < len(raw) else ''
+            row[column['header']] = '' if value is None else str(value).strip()
+        # 1-based, and counted from the top of the sheet - not from the header -
+        # so it lines up with what the user sees in Excel.
+        row['__sourceRow'] = header_row + offset + 1
+        rows.append(row)
+    return headers, rows
+
+
+def _normaliser_input(request):
+    """(headers, rows, session_id), from the body or from the session.
+
+    The body still wins: the frontend sends rows it has already parsed and must
+    keep working unchanged. `session_id` is the alternative for callers that
+    only have a session, which is what makes the normaliser drivable without a
+    browser.
+    """
+    headers = request.data.get('headers') or []
+    rows = (
+        request.data.get('rows')
+        or request.data.get('dataRows')
+        or request.data.get('data')
+        or []
+    )
+    session_id = str(request.data.get('session_id') or '').strip()
+    if session_id and (not headers or not rows):
+        headers, rows = _normaliser_rows_from_session(session_id)
+    return headers, rows, session_id
+
+
+def _normaliser_saved(session_id, key):
+    """What an earlier call already decided, or {}.
+
+    A caller that has to re-send the roles and the config on every request is
+    keeping the state itself, which is the thing session support was meant to
+    remove. Whatever was worked out and saved is the fallback, so a later call
+    can carry nothing but the session id.
+    """
+    if not session_id:
+        return {}
+    info = get_session_consistent(session_id)
+    if not info:
+        return {}
+    value = (info.get('normaliser') or {}).get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def _save_normaliser_state(session_id, **fields):
+    """Remember what the normaliser decided, on the session.
+
+    Until now none of it was written down anywhere: roles, the setup options and
+    the gate answers lived in the browser until the very end, so a closed tab
+    lost the lot and two callers could not share a sheet. Only keys with a value
+    are written, so each call can record its own part without clearing another's.
+    """
+    if not session_id:
+        return
+    info = get_session_consistent(session_id)
+    if not info:
+        return
+    state = dict(info.get('normaliser') or {})
+    state.update({key: value for key, value in fields.items() if value not in (None, {}, [])})
+    info['normaliser'] = state
+    SESSION_STORE[session_id] = info
+    cache.set(f"mapper:session:{session_id}", info, 86400)
+    try:
+        save_session_to_file(session_id, info)
+    except Exception as exc:
+        logger.warning('Could not persist normaliser state for %s: %s', session_id, exc)
+
+
+# The columns the normalised sheet carries into mapping. Mirrors
+# BASE_NORMALIZED_EXPORT_COLUMNS in frontend/src/lib/bomNormalizerAlgorithms.js -
+# the two have to agree, because the mapping page matches on these names.
+NORMALIZED_EXPORT_COLUMNS = [
+    'sourceRow', 'parentKey', 'parent', 'relation', 'level', 'cpn', 'description',
+    'mpn', 'manufacturer', 'quantity', 'uom', 'Notes', 'Internal notes',
+    'Item code', 'rule', 'confidence', 'discardedText',
+]
+
+
+# The Settings panel's typed defaults, and the grid column each one fills.
+# Values are written only into blank cells - a default is what a row gets when
+# it says nothing, never a correction of what it already says.
+_DEFAULT_COLUMN_FOR_SETTING = (
+    ('itemType', 'Item type'),
+    ('measurementUnit', 'Measurement unit'),
+    ('procurementItem', 'Procurement item'),
+    ('salesItem', 'Sales item'),
+    ('procurementEntityName', 'Procurement entity name'),
+)
+
+_JOIN_SEPARATORS = {
+    'underscore': '_', 'hyphen': '-', 'dash': '-', 'slash': '/',
+    'dot': '.', 'space': ' ', 'none': '', 'custom': None,
+}
+
+
+@api_view(['POST'])
+def apply_editor_defaults(request):
+    """Apply an entity's saved Item Directory Defaults to a session, in one call.
+
+    The Settings panel holds several separate decisions - the typed defaults, how
+    the item code is built, and which saved column rules are pinned - and until
+    now each was applied by its own request from the editor. A caller without a
+    UI had to know all three and fire them in the right order. This runs them the
+    way the panel does: defaults first, then the item code (which usually reads
+    columns the defaults just filled), then the pinned rules.
+
+    Takes `session_id`, and optionally `entity_name` / `entity_id` to say whose
+    defaults to use; without them the session's own entity is used.
+
+    Nothing here invents a value. If the panel is empty for an entity, this is a
+    no-op and says so.
+    """
+    from .models import ColumnRule, EditorDefaultSettings
+
+    session_id = str(request.data.get('session_id') or '').strip()
+    if not session_id:
+        return Response({'success': False, 'error': 'session_id required'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    info = get_session_consistent(session_id)
+    if not info:
+        return Response({'success': False, 'error': 'Invalid session'},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    entity_id = str(request.data.get('entity_id') or info.get('entity_id') or '').strip()
+    entity_name = str(request.data.get('entity_name') or info.get('entity_name') or '').strip()
+
+    # The id is the stable key; the name is what older rows were saved under.
+    settings_row = None
+    if entity_id:
+        settings_row = EditorDefaultSettings.objects.filter(entity_id=entity_id).first()
+    if settings_row is None and entity_name:
+        settings_row = EditorDefaultSettings.objects.filter(entity_name=entity_name).first()
+    if settings_row is None:
+        return Response({
+            'success': False,
+            'error': ('No saved defaults for %s. Set them in Settings, or pass '
+                      'entity_id / entity_name.' % (entity_id or entity_name or 'this session')),
+        }, status=status.HTTP_404_NOT_FOUND)
+
+    ui = settings_row.ui_defaults if isinstance(settings_row.ui_defaults, dict) else {}
+    headers, _rows = read_session_grid(session_id, info)
+
+    # Settings stores a numbered slot by its internal name ('Tag_1'); the grid
+    # may carry either that or the label the template shows ('Tag (1)'). Both
+    # spellings are indexed so a pinned rule finds its column either way -
+    # `_template_label_key` alone is not enough, because it drops the number and
+    # would make Tag (1) and Tag (4) look like the same column.
+    column_for_name = {}
+    for header in (headers or []):
+        column_for_name[str(header).strip().lower()] = header
+        internal = internal_name_for_slot_label(header)
+        if internal:
+            column_for_name[internal.lower()] = header
+
+    def resolve_column(name):
+        """The grid column a saved setting means, or '' when the sheet lacks it."""
+        return column_for_name.get(str(name or '').strip().lower(), '')
+    applied = {'defaults': {}, 'item_code': None, 'column_rules': [], 'skipped': []}
+
+    # 1. The typed defaults, into blank cells only.
+    defaults = {}
+    for key, column in _DEFAULT_COLUMN_FOR_SETTING:
+        value = ui.get(key)
+        if value in (None, ''):
+            continue
+        resolved = resolve_column(column)
+        if not resolved:
+            applied['skipped'].append('%s (no %s column)' % (key, column))
+            continue
+        defaults[resolved] = str(value)
+    if defaults:
+        response = fill_required_defaults(_internal_post({
+            'session_id': session_id, 'defaults': defaults,
+        }))
+        payload = getattr(response, 'data', {}) or {}
+        if payload.get('success'):
+            applied['defaults'] = defaults
+        else:
+            applied['skipped'].append('defaults: %s' % payload.get('error'))
+
+    # 2. The item code. Only the join is handled here - the other content types
+    #    (serial, copy, conditional) each carry their own inputs, and guessing
+    #    at them would write item codes nobody asked for.
+    content_type = str(ui.get('itemCodeContentType') or '').strip()
+    if content_type == 'concat':
+        first = str(ui.get('itemCodeJoinFirstColumn') or '').strip()
+        second = str(ui.get('itemCodeJoinSecondColumn') or '').strip()
+        mode = str(ui.get('itemCodeJoinSeparatorMode') or 'underscore').strip()
+        separator = _JOIN_SEPARATORS.get(mode)
+        if separator is None:
+            separator = str(ui.get('itemCodeJoinCustomSeparator') or ui.get('itemCodeSeparator') or '_')
+        first_column = resolve_column(first) or first
+        second_column = resolve_column(second) or second
+        if first and second:
+            response = create_factwise_id(_internal_post({
+                'session_id': session_id,
+                'first_column': first_column,
+                'second_column': second_column,
+                'operator': separator,
+                # The panel's "rows to update" answer: fill blanks, or rewrite all.
+                'strategy': ('fill_only_null'
+                             if str(ui.get('itemCodeRowsToUpdate') or 'fill_empty') == 'fill_empty'
+                             else 'override_all'),
+            }))
+            payload = getattr(response, 'data', {}) or {}
+            if payload.get('success'):
+                applied['item_code'] = {'first': first_column, 'second': second_column,
+                                        'separator': separator}
+            else:
+                applied['skipped'].append('item code: %s' % payload.get('error'))
+        else:
+            applied['skipped'].append('item code: join columns not set')
+    elif content_type:
+        applied['skipped'].append('item code: "%s" is not applied automatically' % content_type)
+
+    # 3. The pinned column rules, in the order the panel lists them.
+    for pinned in (ui.get('autoColumnRules') or []):
+        if not isinstance(pinned, dict):
+            continue
+        rule_id = pinned.get('ruleId')
+        target = str(pinned.get('targetColumn') or '').strip()
+        if not rule_id or not target:
+            continue
+        resolved_target = resolve_column(target)
+        if not resolved_target:
+            applied['skipped'].append('%s (no %s column)' % (pinned.get('ruleName') or rule_id, target))
+            continue
+        target = resolved_target
+        saved = (
+            ColumnRule.objects.filter(id=rule_id).first()
+            or ColumnRule.objects.filter(name=pinned.get('ruleName') or '').first()
+        )
+        if saved is None or not isinstance(saved.rule, dict):
+            applied['skipped'].append('%s (rule not found)' % (pinned.get('ruleName') or rule_id))
+            continue
+        try:
+            # Exactly what the editor sends: the saved rule, aimed at the pinned
+            # column, writing only where that column is empty unless the rule
+            # itself says otherwise.
+            rule = dict(saved.rule)
+            rule.update({
+                'target_mode': 'existing',
+                'target_column': target,
+                'write_mode': saved.rule.get('write_mode') or 'fill_empty',
+            })
+            response = fill_or_create_column(_internal_post({
+                'session_id': session_id, 'rule': rule,
+            }))
+            payload = getattr(response, 'data', {}) or {}
+            if payload.get('success'):
+                applied['column_rules'].append({
+                    'rule': saved.name, 'column': target,
+                    'changed': payload.get('changed', 0),
+                })
+            else:
+                applied['skipped'].append('%s: %s' % (saved.name, payload.get('error')))
+        except Exception as exc:
+            applied['skipped'].append('%s: %s' % (saved.name, exc))
+
+    logger.info('Applied editor defaults to %s: %s', session_id, applied)
+    return Response({
+        'success': True,
+        'session_id': session_id,
+        'entity': settings_row.entity_name or settings_row.entity_id,
+        'applied': applied,
+    })
+
+
+def _internal_post(payload):
+    """A request object for calling one of our own views directly.
+
+    Cheaper and less fragile than re-implementing what those views do, and it
+    keeps a single definition of each behaviour.
+    """
+    from rest_framework.test import APIRequestFactory
+    return APIRequestFactory().post('/', payload, format='json')
+
+
+# Where each normalised column belongs in the FactWise template, best target
+# first. Mirrors buildNormalizerSuggestedMappings in BomNormalizer.js, which has
+# been the only place this was written down - so the browser wired the mapping
+# page up automatically and anything else had to guess.
+#
+# `description` goes to **Item name**, not Description: Item name is the
+# required field, and a sheet that fills only Description imports with no name.
+_NORMALISED_COLUMN_TARGETS = (
+    ('Item code', ('Item code',)),
+    ('cpn', ('CPN Code', 'Customer part number')),
+    ('mpn', ('MPN Code', 'Manufacturer part number')),
+    ('description', ('Item name', 'Description', 'SAP Description')),
+    ('quantity', ('Quantity', 'Qty')),
+    ('uom', ('Measurement unit', 'UOM', 'Unit of measure')),
+    ('level', ('Level', 'BOM level')),
+    ('Notes', ('Notes',)),
+    ('Internal notes', ('Internal notes',)),
+    ('parentKey', ('Parent / group key', 'Sub BOM ID', 'BOM ID')),
+)
+
+
+def _normalised_sheet_mappings(columns, rows, template_headers):
+    """{template column: normalised column} for a sheet Continue just built.
+
+    Only columns that exist on both sides and actually carry a value are mapped:
+    an empty column claiming a template slot costs a real one, because the
+    mapping page drops the loser when two sources contest a target.
+    """
+    available = {str(column) for column in (columns or [])}
+    template_by_key = {}
+    for header in (template_headers or []):
+        template_by_key.setdefault(_template_label_key(header), header)
+
+    def has_values(column):
+        return any(str((row or {}).get(column) or '').strip() for row in (rows or []))
+
+    mappings = {}
+    taken_targets = set()
+    for source, targets in _NORMALISED_COLUMN_TARGETS:
+        if source not in available or not has_values(source):
+            continue
+        for target in targets:
+            header = template_by_key.get(_template_label_key(target))
+            if header and header not in taken_targets:
+                mappings[header] = source
+                taken_targets.add(header)
+                break
+
+    # The manufacturer has no column of its own in the template, so it rides in
+    # the first free Tag slot - the same slot the saved item-code rule joins from.
+    if 'manufacturer' in available and has_values('manufacturer'):
+        for header in (template_headers or []):
+            if _template_label_key(header) == 'tag' and header not in taken_targets:
+                mappings[header] = 'manufacturer'
+                break
+
+    return mappings
+
+
+@api_view(['POST'])
+def normaliser_continue(request, session_id):
+    """Turn the normalised rows into a mapping session, without a browser.
+
+    This is the step the page does by generating an xlsx in JavaScript and
+    uploading it as if it were a new file - which is why nothing the normaliser
+    decided ever reached the server until the very end. The rows are already
+    here, so the sheet is built here instead, and the BOM structure answers are
+    carried onto the new session the same way the upload form carries them.
+
+    Returns the new session and the editor path, so a caller can go straight
+    there and see what it produced.
+    """
+    import openpyxl
+
+    info = get_session_consistent(session_id)
+    if not info:
+        return Response({'success': False, 'error': 'Invalid session'},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    rows = request.data.get('rows')
+    if not rows:
+        rows = ((info.get('normaliser') or {}).get('normalized_rows')) or []
+    if not rows:
+        return Response({
+            'success': False,
+            'error': ('No normalised rows for this session. Run '
+                      '/api/bom/field-patterns/apply/ or /api/bom/normalize/ first, '
+                      'or post them as `rows`.'),
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+    bom_structure = (
+        request.data.get('bomStructure')
+        or request.data.get('bom_structure')
+        or info.get('bom_structure')
+        or {}
+    )
+
+    # Every column the rows actually carry, the known ones first so the sheet
+    # reads the way the mapping page expects.
+    columns = list(NORMALIZED_EXPORT_COLUMNS)
+    for row in rows:
+        for key in (row or {}):
+            if key != 'factwiseId' and key not in columns:
+                columns.append(key)
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = 'Merged BOM'
+    sheet.append(columns)
+    for row in rows:
+        sheet.append([
+            '' if (row or {}).get(column) is None else str((row or {}).get(column, ''))
+            for column in columns
+        ])
+
+    directory = Path(settings.MEDIA_ROOT) / 'uploaded_files'
+    directory.mkdir(parents=True, exist_ok=True)
+    merged_path = directory / ('%s_merged_bom.xlsx' % uuid.uuid4())
+    workbook.save(merged_path)
+    workbook.close()
+
+    # Hand the sheet to the normal upload path so the new session is built the
+    # same way any other upload is - no second code path to drift.
+    with open(merged_path, 'rb') as handle:
+        upload = SimpleUploadedFile(
+            'merged-bom-for-mapping.xlsx',
+            handle.read(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+
+    factory = APIRequestFactory()
+    payload = {'clientFile': upload, 'sheetName': 'Merged BOM', 'headerRow': '1'}
+    if bom_structure:
+        payload['bomStructure'] = json.dumps(bom_structure)
+    response = upload_files(factory.post('/api/upload/', payload, format='multipart'))
+
+    data = getattr(response, 'data', {}) or {}
+    if not data.get('session_id'):
+        return Response({'success': False, 'error': data.get('error') or 'Upload failed'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    new_session_id = data['session_id']
+
+    # The mapping is knowable here - these columns were just generated, so what
+    # each one means is not in doubt - and applying it is what makes the new
+    # session openable. Left undone, the editor answers "No mappings found".
+    new_info = get_session_consistent(new_session_id) or {}
+    template_headers = new_info.get('template_headers') or get_sfo_reference_headers()
+    mappings = _normalised_sheet_mappings(columns, rows, template_headers)
+    mapped = False
+    if mappings:
+        response = save_mappings(_internal_post({
+            'session_id': new_session_id, 'mappings': mappings,
+        }))
+        mapped = bool((getattr(response, 'data', {}) or {}).get('success'))
+
+    logger.info('Normaliser continue: %s -> %s (%d rows, %d mappings)',
+                session_id, new_session_id, len(rows), len(mappings))
+    return Response({
+        'success': True,
+        'session_id': new_session_id,
+        'source_session_id': session_id,
+        'row_count': len(rows),
+        'columns': columns,
+        'headers': data.get('headers') or [],
+        'bom_structure': bom_structure,
+        'mappings': mappings,
+        'mappings_applied': mapped,
+        'mapping_url': '/mapping/%s' % new_session_id,
+        'editor_url': '/editor/%s' % new_session_id,
+    })
+
+
+@api_view(['GET'])
+def normaliser_state(request, session_id):
+    """What the normaliser has decided so far, and what it still has to ask.
+
+    The questions are assembled from what inference already returns - a role with
+    no pick but non-empty candidates is exactly the case a human has to settle -
+    so nothing here second-guesses the inference; it only surfaces it.
+    """
+    info = get_session_consistent(session_id)
+    if not info:
+        return Response({'success': False, 'error': 'Invalid session'},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    state = info.get('normaliser') or {}
+    roles = state.get('roles') or {}
+    candidates = state.get('candidates') or {}
+
+    questions = []
+    for role, options in candidates.items():
+        chosen = str(roles.get(role) or '').strip()
+        alternatives = [
+            {
+                'value': option.get('header'),
+                'score': option.get('score'),
+                'confidence': option.get('confidence'),
+                'reasons': option.get('reasons') or [],
+            }
+            for option in (options or [])
+            if option.get('header') and option.get('header') != chosen
+        ]
+        if chosen and not alternatives:
+            continue
+        questions.append({
+            'id': 'role.%s' % role,
+            'question': 'Which column is the %s?' % role,
+            'answer': chosen or None,
+            'options': alternatives,
+        })
+
+    if not (info.get('bom_structure') or {}).get('sheets'):
+        questions.append({
+            'id': 'gate.bomStructure',
+            'question': ('Which sheet holds the BOM, does it have levels, and what is the '
+                         'finished good? Send it as `bomStructure` on upload, or answer here.'),
+            'answer': None,
+            'options': [],
+        })
+
+    return Response({
+        'success': True,
+        'session_id': session_id,
+        'header_row': info.get('header_row'),
+        'sheet_name': info.get('sheet_name'),
+        'roles': roles,
+        'config': state.get('config') or {},
+        'normalized_row_count': len(state.get('normalized_rows') or []),
+        'bom_structure': info.get('bom_structure') or {},
+        'questions': questions,
+    })
+
+
+def _complete_bom_header(bom_structure):
+    """Fill the parts of a BOM header that follow from the BOM code.
+
+    A caller should only have to name the BOM. Its name and the code of the
+    finished good it builds are the same string far more often than not, so
+    asking for all three is asking the same question three times - and a caller
+    that answers only one of them should not end up with a half-built header.
+
+    Everything supplied is left exactly as given; this only fills blanks.
+    """
+    if not isinstance(bom_structure, dict):
+        return bom_structure
+
+    completed = dict(bom_structure)
+    # Revising an existing BOM is a different flow with different inputs; this
+    # one always builds a new one.
+    completed.setdefault('mode', 'create')
+
+    sheets = {}
+    for sheet_name, answer in (completed.get('sheets') or {}).items():
+        if not isinstance(answer, dict):
+            sheets[sheet_name] = answer
+            continue
+        sheet = dict(answer)
+        header = dict(sheet.get('bomHeader') or {})
+
+        code = str(
+            header.get('bomCode')
+            or header.get('finishedGoodCode')
+            or header.get('bomName')
+            or ''
+        ).strip()
+        if code:
+            header.setdefault('bomCode', code)
+            # The BOM is named after itself, and it builds the item of the same
+            # code, unless the caller said otherwise.
+            if not str(header.get('bomName') or '').strip():
+                header['bomName'] = code
+            if not str(header.get('finishedGoodCode') or '').strip():
+                header['finishedGoodCode'] = code
+            if not str(header.get('itemName') or '').strip():
+                header['itemName'] = code
+
+        if not str(header.get('measurementUnit') or '').strip():
+            header['measurementUnit'] = 'EA'
+        if header.get('baseQuantity') in (None, ''):
+            header['baseQuantity'] = 1
+
+        sheet['bomHeader'] = header
+        # A sheet named in the answer is a sheet that holds a BOM.
+        sheet.setdefault('hasBom', True)
+        sheet.setdefault('hasLevels', False)
+        sheet.setdefault('treeConfirmed', True)
+        sheet.setdefault('bomGenerationAvailable', True)
+        sheet.setdefault('dropDocuments', True)
+        sheet.setdefault('subBoms', {})
+        sheets[sheet_name] = sheet
+
+    completed['sheets'] = sheets
+    return completed
+
+
+@api_view(['POST'])
+def normaliser_answers(request, session_id):
+    """Record answers as they are made, rather than at the end.
+
+    `roles` and `config` merge into what is already there; `bomStructure` is the
+    gate's answer and is stored where the rest of the app already looks for it.
+    """
+    info = get_session_consistent(session_id)
+    if not info:
+        return Response({'success': False, 'error': 'Invalid session'},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    state = dict(info.get('normaliser') or {})
+    roles = request.data.get('roles')
+    config = request.data.get('config')
+    if isinstance(roles, dict):
+        merged = dict(state.get('roles') or {})
+        merged.update(roles)
+        state['roles'] = merged
+    if isinstance(config, dict):
+        merged = dict(state.get('config') or {})
+        merged.update(config)
+        state['config'] = merged
+    info['normaliser'] = state
+
+    bom_structure = request.data.get('bomStructure') or request.data.get('bom_structure')
+    if isinstance(bom_structure, dict):
+        info['bom_structure'] = _complete_bom_header(bom_structure)
+
+    SESSION_STORE[session_id] = info
+    cache.set(f"mapper:session:{session_id}", info, 86400)
+    try:
+        save_session_to_file(session_id, info)
+    except Exception as exc:
+        logger.warning('Could not persist normaliser answers for %s: %s', session_id, exc)
+
+    return Response({'success': True, 'roles': state.get('roles') or {},
+                     'config': state.get('config') or {},
+                     'bom_structure': info.get('bom_structure') or {}})
 
 
 def _read_raw_upload_table(file_path, sheet_name=None):
@@ -875,7 +1573,23 @@ def derive_sfo_column_counts(headers: list) -> dict:
     }
 
 
-BOM_DESTINATION_HEADERS = ["Level", "Quantity", "Base BOM Qty"]
+# FactWise's combined item+BOM import matches sheet headers to its fields by
+# name. "Base BOM Qty" scored 0.750 against its "BOM Qty" field — under the 0.88
+# cutoff — so the column was silently ignored on every import. Renamed to the
+# label the importer actually knows.
+BOM_DESTINATION_HEADERS = ["Level", "Quantity", "BOM Qty"]
+
+# Sessions mapped before the rename still carry the old label in their grid, so
+# anything that DETECTS a BOM column (stripping them from an item export, say)
+# has to recognise both. Only the canonical list above is ever written.
+LEGACY_BOM_DESTINATION_HEADERS = ["Base BOM Qty"]
+BOM_DESTINATION_HEADER_ALIASES = BOM_DESTINATION_HEADERS + LEGACY_BOM_DESTINATION_HEADERS
+
+# Derived on the way out of a combined (4.0) export, never mapped: they say
+# which BOM a line belongs to, and that is structure the tree knows, not a value
+# the uploaded sheet carries.
+COMBINED_FINISHED_GOOD_HEADER = 'Finished good code'
+COMBINED_BOM_CODE_HEADER = 'BOM code' 
 
 
 def add_bom_destination_headers(headers: list) -> list:
@@ -890,7 +1604,12 @@ def add_bom_destination_headers(headers: list) -> list:
         except StopIteration:
             pass
 
-    missing = [header for header in BOM_DESTINATION_HEADERS if _template_label_key(header) not in existing]
+    # A grid still on the old label already has the column — renaming it here
+    # would orphan whatever the user mapped into it, so it is left alone.
+    satisfied = set(existing)
+    if _template_label_key('Base BOM Qty') in satisfied:
+        satisfied.add(_template_label_key('BOM Qty'))
+    missing = [header for header in BOM_DESTINATION_HEADERS if _template_label_key(header) not in satisfied]
     if missing:
         output[insert_at:insert_at] = missing
 
@@ -2114,12 +2833,7 @@ def _finalize_bom_inference_with_structure(inferred_result, learned_matches, req
 def bom_role_inference(request):
     """Infer BOM normalizer role mappings from headers and sampled row values."""
     try:
-        headers = request.data.get('headers') or []
-        rows = request.data.get('rows')
-        if rows is None:
-            rows = request.data.get('dataRows')
-        if rows is None:
-            rows = request.data.get('data') or []
+        headers, rows, normaliser_session_id = _normaliser_input(request)
         options = request.data.get('options') or {}
         if 'sampleSize' in request.data and 'sampleSize' not in options:
             options = {**options, 'sampleSize': request.data.get('sampleSize')}
@@ -2143,6 +2857,14 @@ def bom_role_inference(request):
             'config': request_config,
         }
         result = infer_bom_roles(headers, rows, options=inference_options)
+        # Written down so a later call - or a different caller entirely - can
+        # pick up where this one left off instead of being handed it all again.
+        _save_normaliser_state(
+            normaliser_session_id,
+            roles=result.get('roles'),
+            candidates=result.get('candidates'),
+            block_structure=result.get('blockStructure'),
+        )
         learned_matches = match_bom_structures(
             headers=headers,
             rows=rows,
@@ -2190,14 +2912,9 @@ def bom_role_inference(request):
 def bom_field_pattern_inference(request):
     """Return backend-owned field pattern groups for the BOM Normalizer teach popup."""
     try:
-        headers = request.data.get('headers') or []
-        rows = request.data.get('rows')
-        if rows is None:
-            rows = request.data.get('dataRows')
-        if rows is None:
-            rows = request.data.get('data') or []
-        roles = request.data.get('roles') or {}
-        config = request.data.get('config') or {}
+        headers, rows, normaliser_session_id = _normaliser_input(request)
+        roles = request.data.get('roles') or _normaliser_saved(normaliser_session_id, 'roles')
+        config = request.data.get('config') or _normaliser_saved(normaliser_session_id, 'config')
         selected_columns = request.data.get('selectedColumns') or request.data.get('selected_columns') or []
         options = request.data.get('options') or {}
 
@@ -2244,10 +2961,9 @@ def bom_field_pattern_inference(request):
 def bom_normalize(request):
     """Return backend-authoritative normalized BOM rows."""
     try:
-        headers = request.data.get('headers') or []
-        rows = request.data.get('rows') or []
-        roles = request.data.get('roles') or {}
-        config = request.data.get('config') or {}
+        headers, rows, normaliser_session_id = _normaliser_input(request)
+        roles = request.data.get('roles') or _normaliser_saved(normaliser_session_id, 'roles')
+        config = request.data.get('config') or _normaliser_saved(normaliser_session_id, 'config')
         if not isinstance(headers, list):
             return Response({'success': False, 'error': 'headers must be a list'}, status=status.HTTP_400_BAD_REQUEST)
         if not isinstance(rows, list):
@@ -2294,10 +3010,9 @@ def _retry_sqlite_locked_write(operation, attempts=3):
 def bom_field_pattern_apply(request):
     """Apply all confirmed semantic patterns and return one normalized preview."""
     try:
-        headers = request.data.get('headers') or []
-        rows = request.data.get('rows') or []
-        roles = request.data.get('roles') or {}
-        config = request.data.get('config') or {}
+        headers, rows, normaliser_session_id = _normaliser_input(request)
+        roles = request.data.get('roles') or _normaliser_saved(normaliser_session_id, 'roles')
+        config = request.data.get('config') or _normaliser_saved(normaliser_session_id, 'config')
         source_signature = request.data.get('sourceSignature') or request.data.get('source_signature') or {}
         groups = request.data.get('groups') or request.data.get('patterns') or []
         rules = request.data.get('rules') or request.data.get('fieldPatternRules') or request.data.get('field_pattern_rules') or {}
@@ -2496,6 +3211,15 @@ def bom_field_pattern_apply(request):
                 'success': True,
                 'saved_pattern_rules': [],
             }
+        # Kept on the session so Continue can build the mapping sheet from them.
+        # Previously they existed only in the browser's memory, which is why
+        # the page had to generate a workbook and re-upload it.
+        _save_normaliser_state(
+            normaliser_session_id,
+            normalized_rows=normalized.get('normalizedRows'),
+            roles=roles or None,
+            config=config or None,
+        )
         return Response({
             'success': True,
             **normalized,
@@ -2703,7 +3427,8 @@ def upload_files(request):
         client_file = request.FILES.get('clientFile')
         template_file = request.FILES.get('templateFile')
         sheet_name = request.data.get('sheetName')
-        header_row = int(request.data.get('headerRow', 1))
+        header_row_supplied = request.data.get('headerRow') not in (None, '')
+        header_row = int(request.data.get('headerRow') or 1)
         default_template_metadata = get_sfo_template_metadata()
         template_sheet_name = request.data.get('templateSheetName') or default_template_metadata["template_sheet_name"]
         template_header_row = int(request.data.get('templateHeaderRow') or default_template_metadata["template_header_row"])
@@ -2774,6 +3499,22 @@ def upload_files(request):
         else:
             template_path = default_template_metadata["template_path"]
             template_original_name = default_template_metadata["original_template_name"]
+
+        # A caller that did not say where the table starts gets the answer the
+        # file gives, not row 1. Most real BOMs open with a title block and a
+        # blank line or two, so row 1 is a guess that is usually wrong — the
+        # browser has always detected this before uploading, and anything else
+        # had no way to. An explicit `headerRow` is still honoured exactly.
+        if not header_row_supplied:
+            detected = _sheet_overview(
+                hybrid_file_manager.get_file_path(client_path), sheet_name
+            ).get('detected_header_row')
+            if detected and detected != header_row:
+                logger.info(
+                    'Upload: no headerRow given, using detected row %s for %s',
+                    detected, sheet_name or 'the first sheet'
+                )
+                header_row = detected
 
         packed_cell_transform = _maybe_expand_packed_cell_upload(
             hybrid_file_manager.get_file_path(client_path),
@@ -3169,6 +3910,17 @@ def upload_files(request):
         
         logger.info(f"Files uploaded successfully for session {session_id}")
         
+        # What the sheet looks like, so a caller that did not open the file
+        # itself still knows which row the table starts on and what columns it
+        # has. `header_row` echoes what was actually used; `detected_header_row`
+        # is what the file suggests, so a caller can tell an override from a
+        # guess and offer to change it.
+        overview = _sheet_overview(
+            hybrid_file_manager.get_file_path(SESSION_STORE[session_id]['client_path']),
+            SESSION_STORE[session_id].get('sheet_name'),
+            SESSION_STORE[session_id].get('header_row'),
+        )
+
         return Response({
             'success': True,
             'session_id': session_id,
@@ -3176,7 +3928,13 @@ def upload_files(request):
             'template_applied': template_applied,
             'template_success': template_success,
             'applied_mappings': applied_mappings,
-            'applied_formulas': applied_formulas
+            'applied_formulas': applied_formulas,
+            'sheets': overview.get('sheets', []),
+            'sheet_name': overview.get('sheet_name'),
+            'header_row': overview.get('header_row'),
+            'detected_header_row': overview.get('detected_header_row'),
+            'headers': overview.get('headers', []),
+            'total_rows': overview.get('total_rows'),
         }, status=status.HTTP_201_CREATED)
         
     except Exception as e:
@@ -6582,7 +7340,7 @@ def _drop_bom_columns(rows, headers):
     if not headers:
         return rows, headers
 
-    excluded = {_template_label_key(name) for name in BOM_DESTINATION_HEADERS}
+    excluded = {_template_label_key(name) for name in BOM_DESTINATION_HEADER_ALIASES}
     keep = [position for position, header in enumerate(headers)
             if _template_label_key(header) not in excluded]
     if len(keep) == len(headers):
@@ -6598,6 +7356,175 @@ def _drop_bom_columns(rows, headers):
         else:
             new_rows.append(row)
     return new_rows, new_headers
+
+
+def _add_combined_bom_identity_columns(session_id, rows, headers):
+    """Fill in which BOM each line belongs to, for a combined (4.0) export.
+
+    FactWise's combined item+BOM import treats a row as a BOM line the moment
+    any BOM field on it is populated, and then rejects that row unless
+    ``BOM code`` says which BOM the line is part of. ``Level`` and ``Quantity``
+    alone are enough to trigger it, so a combined sheet without this column
+    fails on every single row — which is exactly what the grid produces, because
+    neither value is something the uploaded sheet carries.
+
+    Both are structure, and structure lives in the derived tree, not the grid.
+    ``GenerationResult.bom_row_grid_rows`` holds the editor row each generated
+    BOM line came from (1-based), which is the join back to the sheet.
+
+    Returns ``(rows, headers, filled_count)``. Any failure to generate returns
+    the sheet untouched: a download must still produce a file when the BOM
+    cannot be built, and the importer's own error is clearer than a 500 here.
+    """
+    if not rows or not headers:
+        return rows, headers, 0
+
+    try:
+        result, _bom_header, error_response = _generate_bom_for_session(session_id)
+    except Exception as exc:  # pragma: no cover - defensive, see docstring
+        logger.warning('Combined export: BOM generation failed (%s)', exc)
+        return rows, headers, 0
+    if error_response is not None or result is None:
+        return rows, headers, 0
+
+    # First generated line wins per grid row. One editor row can produce several
+    # BOM lines (it is consumed by more than one parent), but the grid has a
+    # single row to write back to, and they share the same BOM in that case.
+    identity = {}
+    grid_rows = result.bom_row_grid_rows or []
+    for position, bom_row in enumerate(result.bom_rows or []):
+        grid_row = grid_rows[position] if position < len(grid_rows) else None
+        if grid_row is None:
+            continue
+        identity.setdefault(int(grid_row), (
+            str(bom_row.get('Finished good code') or '').strip(),
+            str(bom_row.get('BOM ID') or '').strip(),
+        ))
+    if not identity:
+        return rows, headers, 0
+
+    # The assemblies, and the BOM each one heads. A finished good is not a line
+    # in any BOM — it is the thing the BOM builds — so its own row never gets an
+    # identity from the loop above and would be rejected as a BOM line missing
+    # its BOM code. FactWise reads such a row as the BOM's header instead, but
+    # only when `level <= 0` and the row points at itself
+    # (item_import/combined.py::_is_header_only_row), so both are set below.
+    heads_bom = {}
+    for bom_row in result.bom_rows or []:
+        finished_good = str(bom_row.get('Finished good code') or '').strip()
+        if finished_good:
+            heads_bom.setdefault(
+                finished_good, str(bom_row.get('BOM ID') or '').strip() or finished_good
+            )
+
+    output_headers = list(headers)
+    position_of = {}
+    for label in (COMBINED_FINISHED_GOOD_HEADER, COMBINED_BOM_CODE_HEADER):
+        index = _grid_column_index(output_headers, label)
+        if index < 0:
+            output_headers.append(label)
+            index = len(output_headers) - 1
+        position_of[label] = index
+    code_index = _grid_column_index(output_headers, 'Item code')
+    level_index = _grid_column_index(output_headers, 'Level')
+
+    width = len(output_headers)
+    output_rows = []
+    headers_marked = 0
+    for position, row in enumerate(rows, start=1):
+        if not isinstance(row, list):
+            output_rows.append(row)
+            continue
+        values = list(row)
+        if len(values) < width:
+            values.extend([''] * (width - len(values)))
+        pair = identity.get(position)
+        if pair:
+            values[position_of[COMBINED_FINISHED_GOOD_HEADER]] = pair[0]
+            values[position_of[COMBINED_BOM_CODE_HEADER]] = pair[1]
+        elif code_index >= 0:
+            item_code = str(values[code_index] or '').strip()
+            bom_code = heads_bom.get(item_code)
+            if bom_code:
+                values[position_of[COMBINED_FINISHED_GOOD_HEADER]] = item_code
+                values[position_of[COMBINED_BOM_CODE_HEADER]] = bom_code
+                if level_index >= 0:
+                    # Level 0 is what marks it as the BOM header rather than a
+                    # line in its own BOM. The grid says 1 because the sheet
+                    # listed it alongside its children.
+                    values[level_index] = '0'
+                headers_marked += 1
+        output_rows.append(values)
+
+    return output_rows, output_headers, len(identity) + headers_marked
+
+
+def _fold_sap_description_column(rows, headers):
+    """Fold `SAP Description` into `Description` for a combined (4.0) export.
+
+    FactWise 4.0 has no SAP field — nothing in its item schema mentions SAP, and
+    a column like `SAP Item ID` resolves to nothing and is quietly dropped.
+    `SAP Description` does not get that treatment: it scores 0.880 against the
+    real `description` field, exactly on the importer's 0.88 fuzzy cutoff, so it
+    claims a field `Description` already owns and the upload fails the header
+    check with DUPLICATE_COLUMN_MAPPING.
+
+    Shipping the column under any name would lose the text anyway, so it is
+    merged instead of dropped: rows whose `Description` is empty take the SAP
+    value, rows that already have one keep it (the same fill-empty rule the
+    editor's own column rules follow), and the column itself goes.
+
+    Returns ``(rows, headers, filled_count)``.
+    """
+    if not headers:
+        return rows, headers, 0
+
+    sap_index = _grid_column_index(headers, 'SAP Description')
+    if sap_index < 0:
+        return rows, headers, 0
+
+    description_index = _grid_column_index(headers, 'Description')
+    if description_index < 0:
+        # Nothing to collide with, so the column can simply become the real one
+        # and keep every value it carries.
+        output_headers = list(headers)
+        output_headers[sap_index] = 'Description'
+        return rows, output_headers, 0
+
+    filled = 0
+    output_rows = []
+    for row in rows or []:
+        if not isinstance(row, list):
+            output_rows.append(row)
+            continue
+        values = list(row)
+        sap_value = str(values[sap_index] or '').strip() if sap_index < len(values) else ''
+        if sap_value and description_index < len(values):
+            if not str(values[description_index] or '').strip():
+                values[description_index] = sap_value
+                filled += 1
+        output_rows.append([
+            value for position, value in enumerate(values) if position != sap_index
+        ])
+
+    output_headers = [
+        header for position, header in enumerate(headers) if position != sap_index
+    ]
+    return output_rows, output_headers, filled
+
+
+def _rename_legacy_bom_columns(headers):
+    """Emit the BOM quantity column under the name the 4.0 importer matches.
+
+    Sessions mapped before the rename still hold "Base BOM Qty" in their grid.
+    The header is corrected on the way out so those sheets import too; the
+    stored grid keeps its own label, so nothing the user mapped moves.
+    """
+    legacy = _template_label_key('Base BOM Qty')
+    return [
+        'BOM Qty' if _template_label_key(header) == legacy else header
+        for header in (headers or [])
+    ]
 
 
 def _authored_finished_goods(info):
@@ -7332,7 +8259,7 @@ def download_file(request, session_id=None):
         # files. BOM structure columns must not appear in an item directory
         # export: the item importer does not know them.
         if export_type == 'item' and requested_column_order:
-            excluded = {_template_label_key(name) for name in BOM_DESTINATION_HEADERS}
+            excluded = {_template_label_key(name) for name in BOM_DESTINATION_HEADER_ALIASES}
             requested_column_order = [
                 column for column in requested_column_order
                 if _template_label_key(column) not in excluded
@@ -7995,6 +8922,33 @@ def download_file(request, session_id=None):
                 logger.warning(
                     "DOWNLOAD: %d item code(s) have rows that disagree: %s"
                     % (len(collapsed_conflicts), ', '.join(collapsed_conflicts[:5]))
+                )
+
+        # A combined (4.0) export ships items and BOM structure in one sheet, so
+        # unlike the item directory it has to say which BOM each line belongs
+        # to. Neither value is mapped — both are read back off the derived tree.
+        if export_type == 'raw':
+            transformed_rows, all_headers, bom_identity_rows = (
+                _add_combined_bom_identity_columns(session_id, transformed_rows, all_headers)
+            )
+            all_headers = _rename_legacy_bom_columns(all_headers)
+            transformed_rows, all_headers, sap_folded = _fold_sap_description_column(
+                transformed_rows, all_headers
+            )
+            if sap_folded:
+                logger.info(
+                    "DOWNLOAD: combined export took Description from SAP Description "
+                    "on %d row(s)" % sap_folded
+                )
+            if bom_identity_rows:
+                logger.info(
+                    "DOWNLOAD: combined export carries BOM identity on %d row(s)"
+                    % bom_identity_rows
+                )
+            else:
+                logger.warning(
+                    "DOWNLOAD: combined export has no BOM identity — FactWise will "
+                    "reject every row that carries a BOM field"
                 )
 
         # Create DataFrame with duplicate column names support
@@ -15905,10 +16859,18 @@ def _normalized_records_from_grid(headers, rows):
             index_of[name] = position
 
     records = []
-    for row in rows or []:
+    for position_in_grid, row in enumerate(rows or [], start=1):
         record = {}
         for name, position in index_of.items():
             record[name] = row[position] if position < len(row) else ''
+        # Which editor row this came from. Here it is simply the position, since
+        # the records ARE the grid. The source-merge path below re-stamps with
+        # its own alignment when the grid has to be joined to the uploaded
+        # sheet; without a stamp here, a session whose grid already carries
+        # everything produced records no row number at all, and anything keyed
+        # off that - validation row numbers, the BOM identity a combined export
+        # writes back - silently had nothing to work with.
+        record[GRID_ROW_KEY] = position_in_grid
         records.append(record)
     return records
 
@@ -16321,6 +17283,10 @@ def _generate_bom_for_session(session_id, apply_dup_policy=True):
     # It reaches the tree the proper way regardless: `root=` is passed to
     # derive_tree from the popup's answer, which is where a finished good the
     # sheet does not contain belongs.
+    #
+    # `grid_positions` holds the editor row numbers of whatever survives that
+    # filter; empty means nothing was dropped and positions already line up.
+    grid_positions = []
     authored_codes = {
         str(good['code']).strip() for good in _authored_finished_goods(info)
     }
@@ -16344,9 +17310,22 @@ def _generate_bom_for_session(session_id, apply_dup_policy=True):
                 return not str(
                     row[cpn_index] if cpn_index < len(row) else ''
                 ).strip()
-            rows = [row for row in (rows or []) if not is_appended(row)]
+            # Dropping a row shifts every row after it, so the editor row each
+            # survivor came from is remembered here — it is the only place both
+            # are still known, and a BOM identity written back to the wrong row
+            # is worse than none at all.
+            kept = [
+                (position, row)
+                for position, row in enumerate(rows or [], start=1)
+                if not is_appended(row)
+            ]
+            grid_positions = [position for position, _row in kept]
+            rows = [row for _position, row in kept]
 
     records = _normalized_records_from_grid(headers or [], rows or [])
+    if grid_positions:
+        for record, position in zip(records, grid_positions):
+            record[GRID_ROW_KEY] = position
     if not _has_normalizer_columns(records):
         source_headers, source_rows = _read_normalized_source_table(info)
         source_records = _normalized_records_from_grid(source_headers, source_rows)

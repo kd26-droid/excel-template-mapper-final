@@ -380,6 +380,76 @@ const BomDuplicatePolicyDefaultSection = ({ t, panelSx, sectionHeaderSx }) => {
   );
 };
 
+// Which shape the editor's BOM export produces by default.
+//
+// 3.0 is the pair FactWise's revision-import consumes today: an item directory
+// and a separate 'BOM Data' sheet. 4.0 delivers one combined sheet instead -
+// the working grid as it stands, item columns and BOM structure columns
+// (Level / Quantity / BOM Qty) together, plus the Finished good code and BOM
+// code derived from the tree, which is what the 4.0 intake expects.
+//
+// Defaults to 3.0 so nothing changes for anyone who does not opt in.
+//
+// Kept in sync with FW_EXPORT_VERSION_KEY in components/EnhancedDataEditor.js.
+const FW_EXPORT_VERSION_KEY = 'fw_default_export_version';
+const EXPORT_VERSION_3 = '3.0';
+const EXPORT_VERSION_4 = '4.0';
+const EXPORT_VERSION_DEFAULT = EXPORT_VERSION_3;
+
+const ExportVersionDefaultSection = ({ t, panelSx, sectionHeaderSx }) => {
+  const [version, setVersion] = React.useState(() => {
+    try {
+      const stored = window.localStorage.getItem(FW_EXPORT_VERSION_KEY);
+      return stored === EXPORT_VERSION_4 ? EXPORT_VERSION_4 : EXPORT_VERSION_DEFAULT;
+    } catch (_) { /* localStorage disabled — fall through */ }
+    return EXPORT_VERSION_DEFAULT;
+  });
+  const [savedAt, setSavedAt] = React.useState(0);
+
+  const handleChange = (event) => {
+    const next = event.target.value === EXPORT_VERSION_4 ? EXPORT_VERSION_4 : EXPORT_VERSION_3;
+    setVersion(next);
+    try {
+      window.localStorage.setItem(FW_EXPORT_VERSION_KEY, next);
+    } catch (_) { /* ignore */ }
+    setSavedAt(Date.now());
+  };
+
+  return (
+    <Paper elevation={0} sx={panelSx}>
+      <Box sx={sectionHeaderSx}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
+          <Box sx={{ width: 36, height: 36, borderRadius: '12px', display: 'grid', placeItems: 'center', bgcolor: t.state.infoBg, color: t.color.info }}>
+            <TableChartIcon fontSize="small" />
+          </Box>
+          <Box>
+            <Typography sx={{ fontSize: 16, fontWeight: 700, color: t.text.heading }}>Default export version</Typography>
+            <Typography sx={{ fontSize: 12.5, color: t.text.secondary }}>
+              Which shape the BOM export produces. Applies to sheets you export from now on.
+            </Typography>
+          </Box>
+        </Box>
+      </Box>
+      <Box sx={{ p: 2.5 }}>
+        <FormControl size="small" sx={{ minWidth: 220 }}>
+          <Select value={version} onChange={handleChange}>
+            <MenuItem value={EXPORT_VERSION_3}>3.0 — item and BOM as separate sheets</MenuItem>
+            <MenuItem value={EXPORT_VERSION_4}>4.0 — one combined sheet</MenuItem>
+          </Select>
+        </FormControl>
+        <Typography variant="body2" sx={{ color: t.text.secondary, mt: 1.75 }}>
+          {version === EXPORT_VERSION_4
+            ? 'One sheet carrying the item columns and the BOM structure columns (Level, Quantity, BOM Qty) together, plus the Finished good code and BOM code FactWise needs to place each line.'
+            : 'Two files: an item directory, and a BOM sheet laid out the way FactWise’s revision import reads it.'}
+        </Typography>
+        <Typography variant="caption" sx={{ color: t.text.secondary, display: 'block', mt: 1.25 }}>
+          {savedAt ? 'Saved.' : 'Change to update immediately — no save button.'}
+        </Typography>
+      </Box>
+    </Paper>
+  );
+};
+
 const Settings = () => {
   const { tokens: t, isDarkMode } = useThemeContext();
   const [digikeyClientId, setDigikeyClientId] = useState('');
@@ -1957,6 +2027,10 @@ const Settings = () => {
 
           <Grid item xs={12}>
             <BomDuplicatePolicyDefaultSection t={t} panelSx={panelSx} sectionHeaderSx={sectionHeaderSx} />
+          </Grid>
+
+          <Grid item xs={12}>
+            <ExportVersionDefaultSection t={t} panelSx={panelSx} sectionHeaderSx={sectionHeaderSx} />
           </Grid>
 
           <Grid item xs={12}>

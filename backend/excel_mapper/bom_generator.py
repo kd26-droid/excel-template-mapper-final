@@ -1122,7 +1122,7 @@ def find_grid_duplicate_groups(headers, rows):
     cpn_i = index_of('CPN Code')
     level_i = index_of('Level')
     qty_i = index_of('Quantity')
-    base_qty_i = index_of('Base BOM Qty')
+    base_qty_i = index_of('BOM Qty', 'Base BOM Qty')
     desc_i = index_of('Description')
 
     if code_i < 0 and cpn_i < 0:

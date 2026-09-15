@@ -91,7 +91,7 @@ const FACTWISE_OUTPUT_COLUMNS = [
   { value: 'Sales item', label: 'Sales item' },
   { value: 'Preferred vendor code', label: 'Preferred vendor code' },
   { value: 'Level', label: 'Level' },
-  { value: 'Base BOM Qty', label: 'Base BOM Qty' },
+  { value: 'BOM Qty', label: 'BOM Qty' },
 
   { value: 'Custom_Identification_Name_1', label: 'Custom identification name (1)' },
   { value: 'Custom_Identification_Value_1', label: 'Custom identification value (1)' },

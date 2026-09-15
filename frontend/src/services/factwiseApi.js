@@ -5,8 +5,15 @@ const STORAGE_KEYS = {
   refreshToken: 'fw_embedded_refresh_token',
   apiUrl: 'fw_api_url',
   entityId: 'fw_entity_id',
+  // Present only on a 4.0 launch, which is what makes it the signal for which
+  // API this mapper is talking to.
+  enterpriseId: 'fw_enterprise_id',
   embedded: 'fw_embedded',
 };
+
+// The mapper's own backend. 4.0 sends no CORS headers, so anything addressed to
+// it has to be relayed from there rather than called from the browser.
+const MAPPER_API_URL = process.env.REACT_APP_API_BASE_URL || '/api';
 
 // Custom DOM event fired the first time a FactWise request fails with an
 // expired-token symptom (401/403 from FW's API Management, or JWT `exp`
@@ -67,9 +74,24 @@ function readCredentials() {
     params.get('entity_id') ||
     params.get('fw_origin')
   );
+  // A launch from FactWise is remembered, and that memory outranks the guess
+  // below. Without this, the heuristic re-runs on every page: it only sees the
+  // launch params while the browser is still ON the launch URL, so the first
+  // navigation inside the mapper looks like a standalone dev session and the
+  // credentials — which are sitting right there in storage — read as null.
+  // Deployed, the mapper is not on localhost so the guess never applies; it is
+  // only when FactWise embeds it at localhost (4.0 local dev) that it does.
+  //
+  // A token is required alongside the flag so a leftover flag with no session
+  // cannot make a genuinely standalone browser claim to be embedded.
+  const launchedFromFactwise = (
+    window.localStorage.getItem(STORAGE_KEYS.embedded) === '1' &&
+    Boolean(window.localStorage.getItem(STORAGE_KEYS.token))
+  );
   const localStandaloneWithoutLaunch = (
     ['localhost', '127.0.0.1'].includes(window.location.hostname) &&
-    !hasFactwiseLaunchParams
+    !hasFactwiseLaunchParams &&
+    !launchedFromFactwise
   );
 
   if (localStandaloneWithoutLaunch) {
@@ -78,6 +100,7 @@ function readCredentials() {
       refreshToken: null,
       apiUrl: null,
       entityId: null,
+      enterpriseId: null,
     };
   }
 
@@ -86,6 +109,7 @@ function readCredentials() {
     refreshToken: window.localStorage.getItem(STORAGE_KEYS.refreshToken),
     apiUrl: window.localStorage.getItem(STORAGE_KEYS.apiUrl),
     entityId: window.localStorage.getItem(STORAGE_KEYS.entityId),
+    enterpriseId: window.localStorage.getItem(STORAGE_KEYS.enterpriseId),
   };
 }
 
@@ -311,6 +335,37 @@ export async function listAllItemTags({ searchText = '', pageNumber = 1, itemsPe
 //
 // Note the token cannot answer this: its `name` claim is the signed-in USER.
 export async function fetchFactwiseEntities() {
+  // On 4.0 the entities live at /enterprises/{id}/entities, and the browser
+  // cannot call it: that API sends no CORS headers, so the request never
+  // leaves. It goes through the mapper's own backend instead. 3.0 launches
+  // carry no enterprise id and keep the direct call below, unchanged.
+  const { apiUrl, token, enterpriseId } = readCredentials();
+  if (enterpriseId && apiUrl && token) {
+    try {
+      const { data } = await axios.post(`${MAPPER_API_URL}/factwise40/call/`, {
+        op: 'entities',
+        api_url: apiUrl,
+        enterprise_id: enterpriseId,
+        token,
+      }, { timeout: 30000 });
+      const rows = Array.isArray(data?.result) ? data.result : [];
+      return {
+        success: true,
+        entities: rows
+          .map(row => ({
+            id: String(row?.entity_id || '').trim(),
+            // 4.0 names an entity twice; the display name is the one meant for
+            // people, and it is what has to match FactWise's own lookup when
+            // this lands in an exported "Procurement entity name" cell.
+            name: String(row?.display_name || row?.legal_name || '').trim(),
+          }))
+          .filter(entity => entity.name),
+      };
+    } catch (error) {
+      return { success: false, entities: [], error: error?.response?.data?.error || error.message };
+    }
+  }
+
   const client = buildClient();
   if (!client) return { success: false, entities: [] };
   try {

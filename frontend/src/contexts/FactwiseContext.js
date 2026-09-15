@@ -15,10 +15,35 @@ const STORAGE_KEYS = {
   apiUrl: 'fw_api_url',
   sessionId: 'fw_session_id',
   entityId: 'fw_entity_id',
+  // The ENTERPRISE, which is not the entity. 4.0 addresses every endpoint as
+  // /enterprises/{id}/... and sends this on the launch URL; it also sends the
+  // same value as entity_id for 3.0's benefit, but the two mean different
+  // things here — entityId names a filing/procurement entity inside the
+  // enterprise — so it is captured separately rather than reused.
+  enterpriseId: 'fw_enterprise_id',
   entityName: 'fw_entity_name',
   fwOrigin: 'fw_origin',
   embedded: 'fw_embedded',
 };
+
+// The enterprise 4.0 addresses its endpoints by. It arrives on the launch URL,
+// but a dev token is literally `dev.<enterprise_id>.<user_id>`, so that is used
+// as a fallback rather than leaving the popup unable to reach FactWise at all.
+// A deployed token is a JWT and carries the enterprise in its claims instead,
+// which is why only the three-part `dev.` shape is unpacked here.
+const enterpriseIdFromDevToken = (token) => {
+  const parts = String(token || '').split('.');
+  return parts.length === 3 && parts[0] === 'dev' ? parts[1] : '';
+};
+
+const readEnterpriseId = (captured) => (
+  captured.enterpriseId
+  || window.localStorage.getItem(STORAGE_KEYS.enterpriseId)
+  || enterpriseIdFromDevToken(
+    captured.token || window.localStorage.getItem(STORAGE_KEYS.token)
+  )
+  || null
+);
 
 const firstParam = (params, names) => {
   for (const name of names) {
@@ -59,10 +84,24 @@ const nameFromObject = (obj) => (
 // The token deliberately has no say in which entity this is: its `name` claim
 // is the signed-in USER (that is how "amaan_test" ended up as the procurement
 // entity on exports). Entities come from /organization/entity/ only.
-const fetchEntityNameFromFactwise = async ({ apiUrl, token, entityId }) => {
+const fetchEntityNameFromFactwise = async ({ apiUrl, token, entityId, enterpriseId }) => {
   const base = cleanString(apiUrl).replace(/\/+$/, '');
   const id = cleanString(entityId);
-  if (!base || !token || !id) return '';
+  if (!base || !token) return '';
+
+  // A 4.0 launch has no single-entity endpoint the browser can reach — that API
+  // sends no CORS headers — and the `entity_id` it puts on the launch URL is
+  // really the enterprise id, so there is nothing here to look one up by. The
+  // list, fetched through our own backend, is the only answer; when it holds
+  // exactly one entity that is unambiguously this account's.
+  if (cleanString(enterpriseId)) {
+    const { entities } = await fetchFactwiseEntities();
+    if (entities.length === 1) return entities[0].name;
+    const match = entities.find(entity => entity.id === id);
+    return match ? match.name : '';
+  }
+
+  if (!id) return '';
 
   const endpoints = [
     `/organization/entity/${encodeURIComponent(id)}/`,
@@ -99,11 +138,27 @@ function readInitialContext() {
     params.get('api_url') ||
     params.get('session_id') ||
     params.get('entity_id') ||
+    params.get('enterprise_id') ||
     params.get('fw_origin')
+  );
+  // A launch from FactWise is remembered, and that memory outranks the guess
+  // below. Without this, the heuristic re-runs on every page: it only sees the
+  // launch params while the browser is still ON the launch URL, so the first
+  // navigation inside the mapper looks like a standalone dev session and the
+  // credentials — which are sitting right there in storage — read as null.
+  // Deployed, the mapper is not on localhost so the guess never applies; it is
+  // only when FactWise embeds it at localhost (4.0 local dev) that it does.
+  //
+  // A token is required alongside the flag so a leftover flag with no session
+  // cannot make a genuinely standalone browser claim to be embedded.
+  const launchedFromFactwise = (
+    window.localStorage.getItem(STORAGE_KEYS.embedded) === '1' &&
+    Boolean(window.localStorage.getItem(STORAGE_KEYS.token))
   );
   const localStandaloneWithoutLaunch = (
     ['localhost', '127.0.0.1'].includes(window.location.hostname) &&
-    !hasFactwiseLaunchParams
+    !hasFactwiseLaunchParams &&
+    !launchedFromFactwise
   );
   const isEmbedded =
     !localStandaloneWithoutLaunch && (
@@ -119,6 +174,7 @@ function readInitialContext() {
     apiUrl: params.get('api_url'),
     sessionId: params.get('session_id'),
     entityId: params.get('entity_id'),
+    enterpriseId: params.get('enterprise_id'),
     entityName: firstParam(params, [
       'entity_name',
       'entityName',
@@ -166,6 +222,7 @@ function readInitialContext() {
       apiUrl: null,
       sessionId: null,
       entityId: null,
+      enterpriseId: null,
       entityName: null,
       fwOrigin: null,
     };
@@ -184,6 +241,7 @@ function readInitialContext() {
       captured.sessionId || window.localStorage.getItem(STORAGE_KEYS.sessionId),
     entityId:
       captured.entityId || window.localStorage.getItem(STORAGE_KEYS.entityId),
+    enterpriseId: readEnterpriseId(captured),
     entityName:
       captured.entityName || window.localStorage.getItem(STORAGE_KEYS.entityName),
     fwOrigin:
@@ -193,6 +251,7 @@ function readInitialContext() {
 
 const FactwiseContext = createContext({
   entities: [],
+  enterpriseId: null,
   entityChangedAtLaunch: false,
   chooseEntity: () => {},
   loadEntities: () => {},
