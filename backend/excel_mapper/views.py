@@ -22,7 +22,7 @@ from django.http import FileResponse, Http404, JsonResponse, HttpResponse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.test import APIRequestFactory
@@ -774,6 +774,240 @@ def _normalised_sheet_mappings(columns, rows, template_headers):
                 break
 
     return mappings
+
+
+@api_view(['POST'])
+@parser_classes([MultiPartParser, FormParser, JSONParser])
+def normaliser_run(request):
+    """Take a BOM file and carry it as far as it can go on its own.
+
+    The seven calls behind this each exist for a reason, but a caller that just
+    wants a normalised sheet should not have to know them, or the order, or
+    which values to carry between them. This runs them and stops at the only two
+    places a human is genuinely needed:
+
+      1. the BOM code - nothing in a component list says what it builds
+      2. item codes shared by rows that describe different parts - only a person
+         knows which description is right
+
+    Both come back as `questions`, each with its options, and are answered by
+    calling again with `session_id` plus the answer. Nothing is guessed.
+
+    First call:   clientFile (+ bom_code if known)
+    Later calls:  session_id + the answers
+
+    `status` is `needs_input` while anything is outstanding, `ready` when the
+    sheet has passed our own checks and can be exported.
+    """
+    session_id = str(request.data.get('session_id') or '').strip()
+    upload = request.FILES.get('clientFile') or request.FILES.get('file')
+
+    if not session_id and upload is None:
+        return Response({'success': False, 'error': 'Send clientFile to start, or session_id to continue.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    steps = []
+
+    # --- 1. the file, and where its table starts ---------------------------
+    if not session_id:
+        response = upload_files(_internal_multipart({'clientFile': upload}))
+        data = getattr(response, 'data', {}) or {}
+        if not data.get('session_id'):
+            return Response({'success': False, 'error': data.get('error') or 'Upload failed'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        session_id = data['session_id']
+        steps.append({'step': 'upload', 'header_row': data.get('header_row'),
+                      'sheet': data.get('sheet_name'), 'rows': data.get('total_rows'),
+                      'columns': data.get('headers')})
+
+    info = get_session_consistent(session_id)
+    if not info:
+        return Response({'success': False, 'error': 'Invalid session'},
+                        status=status.HTTP_404_NOT_FOUND)
+
+    # --- 2. which column plays which part ----------------------------------
+    saved_roles = _normaliser_saved(session_id, 'roles')
+    if not saved_roles:
+        response = bom_role_inference(_internal_post({'session_id': session_id}))
+        result = getattr(response, 'data', {}) or {}
+        saved_roles = result.get('roles') or {}
+        blocks = result.get('blockStructure') or {}
+        steps.append({'step': 'roles', 'roles': {k: v for k, v in saved_roles.items() if v},
+                      'blocks': blocks.get('blockCount')})
+
+    # --- 3. role overrides, if the caller sent any -------------------------
+    overrides = request.data.get('roles')
+    if isinstance(overrides, str):
+        try:
+            overrides = json.loads(overrides)
+        except (TypeError, ValueError):
+            overrides = None
+
+    # --- 4. the BOM code: the first thing only a human knows ---------------
+    sheet_name = info.get('sheet_name') or ((info.get('bom_structure') or {}).get('sheets') and
+                                            list((info['bom_structure']['sheets'])) [0])
+    if not sheet_name:
+        sheets = _list_upload_sheets(hybrid_file_manager.get_file_path(info['client_path']))
+        sheet_name = sheets[0] if sheets else 'Sheet1'
+
+    bom_code = str(request.data.get('bom_code') or '').strip()
+    existing_header = ((info.get('bom_structure') or {}).get('sheets', {})
+                       .get(sheet_name, {}).get('bomHeader') or {})
+    if bom_code or overrides:
+        answer = {'bomStructure': {'sheets': {sheet_name: {
+            'hasLevels': str(request.data.get('has_levels') or '').lower() in ('1', 'true', 'yes'),
+            'bomHeader': {'bomCode': bom_code or existing_header.get('bomCode')},
+        }}}}
+        if request.data.get('level_column'):
+            answer['bomStructure']['sheets'][sheet_name]['levelColumn'] = request.data['level_column']
+        if overrides:
+            answer['roles'] = overrides
+        normaliser_answers(_internal_post(answer), session_id)
+        info = get_session_consistent(session_id) or info
+        existing_header = ((info.get('bom_structure') or {}).get('sheets', {})
+                           .get(sheet_name, {}).get('bomHeader') or {})
+
+    if not existing_header.get('bomCode'):
+        return Response({
+            'success': True,
+            'status': 'needs_input',
+            'session_id': session_id,
+            'steps': steps,
+            'questions': [{
+                'id': 'bom_code',
+                'question': 'What is this BOM called? It is the code of the assembly these parts build.',
+                'why': 'A component list never says what it is a list of.',
+                'answer_with': 'bom_code',
+                'options': [],
+            }],
+        })
+
+    # --- 5. normalise ------------------------------------------------------
+    response = bom_field_pattern_apply(_internal_post({'session_id': session_id}))
+    applied = getattr(response, 'data', {}) or {}
+    if not applied.get('success'):
+        return Response({'success': False, 'session_id': session_id,
+                         'error': applied.get('error') or 'Could not normalise this sheet.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    progress = applied.get('progress') or {}
+    steps.append({'step': 'normalise', 'kept': progress.get('outputRows'),
+                  'dropped': progress.get('skippedRows')})
+
+    # --- 6. the mapping sheet, mapped ---------------------------------------
+    response = normaliser_continue(_internal_post({}), session_id)
+    carried = getattr(response, 'data', {}) or {}
+    if not carried.get('success'):
+        return Response({'success': False, 'session_id': session_id,
+                         'error': carried.get('error') or 'Could not build the mapped sheet.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    mapped_session = carried['session_id']
+    steps.append({'step': 'map', 'session_id': mapped_session,
+                  'mappings': carried.get('mappings')})
+
+    # --- 7. the saved Settings defaults, if this entity has any -------------
+    entity_name = str(request.data.get('entity_name') or info.get('entity_name') or '').strip()
+    if entity_name:
+        response = apply_editor_defaults(_internal_post({
+            'session_id': mapped_session, 'entity_name': entity_name,
+        }))
+        defaults = getattr(response, 'data', {}) or {}
+        if defaults.get('success'):
+            steps.append({'step': 'defaults', 'applied': defaults.get('applied')})
+
+    # --- 8. conflicts: the second thing only a human knows ------------------
+    response = validate_bom_sheet(_internal_get(), mapped_session)
+    checks = getattr(response, 'data', {}) or {}
+    questions = []
+    for error in (checks.get('errors') or []):
+        for conflict in (error.get('conflicts') or []):
+            for field in (conflict.get('fields') or []):
+                questions.append({
+                    'id': 'conflict.%s.%s' % (conflict.get('code'), field.get('column')),
+                    'question': ('%s is used by %s rows that disagree on %s. Which is right?'
+                                 % (conflict.get('code'), conflict.get('rows'), field.get('column'))),
+                    'why': 'Every BOM line using this code would otherwise be ambiguous.',
+                    'answer_with': 'resolve',
+                    'item_code': conflict.get('code'),
+                    'column': field.get('column'),
+                    'options': [{'value': value} for value in (field.get('values') or [])],
+                })
+
+    return Response({
+        'success': True,
+        'status': 'needs_input' if questions else 'ready',
+        'session_id': mapped_session,
+        'source_session_id': session_id,
+        'row_count': carried.get('row_count'),
+        'steps': steps,
+        'questions': questions,
+        'editor_url': '/editor/%s' % mapped_session,
+    })
+
+
+@api_view(['POST'])
+def normaliser_resolve(request, session_id):
+    """Answer a conflict: give one item code one value for one column.
+
+    The same conditional write the editor's own "use this value" button makes -
+    where Item code equals X, set that column to Y - so a choice made here and a
+    choice made in the grid are the same edit.
+    """
+    choices = request.data.get('resolve') or []
+    if isinstance(choices, dict):
+        choices = [choices]
+    if not choices:
+        return Response({'success': False,
+                         'error': 'Send resolve: [{item_code, column, value}, …]'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    applied = []
+    for choice in choices:
+        item_code = str((choice or {}).get('item_code') or '').strip()
+        column = str((choice or {}).get('column') or '').strip()
+        value = (choice or {}).get('value')
+        if not item_code or not column or value is None:
+            continue
+        response = fill_or_create_column(_internal_post({
+            'session_id': session_id,
+            'rule': {
+                'type': 'column_value', 'target_mode': 'existing', 'target_column': column,
+                'value_mode': 'conditional', 'write_mode': 'overwrite',
+                'source_columns': [], 'separator': '_',
+                'condition': {'branches': [{
+                    'column': 'Item code', 'operator': 'equals',
+                    'compare': [item_code], 'output_value': value,
+                }]},
+            },
+        }))
+        payload = getattr(response, 'data', {}) or {}
+        applied.append({'item_code': item_code, 'column': column, 'value': value,
+                        'changed': payload.get('changed', 0),
+                        'success': bool(payload.get('success'))})
+
+    response = validate_bom_sheet(_internal_get(), session_id)
+    checks = getattr(response, 'data', {}) or {}
+    remaining = [c for e in (checks.get('errors') or []) for c in (e.get('conflicts') or [])]
+
+    return Response({
+        'success': True,
+        'status': 'needs_input' if remaining else 'ready',
+        'session_id': session_id,
+        'applied': applied,
+        'conflicts_remaining': len(remaining),
+        'editor_url': '/editor/%s' % session_id,
+    })
+
+
+def _internal_multipart(files):
+    """A multipart request for calling one of our own upload views directly."""
+    from rest_framework.test import APIRequestFactory
+    return APIRequestFactory().post('/', files, format='multipart')
+
+
+def _internal_get():
+    """A bare GET for calling one of our own read views directly."""
+    from rest_framework.test import APIRequestFactory
+    return APIRequestFactory().get('/')
 
 
 @api_view(['POST'])
@@ -7527,6 +7761,93 @@ def _rename_legacy_bom_columns(headers):
     ]
 
 
+def _append_combined_finished_good(info, rows, headers):
+    """Declare the finished good in a combined (4.0) export.
+
+    FactWise reads a row as the BOM's header - the thing the BOM builds, rather
+    than a line in it - when its Item code equals the BOM code and its Level is 0
+    (`_is_header_only_row` in item_import/combined.py).
+
+    A flat sheet never carries such a row. It lists components, and the finished
+    good was authored in the BOM structure gate, so it lives on the session and
+    nowhere in the grid. Without this the sheet describes a BOM whose finished
+    good appears nowhere in it: validation passes, because every line is
+    well-formed, and the commit then fails with "finished good not found" - which
+    is a confusing place to discover the sheet was incomplete.
+
+    The item-directory export answers the same problem with
+    `_append_authored_finished_good`; that row is a plain item, while this one
+    also carries the BOM identity and the Level 0 that make it a header.
+
+    Returns ``(rows, headers)`` unchanged when there is nothing to add.
+    """
+    goods = _authored_finished_goods(info)
+    if not goods or not headers:
+        return rows, headers
+
+    def index_of(*names):
+        for name in names:
+            for position, header in enumerate(headers):
+                if _template_label_key(header) == _template_label_key(name):
+                    return position
+        return -1
+
+    code_index = index_of('Item code')
+    level_index = index_of('Level')
+    bom_index = index_of('BOM code')
+    if code_index < 0 or level_index < 0 or bom_index < 0:
+        # Without all three the row cannot be recognised as a header, and adding
+        # it anyway would just be one more line FactWise rejects.
+        return rows, headers
+
+    name_index = index_of('Item name')
+    type_index = index_of('Item type')
+    uom_index = index_of('Measurement unit')
+    finished_index = index_of('Finished good code')
+
+    # A multi-level sheet already contains its own finished good as a row; adding
+    # a second one would import the item twice.
+    code_header = headers[code_index] if code_index < len(headers) else None
+    existing = set()
+    for row in rows or []:
+        if isinstance(row, list):
+            if code_index < len(row):
+                existing.add(str(row[code_index] or '').strip().casefold())
+        elif isinstance(row, dict) and code_header is not None:
+            existing.add(str(row.get(code_header) or '').strip().casefold())
+    existing.discard('')
+
+    appended = []
+    for good in goods:
+        code = str(good.get('code') or '').strip()
+        if not code or code.casefold() in existing:
+            continue
+        row = [''] * len(headers)
+
+        def put(position, value):
+            if 0 <= position < len(row):
+                row[position] = value
+
+        put(code_index, code)
+        put(name_index, good.get('name') or code)
+        # Named as the template spells it; the importer matches case-insensitively.
+        put(type_index, 'Finished good')
+        put(uom_index, good.get('uom') or 'EA')
+        # Level 0 with a self-referencing code is the whole signal.
+        put(level_index, 0)
+        put(bom_index, code)
+        put(finished_index, code)
+        appended.append(row)
+        existing.add(code.casefold())
+
+    if not appended:
+        return rows, headers
+    logger.info('DOWNLOAD: combined export declared %d finished good(s): %s',
+                len(appended), ', '.join(str(g.get('code')) for g in goods))
+    # First, so the BOM's header precedes the lines that reference it.
+    return appended + list(rows or []), headers
+
+
 def _authored_finished_goods(info):
     """Finished goods the user authored in the BOM structure gate.
 
@@ -8940,6 +9261,11 @@ def download_file(request, session_id=None):
                     "DOWNLOAD: combined export took Description from SAP Description "
                     "on %d row(s)" % sap_folded
                 )
+            # The BOM's own header row. Every line above says which BOM it
+            # belongs to; without this, nothing says what that BOM builds.
+            transformed_rows, all_headers = _append_combined_finished_good(
+                info, transformed_rows, all_headers
+            )
             if bom_identity_rows:
                 logger.info(
                     "DOWNLOAD: combined export carries BOM identity on %d row(s)"

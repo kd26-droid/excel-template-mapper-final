@@ -64,6 +64,8 @@ from .views import (
     normaliser_answers,
     normaliser_continue,
     apply_editor_defaults,
+    normaliser_run,
+    normaliser_resolve,
 
     # Unified Template + Formula views (MappingTemplate based)
     save_mapping_template,
@@ -182,6 +184,8 @@ from .parser_views import (
 )
 
 from .factwise40 import factwise40_call, factwise40_validate
+# The conversational normaliser: one endpoint, a model driving the views above.
+from .agent import agent_message
 
 urlpatterns = [
     # Health check
@@ -273,6 +277,12 @@ urlpatterns = [
     path('normaliser/<str:session_id>/continue/', normaliser_continue, name='normaliser-continue'),
     # The Settings panel's Item Directory Defaults, applied in one call.
     path('editor-defaults/apply/', apply_editor_defaults, name='apply-editor-defaults'),
+    # The whole normaliser in one call: a file in, a normalised session out,
+    # stopping only where a person is genuinely needed.
+    path('normaliser/run/', normaliser_run, name='normaliser-run'),
+    # The same flow as a conversation, for a caller with no UI at all.
+    path('agent/', agent_message, name='agent-message'),
+    path('normaliser/<str:session_id>/resolve/', normaliser_resolve, name='normaliser-resolve'),
     path('bom/structures/', bom_structure_patterns, name='bom-structure-patterns'),
     path('bom/structures/match/', bom_structure_match, name='bom-structure-match'),
     path('bom/structures/profile/', bom_structure_profile, name='bom-structure-profile'),
