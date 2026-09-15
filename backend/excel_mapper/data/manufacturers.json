@@ -110302,10 +110302,130 @@
         "TE CONNE"
       ],
       "name": "TE CONNE"
+    },
+    {
+      "aliases": [
+        "60"
+      ],
+      "name": "60"
+    },
+    {
+      "aliases": [
+        "ALTERACO"
+      ],
+      "name": "ALTERACO"
+    },
+    {
+      "aliases": [
+        "KAGAKU"
+      ],
+      "name": "KAGAKU"
+    },
+    {
+      "aliases": [
+        "PANINDUS"
+      ],
+      "name": "PANINDUS"
+    },
+    {
+      "aliases": [
+        "THT-B724-26X6-2AC-UNPRTD"
+      ],
+      "name": "THT-B724-26X6-2AC-UNPRTD"
+    },
+    {
+      "aliases": [
+        "JAUCH H.C."
+      ],
+      "name": "JAUCH H.C."
+    },
+    {
+      "aliases": [
+        "08051C474K4T2A"
+      ],
+      "name": "08051C474K4T2A"
+    },
+    {
+      "aliases": [
+        "12101C475K4T2A"
+      ],
+      "name": "12101C475K4T2A"
+    },
+    {
+      "aliases": [
+        "74438335100"
+      ],
+      "name": "74438335100"
+    },
+    {
+      "aliases": [
+        "AC0402FR-7W169KL"
+      ],
+      "name": "AC0402FR-7W169KL"
+    },
+    {
+      "aliases": [
+        "AC0402FR-7W30KL"
+      ],
+      "name": "AC0402FR-7W30KL"
+    },
+    {
+      "aliases": [
+        "Added Componants"
+      ],
+      "name": "Added Componants"
+    },
+    {
+      "aliases": [
+        "B1100Q-13-F"
+      ],
+      "name": "B1100Q-13-F"
+    },
+    {
+      "aliases": [
+        "C0603C104K1RACAUTO"
+      ],
+      "name": "C0603C104K1RACAUTO"
+    },
+    {
+      "aliases": [
+        "Existing Componants"
+      ],
+      "name": "Existing Componants"
+    },
+    {
+      "aliases": [
+        "SMCJ58A"
+      ],
+      "name": "SMCJ58A"
+    },
+    {
+      "aliases": [
+        "Total Count = 238"
+      ],
+      "name": "Total Count = 238"
+    },
+    {
+      "aliases": [
+        "DIODES INC. FOX ELECTRONICS PERICOM, FORMERLY SARONIX MTRONPTI JAUCH H.C. FOX ELECTRONICS ABRACON CORPORATION"
+      ],
+      "name": "DIODES INC. FOX ELECTRONICS PERICOM, FORMERLY SARONIX MTRONPTI JAUCH H.C. FOX ELECTRONICS ABRACON CORPORATION"
+    },
+    {
+      "aliases": [
+        "JST (JAPAN SOLDERLESS TERMINAL"
+      ],
+      "name": "JST (JAPAN SOLDERLESS TERMINAL"
+    },
+    {
+      "aliases": [
+        "CGA5L1X7R1C106K160AC"
+      ],
+      "name": "CGA5L1X7R1C106K160AC"
     }
   ],
-  "entry_count": 18084,
-  "name_count": 17928,
+  "entry_count": 18104,
+  "name_count": 17948,
   "names": [
     "Manufacturer",
     "0.1R/0402,1/8W",
@@ -128234,8 +128354,28 @@
     "BETATRAN",
     "FILM",
     "HUMI NAS",
-    "TE CONNE"
+    "TE CONNE",
+    "60",
+    "ALTERACO",
+    "KAGAKU",
+    "PANINDUS",
+    "THT-B724-26X6-2AC-UNPRTD",
+    "JAUCH H.C.",
+    "08051C474K4T2A",
+    "12101C475K4T2A",
+    "74438335100",
+    "AC0402FR-7W169KL",
+    "AC0402FR-7W30KL",
+    "Added Componants",
+    "B1100Q-13-F",
+    "C0603C104K1RACAUTO",
+    "Existing Componants",
+    "SMCJ58A",
+    "Total Count = 238",
+    "DIODES INC. FOX ELECTRONICS PERICOM, FORMERLY SARONIX MTRONPTI JAUCH H.C. FOX ELECTRONICS ABRACON CORPORATION",
+    "JST (JAPAN SOLDERLESS TERMINAL",
+    "CGA5L1X7R1C106K160AC"
   ],
-  "source": "All_Manufacturers_Cleaned.xlsx, MPN-MFR  (version 1).xlsx, MPN-MFR  (version 1).xlsx, MPN-MFR  (version 1).xlsx, MPN-MFR  (version 1).xlsx, MPN-MFR  (version 1).xlsx, MPN-MFR  (version 1).xlsx, user-confirmed-bom-patterns, user-confirmed-bom-patterns",
+  "source": "All_Manufacturers_Cleaned.xlsx, MPN-MFR  (version 1).xlsx, MPN-MFR  (version 1).xlsx, MPN-MFR  (version 1).xlsx, MPN-MFR  (version 1).xlsx, MPN-MFR  (version 1).xlsx, MPN-MFR  (version 1).xlsx, user-confirmed-bom-patterns, user-confirmed-bom-patterns, user-confirmed-bom-patterns, user-confirmed-bom-patterns, user-confirmed-bom-patterns, user-confirmed-bom-patterns, user-confirmed-bom-patterns",
   "version": 1
 }

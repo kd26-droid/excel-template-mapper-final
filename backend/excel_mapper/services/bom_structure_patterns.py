@@ -461,7 +461,17 @@ def _column_shape_similarity(saved, current):
     return max(0.0, min(1.0, 1.0 - distance - length_penalty))
 
 
-def learn_bom_structure(name="", headers=None, rows=None, roles=None, config=None, source_signature=None, workflow=None, confidence=1.0):
+def learn_bom_structure(
+    name="",
+    headers=None,
+    rows=None,
+    roles=None,
+    config=None,
+    source_signature=None,
+    workflow=None,
+    confidence=1.0,
+    profile=None,
+):
     from excel_mapper.models import BomStructurePattern
 
     if not rows:
@@ -470,13 +480,14 @@ def learn_bom_structure(name="", headers=None, rows=None, roles=None, config=Non
             source_rows = source_signature.get("row_sample")
         rows = source_rows if isinstance(source_rows, list) else []
 
-    profile = build_structure_profile(
-        headers=headers,
-        rows=rows,
-        roles=roles,
-        config=config,
-        source_signature=source_signature,
-    )
+    if not isinstance(profile, dict) or not profile.get("fingerprint"):
+        profile = build_structure_profile(
+            headers=headers,
+            rows=rows,
+            roles=roles,
+            config=config,
+            source_signature=source_signature,
+        )
     template_name = clean(name)[:200]
     pattern, created = BomStructurePattern.objects.update_or_create(
         signature_hash=profile["fingerprint"],

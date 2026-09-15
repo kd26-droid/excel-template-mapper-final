@@ -9,6 +9,26 @@ from statistics import mean
 
 logger = logging.getLogger(__name__)
 
+
+def _directory_cache_version():
+    try:
+        from .bom_directory_store import directory_cache_version
+        return directory_cache_version()
+    except Exception:
+        return 0
+
+
+def _versioned_singleton(loader):
+    @lru_cache(maxsize=2)
+    def cached(_version):
+        return loader()
+
+    def wrapped():
+        return cached(_directory_cache_version())
+
+    wrapped.cache_clear = cached.cache_clear
+    return wrapped
+
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 MPN_PATTERN_PATH = DATA_DIR / "mpn_patterns.v1.json.gz"
 MANUFACTURER_PATTERN_PATH = DATA_DIR / "manufacturer_pattern_index.v1.json.gz"
@@ -149,6 +169,22 @@ def _norm_key(value):
     return re.sub(r"[^A-Z0-9]+", " ", _clean(value).upper()).strip()
 
 
+def _looks_like_manufacturer_code_only(value):
+    """Reject learned reference codes that do not look like company names."""
+    text = _clean(value)
+    compact = re.sub(r"[^A-Za-z0-9]+", "", text)
+    if not compact or re.search(r"\s", text):
+        return False
+    letters = sum(character.isalpha() for character in compact)
+    digits = sum(character.isdigit() for character in compact)
+    return (
+        len(compact) >= 4
+        and letters >= 1
+        and digits >= 2
+        and digits / len(compact) >= 0.40
+    )
+
+
 def _manufacturer_key_can_be_segmented(key, known_keys):
     tokens = key.split()
     if len(tokens) < 2:
@@ -284,8 +320,15 @@ def _load_json_gz(path):
         return json.load(handle)
 
 
-@lru_cache(maxsize=1)
+@_versioned_singleton
 def load_mpn_pattern_library():
+    try:
+        from .bom_directory_store import mpn_pattern_rows
+        database_payload = mpn_pattern_rows()
+        if database_payload is not None:
+            return database_payload
+    except Exception as exc:
+        logger.debug("Database MPN pattern library unavailable: %s", exc)
     if not MPN_PATTERN_PATH.exists():
         logger.warning("MPN pattern library not found: %s", MPN_PATTERN_PATH)
         return {}
@@ -300,8 +343,15 @@ def load_manufacturer_pattern_index():
     return _load_json_gz(MANUFACTURER_PATTERN_PATH)
 
 
-@lru_cache(maxsize=1)
+@_versioned_singleton
 def load_mpn_mfr_lookup():
+    try:
+        from .bom_directory_store import database_mpn_lookup
+        database_lookup = database_mpn_lookup()
+        if database_lookup is not None:
+            return database_lookup
+    except Exception as exc:
+        logger.debug("Database MPN/MFR lookup unavailable: %s", exc)
     if not MPN_MFR_LOOKUP_PATH.exists():
         return {}
     try:
@@ -311,27 +361,40 @@ def load_mpn_mfr_lookup():
         return {}
 
 
-@lru_cache(maxsize=1)
+@_versioned_singleton
 def load_manufacturer_lookup():
     lookup = {}
     protected_keys = set()
-    if not MANUFACTURER_DIRECTORY_PATH.exists():
-        return lookup
     try:
-        with MANUFACTURER_DIRECTORY_PATH.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
+        from .bom_directory_store import manufacturer_lookup_rows
+        database_rows = manufacturer_lookup_rows()
     except Exception as exc:
-        logger.warning("Manufacturer directory not loaded for pattern scoring: %s", exc)
-        return lookup
+        logger.debug("Database manufacturer directory unavailable: %s", exc)
+        database_rows = None
 
-    for name in data.get("names") or []:
+    if database_rows is not None:
+        names = database_rows.get("names") or []
+        aliases = database_rows.get("aliases") or []
+    else:
+        if not MANUFACTURER_DIRECTORY_PATH.exists():
+            return lookup
+        try:
+            with MANUFACTURER_DIRECTORY_PATH.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception as exc:
+            logger.warning("Manufacturer directory not loaded for pattern scoring: %s", exc)
+            return lookup
+        names = data.get("names") or []
+        aliases = list((data.get("aliases") or {}).items())
+
+    for name in names:
         clean = _clean(name)
         key = _norm_key(clean)
         if key and len(key.replace(" ", "")) >= 2 and key not in GENERIC_MANUFACTURER_TERMS:
             lookup[key] = clean
             if _should_protect_explicit_manufacturer_key(key) or _has_explicit_manufacturer_joiner(clean):
                 protected_keys.add(key)
-    for alias, canonical in (data.get("aliases") or {}).items():
+    for alias, canonical in aliases:
         alias_key = _norm_key(alias)
         clean_canonical = _clean(canonical)
         canonical_key = _norm_key(clean_canonical)
@@ -365,7 +428,7 @@ def is_composite_manufacturer_name(value, lookup=None):
     return _manufacturer_key_can_be_segmented(key, known_keys)
 
 
-@lru_cache(maxsize=1)
+@_versioned_singleton
 def load_manufacturer_phrase_lookup():
     phrases = {}
     for key, manufacturer in load_manufacturer_lookup().items():
@@ -380,7 +443,7 @@ def load_manufacturer_phrase_lookup():
     return dict(sorted(phrases.items(), key=lambda item: len(item[0]), reverse=True))
 
 
-@lru_cache(maxsize=1)
+@_versioned_singleton
 def load_manufacturer_phrase_token_index():
     token_index = {}
     for key, manufacturer in load_manufacturer_phrase_lookup().items():
@@ -694,8 +757,15 @@ def _is_code_equals_manufacturer_assignment(cell_text, candidate, lookup):
 MPN_TOKEN_RE = re.compile(r"(?=[A-Za-z0-9][A-Za-z0-9./_+\-()]{2,49})(?=[A-Za-z0-9./_+\-()]*\d)[A-Za-z0-9][A-Za-z0-9./_+\-()]*[A-Za-z0-9)+]")
 
 
-@lru_cache(maxsize=1)
+@_versioned_singleton
 def load_mpn_lookup_lengths():
+    try:
+        from .bom_directory_store import mpn_lookup_length_rows
+        database_lengths = mpn_lookup_length_rows()
+        if database_lengths is not None:
+            return database_lengths
+    except Exception as exc:
+        logger.debug("Database MPN length index unavailable: %s", exc)
     return sorted(
         {
             len(key)
@@ -712,27 +782,87 @@ def _known_mpn_substrings(value, lookup, max_candidates=16):
     if len(normalized) < 6:
         return []
 
-    matches = []
-    seen = set()
+    if hasattr(lookup, "get_value_matches"):
+        primed_entries = lookup.get_value_matches(normalized)
+        if primed_entries is not None:
+            return [entry.get("mpn") or normalized for entry in primed_entries[:max_candidates]]
+
+    exact_entry = lookup.get(normalized)
+    if exact_entry and any(char.isalpha() for char in normalized) and any(char.isdigit() for char in normalized):
+        return [exact_entry.get("mpn") or normalized]
+
+    candidate_keys = []
+    seen_candidate_keys = set()
     for length in load_mpn_lookup_lengths():
         if length > len(normalized):
             continue
         for start in range(0, len(normalized) - length + 1):
             key = normalized[start:start + length]
-            if key in seen:
-                continue
-            entry = lookup.get(key)
-            if not entry:
+            if key in seen_candidate_keys:
                 continue
             # Embedded numeric-only IDs are risky; exact/separated numeric tokens
             # are still handled by the normal exact lookup path.
             if not (any(char.isalpha() for char in key) and any(char.isdigit() for char in key)):
                 continue
-            seen.add(key)
+            seen_candidate_keys.add(key)
+            candidate_keys.append(key)
+
+    if hasattr(lookup, "get_many"):
+        known_entries = lookup.get_many(candidate_keys, normalized=True)
+    else:
+        known_entries = {key: lookup.get(key) for key in candidate_keys if lookup.get(key)}
+    matches = []
+    for key in candidate_keys:
+        entry = known_entries.get(key)
+        if entry:
             matches.append(entry.get("mpn") or key)
             if len(matches) >= max_candidates:
-                return matches
+                break
     return matches
+
+
+def prime_mpn_lookup(values):
+    """Batch-load exact and embedded MPN relationships before scoring."""
+    lookup = load_mpn_mfr_lookup()
+    if not hasattr(lookup, "get_many"):
+        return
+    keys = set()
+    matches_by_value = {}
+    lengths = load_mpn_lookup_lengths()
+    for value in values or []:
+        normalized = _norm_mpn_lookup_key(value)
+        if not normalized:
+            continue
+        if not hasattr(lookup, "is_known"):
+            keys.add(normalized)
+            continue
+        if lookup.is_known(normalized):
+            keys.add(normalized)
+            matches_by_value[normalized] = [normalized]
+            continue
+        if len(normalized) < 6:
+            matches_by_value[normalized] = []
+            continue
+        seen_candidates = set()
+        matched_keys = []
+        for length in lengths:
+            if length > len(normalized):
+                continue
+            for start in range(0, len(normalized) - length + 1):
+                candidate = normalized[start:start + length]
+                if candidate in seen_candidates:
+                    continue
+                seen_candidates.add(candidate)
+                if not (any(char.isalpha() for char in candidate) and any(char.isdigit() for char in candidate)):
+                    continue
+                if lookup.is_known(candidate):
+                    keys.add(candidate)
+                    matched_keys.append(candidate)
+        matches_by_value[normalized] = matched_keys[:16]
+    lookup.get_many(keys, normalized=True)
+    if hasattr(lookup, "set_value_matches"):
+        for normalized, matched_keys in matches_by_value.items():
+            lookup.set_value_matches(normalized, matched_keys)
 
 
 def candidate_mpn_tokens(value, max_candidates=16, lookup=None):
@@ -870,7 +1000,7 @@ def _score_mpn_candidate(value):
 
 
 @lru_cache(maxsize=16384)
-def _score_mpn_value_cached(text):
+def _score_mpn_value_cached(_version, text):
     if not text:
         return {"score": 0.0, "matched": False, "reason": "blank"}
 
@@ -980,11 +1110,11 @@ def _score_mpn_value_cached(text):
 
 
 def score_mpn_value(value):
-    return dict(_score_mpn_value_cached(_clean(value)))
+    return dict(_score_mpn_value_cached(_directory_cache_version(), _clean(value)))
 
 
 @lru_cache(maxsize=8192)
-def _score_manufacturer_text(text):
+def _score_manufacturer_text(_version, text):
     if not text:
         return {"score": 0.0, "matched": False, "reason": "blank"}
     if _norm_key(text) in UNIT_ONLY_TERMS:
@@ -1026,6 +1156,13 @@ def _score_manufacturer_text(text):
                 best = 0.85
                 best_match = manufacturer
                 break
+    if best >= 0.75 and _looks_like_manufacturer_code_only(text):
+        return {
+            "score": 0.65,
+            "matched": False,
+            "manufacturer": "",
+            "reason": "code-like identifier is not manufacturer-name evidence",
+        }
     return {
         "score": round(best, 4),
         "matched": best >= 0.75,
@@ -1034,7 +1171,7 @@ def _score_manufacturer_text(text):
 
 
 def score_manufacturer_value(value):
-    return dict(_score_manufacturer_text(_clean(value)))
+    return dict(_score_manufacturer_text(_directory_cache_version(), _clean(value)))
 
 
 def clear_scoring_caches():

@@ -84,6 +84,11 @@ if os.environ.get('DATABASE_URL'):
     import dj_database_url
     DATABASES['default'] = dj_database_url.parse(os.environ.get('DATABASE_URL'))
 
+if DATABASES['default']['ENGINE'].endswith('sqlite3'):
+    DATABASES['default'].setdefault('OPTIONS', {})['timeout'] = int(
+        os.environ.get('SQLITE_BUSY_TIMEOUT_SECONDS', '30')
+    )
+
 # REST Framework Configuration
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [],
@@ -195,7 +200,7 @@ LOGGING = {
         },
         'django.db.backends': {
             'handlers': ['console', 'file'],
-            'level': 'DEBUG',
+            'level': os.environ.get('DJANGO_DB_LOG_LEVEL', 'WARNING'),
             'propagate': False,
         }
     },

@@ -58,6 +58,7 @@ from .views import (
     bom_field_pattern_learning,
     bom_field_pattern_teaching,
     bom_field_pattern_apply,
+    bom_directory_confirm,
     bom_normalize,
 
     # Unified Template + Formula views (MappingTemplate based)
@@ -253,6 +254,7 @@ urlpatterns = [
     path('bom/field-patterns/teach/', bom_field_pattern_teaching, name='bom-field-pattern-teaching'),
     path('bom/field-patterns/learn/', bom_field_pattern_learning, name='bom-field-pattern-learning'),
     path('bom/field-patterns/apply/', bom_field_pattern_apply, name='bom-field-pattern-apply'),
+    path('bom/directory/confirm/', bom_directory_confirm, name='bom-directory-confirm'),
     path('bom/normalize/', bom_normalize, name='bom-normalize'),
     path('bom/structures/', bom_structure_patterns, name='bom-structure-patterns'),
     path('bom/structures/match/', bom_structure_match, name='bom-structure-match'),

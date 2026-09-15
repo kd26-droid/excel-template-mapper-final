@@ -1637,6 +1637,7 @@ const api = {
     headers,
     row,
     roles,
+    config = {},
     group,
     entries = [],
     visualPattern = {},
@@ -1644,6 +1645,7 @@ const api = {
     sourceHeader = '',
     alternateDelimiter = '/',
     alternateMode = 'append',
+    alternateJoiner = '',
     ignoredFields = [],
     hasManualEdits = false,
     persist = true,
@@ -1652,6 +1654,7 @@ const api = {
       headers,
       row,
       roles,
+      config,
       group,
       entries,
       visual_pattern: visualPattern,
@@ -1659,6 +1662,7 @@ const api = {
       source_header: sourceHeader,
       alternate_delimiter: alternateDelimiter,
       alternate_mode: alternateMode,
+      alternate_joiner: alternateJoiner,
       ignored_fields: ignoredFields,
       has_manual_edits: hasManualEdits,
       persist,
@@ -1679,6 +1683,16 @@ const api = {
       config,
       groups,
       persist,
+    }, { timeout: 180000 }),
+
+  /** Promote final user-accepted normalized MPN/MFR values into the database directory. */
+  confirmBomDirectory: ({ headers, rows, roles, config, structureFingerprint = '' }) =>
+    axios.post(`${API_URL}/bom/directory/confirm/`, {
+      headers,
+      rows,
+      roles,
+      config,
+      structureFingerprint,
     }, { timeout: 180000 }),
 
   /**

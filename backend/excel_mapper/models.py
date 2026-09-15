@@ -915,8 +915,8 @@ class BomStructurePattern(models.Model):
         db_table = 'excel_mapper_bom_structure_pattern'
         ordering = ['-updated_at']
         indexes = [
-            models.Index(fields=['structure_type', '-updated_at']),
-            models.Index(fields=['signature_hash']),
+            models.Index(fields=['structure_type', '-updated_at'], name='excel_mappe_structu_4f5739_idx'),
+            models.Index(fields=['signature_hash'], name='excel_mappe_signatu_d4af8f_idx'),
         ]
 
     def __str__(self):
@@ -943,6 +943,194 @@ class BomStructurePattern(models.Model):
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'updated_at': self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class ManufacturerDirectoryEntry(models.Model):
+    """Canonical manufacturer used by BOM recognition."""
+
+    STATUS_PENDING = 'pending'
+    STATUS_VERIFIED = 'verified'
+    STATUS_REJECTED = 'rejected'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_VERIFIED, 'Verified'),
+        (STATUS_REJECTED, 'Rejected'),
+    ]
+
+    name = models.CharField(max_length=255)
+    normalized_name = models.CharField(max_length=255, unique=True)
+    source = models.CharField(max_length=64, default='seed')
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    confirmation_count = models.PositiveIntegerField(default=0)
+    usage_count = models.PositiveIntegerField(default=0)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'excel_mapper_manufacturer_directory'
+        ordering = ['name']
+        indexes = [
+            models.Index(fields=['status', 'normalized_name']),
+            models.Index(fields=['name']),
+        ]
+
+    def __str__(self):
+        return self.name
+
+
+class ManufacturerAlias(models.Model):
+    """Searchable manufacturer spelling linked to one canonical manufacturer."""
+
+    manufacturer = models.ForeignKey(
+        ManufacturerDirectoryEntry,
+        on_delete=models.CASCADE,
+        related_name='aliases',
+    )
+    alias = models.CharField(max_length=255)
+    normalized_alias = models.CharField(max_length=255, unique=True)
+    source = models.CharField(max_length=64, default='seed')
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'excel_mapper_manufacturer_alias'
+        ordering = ['alias']
+        indexes = [models.Index(fields=['is_active', 'normalized_alias'])]
+
+    def __str__(self):
+        return f'{self.alias} -> {self.manufacturer.name}'
+
+
+class MpnDirectoryEntry(models.Model):
+    """Canonical MPN and its precomputed recognition signatures."""
+
+    STATUS_PENDING = 'pending'
+    STATUS_VERIFIED = 'verified'
+    STATUS_REJECTED = 'rejected'
+    STATUS_CHOICES = ManufacturerDirectoryEntry.STATUS_CHOICES
+
+    mpn = models.CharField(max_length=255)
+    normalized_mpn = models.CharField(max_length=255, unique=True)
+    exact_pattern = models.CharField(max_length=255, blank=True, default='')
+    grouped_pattern = models.CharField(max_length=255, blank=True, default='')
+    character_classes = models.CharField(max_length=255, blank=True, default='')
+    mpn_length = models.PositiveSmallIntegerField(default=0)
+    source = models.CharField(max_length=64, default='seed')
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    confirmation_count = models.PositiveIntegerField(default=0)
+    usage_count = models.PositiveIntegerField(default=0)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'excel_mapper_mpn_directory'
+        ordering = ['mpn']
+        indexes = [
+            models.Index(fields=['status', 'normalized_mpn']),
+            models.Index(fields=['grouped_pattern']),
+            models.Index(fields=['exact_pattern']),
+        ]
+
+    def __str__(self):
+        return self.mpn
+
+
+class MpnManufacturerPair(models.Model):
+    """Verified or pending relationship between one MPN and manufacturer."""
+
+    STATUS_PENDING = 'pending'
+    STATUS_VERIFIED = 'verified'
+    STATUS_REJECTED = 'rejected'
+    STATUS_CHOICES = ManufacturerDirectoryEntry.STATUS_CHOICES
+
+    mpn = models.ForeignKey(MpnDirectoryEntry, on_delete=models.CASCADE, related_name='manufacturer_pairs')
+    manufacturer = models.ForeignKey(
+        ManufacturerDirectoryEntry,
+        on_delete=models.CASCADE,
+        related_name='mpn_pairs',
+    )
+    source = models.CharField(max_length=64, default='seed')
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    confirmation_count = models.PositiveIntegerField(default=0)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'excel_mapper_mpn_manufacturer_pair'
+        ordering = ['mpn__mpn', 'manufacturer__name']
+        constraints = [
+            models.UniqueConstraint(fields=['mpn', 'manufacturer'], name='unique_mpn_manufacturer_pair'),
+        ]
+        indexes = [models.Index(fields=['status', 'mpn', 'manufacturer'])]
+
+    def __str__(self):
+        return f'{self.mpn.mpn} -> {self.manufacturer.name}'
+
+
+class MpnPatternEntry(models.Model):
+    """Aggregated MPN shape index used by the pattern scorer."""
+
+    pattern_type = models.CharField(max_length=32)
+    signature = models.CharField(max_length=255)
+    occurrence_count = models.PositiveIntegerField(default=0)
+    examples = models.JSONField(default=list, blank=True)
+    source = models.CharField(max_length=64, default='seed')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'excel_mapper_mpn_pattern_entry'
+        ordering = ['pattern_type', 'signature']
+        constraints = [
+            models.UniqueConstraint(fields=['pattern_type', 'signature'], name='unique_mpn_pattern_signature'),
+        ]
+        indexes = [models.Index(fields=['pattern_type', 'signature'])]
+
+    def __str__(self):
+        return f'{self.pattern_type}: {self.signature}'
+
+
+class DirectoryLearningEvent(models.Model):
+    """Audit trail for values learned from a user-confirmed normalized BOM."""
+
+    STATUS_PENDING = 'pending'
+    STATUS_PROMOTED = 'promoted'
+    STATUS_REJECTED = 'rejected'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_PROMOTED, 'Promoted'),
+        (STATUS_REJECTED, 'Rejected'),
+    ]
+
+    structure = models.ForeignKey(
+        BomStructurePattern,
+        on_delete=models.SET_NULL,
+        related_name='directory_learning_events',
+        blank=True,
+        null=True,
+    )
+    structure_signature = models.CharField(max_length=255, blank=True, default='', db_index=True)
+    source_row = models.IntegerField(blank=True, null=True)
+    raw_mpn = models.TextField(blank=True, default='')
+    raw_manufacturer = models.TextField(blank=True, default='')
+    normalized_mpn = models.CharField(max_length=255, blank=True, default='', db_index=True)
+    normalized_manufacturer = models.CharField(max_length=255, blank=True, default='', db_index=True)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    occurrence_count = models.PositiveIntegerField(default=1)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'excel_mapper_directory_learning_event'
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['status', '-created_at'])]
+
+    def __str__(self):
+        return f'{self.raw_mpn or "No MPN"} / {self.raw_manufacturer or "No manufacturer"}'
 
 
 class ProcessingTemplate(models.Model):

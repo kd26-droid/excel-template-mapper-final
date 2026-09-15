@@ -16,6 +16,7 @@ const FACTWISE_PARSE_FIELD_KEYS = [
 const VISUAL_TEACH_INTERPRETATION_ROLES = new Set([
   ...FACTWISE_PARSE_FIELD_KEYS,
   'alternateList',
+  'insertionMarker',
   'groupSeparator',
   'ignore',
 ]);
@@ -81,6 +82,20 @@ export const shouldRepeatVisualTeachGroupSeparator = (selectedText = '') => {
   if (!text.trim()) return false;
   if (text.length > 1) return true;
   return [']', ';', '|', '\n', '\r'].includes(text);
+};
+
+export const clearVisualTeachTagSelection = (tags = [], selection = null) => {
+  const next = Array.isArray(tags) ? [...tags] : [];
+  if (!selection || !next.length) return next;
+
+  const anchor = Number(selection.start);
+  const focus = Number(selection.end);
+  if (!Number.isFinite(anchor) || !Number.isFinite(focus)) return next;
+
+  const start = Math.max(0, Math.min(anchor, focus));
+  const end = Math.min(next.length - 1, Math.max(anchor, focus));
+  for (let index = start; index <= end; index += 1) next[index] = '';
+  return next;
 };
 
 // Adapt backend rows to the editable table's display shape without parsing.

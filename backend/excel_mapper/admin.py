@@ -1,6 +1,20 @@
 from django.contrib import admin
 from django.utils.html import format_html
-from .models import MappingTemplate, GlobalMpnCache, ProviderCredential, IntermediateArtifact, BomWorkflowTemplate, BomStructurePattern, ProcessingTemplate
+from .models import (
+    BomStructurePattern,
+    BomWorkflowTemplate,
+    DirectoryLearningEvent,
+    GlobalMpnCache,
+    IntermediateArtifact,
+    ManufacturerAlias,
+    ManufacturerDirectoryEntry,
+    MappingTemplate,
+    MpnDirectoryEntry,
+    MpnManufacturerPair,
+    MpnPatternEntry,
+    ProcessingTemplate,
+    ProviderCredential,
+)
 
 @admin.register(MappingTemplate)
 class MappingTemplateAdmin(admin.ModelAdmin):
@@ -134,6 +148,73 @@ class BomStructurePatternAdmin(admin.ModelAdmin):
             return format_html('<span style="color: #4caf50; font-weight: 700;">Yes</span>')
         return format_html('<span style="color: #9e9e9e;">No</span>')
     user_confirmed_display.short_description = 'User confirmed'
+
+
+@admin.register(ManufacturerDirectoryEntry)
+class ManufacturerDirectoryEntryAdmin(admin.ModelAdmin):
+    list_display = ('name', 'status', 'source', 'confirmation_count', 'usage_count', 'updated_at')
+    list_filter = ('status', 'source', 'updated_at')
+    search_fields = ('name', 'normalized_name')
+    readonly_fields = ('normalized_name', 'created_at', 'updated_at')
+    ordering = ('name',)
+
+
+@admin.register(ManufacturerAlias)
+class ManufacturerAliasAdmin(admin.ModelAdmin):
+    list_display = ('alias', 'manufacturer', 'source', 'is_active', 'updated_at')
+    list_filter = ('source', 'is_active', 'updated_at')
+    search_fields = ('alias', 'normalized_alias', 'manufacturer__name')
+    readonly_fields = ('normalized_alias', 'created_at', 'updated_at')
+    autocomplete_fields = ('manufacturer',)
+    ordering = ('alias',)
+
+
+@admin.register(MpnDirectoryEntry)
+class MpnDirectoryEntryAdmin(admin.ModelAdmin):
+    list_display = ('mpn', 'status', 'source', 'confirmation_count', 'grouped_pattern', 'updated_at')
+    list_filter = ('status', 'source', 'updated_at')
+    search_fields = ('mpn', 'normalized_mpn', 'exact_pattern', 'grouped_pattern')
+    readonly_fields = ('normalized_mpn', 'exact_pattern', 'grouped_pattern', 'character_classes', 'mpn_length', 'created_at', 'updated_at')
+    ordering = ('mpn',)
+
+
+@admin.register(MpnManufacturerPair)
+class MpnManufacturerPairAdmin(admin.ModelAdmin):
+    list_display = ('mpn', 'manufacturer', 'status', 'source', 'confirmation_count', 'updated_at')
+    list_filter = ('status', 'source', 'updated_at')
+    search_fields = ('mpn__mpn', 'mpn__normalized_mpn', 'manufacturer__name', 'manufacturer__normalized_name')
+    autocomplete_fields = ('mpn', 'manufacturer')
+    readonly_fields = ('created_at', 'updated_at')
+    ordering = ('mpn__mpn', 'manufacturer__name')
+
+
+@admin.register(MpnPatternEntry)
+class MpnPatternEntryAdmin(admin.ModelAdmin):
+    list_display = ('pattern_type', 'signature', 'occurrence_count', 'source', 'updated_at')
+    list_filter = ('pattern_type', 'source', 'updated_at')
+    search_fields = ('signature',)
+    readonly_fields = ('created_at', 'updated_at')
+    ordering = ('pattern_type', '-occurrence_count')
+
+
+@admin.register(DirectoryLearningEvent)
+class DirectoryLearningEventAdmin(admin.ModelAdmin):
+    list_display = ('raw_mpn', 'raw_manufacturer', 'status', 'structure_signature', 'source_row', 'created_at')
+    list_filter = ('status', 'created_at')
+    search_fields = ('raw_mpn', 'raw_manufacturer', 'normalized_mpn', 'normalized_manufacturer', 'structure_signature')
+    readonly_fields = (
+        'structure',
+        'structure_signature',
+        'source_row',
+        'raw_mpn',
+        'raw_manufacturer',
+        'normalized_mpn',
+        'normalized_manufacturer',
+        'occurrence_count',
+        'metadata',
+        'created_at',
+    )
+    ordering = ('-created_at',)
 
 
 @admin.register(ProcessingTemplate)

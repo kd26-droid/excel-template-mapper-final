@@ -12,11 +12,12 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone as datetime_timezone
 from typing import Dict, Any, Optional
 import unicodedata
+import time
 
 import pandas as pd
 from django.conf import settings
 from django.core.cache import cache
-from django.db import IntegrityError
+from django.db import IntegrityError, OperationalError, transaction
 from django.http import FileResponse, Http404, JsonResponse, HttpResponse
 from django.utils import timezone
 from rest_framework import status
@@ -42,16 +43,17 @@ from .delimited_reader import (
     read_delimited_text_safely,
 )
 from .bom_header_mapper import BOMHeaderMapper
-from .services.bom_directory_learning import learn_confirmed_bom_field_patterns
+from .services.bom_directory_learning import learn_confirmed_bom_field_patterns, learn_normalized_bom_rows
 from .services.bom_role_inference import (
     ROLE_KEYS,
+    _bom_pattern_structure_scope,
     build_bom_field_pattern_groups,
     build_bom_field_pattern_teach_result,
     infer_bom_roles,
     normalize_bom_rows,
     save_bom_field_pattern_rule,
 )
-from .services.bom_structure_patterns import build_structure_profile, match_bom_structures
+from .services.bom_structure_patterns import build_structure_profile, learn_bom_structure, match_bom_structures
 from .default_template import (
     get_sfo_template_metadata,
     get_sfo_template_path,
@@ -2134,8 +2136,12 @@ def bom_role_inference(request):
                 'error': 'rows must be a list',
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        result = infer_bom_roles(headers, rows, options=options)
         request_config = config if isinstance(config, dict) else {}
+        inference_options = {
+            **options,
+            'config': request_config,
+        }
+        result = infer_bom_roles(headers, rows, options=inference_options)
         learned_matches = match_bom_structures(
             headers=headers,
             rows=rows,
@@ -2261,6 +2267,28 @@ def bom_normalize(request):
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+def _retry_sqlite_locked_write(operation, attempts=3):
+    """Retry one atomic write when the local SQLite database is briefly busy."""
+    for attempt in range(max(1, attempts)):
+        try:
+            return operation()
+        except OperationalError as exc:
+            is_sqlite_lock = (
+                settings.DATABASES['default']['ENGINE'].endswith('sqlite3')
+                and 'database is locked' in str(exc).lower()
+            )
+            if not is_sqlite_lock or attempt + 1 >= attempts:
+                raise
+            delay = 0.25 * (2 ** attempt)
+            logger.warning(
+                'SQLite was busy while saving BOM patterns; retrying in %.2fs (%s/%s)',
+                delay,
+                attempt + 1,
+                attempts,
+            )
+            time.sleep(delay)
+
+
 @api_view(['POST'])
 def bom_field_pattern_apply(request):
     """Apply all confirmed semantic patterns and return one normalized preview."""
@@ -2269,6 +2297,7 @@ def bom_field_pattern_apply(request):
         rows = request.data.get('rows') or []
         roles = request.data.get('roles') or {}
         config = request.data.get('config') or {}
+        source_signature = request.data.get('sourceSignature') or request.data.get('source_signature') or {}
         groups = request.data.get('groups') or request.data.get('patterns') or []
         persist = request.data.get('persist', True) is not False
         if not isinstance(headers, list):
@@ -2279,6 +2308,8 @@ def bom_field_pattern_apply(request):
             roles = {}
         if not isinstance(config, dict):
             config = {}
+        if not isinstance(source_signature, dict):
+            source_signature = {}
         if not isinstance(groups, list):
             return Response({'success': False, 'error': 'groups must be a list'}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -2294,15 +2325,117 @@ def bom_field_pattern_apply(request):
                 'unresolvedPatternKeys': unresolved,
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        learning = learn_confirmed_bom_field_patterns(groups) if persist else {
-            'success': True,
-            'saved_pattern_rules': [],
+        structure_scope = _bom_pattern_structure_scope(headers, roles, config)
+        structure_profile = build_structure_profile(
+            headers=headers,
+            rows=rows,
+            roles=roles,
+            config=config,
+            source_signature=source_signature,
+        )
+        structure_fingerprint = structure_profile['fingerprint']
+        scoped_groups = []
+        confirmed_rules = {}
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            scoped_group = dict(group)
+            rule = group.get('rule') if isinstance(group.get('rule'), dict) else {}
+            if rule:
+                confirmed_fields = {
+                    field: {**field_rule, 'customerConfirmed': True}
+                    for field, field_rule in (rule.get('fields') or {}).items()
+                    if isinstance(field_rule, dict)
+                }
+                scoped_rule = {
+                    **rule,
+                    'fields': confirmed_fields,
+                    'structureScope': structure_scope,
+                    'structureSignature': structure_scope['signature'],
+                    'structureFingerprint': structure_fingerprint,
+                }
+                scoped_group['rule'] = scoped_rule
+                rule_key = str(
+                    group.get('patternKey')
+                    or scoped_rule.get('patternKey')
+                    or group.get('shape')
+                    or scoped_rule.get('shape')
+                    or ''
+                ).strip()
+                if rule_key:
+                    confirmed_rules[rule_key] = scoped_rule
+            scoped_groups.append(scoped_group)
+
+        reusable_config = dict(config)
+        reusable_config.pop('fieldPatternOverrides', None)
+        reusable_config.pop('field_pattern_overrides', None)
+        reusable_config['fieldPatternRules'] = confirmed_rules
+        applied_config = {
+            **config,
+            'fieldPatternRules': confirmed_rules,
         }
-        normalized = normalize_bom_rows(headers, rows, roles=roles, config=config)
+        normalized = normalize_bom_rows(headers, rows, roles=roles, config=applied_config)
+        saved_structure = None
+        if persist:
+            backend_source_signature = {
+                **source_signature,
+                'headers': headers,
+                'rowSample': rows[:120],
+                'userTouched': True,
+                'mappingSource': 'user_confirmed',
+            }
+            workflow = {
+                'version': 1,
+                'kind': 'confirmed-field-patterns',
+                'userTouched': True,
+                'mappingSource': 'user_confirmed',
+                'roles': roles,
+                'config': reusable_config,
+            }
+            structure_name = str(
+                source_signature.get('fileName')
+                or source_signature.get('file_name')
+                or source_signature.get('sheetName')
+                or source_signature.get('sheet_name')
+                or 'Confirmed BOM structure'
+            ).strip()
+            def persist_confirmed_patterns():
+                with transaction.atomic():
+                    structure, structure_created = learn_bom_structure(
+                        name=structure_name,
+                        headers=headers,
+                        rows=rows,
+                        roles=roles,
+                        config=reusable_config,
+                        source_signature=backend_source_signature,
+                        workflow=workflow,
+                        confidence=1.0,
+                        profile=structure_profile,
+                    )
+                    learning_result = learn_confirmed_bom_field_patterns(
+                        scoped_groups,
+                        structure_scope=structure_scope,
+                        structure_fingerprint=structure.signature_hash,
+                    )
+                    return structure, structure_created, learning_result
+
+            structure, structure_created, learning = _retry_sqlite_locked_write(
+                persist_confirmed_patterns
+            )
+            saved_structure = {
+                **structure.to_dict(),
+                'created': structure_created,
+            }
+        else:
+            learning = {
+                'success': True,
+                'saved_pattern_rules': [],
+            }
         return Response({
             'success': True,
             **normalized,
             'learning': learning,
+            'savedStructure': saved_structure,
         })
     except Exception as exc:
         logger.error("BOM field pattern apply failed: %s", exc, exc_info=True)
@@ -2334,12 +2467,55 @@ def bom_field_pattern_learning(request):
 
 
 @api_view(['POST'])
+def bom_directory_confirm(request):
+    """Promote final user-accepted normalized MPN/MFR values into the global directory."""
+    try:
+        rows = request.data.get('rows') or []
+        headers = request.data.get('headers') or []
+        roles = request.data.get('roles') or {}
+        config = request.data.get('config') or {}
+        if not isinstance(rows, list):
+            return Response({
+                'success': False,
+                'error': 'rows must be a list',
+            }, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(headers, list):
+            headers = []
+        if not isinstance(roles, dict):
+            roles = {}
+        if not isinstance(config, dict):
+            config = {}
+
+        structure_scope = _bom_pattern_structure_scope(headers, roles, config) if headers else {}
+        structure_fingerprint = str(
+            request.data.get('structureFingerprint')
+            or request.data.get('structure_fingerprint')
+            or ''
+        ).strip()
+        result = learn_normalized_bom_rows(
+            rows,
+            status='verified',
+            source='normalizer_continue',
+            structure_scope=structure_scope,
+            structure_fingerprint=structure_fingerprint,
+        )
+        return Response(result)
+    except Exception as exc:
+        logger.error("BOM directory confirmation failed: %s", exc, exc_info=True)
+        return Response({
+            'success': False,
+            'error': str(exc),
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
 def bom_field_pattern_teaching(request):
     """Derive reusable parser rules from one user-corrected teach popup row."""
     try:
         headers = request.data.get('headers') or []
         row = request.data.get('row') or {}
         roles = request.data.get('roles') or {}
+        config = request.data.get('config') or {}
         entries = request.data.get('entries') or []
         group = request.data.get('group') or {}
         visual_pattern = request.data.get('visualPattern') or request.data.get('visual_pattern') or {}
@@ -2347,6 +2523,9 @@ def bom_field_pattern_teaching(request):
         source_header = request.data.get('sourceHeader') or request.data.get('source_header') or ''
         alternate_delimiter = request.data.get('alternateDelimiter') or request.data.get('alternate_delimiter') or '/'
         alternate_mode = request.data.get('alternateMode') or request.data.get('alternate_mode') or 'append'
+        alternate_joiner = request.data.get('alternateJoiner')
+        if alternate_joiner is None:
+            alternate_joiner = request.data.get('alternate_joiner') or ''
         ignored_fields = request.data.get('ignoredFields') or request.data.get('ignored_fields') or []
         has_manual_edits = request.data.get('hasManualEdits') is True or request.data.get('has_manual_edits') is True
         persist = request.data.get('persist', True)
@@ -2363,6 +2542,8 @@ def bom_field_pattern_teaching(request):
             }, status=status.HTTP_400_BAD_REQUEST)
         if not isinstance(roles, dict):
             roles = {}
+        if not isinstance(config, dict):
+            config = {}
         if not isinstance(entries, list):
             entries = []
         if not isinstance(group, dict):
@@ -2374,12 +2555,14 @@ def bom_field_pattern_teaching(request):
             headers=headers,
             row=row,
             roles=roles,
+            config=config,
             entries=entries,
             group=group,
             tagged_spans=tagged_spans,
             source_header=source_header,
             alternate_delimiter=alternate_delimiter,
             alternate_mode=alternate_mode,
+            alternate_joiner=alternate_joiner,
             ignored_fields=ignored_fields,
             visual_pattern=visual_pattern,
             has_manual_edits=has_manual_edits,

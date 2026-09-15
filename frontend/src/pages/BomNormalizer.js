@@ -11,6 +11,7 @@ import {
   Checkbox,
   Chip,
   CircularProgress,
+  Collapse,
   Dialog,
   DialogActions,
   DialogContent,
@@ -84,12 +85,23 @@ import {
 } from '../lib/bomNormalizerAlgorithmRegistry';
 import {
   VISUAL_TEACH_NO_SPLIT,
+  clearVisualTeachTagSelection,
   fieldPatternSampleKey,
   fieldPatternSampleForWorkflowStep,
   normalizeVisualTeachEntries,
   shouldRepeatVisualTeachGroupSeparator,
   visualTeachTagsFromInterpretationSpans,
 } from '../lib/visualTeachParser';
+import {
+  bomNormalizerSourceKey,
+  clearDurableBomNormalizerWorkspace,
+  persistDurableBomNormalizerWorkspace,
+  restoreUserRoleSelections,
+  restoreDurableBomNormalizerWorkspace,
+  restoredConfigureState,
+  selectBomNormalizerWorkspaceSnapshot,
+  shouldRunBomRoleInference,
+} from '../lib/bomNormalizerWorkspace';
 import { useThemeContext } from '../utils/ThemeContext';
 
 const emptyRoles = ROLE_FIELDS.reduce((acc, field) => {
@@ -111,6 +123,7 @@ const ALTERNATE_INHERIT_FIELD_OPTIONS = [
 const DEFAULT_ALTERNATE_INHERIT_FIELDS = [];
 const ALTERNATE_INHERIT_SELECT_ALL_VALUE = '__select_all_alternate_inherit_fields__';
 const MAX_ALTERNATE_COLUMN_GROUPS = 20;
+const FIELD_PATTERN_REVIEW_PAGE_SIZE = 4;
 
 const FIELD_PATTERN_DELIMITER_OPTIONS = [
   { value: 'none', label: 'No split' },
@@ -141,9 +154,16 @@ const FIELD_PATTERN_COMBO_DELIMITER_OPTIONS = [
 ];
 
 const FIELD_PATTERN_RULE_FIELDS = [
-  { key: 'cpn', label: 'CPN', prefix: false },
+  { key: 'cpn', label: 'CPN', prefix: true },
   { key: 'mpn', label: 'MPN', prefix: true },
   { key: 'manufacturer', label: 'Manufacturer', prefix: true },
+  { key: 'description', label: 'Description', prefix: true },
+  { key: 'quantity', label: 'Quantity', prefix: true },
+  { key: 'uom', label: 'UOM', prefix: true },
+  { key: 'level', label: 'Level', prefix: true },
+  { key: 'parent', label: 'Parent / group key', prefix: true },
+  { key: 'notes', label: 'Notes', prefix: true },
+  { key: 'internalNotes', label: 'Internal notes', prefix: true },
 ];
 
 const TEACH_PATTERN_ROLE_LABELS = {
@@ -303,6 +323,7 @@ const uniqueHeaderName = (baseName, existingHeaders = []) => {
 const BOM_NORMALIZER_RETURN_PREFIX = 'bomNormalizer.returnSnapshot.';
 const BOM_NORMALIZER_LATEST_RESULTS_KEY = 'bomNormalizer.latestResultsSnapshot';
 const BOM_NORMALIZER_WORKSPACE_KEY = 'bomNormalizer.workspaceSnapshot.v1';
+const BOM_NORMALIZER_CONFIGURE_DRAFT_KEY = 'bomNormalizer.configureDraft.v1';
 
 const parseStoredJson = (raw) => {
   try {
@@ -313,10 +334,77 @@ const parseStoredJson = (raw) => {
 };
 
 const clearBomNormalizerWorkspace = () => {
+  void clearDurableBomNormalizerWorkspace();
   try {
     window.sessionStorage.removeItem(BOM_NORMALIZER_WORKSPACE_KEY);
+    window.sessionStorage.removeItem(BOM_NORMALIZER_CONFIGURE_DRAFT_KEY);
   } catch (_) {
     // Workspace persistence is best-effort.
+  }
+};
+
+const persistBomNormalizerWorkspaceSnapshot = (snapshot) => {
+  if (!snapshot) return;
+  void persistDurableBomNormalizerWorkspace(snapshot).catch((error) => {
+    console.warn('Could not persist durable BOM normalizer workspace:', error);
+  });
+  const writeSnapshot = (payload) => {
+    window.sessionStorage.setItem(BOM_NORMALIZER_WORKSPACE_KEY, JSON.stringify(payload));
+  };
+
+  try {
+    window.sessionStorage.setItem(BOM_NORMALIZER_CONFIGURE_DRAFT_KEY, JSON.stringify({
+      kind: 'configure-draft',
+      version: 1,
+      savedAt: Date.now(),
+      sourceKey: bomNormalizerSourceKey(snapshot),
+      roles: snapshot.roles || {},
+      config: snapshot.config || {},
+      sourceEndRow: snapshot.sourceEndRow || '',
+      sheetHeaderRowOverride: snapshot.sheetHeaderRowOverride || '',
+      delimiterTouched: Boolean(snapshot.delimiterTouched),
+      parserTouched: Boolean(snapshot.parserTouched),
+      roleColumnLabelModes: snapshot.roleColumnLabelModes || {},
+    }));
+  } catch (draftError) {
+    console.warn('Could not persist BOM normalizer configure draft:', draftError);
+  }
+
+  try {
+    writeSnapshot(snapshot);
+  } catch (err) {
+    try {
+      writeSnapshot({
+        ...snapshot,
+        workbook: snapshot.workbook
+          ? { SheetNames: snapshot.workbook.SheetNames, Sheets: {} }
+          : null,
+        combineItems: (snapshot.combineItems || []).map((item) => ({
+          ...item,
+          workbook: item.workbook
+            ? { SheetNames: item.workbook.SheetNames, Sheets: {} }
+            : null,
+        })),
+      });
+    } catch (innerErr) {
+      try {
+        const {
+          sheetRows: _sheetRows,
+          preparedDataRows: _preparedDataRows,
+          normalizedRows: _normalizedRows,
+          ...lean
+        } = snapshot;
+        writeSnapshot({
+          ...lean,
+          workbook: snapshot.workbook
+            ? { SheetNames: snapshot.workbook.SheetNames, Sheets: {} }
+            : null,
+          combineItems: [],
+        });
+      } catch (finalErr) {
+        console.warn('Could not persist BOM normalizer workspace:', finalErr);
+      }
+    }
   }
 };
 
@@ -439,6 +527,7 @@ const WorksheetSamplePreview = ({
   const sampleRowHeight = clampNumber(sampleLineCount * 17 + 18, 38, 420);
   const minWidth = rowHeaderWidth + cells.reduce((sum, cell) => sum + cell.width, 0);
   const borderColor = '#d9e2ef';
+
 
   return (
     <Box
@@ -3675,9 +3764,28 @@ const rowLooksLikeDeleted = (row, headers) => {
   return false;
 };
 
+const looksLikeCalendarDate = (value) => (
+  /^(?:\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}|\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4})$/i.test(fmt(value))
+);
+
 const rowLooksLikeSectionTitle = (row, headers, roles) => {
   const values = rowValues(row, headers);
   if (!values.length) return true;
+
+  const valueCounts = values.reduce((counts, value) => {
+    const key = normalizeKey(value);
+    if (key) counts.set(key, (counts.get(key) || 0) + 1);
+    return counts;
+  }, new Map());
+  const [dominantKey, dominantCount] = [...valueCounts.entries()]
+    .sort((left, right) => right[1] - left[1])[0] || ['', 0];
+  const dominantValue = values.find((value) => normalizeKey(value) === dominantKey) || '';
+  const otherValues = values.filter((value) => normalizeKey(value) !== dominantKey);
+  if (
+    dominantCount >= 3 &&
+    /[A-Za-z]/.test(dominantValue) &&
+    otherValues.every(looksLikeCalendarDate)
+  ) return true;
 
   const mpnValue = getCell(row, roles.mpn);
   const manufacturerValue = getCell(row, roles.manufacturer);
@@ -3691,9 +3799,12 @@ const rowLooksLikeSectionTitle = (row, headers, roles) => {
   if (values.length <= 2) {
     const text = values.join(' ').trim();
     const compact = text.replace(/[^A-Za-z0-9]/g, '');
-    const mostlyLetters = /^[A-Za-z0-9&/+\-. ]+$/.test(text) && /[A-Za-z]/.test(text);
-    const titleLike = text === text.toUpperCase() || compact.length <= 28;
-    return mostlyLetters && titleLike && !looksLikeMpnToken(text);
+    const hasLetters = /[A-Za-z]/.test(text);
+    const titleLike = text === text.toUpperCase() || compact.length <= 36 || /(?:=|:)\s*\d/.test(text);
+    const hasStandalonePartToken = values.some(
+      (value) => !looksLikeCalendarDate(value) && looksLikeMpnToken(value)
+    );
+    return hasLetters && titleLike && !hasStandalonePartToken;
   }
 
   return Boolean(descriptionValue) && !mpnValue && !quantityValue;
@@ -3885,11 +3996,11 @@ const shouldSkipSourceRow = (row, headers, roles, config) => {
   if (config.skipRepeatedHeaders && rowLooksLikeRepeatedHeader(row, headers)) return true;
   if (config.skipDoNotPopulate && rowLooksLikeDoNotPopulate(row, headers)) return true;
   if (config.skipDeletedRows && rowLooksLikeDeleted(row, headers)) return true;
+  if (config.skipTitleRows && rowLooksLikeSectionTitle(row, headers, roles)) return true;
   const layoutStructure = effectiveStructure(config);
   if (layoutStructure === 'assembly_quantity_matrix') return false;
   if (layoutStructure === 'multi_block_assembly') return false;
   if (config.structure === 'grouped_rows' && hasGroupedRowContext(row, roles)) return false;
-  if (config.skipTitleRows && rowLooksLikeSectionTitle(row, headers, roles)) return true;
   return false;
 };
 
@@ -9198,19 +9309,6 @@ const fieldPatternRuleForGroup = (rules = {}, group = {}) => (
   rules[fieldPatternRuleKey(group)] || { fields: {} }
 );
 
-const fieldSplitRuleTargets = (fieldConfig = {}, groups = []) => {
-  const configuredTargets = (fieldConfig.targetGroups || [])
-    .filter((target) => fmt(target?.shape || target?.patternKey || target?.id));
-  if (configuredTargets.length) return configuredTargets;
-
-  const targetGroupIds = new Set(fieldConfig.groupIds || []);
-  return (groups || []).filter((group) => (
-    !targetGroupIds.size ||
-    targetGroupIds.has(group.id) ||
-    (group.groupIds || []).some((groupId) => targetGroupIds.has(groupId))
-  ));
-};
-
 const expandFieldPatternReviewRows = (group = {}) => {
   const reviewRows = Array.isArray(group.samples) ? [...group.samples] : [];
   const existingSampleKeys = new Set(reviewRows.map(fieldPatternSampleKey));
@@ -9261,6 +9359,67 @@ const expandFieldPatternReviewRows = (group = {}) => {
   return reviewRows;
 };
 
+// A combination sample is a backend-owned, ordered list of pattern
+// occurrences for one complete customer row. Overlay only the user's current
+// edits; never re-detect or regroup values in the browser.
+const editableEntriesForPatternCombinationSample = (
+  sample = {},
+  groups = [],
+  edits = {},
+  fields = FACTWISE_PARSE_FIELDS,
+  config = {}
+) => {
+  const groupsByPatternKey = new Map(
+    (groups || []).map((group) => [fmt(group.patternKey), group])
+  );
+  const combined = [];
+
+  (sample.occurrences || []).forEach((occurrence) => {
+    const patternKey = fmt(occurrence.patternKey);
+    const group = groupsByPatternKey.get(patternKey);
+    const occurrenceId = fmt(occurrence.occurrenceId);
+    const editedEntries = group && occurrenceId
+      ? edits?.[group.id]?.[occurrenceId]?.entries
+      : null;
+    const sourceEntries = Array.isArray(editedEntries) && editedEntries.length
+      ? editedEntries
+      : filterFactwiseEntriesForConfig(occurrence.entries || [], config).map((entry, entryIndex) => ({
+        relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
+        fields: fieldValuesFromBackendFields(entry.fields || {}, fields),
+        sourceColumns: sourceColumnsFromBackendFields(entry.fields || {}, fields),
+      }));
+
+    sourceEntries.forEach((entry, patternEntryIndex) => {
+      combined.push({
+        ...entry,
+        patternKey,
+        occurrenceId,
+        patternEntryIndex,
+        groupId: group?.id || '',
+      });
+    });
+  });
+
+  if (!combined.length) {
+    filterFactwiseEntriesForConfig(sample.entries || [], config).forEach((entry, entryIndex) => {
+      combined.push({
+        relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
+        fields: fieldValuesFromBackendFields(entry.fields || {}, fields),
+        sourceColumns: sourceColumnsFromBackendFields(entry.fields || {}, fields),
+        patternKey: fmt(entry.patternKey),
+        occurrenceId: fmt(entry.occurrenceId),
+        patternEntryIndex: Number(entry.patternEntryIndex ?? entryIndex),
+        groupId: groupsByPatternKey.get(fmt(entry.patternKey))?.id || '',
+      });
+    });
+  }
+
+  return combined.map((entry, index) => ({
+    ...entry,
+    relation: index === 0 ? 'Primary' : `Alternate ${index}`,
+  }));
+};
+
 const areSimilarFieldPatternGroups = (sourceGroup = {}, targetGroup = {}) => {
   const sourceColumns = (sourceGroup.selectedColumns || []).map(normalizeKey).filter(Boolean).sort();
   const targetColumns = (targetGroup.selectedColumns || []).map(normalizeKey).filter(Boolean).sort();
@@ -9283,6 +9442,7 @@ const updateFieldPatternRuleFieldValue = (rules = {}, group = {}, fieldKey, patc
         [fieldKey]: {
           ...((current.fields || {})[fieldKey] || {}),
           ...patch,
+          customerConfirmed: true,
         },
       },
     },
@@ -9338,7 +9498,9 @@ const mergeSuggestedFieldPatternRules = (baseRules = {}, groups = []) => {
     if (!key || !suggested) return;
     const current = nextRules[key] || { fields: {} };
     const currentFields = current.fields || {};
-    const mergedFields = { ...currentFields };
+    const mergedFields = Object.fromEntries(
+      Object.entries(currentFields).filter(([, fieldRule]) => fieldRule?.customerConfirmed === true)
+    );
     Object.entries(suggested.fields).forEach(([fieldKey, suggestion]) => {
       const existing = currentFields[fieldKey] || {};
       const nextFieldRule = {
@@ -9392,6 +9554,7 @@ const VISUAL_TEACH_FIELD_STYLES = {
 
 const VISUAL_TEACH_STRUCTURAL_ROLES = [
   { key: 'alternateList', label: 'Alternate list', color: '#0f766e', bg: '#ccfbf1' },
+  { key: 'insertionMarker', label: 'Insertion marker', color: '#c2410c', bg: '#ffedd5' },
   { key: 'groupSeparator', label: 'Group separator', color: '#b91c1c', bg: '#fee2e2' },
   { key: 'ignore', label: 'Ignore', color: '#64748b', bg: '#f1f5f9' },
 ];
@@ -9759,21 +9922,32 @@ const BomNormalizer = () => {
   const [configureParserScope, setConfigureParserScope] = useState(null);
   const [patternParserOverrides, setPatternParserOverrides] = useState([]);
   const [fieldPatternReviewOpen, setFieldPatternReviewOpen] = useState(false);
+  const [fieldPatternReviewStage, setFieldPatternReviewStage] = useState('patterns');
+  const [fieldPatternFieldFilter, setFieldPatternFieldFilter] = useState('all');
+  const [fieldPatternExpandedPatternKey, setFieldPatternExpandedPatternKey] = useState('');
   const [fieldPatternLoading, setFieldPatternLoading] = useState(false);
   const [fieldPatternGroups, setFieldPatternGroups] = useState([]);
+  const [fieldPatternCombinations, setFieldPatternCombinations] = useState([]);
+  const [fieldPatternReviewRows, setFieldPatternReviewRows] = useState([]);
+  const [fieldPatternReviewPage, setFieldPatternReviewPage] = useState(0);
+  const [fieldPatternReviewSummary, setFieldPatternReviewSummary] = useState({
+    itemCount: 0,
+    sourceRowCount: 0,
+    patternCount: 0,
+    recognizedPatternCount: 0,
+    unrecognizedPatternCount: 0,
+    recognizedPatterns: [],
+    unrecognizedPatterns: [],
+  });
   const [fieldPatternFields, setFieldPatternFields] = useState([]);
   const [selectedFieldPatternId, setSelectedFieldPatternId] = useState('');
-  const [fieldPatternSampleIndexes, setFieldPatternSampleIndexes] = useState({});
-  const [fieldPatternConfirmed, setFieldPatternConfirmed] = useState({});
+  const [selectedFieldPatternCombinationId, setSelectedFieldPatternCombinationId] = useState('');
   const [fieldPatternEdits, setFieldPatternEdits] = useState({});
   const [fieldPatternRuleDrafts, setFieldPatternRuleDrafts] = useState({});
   const [fieldPatternRulesDirty, setFieldPatternRulesDirty] = useState(false);
+  const [fieldPatternSelectedRuleField, setFieldPatternSelectedRuleField] = useState('');
   const [fieldPatternReviewWorkflow, setFieldPatternReviewWorkflow] = useState({ steps: [], nextStep: null });
   const [fieldPatternWorkflowLaunchRevision, setFieldPatternWorkflowLaunchRevision] = useState(0);
-  const [fieldSplitReviewOpen, setFieldSplitReviewOpen] = useState(false);
-  const [fieldSplitSelectedField, setFieldSplitSelectedField] = useState('');
-  const [fieldSplitRuleDrafts, setFieldSplitRuleDrafts] = useState({});
-  const [fieldSplitIdentityGroupDrafts, setFieldSplitIdentityGroupDrafts] = useState({});
   const [visualTeachOpen, setVisualTeachOpen] = useState(false);
   const [visualTeachContext, setVisualTeachContext] = useState(null);
   const [visualTeachTags, setVisualTeachTags] = useState([]);
@@ -9781,16 +9955,18 @@ const BomNormalizer = () => {
   const [visualTeachDrag, setVisualTeachDrag] = useState(null);
   const [visualTeachDelimiter, setVisualTeachDelimiter] = useState('/');
   const [visualTeachAltMode, setVisualTeachAltMode] = useState('append');
+  const [visualTeachAlternateJoiner, setVisualTeachAlternateJoiner] = useState('');
   const [visualTeachEntryOverrides, setVisualTeachEntryOverrides] = useState({});
   const [visualTeachBackendPreview, setVisualTeachBackendPreview] = useState(null);
   const [visualTeachPreviewLoading, setVisualTeachPreviewLoading] = useState(false);
   const [visualTeachPreviewRevision, setVisualTeachPreviewRevision] = useState(0);
+  const [visualTeachSourceRowExpanded, setVisualTeachSourceRowExpanded] = useState(false);
   const visualTeachPreviewRequestRef = useRef(0);
   const visualTeachPreviewProcessedRef = useRef(0);
   const visualTeachBackendEntriesRef = useRef([]);
   const fieldPatternInferenceCacheRef = useRef({ key: '', data: null });
   const fieldPatternInferenceInFlightRef = useRef({ key: '', promise: null });
-  const fieldPatternAutoOpenedStepIdRef = useRef('');
+  const fieldPatternReviewContentRef = useRef(null);
   // Parse Fields edits wait here until Run normalization. Applying them the
   // moment Apply is clicked rewrote the sheet before the user had walked the
   // remaining patterns, which made a review step that changes nothing on its own
@@ -9886,6 +10062,10 @@ const BomNormalizer = () => {
       const response = await api.inferBomRoles({
         headers: safeHeaders,
         rows: safeRows.slice(0, 250),
+        config: {
+          skipTitleRows: Boolean(config.skipTitleRows),
+          skipRepeatedHeaders: Boolean(config.skipRepeatedHeaders),
+        },
         sourceSignature: {
           fileName,
           sheetName,
@@ -9911,11 +10091,16 @@ const BomNormalizer = () => {
       console.warn('Backend BOM role inference failed; leaving role mappings empty.', err);
       return rolesForMultiBlockAssembly(safeHeaders, emptyRoles);
     }
-  }, [fileName, headerRowIndex, selectedSheetNames, sheetName, sheetScope]);
+  }, [config.skipRepeatedHeaders, config.skipTitleRows, fileName, headerRowIndex, selectedSheetNames, sheetName, sheetScope]);
 
   useEffect(() => {
-    if (currentStep > 2 || restoreInFlightRef.current) return undefined;
-    if (!headers.length || !dataRows.length) return undefined;
+    if (!shouldRunBomRoleInference({
+      currentStep,
+      restoreInFlight: restoreInFlightRef.current,
+      parserTouched,
+      headerCount: headers.length,
+      rowCount: dataRows.length,
+    })) return undefined;
 
     const inferenceKey = [
       sheetScope,
@@ -9924,6 +10109,8 @@ const BomNormalizer = () => {
       sourceEndRow || '',
       headers.join('\u001f'),
       dataRows.length,
+      config.skipTitleRows ? 'skip-titles' : 'keep-titles',
+      config.skipRepeatedHeaders ? 'skip-headers' : 'keep-headers',
       restoreInferenceNonce,
     ].join('\u001e');
     if (backendRoleInferenceKeyRef.current === inferenceKey) return undefined;
@@ -9959,7 +10146,7 @@ const BomNormalizer = () => {
     return () => {
       cancelled = true;
     };
-  }, [currentStep, dataRows, headerRowIndex, headers, inferNormalizerRoles, parserTouched, restoreInferenceNonce, sheetName, sheetScope, sourceEndRow]);
+  }, [config.skipRepeatedHeaders, config.skipTitleRows, currentStep, dataRows, headerRowIndex, headers, inferNormalizerRoles, parserTouched, restoreInferenceNonce, sheetName, sheetScope, sourceEndRow]);
 
   const sourceRowsExcludedByLimit = Math.max(0, sourceDataRows.length - dataRows.length);
   const sourceLimitActive = Boolean(sourceEndRow && sourceRowsExcludedByLimit > 0);
@@ -10712,30 +10899,39 @@ const BomNormalizer = () => {
     fieldPatternGroups[0] ||
     null
   ), [fieldPatternGroups, selectedFieldPatternId]);
-  const fieldPatternWorkflowNextStep = fieldPatternReviewWorkflow?.nextStep || null;
-  const fieldSplitFields = fieldPatternWorkflowNextStep?.type === 'split_fields'
-    ? (fieldPatternWorkflowNextStep.fields || [])
-    : [];
-  const fieldSplitIdentityGroups = fieldPatternWorkflowNextStep?.type === 'split_fields'
-    ? (fieldPatternWorkflowNextStep.identityGroups || [])
-    : [];
-  const selectedFieldSplitConfig = fieldSplitFields.find(
-    (fieldConfig) => fieldConfig.field === fieldSplitSelectedField
-  ) || fieldSplitFields[0] || null;
-  const selectedFieldSplitRule = selectedFieldSplitConfig
-    ? (fieldSplitRuleDrafts[selectedFieldSplitConfig.field] || {
-      delimiter: 'none',
-      customDelimiter: '',
-      stripPrefix: '',
-      prefixMode: 'literal',
-    })
-    : { delimiter: 'none', customDelimiter: '', stripPrefix: '', prefixMode: 'literal' };
-  const selectedFieldSplitRuleDefinition = FIELD_PATTERN_RULE_FIELDS.find(
-    (field) => field.key === selectedFieldSplitConfig?.field
-  );
-  const selectedFieldSplitPreview = selectedFieldSplitConfig?.previews?.[
-    selectedFieldSplitRule.delimiter || 'none'
-  ] || [];
+  const fieldPatternReviewPatterns = useMemo(() => ([
+    ...(fieldPatternReviewSummary.recognizedPatterns || []).map((pattern) => ({
+      ...pattern,
+      recognized: true,
+    })),
+    ...(fieldPatternReviewSummary.unrecognizedPatterns || []).map((pattern) => ({
+      ...pattern,
+      recognized: false,
+    })),
+  ].sort((left, right) => (
+    Number(left.firstSourceRow || Number.MAX_SAFE_INTEGER) -
+    Number(right.firstSourceRow || Number.MAX_SAFE_INTEGER)
+  ))), [fieldPatternReviewSummary]);
+  const fieldPatternFieldFilterOptions = useMemo(() => ([
+    { key: 'all', label: 'All mapped fields' },
+    ...FIELD_PATTERN_RULE_FIELDS
+      .filter((field) => fmt(roles?.[field.key]))
+      .map((field) => ({ key: field.key, label: field.label })),
+  ]), [roles]);
+  const filteredFieldPatternReviewPatterns = useMemo(() => (
+    fieldPatternReviewPatterns.filter((pattern) => (
+      fieldPatternFieldFilter === 'all' ||
+      (pattern.mappedFields || []).includes(fieldPatternFieldFilter)
+    ))
+  ), [fieldPatternFieldFilter, fieldPatternReviewPatterns]);
+  const mappedFieldPatternRuleOptions = useMemo(() => (
+    FIELD_PATTERN_RULE_FIELDS
+      .map((field) => ({ ...field, sourceColumn: fmt(roles?.[field.key]) }))
+      .filter((field) => field.sourceColumn && headers.includes(field.sourceColumn))
+  ), [headers, roles]);
+  const selectedFieldPatternRuleOption = mappedFieldPatternRuleOptions.find(
+    (field) => field.key === fieldPatternSelectedRuleField
+  ) || mappedFieldPatternRuleOptions[0] || null;
   const visualTeachMappedFields = useMemo(() => {
     const sourceColumn = fmt(visualTeachContext?.sourceColumn);
     const workflowFields = visualTeachContext?.workflowStep?.mappedFields || [];
@@ -10752,15 +10948,19 @@ const BomNormalizer = () => {
   const visualTeachDialogTitle = visualTeachBackendPreview?.title ||
     visualTeachContext?.workflowStep?.title ||
     'Confirm pattern';
-  const visualTeachAllowAlternates = visualTeachMappedFieldKeys.includes('mpn') &&
+  const visualTeachAllowAlternates = Boolean(
+    visualTeachContext?.workflowStep?.hasAlternateList ??
+    visualTeachContext?.group?.hasAlternateList
+  ) && visualTeachMappedFieldKeys.includes('mpn') &&
     normalizerConfig.alternateLayout !== 'already_separate_rows';
   const visualTeachRoleOptions = useMemo(() => [
     ...visualTeachMappedFields.map((field) => ({
       ...field,
       ...(VISUAL_TEACH_FIELD_STYLES[field.key] || { color: '#334155', bg: '#f1f5f9' }),
     })),
-    ...(visualTeachAllowAlternates ? [VISUAL_TEACH_STRUCTURAL_ROLES[0]] : []),
-    ...VISUAL_TEACH_STRUCTURAL_ROLES.slice(1),
+    ...VISUAL_TEACH_STRUCTURAL_ROLES.filter((role) => (
+      visualTeachAllowAlternates || !['alternateList', 'insertionMarker'].includes(role.key)
+    )),
   ], [visualTeachAllowAlternates, visualTeachMappedFields]);
   const visualTeachPreparedTags = visualTeachTags;
   const visualTeachIgnoredFields = useMemo(() => {
@@ -10799,13 +10999,6 @@ const BomNormalizer = () => {
     }
     return null;
   }, [fieldPatternReviewWorkflow, visualTeachContext]);
-  const allFieldPatternGroupsConfirmed = useMemo(() => (
-    fieldPatternGroups.length > 0 &&
-    fieldPatternGroups.every((group) => fieldPatternConfirmed[group.id] !== false)
-  ), [fieldPatternConfirmed, fieldPatternGroups]);
-  const pendingFieldPatternConfirmationCount = useMemo(() => (
-    fieldPatternGroups.filter((group) => fieldPatternConfirmed[group.id] === false).length
-  ), [fieldPatternConfirmed, fieldPatternGroups]);
   const selectedSlashVariantStaged = Boolean(
     selectedPatternStagedEdit && String(selectedPatternStagedEdit.summary || '').includes('slash variants')
   );
@@ -11419,10 +11612,10 @@ const BomNormalizer = () => {
         setPreparedDataRows(snapshot.preparedDataRows || []);
         setRoles((prev) => ({
           ...prev,
-          ...sanitizeRestoredRolesForValues(
+          ...restoreUserRoleSelections(
             snapshot.roles || {},
             snapshot.preparedHeaders || getNormalizedExportColumns(restoredRows),
-            snapshot.preparedDataRows || []
+            Object.keys(emptyRoles)
           ),
         }));
         setConfig((prev) => ({ ...prev, ...sanitizeNormalizerConfig(snapshot.config || {}) }));
@@ -11474,95 +11667,127 @@ const BomNormalizer = () => {
       workspaceRestoredRef.current = true;
       return;
     }
-
-    const snapshot = parseStoredJson(window.sessionStorage.getItem(BOM_NORMALIZER_WORKSPACE_KEY));
-    workspaceRestoredRef.current = true;
-    if (!snapshot || snapshot.kind !== 'workspace') return;
-    if (!snapshot.workbook && !snapshot.combineItems?.length && !snapshot.mergePreview && !snapshot.normalizedRows?.length) return;
-
-    const shouldRefreshAutoRoles = !snapshot.parserTouched && Number(snapshot.currentStep || 0) <= 2;
+    let cancelled = false;
     restoreInFlightRef.current = true;
-    setTimeout(() => {
-      restoreInFlightRef.current = false;
-      if (shouldRefreshAutoRoles) {
-        backendRoleInferenceKeyRef.current = '';
-        setRestoreInferenceNonce((value) => value + 1);
-      }
-    }, 0);
 
-    const restoredWorkbook = snapshot.workbook?.SheetNames?.length
-      ? {
-        SheetNames: snapshot.workbook.SheetNames,
-        Sheets: snapshot.workbook.Sheets || {},
+    const restoreWorkspace = async () => {
+      const sessionSnapshot = parseStoredJson(
+        window.sessionStorage.getItem(BOM_NORMALIZER_WORKSPACE_KEY)
+      );
+      const durableSnapshot = await restoreDurableBomNormalizerWorkspace();
+      if (cancelled) return;
+
+      const snapshot = selectBomNormalizerWorkspaceSnapshot(sessionSnapshot, durableSnapshot);
+      workspaceRestoredRef.current = true;
+      if (!snapshot || snapshot.kind !== 'workspace') {
+        restoreInFlightRef.current = false;
+        return;
       }
-      : null;
-    const restoredCombineItems = (snapshot.combineItems || [])
-      .filter((item) => item.workbook?.SheetNames?.length)
-      .map((item) => ({
-        ...item,
-        file: null,
-        workbook: {
-          SheetNames: item.workbook.SheetNames,
-          Sheets: item.workbook.Sheets || {},
-        },
+      if (!snapshot.workbook && !snapshot.combineItems?.length && !snapshot.mergePreview && !snapshot.normalizedRows?.length) {
+        restoreInFlightRef.current = false;
+        return;
+      }
+
+      const configureDraft = parseStoredJson(
+        window.sessionStorage.getItem(BOM_NORMALIZER_CONFIGURE_DRAFT_KEY)
+      );
+      const restoredConfigure = restoredConfigureState(snapshot, configureDraft);
+      const shouldRefreshAutoRoles = !restoredConfigure.parserTouched && Number(snapshot.currentStep || 0) <= 2;
+
+      const restoredWorkbook = snapshot.workbook?.SheetNames?.length
+        ? {
+          SheetNames: snapshot.workbook.SheetNames,
+          Sheets: snapshot.workbook.Sheets || {},
+        }
+        : null;
+      const restoredCombineItems = (snapshot.combineItems || [])
+        .filter((item) => item.workbook?.SheetNames?.length)
+        .map((item) => ({
+          ...item,
+          file: null,
+          workbook: {
+            SheetNames: item.workbook.SheetNames,
+            Sheets: item.workbook.Sheets || {},
+          },
+        }));
+      const restoredStep = Number(snapshot.currentStep || 0);
+
+      setWorkbook(restoredWorkbook);
+      setFileName(snapshot.fileName || '');
+      setSheetName(snapshot.sheetName || restoredWorkbook?.SheetNames?.[0] || '');
+      setSheetScope(snapshot.sheetScope || 'single');
+      setSelectedSheetNames(snapshot.selectedSheetNames || (restoredWorkbook?.SheetNames?.length ? [restoredWorkbook.SheetNames[0]] : []));
+      setSheetRows(snapshot.sheetRows || []);
+      setHeaderRowIndex(snapshot.headerRowIndex || 0);
+      setSheetHeaderRowOverride(restoredConfigure.sheetHeaderRowOverride || '');
+      setSourceEndRow(restoredConfigure.sourceEndRow || '');
+      setPreparedHeaders(snapshot.preparedHeaders || []);
+      setPreparedDataRows(snapshot.preparedDataRows || []);
+      setRoles((prev) => ({
+        ...prev,
+        ...restoreUserRoleSelections(
+          restoredConfigure.roles || {},
+          snapshot.preparedHeaders || [],
+          Object.keys(emptyRoles)
+        ),
       }));
-    const restoredStep = Number(snapshot.currentStep || 0);
+      setConfig((prev) => ({ ...prev, ...sanitizeNormalizerConfig(restoredConfigure.config || {}) }));
+      setPatternParserOverrides(snapshot.patternParserOverrides || []);
+      setStagedPatternEdits(snapshot.stagedPatternEdits || []);
+      setNormalizedRows(snapshot.normalizedRows || []);
+      setCurrentStep(restoredWorkbook
+        ? (restoredStep >= 4 ? 4 : 2)
+        : (restoredStep >= 4 ? 4 : 0));
+      setProgress(snapshot.progress || { processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
+      setDelimiterTouched(Boolean(restoredConfigure.delimiterTouched));
+      setParserTouched(Boolean(restoredConfigure.parserTouched));
+      setSkipSourceSetupForMerge(Boolean(snapshot.skipSourceSetupForMerge));
+      setNormalizationSummary(snapshot.normalizationSummary || null);
+      setLowConfidenceOnly(Boolean(snapshot.lowConfidenceOnly));
+      setFactwiseConfig((prev) => ({ ...prev, ...(snapshot.factwiseConfig || {}) }));
+      setTagConfig((prev) => ({ ...prev, ...(snapshot.tagConfig || {}) }));
+      setBomStructureAnswers(snapshot.bomStructureAnswers || null);
+      setBomStructureSeed(snapshot.bomStructureSeed || null);
+      setRoleColumnLabelModes(restoredConfigure.roleColumnLabelModes || {});
+      setCombineItems(restoredCombineItems);
+      setCombineError(snapshot.combineError || '');
+      setMergeChainMessage(snapshot.mergeChainMessage || '');
+      setMergeSources(snapshot.mergeSources || []);
+      setMergeStage(snapshot.mergeStage || 'sources');
+      setMergeConfig((prev) => ({ ...prev, ...(snapshot.mergeConfig || {}) }));
+      setMergePreview(snapshot.mergePreview || null);
+      setMergePreviewFilter(snapshot.mergePreviewFilter || 'all');
+      setMergePreviewSearch(snapshot.mergePreviewSearch || '');
+      setMergePreviewPage(snapshot.mergePreviewPage || 0);
+      setMergeVisibleColumns(snapshot.mergeVisibleColumns || snapshot.mergePreview?.headers || []);
+      setMergeColumnWidths(snapshot.mergeColumnWidths || {});
+      setPdfRangeEnabled(Boolean(snapshot.pdfRangeEnabled));
+      setPdfRanges(snapshot.pdfRanges?.length ? snapshot.pdfRanges : [
+        { name: 'Section 1', pages: '' },
+        { name: 'Section 2', pages: '' },
+      ]);
+      setError('');
 
-    setWorkbook(restoredWorkbook);
-    setFileName(snapshot.fileName || '');
-    setSheetName(snapshot.sheetName || restoredWorkbook?.SheetNames?.[0] || '');
-    setSheetScope(snapshot.sheetScope || 'single');
-    setSelectedSheetNames(snapshot.selectedSheetNames || (restoredWorkbook?.SheetNames?.length ? [restoredWorkbook.SheetNames[0]] : []));
-    setSheetRows(snapshot.sheetRows || []);
-    setHeaderRowIndex(snapshot.headerRowIndex || 0);
-    setSheetHeaderRowOverride(snapshot.sheetHeaderRowOverride || '');
-    setSourceEndRow(snapshot.sourceEndRow || '');
-    setPreparedHeaders(snapshot.preparedHeaders || []);
-    setPreparedDataRows(snapshot.preparedDataRows || []);
-    setRoles((prev) => ({
-      ...prev,
-      ...sanitizeRestoredRolesForValues(
-        snapshot.roles || {},
-        snapshot.preparedHeaders || [],
-        snapshot.preparedDataRows || []
-      ),
-    }));
-    setConfig((prev) => ({ ...prev, ...sanitizeNormalizerConfig(snapshot.config || {}) }));
-    setPatternParserOverrides(snapshot.patternParserOverrides || []);
-    setStagedPatternEdits(snapshot.stagedPatternEdits || []);
-    setNormalizedRows(snapshot.normalizedRows || []);
-    setCurrentStep(restoredWorkbook
-      ? (restoredStep >= 4 ? 4 : 2)
-      : (restoredStep >= 4 ? 4 : 0));
-    setProgress(snapshot.progress || { processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
-    setDelimiterTouched(Boolean(snapshot.delimiterTouched));
-    setParserTouched(Boolean(snapshot.parserTouched));
-    setSkipSourceSetupForMerge(Boolean(snapshot.skipSourceSetupForMerge));
-    setNormalizationSummary(snapshot.normalizationSummary || null);
-    setLowConfidenceOnly(Boolean(snapshot.lowConfidenceOnly));
-    setFactwiseConfig((prev) => ({ ...prev, ...(snapshot.factwiseConfig || {}) }));
-    setTagConfig((prev) => ({ ...prev, ...(snapshot.tagConfig || {}) }));
-    setBomStructureAnswers(snapshot.bomStructureAnswers || null);
-    setBomStructureSeed(snapshot.bomStructureSeed || null);
-    setRoleColumnLabelModes(snapshot.roleColumnLabelModes || {});
-    setCombineItems(restoredCombineItems);
-    setCombineError(snapshot.combineError || '');
-    setMergeChainMessage(snapshot.mergeChainMessage || '');
-    setMergeSources(snapshot.mergeSources || []);
-    setMergeStage(snapshot.mergeStage || 'sources');
-    setMergeConfig((prev) => ({ ...prev, ...(snapshot.mergeConfig || {}) }));
-    setMergePreview(snapshot.mergePreview || null);
-    setMergePreviewFilter(snapshot.mergePreviewFilter || 'all');
-    setMergePreviewSearch(snapshot.mergePreviewSearch || '');
-    setMergePreviewPage(snapshot.mergePreviewPage || 0);
-    setMergeVisibleColumns(snapshot.mergeVisibleColumns || snapshot.mergePreview?.headers || []);
-    setMergeColumnWidths(snapshot.mergeColumnWidths || {});
-    setPdfRangeEnabled(Boolean(snapshot.pdfRangeEnabled));
-    setPdfRanges(snapshot.pdfRanges?.length ? snapshot.pdfRanges : [
-      { name: 'Section 1', pages: '' },
-      { name: 'Section 2', pages: '' },
-    ]);
-    setError('');
+      setTimeout(() => {
+        restoreInFlightRef.current = false;
+        if (shouldRefreshAutoRoles) {
+          backendRoleInferenceKeyRef.current = '';
+          setRestoreInferenceNonce((value) => value + 1);
+        }
+      }, 0);
+    };
+
+    void restoreWorkspace().catch((err) => {
+      if (cancelled) return;
+      workspaceRestoredRef.current = true;
+      restoreInFlightRef.current = false;
+      setError(err.message || 'Could not restore the BOM Normalizer workspace.');
+    });
+
+    return () => {
+      cancelled = true;
+      if (!workspaceRestoredRef.current) restoreInFlightRef.current = false;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.state]);
 
@@ -11585,49 +11810,38 @@ const BomNormalizer = () => {
 
     const timeoutId = setTimeout(() => {
       const snapshot = buildWorkspaceSnapshot();
-      const writeSnapshot = (payload) => {
-        window.sessionStorage.setItem(BOM_NORMALIZER_WORKSPACE_KEY, JSON.stringify(payload));
-      };
-
-      try {
-        writeSnapshot(snapshot);
-      } catch (err) {
-        try {
-          writeSnapshot({
-            ...snapshot,
-            workbook: snapshot.workbook
-              ? { SheetNames: snapshot.workbook.SheetNames, Sheets: {} }
-              : null,
-            combineItems: (snapshot.combineItems || []).map((item) => ({
-              ...item,
-              workbook: item.workbook
-                ? { SheetNames: item.workbook.SheetNames, Sheets: {} }
-                : null,
-            })),
-          });
-        } catch (innerErr) {
-          try {
-            const {
-              sheetRows: _sheetRows,
-              preparedDataRows: _preparedDataRows,
-              normalizedRows: _normalizedRows,
-              ...lean
-            } = snapshot;
-            writeSnapshot({
-              ...lean,
-              workbook: snapshot.workbook
-                ? { SheetNames: snapshot.workbook.SheetNames, Sheets: {} }
-                : null,
-              combineItems: [],
-            });
-          } catch (finalErr) {
-            console.warn('Could not persist BOM normalizer workspace:', finalErr);
-          }
-        }
-      }
+      persistBomNormalizerWorkspaceSnapshot(snapshot);
     }, 250);
 
     return () => clearTimeout(timeoutId);
+  }, [
+    buildWorkspaceSnapshot,
+    combineItems.length,
+    currentStep,
+    mergePreview,
+    mergeSources.length,
+    normalizedRows.length,
+    workbook,
+  ]);
+
+  useEffect(() => {
+    if (!workspaceRestoredRef.current) return undefined;
+    const persistBeforeRefresh = () => {
+      if (restoreInFlightRef.current) return;
+      const hasWorkspace = Boolean(
+        workbook ||
+        combineItems.length ||
+        mergeSources.length ||
+        mergePreview ||
+        normalizedRows.length ||
+        currentStep > 0
+      );
+      if (hasWorkspace) {
+        persistBomNormalizerWorkspaceSnapshot(buildWorkspaceSnapshot());
+      }
+    };
+    window.addEventListener('pagehide', persistBeforeRefresh);
+    return () => window.removeEventListener('pagehide', persistBeforeRefresh);
   }, [
     buildWorkspaceSnapshot,
     combineItems.length,
@@ -11880,11 +12094,41 @@ const BomNormalizer = () => {
     const nextSelectedSheets = useRequestedSelection
       ? requestedSheets
       : nextSheetScope === 'all' ? nextWorkbook.SheetNames : [preferredSheet];
+    const reconstructedWorkspace = {
+      fileName: nextFileName,
+      sheetName: nextSelectedSheets[0] || preferredSheet,
+      sheetScope: nextSheetScope,
+      selectedSheetNames: nextSelectedSheets,
+      headerRowIndex: prepared.headerRowIndex,
+      preparedHeaders: nextHeaders,
+    };
+    const configureDraft = parseStoredJson(
+      window.sessionStorage.getItem(BOM_NORMALIZER_CONFIGURE_DRAFT_KEY)
+    );
+    const restoredConfigure = restoredConfigureState(reconstructedWorkspace, configureDraft);
+    const hasMatchingConfigureDraft = restoredConfigure === configureDraft;
+    const detectedConfig = nextConfigForDetectedStructure({ bomLayout: 'none' }, nextStructure, {
+      headers: nextHeaders,
+      rows: prepared.dataRows.slice(0, 120),
+      roles: nextRoles,
+    });
+    const restoredRoles = hasMatchingConfigureDraft
+      ? restoreUserRoleSelections(
+        restoredConfigure.roles || {},
+        nextHeaders,
+        Object.keys(emptyRoles)
+      )
+      : nextRoles;
+    const restoredConfig = hasMatchingConfigureDraft
+      ? sanitizeNormalizerConfig(restoredConfigure.config || {})
+      : {};
 
-    setSheetHeaderRowOverride(useRequestedSelection && options.headerRow ? String(options.headerRow) : '');
+    setSheetHeaderRowOverride(hasMatchingConfigureDraft
+      ? (restoredConfigure.sheetHeaderRowOverride || '')
+      : (useRequestedSelection && options.headerRow ? String(options.headerRow) : ''));
     setWorkbook(nextWorkbook);
     setFileName(nextFileName);
-    setSheetName(nextSelectedSheets[0] || preferredSheet);
+    setSheetName(reconstructedWorkspace.sheetName);
     setSheetScope(nextSheetScope);
     setSelectedSheetNames(nextSelectedSheets);
     setSheetRows(prepared.sheetRows);
@@ -11892,18 +12136,22 @@ const BomNormalizer = () => {
     setPreparedHeaders(prepared.headers);
     setPreparedDataRows(prepared.dataRows);
     setPatternParserOverrides([]);
-    setSourceEndRow('');
-    setRoles(nextRoles);
-    setConfig((prev) => nextConfigForDetectedStructure({ ...prev, bomLayout: 'none' }, nextStructure, {
-      headers: nextHeaders,
-      rows: prepared.dataRows.slice(0, 120),
-      roles: nextRoles,
+    setSourceEndRow(hasMatchingConfigureDraft ? (restoredConfigure.sourceEndRow || '') : '');
+    setRoles(restoredRoles);
+    setConfig((prev) => ({
+      ...prev,
+      ...detectedConfig,
+      ...restoredConfig,
+      ...(hasMatchingConfigureDraft && restoredConfig.alternateColumnGroups ? {
+        alternateColumnGroups: resolveSavedAlternateGroups(restoredConfig.alternateColumnGroups, nextHeaders),
+      } : {}),
     }));
     setNormalizedRows([]);
     setCurrentStep(2);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
-    setDelimiterTouched(false);
-    setParserTouched(false);
+    setDelimiterTouched(hasMatchingConfigureDraft && Boolean(restoredConfigure.delimiterTouched));
+    setParserTouched(hasMatchingConfigureDraft && Boolean(restoredConfigure.parserTouched));
+    setRoleColumnLabelModes(hasMatchingConfigureDraft ? (restoredConfigure.roleColumnLabelModes || {}) : {});
     setSkipSourceSetupForMerge(false);
     setNormalizationSummary(null);
     setConfirmOpen(false);
@@ -12679,7 +12927,13 @@ const BomNormalizer = () => {
 
     setBusy(true);
     setError('');
-    api.uploadFiles(formData)
+    api.confirmBomDirectory({
+      headers,
+      rows: handoffRows,
+      roles,
+      config,
+    })
+      .then(() => api.uploadFiles(formData))
       .then(async (response) => {
         const sessionId = response.data?.session_id;
         if (!sessionId) throw new Error('Upload response missing session id.');
@@ -12783,6 +13037,7 @@ const BomNormalizer = () => {
     factwiseConfig,
     fileName,
     headerRowIndex,
+    headers,
     location.state,
     lowConfidenceOnly,
     navigate,
@@ -13091,8 +13346,18 @@ const BomNormalizer = () => {
   const handleRoleChange = useCallback((role, header) => {
     setParserTouched(true);
     setFieldPatternGroups([]);
+    setFieldPatternCombinations([]);
+    setFieldPatternReviewRows([]);
+    setFieldPatternReviewSummary({
+      itemCount: 0,
+      sourceRowCount: 0,
+      patternCount: 0,
+      recognizedPatternCount: 0,
+      unrecognizedPatternCount: 0,
+      recognizedPatterns: [],
+      unrecognizedPatterns: [],
+    });
     setFieldPatternEdits({});
-    setFieldPatternConfirmed({});
     setRoles((prev) => ({ ...prev, [role]: header }));
   }, []);
 
@@ -13576,6 +13841,13 @@ const BomNormalizer = () => {
       ? ruleOverride
       : (Object.keys(fieldPatternRuleDrafts || {}).length ? fieldPatternRuleDrafts : (normalizerConfig.fieldPatternRules || {}));
 
+    if (!options.preserveReviewState) {
+      setFieldPatternReviewStage('patterns');
+      setFieldPatternFieldFilter('all');
+      setFieldPatternExpandedPatternKey('');
+      setVisualTeachOpen(false);
+    }
+
     const selectedColumns = [...new Set(
       [
         ...Object.values(roles),
@@ -13591,7 +13863,7 @@ const BomNormalizer = () => {
         .filter((header) => header && headers.includes(header))
     )];
 
-    const maxInferRows = 500;
+    const maxInferRows = Math.min(dataRows.length, 10000);
     const sampleLimitPerGroup = 4;
     const totalSampleLimit = 64;
     const discoverySampleLimitPerGroup = 3;
@@ -13626,6 +13898,7 @@ const BomNormalizer = () => {
           fieldPatternRules: activeRuleDrafts,
           includeAllRows: true,
           completedReviewStepIds: options.completedReviewStepIds || [],
+          reviewContractVersion: 2,
         },
       };
       const requestKey = JSON.stringify(inferencePayload);
@@ -13656,11 +13929,29 @@ const BomNormalizer = () => {
           }
         }
       }
-      const groups = (responseData?.patterns || responseData?.groups || []).map((group) => ({
+      const backendReviewGroups = responseData?.reviewGroups || (
+        responseData?.patterns?.length ? responseData.patterns : (responseData?.groups || [])
+      );
+      const groups = backendReviewGroups.map((group) => ({
         ...group,
         samples: expandFieldPatternReviewRows(group),
       }));
+      const combinations = Array.isArray(responseData?.patternCombinations)
+        ? responseData.patternCombinations
+        : [];
+      const reviewRows = Array.isArray(responseData?.reviewRows)
+        ? responseData.reviewRows
+        : [];
       const reviewWorkflow = responseData?.reviewWorkflow || { steps: [], nextStep: null };
+      const reviewSummary = responseData?.reviewSummary || {
+        itemCount: 0,
+        sourceRowCount: 0,
+        patternCount: 0,
+        recognizedPatternCount: 0,
+        unrecognizedPatternCount: 0,
+        recognizedPatterns: [],
+        unrecognizedPatterns: [],
+      };
       const fields = responseData?.fields || FACTWISE_PARSE_FIELDS;
       const nextRuleDrafts = mergeSuggestedFieldPatternRules(activeRuleDrafts, groups);
       const edits = {};
@@ -13706,6 +13997,30 @@ const BomNormalizer = () => {
           };
         });
       });
+      const groupsByPatternKey = new Map(
+        groups.map((group) => [fmt(group.patternKey), group])
+      );
+      reviewRows.forEach((reviewRow) => {
+        (reviewRow.occurrences || []).forEach((occurrence) => {
+          const group = groupsByPatternKey.get(fmt(occurrence.patternKey));
+          const occurrenceId = fmt(occurrence.occurrenceId);
+          if (!group || !occurrenceId || edits[group.id]?.[occurrenceId]) return;
+          const convertedEntries = filterFactwiseEntriesForConfig(
+            occurrence.entries || [],
+            normalizerConfig
+          ).map((entry, entryIndex) => ({
+            relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
+            fields: fieldValuesFromBackendFields(entry.fields || {}, fields),
+            sourceColumns: sourceColumnsFromBackendFields(entry.fields || {}, fields),
+          }));
+          edits[group.id][occurrenceId] = {
+            sourceRow: reviewRow.sourceRow,
+            occurrenceId,
+            entries: convertedEntries,
+            left: reviewRow.left || [],
+          };
+        });
+      });
       const manualEditsByShapeAndRow = new Map();
       fieldPatternGroups.forEach((previousGroup) => {
         Object.entries(fieldPatternEdits[previousGroup.id] || {}).forEach(([sampleKey, edit]) => {
@@ -13747,51 +14062,34 @@ const BomNormalizer = () => {
             visualTeachTags: options.preservedVisualTags || [],
             visualTeachDelimiter: options.preservedVisualDelimiter || '/',
             visualTeachAltMode: options.preservedVisualAltMode || 'append',
+            visualTeachAlternateJoiner: options.preservedVisualAlternateJoiner || '',
             visualTeachEntryOverrides: options.preservedVisualEntryOverrides || {},
             manuallyEdited: Boolean(Object.keys(options.preservedVisualEntryOverrides || {}).length),
           };
         }
       }
       setFieldPatternGroups(groups);
+      setFieldPatternCombinations(combinations);
+      setFieldPatternReviewRows(reviewRows);
+      setFieldPatternReviewPage(0);
+      setFieldPatternReviewSummary(reviewSummary);
       setFieldPatternFields(fields);
-      fieldPatternAutoOpenedStepIdRef.current = '';
       setFieldPatternReviewWorkflow(reviewWorkflow);
-      setFieldPatternWorkflowLaunchRevision((revision) => revision + 1);
+      if (!options.preserveReviewState) {
+        setFieldPatternWorkflowLaunchRevision((revision) => revision + 1);
+      }
       setFieldPatternRuleDrafts(nextRuleDrafts);
       setFieldPatternEdits(edits);
-      setFieldPatternConfirmed((previous) => {
-        const next = {};
-        groups.forEach((group) => {
-          if (Object.prototype.hasOwnProperty.call(previous, group.id)) {
-            next[group.id] = previous[group.id];
-          }
-        });
-        return next;
-      });
-      const focusedSampleIndex = focusedGroup
-        ? (focusedGroup.samples || []).findIndex(
-          (sample) => (
-            options.focusOccurrenceId
-              ? fieldPatternSampleKey(sample) === String(options.focusOccurrenceId)
-              : String(sample.sourceRow) === String(options.focusSourceRow)
-          )
-        )
-        : -1;
-      setFieldPatternSampleIndexes(
-        focusedGroup && focusedSampleIndex >= 0
-          ? { [focusedGroup.id]: focusedSampleIndex }
-          : {}
-      );
-      setSelectedFieldPatternId(focusedGroup?.id || groups[0]?.id || '');
-      if (reviewWorkflow?.nextStep?.type === 'normalize') {
-        setVisualTeachOpen(false);
-        setFieldSplitReviewOpen(false);
-        setFieldPatternReviewOpen(false);
-        setPatternApplyNotice('No patterns need review. Normalizing with the selected mappings.');
-        await runNormalization({ openResults: true });
-        return responseData;
-      }
-      setFieldPatternReviewOpen(reviewWorkflow?.nextStep?.type === 'preview');
+      const focusedCombination = combinations.find((combination) => (
+        (combination.patternKeys || []).includes(focusedGroup?.patternKey) &&
+        (options.focusSourceRow === undefined || options.focusSourceRow === null ||
+          (combination.sourceRows || []).some((sourceRow) => String(sourceRow) === String(options.focusSourceRow)))
+      )) || combinations[0] || null;
+      const firstCombinationPatternKey = focusedCombination?.patternKeys?.[0] || '';
+      const firstCombinationGroup = groups.find((group) => group.patternKey === firstCombinationPatternKey);
+      setSelectedFieldPatternCombinationId(focusedCombination?.id || '');
+      setSelectedFieldPatternId(focusedGroup?.id || firstCombinationGroup?.id || groups[0]?.id || '');
+      setFieldPatternReviewOpen(true);
       setFieldPatternRulesDirty(false);
       if (!groups.length) {
         setPatternApplyNotice('No reusable field patterns were detected for the selected customer columns.');
@@ -13804,7 +14102,7 @@ const BomNormalizer = () => {
     } finally {
       setFieldPatternLoading(false);
     }
-  }, [dataRows, fieldPatternEdits, fieldPatternGroups, fieldPatternRuleDrafts, headerRowIndex, headers, normalizerConfig, roles, runNormalization]);
+  }, [dataRows, fieldPatternEdits, fieldPatternGroups, fieldPatternRuleDrafts, headerRowIndex, headers, normalizerConfig, roles]);
 
   const handleFieldPatternRuleChange = useCallback((group, fieldKey, patch) => {
     const baseRules = Object.keys(fieldPatternRuleDrafts || {}).length
@@ -13813,9 +14111,6 @@ const BomNormalizer = () => {
     const nextRules = updateFieldPatternRuleFieldValue(baseRules, group, fieldKey, patch);
     setFieldPatternRuleDrafts(nextRules);
     setFieldPatternRulesDirty(true);
-    if (group?.id) {
-      setFieldPatternConfirmed((prev) => ({ ...prev, [group.id]: false }));
-    }
   }, [fieldPatternRuleDrafts, normalizerConfig.fieldPatternRules]);
 
   const handleFieldPatternIdentityRuleChange = useCallback((group, identityGroup, patch) => {
@@ -13825,72 +14120,7 @@ const BomNormalizer = () => {
     const nextRules = updateFieldPatternIdentityGroupRuleValue(baseRules, group, identityGroup, patch);
     setFieldPatternRuleDrafts(nextRules);
     setFieldPatternRulesDirty(true);
-    if (group?.id) {
-      setFieldPatternConfirmed((prev) => ({ ...prev, [group.id]: false }));
-    }
   }, [fieldPatternRuleDrafts, normalizerConfig.fieldPatternRules]);
-
-  const handleApplyFieldSplitReview = useCallback(async () => {
-    const step = fieldPatternWorkflowNextStep;
-    if (!step || step.type !== 'split_fields' || !step.fields?.length) return;
-    const baseRules = Object.keys(fieldPatternRuleDrafts || {}).length
-      ? fieldPatternRuleDrafts
-      : (normalizerConfig.fieldPatternRules || {});
-    let nextRules = { ...baseRules };
-    const changedGroupIds = new Set();
-    step.fields.forEach((fieldConfig) => {
-      const ruleDraft = fieldSplitRuleDrafts[fieldConfig.field] || {
-        delimiter: 'none',
-        customDelimiter: '',
-        stripPrefix: '',
-        prefixMode: 'literal',
-      };
-      fieldSplitRuleTargets(fieldConfig, fieldPatternGroups).forEach((group) => {
-        if (group.id) changedGroupIds.add(group.id);
-        nextRules = updateFieldPatternRuleFieldValue(nextRules, group, fieldConfig.field, ruleDraft);
-      });
-    });
-    (step.identityGroups || []).forEach((identityGroup) => {
-      const draftKey = identityGroupRuleKey(identityGroup);
-      const ruleDraft = fieldSplitIdentityGroupDrafts[draftKey] || {
-        delimiter: 'auto',
-        customDelimiter: '',
-        order: identityGroup.roles || [],
-      };
-      fieldSplitRuleTargets(identityGroup, fieldPatternGroups).forEach((group) => {
-        if (group.id) changedGroupIds.add(group.id);
-        nextRules = updateFieldPatternIdentityGroupRuleValue(nextRules, group, identityGroup, ruleDraft);
-      });
-    });
-    const completedReviewStepIds = [
-      ...(fieldPatternReviewWorkflow?.completedStepIds || []),
-      step.id,
-    ].filter(Boolean);
-    setFieldSplitReviewOpen(false);
-    setFieldPatternRuleDrafts(nextRules);
-    setFieldPatternRulesDirty(false);
-    setFieldPatternConfirmed((previous) => {
-      const next = { ...previous };
-      changedGroupIds.forEach((groupId) => {
-        next[groupId] = false;
-      });
-      return next;
-    });
-    await handleTeachFieldPattern(nextRules, {
-      forceRefresh: true,
-      completedReviewStepIds,
-      propagateErrors: true,
-    });
-  }, [
-    fieldPatternGroups,
-    fieldPatternReviewWorkflow,
-    fieldPatternRuleDrafts,
-    fieldPatternWorkflowNextStep,
-    fieldSplitIdentityGroupDrafts,
-    fieldSplitRuleDrafts,
-    handleTeachFieldPattern,
-    normalizerConfig.fieldPatternRules,
-  ]);
 
   const handleApplyFieldPatternRuleToAll = useCallback(async (group) => {
     if (!group || !fieldPatternGroups.length) return;
@@ -13921,18 +14151,13 @@ const BomNormalizer = () => {
 
     setFieldPatternRuleDrafts(nextRules);
     setFieldPatternRulesDirty(true);
-    setFieldPatternConfirmed(
-      fieldPatternGroups.reduce((confirmation, targetGroup) => ({
-        ...confirmation,
-        [targetGroup.id]: false,
-      }), {})
-    );
     await handleTeachFieldPattern(nextRules);
     setSelectedFieldPatternId(group.id || '');
   }, [fieldPatternGroups, fieldPatternRuleDrafts, handleTeachFieldPattern, normalizerConfig.fieldPatternRules]);
 
   const handleRefreshFieldPatternPreview = useCallback(async (group = null) => {
     const nextSelectedId = group?.id || selectedFieldPatternId;
+    const nextCombinationId = selectedFieldPatternCombinationId;
     const activeRules = Object.keys(fieldPatternRuleDrafts || {}).length
       ? fieldPatternRuleDrafts
       : (normalizerConfig.fieldPatternRules || {});
@@ -13940,7 +14165,16 @@ const BomNormalizer = () => {
     if (nextSelectedId) {
       setSelectedFieldPatternId(nextSelectedId);
     }
-  }, [fieldPatternRuleDrafts, handleTeachFieldPattern, normalizerConfig.fieldPatternRules, selectedFieldPatternId]);
+    if (nextCombinationId) {
+      setSelectedFieldPatternCombinationId(nextCombinationId);
+    }
+  }, [
+    fieldPatternRuleDrafts,
+    handleTeachFieldPattern,
+    normalizerConfig.fieldPatternRules,
+    selectedFieldPatternCombinationId,
+    selectedFieldPatternId,
+  ]);
 
   const handleTeachFieldPatternFromSample = useCallback(async (group, sample) => {
     if (!group || !sample) return;
@@ -13964,6 +14198,7 @@ const BomNormalizer = () => {
         headers,
         row,
         roles,
+        config: normalizerConfig,
         group: {
           id: group.id,
           patternKey: group.patternKey || '',
@@ -14007,13 +14242,6 @@ const BomNormalizer = () => {
       });
 
       setFieldPatternRuleDrafts(nextRules);
-      setFieldPatternConfirmed((prev) => {
-        const next = { ...prev };
-        similarGroups.forEach((targetGroup) => {
-          next[targetGroup.id] = false;
-        });
-        return next;
-      });
       setFieldPatternRulesDirty(false);
       await handleTeachFieldPattern(nextRules);
       setSelectedFieldPatternId(group.id || '');
@@ -14034,7 +14262,7 @@ const BomNormalizer = () => {
     roles,
   ]);
 
-  const handleOpenVisualTeachPattern = useCallback((group, sample, workflowStep = null) => {
+  const handleOpenVisualTeachPattern = useCallback((group, sample, workflowStep = null, options = {}) => {
     const workflowSourceColumn = fmt(workflowStep?.sourceColumn);
     const sourceItem = workflowSourceColumn
       ? (sample?.left || []).find((item) => fmt(item?.column) === workflowSourceColumn)
@@ -14090,11 +14318,7 @@ const BomNormalizer = () => {
       pattern: workflowStep?.pattern || group?.primaryPatternRow?.pattern || '',
       rule: group?.suggestedRule || {},
     });
-    setVisualTeachTags(
-      Array.isArray(sampleEdit.visualTeachTags) && sampleEdit.visualTeachTags.length === sourceValue.length
-        ? sampleEdit.visualTeachTags
-        : visualTeachTagsFromInterpretationSpans(sourceValue, backendSpans)
-    );
+    setVisualTeachTags(visualTeachTagsFromInterpretationSpans(sourceValue, backendSpans));
     setVisualTeachSelection(null);
     setVisualTeachDrag(null);
     setVisualTeachDelimiter(
@@ -14102,11 +14326,77 @@ const BomNormalizer = () => {
       group?.suggestedRule?.visualPattern?.alternateDelimiter ||
       '/'
     );
-    setVisualTeachAltMode(sampleEdit.visualTeachAltMode || 'append');
+    setVisualTeachAltMode(
+      sampleEdit.visualTeachAltMode ||
+      group?.suggestedRule?.visualPattern?.alternateMode ||
+      'append'
+    );
+    setVisualTeachAlternateJoiner(
+      sampleEdit.visualTeachAlternateJoiner ??
+      group?.suggestedRule?.visualPattern?.alternateJoiner ??
+      ''
+    );
     setVisualTeachEntryOverrides(sampleEdit.visualTeachEntryOverrides || {});
     setVisualTeachPreviewLoading(false);
-    setVisualTeachOpen(true);
+    setVisualTeachSourceRowExpanded(false);
+    setVisualTeachOpen(options.openDialog !== false);
   }, [fieldPatternEdits, fieldPatternFields, normalizerConfig, roles]);
+
+  const handleReviewUnrecognizedPattern = useCallback((pattern) => {
+    const patternKey = fmt(pattern?.patternKey);
+    if (!patternKey) return;
+    if (fieldPatternExpandedPatternKey === patternKey) {
+      setFieldPatternExpandedPatternKey('');
+      return;
+    }
+    const group = fieldPatternGroups.find((item) => item.patternKey === patternKey);
+    const targetRowIndex = fieldPatternReviewRows.findIndex((row) => (
+      (row.patterns || []).some((item) => item.patternKey === patternKey)
+    ));
+    const reviewRow = targetRowIndex >= 0 ? fieldPatternReviewRows[targetRowIndex] : null;
+    const occurrence = (reviewRow?.occurrences || []).find(
+      (item) => item.patternKey === patternKey
+    );
+    if (!group || !reviewRow || !occurrence) {
+      setError('No matching customer row is available for this pattern.');
+      return;
+    }
+
+    const combination = (pattern?.combinationIds || [])
+      .map((combinationId) => fieldPatternCombinations.find((item) => item.id === combinationId))
+      .find(Boolean) || fieldPatternCombinations.find(
+      (item) => (item.patternKeys || []).includes(patternKey)
+    );
+    const sourceColumn = fmt(occurrence.sourceColumn);
+    const sample = {
+      sourceRow: reviewRow.sourceRow,
+      left: reviewRow.left || [],
+      sourceFragment: { ...occurrence, id: occurrence.occurrenceId },
+      entries: occurrence.entries || [],
+      fields: occurrence.entries?.[0]?.fields || {},
+      interpretationSpansByColumn: sourceColumn
+        ? { [sourceColumn]: occurrence.interpretationSpans || [] }
+        : {},
+      patternRows: group.patternRows || [],
+      primaryPatternRow: group.primaryPatternRow || null,
+    };
+    const workflowStep = (fieldPatternReviewWorkflow?.steps || []).find(
+      (step) => step.type === 'teach_visual' && step.patternKey === patternKey
+    );
+
+    if (combination) setSelectedFieldPatternCombinationId(combination.id);
+    setSelectedFieldPatternId(group.id);
+    setFieldPatternReviewPage(Math.max(0, Math.floor(targetRowIndex / FIELD_PATTERN_REVIEW_PAGE_SIZE)));
+    setFieldPatternExpandedPatternKey(patternKey);
+    handleOpenVisualTeachPattern(group, sample, workflowStep, { openDialog: false });
+  }, [
+    fieldPatternExpandedPatternKey,
+    fieldPatternCombinations,
+    fieldPatternGroups,
+    fieldPatternReviewRows,
+    fieldPatternReviewWorkflow,
+    handleOpenVisualTeachPattern,
+  ]);
 
   const handleOpenVisualTeachWorkflowStep = useCallback((step) => {
     if (!step || step.type !== 'teach_visual') return;
@@ -14120,56 +14410,20 @@ const BomNormalizer = () => {
   }, [fieldPatternGroups, handleOpenVisualTeachPattern]);
 
   useEffect(() => {
-    const step = fieldPatternWorkflowNextStep;
-    if (!step) return;
-    if (fieldPatternAutoOpenedStepIdRef.current === step.id) return;
-    fieldPatternAutoOpenedStepIdRef.current = step.id;
-    if (step.type === 'preview') {
-      setVisualTeachOpen(false);
-      setFieldSplitReviewOpen(false);
-      setFieldPatternReviewOpen(true);
-      return;
-    }
-    if (step.type === 'split_fields') {
-      const fields = step.fields || [];
-      const initialDrafts = fields.reduce((drafts, fieldConfig) => {
-        const suggestedRule = fieldConfig.candidateRules?.[0]?.rule || {};
-        drafts[fieldConfig.field] = {
-          delimiter: suggestedRule.delimiter || 'none',
-          customDelimiter: suggestedRule.customDelimiter || '',
-          stripPrefix: suggestedRule.stripPrefix || '',
-          prefixMode: suggestedRule.prefixMode || 'literal',
-        };
-        return drafts;
-      }, {});
-      const initialIdentityGroupDrafts = (step.identityGroups || []).reduce((drafts, identityGroup) => {
-        const suggestedRule = identityGroup.candidateRules?.[0]?.rule || {};
-        drafts[identityGroupRuleKey(identityGroup)] = {
-          delimiter: suggestedRule.delimiter || suggestedRule.comboDelimiter || 'auto',
-          customDelimiter: suggestedRule.customDelimiter || '',
-          order: Array.isArray(suggestedRule.order) && suggestedRule.order.length
-            ? suggestedRule.order
-            : (identityGroup.roles || []),
-        };
-        return drafts;
-      }, {});
-      setVisualTeachOpen(false);
-      setFieldPatternReviewOpen(false);
-      setFieldSplitSelectedField(fields[0]?.field || '');
-      setFieldSplitRuleDrafts(initialDrafts);
-      setFieldSplitIdentityGroupDrafts(initialIdentityGroupDrafts);
-      setFieldSplitReviewOpen(true);
-      return;
-    }
-    if (step.type !== 'teach_visual') return;
-
-    setFieldPatternReviewOpen(false);
-    setFieldSplitReviewOpen(false);
-    handleOpenVisualTeachWorkflowStep(step);
-  }, [fieldPatternWorkflowLaunchRevision, fieldPatternWorkflowNextStep, handleOpenVisualTeachWorkflowStep]);
+    if (!fieldPatternReviewOpen) return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      fieldPatternReviewContentRef.current?.scrollTo({ top: 0, behavior: 'auto' });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [fieldPatternReviewOpen, fieldPatternWorkflowLaunchRevision]);
 
   useEffect(() => {
-    if (!visualTeachOpen || !visualTeachContext?.sourceValue || !visualTeachContext?.sample) return undefined;
+    const hasActiveEditor = visualTeachOpen || (
+      fieldPatternReviewOpen &&
+      fieldPatternReviewStage === 'patterns' &&
+      Boolean(fieldPatternExpandedPatternKey)
+    );
+    if (!hasActiveEditor || !visualTeachContext?.sourceValue || !visualTeachContext?.sample) return undefined;
     if (visualTeachPreviewProcessedRef.current === visualTeachPreviewRevision) return undefined;
     visualTeachPreviewProcessedRef.current = visualTeachPreviewRevision;
     const taggedSpans = visualTeachTaggedSpans(visualTeachTags);
@@ -14204,6 +14458,7 @@ const BomNormalizer = () => {
           headers,
           row,
           roles,
+          config: normalizerConfig,
           group: {
             id: visualTeachContext.group?.id,
             patternKey: visualTeachContext.group?.patternKey || visualTeachContext.workflowStep?.patternKey || '',
@@ -14215,6 +14470,7 @@ const BomNormalizer = () => {
           sourceHeader: visualTeachContext.sourceColumn,
           alternateDelimiter: visualTeachDelimiter,
           alternateMode: visualTeachAltMode,
+          alternateJoiner: visualTeachAlternateJoiner,
           ignoredFields: visualTeachIgnoredFields,
           hasManualEdits,
           persist: false,
@@ -14234,9 +14490,22 @@ const BomNormalizer = () => {
           pattern: response.data?.pattern || '',
           rule: response.data?.rule || {},
         });
+        const nextTags = visualTeachTagsFromInterpretationSpans(
+          visualTeachContext.sourceValue,
+          interpretationSpansByColumn[visualTeachContext.sourceColumn] || []
+        );
+        setVisualTeachTags((current) => (
+          current.length === nextTags.length && current.every((tag, index) => tag === nextTags[index])
+            ? current
+            : nextTags
+        ));
         const backendAlternateMode = response.data?.visualPattern?.alternateMode;
         if (backendAlternateMode && backendAlternateMode !== visualTeachAltMode) {
           setVisualTeachAltMode(backendAlternateMode);
+        }
+        const backendAlternateJoiner = response.data?.visualPattern?.alternateJoiner;
+        if (backendAlternateJoiner !== undefined && backendAlternateJoiner !== visualTeachAlternateJoiner) {
+          setVisualTeachAlternateJoiner(backendAlternateJoiner);
         }
       } catch (err) {
         if (visualTeachPreviewRequestRef.current === requestId) {
@@ -14250,10 +14519,15 @@ const BomNormalizer = () => {
     }, 250);
     return () => clearTimeout(timer);
   }, [
+    fieldPatternExpandedPatternKey,
     fieldPatternFields,
+    fieldPatternReviewOpen,
+    fieldPatternReviewStage,
     headers,
+    normalizerConfig,
     roles,
     visualTeachAltMode,
+    visualTeachAlternateJoiner,
     visualTeachContext,
     visualTeachDelimiter,
     visualTeachIgnoredFields,
@@ -14328,6 +14602,21 @@ const BomNormalizer = () => {
     setVisualTeachDrag(null);
   }, [visualTeachContext]);
 
+  const handleClearVisualTeachSelection = useCallback(() => {
+    if (!visualTeachSelection) return;
+    setVisualTeachTags((current) => clearVisualTeachTagSelection(current, visualTeachSelection));
+    visualTeachBackendEntriesRef.current = visualTeachContext?.seedEntries || [];
+    setVisualTeachBackendPreview({
+      entries: visualTeachContext?.seedEntries || [],
+      interpretationSpansByColumn: {},
+      title: visualTeachContext?.workflowStep?.title || '',
+      pattern: '',
+      rule: {},
+    });
+    setVisualTeachSelection(null);
+    setVisualTeachDrag(null);
+  }, [visualTeachContext, visualTeachSelection]);
+
   const handleApplyVisualTeachPattern = useCallback(async () => {
     const group = visualTeachContext?.group;
     const sample = visualTeachContext?.sample;
@@ -14368,12 +14657,12 @@ const BomNormalizer = () => {
           visualTeachTags,
           visualTeachDelimiter,
           visualTeachAltMode,
+          visualTeachAlternateJoiner,
           visualTeachEntryOverrides,
           manuallyEdited: hasManualEdits,
         },
       },
     }));
-    setFieldPatternConfirmed((prev) => ({ ...prev, [group.id]: false }));
 
     const row = {};
     (sample.left || []).forEach((item) => {
@@ -14389,6 +14678,7 @@ const BomNormalizer = () => {
         headers,
         row,
         roles,
+        config: normalizerConfig,
         group: {
           id: group.id,
           patternKey: group.patternKey || visualTeachContext?.workflowStep?.patternKey || '',
@@ -14403,6 +14693,7 @@ const BomNormalizer = () => {
         sourceHeader: visualTeachContext?.sourceColumn,
         alternateDelimiter: visualTeachDelimiter,
         alternateMode: visualTeachAltMode,
+        alternateJoiner: visualTeachAlternateJoiner,
         ignoredFields: visualTeachIgnoredFields,
         hasManualEdits,
         persist: false,
@@ -14424,6 +14715,16 @@ const BomNormalizer = () => {
         pattern: response.data?.pattern || '',
         rule: taughtRule,
       });
+      const interpretationSpansByColumn = response.data?.interpretationSpansByColumn || {};
+      const nextTags = visualTeachTagsFromInterpretationSpans(
+        sourceValue,
+        interpretationSpansByColumn[visualTeachContext.sourceColumn] || []
+      );
+      setVisualTeachTags((currentTags) => (
+        currentTags.length === nextTags.length && currentTags.every((tag, index) => tag === nextTags[index])
+          ? currentTags
+          : nextTags
+      ));
 
       const baseRules = Object.keys(fieldPatternRuleDrafts || {}).length
         ? fieldPatternRuleDrafts
@@ -14463,9 +14764,11 @@ const BomNormalizer = () => {
         preservedVisualTags: hasManualEdits ? visualTeachTags : null,
         preservedVisualDelimiter: visualTeachDelimiter,
         preservedVisualAltMode: visualTeachAltMode,
+        preservedVisualAlternateJoiner: visualTeachAlternateJoiner,
         preservedVisualEntryOverrides: hasManualEdits ? visualTeachEntryOverrides : {},
         completedReviewStepIds,
         propagateErrors: true,
+        preserveReviewState: true,
       });
       if (!hasManualEdits) {
         const refreshedGroup = (refreshedPatternData?.groups || [])
@@ -14503,9 +14806,10 @@ const BomNormalizer = () => {
     fieldPatternFields,
     handleTeachFieldPattern,
     headers,
-    normalizerConfig.fieldPatternRules,
+    normalizerConfig,
     roles,
     visualTeachAltMode,
+    visualTeachAlternateJoiner,
     visualTeachContext,
     visualTeachDelimiter,
     visualTeachEntryOverrides,
@@ -14515,17 +14819,6 @@ const BomNormalizer = () => {
     visualTeachIsIgnoreInterpretation,
     visualTeachTags,
   ]);
-
-  const handleStepFieldPatternSample = useCallback((group, direction) => {
-    const groupId = group?.id;
-    const sampleCount = Array.isArray(group?.samples) ? group.samples.length : 0;
-    if (!groupId || sampleCount <= 1) return;
-    setFieldPatternSampleIndexes((prev) => {
-      const current = Math.min(Math.max(Number(prev[groupId] || 0), 0), sampleCount - 1);
-      const next = Math.min(Math.max(current + direction, 0), sampleCount - 1);
-      return { ...prev, [groupId]: next };
-    });
-  }, []);
 
   const handleFieldPatternValueChange = useCallback((groupId, sampleKey, entryIndex, fieldKey, value) => {
     setFieldPatternEdits((prev) => ({
@@ -14549,7 +14842,6 @@ const BomNormalizer = () => {
         },
       },
     }));
-    setFieldPatternConfirmed((prev) => ({ ...prev, [groupId]: false }));
   }, []);
 
   const handleAddFieldPatternAlternate = useCallback((groupId, sampleKey) => {
@@ -14573,7 +14865,6 @@ const BomNormalizer = () => {
         },
       };
     });
-    setFieldPatternConfirmed((prev) => ({ ...prev, [groupId]: false }));
   }, []);
 
   const handleRemoveFieldPatternEntry = useCallback((groupId, sampleKey, entryIndex) => {
@@ -14598,7 +14889,6 @@ const BomNormalizer = () => {
         },
       };
     });
-    setFieldPatternConfirmed((prev) => ({ ...prev, [groupId]: false }));
   }, []);
 
   const buildFieldPatternLearningGroup = useCallback((group) => {
@@ -14639,20 +14929,11 @@ const BomNormalizer = () => {
     };
   }, [fieldPatternEdits, fieldPatternFields, fieldPatternRuleDrafts, normalizerConfig, roles]);
 
-  const handleConfirmFieldPatternGroup = useCallback(async (groupId) => {
-    if (fieldPatternConfirmed[groupId] !== false) return;
-    setFieldPatternConfirmed((prev) => ({ ...prev, [groupId]: true }));
-  }, [fieldPatternConfirmed]);
-
   const handleApplyFieldPatternReview = useCallback(async () => {
-    const confirmedGroups = fieldPatternGroups.filter((group) => fieldPatternConfirmed[group.id] !== false);
-    if (confirmedGroups.length !== fieldPatternGroups.length) {
-      setError('Confirm every detected pattern before applying field interpretations.');
-      return;
-    }
+    const reviewGroups = fieldPatternGroups;
 
     const rowsBySourceRow = {};
-    confirmedGroups.forEach((group) => {
+    reviewGroups.forEach((group) => {
       Object.entries(fieldPatternEdits[group.id] || {}).forEach(([sampleKey, edit]) => {
         const sample = (group.samples || []).find((item) => (
           fieldPatternSampleKey(item) === String(edit.occurrenceId || sampleKey)
@@ -14682,7 +14963,7 @@ const BomNormalizer = () => {
       });
     });
 
-    const learningGroups = confirmedGroups
+    const learningGroups = reviewGroups
       .map((group) => buildFieldPatternLearningGroup(group))
       .filter(Boolean);
     const appliedConfig = {
@@ -14691,7 +14972,7 @@ const BomNormalizer = () => {
         source: 'backend_field_pattern_review',
         confirmedAt: new Date().toISOString(),
         rules: fieldPatternRuleDrafts,
-        groups: confirmedGroups.map((group) => ({
+        groups: reviewGroups.map((group) => ({
           id: group.id,
           shape: group.shape,
           rowCount: group.rowCount,
@@ -14724,8 +15005,8 @@ const BomNormalizer = () => {
       setConfig(appliedConfig);
       setParserTouched(true);
       setFieldPatternReviewOpen(false);
-      setPatternApplyNotice(`${confirmedGroups.length} unique field pattern${confirmedGroups.length === 1 ? '' : 's'} applied by backend.`);
-      setSuccessMessage(`${confirmedGroups.length} unique field pattern${confirmedGroups.length === 1 ? '' : 's'} confirmed and applied.`);
+      setPatternApplyNotice(`${reviewGroups.length} unique field pattern${reviewGroups.length === 1 ? '' : 's'} applied by backend.`);
+      setSuccessMessage(`${reviewGroups.length} unique field pattern${reviewGroups.length === 1 ? '' : 's'} applied.`);
       if (pairingCheck.issueRows?.length) {
         setPendingNormalization({ rows: normalized, pairingCheck, openResultsAfterReview: true });
         setPairingReviewRows(pairingCheck.issueRows);
@@ -14740,7 +15021,7 @@ const BomNormalizer = () => {
     } finally {
       setFieldPatternLoading(false);
     }
-  }, [buildFieldPatternLearningGroup, commitNormalizedResult, dataRows, fieldPatternConfirmed, fieldPatternEdits, fieldPatternFields, fieldPatternGroups, fieldPatternRuleDrafts, headerRowIndex, headers, normalizerConfig, roles]);
+  }, [buildFieldPatternLearningGroup, commitNormalizedResult, dataRows, fieldPatternEdits, fieldPatternFields, fieldPatternGroups, fieldPatternRuleDrafts, headerRowIndex, headers, normalizerConfig, roles]);
 
   const handleApplyConfigureSplitColumns = useCallback((result) => {
     const scope = configureParserScope;
@@ -15333,6 +15614,139 @@ const BomNormalizer = () => {
       </Box>
     );
   }
+
+  const renderInlineVisualTeachEditor = () => {
+    if (!visualTeachContext) {
+      return <Alert severity="info">Select a pattern to review its backend interpretation.</Alert>;
+    }
+    return (
+      <Stack gap={1} sx={{ p: 1.25 }}>
+        <Paper elevation={0} sx={{ p: 1, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
+          <Typography sx={{ mb: 0.65, fontSize: 12.5, fontWeight: 850 }}>
+            Source Excel row {visualTeachContext.sample?.sourceRow || '-'}
+          </Typography>
+          <WorksheetSamplePreview
+            sample={visualTeachContext.sample}
+            headers={headers}
+            sheetRows={sheetRows}
+            headerRowIndex={headerRowIndex}
+            worksheet={workbook?.Sheets?.[sheetName] || null}
+            theme={normalizerTheme}
+            height={180}
+          />
+        </Paper>
+
+        <Paper elevation={0} sx={{ p: 1, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 0.7 }}>
+            <Box>
+              <Typography sx={{ fontSize: 12.5, fontWeight: 850 }}>Tag cell spans</Typography>
+              <Typography sx={{ fontSize: 11.5, color: normalizerTheme.muted }}>{visualTeachContext.sourceColumn}</Typography>
+            </Box>
+            <Stack direction="row" gap={0.5}>
+              <Button size="small" disabled={!visualTeachSelection} onClick={handleClearVisualTeachSelection}>Clear selected</Button>
+              <Button size="small" onClick={handleClearVisualTeachTags}>Clear all</Button>
+            </Stack>
+          </Stack>
+          <Box
+            onMouseUp={handleVisualTeachMouseUp}
+            sx={{ p: 1.2, minHeight: 82, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft, fontFamily: 'monospace', fontSize: 13, lineHeight: 2.2, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', cursor: 'text', userSelect: 'none' }}
+          >
+            {(visualTeachContext.sourceValue || '').split('').map((char, index) => {
+              const role = visualTeachPreparedTags[index];
+              const style = VISUAL_TEACH_ROLE_STYLE_BY_KEY[role] || {};
+              const selected = visualTeachSelection && index >= Math.min(visualTeachSelection.start, visualTeachSelection.end) && index <= Math.max(visualTeachSelection.start, visualTeachSelection.end);
+              return (
+                <Box
+                  key={`${index}-${char}`}
+                  component="span"
+                  onMouseDown={(event) => { event.preventDefault(); handleVisualTeachMouseDown(index); }}
+                  onMouseEnter={() => handleVisualTeachMouseEnter(index)}
+                  sx={{ px: role ? 0.1 : 0, py: 0.1, borderRadius: role ? '3px' : 0, bgcolor: style.bg || 'transparent', color: style.color || normalizerTheme.text, fontWeight: role ? 850 : 600, outline: selected ? '2px dashed #0f172a' : 'none', outlineOffset: '-1px' }}
+                >
+                  {char}
+                </Box>
+              );
+            })}
+          </Box>
+          <Stack direction="row" gap={0.65} flexWrap="wrap" sx={{ mt: 0.9 }}>
+            {visualTeachRoleOptions.map((role) => (
+              <Button key={role.key} size="small" variant="outlined" disabled={!visualTeachSelection} onClick={() => handleApplyVisualTeachRole(role.key)} sx={{ borderColor: role.color, color: role.color, bgcolor: role.bg, fontWeight: 800 }}>
+                {role.label}
+              </Button>
+            ))}
+          </Stack>
+        </Paper>
+
+        {visualTeachAllowAlternates && (
+          <Paper elevation={0} sx={{ p: 1, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+            <Stack direction={{ xs: 'column', sm: 'row' }} gap={1}>
+              <FormControl size="small" sx={{ minWidth: 190 }}>
+                <InputLabel>Alternate separator</InputLabel>
+                <Select label="Alternate separator" value={visualTeachDelimiter} onChange={(event) => setVisualTeachDelimiter(event.target.value)}>
+                  {['/', ';', ',', '|', '^', '~'].map((delimiter) => <MenuItem key={delimiter} value={delimiter}>{delimiter}</MenuItem>)}
+                  <MenuItem value={VISUAL_TEACH_NO_SPLIT}>No split</MenuItem>
+                </Select>
+              </FormControl>
+              <FormControl size="small" sx={{ minWidth: 220 }}>
+                <InputLabel>Alternate MPN mode</InputLabel>
+                <Select label="Alternate MPN mode" value={visualTeachAltMode} onChange={(event) => setVisualTeachAltMode(event.target.value)}>
+                  <MenuItem value="append">Append to base MPN</MenuItem>
+                  <MenuItem value="complete">Already complete MPNs</MenuItem>
+                  <MenuItem value="replace_suffix_at_marker">Replace suffix at @</MenuItem>
+                  <MenuItem value="insert_at_marker">Insert list values at marker</MenuItem>
+                </Select>
+              </FormControl>
+              {visualTeachAltMode === 'append' && (
+                <TextField
+                  size="small"
+                  label="Alternate-only separator"
+                  value={visualTeachAlternateJoiner}
+                  onChange={(event) => setVisualTeachAlternateJoiner(event.target.value)}
+                  inputProps={{ maxLength: 8 }}
+                  sx={{ width: 210 }}
+                />
+              )}
+            </Stack>
+          </Paper>
+        )}
+
+        <Paper elevation={0} sx={{ p: 1, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 0.7 }}>
+            <Typography sx={{ fontSize: 12.5, fontWeight: 850 }}>Generated FactWise rows</Typography>
+            <Button size="small" variant="outlined" startIcon={<VisibilityIcon />} disabled={visualTeachPreviewLoading} onClick={() => setVisualTeachPreviewRevision((revision) => revision + 1)}>Preview</Button>
+          </Stack>
+          {visualTeachPreviewEntries.length ? (
+            <TableContainer sx={{ border: `1px solid ${normalizerTheme.border}`, maxHeight: 260 }}>
+              <Table stickyHeader size="small">
+                <TableHead><TableRow><TableCell sx={{ fontWeight: 850 }}>Type</TableCell>{visualTeachMappedFields.map((field) => <TableCell key={field.key} sx={{ fontWeight: 850 }}>{field.label}</TableCell>)}</TableRow></TableHead>
+                <TableBody>
+                  {visualTeachPreviewEntries.map((entry, index) => (
+                    <TableRow key={`${entry.relation}-${index}`}>
+                      <TableCell sx={{ fontWeight: 800 }}>{entry.relation}</TableCell>
+                      {visualTeachMappedFields.map((field) => (
+                        <TableCell key={field.key} sx={{ minWidth: 160 }}>
+                          <TextField fullWidth size="small" value={visualTeachEntryOverrides[index]?.[field.key] ?? entry.fields?.[field.key] ?? ''} onChange={(event) => setVisualTeachEntryOverrides((current) => ({ ...current, [index]: { ...(current[index] || {}), [field.key]: event.target.value } }))} />
+                        </TableCell>
+                      ))}
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </TableContainer>
+          ) : <Alert severity="info">Tag a mapped field to preview generated rows.</Alert>}
+          <Stack direction="row" justifyContent="flex-end" sx={{ mt: 1 }}>
+            <Button
+              variant="contained"
+              disabled={(!visualTeachIsIgnoreInterpretation && !visualTeachPreparedTags.some((role) => visualTeachMappedFieldKeys.includes(role))) || fieldPatternLoading || visualTeachPreviewLoading}
+              onClick={handleApplyVisualTeachPattern}
+            >
+              Use this interpretation
+            </Button>
+          </Stack>
+        </Paper>
+      </Stack>
+    );
+  };
 
   return (
     <Box
@@ -18134,25 +18548,146 @@ const BomNormalizer = () => {
         <DialogTitle sx={{ px: 2.5, py: 1.7, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
           <Stack direction="row" justifyContent="space-between" alignItems="center" gap={2}>
             <Box sx={{ minWidth: 0 }}>
-              <Typography sx={{ fontSize: 18, fontWeight: 780, color: normalizerTheme.text }}>Review detected patterns</Typography>
+              <Typography sx={{ fontSize: 18, fontWeight: 780, color: normalizerTheme.text }}>
+                {fieldPatternReviewStage === 'patterns' ? 'Confirm patterns' : 'Review all rows'}
+              </Typography>
               <Typography sx={{ mt: 0.35, fontSize: 12.5, color: normalizerTheme.muted }}>
-                Compare the customer row with the backend interpretation, then correct only the patterns that need help.
+                {fieldPatternReviewStage === 'patterns'
+                  ? 'Review each unique backend-detected pattern before checking the complete normalized output.'
+                  : 'Compare every customer row with the backend-owned FactWise interpretation.'}
               </Typography>
             </Box>
-            <Chip
-              size="small"
-              variant="outlined"
-              label={pendingFieldPatternConfirmationCount
-                ? `${pendingFieldPatternConfirmationCount} changed pattern${pendingFieldPatternConfirmationCount === 1 ? '' : 's'} need confirmation`
-                : 'All patterns ready'}
-              sx={{ height: 28, flexShrink: 0, fontSize: 11.5, fontWeight: 800, bgcolor: normalizerTheme.paperSoft }}
-            />
           </Stack>
         </DialogTitle>
-        <DialogContent sx={{ flex: 1, minHeight: 0, overflow: 'auto', p: 2 }}>
-          {!fieldPatternGroups.length ? (
+        <DialogContent ref={fieldPatternReviewContentRef} sx={{ flex: 1, minHeight: 0, overflow: 'auto', p: 2 }}>
+          {fieldPatternReviewStage === 'patterns' && (
+            <Stack gap={1.25}>
+              <Paper elevation={0} sx={{ p: 1.5, border: `1px solid ${normalizerTheme.border}`, borderRadius: '8px', bgcolor: normalizerTheme.paper }}>
+                <Stack direction={{ xs: 'column', md: 'row' }} justifyContent="space-between" alignItems={{ xs: 'stretch', md: 'flex-end' }} gap={1.25}>
+                  <Box sx={{ flex: 1 }}>
+                    <Typography sx={{ fontSize: 14, fontWeight: 850, color: normalizerTheme.text }}>Detection summary</Typography>
+                    <Box sx={{ mt: 1, display: 'grid', gridTemplateColumns: { xs: 'repeat(2, minmax(0, 1fr))', md: 'repeat(4, minmax(0, 1fr))' }, border: `1px solid ${normalizerTheme.border}`, borderRadius: '7px', overflow: 'hidden' }}>
+                      {[
+                        ['Items detected', fieldPatternReviewSummary.itemCount, normalizerTheme.text],
+                        ['Patterns detected', fieldPatternReviewSummary.patternCount, '#1d4ed8'],
+                        ['Recognized', fieldPatternReviewSummary.recognizedPatternCount, '#0f766e'],
+                        ['Need review', fieldPatternReviewSummary.unrecognizedPatternCount, '#b45309'],
+                      ].map(([label, value, color], index) => (
+                        <Box key={label} sx={{ px: 1.4, py: 1.05, borderRight: index < 3 ? `1px solid ${normalizerTheme.border}` : 'none', bgcolor: normalizerTheme.paperSoft }}>
+                          <Typography sx={{ fontSize: 11.5, fontWeight: 750, color: normalizerTheme.muted }}>{label}</Typography>
+                          <Typography sx={{ mt: 0.15, fontSize: 22, fontWeight: 900, color }}>{Number(value || 0)}</Typography>
+                        </Box>
+                      ))}
+                    </Box>
+                  </Box>
+                  <Autocomplete
+                    size="small"
+                    options={fieldPatternFieldFilterOptions}
+                    value={fieldPatternFieldFilterOptions.find((option) => option.key === fieldPatternFieldFilter) || fieldPatternFieldFilterOptions[0]}
+                    onChange={(_, option) => {
+                      setFieldPatternFieldFilter(option?.key || 'all');
+                      setFieldPatternExpandedPatternKey('');
+                    }}
+                    getOptionLabel={(option) => option?.label || ''}
+                    isOptionEqualToValue={(option, value) => option.key === value.key}
+                    renderInput={(params) => <TextField {...params} label="Patterns by field" />}
+                    sx={{ width: { xs: '100%', md: 270 }, flexShrink: 0 }}
+                  />
+                </Stack>
+              </Paper>
+
+              {fieldPatternReviewPatterns.length > 0 ? (
+                <Stack gap={0.75}>
+                  {filteredFieldPatternReviewPatterns.map((pattern, index) => {
+                    const expanded = fieldPatternExpandedPatternKey === pattern.patternKey;
+                    return (
+                      <Paper key={pattern.patternKey || index} elevation={0} sx={{ border: `1px solid ${expanded ? '#7db8ad' : normalizerTheme.border}`, overflow: 'hidden', bgcolor: normalizerTheme.paper }}>
+                        <Box
+                          component="button"
+                          type="button"
+                          onClick={() => handleReviewUnrecognizedPattern(pattern)}
+                          aria-expanded={expanded}
+                          sx={{ width: '100%', p: 1.1, border: 0, bgcolor: expanded ? '#eef8f6' : normalizerTheme.paperSoft, color: 'inherit', cursor: 'pointer', textAlign: 'left' }}
+                        >
+                          <Stack direction="row" alignItems="center" justifyContent="space-between" gap={1}>
+                            <Box sx={{ minWidth: 0 }}>
+                              <Typography sx={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace', fontSize: 12.5, fontWeight: 800, overflowWrap: 'anywhere' }}>
+                                {index + 1}. {pattern.pattern}
+                              </Typography>
+                              <Typography sx={{ mt: 0.25, fontSize: 11.5, color: normalizerTheme.muted }}>
+                                {[pattern.sourceColumn, (pattern.mappedFields || []).map((field) => TEACH_PATTERN_ROLE_LABELS[field] || field).join(' + ')].filter(Boolean).join(' - ')}
+                                {pattern.occurrenceCount ? ` - ${pattern.occurrenceCount} occurrences` : ''}
+                              </Typography>
+                            </Box>
+                            <Stack direction="row" alignItems="center" gap={0.65} sx={{ flexShrink: 0 }}>
+                              <Chip size="small" label={pattern.recognized ? 'Recognized' : 'Needs review'} sx={{ bgcolor: pattern.recognized ? '#e4f3f0' : '#fff7e6', color: pattern.recognized ? '#0f6e63' : '#9a5b00', fontWeight: 850 }} />
+                              {expanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+                            </Stack>
+                          </Stack>
+                        </Box>
+                        <Collapse in={expanded} timeout="auto" unmountOnExit>
+                          {expanded && renderInlineVisualTeachEditor()}
+                        </Collapse>
+                      </Paper>
+                    );
+                  })}
+                  {!filteredFieldPatternReviewPatterns.length && (
+                    <Alert severity="info">No detected patterns use the selected mapped field.</Alert>
+                  )}
+                </Stack>
+              ) : (
+                <Paper elevation={0} sx={{ p: 1.5, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+                  <Alert severity="info" sx={{ mb: 1.25 }}>
+                    No reusable patterns were detected. The backend direct mappings are shown below and can still be reviewed.
+                  </Alert>
+                  <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ xs: 'stretch', sm: 'center' }} sx={{ mb: 1.25 }}>
+                    <Autocomplete
+                      size="small"
+                      options={mappedFieldPatternRuleOptions}
+                      value={selectedFieldPatternRuleOption}
+                      onChange={(_, option) => setFieldPatternSelectedRuleField(option?.key || '')}
+                      getOptionLabel={(option) => `${option?.label || ''} - ${option?.sourceColumn || ''}`}
+                      isOptionEqualToValue={(option, value) => option.key === value.key}
+                      renderInput={(params) => <TextField {...params} label="Mapped field" />}
+                      sx={{ minWidth: 300 }}
+                    />
+                    <Button
+                      variant="outlined"
+                      disabled={!selectedFieldPatternRuleOption || configureParserPreparing}
+                      onClick={() => handleOpenConfigureSplitColumns({
+                        title: `Parsing rules for ${selectedFieldPatternRuleOption?.label || 'field'}`,
+                        initialColumn: selectedFieldPatternRuleOption?.sourceColumn || '',
+                      })}
+                    >
+                      Parsing and cleanup rules
+                    </Button>
+                  </Stack>
+                  <TableContainer sx={{ border: `1px solid ${normalizerTheme.border}`, maxHeight: 320 }}>
+                    <Table stickyHeader size="small">
+                      <TableHead><TableRow><TableCell>Source row</TableCell><TableCell>Customer value</TableCell><TableCell>FactWise value</TableCell></TableRow></TableHead>
+                      <TableBody>
+                        {fieldPatternReviewRows.slice(0, 25).map((row, index) => {
+                          const field = selectedFieldPatternRuleOption;
+                          const sourceValue = (row.left || []).find((item) => item.column === field?.sourceColumn)?.value ?? '';
+                          const factwiseValue = row.entries?.[0]?.fields?.[field?.key]?.value ?? row.entries?.[0]?.fields?.[field?.key] ?? '';
+                          return (
+                            <TableRow key={`direct-${row.sourceRow || index}`}>
+                              <TableCell>{row.sourceRow || '-'}</TableCell>
+                              <TableCell sx={{ maxWidth: 420, overflowWrap: 'anywhere' }}>{fmt(sourceValue)}</TableCell>
+                              <TableCell sx={{ maxWidth: 420, overflowWrap: 'anywhere' }}>{fmt(factwiseValue)}</TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  </TableContainer>
+                </Paper>
+              )}
+            </Stack>
+          )}
+          {fieldPatternReviewStage === 'rows' && (!fieldPatternReviewRows.length ? (
             <Alert severity="info">
-              No review patterns were returned by backend for the selected customer columns.
+              No review rows were returned by backend for the selected customer rows.
             </Alert>
           ) : (
             <Grid container spacing={0}>
@@ -18179,9 +18714,8 @@ const BomNormalizer = () => {
                           </Typography>
                           <Chip
                             size="small"
-                            color={fieldPatternConfirmed[group.id] ? 'success' : 'default'}
-                            variant={fieldPatternConfirmed[group.id] ? 'filled' : 'outlined'}
-                            label={fieldPatternConfirmed[group.id] ? 'Confirmed' : `${group.rowCount || 0} matching rows`}
+                            variant="outlined"
+                            label={`${group.rowCount || 0} matching rows`}
                             sx={{ height: 22, fontSize: 10.5, fontWeight: 800 }}
                           />
                         </Stack>
@@ -18245,49 +18779,47 @@ const BomNormalizer = () => {
                 </Paper>
               </Grid>
               <Grid item xs={12} md={12}>
-                {selectedFieldPatternGroup && (() => {
-                  const group = selectedFieldPatternGroup;
-                  const groupSamples = Array.isArray(group.samples) ? group.samples : [];
-                  const currentSampleIndex = Math.min(
-                    Math.max(Number(fieldPatternSampleIndexes[group.id] || 0), 0),
-                    Math.max(groupSamples.length - 1, 0)
+                {fieldPatternReviewRows.length > 0 && (() => {
+                  // Pattern combinations remain available for backend grouping and
+                  // rule application, but the review UI intentionally shows one
+                  // continuous client-versus-FactWise row list.
+                  const combinationPatternKeys = [...new Set(
+                    fieldPatternReviewRows.flatMap((row) => (
+                      (row.occurrences || []).map((occurrence) => occurrence.patternKey).filter(Boolean)
+                    ))
+                  )];
+                  const group = (
+                    selectedFieldPatternGroup && combinationPatternKeys.includes(selectedFieldPatternGroup.patternKey)
+                      ? selectedFieldPatternGroup
+                      : fieldPatternGroups.find((candidate) => candidate.patternKey === combinationPatternKeys[0])
+                  ) || selectedFieldPatternGroup || fieldPatternGroups[0] || {
+                    id: 'direct-mapping',
+                    patternKey: '',
+                    shape: '__direct_mapping__',
+                    selectedColumns: mappedFieldPatternRuleOptions.map((field) => field.sourceColumn),
+                    rowCount: fieldPatternReviewRows.length,
+                  };
+                  const groupSamples = fieldPatternReviewRows;
+                  const reviewPageCount = Math.max(1, Math.ceil(groupSamples.length / FIELD_PATTERN_REVIEW_PAGE_SIZE));
+                  const safeReviewPage = Math.min(fieldPatternReviewPage, reviewPageCount - 1);
+                  const reviewPageStart = safeReviewPage * FIELD_PATTERN_REVIEW_PAGE_SIZE;
+                  const samples = groupSamples.slice(
+                    reviewPageStart,
+                    reviewPageStart + FIELD_PATTERN_REVIEW_PAGE_SIZE
                   );
-                  const samples = groupSamples.length ? [groupSamples[currentSampleIndex]] : [];
                   const activeRuleDraftsForDialog = Object.keys(fieldPatternRuleDrafts || {}).length
                     ? fieldPatternRuleDrafts
                     : (normalizerConfig.fieldPatternRules || {});
                   const groupRule = fieldPatternRuleForGroup(activeRuleDraftsForDialog, group);
                   const identityGroups = sameCellIdentityGroupsFromRoles(roles);
-                  const selectedSamplePatternRows = Array.isArray(samples[0]?.patternRows)
-                    ? samples[0].patternRows.filter((row) => fmt(row?.pattern))
+                  const selectedRuleField = selectedFieldPatternRuleOption;
+                  const selectedRule = selectedRuleField
+                    ? (groupRule.fields?.[selectedRuleField.key] || {})
+                    : {};
+                  const selectedDelimiterMode = selectedRule.delimiter || 'none';
+                  const selectedIdentityGroups = selectedRuleField
+                    ? identityGroups.filter((identityGroup) => identityGroup.roles.includes(selectedRuleField.key))
                     : [];
-                  const selectedSamplePrimaryPatternRow = fmt(samples[0]?.primaryPatternRow?.pattern)
-                    ? samples[0].primaryPatternRow
-                    : null;
-                  const backendPatternRows = Array.isArray(group.patternRows)
-                    ? group.patternRows.filter((row) => fmt(row?.pattern))
-                    : [];
-                  const backendPrimaryPatternRow = fmt(group.primaryPatternRow?.pattern)
-                    ? group.primaryPatternRow
-                    : null;
-                  const patternGrammarRows = selectedSamplePatternRows.length
-                    ? selectedSamplePatternRows
-                    : (backendPatternRows.length
-                      ? backendPatternRows
-                      : (selectedSamplePrimaryPatternRow
-                        ? [selectedSamplePrimaryPatternRow]
-                        : (backendPrimaryPatternRow
-                          ? [backendPrimaryPatternRow]
-                          : buildFieldPatternGrammarRows(group, groupRule, roles))));
-                  const identityPatternRows = patternGrammarRows.filter((row) => {
-                    const rowRoles = Array.isArray(row.roles) ? row.roles : [];
-                    return rowRoles.includes('mpn') && rowRoles.includes('manufacturer');
-                  });
-                  const displayedPatternRows = identityPatternRows.length ? identityPatternRows : patternGrammarRows;
-                  const selectedGroupIndex = Math.max(
-                    fieldPatternGroups.findIndex((candidate) => candidate.id === group.id),
-                    0
-                  );
                   const mappedRolesByColumn = Object.entries(roles || {}).reduce((acc, [role, column]) => {
                     const sourceColumn = fmt(column);
                     if (!sourceColumn) return acc;
@@ -18310,133 +18842,40 @@ const BomNormalizer = () => {
                         gap={1.2}
                         sx={{ px: 1.6, py: 1.15, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}
                       >
-                        <Stack direction="row" alignItems="center" gap={0.8}>
-                          <Tooltip title="Previous pattern">
-                            <span>
-                              <IconButton
-                                size="small"
-                                disabled={selectedGroupIndex <= 0}
-                                onClick={() => setSelectedFieldPatternId(fieldPatternGroups[selectedGroupIndex - 1]?.id || group.id)}
-                                sx={{ width: 30, height: 30, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}
-                              >
-                                <ChevronLeftIcon fontSize="small" />
-                              </IconButton>
-                            </span>
-                          </Tooltip>
-                          <Chip
-                            size="small"
-                            variant="outlined"
-                            label={`Pattern ${selectedGroupIndex + 1} of ${fieldPatternGroups.length}`}
-                            sx={{ height: 28, fontSize: 11.5, fontWeight: 800, bgcolor: normalizerTheme.paper }}
-                          />
-                          <Tooltip title="Next pattern">
-                            <span>
-                              <IconButton
-                                size="small"
-                                disabled={selectedGroupIndex >= fieldPatternGroups.length - 1}
-                                onClick={() => setSelectedFieldPatternId(fieldPatternGroups[selectedGroupIndex + 1]?.id || group.id)}
-                                sx={{ width: 30, height: 30, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}
-                              >
-                                <ChevronRightIcon fontSize="small" />
-                              </IconButton>
-                            </span>
-                          </Tooltip>
-                        </Stack>
+                        <Typography sx={{ fontSize: 14, fontWeight: 850, color: normalizerTheme.text }}>
+                          All detected rows
+                        </Typography>
                         <Stack direction="row" alignItems="center" gap={0.75} flexWrap="wrap">
                           <Chip size="small" label={reviewModeLabel} sx={{ height: 25, fontSize: 11, fontWeight: 800, bgcolor: '#e4f3f0', color: '#0f6e63' }} />
-                          <Chip size="small" variant="outlined" label={`${group.occurrenceCount || group.rowCount || 0} matching fragments`} sx={{ height: 25, fontSize: 11, fontWeight: 800, bgcolor: normalizerTheme.paper }} />
-                          {fieldPatternConfirmed[group.id] && (
-                            <Chip size="small" label="Confirmed" sx={{ height: 25, fontSize: 11, fontWeight: 800, bgcolor: '#dcfce7', color: '#166534' }} />
-                          )}
+                          <Chip size="small" variant="outlined" label={`${groupSamples.length} source rows`} sx={{ height: 25, fontSize: 11, fontWeight: 800, bgcolor: normalizerTheme.paper }} />
                         </Stack>
                       </Stack>
                       <Box sx={{ p: 1.5 }}>
-                      <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1} alignItems={{ xs: 'stretch', sm: 'flex-start' }}>
-                        <Box sx={{ minWidth: 0 }}>
-                          <Typography sx={{ fontSize: 14, fontWeight: 800, color: normalizerTheme.text }}>
-                            {group.title || group.id}
+                      <Stack direction="column" gap={1} sx={{ position: 'relative' }}>
+                        <Box
+                          sx={{
+                            minWidth: 0,
+                            display: 'grid',
+                            gridTemplateColumns: { xs: '1fr', lg: 'minmax(0, 1.15fr) minmax(420px, 0.85fr)' },
+                            columnGap: 1.25,
+                            alignItems: 'start',
+                          }}
+                        >
+                          <Typography sx={{ gridColumn: 1, gridRow: 1, fontSize: 14, fontWeight: 800, color: normalizerTheme.text }}>
+                            Client file and FactWise preview
                           </Typography>
-                          <Stack direction="row" gap={0.65} flexWrap="wrap" sx={{ mt: 0.6 }}>
-                            {group.alternateEntryCount > 0 && (
-                              <Chip size="small" label={`${group.alternateEntryCount} alternate values`} sx={{ height: 22, bgcolor: '#f1eafe', color: '#6d28d9', fontSize: 11, fontWeight: 800 }} />
+                          <Stack direction="row" gap={0.65} flexWrap="wrap" sx={{ gridColumn: 1, gridRow: 2, mt: 0.6 }}>
+                            {(samples[0]?.entries?.length || 0) > 1 && (
+                              <Chip size="small" label={`${samples[0].entries.length - 1} generated alternate rows`} sx={{ height: 22, bgcolor: '#f1eafe', color: '#6d28d9', fontSize: 11, fontWeight: 800 }} />
                             )}
-                            {(group.selectedColumns || []).slice(0, 4).map((column) => (
-                              <Chip
-                                key={`${group.id}-selected-${column}`}
-                                size="small"
-                                variant="outlined"
-                                label={column}
-                                title={column}
-                                sx={{ height: 22, maxWidth: 180, fontSize: 11, '& .MuiChip-label': { overflow: 'hidden', textOverflow: 'ellipsis' } }}
-                              />
-                            ))}
                           </Stack>
-                          {displayedPatternRows.length > 0 && (
-                            <Box
-                              sx={{
-                                mt: 1,
-                                p: 1.1,
-                                borderRadius: '7px',
-                                border: `1px solid ${normalizerTheme.borderStrong}`,
-                                borderLeft: '3px solid #0f6e63',
-                                bgcolor: normalizerTheme.paperSoft,
-                              }}
-                            >
-                              <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" gap={1} alignItems={{ xs: 'stretch', sm: 'flex-start' }}>
-                                <Box sx={{ minWidth: 0 }}>
-                                  <Typography sx={{ mb: 0.45, fontSize: 11.5, fontWeight: 900, color: '#0f6e63' }}>
-                                    Detected pattern
-                                  </Typography>
-                                  <Stack gap={0.6}>
-                                    {displayedPatternRows.map((patternRow, patternIndex) => (
-                                      <Box key={patternRow.key}>
-                                        <Typography
-                                          title={`${patternRow.source}: ${patternRow.pattern}`}
-                                          sx={{
-                                            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-                                            fontSize: 13,
-                                            fontWeight: 900,
-                                            color: '#0f172a',
-                                            lineHeight: 1.35,
-                                            whiteSpace: 'normal',
-                                            wordBreak: 'break-word',
-                                          }}
-                                        >
-                                          {patternIndex + 1}. {patternRow.pattern}
-                                        </Typography>
-                                        <Typography
-                                          title={patternRow.source}
-                                          sx={{
-                                            mt: 0.15,
-                                            fontSize: 11.4,
-                                            fontWeight: 650,
-                                            color: '#475569',
-                                            whiteSpace: 'nowrap',
-                                            overflow: 'hidden',
-                                            textOverflow: 'ellipsis',
-                                          }}
-                                        >
-                                          {patternRow.source}{(group.occurrenceCount || group.rowCount) ? ` - ${group.occurrenceCount || group.rowCount} matching fragments` : ''}
-                                        </Typography>
-                                      </Box>
-                                    ))}
-                                  </Stack>
-                                </Box>
-                                <ShadcnButton
-                                  size="sm"
-                                  variant="outline"
-                                  disabled={fieldPatternLoading || !samples[0]}
-                                  onClick={() => handleOpenVisualTeachPattern(group, samples[0])}
-                                  className="h-8 shrink-0 border-blue-300 bg-white text-blue-700 hover:bg-blue-50"
-                                >
-                                  Teach visually
-                                </ShadcnButton>
-                              </Stack>
-                            </Box>
-                          )}
                           <Box
                             component="details"
+                            open
                             sx={{
+                              display: 'none',
+                              gridColumn: { xs: 1, lg: 2 },
+                              gridRow: { xs: 'auto', lg: 3 },
                               mt: 1,
                               border: `1px solid ${normalizerTheme.border}`,
                               borderRadius: '7px',
@@ -18459,13 +18898,23 @@ const BomNormalizer = () => {
                             </Box>
                             {fieldPatternRulesDirty && (
                               <Alert severity="warning" sx={{ mb: 0.9 }}>
-                                Parser settings changed. Refresh the backend preview before confirming this pattern.
+                                Parser settings changed. Refresh the backend preview before applying these patterns.
                               </Alert>
                             )}
-                            {identityGroups.length > 0 && (
+                            <Autocomplete
+                              size="small"
+                              options={mappedFieldPatternRuleOptions}
+                              value={selectedRuleField}
+                              onChange={(_, option) => setFieldPatternSelectedRuleField(option?.key || '')}
+                              getOptionLabel={(option) => `${option?.label || ''} - ${option?.sourceColumn || ''}`}
+                              isOptionEqualToValue={(option, value) => option.key === value.key}
+                              renderInput={(params) => <TextField {...params} label="Mapped FactWise field" />}
+                              sx={{ mb: 1 }}
+                            />
+                            {selectedIdentityGroups.length > 0 && (
                               <Box sx={{ mb: 1 }}>
                                 <Typography sx={{ mb: 0.55, fontSize: 11.5, fontWeight: 850, color: normalizerTheme.text }}>
-                                  Same-cell CPN / MPN / Manufacturer
+                                  Shared customer column
                                 </Typography>
                                 <Box
                                   sx={{
@@ -18474,7 +18923,7 @@ const BomNormalizer = () => {
                                     gap: 0.9,
                                   }}
                                 >
-                                  {identityGroups.map((identityGroup) => {
+                                  {selectedIdentityGroups.map((identityGroup) => {
                                     const comboRule = findIdentityGroupRule(groupRule, identityGroup);
                                     const comboDelimiter = comboRule.delimiter || comboRule.comboDelimiter || 'auto';
                                     const comboOrder = (comboRule.order && comboRule.order.length ? comboRule.order : identityGroup.roles).join('|');
@@ -18547,121 +18996,89 @@ const BomNormalizer = () => {
                                 </Box>
                               </Box>
                             )}
-                            <Box
-                              sx={{
-                                display: 'grid',
-                                gridTemplateColumns: 'repeat(3, minmax(220px, 1fr))',
-                                gap: 0.9,
-                                overflowX: 'auto',
-                              }}
-                            >
-                              {FIELD_PATTERN_RULE_FIELDS.map((field) => {
-                                const rule = groupRule.fields?.[field.key] || {};
-                                const delimiterMode = rule.delimiter || 'none';
-                                return (
-                                  <Box
-                                    key={`${group.id}-rule-${field.key}`}
-                                    sx={{
-                                      minWidth: 220,
-                                      p: 0.85,
-                                      borderRadius: '6px',
-                                      border: `1px solid ${normalizerTheme.border}`,
-                                      bgcolor: normalizerTheme.paper,
-                                    }}
-                                  >
-                                    <Typography sx={{ mb: 0.65, fontSize: 11.5, fontWeight: 850, color: normalizerTheme.text }}>
-                                      {field.label}
-                                    </Typography>
-                                    <FormControl size="small" fullWidth>
-                                      <InputLabel>Split alternates by</InputLabel>
-                                      <Select
-                                        label="Split alternates by"
-                                        value={delimiterMode}
-                                        onChange={(event) => handleFieldPatternRuleChange(group, field.key, { delimiter: event.target.value })}
-                                      >
-                                        {FIELD_PATTERN_DELIMITER_OPTIONS.map((option) => (
-                                          <MenuItem key={option.value} value={option.value}>
-                                            {option.label}
-                                          </MenuItem>
-                                        ))}
-                                      </Select>
-                                    </FormControl>
-                                    {delimiterMode === 'custom' && (
-                                      <TextField
-                                        fullWidth
-                                        size="small"
-                                        label="Custom delimiter"
-                                        value={rule.customDelimiter || ''}
-                                        onChange={(event) => handleFieldPatternRuleChange(group, field.key, { customDelimiter: event.target.value })}
-                                        sx={{ mt: 0.75 }}
-                                      />
-                                    )}
-                                    {field.prefix && (
-                                      <Stack gap={0.75} sx={{ mt: 0.75 }}>
-                                        <TextField
-                                          fullWidth
-                                          size="small"
-                                          label={rule.prefixMode === 'first_n_chars' ? 'Number of characters' : 'Strip prefix'}
-                                          placeholder={rule.prefixMode === 'first_n_chars' ? 'e.g. 5' : (field.key === 'mpn' ? 'e.g. ABC-' : 'e.g. Vendor:')}
-                                          value={rule.stripPrefix || ''}
-                                          onChange={(event) => handleFieldPatternRuleChange(group, field.key, { stripPrefix: event.target.value })}
-                                        />
-                                        <FormControl size="small" fullWidth>
-                                          <InputLabel>Prefix mode</InputLabel>
-                                          <Select
-                                            label="Prefix mode"
-                                            value={rule.prefixMode || 'literal'}
-                                            onChange={(event) => handleFieldPatternRuleChange(group, field.key, { prefixMode: event.target.value })}
-                                          >
-                                            <MenuItem value="literal">Exact prefix text</MenuItem>
-                                            <MenuItem value="first_n_chars">First N characters</MenuItem>
-                                            <MenuItem value="regex">Regex from start</MenuItem>
-                                            <MenuItem value="before_delimiter">Text before delimiter</MenuItem>
-                                          </Select>
-                                        </FormControl>
-                                      </Stack>
-                                    )}
+                            {selectedRuleField && (
+                              <Box
+                                sx={{
+                                  p: 0.9,
+                                  borderRadius: '6px',
+                                  border: `1px solid ${normalizerTheme.border}`,
+                                  bgcolor: normalizerTheme.paper,
+                                }}
+                              >
+                                <Typography sx={{ mb: 0.7, fontSize: 11.5, fontWeight: 850, color: normalizerTheme.text }}>
+                                  {selectedRuleField.label}
+                                  <Box component="span" sx={{ ml: 0.6, color: normalizerTheme.muted, fontWeight: 650 }}>
+                                    {selectedRuleField.sourceColumn}
                                   </Box>
-                                );
-                              })}
-                            </Box>
+                                </Typography>
+                                <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'minmax(220px, 1fr) minmax(220px, 1fr)' }, gap: 0.8 }}>
+                                  <FormControl size="small" fullWidth>
+                                    <InputLabel>Split alternates by</InputLabel>
+                                    <Select
+                                      label="Split alternates by"
+                                      value={selectedDelimiterMode}
+                                      onChange={(event) => handleFieldPatternRuleChange(group, selectedRuleField.key, { delimiter: event.target.value })}
+                                    >
+                                      {FIELD_PATTERN_DELIMITER_OPTIONS.map((option) => (
+                                        <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                                      ))}
+                                    </Select>
+                                  </FormControl>
+                                  <FormControl size="small" fullWidth>
+                                    <InputLabel>Prefix mode</InputLabel>
+                                    <Select
+                                      label="Prefix mode"
+                                      value={selectedRule.prefixMode || 'literal'}
+                                      onChange={(event) => handleFieldPatternRuleChange(group, selectedRuleField.key, { prefixMode: event.target.value })}
+                                    >
+                                      <MenuItem value="literal">Exact prefix text</MenuItem>
+                                      <MenuItem value="first_n_chars">First N characters</MenuItem>
+                                      <MenuItem value="regex">Regex from start</MenuItem>
+                                      <MenuItem value="before_delimiter">Text before delimiter</MenuItem>
+                                    </Select>
+                                  </FormControl>
+                                </Box>
+                                <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: selectedDelimiterMode === 'custom' ? '1fr 1fr' : '1fr' }, gap: 0.8, mt: 0.8 }}>
+                                  {selectedDelimiterMode === 'custom' && (
+                                    <TextField
+                                      fullWidth
+                                      size="small"
+                                      label="Custom delimiter"
+                                      value={selectedRule.customDelimiter || ''}
+                                      onChange={(event) => handleFieldPatternRuleChange(group, selectedRuleField.key, { customDelimiter: event.target.value })}
+                                    />
+                                  )}
+                                  <TextField
+                                    fullWidth
+                                    size="small"
+                                    label={selectedRule.prefixMode === 'first_n_chars' ? 'Number of characters' : 'Strip prefix'}
+                                    placeholder={selectedRule.prefixMode === 'first_n_chars' ? 'e.g. 5' : 'Text to remove from the start'}
+                                    value={selectedRule.stripPrefix || ''}
+                                    onChange={(event) => handleFieldPatternRuleChange(group, selectedRuleField.key, { stripPrefix: event.target.value })}
+                                  />
+                                </Box>
+                              </Box>
+                            )}
                           </Box>
                         </Box>
-                        <Stack direction="row" gap={0.75} flexWrap="wrap" justifyContent={{ xs: 'flex-start', sm: 'flex-end' }}>
-                          <IconButton
-                            size="small"
-                            aria-label="Previous matching row"
-                            disabled={currentSampleIndex <= 0}
-                            onClick={() => handleStepFieldPatternSample(group, -1)}
-                            sx={{
-                              width: 32,
-                              height: 32,
-                              border: `1px solid ${normalizerTheme.border}`,
-                              bgcolor: normalizerTheme.paper,
-                            }}
-                          >
-                            <ChevronLeftIcon fontSize="small" />
-                          </IconButton>
+                        <Stack
+                          direction="row"
+                          gap={0.75}
+                          flexWrap="wrap"
+                          justifyContent={{ xs: 'flex-start', sm: 'flex-end' }}
+                          sx={{
+                            display: 'none',
+                            position: { xs: 'static', lg: 'absolute' },
+                            top: { lg: 0 },
+                            right: { lg: 0 },
+                          }}
+                        >
                           <Chip
                             size="small"
                             variant="outlined"
-                            label={groupSamples.length ? `Example ${currentSampleIndex + 1} of ${groupSamples.length}` : 'No matching fragments'}
+                            label={`${groupSamples.length} row${groupSamples.length === 1 ? '' : 's'}`}
                             sx={{ height: 32, fontSize: 12, fontWeight: 800 }}
                           />
-                          <IconButton
-                            size="small"
-                            aria-label="Next matching row"
-                            disabled={currentSampleIndex >= groupSamples.length - 1}
-                            onClick={() => handleStepFieldPatternSample(group, 1)}
-                            sx={{
-                              width: 32,
-                              height: 32,
-                              border: `1px solid ${normalizerTheme.border}`,
-                              bgcolor: normalizerTheme.paper,
-                            }}
-                          >
-                            <ChevronRightIcon fontSize="small" />
-                          </IconButton>
                           <ShadcnButton
                             size="sm"
                             variant="outlined"
@@ -18671,28 +19088,18 @@ const BomNormalizer = () => {
                           >
                             Refresh preview
                           </ShadcnButton>
-                          <ShadcnButton
-                            size="sm"
-                            variant={fieldPatternConfirmed[group.id] ? 'secondary' : 'default'}
-                            disabled={fieldPatternLoading || fieldPatternRulesDirty || fieldPatternConfirmed[group.id] !== false}
-                            onClick={() => handleConfirmFieldPatternGroup(group.id)}
-                            className={fieldPatternConfirmed[group.id] ? 'h-8 bg-emerald-100 text-emerald-800 hover:bg-emerald-200' : 'h-8'}
-                          >
-                            {fieldPatternConfirmed[group.id] === false
-                              ? 'Confirm changes'
-                              : (fieldPatternConfirmed[group.id] ? 'Confirmed' : 'No changes')}
-                          </ShadcnButton>
                         </Stack>
                       </Stack>
 
-                      <Stack gap={1.25} sx={{ mt: 1.4, maxHeight: 500, overflowY: 'auto', pr: 0.5 }}>
+                      <Stack gap={1.25} sx={{ mt: 1.4 }}>
                         {samples.map((sample, sampleIndex) => {
-                          const sampleKey = fieldPatternSampleKey(sample);
-                          const sampleEdit = fieldPatternEdits[group.id]?.[sampleKey] || {};
-                          const entries = sampleEdit.entries?.length
-                            ? sampleEdit.entries
-                            : [{ relation: 'Primary', fields: fieldValuesFromBackendFields(sample.fields || {}, fieldPatternFields) }];
-                          const visibleEntries = filterFactwiseEntriesForConfig(entries, normalizerConfig);
+                          const visibleEntries = editableEntriesForPatternCombinationSample(
+                            sample,
+                            fieldPatternGroups,
+                            fieldPatternEdits,
+                            fieldPatternFields,
+                            normalizerConfig
+                          );
                           const visibleFactwiseFields = visibleFactwiseFieldsForPatternSample(
                             fieldPatternFields,
                             visibleEntries,
@@ -18700,15 +19107,86 @@ const BomNormalizer = () => {
                             roles
                           );
                           const showAddAlternate = normalizerConfig.alternateLayout !== 'already_separate_rows';
+                          const activeOccurrence = (sample.occurrences || []).find(
+                            (occurrence) => occurrence.patternKey === group.patternKey
+                          ) || (sample.occurrences || [])[0];
+                          const activeGroup = fieldPatternGroups.find(
+                            (candidate) => candidate.patternKey === activeOccurrence?.patternKey
+                          ) || group;
+                          const activeOccurrenceId = fmt(activeOccurrence?.occurrenceId);
+                          const rowPatterns = sample.patterns || [];
+                          const unresolvedRowPatterns = rowPatterns.filter(
+                            (pattern) => !pattern.recognized
+                          );
                           return (
                             <Paper
                               key={`${group.id}-${sample.sourceRow}-${sampleIndex}`}
+                              id={`field-pattern-row-${sample.sourceRow}`}
                               elevation={0}
-                              sx={{ p: 1.2, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}
+                              sx={{
+                                p: 1.2,
+                                border: `1px solid ${unresolvedRowPatterns.length ? '#f0b35c' : normalizerTheme.border}`,
+                                bgcolor: normalizerTheme.paperSoft,
+                                contentVisibility: 'auto',
+                                containIntrinsicSize: '430px',
+                              }}
                             >
-                              <Typography sx={{ mb: 0.9, fontSize: 12, fontWeight: 800, color: normalizerTheme.muted }}>
-                                Source row {sample.sourceRow}
-                              </Typography>
+                              <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'flex-start', sm: 'center' }} gap={0.75} sx={{ mb: 0.9 }}>
+                                <Typography sx={{ fontSize: 12, fontWeight: 800, color: normalizerTheme.muted }}>
+                                  Source row {sample.sourceRow}
+                                </Typography>
+                                {rowPatterns.length > 0 && (
+                                  <Stack direction="row" gap={0.6} flexWrap="wrap" justifyContent="flex-end">
+                                    {rowPatterns.map((pattern, patternIndex) => {
+                                      const patternGroup = fieldPatternGroups.find(
+                                        (candidate) => candidate.patternKey === pattern.patternKey
+                                      );
+                                      const occurrence = (sample.occurrences || []).find(
+                                        (item) => item.patternKey === pattern.patternKey
+                                      );
+                                      const sourceColumn = fmt(occurrence?.sourceColumn);
+                                      const teachSample = occurrence ? {
+                                        sourceRow: sample.sourceRow,
+                                        left: sample.left || [],
+                                        sourceFragment: {
+                                          ...occurrence,
+                                          id: occurrence.occurrenceId,
+                                        },
+                                        entries: occurrence.entries || [],
+                                        fields: occurrence.entries?.[0]?.fields || {},
+                                        interpretationSpansByColumn: sourceColumn
+                                          ? { [sourceColumn]: occurrence.interpretationSpans || [] }
+                                          : {},
+                                        patternRows: patternGroup?.patternRows || [],
+                                        primaryPatternRow: patternGroup?.primaryPatternRow || null,
+                                      } : null;
+                                      const workflowStep = (fieldPatternReviewWorkflow?.steps || []).find(
+                                        (step) => step.type === 'teach_visual' && step.patternKey === pattern.patternKey
+                                      );
+                                      return (
+                                        <Tooltip key={pattern.patternKey} title={pattern.pattern || 'Unrecognized pattern'} arrow>
+                                          <span>
+                                            <ShadcnButton
+                                              size="sm"
+                                              variant="outline"
+                                              disabled={fieldPatternLoading || !patternGroup || !teachSample}
+                                              onClick={() => {
+                                                setSelectedFieldPatternId(patternGroup.id);
+                                                handleOpenVisualTeachPattern(patternGroup, teachSample, workflowStep);
+                                              }}
+                                              className={pattern.recognized
+                                                ? 'h-8 border-emerald-300 bg-white text-emerald-800 hover:bg-emerald-50'
+                                                : 'h-8 border-amber-300 bg-white text-amber-800 hover:bg-amber-50'}
+                                            >
+                                              Re-teach pattern {patternIndex + 1}
+                                            </ShadcnButton>
+                                          </span>
+                                        </Tooltip>
+                                      );
+                                    })}
+                                  </Stack>
+                                )}
+                              </Stack>
                               <Box
                                 sx={{
                                   display: 'grid',
@@ -18757,7 +19235,8 @@ const BomNormalizer = () => {
                                         <ShadcnButton
                                           size="sm"
                                           variant="outline"
-                                          onClick={() => handleAddFieldPatternAlternate(group.id, sampleKey)}
+                                          disabled={!activeOccurrenceId}
+                                          onClick={() => handleAddFieldPatternAlternate(activeGroup.id, activeOccurrenceId)}
                                           className="h-8 border-blue-300 text-blue-700 hover:bg-blue-50"
                                         >
                                           Add alternate
@@ -18878,28 +19357,37 @@ const BomNormalizer = () => {
                                                     verticalAlign: 'top',
                                                   }}
                                                 >
-                                                  <TextField
-                                                    fullWidth
-                                                    multiline
-                                                    maxRows={3}
-                                                    variant="standard"
+                                                  <Box
+                                                    component="textarea"
                                                     value={entry.fields?.[field.key] ?? ''}
-                                                    onChange={(event) => handleFieldPatternValueChange(group.id, sampleKey, entryIndex, field.key, event.target.value)}
-                                                    inputProps={{ 'aria-label': `${relation} ${field.label}` }}
-                                                    InputProps={{ disableUnderline: true }}
+                                                    onChange={(event) => handleFieldPatternValueChange(
+                                                      entry.groupId,
+                                                      entry.occurrenceId,
+                                                      entry.patternEntryIndex,
+                                                      field.key,
+                                                      event.target.value
+                                                    )}
+                                                    aria-label={`${relation} ${field.label}`}
+                                                    rows={1}
                                                     sx={{
-                                                      '& .MuiInputBase-root': {
-                                                        minHeight: 36,
-                                                        px: 1,
-                                                        py: 0.65,
-                                                        alignItems: 'flex-start',
-                                                        bgcolor: 'transparent',
-                                                      },
-                                                      '& .MuiInputBase-input': {
-                                                        p: 0,
-                                                        fontSize: 12,
-                                                        lineHeight: 1.35,
-                                                      },
+                                                      display: 'block',
+                                                      width: '100%',
+                                                      minHeight: 36,
+                                                      maxHeight: 72,
+                                                      m: 0,
+                                                      px: 1,
+                                                      py: 0.65,
+                                                      border: 0,
+                                                      outline: 0,
+                                                      resize: 'vertical',
+                                                      overflow: 'auto',
+                                                      bgcolor: 'transparent',
+                                                      color: normalizerTheme.text,
+                                                      font: 'inherit',
+                                                      fontSize: 12,
+                                                      lineHeight: 1.35,
+                                                      boxSizing: 'border-box',
+                                                      '&:focus': { boxShadow: 'inset 0 0 0 2px #60a5fa' },
                                                     }}
                                                   />
                                                 </TableCell>
@@ -18920,7 +19408,11 @@ const BomNormalizer = () => {
                                                       size="small"
                                                       color="error"
                                                       aria-label={`Remove ${relation}`}
-                                                      onClick={() => handleRemoveFieldPatternEntry(group.id, sampleKey, entryIndex)}
+                                                      onClick={() => handleRemoveFieldPatternEntry(
+                                                        entry.groupId,
+                                                        entry.occurrenceId,
+                                                        entry.patternEntryIndex
+                                                      )}
                                                       sx={{ width: 28, height: 28 }}
                                                     >
                                                       <DeleteOutlineIcon sx={{ fontSize: 17 }} />
@@ -18939,6 +19431,40 @@ const BomNormalizer = () => {
                             </Paper>
                           );
                         })}
+                        {groupSamples.length > FIELD_PATTERN_REVIEW_PAGE_SIZE && (
+                          <Stack direction="row" alignItems="center" justifyContent="center" gap={1} sx={{ py: 0.75 }}>
+                            <ShadcnButton
+                              size="sm"
+                              variant="outline"
+                              disabled={safeReviewPage === 0}
+                              onClick={() => {
+                                setFieldPatternReviewPage((current) => Math.max(0, current - 1));
+                                fieldPatternReviewContentRef.current?.scrollTo({ top: 0, behavior: 'auto' });
+                              }}
+                              className="h-9"
+                            >
+                              Previous
+                            </ShadcnButton>
+                            <Chip
+                              size="small"
+                              variant="outlined"
+                              label={`Rows ${reviewPageStart + 1}-${Math.min(reviewPageStart + samples.length, groupSamples.length)} of ${groupSamples.length}`}
+                              sx={{ height: 30, fontSize: 11.5, fontWeight: 800 }}
+                            />
+                            <ShadcnButton
+                              size="sm"
+                              variant="outline"
+                              disabled={safeReviewPage >= reviewPageCount - 1}
+                              onClick={() => {
+                                setFieldPatternReviewPage((current) => Math.min(reviewPageCount - 1, current + 1));
+                                fieldPatternReviewContentRef.current?.scrollTo({ top: 0, behavior: 'auto' });
+                              }}
+                              className="h-9"
+                            >
+                              Next
+                            </ShadcnButton>
+                          </Stack>
+                        )}
                       </Stack>
                       </Box>
                     </Paper>
@@ -18946,341 +19472,54 @@ const BomNormalizer = () => {
                 })()}
               </Grid>
             </Grid>
-          )}
+          ))}
         </DialogContent>
         <DialogActions sx={{ px: 2.5, py: 1.35, justifyContent: 'space-between', gap: 1, flexWrap: 'wrap', borderTop: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
-          <Button color="inherit" onClick={() => setFieldPatternReviewOpen(false)}>Close</Button>
-          <Stack direction="row" gap={1} alignItems="center">
-            <Button
-              variant="contained"
-              disabled={!allFieldPatternGroupsConfirmed || fieldPatternRulesDirty}
-              onClick={handleApplyFieldPatternReview}
-              sx={{ bgcolor: '#0f6e63', boxShadow: 'none', '&:hover': { bgcolor: '#0b5b53', boxShadow: 'none' } }}
-            >
-              Confirm patterns
-            </Button>
-          </Stack>
-        </DialogActions>
-      </Dialog>
-
-      <Dialog
-        open={fieldSplitReviewOpen}
-        onClose={() => setFieldSplitReviewOpen(false)}
-        maxWidth="md"
-        fullWidth
-        PaperProps={{
-          sx: {
-            width: 'min(980px, calc(100vw - 32px))',
-            height: 'min(780px, calc(100dvh - 32px))',
-            maxHeight: 'calc(100dvh - 32px)',
-            borderRadius: '8px',
-          },
-        }}
-      >
-        <DialogTitle sx={{ pb: 1 }}>
-          <Stack direction="row" justifyContent="space-between" alignItems="flex-start" gap={2}>
-            <Box sx={{ minWidth: 0 }}>
-              <Typography sx={{ fontSize: 18, fontWeight: 780, color: normalizerTheme.text }}>
-                Split mapped fields
-              </Typography>
-              <Typography sx={{ mt: 0.35, fontSize: 12.5, color: normalizerTheme.muted }}>
-                Select any mapped field to review its customer column and split rule.
-              </Typography>
-            </Box>
-            <Chip
-              size="small"
-              variant="outlined"
-              label={fieldPatternWorkflowNextStep ? `Step ${fieldPatternWorkflowNextStep.position} of ${fieldPatternWorkflowNextStep.total}` : ''}
-              sx={{ height: 27, flexShrink: 0, fontSize: 11, fontWeight: 800 }}
-            />
-          </Stack>
-        </DialogTitle>
-        <DialogContent sx={{ pt: 1, overflowY: 'auto' }}>
-          <Stack gap={1.5}>
-            <Autocomplete
-              size="small"
-              options={fieldSplitFields}
-              value={selectedFieldSplitConfig}
-              onChange={(_, option) => setFieldSplitSelectedField(option?.field || '')}
-              getOptionLabel={(option) => option?.fieldLabel || option?.field || ''}
-              isOptionEqualToValue={(option, value) => option.field === value.field}
-              renderInput={(params) => <TextField {...params} label="FactWise field" />}
-            />
-            <Paper
-              elevation={0}
-              sx={{ border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft, overflow: 'hidden' }}
-            >
-              <Box sx={{ px: 1.5, py: 1.1, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: '#fff' }}>
-                <Typography sx={{ fontSize: 11.5, fontWeight: 850, color: normalizerTheme.muted }}>
-                  Customer column
-                </Typography>
-                <Typography sx={{ mt: 0.25, fontSize: 15, fontWeight: 800, color: normalizerTheme.text, overflowWrap: 'anywhere' }}>
-                  {selectedFieldSplitConfig?.sourceColumn || 'No mapped column'}
-                </Typography>
-              </Box>
-              <Typography sx={{ px: 1.5, pt: 1.1, mb: 0.7, fontSize: 11.5, fontWeight: 850, color: normalizerTheme.muted }}>
-                Sample values
-              </Typography>
-              <Stack gap={0.6} sx={{ px: 1.5, pb: 1.35 }}>
-                {(selectedFieldSplitConfig?.samples || []).map((sample, index) => (
-                  <Typography
-                    key={`${selectedFieldSplitConfig?.field}-sample-${index}`}
-                    sx={{ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace', fontSize: 12.5, color: normalizerTheme.text, overflowWrap: 'anywhere' }}
-                  >
-                    {sample}
-                  </Typography>
-                ))}
-                {!selectedFieldSplitConfig?.samples?.length && (
-                  <Typography sx={{ fontSize: 12.5, color: normalizerTheme.muted }}>
-                    No non-empty sample values found.
-                  </Typography>
-                )}
-              </Stack>
-            </Paper>
-            <Paper
-              elevation={0}
-              sx={{ p: 1.25, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}
-            >
-              <Typography sx={{ mb: 1, fontSize: 12.5, fontWeight: 850, color: normalizerTheme.text }}>
-                Parsing and cleanup rules
-              </Typography>
-              {fieldSplitIdentityGroups.length > 0 && (
-                <Box sx={{ mb: 1.25 }}>
-                  <Typography sx={{ mb: 0.65, fontSize: 11.5, fontWeight: 850, color: normalizerTheme.muted }}>
-                    Same-cell CPN / MPN / Manufacturer
-                  </Typography>
-                  <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 0.9 }}>
-                    {fieldSplitIdentityGroups.map((identityGroup) => {
-                      const draftKey = identityGroupRuleKey(identityGroup);
-                      const comboRule = fieldSplitIdentityGroupDrafts[draftKey] || {};
-                      const comboDelimiter = comboRule.delimiter || comboRule.comboDelimiter || 'auto';
-                      const comboOrder = (
-                        Array.isArray(comboRule.order) && comboRule.order.length
-                          ? comboRule.order
-                          : (identityGroup.roles || [])
-                      ).join('|');
-                      const orderOptions = orderedIdentityRoleOptions(identityGroup.roles || []);
-                      return (
-                        <Box
-                          key={draftKey}
-                          sx={{ p: 1, borderRadius: '6px', border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}
-                        >
-                          <Typography sx={{ mb: 0.7, fontSize: 12, fontWeight: 850, color: normalizerTheme.text }}>
-                            {(identityGroup.roles || []).map((role) => TEACH_PATTERN_ROLE_LABELS[role] || role).join(' + ')}
-                          </Typography>
-                          <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' }, gap: 0.8 }}>
-                            <FormControl size="small" fullWidth>
-                              <InputLabel>Split fields by</InputLabel>
-                              <Select
-                                label="Split fields by"
-                                value={comboDelimiter}
-                                onChange={(event) => setFieldSplitIdentityGroupDrafts((current) => ({
-                                  ...current,
-                                  [draftKey]: {
-                                    ...(current[draftKey] || {}),
-                                    delimiter: event.target.value,
-                                  },
-                                }))}
-                              >
-                                {FIELD_PATTERN_COMBO_DELIMITER_OPTIONS.map((option) => (
-                                  <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
-                                ))}
-                              </Select>
-                            </FormControl>
-                            <FormControl size="small" fullWidth>
-                              <InputLabel>Field order</InputLabel>
-                              <Select
-                                label="Field order"
-                                value={comboOrder}
-                                onChange={(event) => setFieldSplitIdentityGroupDrafts((current) => ({
-                                  ...current,
-                                  [draftKey]: {
-                                    ...(current[draftKey] || {}),
-                                    order: event.target.value.split('|'),
-                                  },
-                                }))}
-                              >
-                                {orderOptions.map((order) => (
-                                  <MenuItem key={order.join('|')} value={order.join('|')}>
-                                    {order.map((role) => TEACH_PATTERN_ROLE_LABELS[role] || role).join(' / ')}
-                                  </MenuItem>
-                                ))}
-                              </Select>
-                            </FormControl>
-                          </Box>
-                          {comboDelimiter === 'custom' && (
-                            <TextField
-                              fullWidth
-                              size="small"
-                              label="Custom delimiter"
-                              value={comboRule.customDelimiter || ''}
-                              onChange={(event) => setFieldSplitIdentityGroupDrafts((current) => ({
-                                ...current,
-                                [draftKey]: {
-                                  ...(current[draftKey] || {}),
-                                  customDelimiter: event.target.value,
-                                },
-                              }))}
-                              sx={{ mt: 0.8 }}
-                            />
-                          )}
-                        </Box>
-                      );
-                    })}
-                  </Box>
-                </Box>
-              )}
-              <Typography sx={{ mb: 0.65, fontSize: 11.5, fontWeight: 850, color: normalizerTheme.muted }}>
-                {selectedFieldSplitConfig?.fieldLabel || 'Selected field'}
-              </Typography>
-              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: selectedFieldSplitRuleDefinition?.prefix ? '1fr 1fr' : '1fr' }, gap: 0.8 }}>
-                <FormControl size="small" fullWidth>
-                  <InputLabel>Split alternates by</InputLabel>
-                  <Select
-                    label="Split alternates by"
-                    value={selectedFieldSplitRule.delimiter || 'none'}
-                    onChange={(event) => {
-                      if (!selectedFieldSplitConfig?.field) return;
-                      setFieldSplitRuleDrafts((current) => ({
-                        ...current,
-                        [selectedFieldSplitConfig.field]: {
-                          ...(current[selectedFieldSplitConfig.field] || {}),
-                          delimiter: event.target.value,
-                        },
-                      }));
-                    }}
-                  >
-                    {(selectedFieldSplitConfig?.delimiterOptions || FIELD_PATTERN_DELIMITER_OPTIONS).map((option) => (
-                      <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-                {selectedFieldSplitRuleDefinition?.prefix && (
-                  <FormControl size="small" fullWidth>
-                    <InputLabel>Prefix mode</InputLabel>
-                    <Select
-                      label="Prefix mode"
-                      value={selectedFieldSplitRule.prefixMode || 'literal'}
-                      onChange={(event) => {
-                        if (!selectedFieldSplitConfig?.field) return;
-                        setFieldSplitRuleDrafts((current) => ({
-                          ...current,
-                          [selectedFieldSplitConfig.field]: {
-                            ...(current[selectedFieldSplitConfig.field] || {}),
-                            prefixMode: event.target.value,
-                          },
-                        }));
-                      }}
-                    >
-                      <MenuItem value="literal">Exact prefix text</MenuItem>
-                      <MenuItem value="first_n_chars">First N characters</MenuItem>
-                      <MenuItem value="regex">Regex from start</MenuItem>
-                      <MenuItem value="before_delimiter">Text before delimiter</MenuItem>
-                    </Select>
-                  </FormControl>
-                )}
-              </Box>
-              <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', sm: selectedFieldSplitRuleDefinition?.prefix && selectedFieldSplitRule.delimiter === 'custom' ? '1fr 1fr' : '1fr' }, gap: 0.8, mt: 0.8 }}>
-                {selectedFieldSplitRule.delimiter === 'custom' && (
-                  <TextField
-                    size="small"
-                    label="Custom delimiter"
-                    value={selectedFieldSplitRule.customDelimiter || ''}
-                    onChange={(event) => {
-                      if (!selectedFieldSplitConfig?.field) return;
-                      setFieldSplitRuleDrafts((current) => ({
-                        ...current,
-                        [selectedFieldSplitConfig.field]: {
-                          ...(current[selectedFieldSplitConfig.field] || {}),
-                          customDelimiter: event.target.value,
-                        },
-                      }));
-                    }}
-                  />
-                )}
-                {selectedFieldSplitRuleDefinition?.prefix && (
-                  <TextField
-                    size="small"
-                    label={selectedFieldSplitRule.prefixMode === 'first_n_chars' ? 'Number of characters' : 'Strip prefix'}
-                    placeholder={selectedFieldSplitRule.prefixMode === 'first_n_chars'
-                      ? 'e.g. 5'
-                      : (selectedFieldSplitConfig?.field === 'mpn' ? 'e.g. ABC-' : 'e.g. Vendor:')}
-                    value={selectedFieldSplitRule.stripPrefix || ''}
-                    onChange={(event) => {
-                      if (!selectedFieldSplitConfig?.field) return;
-                      setFieldSplitRuleDrafts((current) => ({
-                        ...current,
-                        [selectedFieldSplitConfig.field]: {
-                          ...(current[selectedFieldSplitConfig.field] || {}),
-                          stripPrefix: event.target.value,
-                        },
-                      }));
-                    }}
-                  />
-                )}
-              </Box>
-            </Paper>
-            <Paper
-              elevation={0}
-              sx={{ border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper, overflow: 'hidden' }}
-            >
-              <Box sx={{ px: 1.5, py: 1, borderBottom: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
-                <Typography sx={{ fontSize: 12, fontWeight: 850, color: normalizerTheme.text }}>
-                  Preview
-                </Typography>
-                <Typography sx={{ mt: 0.2, fontSize: 11.5, color: normalizerTheme.muted }}>
-                  Values the backend will produce with this split rule.
-                </Typography>
-              </Box>
-              <Stack gap={0.8} sx={{ p: 1.25, maxHeight: 210, overflowY: 'auto' }}>
-                {selectedFieldSplitPreview.map((preview, index) => (
-                  <Box key={`${selectedFieldSplitConfig?.field}-preview-${index}`}>
-                    <Typography sx={{ fontSize: 11, color: normalizerTheme.muted, overflowWrap: 'anywhere' }}>
-                      {preview.source}
-                    </Typography>
-                    <Stack direction="row" gap={0.6} flexWrap="wrap" sx={{ mt: 0.45 }}>
-                      {(preview.values || []).map((value, valueIndex) => (
-                        <Chip
-                          key={`${value}-${valueIndex}`}
-                          size="small"
-                          label={`${valueIndex + 1}. ${value}`}
-                          sx={{ maxWidth: '100%', height: 'auto', py: 0.3, '& .MuiChip-label': { whiteSpace: 'normal', overflowWrap: 'anywhere' } }}
-                        />
-                      ))}
-                    </Stack>
-                  </Box>
-                ))}
-                {!selectedFieldSplitPreview.length && (
-                  <Typography sx={{ fontSize: 12.5, color: normalizerTheme.muted }}>
-                    {selectedFieldSplitRule.delimiter === 'custom'
-                      ? 'Enter the custom delimiter, then continue to refresh the backend preview.'
-                      : 'No non-empty values are available to preview.'}
-                  </Typography>
-                )}
-              </Stack>
-            </Paper>
-          </Stack>
-        </DialogContent>
-        <DialogActions sx={{ px: 3, pb: 2, justifyContent: 'space-between' }}>
-          <Button color="inherit" onClick={() => setFieldSplitReviewOpen(false)}>Cancel</Button>
-          <Button variant="contained" disabled={fieldPatternLoading} onClick={handleApplyFieldSplitReview} endIcon={<ChevronRightIcon />}>
-            Continue
-          </Button>
+          {fieldPatternReviewStage === 'patterns' ? (
+            <>
+              <Button color="inherit" onClick={() => setFieldPatternReviewOpen(false)}>Close</Button>
+              <Button
+                variant="contained"
+                disabled={fieldPatternLoading || !fieldPatternReviewRows.length}
+                onClick={() => {
+                  setFieldPatternReviewPage(0);
+                  setFieldPatternReviewStage('rows');
+                  setFieldPatternExpandedPatternKey('');
+                  fieldPatternReviewContentRef.current?.scrollTo({ top: 0, behavior: 'auto' });
+                }}
+                endIcon={<ChevronRightIcon />}
+              >
+                Review all rows
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button color="inherit" startIcon={<ChevronLeftIcon />} onClick={() => setFieldPatternReviewStage('patterns')}>Back</Button>
+              <Button
+                variant="contained"
+                disabled={fieldPatternLoading || fieldPatternRulesDirty}
+                onClick={handleApplyFieldPatternReview}
+                sx={{ bgcolor: '#0f6e63', boxShadow: 'none', '&:hover': { bgcolor: '#0b5b53', boxShadow: 'none' } }}
+              >
+                Apply patterns
+              </Button>
+            </>
+          )}
         </DialogActions>
       </Dialog>
 
       <Dialog
         open={visualTeachOpen}
         onClose={() => setVisualTeachOpen(false)}
-        maxWidth="lg"
+        maxWidth={false}
         fullWidth
         PaperProps={{
           sx: {
-            width: 'calc(100% - 32px)',
-            maxWidth: '1120px',
-            m: 2,
-            height: 'calc(100dvh - 32px)',
-            maxHeight: 'calc(100vh - 32px)',
+            width: 'min(960px, calc(100vw - 32px))',
+            maxWidth: '960px',
+            m: 0.75,
+            height: 'min(750px, calc(100dvh - 12px))',
+            maxHeight: '750px',
             display: 'flex',
             flexDirection: 'column',
             overflow: 'hidden',
@@ -19300,13 +19539,13 @@ const BomNormalizer = () => {
               </Box>
               {visualTeachContext?.workflowStep && (
                 <Stack direction="row" alignItems="center" gap={0.5} sx={{ flexShrink: 0 }}>
-                <Tooltip title="Previous pattern">
+                <Tooltip title="Previous pattern group">
                   <span>
                     <IconButton
                       size="small"
                       disabled={!visualTeachPreviousWorkflowStep}
                       onClick={() => handleOpenVisualTeachWorkflowStep(visualTeachPreviousWorkflowStep)}
-                      aria-label="Previous pattern"
+                      aria-label="Previous pattern group"
                       sx={{ mt: -0.25 }}
                     >
                       <ChevronLeftIcon />
@@ -19316,16 +19555,24 @@ const BomNormalizer = () => {
                 <Chip
                   size="small"
                   variant="outlined"
-                  label={`Pattern ${visualTeachContext.workflowStep.patternNumberForColumn} of ${visualTeachContext.workflowStep.patternCountForColumn}`}
+                  label={`Pattern group ${visualTeachContext.workflowStep.patternNumberForColumn} of ${visualTeachContext.workflowStep.patternCountForColumn}`}
                   sx={{ height: 27, flexShrink: 0, fontSize: 11, fontWeight: 800 }}
                 />
-                <Tooltip title="Next pattern">
+                {(visualTeachContext.workflowStep.occurrenceCount || visualTeachContext.group?.occurrenceCount) > 0 && (
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label={`${visualTeachContext.workflowStep.occurrenceCount || visualTeachContext.group?.occurrenceCount} matching fragments`}
+                    sx={{ height: 27, flexShrink: 0, fontSize: 11, fontWeight: 800 }}
+                  />
+                )}
+                <Tooltip title="Next pattern group">
                   <span>
                     <IconButton
                       size="small"
                       disabled={!visualTeachNextWorkflowStep}
                       onClick={() => handleOpenVisualTeachWorkflowStep(visualTeachNextWorkflowStep)}
-                      aria-label="Next pattern"
+                      aria-label="Next pattern group"
                       sx={{ mt: -0.25 }}
                     >
                       <ChevronRightIcon />
@@ -19336,29 +19583,46 @@ const BomNormalizer = () => {
               )}
             </Stack>
             <Typography sx={{ mt: 0.45, fontSize: 13, color: normalizerTheme.muted }}>
-              Mark the exact parts of the customer cell, preview the generated primary and alternate rows, then stage it for this pattern.
+              Mark the exact parts of the customer cell, preview the generated primary and alternate rows, then stage it for this pattern group.
             </Typography>
           </Box>
         </DialogTitle>
         <DialogContent sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
           {visualTeachContext ? (
             <Grid container spacing={1.5}>
-              <Grid item xs={12} md={5}>
+              <Grid item xs={12}>
                 <Paper elevation={0} sx={{ p: 1.2, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft }}>
-                  <Typography sx={{ mb: 0.75, fontSize: 12.5, fontWeight: 850, color: normalizerTheme.text }}>
-                    Source row {visualTeachContext.sample?.sourceRow || '-'}
-                  </Typography>
-                  <WorksheetSamplePreview
-                    sample={visualTeachContext.sample}
-                    headers={headers}
-                    sheetRows={sheetRows}
-                    headerRowIndex={headerRowIndex}
-                    worksheet={workbook?.Sheets?.[sheetName] || null}
-                    theme={normalizerTheme}
-                  />
+                  <Stack direction="row" alignItems="center" gap={0.35}>
+                    <Tooltip title={visualTeachSourceRowExpanded ? 'Hide source row' : 'Show source row'}>
+                      <IconButton
+                        size="small"
+                        onClick={() => setVisualTeachSourceRowExpanded((expanded) => !expanded)}
+                        aria-label={visualTeachSourceRowExpanded ? 'Hide source row' : 'Show source row'}
+                        aria-expanded={visualTeachSourceRowExpanded}
+                        sx={{ ml: -0.65 }}
+                      >
+                        {visualTeachSourceRowExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+                      </IconButton>
+                    </Tooltip>
+                    <Typography sx={{ fontSize: 12.5, fontWeight: 850, color: normalizerTheme.text }}>
+                      Source row {visualTeachContext.sample?.sourceRow || '-'}
+                    </Typography>
+                  </Stack>
+                  <Collapse in={visualTeachSourceRowExpanded} timeout="auto">
+                    <Box sx={{ mt: 0.75 }}>
+                      <WorksheetSamplePreview
+                        sample={visualTeachContext.sample}
+                        headers={headers}
+                        sheetRows={sheetRows}
+                        headerRowIndex={headerRowIndex}
+                        worksheet={workbook?.Sheets?.[sheetName] || null}
+                        theme={normalizerTheme}
+                      />
+                    </Box>
+                  </Collapse>
                 </Paper>
               </Grid>
-              <Grid item xs={12} md={7}>
+              <Grid item xs={12}>
                 <Stack gap={1.1}>
                   <Paper elevation={0} sx={{ p: 1.2, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
                     <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1} sx={{ mb: 0.8 }}>
@@ -19373,9 +19637,20 @@ const BomNormalizer = () => {
                           {visualTeachContext.sourceColumn}
                         </Typography>
                       </Box>
-                      <Button size="small" variant="text" onClick={handleClearVisualTeachTags}>
-                        Clear
-                      </Button>
+                      <Stack direction="row" alignItems="center" gap={0.5}>
+                        <Button
+                          size="small"
+                          variant="text"
+                          disabled={!visualTeachSelection}
+                          startIcon={<DeleteOutlineIcon />}
+                          onClick={handleClearVisualTeachSelection}
+                        >
+                          Clear selected
+                        </Button>
+                        <Button size="small" variant="text" onClick={handleClearVisualTeachTags}>
+                          Clear all
+                        </Button>
+                      </Stack>
                     </Stack>
                     <Box
                       onMouseUp={handleVisualTeachMouseUp}
@@ -19481,8 +19756,19 @@ const BomNormalizer = () => {
                           <MenuItem value="append">Append to base MPN</MenuItem>
                           <MenuItem value="complete">Already complete MPNs</MenuItem>
                           <MenuItem value="replace_suffix_at_marker">Replace suffix at @</MenuItem>
+                          <MenuItem value="insert_at_marker">Insert list values at marker</MenuItem>
                         </Select>
                       </FormControl>
+                      {visualTeachAltMode === 'append' && (
+                        <TextField
+                          size="small"
+                          label="Alternate-only separator"
+                          value={visualTeachAlternateJoiner}
+                          onChange={(event) => setVisualTeachAlternateJoiner(event.target.value)}
+                          inputProps={{ maxLength: 8 }}
+                          sx={{ width: 210 }}
+                        />
+                      )}
                     </Stack>
                   </Paper>
                   )}
