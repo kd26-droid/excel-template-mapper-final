@@ -52,7 +52,6 @@ import DownloadIcon from '@mui/icons-material/Download';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp';
-import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import TuneIcon from '@mui/icons-material/Tune';
 import VisibilityIcon from '@mui/icons-material/Visibility';
 import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
@@ -8867,7 +8866,7 @@ const sourceColumnsFromBackendFields = (fields = {}, fieldList = FACTWISE_PARSE_
 
 // Backend owns row construction. This overlay only keeps unsaved user edits
 // visible until they are submitted back to the backend.
-const reviewEntriesWithUserEdits = (row = {}, edits = {}) => {
+export const reviewEntriesWithUserEdits = (row = {}, edits = {}) => {
   const emittedOccurrences = new Set();
   const entries = [];
   (row.entries || []).forEach((entry) => {
@@ -8875,7 +8874,12 @@ const reviewEntriesWithUserEdits = (row = {}, edits = {}) => {
     const occurrenceId = fmt(entry.occurrenceId);
     const occurrenceKey = `${groupId}::${occurrenceId}`;
     const userEdit = groupId && occurrenceId ? edits?.[groupId]?.[occurrenceId] : null;
-    if (!userEdit) {
+    const hasManualEntries = Boolean(
+      userEdit?.manuallyEdited &&
+      Array.isArray(userEdit.entries) &&
+      userEdit.entries.length
+    );
+    if (!hasManualEntries) {
       entries.push(entry);
       return;
     }
@@ -9205,6 +9209,7 @@ const BomNormalizer = () => {
     skipRepeatedHeaders: true,
     skipDoNotPopulate: false,
     skipDeletedRows: true,
+    skipSummaryRows: true,
     parentPathLevels: true,
     alternateColumnGroups: [],
     followingRowAlternateColumn: '',
@@ -9221,6 +9226,7 @@ const BomNormalizer = () => {
     skipRepeatedHeaders: 0,
     skipDoNotPopulate: 0,
     skipDeletedRows: 0,
+    skipSummaryRows: 0,
     parentPathLevels: 0,
   });
   const [busy, setBusy] = useState(false);
@@ -9435,6 +9441,7 @@ const BomNormalizer = () => {
           skipRepeatedHeaders: Boolean(config.skipRepeatedHeaders),
           skipDoNotPopulate: Boolean(config.skipDoNotPopulate),
           skipDeletedRows: Boolean(config.skipDeletedRows),
+          skipSummaryRows: Boolean(config.skipSummaryRows),
           parentPathLevels: Boolean(config.parentPathLevels),
         },
         sourceSignature: {
@@ -9458,6 +9465,7 @@ const BomNormalizer = () => {
         skipRepeatedHeaders: Number(backendCleanupDetections.skipRepeatedHeaders || 0),
         skipDoNotPopulate: Number(backendCleanupDetections.skipDoNotPopulate || 0),
         skipDeletedRows: Number(backendCleanupDetections.skipDeletedRows || 0),
+        skipSummaryRows: Number(backendCleanupDetections.skipSummaryRows || 0),
         parentPathLevels: Number(backendCleanupDetections.parentPathLevels || 0),
       });
       const backendRoles = sanitizeRoleMap(response.data?.roles || {});
@@ -9474,12 +9482,13 @@ const BomNormalizer = () => {
         skipRepeatedHeaders: 0,
         skipDoNotPopulate: 0,
         skipDeletedRows: 0,
+        skipSummaryRows: 0,
         parentPathLevels: 0,
       });
       console.warn('Backend BOM role inference failed; leaving role mappings empty.', err);
       return rolesForMultiBlockAssembly(safeHeaders, emptyRoles);
     }
-  }, [config.parentPathLevels, config.skipDeletedRows, config.skipDoNotPopulate, config.skipRepeatedHeaders, config.skipTitleRows, fileName, headerRowIndex, selectedSheetNames, sheetName, sheetScope]);
+  }, [config.parentPathLevels, config.skipDeletedRows, config.skipDoNotPopulate, config.skipRepeatedHeaders, config.skipSummaryRows, config.skipTitleRows, fileName, headerRowIndex, selectedSheetNames, sheetName, sheetScope]);
 
   useEffect(() => {
     if (!shouldRunBomRoleInference({
@@ -9501,6 +9510,7 @@ const BomNormalizer = () => {
       config.skipRepeatedHeaders ? 'skip-headers' : 'keep-headers',
       config.skipDoNotPopulate ? 'skip-dnp' : 'keep-dnp',
       config.skipDeletedRows ? 'skip-deleted' : 'keep-deleted',
+      config.skipSummaryRows ? 'skip-summaries' : 'keep-summaries',
       config.parentPathLevels ? 'use-parent-path' : 'ignore-parent-path',
       restoreInferenceNonce,
     ].join('\u001e');
@@ -9537,7 +9547,7 @@ const BomNormalizer = () => {
     return () => {
       cancelled = true;
     };
-  }, [config.parentPathLevels, config.skipDeletedRows, config.skipDoNotPopulate, config.skipRepeatedHeaders, config.skipTitleRows, currentStep, dataRows, headerRowIndex, headers, inferNormalizerRoles, parserTouched, restoreInferenceNonce, sheetName, sheetScope, sourceEndRow]);
+  }, [config.parentPathLevels, config.skipDeletedRows, config.skipDoNotPopulate, config.skipRepeatedHeaders, config.skipSummaryRows, config.skipTitleRows, currentStep, dataRows, headerRowIndex, headers, inferNormalizerRoles, parserTouched, restoreInferenceNonce, sheetName, sheetScope, sourceEndRow]);
 
   const sourceRowsExcludedByLimit = Math.max(0, sourceDataRows.length - dataRows.length);
   const sourceLimitActive = Boolean(sourceEndRow && sourceRowsExcludedByLimit > 0);
@@ -14209,6 +14219,7 @@ const BomNormalizer = () => {
       skipRepeatedHeaders: true,
       skipDoNotPopulate: false,
       skipDeletedRows: true,
+      skipSummaryRows: true,
       parentPathLevels: true,
       alternateColumnGroups: [],
       followingRowAlternateColumn: '',
@@ -14333,6 +14344,7 @@ const BomNormalizer = () => {
       skipRepeatedHeaders: true,
       skipDoNotPopulate: false,
       skipDeletedRows: true,
+      skipSummaryRows: true,
       parentPathLevels: true,
       alternateColumnGroups: [],
       followingRowAlternateColumn: '',
@@ -16314,10 +16326,6 @@ const BomNormalizer = () => {
                       {fieldPatternLoading ? <CircularProgress size={14} /> : <TuneIcon fontSize="inherit" />}
                       Review patterns
                     </ShadcnButton>
-                    <ShadcnButton onClick={handleNormalize} disabled={busy} className="bg-blue-600 hover:bg-blue-700">
-                      <PlayArrowIcon fontSize="inherit" />
-                      OLD
-                    </ShadcnButton>
                   </Stack>
                 </Stack>
               </Paper>
@@ -17674,11 +17682,6 @@ const BomNormalizer = () => {
                           <Typography sx={{ gridColumn: 1, gridRow: 1, fontSize: 14, fontWeight: 800, color: normalizerTheme.text }}>
                             Client file and FactWise preview
                           </Typography>
-                          <Stack direction="row" gap={0.65} flexWrap="wrap" sx={{ gridColumn: 1, gridRow: 2, mt: 0.6 }}>
-                            {(samples[0]?.entries?.length || 0) > 1 && (
-                              <Chip size="small" label={`${samples[0].entries.length - 1} generated alternate rows`} sx={{ height: 22, bgcolor: '#f1eafe', color: '#6d28d9', fontSize: 11, fontWeight: 800 }} />
-                            )}
-                          </Stack>
                         </Box>
                       </Stack>
 
@@ -17713,9 +17716,18 @@ const BomNormalizer = () => {
                               }}
                             >
                               <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ xs: 'flex-start', sm: 'center' }} gap={0.75} sx={{ mb: 0.9 }}>
-                                <Typography sx={{ fontSize: 12, fontWeight: 800, color: normalizerTheme.muted }}>
-                                  Source row {sample.sourceRow}
-                                </Typography>
+                                <Stack direction="row" alignItems="center" gap={0.65} flexWrap="wrap">
+                                  <Typography sx={{ fontSize: 12, fontWeight: 800, color: normalizerTheme.muted }}>
+                                    Source row {sample.sourceRow}
+                                  </Typography>
+                                  {visibleEntries.length > 1 && (
+                                    <Chip
+                                      size="small"
+                                      label={`${visibleEntries.length - 1} generated alternate rows`}
+                                      sx={{ height: 22, bgcolor: '#f1eafe', color: '#6d28d9', fontSize: 11, fontWeight: 800 }}
+                                    />
+                                  )}
+                                </Stack>
                                 {rowPatterns.length > 0 && (
                                   <Stack direction="row" gap={0.6} flexWrap="wrap" justifyContent="flex-end">
                                     {rowPatterns.map((pattern, patternIndex) => {

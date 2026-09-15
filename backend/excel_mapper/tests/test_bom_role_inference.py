@@ -134,6 +134,7 @@ class BomRoleInferenceCleanupConfigTests(TestCase):
             "skipRepeatedHeaders": 1,
             "skipDoNotPopulate": 1,
             "skipDeletedRows": 1,
+            "skipSummaryRows": 0,
             "parentPathLevels": 1,
         })
         self.assertEqual(payload["blockStructure"]["dataRowCount"], 1)
@@ -233,6 +234,117 @@ class BomRoleInferenceCleanupConfigTests(TestCase):
         self.assertEqual(kept.json()["blockStructure"]["dataRowCount"], 2)
         self.assertEqual(skipped.json()["blockStructure"]["dataRowCount"], 1)
         self.assertEqual(skipped.json()["blockStructure"]["repeatedHeaderRows"], [20])
+
+    def test_summary_cleanup_detects_labeled_total_and_honors_toggle(self):
+        headers = ["CPN", "Description", "Quantity"]
+        rows = [
+            {
+                "CPN": "ITEM-001",
+                "Description": "Capacitor",
+                "Quantity": "2",
+                "__sourceRow": 30,
+            },
+            {
+                "CPN": "",
+                "Description": "Total Count = 238",
+                "Quantity": "",
+                "__sourceRow": 31,
+            },
+        ]
+
+        kept = self.client.post(
+            "/api/bom/roles/infer/",
+            {
+                "headers": headers,
+                "rows": rows,
+                "config": {"skipSummaryRows": False},
+            },
+            content_type="application/json",
+        )
+        skipped = self.client.post(
+            "/api/bom/roles/infer/",
+            {
+                "headers": headers,
+                "rows": rows,
+                "config": {
+                    "skipSummaryRows": True,
+                    "skipTitleRows": False,
+                },
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(kept.status_code, 200)
+        self.assertEqual(skipped.status_code, 200)
+        self.assertEqual(kept.json()["cleanupDetections"]["skipSummaryRows"], 1)
+        self.assertEqual(kept.json()["blockStructure"]["dataRowCount"], 2)
+        self.assertEqual(skipped.json()["blockStructure"]["summaryRows"], [31])
+        self.assertEqual(skipped.json()["blockStructure"]["dataRowCount"], 1)
+
+    def test_summary_cleanup_detects_isolated_numeric_footer(self):
+        headers = ["Description", "Quantity"]
+        rows = [
+            {
+                "Description": "Capacitor",
+                "Quantity": "2",
+                "__sourceRow": 40,
+            },
+            {
+                "Description": "13",
+                "Quantity": "",
+                "__sourceRow": 41,
+            },
+        ]
+
+        response = self.client.post(
+            "/api/bom/roles/infer/",
+            {
+                "headers": headers,
+                "rows": rows,
+                "config": {
+                    "skipSummaryRows": True,
+                    "skipTitleRows": False,
+                },
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["cleanupDetections"]["skipSummaryRows"], 1)
+        self.assertEqual(response.json()["blockStructure"]["summaryRows"], [41])
+        self.assertEqual(response.json()["blockStructure"]["dataRowCount"], 1)
+
+    def test_summary_cleanup_preserves_numeric_cpn_item(self):
+        headers = ["CPN", "Description"]
+        rows = [
+            {
+                "CPN": "10012",
+                "Description": "Capacitor",
+                "__sourceRow": 50,
+            },
+            {
+                "CPN": "10013",
+                "Description": "",
+                "__sourceRow": 51,
+            },
+        ]
+
+        response = self.client.post(
+            "/api/bom/roles/infer/",
+            {
+                "headers": headers,
+                "rows": rows,
+                "config": {
+                    "skipSummaryRows": True,
+                    "skipTitleRows": False,
+                },
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["cleanupDetections"]["skipSummaryRows"], 0)
+        self.assertEqual(response.json()["blockStructure"]["dataRowCount"], 2)
 
 
 class VisualPatternMpnExtractionTests(SimpleTestCase):
@@ -2577,6 +2689,291 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
                 ["XYZ987", "XYZ987C", "XYZ987D"],
             ],
         )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    def test_teach_refresh_preserves_every_record_in_a_multiline_cell(
+        self,
+        _saved_rules,
+        _saved_interpretations,
+    ):
+        source_header = "Ref.Fab(Fabricant){Statut}[BI]"
+        headers = ["Ref. Article", source_header, "Libelle"]
+        roles = {
+            "cpn": "Ref. Article",
+            "mpn": source_header,
+            "manufacturer": source_header,
+            "description": "Libelle",
+        }
+        config = {"alternateLayout": "inside_selected_mpn_columns"}
+        source_value = "\n".join([
+            "201Y04L (NICOMATI) {HOM} [1881177]",
+            "212M04T03L (ATI) {HOM} [1881176]",
+            "212M04T04L (ATI) {HOM} [2253508]",
+        ])
+        inferred = build_bom_field_pattern_groups(
+            headers,
+            [{
+                "Ref. Article": "A1211925",
+                source_header: source_value,
+                "Libelle": "CONN CARTE EMBASE 4 CONTACTS",
+                "__sourceRow": 39,
+            }],
+            roles=roles,
+            config=config,
+            options={"includeAllRows": True, "reviewContractVersion": 3},
+        )
+        review = inferred["review"]
+        pattern = review["patterns"][0]
+        teach_context = pattern["teachContext"]
+        fragment = teach_context["sample"]["sourceFragment"]["rawValue"]
+
+        def span(text, role):
+            start = fragment.index(text)
+            return {"start": start, "end": start + len(text), "role": role}
+
+        taught = build_bom_field_pattern_teach_result(
+            headers=headers,
+            row={source_header: fragment, "__sourceRow": 39},
+            roles=roles,
+            config=config,
+            group={
+                "id": pattern["groupId"],
+                "shape": pattern["patternKey"],
+                "patternKey": pattern["patternKey"],
+            },
+            tagged_spans=[
+                span("201Y04L", "mpn"),
+                span("NICOMATI", "manufacturer"),
+            ],
+            source_header=source_header,
+        )
+        refreshed = refresh_bom_field_pattern_review_after_teach(
+            review,
+            taught,
+            group={
+                "id": pattern["groupId"],
+                "shape": pattern["patternKey"],
+                "patternKey": pattern["patternKey"],
+            },
+            roles=roles,
+            config=config,
+            active_rules={pattern["patternKey"]: taught["rule"]},
+            source_row=39,
+            occurrence_id=teach_context["sample"]["sourceFragment"]["id"],
+            completed_step_id=teach_context["workflowStepId"],
+            taught_source_value=fragment,
+        )
+
+        self.assertEqual(
+            [entry["fields"]["mpn"] for entry in refreshed["rows"][0]["entries"]],
+            ["201Y04L", "212M04T03L", "212M04T04L"],
+        )
+        self.assertEqual(
+            [entry["fields"]["manufacturer"] for entry in refreshed["rows"][0]["entries"]],
+            ["NICOMATI", "ATI", "ATI"],
+        )
+        self.assertEqual(refreshed["summary"]["recognizedPatternCount"], 1)
+        self.assertEqual(refreshed["summary"]["unrecognizedPatternCount"], 0)
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    def test_teach_refresh_accepts_an_open_review_without_occurrence_metadata(
+        self,
+        _saved_rules,
+        _saved_interpretations,
+    ):
+        source_header = "Ref.Fab(Fabricant){Statut}[BI]"
+        headers = ["Ref. Article", source_header, "Libelle"]
+        roles = {
+            "cpn": "Ref. Article",
+            "mpn": source_header,
+            "manufacturer": source_header,
+            "description": "Libelle",
+        }
+        config = {"alternateLayout": "inside_selected_mpn_columns"}
+        source_value = "\n".join([
+            "LM2903D@ (/R/RE4/RG4) (TEXAS) {HOM} [1671040]",
+            "LM2903D@G (/R2) (ON-SEMI) {HOM} [2258208]",
+            "LM2903M@ (/X) (ON-SEMI) {AFAB} [1126658]",
+        ])
+        inferred = build_bom_field_pattern_groups(
+            headers,
+            [{
+                "Ref. Article": "A1231519",
+                source_header: source_value,
+                "Libelle": "COMPARAT FAIB_CONSO LM2903 300ns",
+                "__sourceRow": 41,
+            }],
+            roles=roles,
+            config=config,
+            options={"includeAllRows": True, "reviewContractVersion": 3},
+        )
+        review = inferred["review"]
+        target_occurrence = next(
+            occurrence
+            for occurrence in review["rows"][0]["occurrences"]
+            if occurrence["rawValue"] == "LM2903D@G (/R2) (ON-SEMI) {HOM} [2258208]"
+        )
+        pattern = next(
+            item
+            for item in review["patterns"]
+            if item["patternKey"] == target_occurrence["patternKey"]
+        )
+        fragment = target_occurrence["rawValue"]
+
+        def span(text, role, start_at=0):
+            start = fragment.index(text, start_at)
+            return {"start": start, "end": start + len(text), "role": role}
+
+        taught = build_bom_field_pattern_teach_result(
+            headers=headers,
+            row={source_header: fragment, "__sourceRow": 41},
+            roles=roles,
+            config=config,
+            group={
+                "id": pattern["groupId"],
+                "shape": pattern["patternKey"],
+                "patternKey": pattern["patternKey"],
+            },
+            tagged_spans=[
+                span("LM2903D", "mpn"),
+                span("@", "insertionMarker"),
+                span("G", "mpn", fragment.index("@") + 1),
+                span("/R2", "alternateList"),
+                span("ON-SEMI", "manufacturer"),
+            ],
+            source_header=source_header,
+            alternate_delimiter="/",
+            alternate_mode="insert_at_marker",
+        )
+        original_entries = list(review["rows"][0]["entries"])
+        review["rows"][0].pop("occurrences", None)
+        refreshed = refresh_bom_field_pattern_review_after_teach(
+            review,
+            taught,
+            group={
+                "id": pattern["groupId"],
+                "shape": pattern["patternKey"],
+                "patternKey": pattern["patternKey"],
+            },
+            roles=roles,
+            config=config,
+            active_rules={pattern["patternKey"]: taught["rule"]},
+            source_row=41,
+            occurrence_id=target_occurrence["occurrenceId"],
+            completed_step_id=pattern["workflowStepId"],
+            taught_source_value=fragment,
+        )
+        refreshed_pattern = next(
+            item
+            for item in refreshed["patterns"]
+            if item["patternKey"] == pattern["patternKey"]
+        )
+
+        self.assertTrue(refreshed_pattern["recognized"])
+        self.assertEqual(refreshed["rows"][0]["entries"], original_entries)
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    def test_teach_refresh_falls_back_when_rule_would_blank_another_row(
+        self,
+        _saved_rules,
+        _saved_interpretations,
+    ):
+        headers = ["Combined"]
+        roles = {"mpn": "Combined", "manufacturer": "Combined"}
+        config = {"alternateLayout": "inside_selected_mpn_columns"}
+        rows = [
+            {"Combined": "ABC123 (KEMET) {HOM} [1]", "__sourceRow": 38},
+            {"Combined": "201Y04L (NICOMATI) {HOM} [1881177]", "__sourceRow": 39},
+        ]
+        inferred = build_bom_field_pattern_groups(
+            headers,
+            rows,
+            roles=roles,
+            config=config,
+            options={"includeAllRows": True, "reviewContractVersion": 3},
+        )
+        review = inferred["review"]
+        pattern = review["patterns"][0]
+        teach_context = pattern["teachContext"]
+        source_value = teach_context["sample"]["sourceFragment"]["rawValue"]
+
+        def span(text, role):
+            start = source_value.index(text)
+            return {"start": start, "end": start + len(text), "role": role}
+
+        taught = build_bom_field_pattern_teach_result(
+            headers=headers,
+            row={"Combined": source_value, "__sourceRow": 38},
+            roles=roles,
+            config=config,
+            group={
+                "id": pattern["groupId"],
+                "shape": pattern["patternKey"],
+                "patternKey": pattern["patternKey"],
+            },
+            tagged_spans=[
+                span("ABC123", "mpn"),
+                span("KEMET", "manufacturer"),
+            ],
+            source_header="Combined",
+        )
+        original_infer = _infer_field_entries_for_row
+
+        def fail_taught_rule_only(*args, **kwargs):
+            active_rule = (kwargs.get("config") or {}).get("_activeFieldPatternRule")
+            if active_rule:
+                return []
+            return original_infer(*args, **kwargs)
+
+        with patch(
+            "excel_mapper.services.bom_role_inference._infer_field_entries_for_row",
+            side_effect=fail_taught_rule_only,
+        ):
+            refreshed = refresh_bom_field_pattern_review_after_teach(
+                review,
+                taught,
+                group={
+                    "id": pattern["groupId"],
+                    "shape": pattern["patternKey"],
+                    "patternKey": pattern["patternKey"],
+                },
+                roles=roles,
+                config=config,
+                active_rules={pattern["patternKey"]: taught["rule"]},
+                source_row=38,
+                occurrence_id=teach_context["sample"]["sourceFragment"]["id"],
+                completed_step_id=teach_context["workflowStepId"],
+                taught_source_value=source_value,
+            )
+
+        row_39 = next(row for row in refreshed["rows"] if row["sourceRow"] == 39)
+        self.assertEqual(len(row_39["entries"]), 1)
+        self.assertEqual(row_39["entries"][0]["fields"]["mpn"], "201Y04L")
+        self.assertEqual(row_39["entries"][0]["fields"]["manufacturer"], "NICOMATI")
+        self.assertEqual(refreshed["summary"]["recognizedPatternCount"], 1)
+        self.assertEqual(refreshed["summary"]["unrecognizedPatternCount"], 0)
+        self.assertIn(teach_context["workflowStepId"], refreshed["workflow"]["completedStepIds"])
 
 
 class StructureScopedPrefixRuleTests(TestCase):

@@ -609,6 +609,11 @@ export const CLEANUP_OPTIONS = [
     label: 'Ignore deleted/red rows',
     description: 'Skips rows marked Deleted, red text, or strikethrough in the source workbook.',
   },
+  {
+    key: 'skipSummaryRows',
+    label: 'Ignore summary/total rows',
+    description: 'Skips footer totals and item-count rows.',
+  },
   // Not a skip like the others - it changes how rows are read rather than
   // whether they are read. It lives here because this is where options that the
   // sheet itself triggers are shown, and it only appears when paths are found.
