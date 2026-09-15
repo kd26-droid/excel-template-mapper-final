@@ -63,6 +63,12 @@ export const fieldPatternSampleForWorkflowStep = (group = {}, step = {}) => {
   return samples[0] || null;
 };
 
+// Visibility is backend-owned. The UI must not reinterpret this using layout
+// selections or the fields it happens to have rendered locally.
+export const visualTeachAllowsAlternates = (context = {}) => Boolean(
+  context?.workflowStep?.hasAlternateList || context?.group?.hasAlternateList
+);
+
 // Display-only: backend source offsets become per-character colors.
 export const visualTeachTagsFromInterpretationSpans = (text = '', spans = []) => {
   const tags = new Array(String(text || '').length).fill('');

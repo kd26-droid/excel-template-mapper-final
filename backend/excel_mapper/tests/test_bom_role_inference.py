@@ -34,6 +34,7 @@ from excel_mapper.services.bom_role_inference import (
     _mpn_source_fragment_pattern,
     _pattern_shape_for_row,
     _same_cell_parenthesized_patterns_from_entries,
+    _semantic_interpretation_coverage,
     _semantic_identity_fragments,
     _semantic_pattern_key,
     _build_split_field_review_step,
@@ -46,6 +47,7 @@ from excel_mapper.services.bom_role_inference import (
     derive_bom_field_pattern_rule_from_correction,
     infer_bom_roles,
     normalize_bom_rows,
+    refresh_bom_field_pattern_review_after_teach,
     save_bom_field_pattern_rule,
 )
 from excel_mapper.views import _retry_sqlite_locked_write
@@ -68,6 +70,74 @@ class SqliteWriteRetryTests(SimpleTestCase):
 
 
 class BomRoleInferenceCleanupConfigTests(TestCase):
+    def test_infer_api_returns_all_backend_cleanup_detection_counts(self):
+        headers = ["Parent", "Description", "MPN", "Manufacturer"]
+        rows = [
+            {
+                "Parent": "Parent",
+                "Description": "Description",
+                "MPN": "MPN",
+                "Manufacturer": "Manufacturer",
+                "__sourceRow": 10,
+            },
+            {
+                "Parent": "Added Components",
+                "Description": "Added Components",
+                "MPN": "Added Components",
+                "Manufacturer": "Added Components",
+                "__sourceRow": 11,
+            },
+            {
+                "Parent": "",
+                "Description": "DO NOT POPULATE",
+                "MPN": "ABC123",
+                "Manufacturer": "KEMET",
+                "__sourceRow": 12,
+            },
+            {
+                "Parent": "",
+                "Description": "Resistor",
+                "MPN": "RC0402FR-0710KL",
+                "Manufacturer": "YAGEO",
+                "__sourceRow": 13,
+                "__redRowStyle": True,
+            },
+            {
+                "Parent": ">ROOT>CHILD",
+                "Description": "Capacitor",
+                "MPN": "C0402C101J5GAC",
+                "Manufacturer": "KEMET",
+                "__sourceRow": 14,
+            },
+        ]
+
+        response = self.client.post(
+            "/api/bom/roles/infer/",
+            {
+                "headers": headers,
+                "rows": rows,
+                "config": {
+                    "skipTitleRows": True,
+                    "skipRepeatedHeaders": True,
+                    "skipDoNotPopulate": True,
+                    "skipDeletedRows": True,
+                    "parentPathLevels": True,
+                },
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["cleanupDetections"], {
+            "skipTitleRows": 1,
+            "skipRepeatedHeaders": 1,
+            "skipDoNotPopulate": 1,
+            "skipDeletedRows": 1,
+            "parentPathLevels": 1,
+        })
+        self.assertEqual(payload["blockStructure"]["dataRowCount"], 1)
+
     def test_endpoint_honors_top_level_title_cleanup_selection(self):
         headers = ["MPN", "Manufacturer", "Quantity"]
         rows = [
@@ -994,6 +1064,51 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         self.assertEqual(payload["normalizedRows"][0]["mpn"], "ABC123")
         self.assertIn("learning", payload)
 
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    def test_apply_api_builds_learning_groups_and_row_overrides_from_user_corrections(
+        self, _saved_rules, _saved_interpretations
+    ):
+        response = self.client.post(
+            "/api/bom/field-patterns/apply/",
+            {
+                "headers": ["MPN", "MFR"],
+                "rows": [{"MPN": "ABC123", "MFR": "KEMET", "__sourceRow": 2}],
+                "roles": {"mpn": "MPN", "manufacturer": "MFR"},
+                "config": {"alternateLayout": "already_separate_rows"},
+                "rules": {
+                    "direct-pattern": {
+                        "shape": "direct-pattern",
+                        "fields": {"mpn": {"delimiter": "none"}},
+                    },
+                },
+                "corrections": [{
+                    "patternKey": "direct-pattern",
+                    "sourceRow": 2,
+                    "occurrenceId": "2",
+                    "entries": [{
+                        "relation": "Primary",
+                        "fields": {"mpn": "XYZ789", "manufacturer": "YAGEO"},
+                    }],
+                }],
+                "persist": False,
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["normalizedRows"][0]["mpn"], "XYZ789")
+        self.assertEqual(payload["normalizedRows"][0]["manufacturer"], "YAGEO")
+        self.assertIn("direct-pattern", payload["appliedConfig"]["fieldPatternRules"])
+        self.assertNotIn("fieldPatternOverrides", payload["appliedConfig"])
+
     def test_slash_manufacturer_alias_does_not_merge_three_records_into_one_pattern(self):
         value = (
             "KGM05AR71H102K@ (H/N) (AVX/KYOC) {HOM} [1807868] "
@@ -1410,6 +1525,33 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
         return_value={},
     )
+    def test_same_cell_setup_enables_alternate_teaching_without_saved_rule(
+        self, _saved_rules, _saved_interpretations
+    ):
+        source_header = "Ref.Fab(Fabricant){Statut}[BI]"
+        result = build_bom_field_pattern_groups(
+            [source_header],
+            [{
+                source_header: "EM-827(I) (EMCTW) {HOM} [3266379]",
+                "__sourceRow": 1,
+            }],
+            roles={"mpn": source_header, "manufacturer": source_header},
+            config={"alternateLayout": "inside_selected_mpn_columns"},
+            options={"includeAllRows": True},
+        )
+
+        pattern = result["patterns"][0]
+        self.assertTrue(pattern["hasAlternateList"])
+        self.assertTrue(result["reviewWorkflow"]["steps"][0]["hasAlternateList"])
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
     def test_long_marker_suffix_list_is_auto_interpreted_without_saved_rule(
         self, _saved_rules, _saved_interpretations
     ):
@@ -1624,6 +1766,41 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
         return_value={},
     )
+    def test_v3_review_contract_is_presentation_ready_and_omits_legacy_duplicates(
+        self, _saved_rules, _saved_interpretations
+    ):
+        result = build_bom_field_pattern_groups(
+            ["Combined"],
+            [{"Combined": "ABC123@ (1/2) (KEMET)", "__sourceRow": 2}],
+            roles={"mpn": "Combined", "manufacturer": "Combined"},
+            config={"alternateLayout": "inside_selected_mpn_columns"},
+            options={"includeAllRows": True, "reviewContractVersion": 3},
+        )
+
+        self.assertNotIn("reviewRows", result)
+        self.assertNotIn("patterns", result)
+        review = result["review"]
+        self.assertEqual(review["contractVersion"], 3)
+        self.assertEqual(len(review["patterns"]), 1)
+        self.assertEqual(review["patterns"][0]["status"], "unrecognized")
+        self.assertTrue(review["patterns"][0]["teachContext"])
+        self.assertEqual(review["patternsByField"]["mpn"], review["patterns"])
+        self.assertEqual(review["display"]["reviewModeLabel"], "Shared-column interpretation")
+        self.assertTrue(review["rows"][0]["entries"])
+        self.assertIn("mpn", review["rows"][0]["visibleFieldKeys"])
+        self.assertEqual(
+            [option["key"] for option in review["mappedFieldOptions"]],
+            ["mpn", "manufacturer"],
+        )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
     def test_one_to_one_mpn_with_customer_text_returns_semantic_pattern(
         self, _saved_rules, _saved_interpretations
     ):
@@ -1816,6 +1993,87 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
                 for entry in result["reviewRows"][0]["occurrences"][0]["entries"]
             ],
             ["TNPW04021K98BEED", "TNPW04021K98BEEI", "TNPW04021K98BEEP"],
+        )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    def test_saved_rule_needs_review_when_it_does_not_cover_detected_alternates(
+        self, _saved_rules, saved_interpretations
+    ):
+        source_header = "Manufacturer Code Number"
+        grammar = "<MPN>@ (<ALTERNATE_SUFFIXES>)"
+        pattern_key = _semantic_pattern_key(source_header, ["mpn"], grammar)
+        saved_interpretations.return_value = {
+            pattern_key: {
+                "patternKey": pattern_key,
+                "matchScope": "structure",
+                "rule": {
+                    "shape": pattern_key,
+                    "patternKey": pattern_key,
+                    "fields": {"mpn": {"delimiter": "none"}},
+                    "visualPattern": {
+                        "type": "tagged_fields",
+                        "sourceHeader": source_header,
+                        "segments": [
+                            {"role": "mpn", "before": "", "after": "@", "wrapper": None},
+                        ],
+                    },
+                },
+            },
+        }
+
+        result = build_bom_field_pattern_groups(
+            [source_header],
+            [{source_header: "TNPW04021K98BE@ (ED/EI/EP)", "__sourceRow": 21}],
+            roles={"mpn": source_header},
+            config={"alternateLayout": "inside_selected_mpn_columns"},
+            options={"includeAllRows": True},
+        )
+
+        pattern = result["patterns"][0]
+        self.assertFalse(pattern["recognized"])
+        self.assertEqual(
+            pattern["recognitionValidation"]["missingRoles"],
+            ["alternateList"],
+        )
+        self.assertEqual(result["reviewSummary"]["recognizedPatternCount"], 0)
+        self.assertEqual(result["reviewSummary"]["unrecognizedPatternCount"], 1)
+
+    def test_saved_rule_needs_review_when_alternate_segment_does_not_apply(self):
+        validation = _semantic_interpretation_coverage(
+            "<MPN>@ (<ALTERNATE_SUFFIXES>) (<MFR>)",
+            ["mpn", "manufacturer"],
+            {
+                "visualPattern": {
+                    "type": "bracket_alternate_manufacturer",
+                    "segments": [
+                        {"role": "mpn"},
+                        {"role": "alternateList"},
+                        {"role": "manufacturer"},
+                    ],
+                },
+            },
+            [{
+                "occurrenceId": "row-41",
+                "sourceRow": 41,
+                "interpretationSpans": [
+                    {"role": "mpn", "start": 0, "end": 7},
+                    {"role": "manufacturer", "start": 24, "end": 29},
+                ],
+            }],
+        )
+
+        self.assertFalse(validation["valid"])
+        self.assertEqual(validation["missingRoles"], [])
+        self.assertEqual(validation["failedOccurrenceCount"], 1)
+        self.assertEqual(
+            validation["failedOccurrences"][0]["missingRoles"],
+            ["alternateList"],
         )
 
     def test_mpn_only_cell_detects_literal_marker_before_alternate_list(self):
@@ -2074,6 +2332,97 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         self.assertEqual(value[manufacturer_span["start"]:manufacturer_span["end"]], "WTC")
         self.assertEqual(value[alternate_span["start"]:alternate_span["end"]], "A/B/D/H/T")
 
+    def test_visual_preview_uses_the_selected_repeated_parenthesis_boundary(self):
+        value = "CAF33 TRANSLUCIDE (310ML) (ELKEM SI) {HOM} [ ]"
+        mpn_text = "CAF33 TRANSLUCIDE (310ML)"
+
+        def span(text, role):
+            start = value.index(text)
+            return {"start": start, "end": start + len(text), "role": role}
+
+        result = build_bom_field_pattern_teach_result(
+            headers=["Combined"],
+            row={"Combined": value},
+            roles={"mpn": "Combined", "manufacturer": "Combined"},
+            group={"patternKey": "repeated-parenthesis-boundary"},
+            tagged_spans=[
+                span(mpn_text, "mpn"),
+                span("ELKEM SI", "manufacturer"),
+            ],
+            source_header="Combined",
+        )
+
+        fields = result["entries"][0]["fields"]
+        self.assertEqual(fields["mpn"]["value"], mpn_text)
+        self.assertEqual(fields["manufacturer"]["value"], "ELKEM SI")
+        self.assertEqual(result["visualPattern"]["segments"][0]["afterOccurrence"], 2)
+
+    def test_visual_preview_preserves_brackets_around_a_tagged_mpn_segment(self):
+        value = "CAF33 TRANSLUCIDE (310ML) (ELKEM SI) {HOM} [ ]"
+
+        def span(text, role):
+            start = value.index(text)
+            return {"start": start, "end": start + len(text), "role": role}
+
+        result = build_bom_field_pattern_teach_result(
+            headers=["Combined"],
+            row={"Combined": value},
+            roles={"mpn": "Combined", "manufacturer": "Combined"},
+            group={"patternKey": "wrapped-mpn-segment"},
+            tagged_spans=[
+                span("CAF33 TRANSLUCIDE", "mpn"),
+                span("310ML", "mpn"),
+                span("ELKEM SI", "manufacturer"),
+            ],
+            source_header="Combined",
+        )
+
+        fields = result["entries"][0]["fields"]
+        self.assertEqual(fields["mpn"]["value"], "CAF33 TRANSLUCIDE (310ML)")
+        self.assertEqual(fields["manufacturer"]["value"], "ELKEM SI")
+        spans = result["interpretationSpansByColumn"]["Combined"]
+        wrapped_mpn_span = next(
+            item for item in spans
+            if item["role"] == "mpn" and value[item["start"]:item["end"]] == "(310ML)"
+        )
+        self.assertEqual(value[wrapped_mpn_span["start"]:wrapped_mpn_span["end"]], "(310ML)")
+
+    def test_manual_normalized_preview_values_realign_to_punctuated_source(self):
+        value = "CAF33 TRANSLUCIDE (310ML) (ELKEM SI) {HOM} [ ]"
+
+        def span(text, role):
+            start = value.index(text)
+            return {"start": start, "end": start + len(text), "role": role}
+
+        result = build_bom_field_pattern_teach_result(
+            headers=["Combined"],
+            row={"Combined": value},
+            roles={"mpn": "Combined", "manufacturer": "Combined"},
+            entries=[{
+                "relation": "Primary",
+                "fields": {
+                    "mpn": "CAF33 TRANSLUCIDE310ML",
+                    "manufacturer": "ELKEM SI",
+                },
+            }],
+            group={"patternKey": "manual-normalized-preview"},
+            tagged_spans=[
+                span("CAF33 TRANSLUCIDE", "mpn"),
+                span("310ML", "manufacturer"),
+            ],
+            source_header="Combined",
+            has_manual_edits=True,
+        )
+
+        fields = result["entries"][0]["fields"]
+        self.assertEqual(fields["mpn"]["value"], "CAF33 TRANSLUCIDE310ML")
+        self.assertEqual(fields["manufacturer"]["value"], "ELKEM SI")
+        spans = result["interpretationSpansByColumn"]["Combined"]
+        mpn_span = next(item for item in spans if item["role"] == "mpn")
+        manufacturer_span = next(item for item in spans if item["role"] == "manufacturer")
+        self.assertEqual(value[mpn_span["start"]:mpn_span["end"]], "CAF33 TRANSLUCIDE (310ML)")
+        self.assertEqual(value[manufacturer_span["start"]:manufacturer_span["end"]], "ELKEM SI")
+
     def test_standalone_punctuation_remains_available_for_user_review(self):
         fragments = _semantic_identity_fragments('"', ["mpn", "manufacturer"])
 
@@ -2140,6 +2489,93 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         self.assertEqual(
             [row["manufacturer"] for row in normalized["normalizedRows"]],
             ["KEMET", "KEMET", "KEMET", "YAGEO", "YAGEO", "YAGEO"],
+        )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    def test_teach_refresh_updates_matching_review_rows_without_reinferring_groups(
+        self,
+        _saved_rules,
+        _saved_interpretations,
+    ):
+        headers = ["Combined"]
+        roles = {"mpn": "Combined", "manufacturer": "Combined"}
+        config = {"alternateLayout": "inside_selected_mpn_columns"}
+        rows = [
+            {"Combined": "ABC123@ (A/B) (KEMET)", "__sourceRow": 2},
+            {"Combined": "XYZ987@ (C/D) (YAGEO)", "__sourceRow": 3},
+        ]
+        inferred = build_bom_field_pattern_groups(
+            headers,
+            rows,
+            roles=roles,
+            config=config,
+            options={
+                "includeAllRows": True,
+                "reviewContractVersion": 3,
+            },
+        )
+        review = inferred["review"]
+        pattern = review["patterns"][0]
+        teach_context = pattern["teachContext"]
+        source_value = teach_context["sample"]["sourceFragment"]["rawValue"]
+
+        def span(text, role):
+            start = source_value.index(text)
+            return {"start": start, "end": start + len(text), "role": role}
+
+        taught = build_bom_field_pattern_teach_result(
+            headers=headers,
+            row={"Combined": source_value, "__sourceRow": 2},
+            roles=roles,
+            config=config,
+            group={
+                "id": pattern["groupId"],
+                "shape": pattern["patternKey"],
+                "patternKey": pattern["patternKey"],
+            },
+            tagged_spans=[
+                span("ABC123@", "mpn"),
+                span("A/B", "alternateList"),
+                span("KEMET", "manufacturer"),
+            ],
+            source_header="Combined",
+            alternate_delimiter="/",
+        )
+        active_rules = {pattern["patternKey"]: taught["rule"]}
+        refreshed = refresh_bom_field_pattern_review_after_teach(
+            review,
+            taught,
+            group={
+                "id": pattern["groupId"],
+                "shape": pattern["patternKey"],
+                "patternKey": pattern["patternKey"],
+            },
+            roles=roles,
+            config=config,
+            active_rules=active_rules,
+            source_row=2,
+            occurrence_id=teach_context["sample"]["sourceFragment"]["id"],
+            completed_step_id=teach_context["workflowStepId"],
+            taught_source_value=source_value,
+        )
+
+        self.assertEqual(refreshed["activeRules"], active_rules)
+        self.assertEqual(refreshed["summary"]["recognizedPatternCount"], 1)
+        self.assertEqual(refreshed["summary"]["unrecognizedPatternCount"], 0)
+        self.assertIn(teach_context["workflowStepId"], refreshed["workflow"]["completedStepIds"])
+        self.assertEqual(
+            [[entry["fields"]["mpn"] for entry in row["entries"]] for row in refreshed["rows"]],
+            [
+                ["ABC123", "ABC123A", "ABC123B"],
+                ["XYZ987", "XYZ987C", "XYZ987D"],
+            ],
         )
 
 

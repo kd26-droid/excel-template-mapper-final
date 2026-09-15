@@ -51,6 +51,7 @@ from .services.bom_role_inference import (
     build_bom_field_pattern_teach_result,
     infer_bom_roles,
     normalize_bom_rows,
+    refresh_bom_field_pattern_review_after_teach,
     save_bom_field_pattern_rule,
 )
 from .services.bom_structure_patterns import build_structure_profile, learn_bom_structure, match_bom_structures
@@ -2299,6 +2300,8 @@ def bom_field_pattern_apply(request):
         config = request.data.get('config') or {}
         source_signature = request.data.get('sourceSignature') or request.data.get('source_signature') or {}
         groups = request.data.get('groups') or request.data.get('patterns') or []
+        rules = request.data.get('rules') or request.data.get('fieldPatternRules') or request.data.get('field_pattern_rules') or {}
+        corrections = request.data.get('corrections') or []
         persist = request.data.get('persist', True) is not False
         if not isinstance(headers, list):
             return Response({'success': False, 'error': 'headers must be a list'}, status=status.HTTP_400_BAD_REQUEST)
@@ -2312,6 +2315,64 @@ def bom_field_pattern_apply(request):
             source_signature = {}
         if not isinstance(groups, list):
             return Response({'success': False, 'error': 'groups must be a list'}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(rules, dict):
+            return Response({'success': False, 'error': 'rules must be an object'}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(corrections, list):
+            return Response({'success': False, 'error': 'corrections must be a list'}, status=status.HTTP_400_BAD_REQUEST)
+
+        corrections_by_pattern = defaultdict(list)
+        override_rows = {}
+        for correction in corrections:
+            if not isinstance(correction, dict):
+                continue
+            pattern_key = str(correction.get('patternKey') or correction.get('pattern_key') or '').strip()
+            source_row = correction.get('sourceRow')
+            entries = correction.get('entries') or []
+            if not isinstance(entries, list):
+                continue
+            normalized_entries = []
+            for entry_index, entry in enumerate(entries):
+                if not isinstance(entry, dict):
+                    continue
+                normalized_entries.append({
+                    'relation': 'Primary' if entry_index == 0 else f'Alternate {entry_index}',
+                    'fields': entry.get('fields') or {},
+                })
+            if not normalized_entries:
+                continue
+            normalized_correction = {
+                **correction,
+                'patternKey': pattern_key,
+                'entries': normalized_entries,
+            }
+            if pattern_key:
+                corrections_by_pattern[pattern_key].append(normalized_correction)
+            row_key = str(source_row)
+            existing_entries = (override_rows.get(row_key) or {}).get('entries') or []
+            combined_entries = existing_entries + normalized_entries
+            override_rows[row_key] = {
+                'entries': [
+                    {
+                        **entry,
+                        'relation': 'Primary' if index == 0 else f'Alternate {index}',
+                    }
+                    for index, entry in enumerate(combined_entries)
+                ],
+            }
+
+        if not groups and rules:
+            groups = [
+                {
+                    'id': f'backend-rule-{index}',
+                    'patternKey': pattern_key,
+                    'shape': rule.get('shape') or pattern_key,
+                    'confirmed': True,
+                    'rule': rule,
+                    'rows': corrections_by_pattern.get(pattern_key) or [],
+                }
+                for index, (pattern_key, rule) in enumerate(rules.items(), start=1)
+                if isinstance(rule, dict)
+            ]
 
         unresolved = [
             group.get('patternKey') or group.get('id')
@@ -2373,6 +2434,10 @@ def bom_field_pattern_apply(request):
         applied_config = {
             **config,
             'fieldPatternRules': confirmed_rules,
+            'fieldPatternOverrides': {
+                'source': 'backend_user_corrections',
+                'rows': override_rows,
+            },
         }
         normalized = normalize_bom_rows(headers, rows, roles=roles, config=applied_config)
         saved_structure = None
@@ -2436,6 +2501,10 @@ def bom_field_pattern_apply(request):
             **normalized,
             'learning': learning,
             'savedStructure': saved_structure,
+            'appliedConfig': {
+                **reusable_config,
+                'fieldPatternRules': confirmed_rules,
+            },
         })
     except Exception as exc:
         logger.error("BOM field pattern apply failed: %s", exc, exc_info=True)
@@ -2528,6 +2597,13 @@ def bom_field_pattern_teaching(request):
             alternate_joiner = request.data.get('alternate_joiner') or ''
         ignored_fields = request.data.get('ignoredFields') or request.data.get('ignored_fields') or []
         has_manual_edits = request.data.get('hasManualEdits') is True or request.data.get('has_manual_edits') is True
+        active_rules = request.data.get('activeRules') or request.data.get('active_rules') or {}
+        review = request.data.get('review') or {}
+        completed_step_id = request.data.get('completedStepId') or request.data.get('completed_step_id') or ''
+        source_row = request.data.get('sourceRow')
+        if source_row is None:
+            source_row = request.data.get('source_row')
+        occurrence_id = request.data.get('occurrenceId') or request.data.get('occurrence_id') or ''
         persist = request.data.get('persist', True)
 
         if not isinstance(headers, list):
@@ -2550,6 +2626,10 @@ def bom_field_pattern_teaching(request):
             group = {}
         if not isinstance(visual_pattern, dict):
             visual_pattern = {}
+        if not isinstance(active_rules, dict):
+            active_rules = {}
+        if not isinstance(review, dict):
+            review = {}
 
         teach_result = build_bom_field_pattern_teach_result(
             headers=headers,
@@ -2568,6 +2648,28 @@ def bom_field_pattern_teaching(request):
             has_manual_edits=has_manual_edits,
         )
         rule = teach_result['rule']
+        next_active_rules = dict(active_rules)
+        rule_key = str(
+            group.get('patternKey')
+            or rule.get('patternKey')
+            or group.get('shape')
+            or rule.get('shape')
+            or ''
+        ).strip()
+        if rule_key:
+            next_active_rules[rule_key] = rule
+        refreshed_review = refresh_bom_field_pattern_review_after_teach(
+            review,
+            teach_result,
+            group=group,
+            roles=roles,
+            config=config,
+            active_rules=next_active_rules,
+            source_row=source_row,
+            occurrence_id=occurrence_id,
+            completed_step_id=completed_step_id,
+            taught_source_value=row.get(source_header) if source_header else '',
+        )
         saved_rule = None
         if persist:
             saved_rule = save_bom_field_pattern_rule(
@@ -2577,6 +2679,8 @@ def bom_field_pattern_teaching(request):
         return Response({
             'success': True,
             **teach_result,
+            'activeRules': next_active_rules,
+            'review': refreshed_review,
             'saved_rule': saved_rule,
         })
     except Exception as exc:

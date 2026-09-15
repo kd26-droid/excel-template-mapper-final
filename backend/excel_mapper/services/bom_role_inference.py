@@ -1,6 +1,7 @@
 import re
 import unicodedata
 import hashlib
+from copy import deepcopy
 from functools import lru_cache
 from statistics import mean
 from time import perf_counter
@@ -1758,14 +1759,21 @@ def infer_bom_roles(headers, rows, options=None):
     except Exception:
         sample_size = 250
     sample_size = max(25, min(sample_size, 250))
-    safe_rows = rows if isinstance(rows, list) else []
+    input_rows = rows if isinstance(rows, list) else []
     safe_rows, block_structure = _prepare_backend_bom_rows(
         safe_headers,
-        safe_rows,
+        input_rows,
         config=(options or {}).get("config") or {},
     )
     profiles = build_column_profiles(safe_headers, safe_rows, sample_size=sample_size)
     resolved = resolve_roles(profiles)
+    mapped_input_rows = [_row_as_header_mapping(row, safe_headers) for row in input_rows]
+    block_structure["parentPathRows"] = [
+        _source_row_number(row, index)
+        for index, row in enumerate(mapped_input_rows)
+        if _backend_parent_path_value(row, safe_headers, resolved["roles"])
+    ]
+    block_structure["cleanupDetections"] = _cleanup_detection_counts(block_structure)
     return {
         "source": "inferred",
         "roles": resolved["roles"],
@@ -1775,6 +1783,7 @@ def infer_bom_roles(headers, rows, options=None):
         "columns": profiles,
         "warnings": resolved["warnings"],
         "blockStructure": block_structure,
+        "cleanupDetections": block_structure.get("cleanupDetections") or {},
         "sampleSize": sample_size,
         "timings": {
             "total_ms": round((perf_counter() - started_at) * 1000, 2),
@@ -1976,6 +1985,54 @@ def _is_backend_summary_row(row, source_roles):
     return bool(quantity and re.fullmatch(r"[-+]?\d+(?:[.,]\d+)?", quantity))
 
 
+def _is_backend_do_not_populate_row(row, headers):
+    text = " ".join(
+        clean(row.get(header, ""))
+        for header in headers
+        if not is_blankish(row.get(header, ""))
+    )
+    return bool(re.search(
+        r"\b(do\s*not\s*populate|not\s*populate|dnp|dni|not\s*fitted|no\s*fit)\b",
+        text,
+        flags=re.IGNORECASE,
+    ))
+
+
+def _is_backend_deleted_row(row):
+    return any(bool(row.get(key)) for key in (
+        "__deletedRowStyle",
+        "__redRowStyle",
+        "__strikeRowStyle",
+    ))
+
+
+def _backend_parent_path_value(row, headers, source_roles):
+    parent_headers = []
+    mapped_parent = clean((source_roles or {}).get("parent"))
+    if mapped_parent in headers:
+        parent_headers.append(mapped_parent)
+    parent_headers.extend(
+        header for header in headers
+        if header not in parent_headers and header_support(header, "parent") >= 0.78
+    )
+    for header in parent_headers:
+        value = clean(row.get(header, ""))
+        if value and any(separator in value for separator in (">", "::", "|", "\\", "/")):
+            return value
+    return ""
+
+
+def _cleanup_detection_counts(diagnostics):
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    return {
+        "skipTitleRows": len(diagnostics.get("sectionTitleRows") or []),
+        "skipRepeatedHeaders": len(diagnostics.get("repeatedHeaderRows") or []),
+        "skipDoNotPopulate": len(diagnostics.get("doNotPopulateRows") or []),
+        "skipDeletedRows": len(diagnostics.get("deletedRows") or []),
+        "parentPathLevels": len(diagnostics.get("parentPathRows") or []),
+    }
+
+
 def _prepare_backend_bom_rows(headers, rows, roles=None, config=None, header_row_index=0):
     """Apply cleanup and remap repeated-header blocks into one logical schema."""
     safe_headers = [clean(header) for header in (headers or [])]
@@ -2010,6 +2067,13 @@ def _prepare_backend_bom_rows(headers, rows, roles=None, config=None, header_row
 
     skip_titles = _normalizer_config_flag(config, "skipTitleRows", "skip_title_rows", True)
     skip_headers = _normalizer_config_flag(config, "skipRepeatedHeaders", "skip_repeated_headers", True)
+    skip_do_not_populate = _normalizer_config_flag(
+        config,
+        "skipDoNotPopulate",
+        "skip_do_not_populate",
+        False,
+    )
+    skip_deleted = _normalizer_config_flag(config, "skipDeletedRows", "skip_deleted_rows", True)
     prepared_rows = []
     current_section = ""
     diagnostics = {
@@ -2017,6 +2081,9 @@ def _prepare_backend_bom_rows(headers, rows, roles=None, config=None, header_row
         "blockCount": len(repeated_headers) + 1 if has_repeated_blocks else 1,
         "repeatedHeaderRows": [],
         "sectionTitleRows": [],
+        "doNotPopulateRows": [],
+        "deletedRows": [],
+        "parentPathRows": [],
         "summaryRows": [],
         "blankRows": [],
         "roleMaps": [],
@@ -2044,15 +2111,31 @@ def _prepare_backend_bom_rows(headers, rows, roles=None, config=None, header_row
                 "sourceRow": source_row,
                 "roles": dict(active_source_roles),
             })
-            if skip_headers:
-                continue
 
         section_title = _backend_section_title(row, safe_headers, active_source_roles)
         if section_title:
             current_section = section_title
             diagnostics["sectionTitleRows"].append(source_row)
-            if skip_titles:
-                continue
+
+        is_do_not_populate = _is_backend_do_not_populate_row(row, safe_headers)
+        if is_do_not_populate:
+            diagnostics["doNotPopulateRows"].append(source_row)
+
+        is_deleted = _is_backend_deleted_row(row)
+        if is_deleted:
+            diagnostics["deletedRows"].append(source_row)
+
+        if _backend_parent_path_value(row, safe_headers, active_source_roles):
+            diagnostics["parentPathRows"].append(source_row)
+
+        if repeated_role_map and skip_headers:
+            continue
+        if section_title and skip_titles:
+            continue
+        if is_do_not_populate and skip_do_not_populate:
+            continue
+        if is_deleted and skip_deleted:
+            continue
 
         if _is_backend_summary_row(row, active_source_roles):
             diagnostics["summaryRows"].append(source_row)
@@ -2078,10 +2161,11 @@ def _prepare_backend_bom_rows(headers, rows, roles=None, config=None, header_row
     diagnostics["inputRowCount"] = len(mapped_rows)
     diagnostics["dataRowCount"] = len(prepared_rows)
     diagnostics["skippedRowCount"] = len(mapped_rows) - len(prepared_rows)
+    diagnostics["cleanupDetections"] = _cleanup_detection_counts(diagnostics)
     return prepared_rows, diagnostics
 
 
-def _selected_customer_columns(headers, roles, selected_columns=None):
+def _selected_customer_columns(headers, roles, selected_columns=None, config=None):
     allowed = set(headers or [])
     ordered = []
 
@@ -2094,6 +2178,11 @@ def _selected_customer_columns(headers, roles, selected_columns=None):
         add(header)
     for role in ROLE_KEYS:
         add((roles or {}).get(role))
+    for group in (config or {}).get("alternateColumnGroups") or (config or {}).get("alternate_column_groups") or []:
+        if not isinstance(group, dict):
+            continue
+        for role in ROLE_KEYS:
+            add(group.get(role))
     return ordered
 
 
@@ -4391,6 +4480,101 @@ def _semantic_pattern_key(source_column, mapped_fields, grammar):
     return f"semantic-{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:20]}"
 
 
+def _semantic_grammar_required_roles(grammar, mapped_fields=None):
+    """Return parser roles that must be represented by a semantic grammar."""
+    grammar_text = clean(grammar).upper()
+    mapped = {clean(role) for role in (mapped_fields or []) if clean(role)}
+    required = set()
+
+    if "mpn" in mapped and re.search(
+        r"<(?:MPN|MPN_PREFIX|MPN_SUFFIX|PRIMARY_SUFFIX)>",
+        grammar_text,
+    ):
+        required.add("mpn")
+    if "manufacturer" in mapped and "<MFR>" in grammar_text:
+        required.add("manufacturer")
+
+    for role in mapped - {"mpn", "manufacturer"}:
+        if _pattern_display_token(role).upper() in grammar_text:
+            required.add(role)
+
+    if re.search(r"<ALTERNATE_[A-Z0-9_]*>", grammar_text):
+        required.add("alternateList")
+    return required
+
+
+def _semantic_interpretation_coverage(grammar, mapped_fields, parser_rule, interpretations=None):
+    """Validate that a stored/session rule covers and applies every grammar role."""
+    required_roles = _semantic_grammar_required_roles(grammar, mapped_fields)
+    parser_rule = parser_rule if isinstance(parser_rule, dict) else {}
+    if _field_pattern_rule_excludes_row(parser_rule):
+        return {
+            "valid": True,
+            "requiredRoles": sorted(required_roles),
+            "coveredRoles": ["ignore"],
+            "missingRoles": [],
+            "failedOccurrenceCount": 0,
+        }
+
+    visual_pattern = parser_rule.get("visualPattern") or parser_rule.get("visual_pattern") or {}
+    visual_pattern = visual_pattern if isinstance(visual_pattern, dict) else {}
+    segments = visual_pattern.get("segments") if isinstance(visual_pattern.get("segments"), list) else []
+    covered_roles = {
+        clean(segment.get("role"))
+        for segment in segments
+        if isinstance(segment, dict) and clean(segment.get("role"))
+    }
+    covered_roles.update(
+        clean(role)
+        for role, rule in (parser_rule.get("fields") or {}).items()
+        if clean(role) and isinstance(rule, dict) and rule
+    )
+
+    # Retain support for older typed rules that predate explicit visual segments.
+    visual_type = clean(visual_pattern.get("type"))
+    if visual_type in {"bracket_manufacturer", "bracket_alternate_manufacturer"}:
+        covered_roles.update({"mpn", "manufacturer"})
+    if visual_type == "bracket_alternate_manufacturer":
+        covered_roles.add("alternateList")
+
+    missing_roles = required_roles - covered_roles
+    failed_occurrences = []
+    safe_interpretations = [
+        interpretation
+        for interpretation in (interpretations or [])
+        if isinstance(interpretation, dict)
+    ]
+    if not missing_roles and required_roles and interpretations is not None and not safe_interpretations:
+        failed_occurrences.append({
+            "occurrenceId": "",
+            "sourceRow": None,
+            "missingRoles": sorted(required_roles),
+        })
+    if not missing_roles and safe_interpretations:
+        for interpretation in safe_interpretations:
+            span_roles = {
+                clean(span.get("role"))
+                for span in interpretation.get("interpretationSpans") or []
+                if isinstance(span, dict) and clean(span.get("role"))
+            }
+            occurrence_missing = required_roles - span_roles
+            if occurrence_missing:
+                failed_occurrences.append({
+                    "occurrenceId": clean(interpretation.get("occurrenceId")),
+                    "sourceRow": interpretation.get("sourceRow"),
+                    "missingRoles": sorted(occurrence_missing),
+                })
+
+    return {
+        "valid": not missing_roles and not failed_occurrences,
+        "requiredRoles": sorted(required_roles),
+        "coveredRoles": sorted(covered_roles),
+        "missingRoles": sorted(missing_roles),
+        "failedOccurrenceCount": len(failed_occurrences),
+        "failedOccurrences": failed_occurrences[:10],
+    }
+
+
 def _semantic_rule_for_source(rule, source_column):
     rebound = dict(rule or {})
     visual_pattern = rebound.get("visualPattern") or rebound.get("visual_pattern")
@@ -4820,6 +5004,35 @@ def _safe_visual_teach_spans(source_value, tagged_spans):
     return sorted(spans, key=lambda item: (item["start"], item["end"], item["role"]))
 
 
+def _preserve_tagged_mpn_wrappers(source_value, spans):
+    """Keep brackets that directly wrap a user-tagged MPN segment."""
+    text = str(source_value or "")
+    wrapper_pairs = {"(": ")", "[": "]", "{": "}", "<": ">"}
+    preserved = []
+    for span in spans or []:
+        next_span = dict(span)
+        if next_span.get("role") == "mpn":
+            start = int(next_span.get("start") or 0)
+            end = int(next_span.get("end") or 0)
+            opening = text[start - 1:start] if start > 0 else ""
+            closing = wrapper_pairs.get(opening)
+            if closing and text[end:end + 1] == closing:
+                wrapper_range = set(range(start - 1, end + 1))
+                overlaps_other_tag = any(
+                    other is not span
+                    and wrapper_range.intersection(range(
+                        int(other.get("start") or 0),
+                        int(other.get("end") or 0),
+                    ))
+                    for other in spans or []
+                )
+                if not overlaps_other_tag:
+                    next_span["start"] = start - 1
+                    next_span["end"] = end + 1
+        preserved.append(next_span)
+    return sorted(preserved, key=lambda item: (item["start"], item["end"], item["role"]))
+
+
 def _visual_teach_wrapper(value):
     text = str(value or "")
     wrappers = {"(": ")", "[": "]", "{": "}", "<": ">"}
@@ -4846,6 +5059,43 @@ def _visual_teach_reusable_before(value, segment_index):
     return match.group(1) if match else text
 
 
+def _visual_token_occurrence_count(text, token):
+    """Count non-overlapping occurrences for an exact taught boundary."""
+    text = str(text or "")
+    token = str(token or "")
+    if not text or not token:
+        return 0
+    count = 0
+    cursor = 0
+    while cursor <= len(text):
+        index = text.find(token, cursor)
+        if index < 0:
+            break
+        count += 1
+        cursor = index + len(token)
+    return count
+
+
+def _find_visual_token(text, token, start=0, occurrence=1):
+    """Find the taught occurrence of a delimiter, not merely its first copy."""
+    text = str(text or "")
+    token = str(token or "")
+    if not token:
+        return -1
+    try:
+        occurrence = max(1, int(occurrence or 1))
+    except (TypeError, ValueError):
+        occurrence = 1
+    cursor = max(0, int(start or 0))
+    found = -1
+    for _index in range(occurrence):
+        found = text.find(token, cursor)
+        if found < 0:
+            return -1
+        cursor = found + len(token)
+    return found
+
+
 def derive_visual_pattern_from_tagged_spans(
     source_value,
     source_header,
@@ -4859,6 +5109,7 @@ def derive_visual_pattern_from_tagged_spans(
     text = str(source_value or "")
     source_header = clean(source_header)
     spans = _safe_visual_teach_spans(text, tagged_spans)
+    spans = _preserve_tagged_mpn_wrappers(text, spans)
     value_spans = [span for span in spans if span["role"] in VISUAL_TEACH_VALUE_ROLES]
     ignored = [span for span in spans if span["role"] == "ignore"]
     if source_header and ignored and not value_spans:
@@ -4957,12 +5208,25 @@ def derive_visual_pattern_from_tagged_spans(
         selected_text = text[span["start"]:span["end"]]
         before = text[previous_end:span["start"]]
         after = text[span["end"]:next_start]
-        segments.append({
+        reusable_before = _visual_teach_reusable_before(before, index)
+        reusable_after = after if index + 1 < len(template_spans) else _visual_teach_end_boundary(after)
+        segment = {
             "role": span["role"],
-            "before": _visual_teach_reusable_before(before, index),
-            "after": after if index + 1 < len(template_spans) else _visual_teach_end_boundary(after),
+            "before": reusable_before,
+            "after": reusable_after,
             "wrapper": _visual_teach_wrapper(selected_text),
-        })
+        }
+        if reusable_after:
+            after_occurrence = _visual_token_occurrence_count(selected_text, reusable_after) + 1
+            if after_occurrence > 1:
+                segment["afterOccurrence"] = after_occurrence
+        if (
+            any(previous.get("role") == span["role"] for previous in template_spans[:index])
+            and before
+            and before.isspace()
+        ):
+            segment["roleJoiner"] = before
+        segments.append(segment)
 
     tagged_roles = {segment["role"] for segment in segments}
     if "mpn" in tagged_roles and "manufacturer" in tagged_roles:
@@ -5066,7 +5330,12 @@ def _next_visual_segment_start(group_text, segments, segment_index, value_start)
             continue
         next_before = str(next_segment.get("before") or "")
         if next_before:
-            boundary = group_text.find(next_before, value_start)
+            boundary = _find_visual_token(
+                group_text,
+                next_before,
+                value_start,
+                next_segment.get("beforeOccurrence") or 1,
+            )
             if boundary >= 0:
                 return boundary
         next_wrapper = (
@@ -5101,7 +5370,12 @@ def _visual_pattern_segment_values(group_text, visual_pattern):
         wrapper = segment.get("wrapper") if isinstance(segment.get("wrapper"), dict) else {}
         value_start = cursor
         if before:
-            before_index = group_text.find(before, cursor)
+            before_index = _find_visual_token(
+                group_text,
+                before,
+                cursor,
+                segment.get("beforeOccurrence") or segment.get("before_occurrence") or 1,
+            )
             if before_index < 0:
                 return {}
             value_start = before_index + len(before)
@@ -5119,7 +5393,12 @@ def _visual_pattern_segment_values(group_text, visual_pattern):
             value_start = open_index
             value_end = close_index + len(closing)
         elif after:
-            after_index = group_text.find(after, value_start)
+            after_index = _find_visual_token(
+                group_text,
+                after,
+                value_start,
+                segment.get("afterOccurrence") or segment.get("after_occurrence") or 1,
+            )
             if after_index >= 0:
                 value_end = after_index
         else:
@@ -5134,7 +5413,8 @@ def _visual_pattern_segment_values(group_text, visual_pattern):
 
         value = clean(group_text[value_start:value_end])
         if value:
-            parsed[role] = f"{parsed.get(role, '')}{value}"
+            role_joiner = str(segment.get("roleJoiner") or segment.get("role_joiner") or "")
+            parsed[role] = f"{parsed.get(role, '')}{role_joiner if parsed.get(role) else ''}{value}"
         cursor = value_end
     return parsed
 
@@ -6983,7 +7263,12 @@ def _visual_pattern_interpretation_spans(value, visual_pattern):
                 wrapper = segment.get("wrapper") if isinstance(segment.get("wrapper"), dict) else {}
                 value_start = cursor
                 if before:
-                    before_index = group_text.find(before, cursor)
+                    before_index = _find_visual_token(
+                        group_text,
+                        before,
+                        cursor,
+                        segment.get("beforeOccurrence") or segment.get("before_occurrence") or 1,
+                    )
                     if before_index < 0:
                         break
                     value_start = before_index + len(before)
@@ -7000,7 +7285,12 @@ def _visual_pattern_interpretation_spans(value, visual_pattern):
                     value_start = open_index
                     value_end = close_index + len(closing)
                 elif after:
-                    after_index = group_text.find(after, value_start)
+                    after_index = _find_visual_token(
+                        group_text,
+                        after,
+                        value_start,
+                        segment.get("afterOccurrence") or segment.get("after_occurrence") or 1,
+                    )
                     if after_index >= 0:
                         value_end = after_index
                 else:
@@ -7110,6 +7400,41 @@ def _visual_pattern_interpretation_spans(value, visual_pattern):
     return sorted(spans, key=lambda item: (item["start"], item["end"], item["role"]))
 
 
+def _normalized_source_value_span(source_text, field_value):
+    """Locate a normalized edited value in its punctuated customer source."""
+    source_chars = []
+    source_positions = []
+    for index, character in enumerate(str(source_text or "")):
+        if character.isalnum():
+            source_chars.append(character.upper())
+            source_positions.append(index)
+    target = "".join(
+        character.upper()
+        for character in str(field_value or "")
+        if character.isalnum()
+    )
+    if len(target) < 3 or not source_chars:
+        return None
+    normalized_source = "".join(source_chars)
+    normalized_start = normalized_source.find(target)
+    if normalized_start < 0:
+        return None
+    normalized_end = normalized_start + len(target) - 1
+    span_start = source_positions[normalized_start]
+    span_end = source_positions[normalized_end] + 1
+    closing_pairs = {")": "(", "]": "[", "}": "{", ">": "<"}
+    while span_end < len(str(source_text or "")):
+        closing = str(source_text)[span_end]
+        opening = closing_pairs.get(closing)
+        if not opening:
+            break
+        selected = str(source_text)[span_start:span_end]
+        if selected.count(opening) <= selected.count(closing):
+            break
+        span_end += 1
+    return span_start, span_end
+
+
 def _entry_interpretation_spans(value, source_header, entries, existing_spans=None):
     text = str(value or "")
     spans = list(existing_spans or [])
@@ -7129,6 +7454,7 @@ def _entry_interpretation_spans(value, source_header, entries, existing_spans=No
             if not field_value:
                 continue
             search_from = 0
+            matched = False
             while search_from < len(text):
                 start = upper_text.find(field_value.upper(), search_from)
                 if start < 0:
@@ -7137,8 +7463,19 @@ def _entry_interpretation_spans(value, source_header, entries, existing_spans=No
                 if not any(index in occupied for index in range(start, end)):
                     _add_interpretation_span(spans, start, end, role, len(text))
                     occupied.update(range(start, end))
+                    matched = True
                     break
                 search_from = start + 1
+            if matched:
+                continue
+            normalized_span = _normalized_source_value_span(text, field_value)
+            if not normalized_span:
+                continue
+            start, end = normalized_span
+            if any(index in occupied for index in range(start, end)):
+                continue
+            _add_interpretation_span(spans, start, end, role, len(text))
+            occupied.update(range(start, end))
     return sorted(spans, key=lambda item: (item["start"], item["end"], item["role"]))
 
 
@@ -8373,6 +8710,14 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                     has_alternate_list = (
                         "<ALTERNATE_" in grammar
                         or any(clean(segment.get("role")) == "alternateList" for segment in visual_segments)
+                        or (
+                            clean(
+                                (config or {}).get("alternateLayout")
+                                or (config or {}).get("alternate_layout")
+                            ) == "inside_selected_mpn_columns"
+                            and "mpn" in mapped_fields
+                            and "<SUFFIX>" in grammar
+                        )
                     )
                     interpretation_pattern = (
                         _visual_pattern_display_pattern(
@@ -8508,6 +8853,23 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
         ),
     )
     for index, item in enumerate(ordered, start=1):
+        has_interpretation = bool(item.get("storedInterpretation") or item.get("draftInterpretation"))
+        coverage = _semantic_interpretation_coverage(
+            item.get("grammar") or "",
+            item.get("mappedFields") or [],
+            item.get("suggestedRule") or {},
+            item.get("interpretations") or [],
+        )
+        if not has_interpretation:
+            coverage = {
+                **coverage,
+                "valid": False,
+                "reason": "no_saved_interpretation",
+            }
+        elif not coverage.get("valid"):
+            coverage["reason"] = "incomplete_grammar_coverage"
+        item["recognitionValidation"] = coverage
+        item["recognized"] = bool(has_interpretation and coverage.get("valid"))
         item["title"] = f"Pattern {index}"
         item["occurrenceCount"] = len(item.get("occurrences") or [])
         item["rowCount"] = len({occ.get("sourceRow") for occ in item.get("occurrences") or []})
@@ -8516,6 +8878,9 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
             item["patternRows"][0]["occurrenceCount"] = item["occurrenceCount"]
         item["alternateEntryCount"] = max(
             [max(0, len(sample.get("entries") or []) - 1) for sample in item.get("samples") or []] or [0]
+        )
+        item["hasAlternateList"] = bool(
+            item.get("hasAlternateList") or item["alternateEntryCount"] > 0
         )
         item["groupIds"] = list(item.get("rowShapeGroupIds") or [])
     return ordered
@@ -8614,7 +8979,7 @@ def _build_pattern_combinations(headers, patterns):
                     "mappedFields": pattern.get("mappedFields") or occurrence.get("mappedFields") or [],
                     "hasAlternateList": bool(pattern.get("hasAlternateList")),
                     "count": member_counts.get(pattern_key, 1),
-                    "reviewed": bool(pattern.get("storedInterpretation") or pattern.get("draftInterpretation")),
+                    "reviewed": bool(pattern.get("recognized")),
                 })
 
         entries = []
@@ -8755,8 +9120,9 @@ def _build_pattern_review_summary(patterns, combinations):
             ),
             "combinationIds": list(dict.fromkeys(combination_ids_by_pattern.get(pattern_key) or [])),
             "recognitionScope": clean(pattern.get("recognitionScope")),
+            "recognitionValidation": pattern.get("recognitionValidation") or {},
         }
-        if pattern.get("recognized") or pattern.get("storedInterpretation"):
+        if pattern.get("recognized"):
             recognized.append(summary_pattern)
         else:
             unrecognized.append(summary_pattern)
@@ -8769,6 +9135,285 @@ def _build_pattern_review_summary(patterns, combinations):
         "unrecognizedPatternCount": len(unrecognized),
         "recognizedPatterns": recognized,
         "unrecognizedPatterns": unrecognized,
+    }
+
+
+def _review_entry_field_value(field):
+    if isinstance(field, dict):
+        return field.get("value") or ""
+    return field or ""
+
+
+def _review_entry_source_column(field):
+    if isinstance(field, dict):
+        return field.get("sourceColumn") or ""
+    return ""
+
+
+def _display_review_entries(entries, config=None):
+    """Return backend-approved rows in the exact shape rendered by the popup."""
+    raw_entries = [entry for entry in (entries or []) if isinstance(entry, dict)]
+    alternate_layout = clean(
+        (config or {}).get("alternateLayout")
+        or (config or {}).get("alternate_layout")
+    )
+    filtered = [
+        entry
+        for index, entry in enumerate(raw_entries)
+        if (
+            index == 0
+            or alternate_layout != "separate_columns"
+            or clean(_review_entry_field_value((entry.get("fields") or {}).get("mpn")))
+        )
+    ]
+    if not filtered and raw_entries:
+        filtered = raw_entries[:1]
+
+    display_entries = []
+    for index, entry in enumerate(filtered):
+        fields = entry.get("fields") or {}
+        display_entries.append({
+            "index": entry.get("index", index),
+            "relation": "Primary" if index == 0 else f"Alternate {index}",
+            "fields": {
+                role: _review_entry_field_value(fields.get(role))
+                for role in FACTWISE_FIELD_LABELS
+            },
+            "sourceColumns": {
+                role: _review_entry_source_column(fields.get(role))
+                for role in FACTWISE_FIELD_LABELS
+            },
+        })
+    return display_entries
+
+
+def _visible_review_field_keys(entries, left, roles):
+    selected_columns = {
+        clean(item.get("column"))
+        for item in (left or [])
+        if isinstance(item, dict) and clean(item.get("column"))
+    }
+    visible = []
+    for role in ROLE_KEYS:
+        role_source = clean((roles or {}).get(role))
+        has_mapped_source = bool(role_source and role_source in selected_columns)
+        has_value = any(clean((entry.get("fields") or {}).get(role)) for entry in entries or [])
+        has_entry_source = any(
+            clean((entry.get("sourceColumns") or {}).get(role)) in selected_columns
+            for entry in entries or []
+        )
+        if has_mapped_source or has_value or has_entry_source:
+            visible.append(role)
+    return visible
+
+
+def _build_backend_review_contract(
+    summary,
+    patterns,
+    groups,
+    review_rows,
+    workflow,
+    roles,
+    config,
+    headers,
+    active_rules,
+):
+    """Build the presentation-ready review contract; React must not reclassify it."""
+    summary = summary or {}
+    recognized_keys = {
+        clean(pattern.get("patternKey"))
+        for pattern in summary.get("recognizedPatterns") or []
+        if isinstance(pattern, dict)
+    }
+    summary_patterns = [
+        {**pattern, "recognized": True, "status": "recognized", "statusLabel": "Recognized"}
+        for pattern in summary.get("recognizedPatterns") or []
+        if isinstance(pattern, dict)
+    ] + [
+        {**pattern, "recognized": False, "status": "unrecognized", "statusLabel": "Needs review"}
+        for pattern in summary.get("unrecognizedPatterns") or []
+        if isinstance(pattern, dict)
+    ]
+
+    def pattern_sort_key(pattern):
+        first_source_row = pattern.get("firstSourceRow")
+        try:
+            return (0, int(first_source_row), clean(pattern.get("patternKey")))
+        except (TypeError, ValueError):
+            return (1, 0, clean(pattern.get("patternKey")))
+
+    ordered_patterns = sorted(summary_patterns, key=pattern_sort_key)
+    groups_by_pattern_key = {
+        clean(group.get("patternKey")): group
+        for group in groups or []
+        if isinstance(group, dict) and clean(group.get("patternKey"))
+    }
+    workflow_steps_by_pattern_key = {
+        clean(step.get("patternKey")): step
+        for step in (workflow or {}).get("steps") or []
+        if isinstance(step, dict) and step.get("type") == "teach_visual" and clean(step.get("patternKey"))
+    }
+    rows_by_pattern_key = {}
+    for row_index, row in enumerate(review_rows or []):
+        if not isinstance(row, dict):
+            continue
+        for occurrence in row.get("occurrences") or []:
+            pattern_key = clean(occurrence.get("patternKey")) if isinstance(occurrence, dict) else ""
+            if pattern_key and pattern_key not in rows_by_pattern_key:
+                rows_by_pattern_key[pattern_key] = (row_index, row, occurrence)
+
+    def teach_context(pattern, group, row_index, row, occurrence):
+        pattern_key = clean(pattern.get("patternKey"))
+        workflow_step = workflow_steps_by_pattern_key.get(pattern_key) or {}
+        source_column = clean(occurrence.get("sourceColumn"))
+        source_fragment = {
+            key: value
+            for key, value in occurrence.items()
+            if key != "entries"
+        }
+        return {
+            "groupId": group.get("id") or "",
+            "workflowStepId": workflow_step.get("id") or "",
+            "combinationId": row.get("combinationId") or (
+                (pattern.get("combinationIds") or [""])[0]
+            ),
+            "reviewRowIndex": row_index,
+            "reviewPage": row_index // 4,
+            "sample": {
+                "sourceRow": row.get("sourceRow"),
+                "left": row.get("left") or [],
+                "sourceFragment": {
+                    **source_fragment,
+                    "id": occurrence.get("occurrenceId") or "",
+                },
+                "entries": [],
+                "fields": {},
+                "interpretationSpansByColumn": {
+                    source_column: occurrence.get("interpretationSpans") or []
+                } if source_column else {},
+                "patternRows": group.get("patternRows") or [],
+                "primaryPatternRow": group.get("primaryPatternRow"),
+            },
+        }
+
+    for pattern in ordered_patterns:
+        pattern_key = clean(pattern.get("patternKey"))
+        group = groups_by_pattern_key.get(pattern_key) or {}
+        row_match = rows_by_pattern_key.get(pattern_key)
+        workflow_step = workflow_steps_by_pattern_key.get(pattern_key) or {}
+        pattern["mappedFieldLabels"] = [
+            FACTWISE_FIELD_LABELS.get(field) or ROLE_LABELS.get(field) or field
+            for field in pattern.get("mappedFields") or []
+        ]
+        pattern["mappedFieldsLabel"] = " + ".join(pattern["mappedFieldLabels"])
+        pattern["groupId"] = group.get("id") or ""
+        pattern["workflowStepId"] = workflow_step.get("id") or ""
+        if not row_match:
+            pattern["teachContext"] = None
+            continue
+        row_index, row, occurrence = row_match
+        pattern["reviewRowIndex"] = row_index
+        pattern["teachContext"] = teach_context(pattern, group, row_index, row, occurrence)
+
+    patterns_by_key = {
+        clean(pattern.get("patternKey")): pattern
+        for pattern in ordered_patterns
+        if clean(pattern.get("patternKey"))
+    }
+    for row_index, row in enumerate(review_rows or []):
+        occurrences_by_key = {
+            clean(occurrence.get("patternKey")): occurrence
+            for occurrence in row.get("occurrences") or []
+            if isinstance(occurrence, dict) and clean(occurrence.get("patternKey"))
+        }
+        for row_pattern in row.get("patterns") or []:
+            pattern_key = clean(row_pattern.get("patternKey"))
+            occurrence = occurrences_by_key.get(pattern_key)
+            pattern = patterns_by_key.get(pattern_key)
+            group = groups_by_pattern_key.get(pattern_key) or {}
+            if occurrence and pattern:
+                row_pattern["teachContext"] = teach_context(
+                    pattern,
+                    group,
+                    row_index,
+                    row,
+                    occurrence,
+                )
+
+    mapped_field_options = [
+        {
+            "key": role,
+            "label": FACTWISE_FIELD_LABELS.get(role) or ROLE_LABELS.get(role) or role,
+            "sourceColumn": clean((roles or {}).get(role)),
+        }
+        for role in ROLE_KEYS
+        if clean((roles or {}).get(role)) in set(headers or [])
+    ]
+    field_filters = [{"key": "all", "label": "All mapped fields"}] + [
+        {"key": option["key"], "label": option["label"]}
+        for option in mapped_field_options
+    ]
+    patterns_by_field = {"all": ordered_patterns}
+    for option in mapped_field_options:
+        field = option["key"]
+        patterns_by_field[field] = [
+            pattern
+            for pattern in ordered_patterns
+            if field in (pattern.get("mappedFields") or [])
+        ]
+
+    mapping_units = (workflow or {}).get("mappingUnits") or []
+    has_shared_mapping = any(
+        isinstance(unit, dict) and unit.get("relationship") == "shared"
+        for unit in mapping_units
+    )
+    alternate_layout = clean(
+        (config or {}).get("alternateLayout")
+        or (config or {}).get("alternate_layout")
+    )
+    public_review_rows = [
+        {
+            key: value
+            for key, value in row.items()
+            if key != "occurrences"
+        }
+        for row in review_rows or []
+    ]
+
+    return {
+        "contractVersion": 3,
+        "summary": {
+            key: summary.get(key, 0)
+            for key in (
+                "itemCount",
+                "sourceRowCount",
+                "patternCount",
+                "recognizedPatternCount",
+                "unrecognizedPatternCount",
+            )
+        },
+        "patterns": ordered_patterns,
+        "patternsByField": patterns_by_field,
+        "fieldFilters": field_filters,
+        "mappedFieldOptions": mapped_field_options,
+        "groups": [_compact_review_group(group) for group in groups or []],
+        "rows": public_review_rows,
+        "fields": [
+            {"key": key, "label": label, "required": key == "mpn"}
+            for key, label in FACTWISE_FIELD_LABELS.items()
+        ],
+        "workflow": workflow or {"steps": [], "nextStep": None},
+        "activeRules": active_rules or {},
+        "display": {
+            "rowPageSize": 4,
+            "reviewModeLabel": (
+                "Shared-column interpretation"
+                if has_shared_mapping
+                else "One-to-one field interpretation"
+            ),
+            "allowAddAlternate": alternate_layout != "already_separate_rows",
+        },
+        "recognizedPatternKeys": sorted(key for key in recognized_keys if key),
     }
 
 
@@ -8794,7 +9439,14 @@ def _compact_review_entries(entries):
     return compact
 
 
-def _build_flat_pattern_review_rows(patterns, combinations):
+def _build_flat_pattern_review_rows(
+    patterns,
+    combinations,
+    groups=None,
+    roles=None,
+    config=None,
+    include_display_entries=False,
+):
     """Return complete source rows for the UI without exposing combination navigation."""
 
     patterns_by_key = {
@@ -8802,6 +9454,12 @@ def _build_flat_pattern_review_rows(patterns, combinations):
         for pattern in (patterns or [])
         if isinstance(pattern, dict) and clean(pattern.get("patternKey"))
     }
+    for group in groups or []:
+        if not isinstance(group, dict):
+            continue
+        pattern_key = clean(group.get("patternKey") or group.get("shape"))
+        if pattern_key and pattern_key not in patterns_by_key:
+            patterns_by_key[pattern_key] = group
     rows_by_key = {}
     for combination in combinations or []:
         if not isinstance(combination, dict):
@@ -8815,8 +9473,11 @@ def _build_flat_pattern_review_rows(patterns, combinations):
             for occurrence in sample.get("occurrences") or []:
                 if not isinstance(occurrence, dict):
                     continue
+                pattern_key = clean(occurrence.get("patternKey"))
+                pattern = patterns_by_key.get(pattern_key) or {}
                 occurrences.append({
                     **occurrence,
+                    "groupId": pattern.get("id") or "",
                     "entries": _compact_review_entries(occurrence.get("entries") or []),
                 })
             row_patterns = []
@@ -8832,19 +9493,44 @@ def _build_flat_pattern_review_rows(patterns, combinations):
                     "pattern": pattern.get("interpretationPattern") or pattern.get("grammar") or "",
                     "sourceColumn": pattern.get("sourceColumn") or occurrence.get("sourceColumn") or "",
                     "mappedFields": pattern.get("mappedFields") or [],
-                    "recognized": bool(pattern.get("recognized") or pattern.get("storedInterpretation")),
+                    "recognized": bool(pattern.get("recognized")),
                     "recognitionScope": clean(pattern.get("recognitionScope")),
+                    "recognitionValidation": pattern.get("recognitionValidation") or {},
                     "occurrenceId": occurrence.get("occurrenceId") or occurrence.get("id") or "",
                 })
+            display_entries = []
+            if include_display_entries:
+                for occurrence in occurrences:
+                    occurrence_id = occurrence.get("occurrenceId") or occurrence.get("id") or ""
+                    for pattern_entry_index, entry in enumerate(_display_review_entries(
+                        occurrence.get("entries") or [],
+                        config=config,
+                    )):
+                        display_entries.append({
+                            **entry,
+                            "patternKey": clean(occurrence.get("patternKey")),
+                            "groupId": occurrence.get("groupId") or "",
+                            "occurrenceId": occurrence_id,
+                            "patternEntryIndex": pattern_entry_index,
+                        })
+                for entry_index, entry in enumerate(display_entries):
+                    entry["relation"] = "Primary" if entry_index == 0 else f"Alternate {entry_index}"
             review_row = {
                 "id": f"review-row-{row_key}",
                 "sourceRow": source_row,
                 "left": sample.get("left") or [],
-                "entryCount": len(sample.get("entries") or []),
+                "entryCount": len(display_entries) if include_display_entries else len(sample.get("entries") or []),
                 "occurrences": occurrences,
                 "patterns": row_patterns,
                 "combinationId": combination.get("id") or "",
             }
+            if include_display_entries:
+                review_row["entries"] = display_entries
+                review_row["visibleFieldKeys"] = _visible_review_field_keys(
+                    display_entries,
+                    sample.get("left") or [],
+                    roles or {},
+                )
             current = rows_by_key.get(row_key)
             if current is None or review_row["entryCount"] > int(current.get("entryCount") or 0):
                 rows_by_key[row_key] = review_row
@@ -8955,6 +9641,8 @@ def _build_bom_field_review_workflow(headers, roles, config, groups, patterns=No
             "occurrenceCount": item.get("occurrenceCount") or 0,
             "storedInterpretation": item.get("storedInterpretation"),
             "draftInterpretation": item.get("draftInterpretation"),
+            "recognized": bool(item.get("recognized")),
+            "recognitionValidation": item.get("recognitionValidation") or {},
             "interpretationRefs": interpretation_refs,
             "interpretationRef": interpretation_refs[0] if interpretation_refs else None,
             "interpretation": interpretations[0] if interpretations else None,
@@ -9005,6 +9693,14 @@ def build_bom_field_pattern_groups(headers, rows, roles=None, config=None, selec
     """Build backend-owned field interpretation groups for the teach popup."""
     started_at = perf_counter()
     options = options or {}
+    try:
+        review_contract_version = int(
+            options.get("reviewContractVersion")
+            or options.get("review_contract_version")
+            or 2
+        )
+    except (TypeError, ValueError):
+        review_contract_version = 2
     safe_headers = [clean(header) for header in (headers or [])]
     safe_rows = rows if isinstance(rows, list) else []
     safe_roles = {role: clean((roles or {}).get(role)) for role in ROLE_KEYS}
@@ -9015,11 +9711,17 @@ def build_bom_field_pattern_groups(headers, rows, roles=None, config=None, selec
         config=config,
         header_row_index=int((options or {}).get("headerRowIndex") or 0),
     )
-    customer_columns = _selected_customer_columns(safe_headers, safe_roles, selected_columns)
+    customer_columns = _selected_customer_columns(
+        safe_headers,
+        safe_roles,
+        selected_columns,
+        config=config,
+    )
     include_all_rows = bool(options.get("includeAllRows") or options.get("include_all_rows"))
 
     try:
-        max_rows = int(options.get("maxRows") or options.get("max_rows") or 500)
+        default_max_rows = len(safe_rows) if include_all_rows else 500
+        max_rows = int(options.get("maxRows") or options.get("max_rows") or default_max_rows)
     except Exception:
         max_rows = 500
     max_rows = max(25, min(max_rows, 10000 if include_all_rows else 2000))
@@ -9298,6 +10000,10 @@ def build_bom_field_pattern_groups(headers, rows, roles=None, config=None, selec
     review_rows = _build_flat_pattern_review_rows(
         semantic_patterns,
         pattern_combinations,
+        groups=groups,
+        roles=safe_roles,
+        config=config,
+        include_display_entries=review_contract_version >= 3,
     )
     public_pattern_combinations = []
     for combination in pattern_combinations:
@@ -9322,6 +10028,26 @@ def build_bom_field_pattern_groups(headers, rows, roles=None, config=None, selec
     public_groups = [_compact_review_group(group) for group in groups]
     public_patterns = [_compact_review_group(pattern) for pattern in semantic_patterns]
     public_review_workflow = _compact_review_workflow(review_workflow)
+    requested_rules = options.get("fieldPatternRules") or options.get("field_pattern_rules") or {}
+    active_rules = dict(requested_rules) if isinstance(requested_rules, dict) else {}
+    for group in groups:
+        rule_key = clean(group.get("patternKey") or group.get("shape"))
+        if rule_key and isinstance(group.get("suggestedRule"), dict):
+            active_rules[rule_key] = group["suggestedRule"]
+    review_contract = None
+    if review_contract_version >= 3:
+        review_groups = semantic_patterns if semantic_patterns else groups
+        review_contract = _build_backend_review_contract(
+            review_summary,
+            semantic_patterns,
+            review_groups,
+            review_rows,
+            public_review_workflow,
+            safe_roles,
+            config or {},
+            safe_headers,
+            active_rules,
+        )
     public_row_shape_groups = [
         {
             key: group.get(key)
@@ -9331,28 +10057,15 @@ def build_bom_field_pattern_groups(headers, rows, roles=None, config=None, selec
         for group in groups
     ]
 
-    return {
+    response = {
         "source": "backend",
-        "fields": [
-            {"key": key, "label": label, "required": key == "mpn"}
-            for key, label in FACTWISE_FIELD_LABELS.items()
-        ],
         "selectedColumns": customer_columns,
-        "groups": public_groups,
-        "rowShapeGroups": public_row_shape_groups,
-        "patterns": public_patterns,
-        # Keep combination detection available to clients without duplicating
-        # every full row. The visible review uses reviewRows below.
-        "patternCombinations": public_pattern_combinations,
-        "reviewRows": review_rows,
         "groupCount": len(groups),
         "patternCount": len(semantic_patterns),
         "combinationCount": len(pattern_combinations),
         "reviewRowCount": len(review_rows),
-        "reviewSummary": review_summary,
         "sampleRowCount": sum(len(group["samples"]) for group in groups),
         "config": config or {},
-        "reviewWorkflow": public_review_workflow,
         "blockStructure": block_structure,
         "timings": {
             "total_ms": round((perf_counter() - started_at) * 1000, 2),
@@ -9366,6 +10079,320 @@ def build_bom_field_pattern_groups(headers, rows, roles=None, config=None, selec
             "total_discovery_sample_limit": total_discovery_sample_limit,
         },
     }
+    if review_contract_version >= 3:
+        response["review"] = review_contract
+    else:
+        response.update({
+            "fields": [
+                {"key": key, "label": label, "required": key == "mpn"}
+                for key, label in FACTWISE_FIELD_LABELS.items()
+            ],
+            "groups": public_groups,
+            "rowShapeGroups": public_row_shape_groups,
+            "patterns": public_patterns,
+            "patternCombinations": public_pattern_combinations,
+            "reviewRows": review_rows,
+            "reviewSummary": review_summary,
+            "reviewWorkflow": public_review_workflow,
+        })
+    return response
+
+
+def refresh_bom_field_pattern_review_after_teach(
+    review,
+    teach_result,
+    *,
+    group=None,
+    roles=None,
+    config=None,
+    active_rules=None,
+    source_row=None,
+    occurrence_id="",
+    completed_step_id="",
+    taught_source_value="",
+):
+    """Refresh one taught semantic pattern without repeating pattern discovery."""
+    if not isinstance(review, dict) or int(review.get("contractVersion") or 0) < 3:
+        return None
+
+    group = group if isinstance(group, dict) else {}
+    roles = roles if isinstance(roles, dict) else {}
+    config = config if isinstance(config, dict) else {}
+    teach_result = teach_result if isinstance(teach_result, dict) else {}
+    rule = teach_result.get("rule") if isinstance(teach_result.get("rule"), dict) else {}
+    pattern_key = clean(
+        group.get("patternKey")
+        or rule.get("patternKey")
+        or group.get("shape")
+        or rule.get("shape")
+    )
+    if not pattern_key or not rule:
+        return None
+
+    refreshed = deepcopy(review)
+    refreshed["activeRules"] = dict(active_rules or {})
+    source_header = clean(
+        (teach_result.get("visualPattern") or {}).get("sourceHeader")
+        or (teach_result.get("visualPattern") or {}).get("source_header")
+    )
+    pattern_record = next((
+        pattern for pattern in refreshed.get("patterns") or []
+        if isinstance(pattern, dict) and clean(pattern.get("patternKey")) == pattern_key
+    ), {})
+    mapped_fields = list(
+        pattern_record.get("mappedFields")
+        or teach_result.get("mappedFields")
+        or [role for role in ROLE_KEYS if source_header and clean(roles.get(role)) == source_header]
+    )
+    group_id = clean(pattern_record.get("groupId") or group.get("id"))
+    taught_entries = teach_result.get("entries") if isinstance(teach_result.get("entries"), list) else []
+    taught_source_value = str(taught_source_value or "")
+    taught_spans = teach_result.get("interpretationSpansByColumn") or {}
+    refreshed_interpretations = []
+
+    parse_config = dict(config)
+    for key in (
+        "semanticPatternRules",
+        "semantic_pattern_rules",
+        "fieldPatternRules",
+        "field_pattern_rules",
+        "_activeFieldPatternRule",
+        "_active_field_pattern_rule",
+    ):
+        parse_config.pop(key, None)
+    parse_config["_semanticPatternPass"] = True
+    parse_config = _config_with_active_rule(
+        parse_config,
+        _semantic_rule_for_source(rule, source_header),
+    )
+
+    for review_row in refreshed.get("rows") or []:
+        if not isinstance(review_row, dict):
+            continue
+        row_patterns = review_row.get("patterns") or []
+        if not any(
+            isinstance(item, dict) and clean(item.get("patternKey")) == pattern_key
+            for item in row_patterns
+        ):
+            continue
+
+        reconstructed_row = {
+            clean(item.get("column")): item.get("value") or ""
+            for item in review_row.get("left") or []
+            if isinstance(item, dict) and clean(item.get("column"))
+        }
+        review_source_row = review_row.get("sourceRow")
+        reconstructed_row["__sourceRow"] = review_source_row
+        source_value = str(reconstructed_row.get(source_header) or "")
+        matching_fragments = []
+        for fragment in _semantic_identity_fragments(source_value, mapped_fields):
+            fragment_key = _semantic_pattern_key(
+                source_header,
+                mapped_fields,
+                fragment.get("grammar"),
+            )
+            if fragment_key == pattern_key:
+                matching_fragments.append(fragment)
+
+        existing_entries = [
+            entry for entry in (review_row.get("entries") or [])
+            if isinstance(entry, dict)
+        ]
+        target_indexes = [
+            index for index, entry in enumerate(existing_entries)
+            if clean(entry.get("patternKey")) == pattern_key
+        ]
+        insert_at = min(target_indexes) if target_indexes else len(existing_entries)
+        retained_entries = [
+            entry for entry in existing_entries
+            if clean(entry.get("patternKey")) != pattern_key
+        ]
+        generated_entries = []
+        for fragment in matching_fragments:
+            start = int(fragment.get("start") or 0)
+            end = int(fragment.get("end") or 0)
+            generated_occurrence_id = hashlib.sha256(
+                (
+                    f"{pattern_key}|{review_source_row}|{source_header}|"
+                    f"{start}|{end}"
+                ).encode("utf-8")
+            ).hexdigest()[:20]
+            fragment_value = str(fragment.get("rawValue") or "")
+            fragment_row = dict(reconstructed_row)
+            fragment_row[source_header] = fragment_value
+            is_taught_occurrence = (
+                str(review_source_row) == str(source_row)
+                and (
+                    (occurrence_id and generated_occurrence_id == clean(occurrence_id))
+                    or (taught_source_value and fragment_value == taught_source_value)
+                )
+            )
+            if is_taught_occurrence:
+                interpreted_entries = taught_entries
+                interpretation_spans = taught_spans.get(source_header) or []
+            else:
+                interpreted_entries = _infer_field_entries_for_row(
+                    fragment_row,
+                    list(reconstructed_row.keys()),
+                    roles,
+                    [source_header],
+                    config=parse_config,
+                )
+                interpretation_spans = _interpretation_spans_by_column(
+                    fragment_row,
+                    list(reconstructed_row.keys()),
+                    [source_header],
+                    rule,
+                    interpreted_entries,
+                ).get(source_header) or []
+            refreshed_interpretations.append({
+                "occurrenceId": generated_occurrence_id,
+                "sourceRow": review_source_row,
+                "interpretationSpans": interpretation_spans,
+            })
+            for occurrence in review_row.get("occurrences") or []:
+                if (
+                    isinstance(occurrence, dict)
+                    and clean(occurrence.get("patternKey")) == pattern_key
+                    and clean(occurrence.get("occurrenceId") or occurrence.get("id")) == generated_occurrence_id
+                ):
+                    occurrence["interpretationSpans"] = interpretation_spans
+            for pattern_entry_index, entry in enumerate(_display_review_entries(
+                interpreted_entries,
+                config=config,
+            )):
+                generated_entries.append({
+                    **entry,
+                    "patternKey": pattern_key,
+                    "groupId": group_id,
+                    "occurrenceId": generated_occurrence_id,
+                    "patternEntryIndex": pattern_entry_index,
+                })
+
+        merged_entries = (
+            retained_entries[:insert_at]
+            + generated_entries
+            + retained_entries[insert_at:]
+        )
+        for entry_index, entry in enumerate(merged_entries):
+            entry["relation"] = "Primary" if entry_index == 0 else f"Alternate {entry_index}"
+        review_row["entries"] = merged_entries
+        review_row["entryCount"] = len(merged_entries)
+        review_row["visibleFieldKeys"] = _visible_review_field_keys(
+            merged_entries,
+            review_row.get("left") or [],
+            roles,
+        )
+        for row_pattern in row_patterns:
+            if isinstance(row_pattern, dict) and clean(row_pattern.get("patternKey")) == pattern_key:
+                row_pattern["recognitionScope"] = "session"
+
+    compact_taught_entries = _compact_review_entries(taught_entries)
+    recognition_validation = _semantic_interpretation_coverage(
+        pattern_record.get("pattern") or "",
+        mapped_fields,
+        rule,
+        refreshed_interpretations,
+    )
+    interpretation_is_recognized = bool(recognition_validation.get("valid"))
+    for review_row in refreshed.get("rows") or []:
+        for row_pattern in review_row.get("patterns") or [] if isinstance(review_row, dict) else []:
+            if isinstance(row_pattern, dict) and clean(row_pattern.get("patternKey")) == pattern_key:
+                row_pattern["recognized"] = interpretation_is_recognized
+                row_pattern["recognitionValidation"] = recognition_validation
+    for pattern in refreshed.get("patterns") or []:
+        if not isinstance(pattern, dict) or clean(pattern.get("patternKey")) != pattern_key:
+            continue
+        pattern.update({
+            "recognized": interpretation_is_recognized,
+            "status": "recognized" if interpretation_is_recognized else "unrecognized",
+            "statusLabel": "Recognized" if interpretation_is_recognized else "Needs review",
+            "recognitionScope": "session",
+            "recognitionValidation": recognition_validation,
+            "draftInterpretation": {"rule": rule},
+        })
+        teach_context = pattern.get("teachContext")
+        if isinstance(teach_context, dict):
+            sample = teach_context.get("sample")
+            if isinstance(sample, dict) and str(sample.get("sourceRow")) == str(source_row):
+                sample["entries"] = compact_taught_entries
+                sample["fields"] = compact_taught_entries[0].get("fields", {}) if compact_taught_entries else {}
+                sample["interpretationSpansByColumn"] = taught_spans
+
+    for review_group in refreshed.get("groups") or []:
+        if not isinstance(review_group, dict):
+            continue
+        if not (
+            clean(review_group.get("patternKey")) == pattern_key
+            or (group_id and clean(review_group.get("id")) == group_id)
+        ):
+            continue
+        review_group["suggestedRule"] = rule
+        review_group["recognized"] = interpretation_is_recognized
+        review_group["recognitionValidation"] = recognition_validation
+        review_group["recognitionScope"] = "session"
+        for sample in review_group.get("samples") or []:
+            if isinstance(sample, dict) and str(sample.get("sourceRow")) == str(source_row):
+                sample["entries"] = compact_taught_entries
+                sample["fields"] = compact_taught_entries[0].get("fields", {}) if compact_taught_entries else {}
+                sample["interpretationSpansByColumn"] = taught_spans
+
+    patterns = [
+        pattern for pattern in refreshed.get("patterns") or []
+        if isinstance(pattern, dict)
+    ]
+    refreshed["patternsByField"] = {
+        "all": patterns,
+        **{
+            option.get("key"): [
+                pattern for pattern in patterns
+                if option.get("key") in (pattern.get("mappedFields") or [])
+            ]
+            for option in refreshed.get("mappedFieldOptions") or []
+            if isinstance(option, dict) and clean(option.get("key"))
+        },
+    }
+    recognized_count = sum(1 for pattern in patterns if pattern.get("recognized"))
+    summary = dict(refreshed.get("summary") or {})
+    summary["patternCount"] = len(patterns)
+    summary["recognizedPatternCount"] = recognized_count
+    summary["unrecognizedPatternCount"] = max(0, len(patterns) - recognized_count)
+    summary["itemCount"] = sum(int(row.get("entryCount") or 0) for row in refreshed.get("rows") or [])
+    refreshed["summary"] = summary
+    refreshed["recognizedPatternKeys"] = sorted(
+        clean(pattern.get("patternKey"))
+        for pattern in patterns
+        if pattern.get("recognized") and clean(pattern.get("patternKey"))
+    )
+
+    workflow = refreshed.get("workflow") if isinstance(refreshed.get("workflow"), dict) else {}
+    completed_ids = {
+        clean(step_id)
+        for step_id in workflow.get("completedStepIds") or []
+        if clean(step_id)
+    }
+    if completed_step_id and interpretation_is_recognized:
+        completed_ids.add(clean(completed_step_id))
+    elif completed_step_id:
+        completed_ids.discard(clean(completed_step_id))
+    for step in workflow.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        if clean(step.get("patternKey")) == pattern_key:
+            step["storedInterpretation"] = {"rule": rule}
+            step["draftInterpretation"] = {"rule": rule}
+            step["recognized"] = interpretation_is_recognized
+            step["recognitionValidation"] = recognition_validation
+            if not interpretation_is_recognized:
+                completed_ids.discard(clean(step.get("id")))
+        step["completed"] = clean(step.get("id")) in completed_ids
+    workflow["completedStepIds"] = sorted(completed_ids)
+    workflow["nextStep"] = next((
+        step for step in workflow.get("steps") or []
+        if isinstance(step, dict) and not step.get("completed")
+    ), None)
+    refreshed["workflow"] = workflow
+    return refreshed
 
 
 def _normalize_following_item_row_groups(normalized_rows, source_rows, headers, roles, config, header_row_index=0):
@@ -9483,7 +10510,12 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
         config=safe_config,
         header_row_index=header_row_index,
     )
-    selected_columns = _selected_customer_columns(safe_headers, safe_roles, [])
+    selected_columns = _selected_customer_columns(
+        safe_headers,
+        safe_roles,
+        [],
+        config=safe_config,
+    )
     pattern_rules = safe_config.get("fieldPatternRules") or safe_config.get("field_pattern_rules") or {}
     result = build_bom_field_pattern_groups(
         headers=safe_headers,
@@ -9507,13 +10539,35 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
     for group in result.get("groups") or []:
         for source_row, row_result in (group.get("rowEntries") or {}).items():
             entries_by_source_row[str(source_row)] = row_result.get("entries") or []
+    for review_row in result.get("reviewRows") or []:
+        source_row = review_row.get("sourceRow")
+        row_entries = [
+            entry
+            for occurrence in review_row.get("occurrences") or []
+            if isinstance(occurrence, dict)
+            for entry in occurrence.get("entries") or []
+            if isinstance(entry, dict)
+        ]
+        if row_entries:
+            entries_by_source_row[str(source_row)] = [
+                {
+                    **entry,
+                    "relation": "Primary" if index == 0 else f"Alternate {index}",
+                }
+                for index, entry in enumerate(row_entries)
+            ]
 
     confirmed_rows = (
         ((safe_config.get("fieldPatternOverrides") or {}).get("rows") or {})
         if isinstance(safe_config.get("fieldPatternOverrides"), dict)
         else {}
     )
-    if _semantic_pattern_rules(safe_config):
+    override_source = clean(
+        (safe_config.get("fieldPatternOverrides") or {}).get("source")
+        if isinstance(safe_config.get("fieldPatternOverrides"), dict)
+        else ""
+    )
+    if _semantic_pattern_rules(safe_config) and override_source != "backend_user_corrections":
         confirmed_rows = {}
     normalized_rows = []
     skipped_rows = int(block_structure.get("skippedRowCount") or 0)
@@ -9526,7 +10580,27 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
         override = confirmed_rows.get(str(source_row)) if isinstance(confirmed_rows, dict) else None
         entries = override.get("entries") if isinstance(override, dict) else None
         if not isinstance(entries, list) or not entries:
-            entries = entries_by_source_row.get(str(source_row)) or []
+            row_shape = _pattern_shape_for_row(
+                row,
+                safe_headers,
+                safe_roles,
+                selected_columns,
+                config=safe_config,
+            )
+            row_rule = _pattern_rule_for_shape(
+                {"fieldPatternRules": pattern_rules},
+                row_shape,
+            )
+            if row_rule:
+                entries = _infer_field_entries_for_row(
+                    row,
+                    safe_headers,
+                    safe_roles,
+                    selected_columns,
+                    config=_config_with_active_rule(safe_config, row_rule),
+                )
+            else:
+                entries = entries_by_source_row.get(str(source_row)) or []
         if not entries:
             entries = _infer_field_entries_for_row(
                 row,

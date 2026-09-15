@@ -4,6 +4,7 @@ import {
   fieldPatternSampleForWorkflowStep,
   normalizeVisualTeachEntries,
   shouldRepeatVisualTeachGroupSeparator,
+  visualTeachAllowsAlternates,
   visualTeachTagsFromInterpretationSpans,
 } from './visualTeachParser';
 
@@ -32,6 +33,18 @@ describe('visual teach display helpers', () => {
         ],
       }
     )).toBe(second);
+  });
+
+  test('shows alternate controls only from the backend decision', () => {
+    expect(visualTeachAllowsAlternates({
+      workflowStep: { hasAlternateList: true },
+      alternateLayout: 'already_separate_rows',
+    })).toBe(true);
+    expect(visualTeachAllowsAlternates({
+      workflowStep: { hasAlternateList: false },
+      group: { hasAlternateList: false },
+      alternateLayout: 'inside_selected_mpn_columns',
+    })).toBe(false);
   });
 
   test('renders backend interpretation spans as character tags', () => {

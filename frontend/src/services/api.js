@@ -1648,6 +1648,11 @@ const api = {
     alternateJoiner = '',
     ignoredFields = [],
     hasManualEdits = false,
+    activeRules = {},
+    review = {},
+    completedStepId = '',
+    sourceRow = null,
+    occurrenceId = '',
     persist = true,
   }) =>
     axios.post(`${API_URL}/bom/field-patterns/teach/`, {
@@ -1665,6 +1670,11 @@ const api = {
       alternate_joiner: alternateJoiner,
       ignored_fields: ignoredFields,
       has_manual_edits: hasManualEdits,
+      active_rules: activeRules,
+      review,
+      completed_step_id: completedStepId,
+      source_row: sourceRow,
+      occurrence_id: occurrenceId,
       persist,
     }, { timeout: 120000 }),
 
@@ -1675,13 +1685,14 @@ const api = {
     }, { timeout: 120000 }),
 
   /** Persist confirmed interpretations and return the backend-normalized preview. */
-  applyBomFieldPatterns: ({ headers, rows, roles, config, groups = [], persist = true }) =>
+  applyBomFieldPatterns: ({ headers, rows, roles, config, rules = {}, corrections = [], persist = true }) =>
     axios.post(`${API_URL}/bom/field-patterns/apply/`, {
       headers,
       rows,
       roles,
       config,
-      groups,
+      rules,
+      corrections,
       persist,
     }, { timeout: 180000 }),
 

@@ -90,6 +90,7 @@ import {
   fieldPatternSampleForWorkflowStep,
   normalizeVisualTeachEntries,
   shouldRepeatVisualTeachGroupSeparator,
+  visualTeachAllowsAlternates,
   visualTeachTagsFromInterpretationSpans,
 } from '../lib/visualTeachParser';
 import {
@@ -123,48 +124,6 @@ const ALTERNATE_INHERIT_FIELD_OPTIONS = [
 const DEFAULT_ALTERNATE_INHERIT_FIELDS = [];
 const ALTERNATE_INHERIT_SELECT_ALL_VALUE = '__select_all_alternate_inherit_fields__';
 const MAX_ALTERNATE_COLUMN_GROUPS = 20;
-const FIELD_PATTERN_REVIEW_PAGE_SIZE = 4;
-
-const FIELD_PATTERN_DELIMITER_OPTIONS = [
-  { value: 'none', label: 'No split' },
-  { value: 'auto', label: 'Auto-detect' },
-  { value: '/', label: 'Slash (/)' },
-  { value: ',', label: 'Comma (,)' },
-  { value: ';', label: 'Semicolon (;)' },
-  { value: '|', label: 'Pipe (|)' },
-  { value: '^', label: 'Caret (^)' },
-  { value: '~', label: 'Tilde (~)' },
-  { value: '\\n', label: 'New line' },
-  { value: 'custom', label: 'Custom' },
-];
-
-const FIELD_PATTERN_COMBO_DELIMITER_OPTIONS = [
-  { value: 'auto', label: 'Auto-detect' },
-  { value: 'none', label: 'No split' },
-  { value: ':', label: 'Colon (:)' },
-  { value: '^', label: 'Caret (^)' },
-  { value: 'colon_caret', label: 'Colon + caret (: and ^)' },
-  { value: ',', label: 'Comma (,)' },
-  { value: ';', label: 'Semicolon (;)' },
-  { value: '|', label: 'Pipe (|)' },
-  { value: '/', label: 'Slash (/)' },
-  { value: '~', label: 'Tilde (~)' },
-  { value: '\\n', label: 'New line' },
-  { value: 'custom', label: 'Custom' },
-];
-
-const FIELD_PATTERN_RULE_FIELDS = [
-  { key: 'cpn', label: 'CPN', prefix: true },
-  { key: 'mpn', label: 'MPN', prefix: true },
-  { key: 'manufacturer', label: 'Manufacturer', prefix: true },
-  { key: 'description', label: 'Description', prefix: true },
-  { key: 'quantity', label: 'Quantity', prefix: true },
-  { key: 'uom', label: 'UOM', prefix: true },
-  { key: 'level', label: 'Level', prefix: true },
-  { key: 'parent', label: 'Parent / group key', prefix: true },
-  { key: 'notes', label: 'Notes', prefix: true },
-  { key: 'internalNotes', label: 'Internal notes', prefix: true },
-];
 
 const TEACH_PATTERN_ROLE_LABELS = {
   cpn: 'CPN',
@@ -177,119 +136,6 @@ const TEACH_PATTERN_ROLE_LABELS = {
   parent: 'Parent / group key',
   notes: 'Notes',
   internalNotes: 'Internal notes',
-};
-
-const readableFieldList = (labels = []) => {
-  const values = labels.filter(Boolean);
-  if (values.length <= 1) return values[0] || 'mapped fields';
-  if (values.length === 2) return `${values[0]} and ${values[1]}`;
-  return `${values.slice(0, -1).join(', ')}, and ${values[values.length - 1]}`;
-};
-
-const sameCellIdentityGroupsFromRoles = (roles = {}) => {
-  const groupsByHeader = {};
-  ['cpn', 'mpn', 'manufacturer'].forEach((role) => {
-    const header = fmt(roles?.[role]);
-    if (!header) return;
-    groupsByHeader[header] = groupsByHeader[header] || [];
-    groupsByHeader[header].push(role);
-  });
-  return Object.entries(groupsByHeader)
-    .filter(([, groupRoles]) => groupRoles.length >= 2)
-    .map(([header, groupRoles]) => ({ header, roles: groupRoles }));
-};
-
-const identityGroupRuleKey = (group = {}) => `${fmt(group.header || group.sourceColumn || group.source_column)}::${[...(group.roles || [])].map(fmt).filter(Boolean).sort().join('+')}`;
-
-const mergeIdentityGroupRules = (baseGroups = [], overrideGroups = []) => {
-  const mergedGroups = [];
-  const positionsByKey = new Map();
-
-  (Array.isArray(baseGroups) ? baseGroups : []).forEach((group) => {
-    if (!group || typeof group !== 'object') return;
-    const key = identityGroupRuleKey(group);
-    if (key) positionsByKey.set(key, mergedGroups.length);
-    mergedGroups.push({ ...group });
-  });
-
-  (Array.isArray(overrideGroups) ? overrideGroups : []).forEach((group) => {
-    if (!group || typeof group !== 'object') return;
-    const key = identityGroupRuleKey(group);
-    if (key && positionsByKey.has(key)) {
-      const index = positionsByKey.get(key);
-      mergedGroups[index] = { ...mergedGroups[index], ...group };
-      return;
-    }
-    if (key) positionsByKey.set(key, mergedGroups.length);
-    mergedGroups.push({ ...group });
-  });
-
-  return mergedGroups;
-};
-
-const expansionRuleKey = (rule = {}) => [
-  fmt(rule.type),
-  fmt(rule.role || rule.sourceRole || rule.source_role),
-  fmt(rule.anchor),
-  fmt(rule.suffixDelimiter || rule.suffix_delimiter || rule.delimiter),
-  fmt(rule.suffixGroupIndex || rule.suffix_group_index),
-].join('::');
-
-const mergeExpansionRules = (baseRules = [], overrideRules = []) => {
-  const mergedRules = [];
-  const positionsByKey = new Map();
-
-  (Array.isArray(baseRules) ? baseRules : []).forEach((rule) => {
-    if (!rule || typeof rule !== 'object') return;
-    const key = expansionRuleKey(rule);
-    if (key) positionsByKey.set(key, mergedRules.length);
-    mergedRules.push({ ...rule });
-  });
-
-  (Array.isArray(overrideRules) ? overrideRules : []).forEach((rule) => {
-    if (!rule || typeof rule !== 'object') return;
-    const key = expansionRuleKey(rule);
-    if (key && positionsByKey.has(key)) {
-      const index = positionsByKey.get(key);
-      mergedRules[index] = { ...mergedRules[index], ...rule };
-      return;
-    }
-    if (key) positionsByKey.set(key, mergedRules.length);
-    mergedRules.push({ ...rule });
-  });
-
-  return mergedRules;
-};
-
-const findIdentityGroupRule = (rule = {}, identityGroup = {}) => {
-  const targetHeader = fmt(identityGroup.header);
-  const targetRoles = new Set(identityGroup.roles || []);
-  return (rule.identityGroups || []).find((item) => {
-    const itemHeader = fmt(item.header || item.sourceColumn || item.source_column);
-    const itemRoles = new Set(item.roles || []);
-    if (itemHeader && itemHeader !== targetHeader) return false;
-    if (itemRoles.size && itemRoles.size !== targetRoles.size) return false;
-    return !itemRoles.size || [...targetRoles].every((role) => itemRoles.has(role));
-  }) || {};
-};
-
-const orderedIdentityRoleOptions = (roles = []) => {
-  if (roles.length <= 1) return [roles];
-  const result = [];
-  const visit = (remaining, prefix = []) => {
-    if (!remaining.length) {
-      result.push(prefix);
-      return;
-    }
-    remaining.forEach((role, index) => {
-      visit([
-        ...remaining.slice(0, index),
-        ...remaining.slice(index + 1),
-      ], [...prefix, role]);
-    });
-  };
-  visit(roles);
-  return result;
 };
 
 const alternateInheritFieldsFromConfig = (config = {}) => {
@@ -546,7 +392,7 @@ const WorksheetSamplePreview = ({
           display: 'grid',
           gridTemplateColumns,
           fontFamily: '"Aptos", "Calibri", "Arial", sans-serif',
-          fontSize: 11,
+          fontSize: 13,
           color: theme.text,
         }}
       >
@@ -665,279 +511,6 @@ const truncateMiddle = (value, maxLength = 72) => {
   if (text.length <= maxLength) return text;
   const keep = Math.max(8, Math.floor((maxLength - 3) / 2));
   return `${text.slice(0, keep)}...${text.slice(-keep)}`;
-};
-
-const formatPatternGroupPreviewValue = (value, maxLength = 120) => {
-  const text = fmt(value)
-    .replace(/\s*\r?\n\s*/g, ' / ')
-    .replace(/\s{2,}/g, ' ');
-  if (text.length <= maxLength) return text;
-  return `${text.slice(0, maxLength - 3)}...`;
-};
-
-const getPatternGroupExampleValues = (group = {}, limit = 6) => {
-  const samples = Array.isArray(group.samples) ? group.samples : [];
-  const shape = fmt(group.shape);
-  const nonBlankItems = (sample) => (
-    (sample?.left || [])
-      .map((item) => ({
-        column: fmt(item.column),
-        value: fmt(item.value),
-        isShapeColumn: shape.includes(`@${fmt(item.column)}=`),
-      }))
-      .filter((item) => item.column && item.value && item.value !== '-')
-  );
-  const sample = samples.find((item) => nonBlankItems(item).some((value) => value.isShapeColumn)) ||
-    samples.find((item) => nonBlankItems(item).length) ||
-    samples[0];
-  const items = nonBlankItems(sample).sort((a, b) => Number(b.isShapeColumn) - Number(a.isShapeColumn));
-  return items.slice(0, limit);
-};
-
-const PATTERN_DELIMITER_LABELS = {
-  slash: ' / ',
-  '/': ' / ',
-  backslash: ' \\ ',
-  '\\': ' \\ ',
-  pipe: ' | ',
-  pipe_like_i: ' | ',
-  '|': ' | ',
-  colon: ' : ',
-  ':': ' : ',
-  semicolon: ' ; ',
-  ';': ' ; ',
-  comma: ' , ',
-  ',': ' , ',
-  caret: ' ^ ',
-  '^': ' ^ ',
-  tilde: ' ~ ',
-  '~': ' ~ ',
-  dash: ' - ',
-  '-': ' - ',
-  percent: ' % ',
-  '%': ' % ',
-  equals: ' = ',
-  '=': ' = ',
-  hash: ' # ',
-  '#': ' # ',
-  at: ' @ ',
-  '@': ' @ ',
-  plus: ' + ',
-  '+': ' + ',
-  amp: ' & ',
-  '&': ' & ',
-  '\\n': ' [new line] ',
-  newline: ' [new line] ',
-  '\\t': ' [tab] ',
-  tab: ' [tab] ',
-};
-
-const patternDelimiterLabel = (delimiter, rawValue = '', fieldKey = '') => {
-  const mode = fmt(delimiter);
-  if (PATTERN_DELIMITER_LABELS[mode]) return PATTERN_DELIMITER_LABELS[mode];
-  if (mode && mode !== 'auto' && mode !== 'none') return ` ${mode} `;
-  const text = String(rawValue || '');
-  if (fieldKey === 'mpn' && /\r?\n/.test(text)) return ' ';
-  if (/\s+\/\s+/.test(text)) return ' / ';
-  if (text.includes('|')) return ' | ';
-  if (text.includes(';')) return ' ; ';
-  if (text.includes('^')) return ' ^ ';
-  if (text.includes('~')) return ' ~ ';
-  if (text.includes(',')) return ' , ';
-  if (text.includes('\n') || text.includes('\r')) return ' [new line] ';
-  return ' ';
-};
-
-const identityComboDelimiterLabel = (rule = {}) => {
-  const delimiter = fmt(rule.delimiter || rule.comboDelimiter);
-  if (delimiter === 'colon_caret') return [' : ', ' ^ '];
-  if (PATTERN_DELIMITER_LABELS[delimiter]) return [PATTERN_DELIMITER_LABELS[delimiter]];
-  if (delimiter && delimiter !== 'auto' && delimiter !== 'none' && delimiter !== 'custom') return [` ${delimiter} `];
-  if (delimiter === 'custom' && fmt(rule.customDelimiter)) return [` ${fmt(rule.customDelimiter)} `];
-  return [' '];
-};
-
-const rolePatternToken = (role, rule = {}) => {
-  if (role === 'manufacturer') return '<MFR>';
-  if (role === 'mpn') return '<MPN>';
-  if (role === 'cpn') return '<CPN>';
-  return `<${(TEACH_PATTERN_ROLE_LABELS[role] || role || 'Value').toUpperCase()}>`;
-};
-
-const buildRepeatedPattern = (token, separator, repeatCount = 2) => {
-  const count = Math.max(1, Math.min(Number(repeatCount) || 2, 3));
-  const pattern = Array.from({ length: count }, () => token).join(separator);
-  return repeatCount > count ? `${pattern} ...` : pattern;
-};
-
-const parsePatternShapePart = (shapePart = '') => {
-  const match = fmt(shapePart).match(/^([^@=]+)@([^=]+)=(.+)$/);
-  if (!match) return null;
-  const scopeAndRoles = fmt(match[1]);
-  const source = fmt(match[2]);
-  const signature = fmt(match[3]);
-  const [scope = 'primary', rolesText = ''] = scopeAndRoles.includes('.')
-    ? scopeAndRoles.split(/\.(.+)/)
-    : ['primary', scopeAndRoles];
-  const roles = rolesText.split('+').map(fmt).filter(Boolean);
-  const tokenText = fmt((signature.match(/tokens=([^:|]+)/) || [])[1] || '1');
-  const tokenCount = /^\d+$/.test(tokenText) ? Number(tokenText) : null;
-  const sequenceText = fmt((signature.match(/seq=([^|]+)/) || [])[1]);
-  const sequence = sequenceText && sequenceText !== 'none'
-    ? sequenceText.split('>').map((item) => patternDelimiterLabel(item)).filter(Boolean)
-    : [];
-  return { scope: fmt(scope), roles, source, tokenCount, tokenText, sequence };
-};
-
-const roleLabelForPattern = (role) => (
-  role === 'manufacturer'
-    ? 'MFR'
-    : (TEACH_PATTERN_ROLE_LABELS[role] || role || 'Value')
-);
-
-const patternLabelForShapePart = (shapePart = {}) => {
-  const label = (shapePart.roles || []).map(roleLabelForPattern).join(' + ') || 'Pattern';
-  const altMatch = fmt(shapePart.scope).match(/^alt(\d+)$/i);
-  return altMatch ? `Alt ${altMatch[1]} ${label}` : label;
-};
-
-const orderedRolesForShapePart = (shapePart = {}, groupRule = {}) => {
-  const shapeRoles = (shapePart.roles || []).filter(Boolean);
-  if (shapeRoles.length <= 1) return shapeRoles;
-  const identityRule = (groupRule.identityGroups || []).find((rule) => {
-    const ruleRoles = Array.isArray(rule.roles) ? rule.roles : [];
-    return ruleRoles.length === shapeRoles.length && shapeRoles.every((role) => ruleRoles.includes(role));
-  });
-  const configuredOrder = Array.isArray(identityRule?.order) ? identityRule.order.filter((role) => shapeRoles.includes(role)) : [];
-  return configuredOrder.length === shapeRoles.length ? configuredOrder : shapeRoles;
-};
-
-const patternForShapePart = (shapePart = {}, groupRule = {}, group = {}) => {
-  const roles = orderedRolesForShapePart(shapePart, groupRule);
-  const inferredCount = shapePart.tokenCount || (shapePart.tokenText === 'multi' ? Number(group.alternateEntryCount || 0) + 1 : 1);
-  const tokenCount = Math.max(1, Math.min(Number(inferredCount) || 1, 9));
-  const sequence = shapePart.sequence || [];
-  const tokens = [];
-  for (let index = 0; index < tokenCount; index += 1) {
-    const role = roles[index % Math.max(roles.length, 1)] || roles[0] || 'value';
-    const rule = groupRule.fields?.[role] || {};
-    const separator = index === 0 ? '' : (sequence[index - 1] || sequence[sequence.length - 1] || ' ');
-    tokens.push(`${separator}${rolePatternToken(role, rule)}`);
-  }
-  return tokens.join('') + ((Number(inferredCount) || 1) > tokenCount ? ' ...' : '');
-};
-
-const buildPatternRowsFromShape = (group = {}, groupRule = {}) => {
-  const shapeParts = fmt(group.shape)
-    .split(/\s+\|\s+/)
-    .map(parsePatternShapePart)
-    .filter(Boolean);
-  return shapeParts.map((shapePart, index) => ({
-    key: `shape-${index}-${shapePart.source}`,
-    label: patternLabelForShapePart(shapePart),
-    source: shapePart.source,
-    roles: shapePart.roles,
-    pattern: patternForShapePart(shapePart, groupRule, group),
-  }));
-};
-
-const buildFieldPatternGrammarRows = (group = {}, groupRule = {}, roles = {}) => {
-  const rows = buildPatternRowsFromShape(group, groupRule);
-  const firstSample = (Array.isArray(group.samples) ? group.samples : [])[0] || {};
-  const sampleValues = new Map((firstSample.left || []).map((item) => [fmt(item.column), item.value]));
-  const entryCount = Math.max(1, Number(group.alternateEntryCount || 0) + 1);
-  const consumedSameCellRoles = new Set();
-
-  sameCellIdentityGroupsFromRoles(roles).forEach((identityGroup) => {
-    const hasShapeRow = rows.some((row) => (
-      row.source === identityGroup.header &&
-      identityGroup.roles.every((role) => (row.roles || []).includes(role))
-    ));
-    if (hasShapeRow) return;
-    const rule = findIdentityGroupRule(groupRule, identityGroup);
-    const delimiter = fmt(rule.delimiter || rule.comboDelimiter);
-    if (!delimiter || delimiter === 'none') return;
-    const order = (Array.isArray(rule.order) && rule.order.length ? rule.order : identityGroup.roles)
-      .filter((role) => identityGroup.roles.includes(role));
-    if (order.length < 2) return;
-    const delimiters = identityComboDelimiterLabel(rule);
-    const pattern = order.map((role, index) => {
-      const fieldRule = groupRule.fields?.[role] || {};
-      const prefix = index === 0 ? '' : (delimiters[index - 1] || delimiters[0] || ' ');
-      return `${prefix}${rolePatternToken(role, fieldRule)}`;
-    }).join('');
-    rows.push({
-      key: `identity-${identityGroupRuleKey(identityGroup)}`,
-      label: `${identityGroup.roles.map((role) => TEACH_PATTERN_ROLE_LABELS[role] || role).join(' + ')}`,
-      source: identityGroup.header,
-      pattern,
-    });
-    order.forEach((role) => consumedSameCellRoles.add(role));
-  });
-
-  FIELD_PATTERN_RULE_FIELDS.forEach((field) => {
-    if (consumedSameCellRoles.has(field.key)) return;
-    const source = fmt(roles?.[field.key]);
-    if (!source) return;
-    const hasShapeRow = rows.some((row) => row.source === source && (row.roles || []).includes(field.key));
-    if (hasShapeRow) return;
-    const rule = groupRule.fields?.[field.key] || {};
-    const delimiter = fmt(rule.delimiter || rule.delimiterMode || rule.delimiter_mode || 'none');
-    const hasPrefix = fmt(rule.stripPrefix || rule.strip_prefix || rule.prefix);
-    const shouldRepeat = field.key === 'manufacturer' || field.key === 'mpn' || delimiter !== 'none';
-    const token = rolePatternToken(field.key, rule);
-    const pattern = shouldRepeat
-      ? buildRepeatedPattern(token, patternDelimiterLabel(delimiter, sampleValues.get(source), field.key), entryCount)
-      : token;
-    rows.push({
-      key: field.key,
-      label: field.label,
-      source,
-      pattern: hasPrefix && field.key === 'mpn' ? pattern : pattern,
-    });
-  });
-
-  return rows;
-};
-
-const FIELD_PATTERN_CORE_FIELD_KEYS = new Set(['cpn', 'mpn', 'manufacturer', 'description', 'quantity', 'uom']);
-
-const FIELD_PATTERN_FALLBACK_FACTWISE_FIELDS = [
-  { key: 'cpn', label: 'CPN' },
-  { key: 'mpn', label: 'MPN', required: true },
-  { key: 'manufacturer', label: 'Manufacturer' },
-  { key: 'description', label: 'Description' },
-  { key: 'quantity', label: 'Quantity' },
-  { key: 'uom', label: 'UOM' },
-  { key: 'level', label: 'Level' },
-  { key: 'parent', label: 'Parent / group key' },
-  { key: 'notes', label: 'Notes' },
-  { key: 'internalNotes', label: 'Internal notes' },
-];
-
-const visibleFactwiseFieldsForPatternSample = (fieldList = [], entries = [], sample = {}, roles = {}) => {
-  const fields = fieldList.length ? fieldList : FIELD_PATTERN_FALLBACK_FACTWISE_FIELDS;
-  const selectedColumns = new Set((sample.left || []).map((item) => fmt(item.column)).filter(Boolean));
-  const visibleKeys = new Set(FIELD_PATTERN_CORE_FIELD_KEYS);
-
-  fields.forEach((field) => {
-    const roleSource = fmt(roles?.[field.key]);
-    if (roleSource && selectedColumns.has(roleSource)) {
-      visibleKeys.add(field.key);
-    }
-  });
-
-  (entries || []).forEach((entry) => {
-    fields.forEach((field) => {
-      const value = fmt(entry?.fields?.[field.key]);
-      const sourceColumn = fmt(entry?.sourceColumns?.[field.key]);
-      if (value || (sourceColumn && selectedColumns.has(sourceColumn))) {
-        visibleKeys.add(field.key);
-      }
-    });
-  });
-
-  return fields.filter((field) => visibleKeys.has(field.key));
 };
 
 const normalizeKey = (value) => fmt(value)
@@ -3961,17 +3534,6 @@ const pairedStructuredRoleValue = (parts, rawValue, index) => (
 const PARENT_CHAIN_DEPTH_KEY = '__parentChainDepth';
 const rowLevel = (row, roles) => String(row?.[PATH_DEPTH_KEY] ?? row?.[PARENT_CHAIN_DEPTH_KEY] ?? '') || getCell(row, roles.level);
 const outputRowLevel = (row, roles) => String(row?.[PATH_DEPTH_KEY] ?? '') || getCell(row, roles.level);
-
-// Whether this row's parent cell reads as a trail rather than a plain code.
-// Only used to decide whether to OFFER the option - a separator alone does not
-// prove a path, so what the option actually does is still measured against the
-// sheet's codes before anything is written.
-const rowHoldsParentPath = (row, roles) => {
-  if (!roles?.parent) return false;
-  const value = getCell(row, roles.parent);
-  if (!value) return false;
-  return PATH_SEPARATORS.some((separator) => value.includes(separator));
-};
 
 const hasGroupedRowContext = (row, roles) => Boolean(
   getCell(row, roles.parent) ||
@@ -9303,237 +8865,33 @@ const sourceColumnsFromBackendFields = (fields = {}, fieldList = FACTWISE_PARSE_
   return sourceColumns;
 };
 
-const fieldPatternRuleKey = (group = {}) => fmt(group.patternKey || group.shape || group.id);
-
-const fieldPatternRuleForGroup = (rules = {}, group = {}) => (
-  rules[fieldPatternRuleKey(group)] || { fields: {} }
-);
-
-const expandFieldPatternReviewRows = (group = {}) => {
-  const reviewRows = Array.isArray(group.samples) ? [...group.samples] : [];
-  const existingSampleKeys = new Set(reviewRows.map(fieldPatternSampleKey));
-  (group.interpretations || []).forEach((interpretation) => {
-    const sampleKey = fieldPatternSampleKey(interpretation);
-    if (!sampleKey || existingSampleKeys.has(sampleKey)) return;
-    const entries = Array.isArray(interpretation.entries) ? interpretation.entries : [];
-    const sourceColumn = fmt(interpretation.sourceColumn);
-    reviewRows.push({
-      sourceRow: interpretation.sourceRow,
-      left: Array.isArray(interpretation.left) && interpretation.left.length
-        ? interpretation.left
-        : (sourceColumn ? [{ column: sourceColumn, value: interpretation.rawValue || '' }] : []),
-      sourceFragment: {
-        id: interpretation.occurrenceId,
-        sourceRow: interpretation.sourceRow,
-        sourceColumn: interpretation.sourceColumn,
-        start: interpretation.start,
-        end: interpretation.end,
-        rawValue: interpretation.rawValue,
-        patternKey: group.patternKey,
-      },
-      entries,
-      fields: entries[0]?.fields || {},
-      interpretationSpansByColumn: sourceColumn
-        ? { [sourceColumn]: interpretation.interpretationSpans || [] }
-        : {},
-      patternRows: group.patternRows || [],
-      primaryPatternRow: group.primaryPatternRow || null,
-    });
-    existingSampleKeys.add(sampleKey);
-  });
-  Object.values(group.rowEntries || {}).forEach((rowEntry) => {
-    const sampleKey = fieldPatternSampleKey(rowEntry);
-    if (!sampleKey || existingSampleKeys.has(sampleKey)) return;
-    const entries = Array.isArray(rowEntry.entries) ? rowEntry.entries : [];
-    reviewRows.push({
-      sourceRow: rowEntry.sourceRow,
-      left: rowEntry.left || [],
-      entries,
-      fields: entries[0]?.fields || {},
-      interpretationSpansByColumn: rowEntry.interpretationSpansByColumn || {},
-      patternRows: rowEntry.patternRows || [],
-      primaryPatternRow: rowEntry.primaryPatternRow || null,
-    });
-    existingSampleKeys.add(sampleKey);
-  });
-  return reviewRows;
-};
-
-// A combination sample is a backend-owned, ordered list of pattern
-// occurrences for one complete customer row. Overlay only the user's current
-// edits; never re-detect or regroup values in the browser.
-const editableEntriesForPatternCombinationSample = (
-  sample = {},
-  groups = [],
-  edits = {},
-  fields = FACTWISE_PARSE_FIELDS,
-  config = {}
-) => {
-  const groupsByPatternKey = new Map(
-    (groups || []).map((group) => [fmt(group.patternKey), group])
-  );
-  const combined = [];
-
-  (sample.occurrences || []).forEach((occurrence) => {
-    const patternKey = fmt(occurrence.patternKey);
-    const group = groupsByPatternKey.get(patternKey);
-    const occurrenceId = fmt(occurrence.occurrenceId);
-    const editedEntries = group && occurrenceId
-      ? edits?.[group.id]?.[occurrenceId]?.entries
-      : null;
-    const sourceEntries = Array.isArray(editedEntries) && editedEntries.length
-      ? editedEntries
-      : filterFactwiseEntriesForConfig(occurrence.entries || [], config).map((entry, entryIndex) => ({
-        relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
-        fields: fieldValuesFromBackendFields(entry.fields || {}, fields),
-        sourceColumns: sourceColumnsFromBackendFields(entry.fields || {}, fields),
-      }));
-
-    sourceEntries.forEach((entry, patternEntryIndex) => {
-      combined.push({
-        ...entry,
-        patternKey,
+// Backend owns row construction. This overlay only keeps unsaved user edits
+// visible until they are submitted back to the backend.
+const reviewEntriesWithUserEdits = (row = {}, edits = {}) => {
+  const emittedOccurrences = new Set();
+  const entries = [];
+  (row.entries || []).forEach((entry) => {
+    const groupId = fmt(entry.groupId);
+    const occurrenceId = fmt(entry.occurrenceId);
+    const occurrenceKey = `${groupId}::${occurrenceId}`;
+    const userEdit = groupId && occurrenceId ? edits?.[groupId]?.[occurrenceId] : null;
+    if (!userEdit) {
+      entries.push(entry);
+      return;
+    }
+    if (emittedOccurrences.has(occurrenceKey)) return;
+    emittedOccurrences.add(occurrenceKey);
+    (userEdit.entries || []).forEach((editedEntry, patternEntryIndex) => {
+      entries.push({
+        ...editedEntry,
+        patternKey: entry.patternKey,
+        groupId,
         occurrenceId,
         patternEntryIndex,
-        groupId: group?.id || '',
       });
     });
   });
-
-  if (!combined.length) {
-    filterFactwiseEntriesForConfig(sample.entries || [], config).forEach((entry, entryIndex) => {
-      combined.push({
-        relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
-        fields: fieldValuesFromBackendFields(entry.fields || {}, fields),
-        sourceColumns: sourceColumnsFromBackendFields(entry.fields || {}, fields),
-        patternKey: fmt(entry.patternKey),
-        occurrenceId: fmt(entry.occurrenceId),
-        patternEntryIndex: Number(entry.patternEntryIndex ?? entryIndex),
-        groupId: groupsByPatternKey.get(fmt(entry.patternKey))?.id || '',
-      });
-    });
-  }
-
-  return combined.map((entry, index) => ({
-    ...entry,
-    relation: index === 0 ? 'Primary' : `Alternate ${index}`,
-  }));
-};
-
-const areSimilarFieldPatternGroups = (sourceGroup = {}, targetGroup = {}) => {
-  const sourceColumns = (sourceGroup.selectedColumns || []).map(normalizeKey).filter(Boolean).sort();
-  const targetColumns = (targetGroup.selectedColumns || []).map(normalizeKey).filter(Boolean).sort();
-  if (!sourceColumns.length || sourceColumns.length !== targetColumns.length) return false;
-  return sourceColumns.every((column, index) => column === targetColumns[index]);
-};
-
-const updateFieldPatternRuleFieldValue = (rules = {}, group = {}, fieldKey, patch = {}) => {
-  const key = fieldPatternRuleKey(group);
-  if (!key || !fieldKey) return rules;
-  const current = rules[key] || { fields: {} };
-  return {
-    ...rules,
-    [key]: {
-      ...current,
-      patternKey: group.patternKey || current.patternKey || '',
-      shape: group.shape || current.shape || '',
-      fields: {
-        ...(current.fields || {}),
-        [fieldKey]: {
-          ...((current.fields || {})[fieldKey] || {}),
-          ...patch,
-          customerConfirmed: true,
-        },
-      },
-    },
-  };
-};
-
-const updateFieldPatternIdentityGroupRuleValue = (rules = {}, group = {}, identityGroup = {}, patch = {}) => {
-  const key = fieldPatternRuleKey(group);
-  const identityKey = identityGroupRuleKey(identityGroup);
-  if (!key || !identityKey) return rules;
-
-  const current = rules[key] || { fields: {} };
-  const currentGroups = Array.isArray(current.identityGroups) ? current.identityGroups : [];
-  const existingIndex = currentGroups.findIndex((item) => identityGroupRuleKey({
-    header: item.header || item.sourceColumn || item.source_column,
-    roles: item.roles || identityGroup.roles,
-  }) === identityKey);
-  const base = existingIndex >= 0 ? currentGroups[existingIndex] : {
-    header: identityGroup.header,
-    roles: identityGroup.roles,
-    delimiter: 'auto',
-    order: identityGroup.roles,
-  };
-  const nextIdentityGroup = {
-    ...base,
-    header: identityGroup.header,
-    roles: identityGroup.roles,
-    ...patch,
-  };
-  const nextGroups = existingIndex >= 0
-    ? currentGroups.map((item, index) => (index === existingIndex ? nextIdentityGroup : item))
-    : [...currentGroups, nextIdentityGroup];
-
-  return {
-    ...rules,
-    [key]: {
-      ...current,
-      patternKey: group.patternKey || current.patternKey || '',
-      shape: group.shape || current.shape || '',
-      fields: {
-        ...(current.fields || {}),
-      },
-      identityGroups: nextGroups,
-    },
-  };
-};
-
-const mergeSuggestedFieldPatternRules = (baseRules = {}, groups = []) => {
-  const nextRules = { ...(baseRules || {}) };
-  (groups || []).forEach((group) => {
-    const key = fieldPatternRuleKey(group);
-    const suggested = group?.suggestedRule;
-    if (!key || !suggested) return;
-    const current = nextRules[key] || { fields: {} };
-    const currentFields = current.fields || {};
-    const mergedFields = Object.fromEntries(
-      Object.entries(currentFields).filter(([, fieldRule]) => fieldRule?.customerConfirmed === true)
-    );
-    Object.entries(suggested.fields).forEach(([fieldKey, suggestion]) => {
-      const existing = currentFields[fieldKey] || {};
-      const nextFieldRule = {
-        ...suggestion,
-        ...existing,
-        delimiter: existing.delimiter || suggestion.delimiter || 'auto',
-      };
-      if (existing.delimiter === 'none') {
-        if (!Object.prototype.hasOwnProperty.call(existing, 'stripPrefix')) delete nextFieldRule.stripPrefix;
-        if (!Object.prototype.hasOwnProperty.call(existing, 'prefixMode')) delete nextFieldRule.prefixMode;
-      }
-      mergedFields[fieldKey] = nextFieldRule;
-    });
-    nextRules[key] = {
-      ...current,
-      patternKey: group.patternKey || current.patternKey || '',
-      shape: group.shape || current.shape || '',
-      fields: mergedFields,
-      identityGroups: mergeIdentityGroupRules(suggested.identityGroups, current.identityGroups),
-      expansions: mergeExpansionRules(suggested.expansions, current.expansions),
-    };
-  });
-  return nextRules;
-};
-
-const filterFactwiseEntriesForConfig = (entries = [], config = {}) => {
-  const rawEntries = Array.isArray(entries) ? entries : [];
-  const filtered = rawEntries.filter((entry, index) => (
-    index === 0 ||
-    config.alternateLayout !== 'separate_columns' ||
-    Boolean(fmt(typeof entry?.fields?.mpn === 'object' ? entry.fields.mpn?.value : entry?.fields?.mpn))
-  ));
-  return (filtered.length ? filtered : rawEntries.slice(0, 1)).map((entry, index) => ({
+  return entries.map((entry, index) => ({
     ...entry,
     relation: index === 0 ? 'Primary' : `Alternate ${index}`,
   }));
@@ -9858,6 +9216,13 @@ const BomNormalizer = () => {
     followingItemRowsCpnMode: 'primary',
   });
   const [normalizedRows, setNormalizedRows] = useState([]);
+  const [cleanupDetections, setCleanupDetections] = useState({
+    skipTitleRows: 0,
+    skipRepeatedHeaders: 0,
+    skipDoNotPopulate: 0,
+    skipDeletedRows: 0,
+    parentPathLevels: 0,
+  });
   const [busy, setBusy] = useState(false);
   const [currentStep, setCurrentStep] = useState(0);
   const [progress, setProgress] = useState({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
@@ -9927,7 +9292,6 @@ const BomNormalizer = () => {
   const [fieldPatternExpandedPatternKey, setFieldPatternExpandedPatternKey] = useState('');
   const [fieldPatternLoading, setFieldPatternLoading] = useState(false);
   const [fieldPatternGroups, setFieldPatternGroups] = useState([]);
-  const [fieldPatternCombinations, setFieldPatternCombinations] = useState([]);
   const [fieldPatternReviewRows, setFieldPatternReviewRows] = useState([]);
   const [fieldPatternReviewPage, setFieldPatternReviewPage] = useState(0);
   const [fieldPatternReviewSummary, setFieldPatternReviewSummary] = useState({
@@ -9939,12 +9303,18 @@ const BomNormalizer = () => {
     recognizedPatterns: [],
     unrecognizedPatterns: [],
   });
+  const [fieldPatternReviewContract, setFieldPatternReviewContract] = useState({
+    contractVersion: 0,
+    patterns: [],
+    patternsByField: { all: [] },
+    fieldFilters: [{ key: 'all', label: 'All mapped fields' }],
+    mappedFieldOptions: [],
+    display: { rowPageSize: 4, reviewModeLabel: '', allowAddAlternate: false },
+  });
   const [fieldPatternFields, setFieldPatternFields] = useState([]);
   const [selectedFieldPatternId, setSelectedFieldPatternId] = useState('');
-  const [selectedFieldPatternCombinationId, setSelectedFieldPatternCombinationId] = useState('');
   const [fieldPatternEdits, setFieldPatternEdits] = useState({});
   const [fieldPatternRuleDrafts, setFieldPatternRuleDrafts] = useState({});
-  const [fieldPatternRulesDirty, setFieldPatternRulesDirty] = useState(false);
   const [fieldPatternSelectedRuleField, setFieldPatternSelectedRuleField] = useState('');
   const [fieldPatternReviewWorkflow, setFieldPatternReviewWorkflow] = useState({ steps: [], nextStep: null });
   const [fieldPatternWorkflowLaunchRevision, setFieldPatternWorkflowLaunchRevision] = useState(0);
@@ -9964,8 +9334,6 @@ const BomNormalizer = () => {
   const visualTeachPreviewRequestRef = useRef(0);
   const visualTeachPreviewProcessedRef = useRef(0);
   const visualTeachBackendEntriesRef = useRef([]);
-  const fieldPatternInferenceCacheRef = useRef({ key: '', data: null });
-  const fieldPatternInferenceInFlightRef = useRef({ key: '', promise: null });
   const fieldPatternReviewContentRef = useRef(null);
   // Parse Fields edits wait here until Run normalization. Applying them the
   // moment Apply is clicked rewrote the sheet before the user had walked the
@@ -10061,10 +9429,13 @@ const BomNormalizer = () => {
     try {
       const response = await api.inferBomRoles({
         headers: safeHeaders,
-        rows: safeRows.slice(0, 250),
+        rows: safeRows,
         config: {
           skipTitleRows: Boolean(config.skipTitleRows),
           skipRepeatedHeaders: Boolean(config.skipRepeatedHeaders),
+          skipDoNotPopulate: Boolean(config.skipDoNotPopulate),
+          skipDeletedRows: Boolean(config.skipDeletedRows),
+          parentPathLevels: Boolean(config.parentPathLevels),
         },
         sourceSignature: {
           fileName,
@@ -10079,6 +9450,16 @@ const BomNormalizer = () => {
       backendSuggestedConfigRef.current = response.data?.config
         ? sanitizeNormalizerConfig(response.data.config)
         : null;
+      const backendCleanupDetections = response.data?.cleanupDetections
+        || response.data?.blockStructure?.cleanupDetections
+        || {};
+      setCleanupDetections({
+        skipTitleRows: Number(backendCleanupDetections.skipTitleRows || 0),
+        skipRepeatedHeaders: Number(backendCleanupDetections.skipRepeatedHeaders || 0),
+        skipDoNotPopulate: Number(backendCleanupDetections.skipDoNotPopulate || 0),
+        skipDeletedRows: Number(backendCleanupDetections.skipDeletedRows || 0),
+        parentPathLevels: Number(backendCleanupDetections.parentPathLevels || 0),
+      });
       const backendRoles = sanitizeRoleMap(response.data?.roles || {});
       const resolvedRoles = Object.keys(emptyRoles).reduce((acc, key) => {
         const header = backendRoles[key];
@@ -10088,10 +9469,17 @@ const BomNormalizer = () => {
       return rolesForMultiBlockAssembly(safeHeaders, resolvedRoles);
     } catch (err) {
       backendSuggestedConfigRef.current = null;
+      setCleanupDetections({
+        skipTitleRows: 0,
+        skipRepeatedHeaders: 0,
+        skipDoNotPopulate: 0,
+        skipDeletedRows: 0,
+        parentPathLevels: 0,
+      });
       console.warn('Backend BOM role inference failed; leaving role mappings empty.', err);
       return rolesForMultiBlockAssembly(safeHeaders, emptyRoles);
     }
-  }, [config.skipRepeatedHeaders, config.skipTitleRows, fileName, headerRowIndex, selectedSheetNames, sheetName, sheetScope]);
+  }, [config.parentPathLevels, config.skipDeletedRows, config.skipDoNotPopulate, config.skipRepeatedHeaders, config.skipTitleRows, fileName, headerRowIndex, selectedSheetNames, sheetName, sheetScope]);
 
   useEffect(() => {
     if (!shouldRunBomRoleInference({
@@ -10111,6 +9499,9 @@ const BomNormalizer = () => {
       dataRows.length,
       config.skipTitleRows ? 'skip-titles' : 'keep-titles',
       config.skipRepeatedHeaders ? 'skip-headers' : 'keep-headers',
+      config.skipDoNotPopulate ? 'skip-dnp' : 'keep-dnp',
+      config.skipDeletedRows ? 'skip-deleted' : 'keep-deleted',
+      config.parentPathLevels ? 'use-parent-path' : 'ignore-parent-path',
       restoreInferenceNonce,
     ].join('\u001e');
     if (backendRoleInferenceKeyRef.current === inferenceKey) return undefined;
@@ -10146,7 +9537,7 @@ const BomNormalizer = () => {
     return () => {
       cancelled = true;
     };
-  }, [config.skipRepeatedHeaders, config.skipTitleRows, currentStep, dataRows, headerRowIndex, headers, inferNormalizerRoles, parserTouched, restoreInferenceNonce, sheetName, sheetScope, sourceEndRow]);
+  }, [config.parentPathLevels, config.skipDeletedRows, config.skipDoNotPopulate, config.skipRepeatedHeaders, config.skipTitleRows, currentStep, dataRows, headerRowIndex, headers, inferNormalizerRoles, parserTouched, restoreInferenceNonce, sheetName, sheetScope, sourceEndRow]);
 
   const sourceRowsExcludedByLimit = Math.max(0, sourceDataRows.length - dataRows.length);
   const sourceLimitActive = Boolean(sourceEndRow && sourceRowsExcludedByLimit > 0);
@@ -10899,36 +10290,12 @@ const BomNormalizer = () => {
     fieldPatternGroups[0] ||
     null
   ), [fieldPatternGroups, selectedFieldPatternId]);
-  const fieldPatternReviewPatterns = useMemo(() => ([
-    ...(fieldPatternReviewSummary.recognizedPatterns || []).map((pattern) => ({
-      ...pattern,
-      recognized: true,
-    })),
-    ...(fieldPatternReviewSummary.unrecognizedPatterns || []).map((pattern) => ({
-      ...pattern,
-      recognized: false,
-    })),
-  ].sort((left, right) => (
-    Number(left.firstSourceRow || Number.MAX_SAFE_INTEGER) -
-    Number(right.firstSourceRow || Number.MAX_SAFE_INTEGER)
-  ))), [fieldPatternReviewSummary]);
-  const fieldPatternFieldFilterOptions = useMemo(() => ([
-    { key: 'all', label: 'All mapped fields' },
-    ...FIELD_PATTERN_RULE_FIELDS
-      .filter((field) => fmt(roles?.[field.key]))
-      .map((field) => ({ key: field.key, label: field.label })),
-  ]), [roles]);
-  const filteredFieldPatternReviewPatterns = useMemo(() => (
-    fieldPatternReviewPatterns.filter((pattern) => (
-      fieldPatternFieldFilter === 'all' ||
-      (pattern.mappedFields || []).includes(fieldPatternFieldFilter)
-    ))
-  ), [fieldPatternFieldFilter, fieldPatternReviewPatterns]);
-  const mappedFieldPatternRuleOptions = useMemo(() => (
-    FIELD_PATTERN_RULE_FIELDS
-      .map((field) => ({ ...field, sourceColumn: fmt(roles?.[field.key]) }))
-      .filter((field) => field.sourceColumn && headers.includes(field.sourceColumn))
-  ), [headers, roles]);
+  const fieldPatternReviewPatterns = fieldPatternReviewContract.patterns || [];
+  const fieldPatternFieldFilterOptions = fieldPatternReviewContract.fieldFilters || [];
+  const filteredFieldPatternReviewPatterns = (
+    fieldPatternReviewContract.patternsByField?.[fieldPatternFieldFilter] || []
+  );
+  const mappedFieldPatternRuleOptions = fieldPatternReviewContract.mappedFieldOptions || [];
   const selectedFieldPatternRuleOption = mappedFieldPatternRuleOptions.find(
     (field) => field.key === fieldPatternSelectedRuleField
   ) || mappedFieldPatternRuleOptions[0] || null;
@@ -10948,11 +10315,7 @@ const BomNormalizer = () => {
   const visualTeachDialogTitle = visualTeachBackendPreview?.title ||
     visualTeachContext?.workflowStep?.title ||
     'Confirm pattern';
-  const visualTeachAllowAlternates = Boolean(
-    visualTeachContext?.workflowStep?.hasAlternateList ??
-    visualTeachContext?.group?.hasAlternateList
-  ) && visualTeachMappedFieldKeys.includes('mpn') &&
-    normalizerConfig.alternateLayout !== 'already_separate_rows';
+  const visualTeachAllowAlternates = visualTeachAllowsAlternates(visualTeachContext);
   const visualTeachRoleOptions = useMemo(() => [
     ...visualTeachMappedFields.map((field) => ({
       ...field,
@@ -11853,24 +11216,6 @@ const BomNormalizer = () => {
   ]);
 
   const availableStructureOptions = useMemo(() => getIdentityLayoutOptions(), []);
-
-  const cleanupDetections = useMemo(() => {
-    const detections = {
-      skipTitleRows: 0,
-      skipRepeatedHeaders: 0,
-      skipDoNotPopulate: 0,
-      skipDeletedRows: 0,
-      parentPathLevels: 0,
-    };
-    sourceDataRows.forEach((row) => {
-      if (rowLooksLikeSectionTitle(row, headers, roles)) detections.skipTitleRows += 1;
-      if (rowLooksLikeRepeatedHeader(row, headers)) detections.skipRepeatedHeaders += 1;
-      if (rowLooksLikeDoNotPopulate(row, headers)) detections.skipDoNotPopulate += 1;
-      if (rowLooksLikeDeleted(row, headers)) detections.skipDeletedRows += 1;
-      if (rowHoldsParentPath(row, roles)) detections.parentPathLevels += 1;
-    });
-    return detections;
-  }, [headers, roles, sourceDataRows]);
 
   const detectedCleanupOptions = useMemo(
     () => CLEANUP_OPTIONS.filter((option) => cleanupDetections[option.key] > 0),
@@ -13346,7 +12691,6 @@ const BomNormalizer = () => {
   const handleRoleChange = useCallback((role, header) => {
     setParserTouched(true);
     setFieldPatternGroups([]);
-    setFieldPatternCombinations([]);
     setFieldPatternReviewRows([]);
     setFieldPatternReviewSummary({
       itemCount: 0,
@@ -13356,6 +12700,14 @@ const BomNormalizer = () => {
       unrecognizedPatternCount: 0,
       recognizedPatterns: [],
       unrecognizedPatterns: [],
+    });
+    setFieldPatternReviewContract({
+      contractVersion: 0,
+      patterns: [],
+      patternsByField: { all: [] },
+      fieldFilters: [{ key: 'all', label: 'All mapped fields' }],
+      mappedFieldOptions: [],
+      display: { rowPageSize: 4, reviewModeLabel: '', allowAddAlternate: false },
     });
     setFieldPatternEdits({});
     setRoles((prev) => ({ ...prev, [role]: header }));
@@ -13848,177 +13200,57 @@ const BomNormalizer = () => {
       setVisualTeachOpen(false);
     }
 
-    const selectedColumns = [...new Set(
-      [
-        ...Object.values(roles),
-        ...(normalizerConfig.alternateColumnGroups || []).flatMap((group) => [
-          group.cpn,
-          group.mpn,
-          group.mfr,
-          group.qty,
-          group.uom,
-        ]),
-      ]
-        .map(fmt)
-        .filter((header) => header && headers.includes(header))
-    )];
-
-    const maxInferRows = Math.min(dataRows.length, 10000);
-    const sampleLimitPerGroup = 4;
-    const totalSampleLimit = 64;
-    const discoverySampleLimitPerGroup = 3;
-    const totalDiscoverySampleLimit = 80;
-    const inferenceRows = dataRows.slice(0, maxInferRows).map((row) => {
-      const compactRow = {};
-      selectedColumns.forEach((header) => {
-        compactRow[header] = row?.[header] ?? '';
-      });
-      ['__sourceRow', 'sourceRow', 'Source row'].forEach((key) => {
-        if (row?.[key] !== undefined) compactRow[key] = row[key];
-      });
-      return compactRow;
-    });
-
     setFieldPatternLoading(true);
     setError('');
     try {
       const inferencePayload = {
         headers,
-        rows: inferenceRows,
+        rows: dataRows,
         roles,
         config: normalizerConfig,
-        selectedColumns,
         options: {
           headerRowIndex,
-          maxRows: maxInferRows,
-          sampleLimitPerGroup,
-          totalSampleLimit,
-          discoverySampleLimitPerGroup,
-          totalDiscoverySampleLimit,
           fieldPatternRules: activeRuleDrafts,
           includeAllRows: true,
           completedReviewStepIds: options.completedReviewStepIds || [],
-          reviewContractVersion: 2,
+          reviewContractVersion: 3,
         },
       };
-      const requestKey = JSON.stringify(inferencePayload);
-      let responseData = null;
-      if (options.forceRefresh) {
-        fieldPatternInferenceCacheRef.current = { key: '', data: null };
-        fieldPatternInferenceInFlightRef.current = { key: '', promise: null };
+      const response = await api.inferBomFieldPatterns(inferencePayload);
+      const responseData = response.data || {};
+      const review = responseData.review;
+      if (!review || Number(review.contractVersion || 0) < 3) {
+        throw new Error('Backend did not return the required pattern review contract.');
       }
-
-      if (!options.forceRefresh && fieldPatternInferenceCacheRef.current.key === requestKey) {
-        responseData = fieldPatternInferenceCacheRef.current.data;
-      } else if (
-        !options.forceRefresh &&
-        fieldPatternInferenceInFlightRef.current.key === requestKey &&
-        fieldPatternInferenceInFlightRef.current.promise
-      ) {
-        responseData = await fieldPatternInferenceInFlightRef.current.promise;
-      } else {
-        const requestPromise = api.inferBomFieldPatterns(inferencePayload)
-          .then((response) => response.data || {});
-        fieldPatternInferenceInFlightRef.current = { key: requestKey, promise: requestPromise };
-        try {
-          responseData = await requestPromise;
-          fieldPatternInferenceCacheRef.current = { key: requestKey, data: responseData };
-        } finally {
-          if (fieldPatternInferenceInFlightRef.current.key === requestKey) {
-            fieldPatternInferenceInFlightRef.current = { key: '', promise: null };
-          }
-        }
-      }
-      const backendReviewGroups = responseData?.reviewGroups || (
-        responseData?.patterns?.length ? responseData.patterns : (responseData?.groups || [])
-      );
-      const groups = backendReviewGroups.map((group) => ({
-        ...group,
-        samples: expandFieldPatternReviewRows(group),
-      }));
-      const combinations = Array.isArray(responseData?.patternCombinations)
-        ? responseData.patternCombinations
-        : [];
-      const reviewRows = Array.isArray(responseData?.reviewRows)
-        ? responseData.reviewRows
-        : [];
-      const reviewWorkflow = responseData?.reviewWorkflow || { steps: [], nextStep: null };
-      const reviewSummary = responseData?.reviewSummary || {
-        itemCount: 0,
-        sourceRowCount: 0,
-        patternCount: 0,
-        recognizedPatternCount: 0,
-        unrecognizedPatternCount: 0,
-        recognizedPatterns: [],
-        unrecognizedPatterns: [],
-      };
-      const fields = responseData?.fields || FACTWISE_PARSE_FIELDS;
-      const nextRuleDrafts = mergeSuggestedFieldPatternRules(activeRuleDrafts, groups);
+      const groups = Array.isArray(review.groups) ? review.groups : [];
+      const reviewRows = Array.isArray(review.rows) ? review.rows : [];
+      const reviewWorkflow = review.workflow || { steps: [], nextStep: null };
+      const reviewSummary = review.summary || {};
+      const fields = Array.isArray(review.fields) ? review.fields : [];
+      const nextRuleDrafts = review.activeRules || {};
       const edits = {};
       groups.forEach((group) => {
         edits[group.id] = {};
-        (group.samples || []).forEach((sample) => {
-          const sampleKey = fieldPatternSampleKey(sample);
-          if (!sampleKey) return;
-          const entries = Array.isArray(sample.entries) && sample.entries.length
-            ? sample.entries
-            : [{ index: 0, relation: 'Primary', fields: sample.fields || {} }];
-          const filteredEntries = filterFactwiseEntriesForConfig(entries, normalizerConfig);
-          const convertedEntries = filteredEntries.map((entry, entryIndex) => ({
-              relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
-              fields: fieldValuesFromBackendFields(entry.fields || {}, fields),
-              sourceColumns: sourceColumnsFromBackendFields(entry.fields || {}, fields),
-            }));
-          edits[group.id][sampleKey] = {
-            sourceRow: sample.sourceRow,
-            occurrenceId: sample.sourceFragment?.id || '',
-            entries: convertedEntries,
-            left: sample.left || [],
-          };
-        });
-        Object.values(group.rowEntries || {}).forEach((rowEntry) => {
-          const entries = Array.isArray(rowEntry.entries) && rowEntry.entries.length
-            ? rowEntry.entries
-            : [];
-          if (!entries.length) return;
-          const convertedEntries = filterFactwiseEntriesForConfig(entries, normalizerConfig)
-            .map((entry, entryIndex) => ({
-              relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
-              fields: fieldValuesFromBackendFields(entry.fields || {}, fields),
-              sourceColumns: sourceColumnsFromBackendFields(entry.fields || {}, fields),
-            }));
-          const sampleKey = fieldPatternSampleKey(rowEntry);
-          if (!sampleKey) return;
-          edits[group.id][sampleKey] = {
-            sourceRow: rowEntry.sourceRow,
-            occurrenceId: rowEntry.occurrenceId || '',
-            entries: convertedEntries,
-            left: rowEntry.left || [],
-          };
-        });
       });
-      const groupsByPatternKey = new Map(
-        groups.map((group) => [fmt(group.patternKey), group])
-      );
       reviewRows.forEach((reviewRow) => {
-        (reviewRow.occurrences || []).forEach((occurrence) => {
-          const group = groupsByPatternKey.get(fmt(occurrence.patternKey));
-          const occurrenceId = fmt(occurrence.occurrenceId);
-          if (!group || !occurrenceId || edits[group.id]?.[occurrenceId]) return;
-          const convertedEntries = filterFactwiseEntriesForConfig(
-            occurrence.entries || [],
-            normalizerConfig
-          ).map((entry, entryIndex) => ({
-            relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
-            fields: fieldValuesFromBackendFields(entry.fields || {}, fields),
-            sourceColumns: sourceColumnsFromBackendFields(entry.fields || {}, fields),
-          }));
-          edits[group.id][occurrenceId] = {
-            sourceRow: reviewRow.sourceRow,
-            occurrenceId,
-            entries: convertedEntries,
-            left: reviewRow.left || [],
-          };
+        (reviewRow.entries || []).forEach((entry) => {
+          const groupId = fmt(entry.groupId);
+          const occurrenceId = fmt(entry.occurrenceId);
+          if (!groupId || !occurrenceId) return;
+          edits[groupId] = edits[groupId] || {};
+          if (!edits[groupId][occurrenceId]) {
+            edits[groupId][occurrenceId] = {
+              sourceRow: reviewRow.sourceRow,
+              occurrenceId,
+              entries: [],
+              left: reviewRow.left || [],
+            };
+          }
+          edits[groupId][occurrenceId].entries.push({
+            relation: entry.relation,
+            fields: entry.fields || {},
+            sourceColumns: entry.sourceColumns || {},
+          });
         });
       });
       const manualEditsByShapeAndRow = new Map();
@@ -14044,13 +13276,15 @@ const BomNormalizer = () => {
         : null;
       if (focusedGroup && options.focusSourceRow !== undefined && options.focusSourceRow !== null) {
         const focusedSourceRow = String(options.focusSourceRow);
-        const focusedSample = (focusedGroup.samples || []).find(
-          (sample) => (
-            options.focusOccurrenceId
-              ? fieldPatternSampleKey(sample) === String(options.focusOccurrenceId)
-              : String(sample.sourceRow) === focusedSourceRow
+        const focusedPattern = (review.patterns || []).find((pattern) => (
+          pattern.teachContext?.groupId === focusedGroup.id &&
+          String(pattern.teachContext?.sample?.sourceRow) === focusedSourceRow &&
+          (
+            !options.focusOccurrenceId ||
+            String(pattern.teachContext?.sample?.sourceFragment?.id) === String(options.focusOccurrenceId)
           )
-        );
+        ));
+        const focusedSample = focusedPattern?.teachContext?.sample;
         if (focusedSample && Array.isArray(options.preservedEntries)) {
           const focusedSampleKey = fieldPatternSampleKey(focusedSample);
           edits[focusedGroup.id][focusedSampleKey] = {
@@ -14069,10 +13303,10 @@ const BomNormalizer = () => {
         }
       }
       setFieldPatternGroups(groups);
-      setFieldPatternCombinations(combinations);
       setFieldPatternReviewRows(reviewRows);
       setFieldPatternReviewPage(0);
       setFieldPatternReviewSummary(reviewSummary);
+      setFieldPatternReviewContract(review);
       setFieldPatternFields(fields);
       setFieldPatternReviewWorkflow(reviewWorkflow);
       if (!options.preserveReviewState) {
@@ -14080,17 +13314,8 @@ const BomNormalizer = () => {
       }
       setFieldPatternRuleDrafts(nextRuleDrafts);
       setFieldPatternEdits(edits);
-      const focusedCombination = combinations.find((combination) => (
-        (combination.patternKeys || []).includes(focusedGroup?.patternKey) &&
-        (options.focusSourceRow === undefined || options.focusSourceRow === null ||
-          (combination.sourceRows || []).some((sourceRow) => String(sourceRow) === String(options.focusSourceRow)))
-      )) || combinations[0] || null;
-      const firstCombinationPatternKey = focusedCombination?.patternKeys?.[0] || '';
-      const firstCombinationGroup = groups.find((group) => group.patternKey === firstCombinationPatternKey);
-      setSelectedFieldPatternCombinationId(focusedCombination?.id || '');
-      setSelectedFieldPatternId(focusedGroup?.id || firstCombinationGroup?.id || groups[0]?.id || '');
+      setSelectedFieldPatternId(focusedGroup?.id || groups[0]?.id || '');
       setFieldPatternReviewOpen(true);
-      setFieldPatternRulesDirty(false);
       if (!groups.length) {
         setPatternApplyNotice('No reusable field patterns were detected for the selected customer columns.');
       }
@@ -14103,164 +13328,6 @@ const BomNormalizer = () => {
       setFieldPatternLoading(false);
     }
   }, [dataRows, fieldPatternEdits, fieldPatternGroups, fieldPatternRuleDrafts, headerRowIndex, headers, normalizerConfig, roles]);
-
-  const handleFieldPatternRuleChange = useCallback((group, fieldKey, patch) => {
-    const baseRules = Object.keys(fieldPatternRuleDrafts || {}).length
-      ? fieldPatternRuleDrafts
-      : (normalizerConfig.fieldPatternRules || {});
-    const nextRules = updateFieldPatternRuleFieldValue(baseRules, group, fieldKey, patch);
-    setFieldPatternRuleDrafts(nextRules);
-    setFieldPatternRulesDirty(true);
-  }, [fieldPatternRuleDrafts, normalizerConfig.fieldPatternRules]);
-
-  const handleFieldPatternIdentityRuleChange = useCallback((group, identityGroup, patch) => {
-    const baseRules = Object.keys(fieldPatternRuleDrafts || {}).length
-      ? fieldPatternRuleDrafts
-      : (normalizerConfig.fieldPatternRules || {});
-    const nextRules = updateFieldPatternIdentityGroupRuleValue(baseRules, group, identityGroup, patch);
-    setFieldPatternRuleDrafts(nextRules);
-    setFieldPatternRulesDirty(true);
-  }, [fieldPatternRuleDrafts, normalizerConfig.fieldPatternRules]);
-
-  const handleApplyFieldPatternRuleToAll = useCallback(async (group) => {
-    if (!group || !fieldPatternGroups.length) return;
-    const baseRules = mergeSuggestedFieldPatternRules(
-      Object.keys(fieldPatternRuleDrafts || {}).length
-        ? fieldPatternRuleDrafts
-        : (normalizerConfig.fieldPatternRules || {}),
-      fieldPatternGroups
-    );
-    const sourceRule = fieldPatternRuleForGroup(baseRules, group);
-    const sourceFields = sourceRule.fields || {};
-    const sourceIdentityGroups = Array.isArray(sourceRule.identityGroups) ? sourceRule.identityGroups : [];
-    const sourceExpansions = Array.isArray(sourceRule.expansions) ? sourceRule.expansions : [];
-    if (!Object.keys(sourceFields).length && !sourceIdentityGroups.length && !sourceExpansions.length) return;
-
-    const nextRules = { ...baseRules };
-    fieldPatternGroups.forEach((targetGroup) => {
-      const key = fieldPatternRuleKey(targetGroup);
-      if (!key) return;
-      nextRules[key] = {
-        ...(nextRules[key] || {}),
-        shape: targetGroup.shape || nextRules[key]?.shape || '',
-        fields: JSON.parse(JSON.stringify(sourceFields)),
-        identityGroups: JSON.parse(JSON.stringify(sourceIdentityGroups)),
-        expansions: JSON.parse(JSON.stringify(sourceExpansions)),
-      };
-    });
-
-    setFieldPatternRuleDrafts(nextRules);
-    setFieldPatternRulesDirty(true);
-    await handleTeachFieldPattern(nextRules);
-    setSelectedFieldPatternId(group.id || '');
-  }, [fieldPatternGroups, fieldPatternRuleDrafts, handleTeachFieldPattern, normalizerConfig.fieldPatternRules]);
-
-  const handleRefreshFieldPatternPreview = useCallback(async (group = null) => {
-    const nextSelectedId = group?.id || selectedFieldPatternId;
-    const nextCombinationId = selectedFieldPatternCombinationId;
-    const activeRules = Object.keys(fieldPatternRuleDrafts || {}).length
-      ? fieldPatternRuleDrafts
-      : (normalizerConfig.fieldPatternRules || {});
-    await handleTeachFieldPattern(activeRules, { forceRefresh: true });
-    if (nextSelectedId) {
-      setSelectedFieldPatternId(nextSelectedId);
-    }
-    if (nextCombinationId) {
-      setSelectedFieldPatternCombinationId(nextCombinationId);
-    }
-  }, [
-    fieldPatternRuleDrafts,
-    handleTeachFieldPattern,
-    normalizerConfig.fieldPatternRules,
-    selectedFieldPatternCombinationId,
-    selectedFieldPatternId,
-  ]);
-
-  const handleTeachFieldPatternFromSample = useCallback(async (group, sample) => {
-    if (!group || !sample) return;
-    const sampleEdit = fieldPatternEdits[group.id]?.[fieldPatternSampleKey(sample)] || {};
-    const baseEntries = sampleEdit.entries?.length ? sampleEdit.entries : [{
-      relation: 'Primary',
-      fields: fieldValuesFromBackendFields(sample.fields || {}, fieldPatternFields),
-      sourceColumns: sourceColumnsFromBackendFields(sample.fields || {}, fieldPatternFields),
-    }];
-    const entries = baseEntries;
-    const row = {};
-    (sample.left || []).forEach((item) => {
-      if (item?.column) row[item.column] = item.value ?? '';
-    });
-    row.__sourceRow = sample.sourceRow;
-
-    setFieldPatternLoading(true);
-    setError('');
-    try {
-      const response = await api.teachBomFieldPattern({
-        headers,
-        row,
-        roles,
-        config: normalizerConfig,
-        group: {
-          id: group.id,
-          patternKey: group.patternKey || '',
-          shape: group.shape,
-          selectedColumns: group.selectedColumns || [],
-        },
-        entries: entries.map((entry, entryIndex) => ({
-          relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
-          fields: entry.fields || {},
-        })),
-        persist: false,
-      });
-      const taughtRule = response.data?.rule || {};
-      const hasTaughtFields = Object.keys(taughtRule.fields || {}).length > 0;
-      const hasTaughtIdentityGroups = Array.isArray(taughtRule.identityGroups) && taughtRule.identityGroups.length > 0;
-      const hasTaughtExpansions = Array.isArray(taughtRule.expansions) && taughtRule.expansions.length > 0;
-      if (!hasTaughtFields && !hasTaughtIdentityGroups && !hasTaughtExpansions) {
-        setError('Backend could not derive a reusable rule from this correction. Add clearer corrected values or split settings.');
-        return;
-      }
-
-      const baseRules = Object.keys(fieldPatternRuleDrafts || {}).length
-        ? fieldPatternRuleDrafts
-        : (normalizerConfig.fieldPatternRules || {});
-      const nextRules = { ...baseRules };
-      const similarGroups = fieldPatternGroups.filter((targetGroup) => areSimilarFieldPatternGroups(group, targetGroup));
-      similarGroups.forEach((targetGroup) => {
-        const key = fieldPatternRuleKey(targetGroup);
-        if (!key) return;
-        const current = nextRules[key] || { fields: {} };
-        nextRules[key] = {
-          ...current,
-          shape: targetGroup.shape || current.shape || '',
-          fields: {
-            ...(current.fields || {}),
-            ...(taughtRule.fields || {}),
-          },
-          identityGroups: mergeIdentityGroupRules(current.identityGroups, taughtRule.identityGroups),
-          expansions: mergeExpansionRules(current.expansions, taughtRule.expansions),
-        };
-      });
-
-      setFieldPatternRuleDrafts(nextRules);
-      setFieldPatternRulesDirty(false);
-      await handleTeachFieldPattern(nextRules);
-      setSelectedFieldPatternId(group.id || '');
-      setPatternApplyNotice(`Taught this correction to ${similarGroups.length || 1} similar pattern group${(similarGroups.length || 1) === 1 ? '' : 's'}.`);
-    } catch (err) {
-      setError(err.response?.data?.error || err.message || 'Could not teach this field pattern.');
-    } finally {
-      setFieldPatternLoading(false);
-    }
-  }, [
-    fieldPatternEdits,
-    fieldPatternFields,
-    fieldPatternGroups,
-    fieldPatternRuleDrafts,
-    handleTeachFieldPattern,
-    headers,
-    normalizerConfig,
-    roles,
-  ]);
 
   const handleOpenVisualTeachPattern = useCallback((group, sample, workflowStep = null, options = {}) => {
     const workflowSourceColumn = fmt(workflowStep?.sourceColumn);
@@ -14289,14 +13356,18 @@ const BomNormalizer = () => {
     const backendEntries = Array.isArray(sample.entries) && sample.entries.length
       ? sample.entries
       : [{ fields: sample.fields || {} }];
-    const backendManufacturerHints = backendEntries
-      .map((entry) => fmt(entry?.fields?.manufacturer?.value))
-      .filter(Boolean);
     const baseEntries = sampleEdit.entries?.length ? sampleEdit.entries : [{
       relation: 'Primary',
       fields: fieldValuesFromBackendFields(sample.fields || {}, fieldPatternFields),
       sourceColumns: sourceColumnsFromBackendFields(sample.fields || {}, fieldPatternFields),
     }];
+    const backendManufacturerHints = (baseEntries.length ? baseEntries : backendEntries)
+      .map((entry) => fmt(
+        typeof entry?.fields?.manufacturer === 'object'
+          ? entry.fields.manufacturer?.value
+          : entry?.fields?.manufacturer
+      ))
+      .filter(Boolean);
     const seedEntries = baseEntries;
     visualTeachPreviewRequestRef.current += 1;
     visualTeachBackendEntriesRef.current = seedEntries;
@@ -14349,51 +13420,24 @@ const BomNormalizer = () => {
       setFieldPatternExpandedPatternKey('');
       return;
     }
-    const group = fieldPatternGroups.find((item) => item.patternKey === patternKey);
-    const targetRowIndex = fieldPatternReviewRows.findIndex((row) => (
-      (row.patterns || []).some((item) => item.patternKey === patternKey)
-    ));
-    const reviewRow = targetRowIndex >= 0 ? fieldPatternReviewRows[targetRowIndex] : null;
-    const occurrence = (reviewRow?.occurrences || []).find(
-      (item) => item.patternKey === patternKey
-    );
-    if (!group || !reviewRow || !occurrence) {
+    const teachContext = pattern?.teachContext;
+    const group = fieldPatternGroups.find((item) => item.id === teachContext?.groupId);
+    const sample = teachContext?.sample;
+    if (!group || !sample) {
       setError('No matching customer row is available for this pattern.');
       return;
     }
-
-    const combination = (pattern?.combinationIds || [])
-      .map((combinationId) => fieldPatternCombinations.find((item) => item.id === combinationId))
-      .find(Boolean) || fieldPatternCombinations.find(
-      (item) => (item.patternKeys || []).includes(patternKey)
-    );
-    const sourceColumn = fmt(occurrence.sourceColumn);
-    const sample = {
-      sourceRow: reviewRow.sourceRow,
-      left: reviewRow.left || [],
-      sourceFragment: { ...occurrence, id: occurrence.occurrenceId },
-      entries: occurrence.entries || [],
-      fields: occurrence.entries?.[0]?.fields || {},
-      interpretationSpansByColumn: sourceColumn
-        ? { [sourceColumn]: occurrence.interpretationSpans || [] }
-        : {},
-      patternRows: group.patternRows || [],
-      primaryPatternRow: group.primaryPatternRow || null,
-    };
     const workflowStep = (fieldPatternReviewWorkflow?.steps || []).find(
-      (step) => step.type === 'teach_visual' && step.patternKey === patternKey
+      (step) => step.id === teachContext.workflowStepId
     );
 
-    if (combination) setSelectedFieldPatternCombinationId(combination.id);
     setSelectedFieldPatternId(group.id);
-    setFieldPatternReviewPage(Math.max(0, Math.floor(targetRowIndex / FIELD_PATTERN_REVIEW_PAGE_SIZE)));
+    setFieldPatternReviewPage(Number(teachContext.reviewPage || 0));
     setFieldPatternExpandedPatternKey(patternKey);
     handleOpenVisualTeachPattern(group, sample, workflowStep, { openDialog: false });
   }, [
     fieldPatternExpandedPatternKey,
-    fieldPatternCombinations,
     fieldPatternGroups,
-    fieldPatternReviewRows,
     fieldPatternReviewWorkflow,
     handleOpenVisualTeachPattern,
   ]);
@@ -14696,6 +13740,13 @@ const BomNormalizer = () => {
         alternateJoiner: visualTeachAlternateJoiner,
         ignoredFields: visualTeachIgnoredFields,
         hasManualEdits,
+        activeRules: Object.keys(fieldPatternRuleDrafts || {}).length
+          ? fieldPatternRuleDrafts
+          : (normalizerConfig.fieldPatternRules || {}),
+        review: fieldPatternReviewContract,
+        completedStepId: visualTeachContext?.workflowStep?.id || '',
+        sourceRow: sample.sourceRow,
+        occurrenceId: sample.sourceFragment?.id || '',
         persist: false,
       });
       const taughtRule = response.data?.rule || {};
@@ -14726,75 +13777,42 @@ const BomNormalizer = () => {
           : nextTags
       ));
 
-      const baseRules = Object.keys(fieldPatternRuleDrafts || {}).length
-        ? fieldPatternRuleDrafts
-        : (normalizerConfig.fieldPatternRules || {});
-      const key = fieldPatternRuleKey(group);
-      const current = baseRules[key] || { fields: {} };
-      const nextRules = {
-        ...baseRules,
-        [key]: {
-          ...current,
-          ...taughtRule,
-          patternKey: group.patternKey || taughtRule.patternKey || current.patternKey || '',
-          shape: group.shape || taughtRule.shape || current.shape || '',
-          fields: {
-            ...(current.fields || {}),
-            ...(taughtRule.fields || {}),
-          },
-          identityGroups: mergeIdentityGroupRules(current.identityGroups, taughtRule.identityGroups),
-          expansions: mergeExpansionRules(current.expansions, taughtRule.expansions),
-          visualPattern: taughtRule.visualPattern,
-        },
-      };
+      const refreshedReview = response.data?.review;
+      if (!refreshedReview || Number(refreshedReview.contractVersion || 0) < 3) {
+        throw new Error('Backend did not return the updated pattern review.');
+      }
+      const nextRules = refreshedReview.activeRules || response.data?.activeRules || {};
+      const refreshedGroups = Array.isArray(refreshedReview.groups) ? refreshedReview.groups : [];
+      const refreshedRows = Array.isArray(refreshedReview.rows) ? refreshedReview.rows : [];
+      const refreshedWorkflow = refreshedReview.workflow || { steps: [], nextStep: null };
+      const refreshedGroup = refreshedGroups.find((candidate) => (
+        (group.patternKey && candidate.patternKey === group.patternKey) ||
+        candidate.id === group.id ||
+        candidate.shape === group.shape
+      ));
+      const refreshedPattern = (refreshedReview.patterns || []).find(
+        (candidate) => candidate.patternKey === (group.patternKey || visualTeachContext?.workflowStep?.patternKey)
+      );
+      const refreshedSample = refreshedPattern?.teachContext?.sample || (refreshedGroup?.samples || [])
+        .find((candidate) => String(candidate.sourceRow) === String(sample.sourceRow));
 
       setFieldPatternRuleDrafts(nextRules);
-      setFieldPatternRulesDirty(false);
-      const completedReviewStepIds = [
-        ...(fieldPatternReviewWorkflow?.completedStepIds || []),
-        visualTeachContext?.workflowStep?.id,
-      ].filter(Boolean);
-      const refreshedPatternData = await handleTeachFieldPattern(nextRules, {
-        forceRefresh: true,
-        includeAllRows: true,
-        focusShape: group.shape,
-        focusSourceRow: sample.sourceRow,
-        focusOccurrenceId: fieldPatternSampleKey(sample),
-        preservedEntries: hasManualEdits ? entries : null,
-        preservedVisualTags: hasManualEdits ? visualTeachTags : null,
-        preservedVisualDelimiter: visualTeachDelimiter,
-        preservedVisualAltMode: visualTeachAltMode,
-        preservedVisualAlternateJoiner: visualTeachAlternateJoiner,
-        preservedVisualEntryOverrides: hasManualEdits ? visualTeachEntryOverrides : {},
-        completedReviewStepIds,
-        propagateErrors: true,
-        preserveReviewState: true,
-      });
-      if (!hasManualEdits) {
-        const refreshedGroup = (refreshedPatternData?.groups || [])
-          .find((candidate) => (
-            (group.patternKey && candidate.patternKey === group.patternKey) ||
-            candidate.shape === group.shape
-          ));
-        const refreshedSample = (refreshedGroup?.samples || [])
-          .find((candidate) => String(candidate.sourceRow) === String(sample.sourceRow));
-        if (refreshedSample) {
-          const refreshedEntries = (refreshedSample.entries || []).map((entry, entryIndex) => ({
-            relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
-            fields: fieldValuesFromBackendFields(entry.fields || {}, fieldPatternFields),
-            sourceColumns: sourceColumnsFromBackendFields(entry.fields || {}, fieldPatternFields),
-          }));
-          setVisualTeachContext((current) => ({
-            ...current,
-            group: refreshedGroup,
-            sample: refreshedSample,
-            seedEntries: refreshedEntries,
-          }));
-          visualTeachBackendEntriesRef.current = refreshedEntries;
-          setVisualTeachEntryOverrides({});
-        }
+      setFieldPatternGroups(refreshedGroups);
+      setFieldPatternReviewRows(refreshedRows);
+      setFieldPatternReviewSummary(refreshedReview.summary || {});
+      setFieldPatternReviewContract(refreshedReview);
+      setFieldPatternFields(Array.isArray(refreshedReview.fields) ? refreshedReview.fields : []);
+      setFieldPatternReviewWorkflow(refreshedWorkflow);
+      setSelectedFieldPatternId(refreshedGroup?.id || group.id);
+      if (refreshedGroup || refreshedSample) {
+        setVisualTeachContext((current) => ({
+          ...current,
+          group: refreshedGroup || current.group,
+          sample: refreshedSample || current.sample,
+          seedEntries: taughtEntries,
+        }));
       }
-      setPatternApplyNotice(`Interpretation applied to all ${group.occurrenceCount || group.rowCount || 0} matching fragments.`);
+      setPatternApplyNotice(`Interpretation updated for all ${group.occurrenceCount || group.rowCount || 0} matching fragments.`);
     } catch (err) {
       setError(err.response?.data?.error || err.message || 'Could not apply this visual pattern to matching fragments.');
     } finally {
@@ -14802,9 +13820,8 @@ const BomNormalizer = () => {
     }
   }, [
     fieldPatternRuleDrafts,
-    fieldPatternReviewWorkflow,
+    fieldPatternReviewContract,
     fieldPatternFields,
-    handleTeachFieldPattern,
     headers,
     normalizerConfig,
     roles,
@@ -14891,97 +13908,17 @@ const BomNormalizer = () => {
     });
   }, []);
 
-  const buildFieldPatternLearningGroup = useCallback((group) => {
-    if (!group) return null;
-    const activeRules = Object.keys(fieldPatternRuleDrafts || {}).length
-      ? fieldPatternRuleDrafts
-      : (normalizerConfig.fieldPatternRules || {});
-    return {
-      id: group.id,
-      shape: group.shape,
-      confirmed: true,
-      rule: {
-        ...(fieldPatternRuleForGroup(activeRules, group) || {}),
-        shape: group.shape,
-      },
-      rows: Object.entries(fieldPatternEdits[group.id] || {}).map(([sampleKey, edit]) => {
-        const sample = (group.samples || []).find((item) => (
-          fieldPatternSampleKey(item) === String(edit.occurrenceId || sampleKey)
-        )) || {
-          sourceRow: edit.sourceRow,
-          left: edit.left || [],
-          fields: {},
-        };
-        const entries = normalizeVisualTeachEntries(edit.entries?.length ? edit.entries : [{
-          relation: 'Primary',
-          fields: fieldValuesFromBackendFields(sample.fields || {}, fieldPatternFields),
-          sourceColumns: sourceColumnsFromBackendFields(sample.fields || {}, fieldPatternFields),
-        }]);
-        return {
-          sourceRow: edit.sourceRow ?? sample.sourceRow,
-          occurrenceId: edit.occurrenceId || sample.sourceFragment?.id || '',
-          entries: entries.map((entry, entryIndex) => ({
-            relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
-            fields: entry.fields || {},
-          })),
-        };
-      }),
-    };
-  }, [fieldPatternEdits, fieldPatternFields, fieldPatternRuleDrafts, normalizerConfig, roles]);
-
   const handleApplyFieldPatternReview = useCallback(async () => {
-    const reviewGroups = fieldPatternGroups;
-
-    const rowsBySourceRow = {};
-    reviewGroups.forEach((group) => {
-      Object.entries(fieldPatternEdits[group.id] || {}).forEach(([sampleKey, edit]) => {
-        const sample = (group.samples || []).find((item) => (
-          fieldPatternSampleKey(item) === String(edit.occurrenceId || sampleKey)
-        )) || {
+    const corrections = fieldPatternGroups.flatMap((group) => (
+      Object.values(fieldPatternEdits[group.id] || [])
+        .filter((edit) => edit?.manuallyEdited)
+        .map((edit) => ({
+          patternKey: group.patternKey || group.shape || '',
           sourceRow: edit.sourceRow,
-          left: edit.left || [],
-          fields: {},
-        };
-        const entries = normalizeVisualTeachEntries(edit.entries?.length ? edit.entries : [{
-          relation: 'Primary',
-          fields: fieldValuesFromBackendFields(sample.fields || {}, fieldPatternFields),
-          sourceColumns: sourceColumnsFromBackendFields(sample.fields || {}, fieldPatternFields),
-        }]);
-        const sourceRow = edit.sourceRow ?? sample.sourceRow;
-        const existingEntries = rowsBySourceRow[String(sourceRow)]?.entries || [];
-        const normalizedEntries = entries.map((entry, entryIndex) => ({
-          relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
-          fields: entry.fields || {},
-        }));
-        rowsBySourceRow[String(sourceRow)] = {
-          entries: [...existingEntries, ...normalizedEntries].map((entry, entryIndex) => ({
-            ...entry,
-            relation: entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`,
-          })),
-          fields: rowsBySourceRow[String(sourceRow)]?.fields || entries[0]?.fields || {},
-        };
-      });
-    });
-
-    const learningGroups = reviewGroups
-      .map((group) => buildFieldPatternLearningGroup(group))
-      .filter(Boolean);
-    const appliedConfig = {
-      ...normalizerConfig,
-      fieldPatternOverrides: {
-        source: 'backend_field_pattern_review',
-        confirmedAt: new Date().toISOString(),
-        rules: fieldPatternRuleDrafts,
-        groups: reviewGroups.map((group) => ({
-          id: group.id,
-          shape: group.shape,
-          rowCount: group.rowCount,
-          selectedColumns: group.selectedColumns || [],
-        })),
-        rows: rowsBySourceRow,
-      },
-      fieldPatternRules: fieldPatternRuleDrafts,
-    };
+          occurrenceId: edit.occurrenceId || '',
+          entries: edit.entries || [],
+        }))
+    ));
 
     setFieldPatternLoading(true);
     setError('');
@@ -14990,8 +13927,9 @@ const BomNormalizer = () => {
         headers,
         rows: dataRows,
         roles,
-        config: { ...appliedConfig, headerRowIndex },
-        groups: learningGroups,
+        config: { ...normalizerConfig, headerRowIndex },
+        rules: fieldPatternRuleDrafts,
+        corrections,
         persist: true,
       });
       const normalized = response.data?.normalizedRows || [];
@@ -15002,11 +13940,12 @@ const BomNormalizer = () => {
         outputRows: normalized.length,
         skippedRows: 0,
       });
-      setConfig(appliedConfig);
+      setConfig(response.data?.appliedConfig || normalizerConfig);
       setParserTouched(true);
       setFieldPatternReviewOpen(false);
-      setPatternApplyNotice(`${reviewGroups.length} unique field pattern${reviewGroups.length === 1 ? '' : 's'} applied by backend.`);
-      setSuccessMessage(`${reviewGroups.length} unique field pattern${reviewGroups.length === 1 ? '' : 's'} applied.`);
+      const appliedPatternCount = Number(fieldPatternReviewSummary.patternCount || 0);
+      setPatternApplyNotice(`${appliedPatternCount} unique field pattern${appliedPatternCount === 1 ? '' : 's'} applied by backend.`);
+      setSuccessMessage(`${appliedPatternCount} unique field pattern${appliedPatternCount === 1 ? '' : 's'} applied.`);
       if (pairingCheck.issueRows?.length) {
         setPendingNormalization({ rows: normalized, pairingCheck, openResultsAfterReview: true });
         setPairingReviewRows(pairingCheck.issueRows);
@@ -15021,7 +13960,7 @@ const BomNormalizer = () => {
     } finally {
       setFieldPatternLoading(false);
     }
-  }, [buildFieldPatternLearningGroup, commitNormalizedResult, dataRows, fieldPatternEdits, fieldPatternFields, fieldPatternGroups, fieldPatternRuleDrafts, headerRowIndex, headers, normalizerConfig, roles]);
+  }, [commitNormalizedResult, dataRows, fieldPatternEdits, fieldPatternGroups, fieldPatternReviewSummary.patternCount, fieldPatternRuleDrafts, headerRowIndex, headers, normalizerConfig, roles]);
 
   const handleApplyConfigureSplitColumns = useCallback((result) => {
     const scope = configureParserScope;
@@ -17369,7 +16308,7 @@ const BomNormalizer = () => {
                     <ShadcnButton
                       variant="outline"
                       disabled={fieldPatternLoading || !headers.length || !dataRows.length}
-                      onClick={() => handleTeachFieldPattern(null, { forceRefresh: true })}
+                      onClick={() => handleTeachFieldPattern()}
                       className="border-blue-200 text-blue-700 hover:bg-blue-50"
                     >
                       {fieldPatternLoading ? <CircularProgress size={14} /> : <TuneIcon fontSize="inherit" />}
@@ -18615,12 +17554,12 @@ const BomNormalizer = () => {
                                 {index + 1}. {pattern.pattern}
                               </Typography>
                               <Typography sx={{ mt: 0.25, fontSize: 11.5, color: normalizerTheme.muted }}>
-                                {[pattern.sourceColumn, (pattern.mappedFields || []).map((field) => TEACH_PATTERN_ROLE_LABELS[field] || field).join(' + ')].filter(Boolean).join(' - ')}
+                                {[pattern.sourceColumn, pattern.mappedFieldsLabel].filter(Boolean).join(' - ')}
                                 {pattern.occurrenceCount ? ` - ${pattern.occurrenceCount} occurrences` : ''}
                               </Typography>
                             </Box>
                             <Stack direction="row" alignItems="center" gap={0.65} sx={{ flexShrink: 0 }}>
-                              <Chip size="small" label={pattern.recognized ? 'Recognized' : 'Needs review'} sx={{ bgcolor: pattern.recognized ? '#e4f3f0' : '#fff7e6', color: pattern.recognized ? '#0f6e63' : '#9a5b00', fontWeight: 850 }} />
+                              <Chip size="small" label={pattern.statusLabel} sx={{ bgcolor: pattern.recognized ? '#e4f3f0' : '#fff7e6', color: pattern.recognized ? '#0f6e63' : '#9a5b00', fontWeight: 850 }} />
                               {expanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
                             </Stack>
                           </Stack>
@@ -18691,148 +17630,19 @@ const BomNormalizer = () => {
             </Alert>
           ) : (
             <Grid container spacing={0}>
-              <Grid item xs={12} md={3} sx={{ display: 'none' }}>
-                <Paper elevation={0} sx={{ border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paperSoft, maxHeight: 560, overflowY: 'auto' }}>
-                  {fieldPatternGroups.map((group) => {
-                    const selected = selectedFieldPatternGroup?.id === group.id;
-                    const previewValues = getPatternGroupExampleValues(group, 3);
-                    return (
-                      <Box
-                        key={group.id}
-                        onClick={() => setSelectedFieldPatternId(group.id)}
-                        sx={{
-                          p: 1.15,
-                          cursor: 'pointer',
-                          borderBottom: `1px solid ${normalizerTheme.border}`,
-                          bgcolor: selected ? (isDarkMode ? 'rgba(37, 99, 235, 0.18)' : '#eff6ff') : 'transparent',
-                          '&:hover': { bgcolor: normalizerTheme.hover },
-                        }}
-                      >
-                        <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1}>
-                          <Typography sx={{ fontSize: 13, fontWeight: 800, color: normalizerTheme.text }}>
-                            {group.title || group.id}
-                          </Typography>
-                          <Chip
-                            size="small"
-                            variant="outlined"
-                            label={`${group.rowCount || 0} matching rows`}
-                            sx={{ height: 22, fontSize: 10.5, fontWeight: 800 }}
-                          />
-                        </Stack>
-                        <Typography sx={{ mt: 0.45, fontSize: 11.5, color: normalizerTheme.muted, lineHeight: 1.35 }}>
-                          {(group.selectedColumns || []).join(', ') || 'Selected customer fields'}
-                        </Typography>
-                        {previewValues.length > 0 && (
-                          <Stack gap={0.55} sx={{ mt: 0.75 }}>
-                            {previewValues.map((item) => (
-                              <Box
-                                key={`${group.id}-preview-${item.column}`}
-                                title={`${item.column}: ${item.value}`}
-                                sx={{
-                                  minWidth: 0,
-                                  borderLeft: item.isShapeColumn ? '2px solid #2563eb' : `2px solid ${normalizerTheme.border}`,
-                                  pl: 0.65,
-                                }}
-                              >
-                                <Typography
-                                  sx={{
-                                    fontSize: 10.5,
-                                    color: normalizerTheme.muted,
-                                    fontWeight: 800,
-                                    lineHeight: 1.15,
-                                    whiteSpace: 'nowrap',
-                                    overflow: 'hidden',
-                                    textOverflow: 'ellipsis',
-                                  }}
-                                >
-                                  {item.column}
-                                </Typography>
-                                <Typography
-                                  sx={{
-                                    mt: 0.15,
-                                    fontSize: 11.4,
-                                    color: item.isShapeColumn ? '#1d4ed8' : normalizerTheme.text,
-                                    fontWeight: item.isShapeColumn ? 800 : 650,
-                                    lineHeight: 1.22,
-                                    display: '-webkit-box',
-                                    WebkitLineClamp: 2,
-                                    WebkitBoxOrient: 'vertical',
-                                    overflow: 'hidden',
-                                    whiteSpace: 'normal',
-                                    wordBreak: 'break-word',
-                                  }}
-                                >
-                                  {formatPatternGroupPreviewValue(item.value)}
-                                </Typography>
-                              </Box>
-                            ))}
-                          </Stack>
-                        )}
-                        {group.alternateEntryCount > 0 && (
-                          <Typography sx={{ mt: 0.4, fontSize: 11.5, color: '#2563eb', fontWeight: 750 }}>
-                            {group.alternateEntryCount} alternate entr{group.alternateEntryCount === 1 ? 'y' : 'ies'}
-                          </Typography>
-                        )}
-                      </Box>
-                    );
-                  })}
-                </Paper>
-              </Grid>
               <Grid item xs={12} md={12}>
                 {fieldPatternReviewRows.length > 0 && (() => {
-                  // Pattern combinations remain available for backend grouping and
-                  // rule application, but the review UI intentionally shows one
-                  // continuous client-versus-FactWise row list.
-                  const combinationPatternKeys = [...new Set(
-                    fieldPatternReviewRows.flatMap((row) => (
-                      (row.occurrences || []).map((occurrence) => occurrence.patternKey).filter(Boolean)
-                    ))
-                  )];
-                  const group = (
-                    selectedFieldPatternGroup && combinationPatternKeys.includes(selectedFieldPatternGroup.patternKey)
-                      ? selectedFieldPatternGroup
-                      : fieldPatternGroups.find((candidate) => candidate.patternKey === combinationPatternKeys[0])
-                  ) || selectedFieldPatternGroup || fieldPatternGroups[0] || {
-                    id: 'direct-mapping',
-                    patternKey: '',
-                    shape: '__direct_mapping__',
-                    selectedColumns: mappedFieldPatternRuleOptions.map((field) => field.sourceColumn),
-                    rowCount: fieldPatternReviewRows.length,
-                  };
+                  const group = selectedFieldPatternGroup || fieldPatternGroups[0] || {};
                   const groupSamples = fieldPatternReviewRows;
-                  const reviewPageCount = Math.max(1, Math.ceil(groupSamples.length / FIELD_PATTERN_REVIEW_PAGE_SIZE));
+                  const reviewPageSize = Number(fieldPatternReviewContract.display?.rowPageSize || 4);
+                  const reviewPageCount = Math.max(1, Math.ceil(groupSamples.length / reviewPageSize));
                   const safeReviewPage = Math.min(fieldPatternReviewPage, reviewPageCount - 1);
-                  const reviewPageStart = safeReviewPage * FIELD_PATTERN_REVIEW_PAGE_SIZE;
+                  const reviewPageStart = safeReviewPage * reviewPageSize;
                   const samples = groupSamples.slice(
                     reviewPageStart,
-                    reviewPageStart + FIELD_PATTERN_REVIEW_PAGE_SIZE
+                    reviewPageStart + reviewPageSize
                   );
-                  const activeRuleDraftsForDialog = Object.keys(fieldPatternRuleDrafts || {}).length
-                    ? fieldPatternRuleDrafts
-                    : (normalizerConfig.fieldPatternRules || {});
-                  const groupRule = fieldPatternRuleForGroup(activeRuleDraftsForDialog, group);
-                  const identityGroups = sameCellIdentityGroupsFromRoles(roles);
-                  const selectedRuleField = selectedFieldPatternRuleOption;
-                  const selectedRule = selectedRuleField
-                    ? (groupRule.fields?.[selectedRuleField.key] || {})
-                    : {};
-                  const selectedDelimiterMode = selectedRule.delimiter || 'none';
-                  const selectedIdentityGroups = selectedRuleField
-                    ? identityGroups.filter((identityGroup) => identityGroup.roles.includes(selectedRuleField.key))
-                    : [];
-                  const mappedRolesByColumn = Object.entries(roles || {}).reduce((acc, [role, column]) => {
-                    const sourceColumn = fmt(column);
-                    if (!sourceColumn) return acc;
-                    acc[sourceColumn] = acc[sourceColumn] || [];
-                    acc[sourceColumn].push(role);
-                    return acc;
-                  }, {});
-                  const sharedMappings = Object.entries(mappedRolesByColumn)
-                    .filter(([, mappedRoles]) => mappedRoles.length > 1)
-                    .filter(([sourceColumn]) => !(group.selectedColumns || []).length || (group.selectedColumns || []).includes(sourceColumn));
-                  const reviewModeLabel = sharedMappings.length
-                    ? 'Shared-column interpretation'
-                    : 'One-to-one field interpretation';
+                  const reviewModeLabel = fieldPatternReviewContract.display?.reviewModeLabel || '';
                   return (
                     <Paper elevation={0} sx={{ border: `1px solid ${normalizerTheme.border}`, borderRadius: '8px', overflow: 'hidden', bgcolor: normalizerTheme.paper }}>
                       <Stack
@@ -18869,251 +17679,22 @@ const BomNormalizer = () => {
                               <Chip size="small" label={`${samples[0].entries.length - 1} generated alternate rows`} sx={{ height: 22, bgcolor: '#f1eafe', color: '#6d28d9', fontSize: 11, fontWeight: 800 }} />
                             )}
                           </Stack>
-                          <Box
-                            component="details"
-                            open
-                            sx={{
-                              display: 'none',
-                              gridColumn: { xs: 1, lg: 2 },
-                              gridRow: { xs: 'auto', lg: 3 },
-                              mt: 1,
-                              border: `1px solid ${normalizerTheme.border}`,
-                              borderRadius: '7px',
-                              bgcolor: normalizerTheme.paperSoft,
-                              '&[open]': { p: 1 },
-                            }}
-                          >
-                            <Box
-                              component="summary"
-                              sx={{
-                                px: 1,
-                                py: 0.85,
-                                cursor: 'pointer',
-                                fontSize: 12.5,
-                                fontWeight: 850,
-                                color: normalizerTheme.text,
-                              }}
-                            >
-                              Parsing and cleanup rules
-                            </Box>
-                            {fieldPatternRulesDirty && (
-                              <Alert severity="warning" sx={{ mb: 0.9 }}>
-                                Parser settings changed. Refresh the backend preview before applying these patterns.
-                              </Alert>
-                            )}
-                            <Autocomplete
-                              size="small"
-                              options={mappedFieldPatternRuleOptions}
-                              value={selectedRuleField}
-                              onChange={(_, option) => setFieldPatternSelectedRuleField(option?.key || '')}
-                              getOptionLabel={(option) => `${option?.label || ''} - ${option?.sourceColumn || ''}`}
-                              isOptionEqualToValue={(option, value) => option.key === value.key}
-                              renderInput={(params) => <TextField {...params} label="Mapped FactWise field" />}
-                              sx={{ mb: 1 }}
-                            />
-                            {selectedIdentityGroups.length > 0 && (
-                              <Box sx={{ mb: 1 }}>
-                                <Typography sx={{ mb: 0.55, fontSize: 11.5, fontWeight: 850, color: normalizerTheme.text }}>
-                                  Shared customer column
-                                </Typography>
-                                <Box
-                                  sx={{
-                                    display: 'grid',
-                                    gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))',
-                                    gap: 0.9,
-                                  }}
-                                >
-                                  {selectedIdentityGroups.map((identityGroup) => {
-                                    const comboRule = findIdentityGroupRule(groupRule, identityGroup);
-                                    const comboDelimiter = comboRule.delimiter || comboRule.comboDelimiter || 'auto';
-                                    const comboOrder = (comboRule.order && comboRule.order.length ? comboRule.order : identityGroup.roles).join('|');
-                                    const orderOptions = orderedIdentityRoleOptions(identityGroup.roles);
-                                    return (
-                                      <Box
-                                        key={`${group.id}-identity-${identityGroupRuleKey(identityGroup)}`}
-                                        sx={{
-                                          p: 0.85,
-                                          borderRadius: '6px',
-                                          border: `1px solid ${normalizerTheme.border}`,
-                                          bgcolor: normalizerTheme.paper,
-                                        }}
-                                      >
-                                        <Typography
-                                          title={identityGroup.header}
-                                          sx={{
-                                            mb: 0.65,
-                                            fontSize: 11.5,
-                                            fontWeight: 850,
-                                            color: normalizerTheme.text,
-                                            whiteSpace: 'nowrap',
-                                            overflow: 'hidden',
-                                            textOverflow: 'ellipsis',
-                                          }}
-                                        >
-                                          {identityGroup.roles.map((role) => TEACH_PATTERN_ROLE_LABELS[role] || role).join(' + ')}
-                                        </Typography>
-                                        <FormControl size="small" fullWidth>
-                                          <InputLabel>Split fields by</InputLabel>
-                                          <Select
-                                            label="Split fields by"
-                                            value={comboDelimiter}
-                                            onChange={(event) => handleFieldPatternIdentityRuleChange(group, identityGroup, { delimiter: event.target.value })}
-                                          >
-                                            {FIELD_PATTERN_COMBO_DELIMITER_OPTIONS.map((option) => (
-                                              <MenuItem key={option.value} value={option.value}>
-                                                {option.label}
-                                              </MenuItem>
-                                            ))}
-                                          </Select>
-                                        </FormControl>
-                                        {comboDelimiter === 'custom' && (
-                                          <TextField
-                                            fullWidth
-                                            size="small"
-                                            label="Custom delimiter"
-                                            value={comboRule.customDelimiter || ''}
-                                            onChange={(event) => handleFieldPatternIdentityRuleChange(group, identityGroup, { customDelimiter: event.target.value })}
-                                            sx={{ mt: 0.75 }}
-                                          />
-                                        )}
-                                        <FormControl size="small" fullWidth sx={{ mt: 0.75 }}>
-                                          <InputLabel>Field order</InputLabel>
-                                          <Select
-                                            label="Field order"
-                                            value={comboOrder}
-                                            onChange={(event) => handleFieldPatternIdentityRuleChange(group, identityGroup, { order: event.target.value.split('|') })}
-                                          >
-                                            {orderOptions.map((order) => (
-                                              <MenuItem key={order.join('|')} value={order.join('|')}>
-                                                {order.map((role) => TEACH_PATTERN_ROLE_LABELS[role] || role).join(' / ')}
-                                              </MenuItem>
-                                            ))}
-                                          </Select>
-                                        </FormControl>
-                                      </Box>
-                                    );
-                                  })}
-                                </Box>
-                              </Box>
-                            )}
-                            {selectedRuleField && (
-                              <Box
-                                sx={{
-                                  p: 0.9,
-                                  borderRadius: '6px',
-                                  border: `1px solid ${normalizerTheme.border}`,
-                                  bgcolor: normalizerTheme.paper,
-                                }}
-                              >
-                                <Typography sx={{ mb: 0.7, fontSize: 11.5, fontWeight: 850, color: normalizerTheme.text }}>
-                                  {selectedRuleField.label}
-                                  <Box component="span" sx={{ ml: 0.6, color: normalizerTheme.muted, fontWeight: 650 }}>
-                                    {selectedRuleField.sourceColumn}
-                                  </Box>
-                                </Typography>
-                                <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'minmax(220px, 1fr) minmax(220px, 1fr)' }, gap: 0.8 }}>
-                                  <FormControl size="small" fullWidth>
-                                    <InputLabel>Split alternates by</InputLabel>
-                                    <Select
-                                      label="Split alternates by"
-                                      value={selectedDelimiterMode}
-                                      onChange={(event) => handleFieldPatternRuleChange(group, selectedRuleField.key, { delimiter: event.target.value })}
-                                    >
-                                      {FIELD_PATTERN_DELIMITER_OPTIONS.map((option) => (
-                                        <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
-                                      ))}
-                                    </Select>
-                                  </FormControl>
-                                  <FormControl size="small" fullWidth>
-                                    <InputLabel>Prefix mode</InputLabel>
-                                    <Select
-                                      label="Prefix mode"
-                                      value={selectedRule.prefixMode || 'literal'}
-                                      onChange={(event) => handleFieldPatternRuleChange(group, selectedRuleField.key, { prefixMode: event.target.value })}
-                                    >
-                                      <MenuItem value="literal">Exact prefix text</MenuItem>
-                                      <MenuItem value="first_n_chars">First N characters</MenuItem>
-                                      <MenuItem value="regex">Regex from start</MenuItem>
-                                      <MenuItem value="before_delimiter">Text before delimiter</MenuItem>
-                                    </Select>
-                                  </FormControl>
-                                </Box>
-                                <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: selectedDelimiterMode === 'custom' ? '1fr 1fr' : '1fr' }, gap: 0.8, mt: 0.8 }}>
-                                  {selectedDelimiterMode === 'custom' && (
-                                    <TextField
-                                      fullWidth
-                                      size="small"
-                                      label="Custom delimiter"
-                                      value={selectedRule.customDelimiter || ''}
-                                      onChange={(event) => handleFieldPatternRuleChange(group, selectedRuleField.key, { customDelimiter: event.target.value })}
-                                    />
-                                  )}
-                                  <TextField
-                                    fullWidth
-                                    size="small"
-                                    label={selectedRule.prefixMode === 'first_n_chars' ? 'Number of characters' : 'Strip prefix'}
-                                    placeholder={selectedRule.prefixMode === 'first_n_chars' ? 'e.g. 5' : 'Text to remove from the start'}
-                                    value={selectedRule.stripPrefix || ''}
-                                    onChange={(event) => handleFieldPatternRuleChange(group, selectedRuleField.key, { stripPrefix: event.target.value })}
-                                  />
-                                </Box>
-                              </Box>
-                            )}
-                          </Box>
                         </Box>
-                        <Stack
-                          direction="row"
-                          gap={0.75}
-                          flexWrap="wrap"
-                          justifyContent={{ xs: 'flex-start', sm: 'flex-end' }}
-                          sx={{
-                            display: 'none',
-                            position: { xs: 'static', lg: 'absolute' },
-                            top: { lg: 0 },
-                            right: { lg: 0 },
-                          }}
-                        >
-                          <Chip
-                            size="small"
-                            variant="outlined"
-                            label={`${groupSamples.length} row${groupSamples.length === 1 ? '' : 's'}`}
-                            sx={{ height: 32, fontSize: 12, fontWeight: 800 }}
-                          />
-                          <ShadcnButton
-                            size="sm"
-                            variant="outlined"
-                            disabled={fieldPatternLoading}
-                            onClick={() => handleRefreshFieldPatternPreview(group)}
-                            className="h-8"
-                          >
-                            Refresh preview
-                          </ShadcnButton>
-                        </Stack>
                       </Stack>
 
                       <Stack gap={1.25} sx={{ mt: 1.4 }}>
                         {samples.map((sample, sampleIndex) => {
-                          const visibleEntries = editableEntriesForPatternCombinationSample(
-                            sample,
-                            fieldPatternGroups,
-                            fieldPatternEdits,
-                            fieldPatternFields,
-                            normalizerConfig
+                          const visibleEntries = reviewEntriesWithUserEdits(sample, fieldPatternEdits);
+                          const visibleFieldKeys = new Set(sample.visibleFieldKeys || []);
+                          const visibleFactwiseFields = fieldPatternFields.filter(
+                            (field) => visibleFieldKeys.has(field.key)
                           );
-                          const visibleFactwiseFields = visibleFactwiseFieldsForPatternSample(
-                            fieldPatternFields,
-                            visibleEntries,
-                            sample,
-                            roles
-                          );
-                          const showAddAlternate = normalizerConfig.alternateLayout !== 'already_separate_rows';
-                          const activeOccurrence = (sample.occurrences || []).find(
-                            (occurrence) => occurrence.patternKey === group.patternKey
-                          ) || (sample.occurrences || [])[0];
+                          const showAddAlternate = Boolean(fieldPatternReviewContract.display?.allowAddAlternate);
+                          const activeEntry = visibleEntries[0] || {};
                           const activeGroup = fieldPatternGroups.find(
-                            (candidate) => candidate.patternKey === activeOccurrence?.patternKey
+                            (candidate) => candidate.id === activeEntry.groupId
                           ) || group;
-                          const activeOccurrenceId = fmt(activeOccurrence?.occurrenceId);
+                          const activeOccurrenceId = fmt(activeEntry.occurrenceId);
                           const rowPatterns = sample.patterns || [];
                           const unresolvedRowPatterns = rowPatterns.filter(
                             (pattern) => !pattern.recognized
@@ -19139,29 +17720,11 @@ const BomNormalizer = () => {
                                   <Stack direction="row" gap={0.6} flexWrap="wrap" justifyContent="flex-end">
                                     {rowPatterns.map((pattern, patternIndex) => {
                                       const patternGroup = fieldPatternGroups.find(
-                                        (candidate) => candidate.patternKey === pattern.patternKey
+                                        (candidate) => candidate.id === pattern.teachContext?.groupId
                                       );
-                                      const occurrence = (sample.occurrences || []).find(
-                                        (item) => item.patternKey === pattern.patternKey
-                                      );
-                                      const sourceColumn = fmt(occurrence?.sourceColumn);
-                                      const teachSample = occurrence ? {
-                                        sourceRow: sample.sourceRow,
-                                        left: sample.left || [],
-                                        sourceFragment: {
-                                          ...occurrence,
-                                          id: occurrence.occurrenceId,
-                                        },
-                                        entries: occurrence.entries || [],
-                                        fields: occurrence.entries?.[0]?.fields || {},
-                                        interpretationSpansByColumn: sourceColumn
-                                          ? { [sourceColumn]: occurrence.interpretationSpans || [] }
-                                          : {},
-                                        patternRows: patternGroup?.patternRows || [],
-                                        primaryPatternRow: patternGroup?.primaryPatternRow || null,
-                                      } : null;
+                                      const teachSample = pattern.teachContext?.sample || null;
                                       const workflowStep = (fieldPatternReviewWorkflow?.steps || []).find(
-                                        (step) => step.type === 'teach_visual' && step.patternKey === pattern.patternKey
+                                        (step) => step.id === pattern.teachContext?.workflowStepId
                                       );
                                       return (
                                         <Tooltip key={pattern.patternKey} title={pattern.pattern || 'Unrecognized pattern'} arrow>
@@ -19431,7 +17994,7 @@ const BomNormalizer = () => {
                             </Paper>
                           );
                         })}
-                        {groupSamples.length > FIELD_PATTERN_REVIEW_PAGE_SIZE && (
+                        {groupSamples.length > reviewPageSize && (
                           <Stack direction="row" alignItems="center" justifyContent="center" gap={1} sx={{ py: 0.75 }}>
                             <ShadcnButton
                               size="sm"
@@ -19497,7 +18060,7 @@ const BomNormalizer = () => {
               <Button color="inherit" startIcon={<ChevronLeftIcon />} onClick={() => setFieldPatternReviewStage('patterns')}>Back</Button>
               <Button
                 variant="contained"
-                disabled={fieldPatternLoading || fieldPatternRulesDirty}
+                disabled={fieldPatternLoading}
                 onClick={handleApplyFieldPatternReview}
                 sx={{ bgcolor: '#0f6e63', boxShadow: 'none', '&:hover': { bgcolor: '#0b5b53', boxShadow: 'none' } }}
               >
