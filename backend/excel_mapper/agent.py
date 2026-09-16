@@ -179,10 +179,15 @@ Work through these in order. Each one ends with a question. After you ask, STOP 
    Two examples at most per pattern, and only when the second shows something the first does not. Number the single example too, so the person can point at one by number when they answer.
    If a value came out wrong, say so in your own words before you ask - a part number carrying a bracket, a manufacturer that swallowed half the cell, a manufacturer that belongs to a different part than the number beside it. That is the entire reason for showing them.
    parts_found is how many approved parts the parser got out of the cell. parts_listed is how many that cell visibly lists. When parts_found is the smaller number, say plainly that the rest are being dropped and quote both numbers - "the cell lists three parts and only one is being kept". Never state a count you did not read from one of those two fields. Never tell someone their alternates are preserved when parts_found is the smaller number; for that pattern they are not.
-   Ask whether each pattern is right. If they want to change one, they type the grammar themselves. Only then show them how, using that pattern's own example_grammar - it is built to fit that cell, so it works if they copy it. Never invent an example with more parts than parts_in_cell, or it will be rejected. Say which words they can use: MPN, MANUFACTURER, CPN, DESCRIPTION, QUANTITY, UOM, IGNORE.
+   Ask whether each pattern is right, and say in that same message how they can answer: in their own words, describing where each field sits - "before the bracket is the part number, inside it up to the comma is the maker, after the comma is a suffix so ignore it, and the comma separates the parts". Never ask them to type a grammar, to name a token, or to count characters. Working out the character positions from what they said is your job, not theirs.
+   When one is wrong you can also correct it yourself without being asked: you can see the cell and what it should divide into, so say how you would read it and offer to apply that.
+   Correct it with set_pattern and `parts` - one entry per field of the FIRST approved part, quoting the exact text out of the example cell in the order it appears. For `CAV24C64WE-GT3(ON SEMICONDUCTOR,M000000034)` that is MPN `CAV24C64WE-GT3`, MANUFACTURER `ON SEMICONDUCTOR`, IGNORE `,M000000034)`. Quote the brackets and commas that belong to a piece being ignored; they are part of what it covers.
+   When the cell lists more than one approved part, pass `group_separator` as the character between them - a comma for a cell like `A(MAKER,CODE),B(MAKER,CODE)`. Without it they are never divided at all: the separators tried by default are slash, pipe, semicolon, newline and caret, and a comma falls through every one, leaving the whole cell as a single part number.
+   A person may describe the rule instead of quoting - "before the bracket is the part number, inside it up to the comma is the maker, after the comma is a suffix to ignore, and the comma separates the parts". Read it against the example cell and turn it into `parts` yourself; do not ask them to count characters.
+   `grammar` is still accepted for cells whose fields really are separated by spaces, and only if they typed one unprompted. Never invent an example with more parts than parts_in_cell, or it will be rejected. The roles a field can take, whichever route: MPN, MANUFACTURER, CPN, DESCRIPTION, QUANTITY, UOM, IGNORE.
 
-   A pattern with `reads_alternates` true carries the line's other approved parts - a stem, a placeholder and the list that fills it, like `KGM05AR71H102K@ (H/N)`. It has no `example_grammar`, and that is deliberate: the words above cannot say "and here are the other approved suffixes", so any grammar typed over it silently discards them and the line keeps only the stem, which is not a part number. Say what it reads, show the example cell, and offer to accept it as detected. Only rewrite one if the person asks after being told what it costs.
-   Pass what they type to set_pattern exactly as they wrote it.
+   A pattern with `reads_alternates` true carries the line's other approved parts - a stem, a placeholder and the list that fills it, like `KGM05AR71H102K@ (H/N)`. It has no `example_grammar`, and a typed GRAMMAR over one of those silently discards the alternates and keeps only the stem, which is not a part number. `parts` does not: quoting the first approved part and passing `group_separator` teaches the division, and the rest are read the same way. So accept it as detected when it already reads correctly, and correct it with `parts` when it does not - never with a grammar.
+   After a correction, say what the cell now reads as, field by field, so they can see it took.
    If nothing needs review, say so in one line and go to checkpoint 4. Do not make them confirm what is already recognised.
    `all_recognised` and `nothing_detected` are not the same answer. The first means every pattern found was one the library already knew. The second means no pattern was found at all - the column holds plain values needing no interpretation. Say whichever is true; telling someone their patterns were all recognised when none were detected tells them their file was checked when it was not.
 
@@ -197,7 +202,7 @@ Work through these in order. Each one ends with a question. After you ask, STOP 
    Only when the sheet has levels. Call normalise, then build_sheet, then review_sub_boms, in that order. review_sub_boms reads the BUILT sheet, not the normalised one; called before build_sheet it returns `not_built_yet`, which means you called it too early and says nothing about their file. Call build_sheet and ask it again. Never report that as a finding, and never let it end this checkpoint.
    If it comes back with no sub-assemblies, the sheet is one flat BOM and the question you already asked at checkpoint 4 covered all of it. Say nothing further and go to checkpoint 5.
    Otherwise every sub-assembly becomes a BOM of its own, and three of its values were DERIVED rather than read from the sheet: the name is its own code repeated, the unit is EA, the base quantity is 1. Anything with `confirmed` false is a default nobody chose, and this checkpoint is the only place in the whole conversation where they can say otherwise. If you skip it, those defaults ship.
-   Show them as a short list - code, name, unit, quantity, and how many lines each holds. Then say in one line that the name, the unit and the quantity are defaults rather than anything their file said, and that any of the three can be changed on any of them - a real name, whatever unit those parts are bought in, whatever base quantity the assembly is built at. Ask once whether any need changing. Do not read out fifteen of them one at a time.
+   Show them as a short list - level, code, name, unit, quantity, and how many lines each holds. They come back sorted by level, so keep that order and say each one's level: it is the shape of the tree, and an assembly three levels down sits inside another one rather than directly under the top. Then say in one line that the name, the unit and the quantity are defaults rather than anything their file said, and that any of the three can be changed on any of them - a real name, whatever unit those parts are bought in, whatever base quantity the assembly is built at. Ask once whether any need changing. Do not read out fifteen of them one at a time.
    - They say it is fine -> go on.
    - They name one to change -> call set_sub_bom with just that code and just the fields that change.
    If it reports that the BOM cannot be derived, that IS a finding about their file - tell them what it said.
@@ -465,19 +470,56 @@ TOOLS = [
         'function': {
             'name': 'set_pattern',
             'description': (
-                'Correct one pattern to the grammar the person typed, for example '
-                '"<MANUFACTURER> <MPN>". Tokens are matched to the parts of the '
-                'cell in the order they are written.'
+                'Correct how one pattern reads its column. Prefer `parts`: the '
+                'text of each field quoted straight out of the example cell, in '
+                'the order it appears. That can divide a cell anywhere, '
+                'including mid-word, which a grammar cannot. `grammar` remains '
+                'for cells whose fields really are separated by spaces.'
             ),
             'parameters': {
                 'type': 'object',
                 'properties': {
                     'pattern_id': {'type': 'string',
                                    'description': 'The id from review_patterns.'},
+                    'parts': {
+                        'type': 'array',
+                        'description': (
+                            'One entry per field of the FIRST approved part in '
+                            'the cell, in the order the text appears. Quote the '
+                            'text exactly, including brackets and commas that '
+                            'belong to a piece being ignored.'),
+                        'items': {
+                            'type': 'object',
+                            'properties': {
+                                'role': {
+                                    'type': 'string',
+                                    'description': ('MPN, MANUFACTURER, CPN, '
+                                                    'DESCRIPTION, QUANTITY, UOM '
+                                                    'or IGNORE'),
+                                },
+                                'text': {
+                                    'type': 'string',
+                                    'description': ('the exact characters this '
+                                                    'field covers, copied from '
+                                                    'the cell'),
+                                },
+                            },
+                            'required': ['role', 'text'],
+                        },
+                    },
+                    'group_separator': {
+                        'type': 'string',
+                        'description': (
+                            'The character that separates one approved part from '
+                            'the next, when the cell holds more than one. Pass it '
+                            'whenever the cell lists alternates - without it they '
+                            'are never divided, because a comma is not one of the '
+                            'separators tried by default.'),
+                    },
                     'grammar': {'type': 'string',
-                                'description': 'What they typed, verbatim.'},
+                                'description': 'A typed grammar, if they gave one.'},
                 },
-                'required': ['pattern_id', 'grammar'],
+                'required': ['pattern_id'],
             },
         },
     },
@@ -1733,6 +1775,52 @@ def _spans_for_grammar(value, grammar):
     return spans, None
 
 
+def _spans_from_parts(value, parts):
+    """Character spans for text quoted straight out of the cell.
+
+    A grammar can only name whole whitespace-separated tokens, and the cells
+    that actually need teaching have no spaces where their fields divide:
+    "CAV24C64WE-GT3(ON SEMICONDUCTOR,M000000034)" divides at character 14, in
+    the middle of the first token, and its last twelve characters are a vendor
+    code nobody wants. No sequence of <MPN> <MANUFACTURER> can say that.
+
+    Quoting says it exactly. Each piece is searched for from where the previous
+    one ended, so the same text appearing twice takes the right occurrence, and
+    a piece that cannot be found is reported with the cell rather than guessed
+    at. Asking for the text rather than for offsets also keeps the answer to
+    something that can be checked against what is on screen.
+    """
+    text = str(value or '')
+    if not text:
+        return None, 'That row has nothing in the column this pattern reads.'
+    if not isinstance(parts, (list, tuple)) or not parts:
+        return None, 'No parts were given.'
+
+    spans = []
+    cursor = 0
+    for part in parts:
+        if not isinstance(part, dict):
+            return None, 'Each part needs a role and the text it covers.'
+        name = str(part.get('role') or '').strip().upper()
+        role = PATTERN_ROLES.get(name)
+        if role is None:
+            return None, ('"%s" is not something a pattern can hold. Use MPN, '
+                          'MANUFACTURER, CPN, DESCRIPTION, QUANTITY, UOM or '
+                          'IGNORE.' % (part.get('role') or ''))
+        fragment = str(part.get('text') or '')
+        if not fragment:
+            return None, ('Every part needs the text it covers, copied from the '
+                          'cell exactly as it appears.')
+        start = text.find(fragment, cursor)
+        if start < 0:
+            return None, ('"%s" does not appear in the cell after the piece '
+                          'before it. The cell is "%s". Copy each piece exactly '
+                          'as written, in the order it appears.' % (fragment, text))
+        spans.append({'start': start, 'end': start + len(fragment), 'role': role})
+        cursor = start + len(fragment)
+    return spans, None
+
+
 def _tool_set_pattern(state, args):
     """Teach the normaliser to read a column the way the person says it reads."""
     from .views import (_internal_post, _normaliser_saved,
@@ -1740,8 +1828,14 @@ def _tool_set_pattern(state, args):
 
     pattern_id = str(args.get('pattern_id') or '').strip()
     grammar = str(args.get('grammar') or '').strip()
-    if not pattern_id or not grammar:
-        return {'ok': False, 'error': 'Needs the pattern id and the grammar they typed.'}
+    parts = args.get('parts')
+    group_separator = str(args.get('group_separator') or '').strip()
+    if not pattern_id:
+        return {'ok': False, 'error': 'Needs the pattern id.'}
+    if not grammar and not isinstance(parts, (list, tuple)):
+        return {'ok': False,
+                'error': ('Needs either `parts` - the text of each field quoted '
+                          'out of the example cell - or a `grammar`.')}
 
     payload = _pattern_payload(state)
     pattern = next((p for p in (payload.get('patterns') or [])
@@ -1760,14 +1854,38 @@ def _tool_set_pattern(state, args):
 
     cells = {str(cell.get('column')): cell.get('value')
              for cell in (example.get('left') or [])}
-    spans, problem = _spans_for_grammar(cells.get(source_column), grammar)
+    if isinstance(parts, (list, tuple)) and parts:
+        spans, problem = _spans_from_parts(cells.get(source_column), parts)
+    else:
+        spans, problem = _spans_for_grammar(cells.get(source_column), grammar)
     if problem:
         return {'ok': False, 'error': problem}
 
     config = dict(_normaliser_saved(state['session_id'], 'config') or {})
+    if group_separator:
+        # Without this the approved parts are never divided at all: the default
+        # separators are slash, pipe, semicolon, newline and caret, and a sheet
+        # that separates them with a comma falls through every one of them and
+        # keeps the whole cell as a single part number.
+        config['delimiterMode'] = group_separator
+        _save_normaliser_state(state['session_id'], config=config)
     known_rules = dict(config.get('fieldPatternRules') or {})
 
-    response = bom_field_pattern_teaching(_internal_post({
+    # How each field is divided, for the roles that were actually taught. Spans
+    # alone say where the fields sit in ONE cell; they say nothing about what
+    # separates one approved part from the next, and the saved rule is built
+    # from `field_rules` - it is the only input that marks a field
+    # customerConfirmed. Without it the library stored the shape and an empty
+    # `fields`, which parses nothing: correct in the session that taught it,
+    # useless on the next sheet.
+    taught_field_rules = {}
+    if group_separator:
+        for span in spans:
+            role = span.get('role')
+            if role and role != 'ignore':
+                taught_field_rules[role] = {'delimiter': group_separator}
+
+    payload = {
         'headers': list(cells),
         'row': cells,
         'roles': _normaliser_saved(state['session_id'], 'roles') or {},
@@ -1779,8 +1897,13 @@ def _tool_set_pattern(state, args):
         # Every rule taught so far, so teaching a second pattern does not forget
         # the first - the editor threads the same set through each call.
         'active_rules': known_rules,
+        'base_rule': pattern.get('suggestedRule') or {},
         'persist': True,
-    }))
+    }
+    if taught_field_rules:
+        payload['field_rules'] = taught_field_rules
+        payload['alternate_delimiter'] = group_separator
+    response = bom_field_pattern_teaching(_internal_post(payload))
     result = getattr(response, 'data', {}) or {}
     if not result.get('success', True) and result.get('error'):
         return {'ok': False, 'error': result['error']}
