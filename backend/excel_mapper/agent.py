@@ -158,7 +158,16 @@ Work through these in order. Each one ends with a question. After you ask, STOP 
 
 7. CHECK IT AGAINST FACTWISE
    Call check_with_factwise. This runs FactWise's own import validator over the sheet. It is the only thing that decides whether the sheet can be imported, so report exactly what it says and add no findings of your own.
-   If it reports errors, list them plainly - the row, the column and the reason - and say what would fix them. Do not import a sheet that failed.
+   If it reports errors, list them plainly - the row, the column and the reason - grouped by what kind of problem they are. Do not import a sheet that failed.
+
+   Then offer to fix what can be fixed. `fixable` on the result says which kinds have a repair behind them, and `repair_tools` names the tool for each. Work one kind at a time.
+   Before applying anything, say what you are about to do and to how many rows, and ASK.
+   Look before you ask. For anything about a column, call inspect_column first - it says how many cells are empty and what the rest hold, so you can offer a real choice instead of a blind menu: "Measurement unit is empty on 12 rows; the rest are EA, PCS and NOS."
+   Every repair tool is a form, not a button. Ask for the mode first - the strategy, the value_mode - and then ask ONLY for what that mode needs: a join wants its columns and separator, a default wants its value, carrying down wants nothing more. Offer the modes the tool actually lists and never a word outside them.
+   An error kind with no repair behind it, an unresolvable vendor or unit for instance, is not something to guess at. Say it needs them, and offer the sheet: they can download it, correct it in Excel, and send it back with apply_edited_sheet - which keeps this session, its mappings and anything already checked.
+   They may also just tell you what they want in their own words - "make every unit EA", "drop the rows with no part number", "put a suffix on the duplicate codes". Work out which tool that is and confirm the details before running it. If what they asked could mean two things, ask which; do not pick.
+   A delete is the one repair that cannot be walked back, so say how many rows will go BEFORE running it, not after. If the result comes back with rows kept because the BOM still needs them, say so plainly - they asked for those rows to go and did not get that.
+   After every repair, check with FactWise again and say whether the error count went down. If it went UP, say so plainly - the repair made things worse and they need to know, because there is no undo.
    If it passes, say how many rows it read. Then ask which they want next: check the manufacturer part numbers against the distributors first, or go straight to importing into FactWise. Stop and wait.
    - they want the MPN check -> checkpoint 8.
    - they want to import -> checkpoint 9.
@@ -402,6 +411,244 @@ TOOLS = [
                 'Look up every manufacturer part number in the sheet at DigiKey, '
                 'Mouser and Element14, and report what each distributor said. '
                 'Slow - it can take a couple of minutes on a large sheet.'
+            ),
+            'parameters': {'type': 'object', 'properties': {}},
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'fix_item_codes',
+            'description': (
+                'Repair blank or duplicated Item codes - the two most common '
+                'reasons FactWise rejects a sheet. Ask which strategy they want '
+                'before calling.'
+            ),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'blank_strategy': {
+                        'type': 'string', 'enum': ['prefix_sequence', 'leave'],
+                        'description': 'Generate a numbered code, or leave blanks alone.',
+                    },
+                    'duplicate_strategy': {
+                        'type': 'string', 'enum': ['suffix', 'prefix_sequence', 'leave'],
+                        'description': 'Add a suffix, renumber, or leave duplicates alone.',
+                    },
+                    'prefix': {'type': 'string',
+                               'description': 'Used by prefix_sequence. Ask for it.'},
+                    'column': {'type': 'string',
+                               'description': 'Defaults to the Item code column.'},
+                },
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'inspect_column',
+            'description': (
+                'Look at a column before changing it: how many cells are empty, '
+                'and what values the rest hold. Call this BEFORE asking someone '
+                'how to fill a column, so the choice is offered against what is '
+                'actually there.'
+            ),
+            'parameters': {
+                'type': 'object',
+                'properties': {'column': {'type': 'string'}},
+                'required': ['column'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'fill_blanks',
+            'description': (
+                'Fill the empty cells of a column. `strategy` decides where the '
+                'value comes from; ask which they want, then ask only for what '
+                'that strategy needs.'
+            ),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'column': {'type': 'string'},
+                    'strategy': {
+                        'type': 'string',
+                        'enum': ['above', 'below', 'default', 'source_column'],
+                        'description': ('above/below carry the neighbouring value into '
+                                        'the gap; default writes one value; '
+                                        'source_column copies another column.'),
+                    },
+                    'default_value': {'type': 'string',
+                                      'description': 'Required when strategy is default.'},
+                    'source_column': {'type': 'string',
+                                      'description': 'Required when strategy is source_column.'},
+                },
+                'required': ['column', 'strategy'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'fill_column',
+            'description': (
+                'Write a column, or create one. `value_mode` decides what goes '
+                'in it. Ask which mode they want first, then ask only for that '
+                "mode's inputs - the same way the editor's own dialog changes "
+                'its form. Use this rather than fill_blanks when the value has '
+                'to be built, not just copied.'
+            ),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'target_column': {'type': 'string'},
+                    'target_mode': {
+                        'type': 'string', 'enum': ['existing', 'new'],
+                        'description': 'Write into a column that exists, or make one.',
+                    },
+                    'value_mode': {
+                        'type': 'string',
+                        'enum': ['fixed', 'join', 'copy', 'serial', 'conditional',
+                                 'saved_rule'],
+                        'description': ('fixed: one value. join: two or more columns '
+                                        'joined. copy: another column as-is. serial: a '
+                                        'numbered sequence. conditional: if a column '
+                                        'looks a certain way write one value, otherwise '
+                                        'another. saved_rule: run a rule this entity '
+                                        'already saved - call list_saved_rules first.'),
+                    },
+                    'write_mode': {
+                        'type': 'string',
+                        'enum': ['fill_empty', 'overwrite', 'duplicates'],
+                        'description': ('fill_empty: only the blanks. overwrite: every '
+                                        'row. duplicates: only rows whose value repeats '
+                                        'elsewhere in the column.'),
+                    },
+                    'fixed_value': {'type': 'string', 'description': 'For fixed.'},
+                    'source_columns': {
+                        'type': 'array', 'items': {'type': 'string'},
+                        'description': 'For join (two or more) or copy (one).',
+                    },
+                    'separator': {'type': 'string',
+                                  'description': 'For join. Ask what goes between them.'},
+                    'serial_prefix': {'type': 'string', 'description': 'For serial.'},
+                    'serial_start': {'type': 'integer', 'description': 'For serial.'},
+                    'serial_padding': {'type': 'integer',
+                                       'description': 'For serial - digits, so 1 becomes 001.'},
+                    'branches': {
+                        'type': 'array',
+                        'description': ('For conditional. Each entry is one "if". They '
+                                        'are tried in order and the first match wins.'),
+                        'items': {
+                            'type': 'object',
+                            'properties': {
+                                'column': {'type': 'string',
+                                           'description': 'The column being tested.'},
+                                'operator': {
+                                    'type': 'string',
+                                    'enum': ['equals', 'not_equals', 'contains',
+                                             'starts_with', 'ends_with',
+                                             'is_empty', 'not_empty'],
+                                },
+                                'compare': {
+                                    'type': 'array', 'items': {'type': 'string'},
+                                    'description': ('What to test against. Several values '
+                                                    'mean any of these. Not needed for '
+                                                    'is_empty or not_empty.'),
+                                },
+                                'output_value': {'type': 'string',
+                                                 'description': 'What to write when it matches.'},
+                                'output_source_column': {
+                                    'type': 'string',
+                                    'description': ('Instead of a fixed value, copy this '
+                                                    'column cell.'),
+                                },
+                            },
+                            'required': ['column', 'operator'],
+                        },
+                    },
+                    'otherwise_value': {
+                        'type': 'string',
+                        'description': 'For conditional - what to write when no branch matches.'},
+                    'otherwise_source_column': {
+                        'type': 'string',
+                        'description': 'For conditional - or copy this column instead.'},
+                    'saved_rule': {
+                        'type': 'string',
+                        'description': ('For saved_rule - the rule name exactly as '
+                                        'list_saved_rules gave it.'),
+                    },
+                },
+                'required': ['target_column', 'value_mode', 'write_mode'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'list_saved_rules',
+            'description': (
+                'The column rules this instance has saved, with what each one '
+                'does. Call this before offering saved_rule, so the names you '
+                'offer are real ones.'
+            ),
+            'parameters': {'type': 'object', 'properties': {}},
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'copy_column',
+            'description': (
+                "Copy one column's values into another. Two calls through a "
+                'spare column is how two columns get swapped.'
+            ),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'source_column': {'type': 'string'},
+                    'target_column': {'type': 'string'},
+                    'only_empty': {'type': 'boolean'},
+                },
+                'required': ['source_column', 'target_column', 'only_empty'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'delete_rows',
+            'description': (
+                'Delete rows where a column meets a condition. Destructive and '
+                'not undoable - say how many rows will go, and confirm first.'
+            ),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'column': {'type': 'string'},
+                    'operator': {
+                        'type': 'string',
+                        'enum': ['is_empty', 'not_empty', 'equals', 'not_equals', 'contains'],
+                    },
+                    'compare': {'type': 'string',
+                                'description': 'The value to compare against, where the operator needs one.'},
+                },
+                'required': ['column', 'operator'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'apply_edited_sheet',
+            'description': (
+                'Take back a sheet the person downloaded and edited themselves, '
+                'and use it as the new grid. Columns are matched by name, so '
+                'reordering is safe, and columns they left out keep their '
+                'current values. Only call this once they say they have '
+                'attached the edited file.'
             ),
             'parameters': {'type': 'object', 'properties': {}},
         },
@@ -1212,11 +1459,27 @@ def _tool_check_with_factwise(state, args):
                 'error': data.get('error') or 'FactWise could not check the sheet.'}
     result = data.get('result') or {}
     errors = result.get('errors') or []
+    # Grouped by kind, because a repair applies to a kind and not to one row -
+    # forty "Item Type is required" errors are one decision, not forty.
+    kinds = {}
+    for error in errors:
+        key = str(error.get('code') or 'UNKNOWN')
+        entry = kinds.setdefault(key, {'code': key, 'rows': 0, 'columns': set(),
+                                       'example': error.get('message')})
+        entry['rows'] += 1
+        if error.get('column'):
+            entry['columns'].add(str(error['column']))
+    grouped = [{**k, 'columns': sorted(k['columns']),
+                'repair_tool': REPAIRS.get(k['code'])} for k in kinds.values()]
     return {
         'ok': True,
         'passed': bool(result.get('ok')),
         'rows_read': result.get('row_count'),
         'error_count': result.get('error_count'),
+        'by_kind': grouped,
+        'fixable': [k['code'] for k in grouped if k['repair_tool']],
+        'needs_a_person': [k['code'] for k in grouped if not k['repair_tool']],
+        'repair_tools': {k['code']: k['repair_tool'] for k in grouped if k['repair_tool']},
         # Verbatim, capped only so one broken sheet cannot fill the whole turn.
         'errors': errors[:40],
         'errors_shown': min(len(errors), 40),
@@ -1341,6 +1604,420 @@ def _tool_check_mpns(state, args):
         'caution': ('No distributor could be reached, so this run says nothing about '
                     'the parts themselves.'
                     if unreached and len(unreached) >= len(sources) else None),
+    }
+
+
+# Which FactWise error codes have a repair behind them, and which tool it is.
+# Anything absent needs a person: an unresolvable vendor or unit cannot be
+# guessed at, and a plausible-looking substitute is worse than an honest gap.
+REPAIRS = {
+    'ITEM_CODE_REQUIRED': 'fix_item_codes',
+    'DUPLICATE_ITEM_CODE': 'fix_item_codes',
+    'REQUIRED': 'fill_blanks',
+    'BAD_QUANTITY': 'fill_column',
+}
+
+
+def _repair(state, view, payload, what):
+    """Run one repair on the built sheet and say what it touched.
+
+    Every repair goes through the endpoint the editor's own button calls, so a
+    change made in conversation and a change made in the grid are the same
+    change. Nothing here writes a cell itself.
+    """
+    from .views import _internal_post
+
+    session_id = state.get('mapped_session_id')
+    if not session_id:
+        return {'ok': False, 'error': 'Build the sheet before repairing it.'}
+    response = view(_internal_post(dict(payload, session_id=session_id)))
+    data = getattr(response, 'data', {}) or {}
+    if not data.get('success'):
+        return {'ok': False, 'error': data.get('error') or ('%s failed.' % what)}
+    # Each endpoint names its count differently - `changed` for a fill, `removed`
+    # for a delete - and reading only some of them made a delete report that it
+    # had changed nothing while removing forty rows.
+    changed = next((data[key] for key in ('changed', 'updated', 'removed', 'deleted')
+                    if data.get(key) is not None), None)
+    result = {
+        'ok': True,
+        'did': what,
+        'rows_changed': changed,
+        'detail': {k: v for k, v in data.items()
+                   if k not in ('success', 'data', 'headers', 'rows')},
+        'next': 'Call check_with_factwise again and compare the error count.',
+    }
+    # Rows the BOM still needs are kept even when the condition matched them.
+    # The endpoint reports that rather than swallowing it, because a silent
+    # under-delete looks like a bug to whoever asked for those rows to go.
+    if data.get('protected'):
+        result['kept_because_the_bom_needs_them'] = data['protected']
+        result['say_this'] = ('%s row(s) matched but were kept because the BOM still '
+                              'refers to them. Tell them that.' % data['protected'])
+    if data.get('remaining') is not None:
+        result['rows_left'] = data['remaining']
+    return result
+
+
+def _tool_fix_item_codes(state, args):
+    """Blank or duplicated item codes - the two FactWise rejects most often."""
+    from .views import resolve_item_code
+
+    return _repair(state, resolve_item_code, {
+        'blank_strategy': args.get('blank_strategy') or 'leave',
+        'duplicate_strategy': args.get('duplicate_strategy') or 'leave',
+        'prefix': args.get('prefix') or '',
+        'column': args.get('column') or 'Item code',
+    }, 'repaired item codes')
+
+
+def _resolve_column(state, name):
+    """The grid column a caller means, matched forgivingly. '' when there is none.
+
+    FactWise reports its errors against ITS names - "Item Type" - while the grid
+    holds the mapper's - "Item type". An exact match therefore fails on exactly
+    the columns a repair is most often aimed at, and the agent ends up telling
+    someone their sheet has no Item Type column while looking straight at it.
+
+    `_template_label_key` is the same forgiving key the importer and the mapping
+    page already compare with, so a column found here is the column those two
+    would have found.
+    """
+    from .views import _template_label_key, get_session_consistent, read_session_grid
+
+    wanted = str(name or '').strip()
+    if not wanted:
+        return ''
+    session_id = state.get('mapped_session_id')
+    info = get_session_consistent(session_id) if session_id else None
+    if not info:
+        return wanted
+    headers, _rows = read_session_grid(session_id, info)
+    for header in (headers or []):
+        if str(header).strip() == wanted:
+            return header
+    key = _template_label_key(wanted)
+    for header in (headers or []):
+        if _template_label_key(header) == key:
+            return header
+    return ''
+
+
+def _column_or_error(state, name, role='column'):
+    """(resolved, error). The error names what IS there, so the next guess is informed."""
+    from .views import get_session_consistent, read_session_grid
+
+    resolved = _resolve_column(state, name)
+    if resolved:
+        return resolved, None
+    session_id = state.get('mapped_session_id')
+    info = get_session_consistent(session_id) if session_id else None
+    headers = []
+    if info:
+        headers, _rows = read_session_grid(session_id, info)
+    return '', {
+        'ok': False,
+        'error': 'There is no %s called "%s" in this sheet.' % (role, name),
+        'columns_available': [str(h) for h in (headers or [])][:60],
+    }
+
+
+def _tool_inspect_column(state, args):
+    """What is actually in a column, before anyone decides how to change it.
+
+    `fill_missing_values` has a dry run built into it, and it is the difference
+    between offering a blind menu and offering a real choice: "Measurement unit
+    is empty on 12 rows, the rest are EA, PCS and NOS" is a question someone can
+    answer.
+    """
+    from .views import _internal_post, fill_missing_values
+
+    session_id = state.get('mapped_session_id')
+    if not session_id:
+        return {'ok': False, 'error': 'Build the sheet first.'}
+    column, problem = _column_or_error(state, args.get('column'))
+    if problem:
+        return problem
+
+    response = fill_missing_values(_internal_post({
+        'session_id': session_id, 'column': column, 'action': 'analyze',
+    }))
+    data = getattr(response, 'data', {}) or {}
+    if not data.get('success'):
+        return {'ok': False, 'error': data.get('error') or 'That column could not be read.'}
+    return {
+        'ok': True,
+        'column': column,
+        'empty_cells': data.get('empty_count', data.get('missing_count')),
+        'total_rows': data.get('total_rows', data.get('row_count')),
+        'values_present': (data.get('values') or data.get('distinct_values')
+                           or data.get('value_counts')),
+        'ways_to_fill': ['above', 'below', 'default', 'source_column'],
+    }
+
+
+def _tool_fill_blanks(state, args):
+    """Fill a column's empty cells, by whichever route they chose."""
+    from .views import fill_missing_values
+
+    strategy = str(args.get('strategy') or '').strip()
+    if not strategy:
+        return {'ok': False, 'error': 'Needs a column and a strategy.'}
+    column, problem = _column_or_error(state, args.get('column'))
+    if problem:
+        return problem
+    if strategy not in ('above', 'below', 'default', 'source_column'):
+        return {'ok': False, 'error': 'strategy must be above, below, default or source_column.'}
+    if strategy == 'default' and not str(args.get('default_value') or '').strip():
+        return {'ok': False, 'error': 'A default strategy needs the value to write. Ask for it.'}
+    if strategy == 'source_column':
+        source, problem = _column_or_error(state, args.get('source_column'), 'column to copy from')
+        if problem:
+            return problem
+        args = dict(args, source_column=source)
+
+    payload = {
+        'column': column, 'action': 'apply', 'target_mode': 'empty',
+        'strategy': strategy,
+    }
+    if args.get('default_value') is not None:
+        payload['default_value'] = args['default_value']
+    if args.get('source_column'):
+        payload['source_column'] = args['source_column']
+    described = {
+        'above': 'carried the value above down into the blanks',
+        'below': 'carried the value below up into the blanks',
+        'default': 'wrote "%s" into the blanks' % args.get('default_value'),
+        'source_column': 'copied %s into the blanks' % args.get('source_column'),
+    }[strategy]
+    return _repair(state, fill_missing_values, payload, '%s of %s' % (described, column))
+
+
+def _tool_fill_column(state, args):
+    """Write or create a column, by whichever mode they chose.
+
+    One tool for one endpoint, with the endpoint's own modes. The alternative -
+    a separate small tool per mode - reads tidier in a list and behaves worse:
+    the model picks whichever name sounds closest instead of asking which mode
+    the person actually wants.
+    """
+    from .views import fill_or_create_column
+
+    value_mode = str(args.get('value_mode') or '').strip()
+    write_mode = str(args.get('write_mode') or 'fill_empty').strip()
+    if not str(args.get('target_column') or '').strip() or not value_mode:
+        return {'ok': False, 'error': 'Needs a target column and a value mode.'}
+
+    # A NEW column is named, not found; an existing one has to actually be there.
+    if str(args.get('target_mode') or 'existing') == 'new':
+        target = str(args['target_column']).strip()
+    else:
+        target, problem = _column_or_error(state, args.get('target_column'), 'target column')
+        if problem:
+            return problem
+
+    sources = []
+    for candidate in (args.get('source_columns') or []):
+        resolved, problem = _column_or_error(state, candidate, 'source column')
+        if problem:
+            return problem
+        sources.append(resolved)
+    rule = {
+        'type': 'column_value',
+        'target_mode': str(args.get('target_mode') or 'existing'),
+        'target_column': target,
+        'value_mode': value_mode,
+        'write_mode': write_mode,
+        'source_columns': sources,
+        'separator': args.get('separator') if args.get('separator') is not None else '_',
+    }
+
+    if value_mode == 'fixed':
+        if args.get('fixed_value') is None:
+            return {'ok': False, 'error': 'A fixed value mode needs the value. Ask for it.'}
+        rule['fixed_value'] = args['fixed_value']
+        described = 'set %s to "%s"' % (target, args['fixed_value'])
+    elif value_mode == 'join':
+        if len(sources) < 2:
+            return {'ok': False, 'error': 'A join needs at least two columns. Ask which.'}
+        described = 'built %s from %s joined with "%s"' % (
+            target, ' and '.join(sources), rule['separator'])
+    elif value_mode == 'copy':
+        if len(sources) != 1:
+            return {'ok': False, 'error': 'A copy needs exactly one source column.'}
+        rule['source_column'] = sources[0]
+        described = 'copied %s into %s' % (sources[0], target)
+    elif value_mode == 'serial':
+        rule['serial_prefix'] = args.get('serial_prefix') or ''
+        rule['serial_start'] = int(args.get('serial_start') or 1)
+        rule['serial_padding'] = int(args.get('serial_padding') or 0)
+        described = 'numbered %s from %s%s' % (
+            target, rule['serial_prefix'], rule['serial_start'])
+    elif value_mode == 'saved_rule':
+        from .models import ColumnRule
+
+        name = str(args.get('saved_rule') or '').strip()
+        if not name:
+            return {'ok': False,
+                    'error': 'Which saved rule? Call list_saved_rules and offer the names.'}
+        saved = ColumnRule.objects.filter(name=name).first()
+        if saved is None or not isinstance(saved.rule, dict):
+            available = [r.name for r in ColumnRule.objects.all()[:20]]
+            return {'ok': False,
+                    'error': 'There is no saved rule called "%s".' % name,
+                    'rules_available': available}
+        # The saved rule already says how to compute the value; only where it
+        # lands and which rows it touches come from this call. Same split the
+        # editor's dialog makes.
+        rule = dict(saved.rule)
+        rule.update({'target_mode': rule.get('target_mode') or 'existing',
+                     'target_column': target, 'write_mode': write_mode})
+        described = 'applied the saved rule "%s" to %s' % (name, target)
+        return _repair(state, fill_or_create_column, {'rule': rule}, described)
+    elif value_mode == 'conditional':
+        branches = [b for b in (args.get('branches') or []) if isinstance(b, dict)]
+        if not branches:
+            return {'ok': False,
+                    'error': ('A conditional needs at least one rule. Ask which column '
+                              'to look at, what to look for, and what to write.')}
+        prepared, told = [], []
+        for branch in branches:
+            operator = str(branch.get('operator') or '').strip()
+            if not str(branch.get('column') or '').strip() or not operator:
+                return {'ok': False, 'error': 'Each rule needs a column and an operator.'}
+            column, problem = _column_or_error(state, branch.get('column'), 'column to test')
+            if problem:
+                return problem
+            # A list is the shape the engine wants - several values mean "any of
+            # these". Collapsing it to a string made a contains test hunt for the
+            # literal bracketed text inside the cell instead of the values.
+            compare = branch.get('compare')
+            if compare is None:
+                compare = []
+            elif not isinstance(compare, (list, tuple)):
+                compare = [compare]
+            compare = [str(value) for value in compare]
+            if operator not in ('is_empty', 'not_empty') and not compare:
+                return {'ok': False,
+                        'error': '"%s" needs something to compare against.' % operator}
+            entry = {'column': column, 'operator': operator, 'compare': compare}
+            if branch.get('output_source_column'):
+                entry['output_source_column'] = str(branch['output_source_column'])
+                wrote = 'the %s cell' % entry['output_source_column']
+            else:
+                entry['output_value'] = ('' if branch.get('output_value') is None
+                                         else str(branch['output_value']))
+                wrote = '"%s"' % entry['output_value']
+            prepared.append(entry)
+            told.append('%s %s%s -> %s' % (
+                column, operator.replace('_', ' '),
+                (' ' + ' or '.join(compare)) if compare else '', wrote))
+
+        condition = {'branches': prepared}
+        if args.get('otherwise_source_column'):
+            condition['else_source_column'] = str(args['otherwise_source_column'])
+            told.append('otherwise the %s cell' % args['otherwise_source_column'])
+        elif args.get('otherwise_value') is not None:
+            condition['else'] = str(args['otherwise_value'])
+            told.append('otherwise "%s"' % args['otherwise_value'])
+        rule['condition'] = condition
+        described = 'set %s by rule: %s' % (target, '; '.join(told))
+    else:
+        return {'ok': False,
+                'error': ('value_mode must be fixed, join, copy, serial, conditional '
+                          'or saved_rule.')}
+
+    return _repair(state, fill_or_create_column, {'rule': rule}, described)
+
+
+def _tool_list_saved_rules(state, args):
+    """The saved column rules, so a saved_rule can be offered by its real name."""
+    from .models import ColumnRule
+
+    rules = []
+    for rule in ColumnRule.objects.all()[:50]:
+        body = rule.rule if isinstance(rule.rule, dict) else {}
+        rules.append({
+            'name': rule.name,
+            'value_mode': body.get('value_mode'),
+            'writes': body.get('target_column'),
+            # The definition itself, so the agent can say what a rule DOES
+            # rather than only what it is called.
+            'definition': body,
+        })
+    return {'ok': True, 'rules': rules, 'count': len(rules)}
+
+
+def _tool_copy_column(state, args):
+    """One column's values into another."""
+    from .views import copy_column_values
+
+    source, problem = _column_or_error(state, args.get('source_column'), 'column to copy from')
+    if problem:
+        return problem
+    target, problem = _column_or_error(state, args.get('target_column'), 'column to copy into')
+    if problem:
+        return problem
+    if source == target:
+        return {'ok': False, 'error': 'Those are the same column.'}
+    return _repair(state, copy_column_values, {
+        'source_column': source,
+        'target_column': target,
+        'only_empty': bool(args.get('only_empty', False)),
+    }, 'copied %s into %s' % (source, target))
+
+
+def _tool_delete_rows(state, args):
+    """Rows matching a condition. Destructive, and there is no undo."""
+    from .views import delete_rows_conditional
+
+    operator = str(args.get('operator') or 'is_empty').strip()
+    column, problem = _column_or_error(state, args.get('column'), 'column to test')
+    if problem:
+        return problem
+    payload = {'column': column, 'operator': operator}
+    if args.get('compare') is not None:
+        payload['compare'] = args['compare']
+    return _repair(state, delete_rows_conditional, payload,
+                   'deleted rows where %s %s' % (column, operator.replace('_', ' ')))
+
+
+def _tool_apply_edited_sheet(state, args):
+    """Replace the grid with the sheet the person edited by hand.
+
+    The way out of anything the tools cannot do. An unresolvable vendor, a
+    judgement call across forty rows - those belong in the tool they already
+    know. Importing writes into THIS session rather than starting a new one, so
+    the mapping, the tags and any distributor results stay attached.
+    """
+    from django.core.files.uploadedfile import SimpleUploadedFile
+
+    from .views import _internal_multipart, import_edited_sheet
+
+    session_id = state.get('mapped_session_id')
+    if not session_id:
+        return {'ok': False, 'error': 'There is no sheet to replace yet.'}
+    path = state.get('edited_path')
+    if not path:
+        return {'ok': False,
+                'error': ('No edited sheet has been attached. Ask them to send the '
+                          'file back with their next message.')}
+    with open(path, 'rb') as handle:
+        upload = SimpleUploadedFile(state.get('edited_name') or 'edited.xlsx', handle.read())
+
+    response = import_edited_sheet(_internal_multipart({'file': upload}), session_id)
+    data = getattr(response, 'data', {}) or {}
+    if not data.get('success'):
+        return {'ok': False, 'error': data.get('error') or 'That sheet could not be read.'}
+    # Consumed, so a later turn cannot silently re-apply the same file.
+    state['edited_path'] = None
+    state['edited_name'] = None
+    return {
+        'ok': True,
+        'rows_now': data.get('row_count') or data.get('rows'),
+        'columns_updated': data.get('updated_columns') or data.get('matched'),
+        'columns_ignored': data.get('ignored') or data.get('ignored_columns'),
+        'next': 'Check with FactWise again to see where that leaves it.',
     }
 
 
@@ -1489,6 +2166,14 @@ DISPATCH = {
     'check_sheet': _tool_check_sheet,
     'resolve_conflict': _tool_resolve_conflict,
     'check_with_factwise': _tool_check_with_factwise,
+    'fix_item_codes': _tool_fix_item_codes,
+    'inspect_column': _tool_inspect_column,
+    'fill_blanks': _tool_fill_blanks,
+    'fill_column': _tool_fill_column,
+    'list_saved_rules': _tool_list_saved_rules,
+    'copy_column': _tool_copy_column,
+    'delete_rows': _tool_delete_rows,
+    'apply_edited_sheet': _tool_apply_edited_sheet,
     'check_mpns': _tool_check_mpns,
     'list_projects': _tool_list_projects,
     'import_to_factwise': _tool_import_to_factwise,
@@ -1685,10 +2370,20 @@ def agent_message(request):
              'error': 'Attach a spreadsheet to start, or send conversation_id to continue.'},
             status=status.HTTP_400_BAD_REQUEST)
 
-    state['messages'].append({
-        'role': 'user',
-        'content': message or 'I have attached a BOM. Please normalise it.',
-    })
+    # A file on a LATER turn is the edited sheet coming back, not a new BOM.
+    if upload is not None and state.get('mapped_session_id'):
+        state['edited_path'] = _hold(conversation_id, upload)
+        state['edited_name'] = upload.name or 'edited.xlsx'
+
+    # Say that a file arrived, as well as whatever they typed. A note only used
+    # when the message is empty is a note that never appears - people attach a
+    # file AND explain it - and the model then asks for the sheet it is holding.
+    content = message or 'I have attached a BOM. Please normalise it.'
+    if state.get('edited_path'):
+        content = (
+            '%s\n\n[The edited sheet "%s" is attached and ready; apply it with '
+            'apply_edited_sheet.]' % (content, state.get('edited_name') or 'sheet.xlsx'))
+    state['messages'].append({'role': 'user', 'content': content})
 
     used = []
     try:
