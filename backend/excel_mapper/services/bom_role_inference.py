@@ -1974,7 +1974,35 @@ def _backend_section_title(row, headers, source_roles):
     return text
 
 
-def _is_backend_summary_row(row, source_roles):
+def _is_backend_summary_row(
+    row,
+    source_roles,
+    headers=None,
+    *,
+    is_footer=False,
+    has_prior_data=False,
+):
+    safe_headers = [clean(header) for header in (headers or [])]
+    populated = [
+        (header, clean(row.get(header, "")))
+        for header in safe_headers
+        if not is_blankish(row.get(header, ""))
+    ]
+    values = [value for _, value in populated]
+    combined = " ".join(values)
+    has_number = bool(re.search(r"(?<![A-Za-z])[-+]?\d+(?:[.,]\d+)?(?![A-Za-z])", combined))
+    has_summary_label = bool(re.search(
+        r"\b(?:"
+        r"grand\s+total|sub\s*total|"
+        r"total(?:\s+(?:count|items?|components?|parts?|quantity|qty|rows?|records?))?|"
+        r"(?:item|component|part|row|record)\s+count"
+        r")\b",
+        combined,
+        flags=re.IGNORECASE,
+    ))
+    if has_summary_label and has_number:
+        return True
+
     has_identity = any(
         _source_value_for_role(row, source_roles, role)
         for role in ("cpn", "mpn", "manufacturer", "description", "parent", "level")
@@ -1982,7 +2010,27 @@ def _is_backend_summary_row(row, source_roles):
     if has_identity:
         return False
     quantity = _source_value_for_role(row, source_roles, "quantity")
-    return bool(quantity and re.fullmatch(r"[-+]?\d+(?:[.,]\d+)?", quantity))
+    if quantity and re.fullmatch(r"[-+]?\d+(?:[.,]\d+)?", quantity):
+        return True
+
+    # A workbook may end with an unlabeled numeric total. Only classify that
+    # narrow footer shape when it follows substantive rows and the populated
+    # column is not an identifier/hierarchy field. This keeps numeric CPNs and
+    # line identifiers available to normalization.
+    if not (is_footer and has_prior_data and len(populated) == 1):
+        return False
+    header, value = populated[0]
+    if not re.fullmatch(r"[-+]?\d+(?:[.,]\d+)?", value):
+        return False
+    protected_roles = {"cpn", "mpn", "manufacturer", "parent", "level"}
+    mapped_role = next((
+        role
+        for role, mapped_header in (source_roles or {}).items()
+        if clean(mapped_header) == header
+    ), "")
+    if mapped_role in protected_roles:
+        return False
+    return _strong_semantic_header_role(header) not in protected_roles
 
 
 def _is_backend_do_not_populate_row(row, headers):
@@ -2029,6 +2077,7 @@ def _cleanup_detection_counts(diagnostics):
         "skipRepeatedHeaders": len(diagnostics.get("repeatedHeaderRows") or []),
         "skipDoNotPopulate": len(diagnostics.get("doNotPopulateRows") or []),
         "skipDeletedRows": len(diagnostics.get("deletedRows") or []),
+        "skipSummaryRows": len(diagnostics.get("summaryRows") or []),
         "parentPathLevels": len(diagnostics.get("parentPathRows") or []),
     }
 
@@ -2074,6 +2123,7 @@ def _prepare_backend_bom_rows(headers, rows, roles=None, config=None, header_row
         False,
     )
     skip_deleted = _normalizer_config_flag(config, "skipDeletedRows", "skip_deleted_rows", True)
+    skip_summaries = _normalizer_config_flag(config, "skipSummaryRows", "skip_summary_rows", True)
     prepared_rows = []
     current_section = ""
     diagnostics = {
@@ -2094,6 +2144,22 @@ def _prepare_backend_bom_rows(headers, rows, roles=None, config=None, header_row
             "roles": dict(active_source_roles),
         })
 
+    nonblank_row_indexes = [
+        index
+        for index, row in enumerate(mapped_rows)
+        if any(not is_blankish(row.get(header, "")) for header in safe_headers)
+    ]
+    final_nonblank_index = nonblank_row_indexes[-1] if nonblank_row_indexes else -1
+    prior_data_flags = []
+    has_prior_substantive_row = False
+    for row in mapped_rows:
+        prior_data_flags.append(has_prior_substantive_row)
+        if sum(
+            not is_blankish(row.get(header, ""))
+            for header in safe_headers
+        ) >= 2:
+            has_prior_substantive_row = True
+
     for index, row in enumerate(mapped_rows):
         source_row = _source_row_number(row, index, header_row_index)
         if not any(not is_blankish(row.get(header, "")) for header in safe_headers):
@@ -2112,10 +2178,25 @@ def _prepare_backend_bom_rows(headers, rows, roles=None, config=None, header_row
                 "roles": dict(active_source_roles),
             })
 
-        section_title = _backend_section_title(row, safe_headers, active_source_roles)
+        is_summary = _is_backend_summary_row(
+            row,
+            active_source_roles,
+            safe_headers,
+            is_footer=index == final_nonblank_index,
+            has_prior_data=prior_data_flags[index],
+        )
+        if is_summary:
+            diagnostics["summaryRows"].append(source_row)
+
+        section_title = _backend_section_title(
+            row,
+            safe_headers,
+            active_source_roles,
+        )
         if section_title:
-            current_section = section_title
             diagnostics["sectionTitleRows"].append(source_row)
+            if not is_summary:
+                current_section = section_title
 
         is_do_not_populate = _is_backend_do_not_populate_row(row, safe_headers)
         if is_do_not_populate:
@@ -2130,15 +2211,13 @@ def _prepare_backend_bom_rows(headers, rows, roles=None, config=None, header_row
 
         if repeated_role_map and skip_headers:
             continue
-        if section_title and skip_titles:
+        if section_title and skip_titles and not is_summary:
             continue
         if is_do_not_populate and skip_do_not_populate:
             continue
         if is_deleted and skip_deleted:
             continue
-
-        if _is_backend_summary_row(row, active_source_roles):
-            diagnostics["summaryRows"].append(source_row)
+        if is_summary and skip_summaries:
             continue
 
         remapped = dict(row)
@@ -8785,8 +8864,17 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                     fragment_row = dict(row) if isinstance(row, dict) else {}
                     fragment_row[source_column] = occurrence["rawValue"]
                     fragment_config = dict(config or {})
-                    fragment_config.pop("fieldPatternRules", None)
-                    fragment_config.pop("field_pattern_rules", None)
+                    for config_key in (
+                        "semanticPatternRules",
+                        "semantic_pattern_rules",
+                        "fieldPatternRules",
+                        "field_pattern_rules",
+                        "_activeFieldPatternRule",
+                        "_active_field_pattern_rule",
+                    ):
+                        fragment_config.pop(config_key, None)
+                    fragment_config["_semanticPatternPass"] = True
+                    fallback_fragment_config = dict(fragment_config)
                     if parser_rule:
                         fragment_config = _config_with_active_rule(fragment_config, parser_rule)
                     entries = _infer_field_entries_for_row(
@@ -8796,11 +8884,21 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                         [source_column],
                         config=fragment_config,
                     )
+                    rule_fallback_used = False
+                    if not entries and parser_rule and not _field_pattern_rule_excludes_row(parser_rule):
+                        entries = _infer_field_entries_for_row(
+                            fragment_row,
+                            headers,
+                            roles,
+                            [source_column],
+                            config=fallback_fragment_config,
+                        )
+                        rule_fallback_used = bool(entries)
                     spans = _interpretation_spans_by_column(
                         fragment_row,
                         headers,
                         [source_column],
-                        parser_rule,
+                        {} if rule_fallback_used else parser_rule,
                         entries,
                     )
                     interpretation = {
@@ -8813,6 +8911,7 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                         "left": raw_sample.get("left") or [],
                         "entries": entries,
                         "interpretationSpans": spans.get(source_column) or [],
+                        "ruleFallbackUsed": rule_fallback_used,
                     }
                     item["interpretations"].append(interpretation)
                     pattern_row = {
@@ -9371,14 +9470,33 @@ def _build_backend_review_contract(
         (config or {}).get("alternateLayout")
         or (config or {}).get("alternate_layout")
     )
-    public_review_rows = [
-        {
+    public_review_rows = []
+    for row in review_rows or []:
+        public_row = {
             key: value
             for key, value in row.items()
             if key != "occurrences"
         }
-        for row in review_rows or []
-    ]
+        public_row["occurrences"] = [
+            {
+                key: occurrence.get(key)
+                for key in (
+                    "patternKey",
+                    "occurrenceId",
+                    "id",
+                    "sourceColumn",
+                    "start",
+                    "end",
+                    "rawValue",
+                    "pattern",
+                    "interpretationSpans",
+                )
+                if occurrence.get(key) is not None
+            }
+            for occurrence in row.get("occurrences") or []
+            if isinstance(occurrence, dict)
+        ]
+        public_review_rows.append(public_row)
 
     return {
         "contractVersion": 3,
@@ -10161,6 +10279,7 @@ def refresh_bom_field_pattern_review_after_teach(
     ):
         parse_config.pop(key, None)
     parse_config["_semanticPatternPass"] = True
+    fallback_parse_config = dict(parse_config)
     parse_config = _config_with_active_rule(
         parse_config,
         _semantic_rule_for_source(rule, source_header),
@@ -10184,15 +10303,29 @@ def refresh_bom_field_pattern_review_after_teach(
         review_source_row = review_row.get("sourceRow")
         reconstructed_row["__sourceRow"] = review_source_row
         source_value = str(reconstructed_row.get(source_header) or "")
-        matching_fragments = []
-        for fragment in _semantic_identity_fragments(source_value, mapped_fields):
-            fragment_key = _semantic_pattern_key(
-                source_header,
-                mapped_fields,
-                fragment.get("grammar"),
+        matching_fragments = [
+            {
+                "id": clean(occurrence.get("occurrenceId") or occurrence.get("id")),
+                "start": int(occurrence.get("start") or 0),
+                "end": int(occurrence.get("end") or 0),
+                "rawValue": occurrence.get("rawValue") or "",
+                "grammar": occurrence.get("pattern") or pattern_record.get("pattern") or "",
+            }
+            for occurrence in review_row.get("occurrences") or []
+            if (
+                isinstance(occurrence, dict)
+                and clean(occurrence.get("patternKey")) == pattern_key
             )
-            if fragment_key == pattern_key:
-                matching_fragments.append(fragment)
+        ]
+        if not matching_fragments:
+            for fragment in _semantic_identity_fragments(source_value, mapped_fields):
+                fragment_key = _semantic_pattern_key(
+                    source_header,
+                    mapped_fields,
+                    fragment.get("grammar"),
+                )
+                if fragment_key == pattern_key:
+                    matching_fragments.append(fragment)
 
         existing_entries = [
             entry for entry in (review_row.get("entries") or [])
@@ -10208,10 +10341,26 @@ def refresh_bom_field_pattern_review_after_teach(
             if clean(entry.get("patternKey")) != pattern_key
         ]
         generated_entries = []
+        if not matching_fragments and target_indexes and not _field_pattern_rule_excludes_row(rule):
+            # Review contracts opened before occurrence metadata was added cannot
+            # replay multiline cells from their whitespace-normalized preview.
+            # Keep their backend-generated rows and validate the occurrence the
+            # user explicitly confirmed instead of erasing the whole pattern.
+            generated_entries = [
+                deepcopy(existing_entries[index])
+                for index in target_indexes
+            ]
+            if str(review_source_row) == str(source_row) and taught_spans.get(source_header):
+                refreshed_interpretations.append({
+                    "occurrenceId": clean(occurrence_id),
+                    "sourceRow": review_source_row,
+                    "interpretationSpans": taught_spans.get(source_header) or [],
+                    "ruleFallbackUsed": False,
+                })
         for fragment in matching_fragments:
             start = int(fragment.get("start") or 0)
             end = int(fragment.get("end") or 0)
-            generated_occurrence_id = hashlib.sha256(
+            generated_occurrence_id = clean(fragment.get("id")) or hashlib.sha256(
                 (
                     f"{pattern_key}|{review_source_row}|{source_header}|"
                     f"{start}|{end}"
@@ -10230,6 +10379,7 @@ def refresh_bom_field_pattern_review_after_teach(
             if is_taught_occurrence:
                 interpreted_entries = taught_entries
                 interpretation_spans = taught_spans.get(source_header) or []
+                rule_fallback_used = False
             else:
                 interpreted_entries = _infer_field_entries_for_row(
                     fragment_row,
@@ -10238,17 +10388,28 @@ def refresh_bom_field_pattern_review_after_teach(
                     [source_header],
                     config=parse_config,
                 )
+                rule_fallback_used = False
+                if not interpreted_entries and not _field_pattern_rule_excludes_row(rule):
+                    interpreted_entries = _infer_field_entries_for_row(
+                        fragment_row,
+                        list(reconstructed_row.keys()),
+                        roles,
+                        [source_header],
+                        config=fallback_parse_config,
+                    )
+                    rule_fallback_used = bool(interpreted_entries)
                 interpretation_spans = _interpretation_spans_by_column(
                     fragment_row,
                     list(reconstructed_row.keys()),
                     [source_header],
-                    rule,
+                    {} if rule_fallback_used else rule,
                     interpreted_entries,
                 ).get(source_header) or []
             refreshed_interpretations.append({
                 "occurrenceId": generated_occurrence_id,
                 "sourceRow": review_source_row,
                 "interpretationSpans": interpretation_spans,
+                "ruleFallbackUsed": rule_fallback_used,
             })
             for occurrence in review_row.get("occurrences") or []:
                 if (
