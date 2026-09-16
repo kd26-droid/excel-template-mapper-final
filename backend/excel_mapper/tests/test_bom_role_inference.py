@@ -29,11 +29,15 @@ from excel_mapper.services.bom_role_inference import (
     build_bom_field_pattern_teach_result,
     derive_visual_pattern_from_tagged_spans,
     _infer_field_entries_for_row,
+    _infer_marker_alternate_visual_rule,
     _interpretation_spans_by_column,
     _mpn_only_marker_alternate_pattern,
+    _mpn_position_prefix_layout,
+    _mpn_position_prefix_rule,
     _mpn_source_fragment_pattern,
     _pattern_shape_for_row,
     _same_cell_parenthesized_patterns_from_entries,
+    _same_cell_parenthesized_mpn_manufacturer_pairs,
     _semantic_interpretation_coverage,
     _semantic_identity_fragments,
     _semantic_pattern_key,
@@ -347,6 +351,33 @@ class BomRoleInferenceCleanupConfigTests(TestCase):
         self.assertEqual(response.json()["blockStructure"]["dataRowCount"], 2)
 
 
+class BomFieldPatternTeachApiTests(TestCase):
+    def test_missing_alternate_separator_stays_empty(self):
+        response = self.client.post(
+            "/api/bom/field-patterns/teach/",
+            {
+                "headers": ["Combined part"],
+                "row": {"Combined part": "BASE (A/B) (YAGEO)"},
+                "roles": {
+                    "mpn": "Combined part",
+                    "manufacturer": "Combined part",
+                },
+                "group": {"shape": "no-separator", "patternKey": "no-separator"},
+                "tagged_spans": [
+                    {"start": 0, "end": 4, "role": "mpn"},
+                    {"start": 6, "end": 9, "role": "alternateList"},
+                    {"start": 12, "end": 17, "role": "manufacturer"},
+                ],
+                "source_header": "Combined part",
+                "persist": False,
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["visualPattern"]["alternateDelimiter"], "")
+
+
 class VisualPatternMpnExtractionTests(SimpleTestCase):
     def setUp(self):
         self.value = "SOLDER MASK ALKALINE DEV. FINEDEL DSR-330C10-11M (TAMURA)"
@@ -354,6 +385,232 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
             "type": "bracket_manufacturer",
             "sourceHeader": "Combined part",
         }
+
+    def test_missing_alternate_delimiter_does_not_fall_back_to_slash(self):
+        value = "BASE (A/B) (YAGEO)"
+        tagged_spans = [
+            {"start": 0, "end": 4, "role": "mpn"},
+            {"start": 6, "end": 9, "role": "alternateList"},
+            {"start": 12, "end": 17, "role": "manufacturer"},
+        ]
+
+        result = build_bom_field_pattern_teach_result(
+            headers=["Combined part"],
+            row={"Combined part": value},
+            roles={"mpn": "Combined part", "manufacturer": "Combined part"},
+            group={"shape": "no-separator"},
+            tagged_spans=tagged_spans,
+            source_header="Combined part",
+        )
+
+        self.assertEqual(result["visualPattern"]["alternateDelimiter"], "")
+        self.assertEqual(
+            [entry["fields"]["mpn"]["value"] for entry in result["entries"]],
+            ["BASE"],
+        )
+
+    def test_saved_visual_pattern_without_delimiter_does_not_assume_slash(self):
+        value = "BASE (A/B) (YAGEO)"
+        visual_pattern = {
+            "type": "bracket_alternate_manufacturer",
+            "sourceHeader": "Combined part",
+            "alternateMode": "append",
+            "segments": [
+                {"role": "mpn", "before": "", "after": " (", "wrapper": None},
+                {
+                    "role": "alternateList",
+                    "before": " (",
+                    "after": ") (",
+                    "wrapper": {"open": "(", "close": ")"},
+                },
+                {"role": "manufacturer", "before": ") (", "after": ")", "wrapper": None},
+            ],
+        }
+
+        pairs = _visual_pattern_identity_pairs(
+            {"Combined part": value},
+            ["Combined part"],
+            {"mpn": "Combined part", "manufacturer": "Combined part"},
+            {"_activeFieldPatternRule": {"visualPattern": visual_pattern}},
+        )
+
+        self.assertEqual(
+            [(pair["mpn"], pair["manufacturer"]) for pair in pairs],
+            [("BASE", "YAGEO")],
+        )
+
+    def test_taught_insertion_marker_is_removed_when_row_has_no_alternate_list(self):
+        visual_pattern = {
+            "type": "bracket_alternate_manufacturer",
+            "sourceHeader": "Combined part",
+            "alternateDelimiter": "/",
+            "alternateMode": "insert_at_marker",
+            "segments": [
+                {"role": "mpn", "before": "", "after": " (", "wrapper": None},
+                {
+                    "role": "alternateList",
+                    "before": " (",
+                    "after": ") (",
+                    "wrapper": {"open": "(", "close": ")"},
+                },
+                {"role": "manufacturer", "before": ") (", "after": ")", "wrapper": None},
+            ],
+            "mpnComposition": {
+                "operation": "insert_alternate_at_marker",
+                "marker": "@",
+                "markerSequence": "@",
+                "markerOccurrence": 1,
+                "prefixSource": "mpn_before_marker",
+                "suffixSource": "mpn_after_marker",
+                "alternateSource": "alternateList",
+                "listSuppliesPrimary": True,
+            },
+        }
+
+        values = [
+            ("VJ0603Y102KXCA@ (VISH/VIT){HOM}[1911348]", "VJ0603Y102KXCA", "VISH/VIT"),
+            ("WF06U1503B@L (WTC){HOM}[]", "WF06U1503BL", "WTC"),
+        ]
+        for value, expected_mpn, expected_manufacturer in values:
+            pairs = _visual_pattern_identity_pairs(
+                {"Combined part": value},
+                ["Combined part"],
+                {"mpn": "Combined part", "manufacturer": "Combined part"},
+                {"_activeFieldPatternRule": {"visualPattern": visual_pattern}},
+            )
+            self.assertEqual(
+                [(pair["mpn"], pair["manufacturer"]) for pair in pairs],
+                [(expected_mpn, expected_manufacturer)],
+            )
+
+    def test_at_is_preserved_without_a_taught_marker_rule(self):
+        value = "REAL@MPN1 (YAGEO)"
+
+        pairs = _same_cell_parenthesized_mpn_manufacturer_pairs(value)
+
+        self.assertEqual(
+            [(pair["mpn"], pair["manufacturer"]) for pair in pairs],
+            [("REAL@MPN1", "YAGEO")],
+        )
+
+    def test_no_alternate_marker_pattern_can_be_taught_and_applied(self):
+        value = 'WF06U1503B@L(WTC){HOM}[]"'
+        marker_start = value.index("@")
+        manufacturer_start = value.index("WTC")
+        visual_pattern = derive_visual_pattern_from_tagged_spans(
+            source_value=value,
+            source_header="Combined part",
+            tagged_spans=[
+                {"start": 0, "end": marker_start, "role": "mpn"},
+                {"start": marker_start, "end": marker_start + 1, "role": "insertionMarker"},
+                {"start": marker_start + 1, "end": value.index("("), "role": "mpn"},
+                {
+                    "start": manufacturer_start,
+                    "end": manufacturer_start + len("WTC"),
+                    "role": "manufacturer",
+                },
+            ],
+        )
+
+        self.assertEqual(visual_pattern["type"], "bracket_manufacturer")
+        self.assertEqual(
+            visual_pattern["mpnComposition"]["operation"],
+            "insert_alternate_at_marker",
+        )
+        self.assertNotIn("alternateSource", visual_pattern["mpnComposition"])
+        self.assertEqual(
+            visual_pattern["displayPattern"],
+            "<MPN_PREFIX><INSERTION_MARKER><MPN_SUFFIX> (<MFR>) {<STATUS>} [<REF>]",
+        )
+
+        pairs = _visual_pattern_identity_pairs(
+            {"Combined part": value},
+            ["Combined part"],
+            {"mpn": "Combined part", "manufacturer": "Combined part"},
+            {"_activeFieldPatternRule": {"visualPattern": visual_pattern}},
+        )
+
+        self.assertEqual(
+            [(pair["mpn"], pair["manufacturer"]) for pair in pairs],
+            [("WF06U1503BL", "WTC")],
+        )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference._looks_like_parenthesized_manufacturer_alias",
+        return_value=True,
+    )
+    def test_apply_api_uses_taught_no_alternate_marker_pattern(
+        self,
+        _manufacturer_alias,
+        _saved_rules,
+        _saved_interpretations,
+    ):
+        value = 'WF06U1503B@L(WTC){HOM}[]"'
+        marker_start = value.index("@")
+        manufacturer_start = value.index("WTC")
+        visual_pattern = derive_visual_pattern_from_tagged_spans(
+            source_value=value,
+            source_header="Combined part",
+            tagged_spans=[
+                {"start": 0, "end": marker_start, "role": "mpn"},
+                {"start": marker_start, "end": marker_start + 1, "role": "insertionMarker"},
+                {"start": marker_start + 1, "end": value.index("("), "role": "mpn"},
+                {
+                    "start": manufacturer_start,
+                    "end": manufacturer_start + len("WTC"),
+                    "role": "manufacturer",
+                },
+            ],
+        )
+        grammar = _semantic_identity_fragments(
+            value,
+            ["mpn", "manufacturer"],
+        )[0]["grammar"]
+        pattern_key = _semantic_pattern_key(
+            "Combined part",
+            ["mpn", "manufacturer"],
+            grammar,
+        )
+        rule = {
+            "shape": pattern_key,
+            "patternKey": pattern_key,
+            "fields": {},
+            "visualPattern": visual_pattern,
+        }
+
+        response = self.client.post(
+            "/api/bom/field-patterns/apply/",
+            {
+                "headers": ["Combined part"],
+                "rows": [{"Combined part": value, "__sourceRow": 2}],
+                "roles": {
+                    "mpn": "Combined part",
+                    "manufacturer": "Combined part",
+                },
+                "config": {"alternateLayout": "inside_selected_mpn_columns"},
+                "rules": {pattern_key: rule},
+                "corrections": [],
+                "persist": False,
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [
+                (row["mpn"], row["manufacturer"])
+                for row in response.json()["normalizedRows"]
+            ],
+            [("WF06U1503BL", "WTC")],
+        )
 
     def test_visual_pattern_excludes_description_before_embedded_mpn(self):
         pairs = _visual_pattern_identity_pairs(
@@ -408,6 +665,185 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         self.assertEqual(
             [(value[span["start"]:span["end"]], span["role"]) for span in spans],
             [("EM-827", "mpn"), ("(I)", "alternateList"), ("EMCTW", "manufacturer")],
+        )
+
+    def test_visual_pattern_decodes_newline_alternate_delimiter(self):
+        value = "BASE\nALT-1\nALT-2"
+        visual_pattern = {
+            "type": "tagged_fields",
+            "sourceHeader": "Combined part",
+            "alternateDelimiter": "\\n",
+            "alternateMode": "complete",
+            "segments": [
+                {"role": "mpn", "before": "", "after": "\n", "wrapper": None},
+                {"role": "alternateList", "before": "\n", "after": "", "wrapper": None},
+            ],
+        }
+
+        pairs = _visual_pattern_identity_pairs(
+            {"Combined part": value},
+            ["Combined part"],
+            {"mpn": "Combined part"},
+            {"_activeFieldPatternRule": {"visualPattern": visual_pattern}},
+        )
+
+        self.assertEqual(
+            [pair["mpn"] for pair in pairs],
+            ["BASE", "ALT-1", "ALT-2"],
+        )
+
+    def test_visual_pattern_preserves_explicit_no_split(self):
+        value = "BASE\nALT-1/ALT-2"
+        visual_pattern = {
+            "type": "tagged_fields",
+            "sourceHeader": "Combined part",
+            "alternateDelimiter": "",
+            "alternateMode": "complete",
+            "segments": [
+                {"role": "mpn", "before": "", "after": "\n", "wrapper": None},
+                {"role": "alternateList", "before": "\n", "after": "", "wrapper": None},
+            ],
+        }
+
+        pairs = _visual_pattern_identity_pairs(
+            {"Combined part": value},
+            ["Combined part"],
+            {"mpn": "Combined part"},
+            {"_activeFieldPatternRule": {"visualPattern": visual_pattern}},
+        )
+
+        self.assertEqual([pair["mpn"] for pair in pairs], ["BASE"])
+
+    def test_saved_visual_pattern_ignores_optional_separator_spaces(self):
+        value = "IRLML6402@PBF(/TR)(INFINEON) {HOM} [2225412]"
+        visual_pattern = {
+            "type": "bracket_alternate_manufacturer",
+            "sourceHeader": "Ref Statut",
+            "alternateDelimiter": "/",
+            "alternateMode": "insert_at_marker",
+            "segments": [
+                {"role": "mpn", "before": "", "after": " (", "wrapper": None},
+                {"role": "alternateList", "before": " (", "after": ") (", "wrapper": None},
+                {"role": "manufacturer", "before": ") (", "after": ")", "wrapper": None},
+            ],
+            "mpnComposition": {
+                "operation": "insert_alternate_at_marker",
+                "markerSequence": "@",
+                "markerOccurrence": 1,
+                "listSuppliesPrimary": True,
+            },
+        }
+
+        pairs = _visual_pattern_identity_pairs(
+            {"Ref Statut": value},
+            ["Ref Statut"],
+            {"mpn": "Ref Statut", "manufacturer": "Ref Statut"},
+            {"_activeFieldPatternRule": {"visualPattern": visual_pattern}},
+        )
+        spans = _visual_pattern_interpretation_spans(value, visual_pattern)
+
+        self.assertEqual(
+            [(pair["mpn"], pair["manufacturer"]) for pair in pairs],
+            [("IRLML6402PBF", "INFINEON"), ("IRLML6402TRPBF", "INFINEON")],
+        )
+        manufacturer_span = next(span for span in spans if span["role"] == "manufacturer")
+        self.assertEqual(value[manufacturer_span["start"]:manufacturer_span["end"]], "INFINEON")
+
+    def test_auto_marker_detection_keeps_distinct_adjacent_delimiters(self):
+        value = "LTC2936IUF#@@PBF (/TR) (LTC) {HOM} [3489945]"
+        rule = _infer_marker_alternate_visual_rule(
+            value,
+            "Ref Statut",
+            ["mpn", "manufacturer"],
+        )
+        visual_pattern = rule["visualPattern"]
+        pairs = _visual_pattern_identity_pairs(
+            {"Ref Statut": value},
+            ["Ref Statut"],
+            {"mpn": "Ref Statut", "manufacturer": "Ref Statut"},
+            {"_activeFieldPatternRule": rule},
+        )
+
+        self.assertEqual(visual_pattern["mpnComposition"]["markerSequence"], "@@")
+        self.assertEqual(
+            [(pair["mpn"], pair["manufacturer"]) for pair in pairs],
+            [("LTC2936IUF#PBF", "LTC"), ("LTC2936IUF#TRPBF", "LTC")],
+        )
+
+    def test_saved_insertion_rule_is_not_overridden_by_equal_length_values(self):
+        value = "WR04X000 P@L (A/B/D/H/T) (WTC) {HOM} [3078936]"
+        visual_pattern = {
+            "type": "bracket_alternate_manufacturer",
+            "sourceHeader": "Ref Statut",
+            "alternateDelimiter": "/",
+            "alternateMode": "insert_at_marker",
+            "segments": [
+                {"role": "mpn", "before": "", "after": " (", "wrapper": None},
+                {"role": "alternateList", "before": " (", "after": ") (", "wrapper": None},
+                {"role": "manufacturer", "before": ") (", "after": ")", "wrapper": None},
+            ],
+            "mpnComposition": {
+                "operation": "insert_alternate_at_marker",
+                "markerSequence": "@",
+                "markerOccurrence": 1,
+                "listSuppliesPrimary": True,
+            },
+        }
+
+        pairs = _visual_pattern_identity_pairs(
+            {"Ref Statut": value},
+            ["Ref Statut"],
+            {"mpn": "Ref Statut", "manufacturer": "Ref Statut"},
+            {"_activeFieldPatternRule": {"visualPattern": visual_pattern}},
+        )
+
+        self.assertEqual(
+            [(pair["mpn"], pair["manufacturer"]) for pair in pairs],
+            [
+                ("WR04X000 PAL", "WTC"),
+                ("WR04X000 PBL", "WTC"),
+                ("WR04X000 PDL", "WTC"),
+                ("WR04X000 PHL", "WTC"),
+                ("WR04X000 PTL", "WTC"),
+            ],
+        )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference._best_mpn_from_text",
+        side_effect=lambda value: (
+            (value[6:], 1.0, "known MPN found inside cell")
+            if value.startswith(("01525-", "28384-"))
+            else (value, 1.0, "known MPN")
+        ),
+    )
+    def test_backend_derives_prefix_length_from_recognized_mpn_positions(self, _best_mpn):
+        value = "01525-22-03-2061\n28384-69173-406HLF"
+
+        rule = _mpn_position_prefix_rule(value)
+        result = build_bom_field_pattern_teach_result(
+            headers=["Part"],
+            row={"Part": value},
+            roles={"mpn": "Part"},
+            group={"shape": "position-derived", "patternKey": "position-derived"},
+            source_header="Part",
+            base_rule=rule,
+            field_rules=rule["fields"],
+            prefer_field_rules=True,
+        )
+
+        self.assertEqual(
+            result["rule"]["fields"]["mpn"],
+            {
+                "delimiter": "\\n",
+                "stripPrefix": "6",
+                "prefixMode": "first_n_chars",
+                "detectionSource": "recognized_mpn_position",
+                "customerConfirmed": True,
+            },
+        )
+        self.assertEqual(
+            [entry["fields"]["mpn"]["value"] for entry in result["entries"]],
+            ["22-03-2061", "69173-406HLF"],
         )
 
     def test_append_mode_can_add_a_separator_only_to_alternate_mpns(self):
@@ -1978,6 +2414,506 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
 
 class SemanticIdentityFragmentTests(SimpleTestCase):
     @patch(
+        "excel_mapper.services.bom_role_inference._looks_like_parenthesized_manufacturer_alias",
+        return_value=True,
+    )
+    def test_marker_without_alternate_list_has_distinct_semantic_grammar(self, _manufacturer_alias):
+        values = {
+            "PLAIN123(WTC){HOM}[]": "<MPN> (<MFR>) {<STATUS>} [<REF>]",
+            "VJ0603Y102KXCA@(VISH/VIT){HOM}[1911348]": (
+                "<MPN>@ (<MFR>) {<STATUS>} [<REF>]"
+            ),
+            'WF06U1503B@L(WTC){HOM}[]"': (
+                '<MPN_PREFIX>@<MPN_SUFFIX> (<MFR>) {<STATUS>} [<REF>] "'
+            ),
+            "ABC123@L(A/B)(WTC){HOM}[]": (
+                "<MPN_PREFIX>@<PRIMARY_SUFFIX> (<ALTERNATE_SUFFIXES>) "
+                "(<MFR>) {<STATUS>} [<REF>]"
+            ),
+        }
+
+        grammars = {}
+        for value, expected in values.items():
+            fragments = _semantic_identity_fragments(value, ["mpn", "manufacturer"])
+            self.assertEqual(len(fragments), 1)
+            grammars[value] = fragments[0]["grammar"]
+            self.assertEqual(fragments[0]["grammar"], expected)
+
+        keys = {
+            _semantic_pattern_key("Combined", ["mpn", "manufacturer"], grammar)
+            for grammar in grammars.values()
+        }
+        self.assertEqual(len(keys), len(values))
+
+    @patch(
+        "excel_mapper.services.bom_role_inference._best_mpn_from_text",
+        side_effect=lambda value: (
+            (value[6:], 1.0, "known MPN found inside cell")
+            if len(value) > 6
+            else (value, 0.2, "")
+        ),
+    )
+    def test_mpn_position_groups_variable_prefix_values_by_detected_offset(self, _best_mpn):
+        values = [
+            "01525-22-03-2061\n28384-69173-406HLF",
+            "27146-02015A180FAT\n11962-CC0201FRNP09BN180",
+            "00078-CR1206FX1002ELF\n18981-CRCW120610K0FKE",
+        ]
+
+        grammars = [
+            _semantic_identity_fragments(value, ["mpn"])[0]["grammar"]
+            for value in values
+        ]
+
+        self.assertEqual(
+            grammars,
+            ["<PREFIX:6><MPN> repeated by <NEW_LINE>"] * 3,
+        )
+
+    def test_mpn_lookup_returns_loaded_match_while_caching_unknown_keys(self):
+        lookup = DatabaseMpnLookup.__new__(DatabaseMpnLookup)
+        lookup._known = {"KNOWN123": (1, "KNOWN-123")}
+        lookup._entries = {
+            "KNOWN123": {
+                "mpn": "KNOWN-123",
+                "normalized_mpn": "KNOWN123",
+                "manufacturers": [],
+                "counts": {},
+            },
+        }
+        lookup._loaded = {"KNOWN123"}
+        lookup._value_matches = {}
+
+        result = lookup.get_many(["KNOWN123", "UNKNOWN999"], normalized=True)
+
+        self.assertEqual(result["KNOWN123"]["mpn"], "KNOWN-123")
+        self.assertIn("UNKNOWN999", lookup._loaded)
+
+    def test_detected_mpn_position_rule_strips_each_newline_record(self):
+        value = "01525-22-03-2061\n28384-69173-406HLF"
+        rule = {
+            "fields": {
+                "mpn": {
+                    "delimiter": "\\n",
+                    "stripPrefix": "6",
+                    "prefixMode": "first_n_chars",
+                },
+            },
+        }
+
+        entries = _infer_field_entries_for_row(
+            {"Part": value},
+            ["Part"],
+            {"mpn": "Part"},
+            ["Part"],
+            config={"_activeFieldPatternRule": rule},
+        )
+
+        self.assertEqual(
+            [entry["fields"]["mpn"]["value"] for entry in entries],
+            ["22-03-2061", "69173-406HLF"],
+        )
+
+    def test_position_rule_returns_backend_newline_control(self):
+        with patch(
+            "excel_mapper.services.bom_role_inference._best_mpn_from_text",
+            side_effect=lambda value: (value[6:], 1.0, "known MPN"),
+        ):
+            rule = _mpn_position_prefix_rule(
+                "00037-GC2400009\n20038-278LF-24-65",
+                source_column="Manufacturer Equivalent Part",
+            )
+
+        self.assertEqual(rule["fields"]["mpn"]["delimiter"], "\\n")
+        self.assertEqual(rule["visualPattern"]["alternateDelimiter"], "\n")
+        self.assertEqual(rule["visualPattern"]["alternateMode"], "complete")
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    def test_repeated_supplier_prefixes_share_one_structural_pattern(
+        self,
+        _saved_rules,
+        _saved_interpretations,
+    ):
+        values = [
+            "18889-SMBT2222AE6327HTSA1 18846-MMBT2222ALT1G 18889-SMBT 2222A E6327 02254-SST2222AT116 28604-PMBT2222A",
+            "11962-RC0603FR-0725K5L 05498-MC06032552FTW 18981-CRCW060325K5FKE 10302-RMCF1/16-25.5K-1% 02254 MCR03EZPFX2552",
+        ]
+
+        for value in values:
+            self.assertEqual(
+                _mpn_position_prefix_layout(value),
+                {
+                    "prefixLength": 6,
+                    "recordDelimiter": "repeated_prefix",
+                    "lineCount": 1,
+                    "evidenceCount": 5,
+                },
+            )
+
+        inferred = build_bom_field_pattern_groups(
+            ["Manufacturer Equivalent part"],
+            [
+                {"Manufacturer Equivalent part": value, "__sourceRow": index + 2}
+                for index, value in enumerate(values)
+            ],
+            roles={"mpn": "Manufacturer Equivalent part"},
+            config={},
+            options={"includeAllRows": True, "reviewContractVersion": 3},
+        )
+
+        self.assertEqual(len(inferred["review"]["patterns"]), 1)
+        self.assertEqual(inferred["review"]["patterns"][0]["pattern"], "<PREFIX:6><MPN>")
+        rule = _mpn_position_prefix_rule(values[1])
+        self.assertEqual(rule["fields"]["mpn"]["delimiter"], "repeated_prefix")
+        self.assertTrue(rule["fields"]["mpn"]["preserveOriginalValue"])
+        entries = _infer_field_entries_for_row(
+            {"Manufacturer Equivalent part": values[1]},
+            ["Manufacturer Equivalent part"],
+            {"mpn": "Manufacturer Equivalent part"},
+            ["Manufacturer Equivalent part"],
+            config={"_activeFieldPatternRule": rule},
+        )
+        self.assertEqual(
+            [entry["fields"]["mpn"]["value"] for entry in entries],
+            [
+                "RC0603FR-0725K5L",
+                "MC06032552FTW",
+                "CRCW060325K5FKE",
+                "RMCF1/16-25.5K-1%",
+                "MCR03EZPFX2552",
+            ],
+        )
+
+    def test_taught_repeated_prefix_rule_replays_on_other_supplier_prefix_rows(self):
+        source_header = "Manufacturer Equivalent part"
+        headers = [source_header, "Manufacturer"]
+        roles = {"mpn": source_header, "manufacturer": "Manufacturer"}
+        taught_value = (
+            "AGILE-CC0805KKX7R8BB225 AGILE-C0805C225K3RAC "
+            "AGILE-NMC0805X7R225K25TRPF AGILE-08053C225KAT"
+        )
+        first_end = taught_value.index(" AGILE-")
+        taught = build_bom_field_pattern_teach_result(
+            headers=headers,
+            row={
+                source_header: taught_value,
+                "Manufacturer": "YAGEO KEMET NIC COMPONENTS AVX",
+            },
+            roles=roles,
+            config={},
+            group={"shape": "repeated-prefix", "patternKey": "repeated-prefix"},
+            tagged_spans=[
+                {"start": 6, "end": first_end, "role": "mpn"},
+                {"start": first_end + 1, "end": len(taught_value), "role": "alternateList"},
+            ],
+            source_header=source_header,
+            alternate_delimiter="/",
+            alternate_mode="append",
+            field_rules={
+                "mpn": {
+                    "stripPrefix": "6",
+                    "prefixMode": "first_n_chars",
+                },
+            },
+            prefer_field_rules=True,
+        )
+
+        self.assertNotIn("visualPattern", taught["rule"])
+        self.assertEqual(taught["rule"]["fields"]["mpn"]["delimiter"], "repeated_prefix")
+        self.assertEqual(
+            [entry["fields"]["mpn"]["value"] for entry in taught["entries"]],
+            [
+                "CC0805KKX7R8BB225",
+                "C0805C225K3RAC",
+                "NMC0805X7R225K25TRPF",
+                "08053C225KAT",
+            ],
+        )
+
+        replayed = _infer_field_entries_for_row(
+            {
+                source_header: (
+                    "18889-SMBT2222AE6327HTSA1 18846-MMBT2222ALT1G "
+                    "18889-SMBT 2222A E6327 02254-SST2222AT116 28604-PMBT2222A"
+                ),
+                "Manufacturer": (
+                    "INFINEON TECHNOLOGIES AG ON SEMICONDUCTOR "
+                    "INFINEON TECHNOLOGIES AG ROHM NEXPERIA"
+                ),
+            },
+            headers,
+            roles,
+            headers,
+            config={"_activeFieldPatternRule": taught["rule"]},
+        )
+        self.assertEqual(
+            [entry["fields"]["mpn"]["value"] for entry in replayed],
+            [
+                "SMBT2222AE6327HTSA1",
+                "MMBT2222ALT1G",
+                "SMBT 2222A E6327",
+                "SST2222AT116",
+                "PMBT2222A",
+            ],
+        )
+        self.assertEqual(
+            [entry["fields"]["manufacturer"]["value"] for entry in replayed],
+            [
+                "INFINEON TECHNOLOGIES AG",
+                "ON SEMICONDUCTOR",
+                "INFINEON TECHNOLOGIES AG",
+                "ROHM",
+                "NEXPERIA",
+            ],
+        )
+
+    def test_visual_tags_override_field_only_preference_and_clean_each_mpn(self):
+        value = (
+            "00037-GC2400009\n"
+            "20038-278LF-24-65\n"
+            "05968-49SMLB24.0000-16GGC-E\n"
+            "19971-ATSM-49-R 24.0000MHZ 16PF\n"
+            "12085-Q 24,0-SMU3-16-30/50-T1-FU-LF\n"
+            "20038-FC4SDCBKF24.0\n"
+            "23512-FC4SDCBKF24.0"
+        )
+        manufacturers = (
+            "DIODES INC.\n"
+            "FOX ELECTRONICS\n"
+            "PERICOM, FORMERLY SARONIX\n"
+            "MTRONPTI\n"
+            "JAUCH H.C.\n"
+            "FOX ELECTRONICS\n"
+            "ABRACON CORPORATION"
+        )
+        first_newline = value.index("\n")
+        result = build_bom_field_pattern_teach_result(
+            headers=["Manufacturer Equivalent Part", "Manufacturer"],
+            row={
+                "Manufacturer Equivalent Part": value,
+                "Manufacturer": manufacturers,
+            },
+            roles={
+                "mpn": "Manufacturer Equivalent Part",
+                "manufacturer": "Manufacturer",
+            },
+            group={"shape": "newline-prefix", "patternKey": "newline-prefix"},
+            tagged_spans=[
+                {"start": 0, "end": first_newline, "role": "mpn"},
+                {"start": first_newline + 1, "end": len(value), "role": "alternateList"},
+            ],
+            source_header="Manufacturer Equivalent Part",
+            alternate_delimiter="\n",
+            alternate_mode="complete",
+            field_rules={
+                "mpn": {
+                    "delimiter": "\\n",
+                    "stripPrefix": "6",
+                    "prefixMode": "first_n_chars",
+                },
+            },
+            prefer_field_rules=True,
+        )
+
+        self.assertTrue(result["visualPattern"])
+        self.assertEqual(
+            [entry["fields"]["mpn"]["value"] for entry in result["entries"]],
+            [
+                "GC2400009",
+                "278LF-24-65",
+                "49SMLB24.0000-16GGC-E",
+                "ATSM-49-R 24.0000MHZ 16PF",
+                "Q 24,0-SMU3-16-30/50-T1-FU-LF",
+                "FC4SDCBKF24.0",
+                "FC4SDCBKF24.0",
+            ],
+        )
+        self.assertEqual(
+            [entry["fields"]["manufacturer"]["value"] for entry in result["entries"]],
+            [
+                "DIODES INC.",
+                "FOX ELECTRONICS",
+                "PERICOM, FORMERLY SARONIX",
+                "MTRONPTI",
+                "JAUCH H.C.",
+                "FOX ELECTRONICS",
+                "ABRACON CORPORATION",
+            ],
+        )
+
+    def test_complete_newline_mpn_tag_uses_record_split_before_prefix_cleanup(self):
+        value = (
+            "00037-GC2400009\n"
+            "20038-278LF-24-65\n"
+            "05968-49SMLB24.0000-16GGC-E\n"
+            "19971-ATSM-49-R 24.0000MHZ 16PF\n"
+            "12085-Q 24,0-SMU3-16-30/50-T1-FU-LF\n"
+            "20038-FC4SDCBKF24.0\n"
+            "23512-FC4SDCBKF24.0"
+        )
+        manufacturers = (
+            "DIODES INC.\n"
+            "FOX ELECTRONICS\n"
+            "PERICOM, FORMERLY SARONIX\n"
+            "MTRONPTI\n"
+            "JAUCH H.C.\n"
+            "FOX ELECTRONICS\n"
+            "ABRACON CORPORATION"
+        )
+
+        result = build_bom_field_pattern_teach_result(
+            headers=["Manufacturer Equivalent Part", "Manufacturer"],
+            row={
+                "Manufacturer Equivalent Part": value,
+                "Manufacturer": manufacturers,
+            },
+            roles={
+                "mpn": "Manufacturer Equivalent Part",
+                "manufacturer": "Manufacturer",
+            },
+            group={"shape": "newline-prefix", "patternKey": "newline-prefix"},
+            tagged_spans=[
+                {"start": 6, "end": len(value), "role": "mpn"},
+            ],
+            source_header="Manufacturer Equivalent Part",
+            alternate_delimiter="\n",
+            alternate_mode="complete",
+            field_rules={
+                "mpn": {
+                    "stripPrefix": "6",
+                    "prefixMode": "first_n_chars",
+                },
+            },
+            prefer_field_rules=True,
+        )
+
+        self.assertEqual(result["rule"]["fields"]["mpn"]["delimiter"], "\\n")
+        self.assertEqual(
+            [entry["fields"]["mpn"]["value"] for entry in result["entries"]],
+            [
+                "GC2400009",
+                "278LF-24-65",
+                "49SMLB24.0000-16GGC-E",
+                "ATSM-49-R 24.0000MHZ 16PF",
+                "Q 24,0-SMU3-16-30/50-T1-FU-LF",
+                "FC4SDCBKF24.0",
+                "FC4SDCBKF24.0",
+            ],
+        )
+        self.assertEqual(
+            [entry["fields"]["manufacturer"]["value"] for entry in result["entries"]],
+            [
+                "DIODES INC.",
+                "FOX ELECTRONICS",
+                "PERICOM, FORMERLY SARONIX",
+                "MTRONPTI",
+                "JAUCH H.C.",
+                "FOX ELECTRONICS",
+                "ABRACON CORPORATION",
+            ],
+        )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    @patch("excel_mapper.services.bom_role_inference._best_mpn_from_text")
+    def test_complete_newline_field_rule_becomes_recognized_after_teach(
+        self,
+        best_mpn,
+        _saved_rules,
+        _saved_interpretations,
+    ):
+        best_mpn.side_effect = lambda value: (
+            (str(value)[6:], 1.0, "known MPN found inside cell")
+            if str(value).startswith(("01525-", "28384-"))
+            else (str(value), 1.0, "known MPN")
+        )
+        source_header = "Manufacturer Equivalent Part"
+        source_value = "01525-22-03-2061\n28384-69173-406HLF"
+        manufacturers = "MOLEX\nAMPHENOL FCI"
+        headers = [source_header, "Manufacturer"]
+        roles = {"mpn": source_header, "manufacturer": "Manufacturer"}
+        row = {
+            source_header: source_value,
+            "Manufacturer": manufacturers,
+            "__sourceRow": 2,
+        }
+        inferred = build_bom_field_pattern_groups(
+            headers,
+            [row],
+            roles=roles,
+            config={},
+            options={"includeAllRows": True, "reviewContractVersion": 3},
+        )
+        review = inferred["review"]
+        pattern = next(
+            item for item in review["patterns"]
+            if "<PREFIX:6><MPN>" in item["pattern"]
+        )
+        teach_context = pattern["teachContext"]
+        taught = build_bom_field_pattern_teach_result(
+            headers=headers,
+            row=row,
+            roles=roles,
+            config={},
+            group={
+                "id": pattern["groupId"],
+                "shape": pattern["patternKey"],
+                "patternKey": pattern["patternKey"],
+            },
+            tagged_spans=[
+                {"start": 6, "end": len(source_value), "role": "mpn"},
+            ],
+            source_header=source_header,
+            alternate_delimiter="\n",
+            alternate_mode="complete",
+            field_rules={
+                "mpn": {
+                    "stripPrefix": "6",
+                    "prefixMode": "first_n_chars",
+                },
+            },
+            prefer_field_rules=True,
+        )
+        refreshed = refresh_bom_field_pattern_review_after_teach(
+            review,
+            taught,
+            group={
+                "id": pattern["groupId"],
+                "shape": pattern["patternKey"],
+                "patternKey": pattern["patternKey"],
+            },
+            roles=roles,
+            config={},
+            active_rules={pattern["patternKey"]: taught["rule"]},
+            source_row=2,
+            occurrence_id=teach_context["sample"]["sourceFragment"]["id"],
+            completed_step_id=teach_context["workflowStepId"],
+            taught_source_value=source_value,
+        )
+
+        refreshed_pattern = next(
+            item for item in refreshed["patterns"]
+            if item["patternKey"] == pattern["patternKey"]
+        )
+        self.assertTrue(refreshed_pattern["recognized"])
+        self.assertEqual(refreshed_pattern["statusLabel"], "Recognized")
+        self.assertEqual(refreshed["summary"]["recognizedPatternCount"], 1)
+        self.assertEqual(refreshed["summary"]["unrecognizedPatternCount"], 0)
+
+    @patch(
         "excel_mapper.services.bom_role_inference._looks_like_parenthesized_manufacturer_alias"
     )
     def test_false_early_manufacturer_never_truncates_complete_source_record(
@@ -2885,6 +3821,100 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
 
         self.assertTrue(refreshed_pattern["recognized"])
         self.assertEqual(refreshed["rows"][0]["entries"], original_entries)
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    def test_confirmed_pattern_completes_when_another_occurrence_has_replay_warnings(
+        self,
+        _saved_rules,
+        _saved_interpretations,
+    ):
+        headers = ["Combined"]
+        roles = {"mpn": "Combined", "manufacturer": "Combined"}
+        config = {"alternateLayout": "inside_selected_mpn_columns"}
+        rows = [
+            {"Combined": "ABC123@PBF (/TR) (INFINEON)", "__sourceRow": 21},
+            {"Combined": "XYZ987@PBF (/T) (INFINEON)", "__sourceRow": 22},
+        ]
+        inferred = build_bom_field_pattern_groups(
+            headers,
+            rows,
+            roles=roles,
+            config=config,
+            options={"includeAllRows": True, "reviewContractVersion": 3},
+        )
+        review = inferred["review"]
+        pattern = review["patterns"][0]
+        teach_context = pattern["teachContext"]
+        fragment = teach_context["sample"]["sourceFragment"]["rawValue"]
+
+        def span(text, role, start_at=0):
+            start = fragment.index(text, start_at)
+            return {"start": start, "end": start + len(text), "role": role}
+
+        taught = build_bom_field_pattern_teach_result(
+            headers=headers,
+            row={"Combined": fragment, "__sourceRow": 21},
+            roles=roles,
+            config=config,
+            group={
+                "id": pattern["groupId"],
+                "shape": pattern["patternKey"],
+                "patternKey": pattern["patternKey"],
+            },
+            tagged_spans=[
+                span("ABC123", "mpn"),
+                span("@", "insertionMarker"),
+                span("PBF", "mpn", fragment.index("@") + 1),
+                span("/TR", "alternateList"),
+                span("INFINEON", "manufacturer"),
+            ],
+            source_header="Combined",
+            alternate_delimiter="/",
+            alternate_mode="insert_at_marker",
+        )
+        original_spans = _interpretation_spans_by_column
+
+        def fail_replay_for_second_row(row, *args, **kwargs):
+            if row.get("__sourceRow") == 22:
+                return {}
+            return original_spans(row, *args, **kwargs)
+
+        with patch(
+            "excel_mapper.services.bom_role_inference._interpretation_spans_by_column",
+            side_effect=fail_replay_for_second_row,
+        ):
+            refreshed = refresh_bom_field_pattern_review_after_teach(
+                review,
+                taught,
+                group={
+                    "id": pattern["groupId"],
+                    "shape": pattern["patternKey"],
+                    "patternKey": pattern["patternKey"],
+                },
+                roles=roles,
+                config=config,
+                active_rules={pattern["patternKey"]: taught["rule"]},
+                source_row=21,
+                occurrence_id=teach_context["sample"]["sourceFragment"]["id"],
+                completed_step_id=teach_context["workflowStepId"],
+                taught_source_value=fragment,
+            )
+
+        refreshed_pattern = refreshed["patterns"][0]
+        self.assertTrue(refreshed_pattern["recognized"])
+        self.assertTrue(refreshed_pattern["recognitionValidation"]["confirmedOccurrenceValid"])
+        self.assertFalse(refreshed_pattern["recognitionValidation"]["groupReplayValid"])
+        self.assertEqual(
+            refreshed_pattern["recognitionValidation"]["reason"],
+            "confirmed_with_replay_warnings",
+        )
 
     @patch(
         "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",

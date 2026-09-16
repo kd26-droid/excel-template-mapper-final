@@ -3716,7 +3716,11 @@ def bom_field_pattern_teaching(request):
         visual_pattern = request.data.get('visualPattern') or request.data.get('visual_pattern') or {}
         tagged_spans = request.data.get('taggedSpans') or request.data.get('tagged_spans')
         source_header = request.data.get('sourceHeader') or request.data.get('source_header') or ''
-        alternate_delimiter = request.data.get('alternateDelimiter') or request.data.get('alternate_delimiter') or '/'
+        alternate_delimiter = request.data.get('alternateDelimiter')
+        if alternate_delimiter is None:
+            alternate_delimiter = request.data.get('alternate_delimiter')
+        if alternate_delimiter is None:
+            alternate_delimiter = ''
         alternate_mode = request.data.get('alternateMode') or request.data.get('alternate_mode') or 'append'
         alternate_joiner = request.data.get('alternateJoiner')
         if alternate_joiner is None:
@@ -3724,6 +3728,12 @@ def bom_field_pattern_teaching(request):
         ignored_fields = request.data.get('ignoredFields') or request.data.get('ignored_fields') or []
         has_manual_edits = request.data.get('hasManualEdits') is True or request.data.get('has_manual_edits') is True
         active_rules = request.data.get('activeRules') or request.data.get('active_rules') or {}
+        base_rule = request.data.get('baseRule') or request.data.get('base_rule') or {}
+        field_rules = request.data.get('fieldRules') or request.data.get('field_rules') or {}
+        prefer_field_rules = (
+            request.data.get('preferFieldRules') is True
+            or request.data.get('prefer_field_rules') is True
+        )
         review = request.data.get('review') or {}
         completed_step_id = request.data.get('completedStepId') or request.data.get('completed_step_id') or ''
         source_row = request.data.get('sourceRow')
@@ -3754,6 +3764,10 @@ def bom_field_pattern_teaching(request):
             visual_pattern = {}
         if not isinstance(active_rules, dict):
             active_rules = {}
+        if not isinstance(base_rule, dict):
+            base_rule = {}
+        if not isinstance(field_rules, dict):
+            field_rules = {}
         if not isinstance(review, dict):
             review = {}
 
@@ -3772,6 +3786,9 @@ def bom_field_pattern_teaching(request):
             ignored_fields=ignored_fields,
             visual_pattern=visual_pattern,
             has_manual_edits=has_manual_edits,
+            base_rule=base_rule,
+            field_rules=field_rules,
+            prefer_field_rules=prefer_field_rules,
         )
         rule = teach_result['rule']
         next_active_rules = dict(active_rules)

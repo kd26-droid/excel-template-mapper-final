@@ -239,7 +239,11 @@ class DatabaseMpnLookup:
         }
         if not by_id:
             self._loaded.update(unresolved)
-            return {}
+            return {
+                key: self._entries[key]
+                for key in normalized_keys
+                if key in self._entries
+            }
         pairs = MpnManufacturerPair.objects.filter(
             status=MpnManufacturerPair.STATUS_VERIFIED,
             mpn_id__in=by_id,

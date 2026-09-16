@@ -113,7 +113,7 @@ const BomDuplicatePolicyBanner = ({ sessionId, refreshKey }) => {
   // carrying that item code. A conditional rule with NO 'else' branch touches
   // only the matching rows - everything else keeps what it has. Once the rows
   // agree they are the same item, so they collapse and their quantities add up.
-  const useValue = useCallback(async (code, column, value) => {
+  const applyValue = useCallback(async (code, column, value) => {
     setApplying(`${code}|${column}|${value}`);
     try {
       await api.fillOrCreateColumn(sessionId, {
@@ -250,7 +250,7 @@ const BomDuplicatePolicyBanner = ({ sessionId, refreshKey }) => {
                           size="small"
                           variant="outlined"
                           disabled={Boolean(applying)}
-                          onClick={() => useValue(conflict.code, field.column, v)}
+                          onClick={() => applyValue(conflict.code, field.column, v)}
                           sx={{ textTransform: 'none', py: 0, minWidth: 0, fontFamily: 'monospace' }}
                         >
                           {applying === `${conflict.code}|${field.column}|${v}`

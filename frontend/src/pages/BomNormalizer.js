@@ -89,7 +89,6 @@ import {
   fieldPatternSampleForWorkflowStep,
   normalizeVisualTeachEntries,
   shouldRepeatVisualTeachGroupSeparator,
-  visualTeachAllowsAlternates,
   visualTeachTagsFromInterpretationSpans,
 } from '../lib/visualTeachParser';
 import {
@@ -8964,6 +8963,19 @@ const VISUAL_TEACH_STRUCTURAL_ROLES = [
   { key: 'ignore', label: 'Ignore', color: '#64748b', bg: '#f1f5f9' },
 ];
 
+const VISUAL_TEACH_CUSTOM_DELIMITER = '__custom_delimiter__';
+const VISUAL_TEACH_DELIMITER_OPTIONS = [
+  { value: '', label: 'No separator' },
+  { value: '/', label: 'Slash (/)' },
+  { value: ';', label: 'Semicolon (;)' },
+  { value: ',', label: 'Comma (,)' },
+  { value: '|', label: 'Pipe (|)' },
+  { value: '^', label: 'Caret (^)' },
+  { value: '~', label: 'Tilde (~)' },
+  { value: '\n', label: 'New line' },
+  { value: VISUAL_TEACH_NO_SPLIT, label: 'No split' },
+];
+
 const VISUAL_TEACH_ROLE_STYLE_BY_KEY = [
   ...FACTWISE_PARSE_FIELDS.map((field) => ({
     ...field,
@@ -9372,16 +9384,18 @@ const BomNormalizer = () => {
   const [visualTeachTags, setVisualTeachTags] = useState([]);
   const [visualTeachSelection, setVisualTeachSelection] = useState(null);
   const [visualTeachDrag, setVisualTeachDrag] = useState(null);
-  const [visualTeachDelimiter, setVisualTeachDelimiter] = useState('/');
+  const [visualTeachDelimiter, setVisualTeachDelimiter] = useState('');
   const [visualTeachAltMode, setVisualTeachAltMode] = useState('append');
   const [visualTeachAlternateJoiner, setVisualTeachAlternateJoiner] = useState('');
+  const [visualTeachMpnPrefixLength, setVisualTeachMpnPrefixLength] = useState('');
+  const [visualTeachMpnPrefixTouched, setVisualTeachMpnPrefixTouched] = useState(false);
   const [visualTeachEntryOverrides, setVisualTeachEntryOverrides] = useState({});
   const [visualTeachBackendPreview, setVisualTeachBackendPreview] = useState(null);
   const [visualTeachPreviewLoading, setVisualTeachPreviewLoading] = useState(false);
-  const [visualTeachPreviewRevision, setVisualTeachPreviewRevision] = useState(0);
   const [visualTeachSourceRowExpanded, setVisualTeachSourceRowExpanded] = useState(false);
   const visualTeachPreviewRequestRef = useRef(0);
-  const visualTeachPreviewProcessedRef = useRef(0);
+  const visualTeachPreviewInFlightRef = useRef(false);
+  const visualTeachApplyInFlightRef = useRef(false);
   const visualTeachBackendEntriesRef = useRef([]);
   const fieldPatternReviewContentRef = useRef(null);
   // Parse Fields edits wait here until Run normalization. Applying them the
@@ -10368,16 +10382,20 @@ const BomNormalizer = () => {
   const visualTeachDialogTitle = visualTeachBackendPreview?.title ||
     visualTeachContext?.workflowStep?.title ||
     'Confirm pattern';
-  const visualTeachAllowAlternates = visualTeachAllowsAlternates(visualTeachContext);
   const visualTeachRoleOptions = useMemo(() => [
     ...visualTeachMappedFields.map((field) => ({
       ...field,
       ...(VISUAL_TEACH_FIELD_STYLES[field.key] || { color: '#334155', bg: '#f1f5f9' }),
     })),
-    ...VISUAL_TEACH_STRUCTURAL_ROLES.filter((role) => (
-      visualTeachAllowAlternates || !['alternateList', 'insertionMarker'].includes(role.key)
-    )),
-  ], [visualTeachAllowAlternates, visualTeachMappedFields]);
+    ...VISUAL_TEACH_STRUCTURAL_ROLES,
+  ], [visualTeachMappedFields]);
+  const visualTeachDelimiterSelectValue = VISUAL_TEACH_DELIMITER_OPTIONS.some(
+    (option) => option.value === visualTeachDelimiter
+  ) ? visualTeachDelimiter : VISUAL_TEACH_CUSTOM_DELIMITER;
+  const handleVisualTeachDelimiterSelect = useCallback((event) => {
+    const selected = event.target.value;
+    setVisualTeachDelimiter(selected === VISUAL_TEACH_CUSTOM_DELIMITER ? '' : selected);
+  }, []);
   const visualTeachPreparedTags = visualTeachTags;
   const visualTeachIgnoredFields = useMemo(() => {
     if (visualTeachMappedFieldKeys.length) return visualTeachMappedFieldKeys;
@@ -13349,7 +13367,7 @@ const BomNormalizer = () => {
             entries: normalizeVisualTeachEntries(options.preservedEntries),
             left: focusedSample.left || [],
             visualTeachTags: options.preservedVisualTags || [],
-            visualTeachDelimiter: options.preservedVisualDelimiter || '/',
+            visualTeachDelimiter: options.preservedVisualDelimiter ?? '',
             visualTeachAltMode: options.preservedVisualAltMode || 'append',
             visualTeachAlternateJoiner: options.preservedVisualAlternateJoiner || '',
             visualTeachEntryOverrides: options.preservedVisualEntryOverrides || {},
@@ -13448,9 +13466,9 @@ const BomNormalizer = () => {
     setVisualTeachSelection(null);
     setVisualTeachDrag(null);
     setVisualTeachDelimiter(
-      sampleEdit.visualTeachDelimiter ||
-      group?.suggestedRule?.visualPattern?.alternateDelimiter ||
-      '/'
+      sampleEdit.visualTeachDelimiter ??
+      group?.suggestedRule?.visualPattern?.alternateDelimiter ??
+      ''
     );
     setVisualTeachAltMode(
       sampleEdit.visualTeachAltMode ||
@@ -13462,6 +13480,15 @@ const BomNormalizer = () => {
       group?.suggestedRule?.visualPattern?.alternateJoiner ??
       ''
     );
+    const suggestedMpnRule = group?.suggestedRule?.fields?.mpn || {};
+    setVisualTeachMpnPrefixLength(
+      sampleEdit.visualTeachMpnPrefixLength ?? (
+        suggestedMpnRule.prefixMode === 'first_n_chars'
+          ? String(suggestedMpnRule.stripPrefix || '')
+          : ''
+      )
+    );
+    setVisualTeachMpnPrefixTouched(false);
     setVisualTeachEntryOverrides(sampleEdit.visualTeachEntryOverrides || {});
     setVisualTeachPreviewLoading(false);
     setVisualTeachSourceRowExpanded(false);
@@ -13516,20 +13543,15 @@ const BomNormalizer = () => {
     return () => window.cancelAnimationFrame(frame);
   }, [fieldPatternReviewOpen, fieldPatternWorkflowLaunchRevision]);
 
-  useEffect(() => {
-    const hasActiveEditor = visualTeachOpen || (
-      fieldPatternReviewOpen &&
-      fieldPatternReviewStage === 'patterns' &&
-      Boolean(fieldPatternExpandedPatternKey)
-    );
-    if (!hasActiveEditor || !visualTeachContext?.sourceValue || !visualTeachContext?.sample) return undefined;
-    if (visualTeachPreviewProcessedRef.current === visualTeachPreviewRevision) return undefined;
-    visualTeachPreviewProcessedRef.current = visualTeachPreviewRevision;
+  const handlePreviewVisualTeachPattern = useCallback(async () => {
+    if (visualTeachPreviewInFlightRef.current) return;
+    if (!visualTeachContext?.sourceValue || !visualTeachContext?.sample) return;
     const taggedSpans = visualTeachTaggedSpans(visualTeachTags);
+    const hasPrefixCleanup = Boolean(visualTeachMpnPrefixLength) || visualTeachMpnPrefixTouched;
     const hasInterpretation = taggedSpans.some(
       (span) => span.role !== 'groupSeparator'
-    );
-    if (!hasInterpretation) return undefined;
+    ) || hasPrefixCleanup;
+    if (!hasInterpretation) return;
     const hasManualEdits = Object.values(visualTeachEntryOverrides || {})
       .some((fieldOverrides) => fieldOverrides && Object.keys(fieldOverrides).length > 0);
     const requestEntries = hasManualEdits
@@ -13544,7 +13566,7 @@ const BomNormalizer = () => {
 
     const requestId = visualTeachPreviewRequestRef.current + 1;
     visualTeachPreviewRequestRef.current = requestId;
-    const timer = setTimeout(async () => {
+    visualTeachPreviewInFlightRef.current = true;
       const row = {};
       (visualTeachContext.sample.left || []).forEach((item) => {
         if (item?.column) row[item.column] = item.value ?? '';
@@ -13570,6 +13592,11 @@ const BomNormalizer = () => {
           alternateDelimiter: visualTeachDelimiter,
           alternateMode: visualTeachAltMode,
           alternateJoiner: visualTeachAlternateJoiner,
+          baseRule: visualTeachContext.group?.suggestedRule || {},
+          fieldRules: hasPrefixCleanup
+            ? { mpn: { prefixMode: visualTeachMpnPrefixLength ? 'first_n_chars' : 'none', stripPrefix: visualTeachMpnPrefixLength } }
+            : {},
+          preferFieldRules: hasPrefixCleanup,
           ignoredFields: visualTeachIgnoredFields,
           hasManualEdits,
           persist: false,
@@ -13602,6 +13629,14 @@ const BomNormalizer = () => {
         if (backendAlternateMode && backendAlternateMode !== visualTeachAltMode) {
           setVisualTeachAltMode(backendAlternateMode);
         }
+        const backendAlternateDelimiter = response.data?.visualPattern?.alternateDelimiter;
+        if (
+          backendAlternateDelimiter !== undefined &&
+          backendAlternateDelimiter !== null &&
+          backendAlternateDelimiter !== visualTeachDelimiter
+        ) {
+          setVisualTeachDelimiter(backendAlternateDelimiter);
+        }
         const backendAlternateJoiner = response.data?.visualPattern?.alternateJoiner;
         if (backendAlternateJoiner !== undefined && backendAlternateJoiner !== visualTeachAlternateJoiner) {
           setVisualTeachAlternateJoiner(backendAlternateJoiner);
@@ -13611,17 +13646,13 @@ const BomNormalizer = () => {
           setError(err.response?.data?.error || err.message || 'Backend could not preview this interpretation.');
         }
       } finally {
+        visualTeachPreviewInFlightRef.current = false;
         if (visualTeachPreviewRequestRef.current === requestId) {
           setVisualTeachPreviewLoading(false);
         }
       }
-    }, 250);
-    return () => clearTimeout(timer);
   }, [
-    fieldPatternExpandedPatternKey,
     fieldPatternFields,
-    fieldPatternReviewOpen,
-    fieldPatternReviewStage,
     headers,
     normalizerConfig,
     roles,
@@ -13630,9 +13661,9 @@ const BomNormalizer = () => {
     visualTeachContext,
     visualTeachDelimiter,
     visualTeachIgnoredFields,
+    visualTeachMpnPrefixLength,
+    visualTeachMpnPrefixTouched,
     visualTeachEntryOverrides,
-    visualTeachOpen,
-    visualTeachPreviewRevision,
     visualTeachTags,
   ]);
 
@@ -13717,6 +13748,7 @@ const BomNormalizer = () => {
   }, [visualTeachContext, visualTeachSelection]);
 
   const handleApplyVisualTeachPattern = useCallback(async () => {
+    if (visualTeachApplyInFlightRef.current) return;
     const group = visualTeachContext?.group;
     const sample = visualTeachContext?.sample;
     const sourceValue = visualTeachContext?.sourceValue || '';
@@ -13724,6 +13756,7 @@ const BomNormalizer = () => {
 
     const taggedSpans = visualTeachTaggedSpans(visualTeachTags);
     const isIgnoreInterpretation = visualTeachIsIgnoreInterpretation;
+    const hasPrefixCleanup = Boolean(visualTeachMpnPrefixLength) || visualTeachMpnPrefixTouched;
     const entries = visualTeachPreviewEntries.map((entry, index) => ({
       ...entry,
       fields: {
@@ -13734,12 +13767,12 @@ const BomNormalizer = () => {
     const hasManualEdits = Object.values(visualTeachEntryOverrides || {})
       .some((fieldOverrides) => fieldOverrides && Object.keys(fieldOverrides).length > 0);
     const hasMappedTag = taggedSpans.some((span) => visualTeachMappedFieldKeys.includes(span.role));
-    if (!isIgnoreInterpretation && !hasMappedTag) {
+    if (!isIgnoreInterpretation && !hasMappedTag && !hasPrefixCleanup) {
       setError('Tag or enter at least one mapped FactWise value before applying this interpretation.');
       return;
     }
 
-    if (!taggedSpans.some((span) => span.role !== 'groupSeparator')) {
+    if (!hasPrefixCleanup && !taggedSpans.some((span) => span.role !== 'groupSeparator')) {
       setError('Mark the base MPN and manufacturer so this pattern can be reused.');
       return;
     }
@@ -13757,6 +13790,8 @@ const BomNormalizer = () => {
           visualTeachDelimiter,
           visualTeachAltMode,
           visualTeachAlternateJoiner,
+          visualTeachMpnPrefixLength,
+          visualTeachMpnPrefixTouched,
           visualTeachEntryOverrides,
           manuallyEdited: hasManualEdits,
         },
@@ -13770,6 +13805,7 @@ const BomNormalizer = () => {
     row[visualTeachContext.sourceColumn] = sourceValue;
     row.__sourceRow = sample.sourceRow;
 
+    visualTeachApplyInFlightRef.current = true;
     setFieldPatternLoading(true);
     setError('');
     try {
@@ -13793,6 +13829,11 @@ const BomNormalizer = () => {
         alternateDelimiter: visualTeachDelimiter,
         alternateMode: visualTeachAltMode,
         alternateJoiner: visualTeachAlternateJoiner,
+        baseRule: group.suggestedRule || {},
+        fieldRules: hasPrefixCleanup
+          ? { mpn: { prefixMode: visualTeachMpnPrefixLength ? 'first_n_chars' : 'none', stripPrefix: visualTeachMpnPrefixLength } }
+          : {},
+        preferFieldRules: hasPrefixCleanup,
         ignoredFields: visualTeachIgnoredFields,
         hasManualEdits,
         activeRules: Object.keys(fieldPatternRuleDrafts || {}).length
@@ -13805,8 +13846,8 @@ const BomNormalizer = () => {
         persist: false,
       });
       const taughtRule = response.data?.rule || {};
-      if (!taughtRule.visualPattern) {
-        throw new Error('Backend did not accept the visual pattern rule.');
+      if (!taughtRule.visualPattern && !Object.keys(taughtRule.fields || {}).length) {
+        throw new Error('Backend did not accept the pattern rule.');
       }
       const taughtEntries = (response.data?.entries || []).map((entry, entryIndex) => ({
         relation: entry.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
@@ -13871,6 +13912,7 @@ const BomNormalizer = () => {
     } catch (err) {
       setError(err.response?.data?.error || err.message || 'Could not apply this visual pattern to matching fragments.');
     } finally {
+      visualTeachApplyInFlightRef.current = false;
       setFieldPatternLoading(false);
     }
   }, [
@@ -13886,6 +13928,8 @@ const BomNormalizer = () => {
     visualTeachDelimiter,
     visualTeachEntryOverrides,
     visualTeachIgnoredFields,
+    visualTeachMpnPrefixLength,
+    visualTeachMpnPrefixTouched,
     visualTeachMappedFieldKeys,
     visualTeachPreviewEntries,
     visualTeachIsIgnoreInterpretation,
@@ -14673,16 +14717,27 @@ const BomNormalizer = () => {
           </Stack>
         </Paper>
 
-        {visualTeachAllowAlternates && (
-          <Paper elevation={0} sx={{ p: 1, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
+        <Paper elevation={0} sx={{ p: 1, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
             <Stack direction={{ xs: 'column', sm: 'row' }} gap={1}>
               <FormControl size="small" sx={{ minWidth: 190 }}>
                 <InputLabel>Alternate separator</InputLabel>
-                <Select label="Alternate separator" value={visualTeachDelimiter} onChange={(event) => setVisualTeachDelimiter(event.target.value)}>
-                  {['/', ';', ',', '|', '^', '~'].map((delimiter) => <MenuItem key={delimiter} value={delimiter}>{delimiter}</MenuItem>)}
-                  <MenuItem value={VISUAL_TEACH_NO_SPLIT}>No split</MenuItem>
+                <Select label="Alternate separator" value={visualTeachDelimiterSelectValue} onChange={handleVisualTeachDelimiterSelect}>
+                  {VISUAL_TEACH_DELIMITER_OPTIONS.map((option) => (
+                    <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                  ))}
+                  <MenuItem value={VISUAL_TEACH_CUSTOM_DELIMITER}>Custom delimiter</MenuItem>
                 </Select>
               </FormControl>
+              {visualTeachDelimiterSelectValue === VISUAL_TEACH_CUSTOM_DELIMITER && (
+                <TextField
+                  size="small"
+                  label="Custom delimiter"
+                  value={visualTeachDelimiter}
+                  onChange={(event) => setVisualTeachDelimiter(event.target.value)}
+                  inputProps={{ maxLength: 12 }}
+                  sx={{ width: 190 }}
+                />
+              )}
               <FormControl size="small" sx={{ minWidth: 220 }}>
                 <InputLabel>Alternate MPN mode</InputLabel>
                 <Select label="Alternate MPN mode" value={visualTeachAltMode} onChange={(event) => setVisualTeachAltMode(event.target.value)}>
@@ -14702,14 +14757,30 @@ const BomNormalizer = () => {
                   sx={{ width: 210 }}
                 />
               )}
+              {visualTeachMappedFieldKeys.includes('mpn') && (
+                <TextField
+                  size="small"
+                  type="number"
+                  label="Strip first characters"
+                  value={visualTeachMpnPrefixLength}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setVisualTeachMpnPrefixTouched(true);
+                    setVisualTeachMpnPrefixLength(
+                      value === '' ? '' : String(Math.max(0, Math.min(99, Number(value) || 0)))
+                    );
+                  }}
+                  inputProps={{ min: 0, max: 99 }}
+                  sx={{ width: 190 }}
+                />
+              )}
             </Stack>
-          </Paper>
-        )}
+        </Paper>
 
         <Paper elevation={0} sx={{ p: 1, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
           <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 0.7 }}>
             <Typography sx={{ fontSize: 12.5, fontWeight: 850 }}>Generated FactWise rows</Typography>
-            <Button size="small" variant="outlined" startIcon={<VisibilityIcon />} disabled={visualTeachPreviewLoading} onClick={() => setVisualTeachPreviewRevision((revision) => revision + 1)}>Preview</Button>
+            <Button size="small" variant="outlined" startIcon={<VisibilityIcon />} disabled={visualTeachPreviewLoading} onClick={handlePreviewVisualTeachPattern}>Preview</Button>
           </Stack>
           {visualTeachPreviewEntries.length ? (
             <TableContainer sx={{ border: `1px solid ${normalizerTheme.border}`, maxHeight: 260 }}>
@@ -18345,33 +18416,37 @@ const BomNormalizer = () => {
                     </Typography>
                   </Paper>
 
-                  {visualTeachAllowAlternates && (
                   <Paper elevation={0} sx={{ p: 1.2, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
                     <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ xs: 'stretch', sm: 'center' }}>
                       <FormControl size="small" sx={{ minWidth: 190 }}>
                         <InputLabel>Alternate separator</InputLabel>
                         <Select
                           label="Alternate separator"
-                          value={visualTeachDelimiter}
-                          onChange={(event) => setVisualTeachDelimiter(event.target.value)}
-                          disabled={!visualTeachAllowAlternates}
+                          value={visualTeachDelimiterSelectValue}
+                          onChange={handleVisualTeachDelimiterSelect}
                         >
-                          <MenuItem value="/">Slash (/)</MenuItem>
-                          <MenuItem value=";">Semicolon (;)</MenuItem>
-                          <MenuItem value=",">Comma (,)</MenuItem>
-                          <MenuItem value="|">Pipe (|)</MenuItem>
-                          <MenuItem value="^">Caret (^)</MenuItem>
-                          <MenuItem value="~">Tilde (~)</MenuItem>
-                          <MenuItem value={VISUAL_TEACH_NO_SPLIT}>No split</MenuItem>
+                          {VISUAL_TEACH_DELIMITER_OPTIONS.map((option) => (
+                            <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                          ))}
+                          <MenuItem value={VISUAL_TEACH_CUSTOM_DELIMITER}>Custom delimiter</MenuItem>
                         </Select>
                       </FormControl>
+                      {visualTeachDelimiterSelectValue === VISUAL_TEACH_CUSTOM_DELIMITER && (
+                        <TextField
+                          size="small"
+                          label="Custom delimiter"
+                          value={visualTeachDelimiter}
+                          onChange={(event) => setVisualTeachDelimiter(event.target.value)}
+                          inputProps={{ maxLength: 12 }}
+                          sx={{ width: 190 }}
+                        />
+                      )}
                       <FormControl size="small" sx={{ minWidth: 190 }}>
                         <InputLabel>Alternate MPN mode</InputLabel>
                         <Select
                           label="Alternate MPN mode"
                           value={visualTeachAltMode}
                           onChange={(event) => setVisualTeachAltMode(event.target.value)}
-                          disabled={!visualTeachAllowAlternates}
                         >
                           <MenuItem value="append">Append to base MPN</MenuItem>
                           <MenuItem value="complete">Already complete MPNs</MenuItem>
@@ -18391,7 +18466,6 @@ const BomNormalizer = () => {
                       )}
                     </Stack>
                   </Paper>
-                  )}
 
                   <Paper elevation={0} sx={{ p: 1.2, border: `1px solid ${normalizerTheme.border}`, bgcolor: normalizerTheme.paper }}>
                     <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1} sx={{ mb: 0.8 }}>
@@ -18407,7 +18481,7 @@ const BomNormalizer = () => {
                             visualTeachPreviewLoading ||
                             !visualTeachPreparedTags.some((role) => role && role !== 'groupSeparator')
                           }
-                          onClick={() => setVisualTeachPreviewRevision((revision) => revision + 1)}
+                          onClick={handlePreviewVisualTeachPattern}
                           sx={{ minHeight: 26, py: 0.2, fontSize: 11.5, fontWeight: 800 }}
                         >
                           Preview
