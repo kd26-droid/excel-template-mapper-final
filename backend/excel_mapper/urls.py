@@ -185,7 +185,7 @@ from .parser_views import (
 
 from .factwise40 import factwise40_call, factwise40_validate
 # The conversational normaliser: one endpoint, a model driving the views above.
-from .agent import agent_message
+from .agent import agent_download, agent_message
 
 urlpatterns = [
     # Health check
@@ -282,6 +282,8 @@ urlpatterns = [
     path('normaliser/run/', normaliser_run, name='normaliser-run'),
     # The same flow as a conversation, for a caller with no UI at all.
     path('agent/', agent_message, name='agent-message'),
+    # The sheet a conversation built, as a file - no session id needed.
+    path('agent/<str:conversation_id>/download/', agent_download, name='agent-download'),
     path('normaliser/<str:session_id>/resolve/', normaliser_resolve, name='normaliser-resolve'),
     path('bom/structures/', bom_structure_patterns, name='bom-structure-patterns'),
     path('bom/structures/match/', bom_structure_match, name='bom-structure-match'),

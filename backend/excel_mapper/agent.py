@@ -43,7 +43,7 @@ CONVERSATION_TTL_SECONDS = 24 * 60 * 60
 # A turn is one human message. The model may need several tool calls to answer it
 # (read the sheet, then infer the columns, then look at the conflicts), but a turn
 # that has not produced a reply after this many is looping, not working.
-MAX_TOOL_CALLS_PER_TURN = 14
+MAX_TOOL_CALLS_PER_TURN = 16
 
 # Rows shown to a person deciding whether a header row is right. Three is enough
 # to recognise a table and few enough to read in a chat bubble.
@@ -116,7 +116,7 @@ SYSTEM_PROMPT = """You are the BOM Normaliser. Someone gives you a spreadsheet e
 
 You never edit data yourself. Every change is made by a tool, and each tool is an operation the Normaliser already performs. You decide which to call and in what order, and you report what happened in plain language.
 
-THE FIVE CHECKPOINTS
+THE CHECKPOINTS
 
 Work through these in order. Each one ends with a question. After you ask, STOP - end your turn and wait for their reply. Never ask about two checkpoints in one message, and never assume an answer you were not given.
 
@@ -151,11 +151,24 @@ Work through these in order. Each one ends with a question. After you ask, STOP 
 6. CHECK IT AGAINST FACTWISE
    Call check_with_factwise. This runs FactWise's own import validator over the sheet. It is the only thing that decides whether the sheet can be imported, so report exactly what it says and add no findings of your own.
    If it reports errors, list them plainly - the row, the column and the reason - and say what would fix them. Do not import a sheet that failed.
-   If it passes, say how many rows it read, and ask whether to import it.
+   If it passes, say how many rows it read. Then ask which they want next: check the manufacturer part numbers against the distributors first, or go straight to importing into FactWise. Stop and wait.
+   - they want the MPN check -> checkpoint 7.
+   - they want to import -> checkpoint 8.
 
-7. IMPORT IT
-   Call list_projects. It returns the three most recent projects, each with its code, name and id, and how many exist in total.
-   Show those three - code and name - and ask, in this shape: these are your three most recent projects; do you want to import into one of them, or a different project? If a different one, give me its project id. If you want a NEW project, give me a name for it instead.
+7. THE MPN CHECK (only if they asked for it)
+   Call check_mpns. It looks every manufacturer part number up at DigiKey, Mouser and Element14 and reports what each one said. It can take a couple of minutes.
+   Report it per distributor: how many each one confirmed, and how many it did not.
+   Be careful what you claim. A distributor not listing a part is not proof the part is wrong - it may simply not stock it, or the lookup may have failed. Say "DigiKey did not confirm 12 of them", never "12 parts are invalid".
+   `providers_unavailable` names distributors that could not be reached at all, with the reason. Say which and why - a spent daily quota, a credential problem - and be clear their blank columns are not a finding. If `caution` or `incomplete` is set, read it out. Never let an unreachable distributor stop the import.
+   Then ask whether to import.
+
+8. IMPORT IT
+   Call list_projects. It returns up to three projects, newest first, each with its code, name and id, and how many exist in total.
+   Ask where the BOM should go, phrased to match how many there actually are. Never say "your three most recent projects" unless you are showing three.
+   - none at all -> say they have no projects yet, and ask for a name to create one, or a project id if they have one in mind.
+   - one -> name that one and ask whether to import into it, into a different project by id, or into a new project they name.
+   - two -> list both and ask the same.
+   - three or more -> list the three, say they are the most recent, and add that any other project can be used by its id.
    Then call import_to_factwise:
    - they picked one of the three, or gave an id -> project_mode "existing" with that project_id
    - they gave a name for a new project -> project_mode "new" with that project_name
@@ -336,6 +349,18 @@ TOOLS = [
                 "Run the sheet through FactWise's own import validator and return "
                 'its verdict unchanged: how many rows it read and every error it '
                 'found. This is what decides whether the sheet can be imported.'
+            ),
+            'parameters': {'type': 'object', 'properties': {}},
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'check_mpns',
+            'description': (
+                'Look up every manufacturer part number in the sheet at DigiKey, '
+                'Mouser and Element14, and report what each distributor said. '
+                'Slow - it can take a couple of minutes on a large sheet.'
             ),
             'parameters': {'type': 'object', 'properties': {}},
         },
@@ -954,6 +979,127 @@ def _tool_check_with_factwise(state, args):
     }
 
 
+def _internal_post_local(payload):
+    """An internal POST that reports the host it genuinely came from.
+
+    Provider credentials held in the environment are only handed out to requests
+    from localhost, which is a sensible guard - but a request this process builds
+    for itself reports the host `testserver`, so it failed that check and the
+    Mouser and Element14 clients came back with no key at all. They were then
+    silently skipped, and their empty columns read as "found nothing" rather than
+    "never asked". This is in-process on the same machine; saying so is accurate.
+    """
+    from rest_framework.test import APIRequestFactory
+    return APIRequestFactory().post('/', payload, format='json', HTTP_HOST='localhost')
+
+
+# Warming is done in slices: one request per ~15 uncached parts, because a whole
+# BOM in one call fans out enough distributor lookups to blow past a gateway's
+# request limit. These bound the loop so a slow or wedged provider cannot hold a
+# conversation open indefinitely.
+MPN_WARM_BATCHES = 40
+MPN_WARM_SECONDS = 240
+
+
+def _tool_check_mpns(state, args):
+    """Check the sheet's part numbers against the distributors.
+
+    Two steps, because the endpoints split the work that way. `validate-warm`
+    is what actually calls DigiKey, Mouser and Element14, a slice at a time;
+    `validate` then reads what those calls cached and writes the result columns.
+    Calling only the second - which is what this did at first - reports DigiKey's
+    answer and leaves the other two blank, which reads as "Mouser found nothing"
+    when the truth is that Mouser was never asked.
+
+    Reports per distributor rather than as one verdict, because they do not mean
+    the same thing: a part DigiKey does not list may simply be one DigiKey does
+    not stock. Collapsing that into "invalid" tells people their good parts are
+    bad, which is worse than not checking at all.
+
+    `provider_failures` comes from the warm calls themselves and is the honest
+    signal: a populated list means those providers were never reached, so their
+    blank columns are not a finding.
+    """
+    import time
+
+    from rest_framework.test import APIRequestFactory
+
+    from .mpn_views import mpn_validate, mpn_validate_warm, mpn_validation_summary
+    from .views import _internal_post
+
+    session_id = state.get('mapped_session_id')
+    if not session_id:
+        return {'ok': False, 'error': 'Build the sheet before checking part numbers.'}
+
+    # --- 1. ask the distributors, a slice at a time ------------------------
+    started = time.monotonic()
+    failures = {}
+    offset, total, done = 0, None, False
+    for _ in range(MPN_WARM_BATCHES):
+        response = mpn_validate_warm(_internal_post_local({
+            'session_id': session_id, 'offset': offset,
+        }))
+        batch = getattr(response, 'data', {}) or {}
+        if not batch.get('success'):
+            return {'ok': False,
+                    'error': batch.get('error') or 'The part numbers could not be checked.'}
+        for failure in (batch.get('provider_failures') or []):
+            name = str((failure or {}).get('provider') or failure)
+            failures[name] = failure
+        total = batch.get('total')
+        offset = batch.get('next_offset') or offset
+        done = bool(batch.get('done'))
+        if done or time.monotonic() - started > MPN_WARM_SECONDS:
+            break
+
+    # --- 2. write the answers into the sheet -------------------------------
+    response = mpn_validate(_internal_post_local({'session_id': session_id}))
+    run = getattr(response, 'data', {}) or {}
+    if not run.get('success'):
+        return {'ok': False, 'error': run.get('error') or 'The part numbers could not be checked.'}
+
+    response = mpn_validation_summary(
+        APIRequestFactory().get('/', HTTP_HOST='localhost'), session_id)
+    summary = getattr(response, 'data', {}) or {}
+
+    sources = []
+    for source in (summary.get('sources') or []):
+        confirmed = int(source.get('valid') or 0)
+        not_confirmed = int(source.get('invalid') or 0)
+        not_checked = int(source.get('unchecked') or 0)
+        sources.append({
+            'distributor': source.get('name'),
+            'confirmed': confirmed,
+            'not_confirmed': not_confirmed,
+            'not_checked': not_checked,
+            'end_of_life': source.get('eol'),
+            'discontinued': source.get('discontinued'),
+        })
+
+    overall = summary.get('overall') or {}
+    unreached = sorted(failures)
+    return {
+        'ok': True,
+        'mpn_column': run.get('mpn_header'),
+        'part_numbers_checked': run.get('total_unique'),
+        'warmed': offset,
+        'warm_complete': done,
+        'confirmed_by_someone': overall.get('valid'),
+        'confirmed_by_nobody': overall.get('invalid'),
+        'by_distributor': sources,
+        # Named distributors that could not be reached at all, with the reason
+        # each one gave. Their columns are blank because nobody asked them.
+        'providers_unavailable': unreached or None,
+        'provider_failure_detail': [failures[name] for name in unreached] or None,
+        'incomplete': (None if done else
+                       'Only %s of %s part numbers were looked up before the time '
+                       'budget ran out.' % (offset, total)),
+        'caution': ('No distributor could be reached, so this run says nothing about '
+                    'the parts themselves.'
+                    if unreached and len(unreached) >= len(sources) else None),
+    }
+
+
 def _tool_list_projects(state, args):
     """The projects and entities this enterprise actually has."""
     if _factwise_credentials(state) is None:
@@ -969,6 +1115,17 @@ def _tool_list_projects(state, args):
     # Newest first. A person picking a project to import into almost always
     # means one they made recently; the rest are reachable by id.
     projects.sort(key=lambda row: str(row.get('created_at') or ''), reverse=True)
+    shown = projects[:3]
+    # The note is what the model tends to echo, so it has to be true for the
+    # count actually in hand - "the three most recent" alongside an empty list
+    # is the kind of sentence that makes people distrust the whole answer.
+    if not total:
+        note = 'This enterprise has no projects yet.'
+    elif total <= len(shown):
+        note = 'That is all of them.'
+    else:
+        note = ('The %d most recent of %s. Any other project can be used by its id.'
+                % (len(shown), total))
     return {
         'ok': True,
         'projects': [
@@ -976,11 +1133,11 @@ def _tool_list_projects(state, args):
              'code': row.get('project_code'),
              'name': row.get('project_name'),
              'status': row.get('project_status')}
-            for row in projects[:3]
+            for row in shown
         ],
         'total_projects': total,
-        'note': ('Showing the 3 most recent of %s. Any other project can be used '
-                 'by its id.' % total),
+        'showing': len(shown),
+        'note': note,
     }
 
 
@@ -1086,6 +1243,7 @@ DISPATCH = {
     'check_sheet': _tool_check_sheet,
     'resolve_conflict': _tool_resolve_conflict,
     'check_with_factwise': _tool_check_with_factwise,
+    'check_mpns': _tool_check_mpns,
     'list_projects': _tool_list_projects,
     'import_to_factwise': _tool_import_to_factwise,
     'preview': _tool_preview,
@@ -1137,6 +1295,85 @@ def _hold(conversation_id, upload):
         for chunk in upload.chunks():
             handle.write(chunk)
     return path
+
+
+def _grid_bytes(state):
+    """The sheet as the person sees it, with every column it has gained.
+
+    NOT the same export FactWise receives. That one is rebuilt from the FactWise
+    template, so any column the template does not define is dropped on the way
+    out - which is right for an import and wrong for a person, because it throws
+    away exactly the columns they asked to see. The distributor results are the
+    case in point: they live in the grid, and arrive in the FactWise export as
+    empty headers.
+
+    So the download reads the grid directly and writes that.
+    """
+    from .views import (_internal_post, download_grid_excel,
+                        get_session_consistent, read_session_grid)
+
+    session_id = state['mapped_session_id']
+    info = get_session_consistent(session_id)
+    if not info:
+        raise RuntimeError('That sheet is no longer available.')
+    headers, rows = read_session_grid(session_id, info)
+    if not headers:
+        raise RuntimeError('The sheet has no columns to export.')
+
+    # download_grid_excel takes the rows from its caller - it is what the editor
+    # posts its own grid to - so the data is read here and handed over, rather
+    # than re-derived through the mapping a second time.
+    response = download_grid_excel(_internal_post({
+        'session_id': session_id,
+        'headers': list(headers),
+        'rows': [list(row) for row in (rows or [])],
+    }))
+    if getattr(response, 'streaming', False):
+        return b''.join(response.streaming_content)
+    content = getattr(response, 'content', None)
+    if not content:
+        detail = getattr(response, 'data', None)
+        raise RuntimeError(
+            (detail or {}).get('error') if isinstance(detail, dict)
+            else 'The sheet could not be exported.')
+    return content
+
+
+@api_view(['GET'])
+def agent_download(request, conversation_id):
+    """The sheet this conversation built, as an xlsx.
+
+    Keyed by the conversation rather than the session so the caller never needs
+    a session id - the same reason the replies do not carry editor links. What
+    comes back is the sheet as it stands, including any columns a step added
+    along the way (the distributor results, for one), so a person can see the
+    findings in the tool they actually use for this.
+    """
+    state = _load(conversation_id)
+    if state is None:
+        return Response({'success': False, 'error': 'That conversation has expired.'},
+                        status=status.HTTP_404_NOT_FOUND)
+    if not state.get('mapped_session_id'):
+        return Response({'success': False, 'error': 'This conversation has no sheet yet.'},
+                        status=status.HTTP_409_CONFLICT)
+    try:
+        content = _grid_bytes(state)
+    except Exception as exc:
+        logger.warning('Agent download failed for %s: %s', conversation_id, exc)
+        return Response({'success': False, 'error': 'The sheet could not be exported.'},
+                        status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    from django.http import HttpResponse
+
+    name = str(state.get('file_name') or 'sheet.xlsx')
+    if name.lower().endswith(('.xlsx', '.xls', '.csv')):
+        name = name.rsplit('.', 1)[0]
+    response = HttpResponse(
+        content,
+        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    response['Content-Disposition'] = 'attachment; filename="%s (normalised).xlsx"' % name
+    response['Cache-Control'] = 'no-store'
+    return response
 
 
 @api_view(['POST'])
@@ -1228,6 +1465,10 @@ def agent_message(request):
                     'tools_used': used,
                     'session_id': state.get('session_id'),
                     'mapped_session_id': state.get('mapped_session_id'),
+                    # There is a sheet worth downloading once one has been built.
+                    # The caller decides how to offer it; the model is never told
+                    # about it, so it cannot paste a link into the conversation.
+                    'download_ready': bool(state.get('mapped_session_id')),
                     'editor_url': ('/editor/%s' % state['mapped_session_id']
                                    if state.get('mapped_session_id') else None),
                 })
