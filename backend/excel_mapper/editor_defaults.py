@@ -306,9 +306,19 @@ def _saved_item_code_rule(settings_obj):
 #:
 #: Matched case-insensitively. A unit FactWise already knows is never rewritten:
 #: the point is to translate, not to overrule what the customer said.
-MEASUREMENT_UNIT_ALIASES = {
-    'p': 'EA',
-}
+#:
+#: EMPTY ON PURPOSE. "P" was translated here for THALES, where it is the French
+#: abbreviation for piece. But this table has no idea whose sheet it is reading,
+#: and it runs on every export for every customer: elsewhere P is as likely to
+#: mean pack, pair or pound, and a unit that quietly becomes EA is wrong in the
+#: one direction nobody checks - an order for 40 pairs shipped as 40 pieces
+#: reads as correct everywhere on the way out.
+#:
+#: A translation belongs to a customer, so it needs to hang off the entity, not
+#: off the module. Until it does, THALES sheets carry P through to validation,
+#: where it is rejected visibly and a person decides - which is worse for them
+#: and safer for everyone else.
+MEASUREMENT_UNIT_ALIASES = {}
 
 #: Every column that carries one.
 MEASUREMENT_UNIT_COLUMNS = ('Measurement unit', 'BOM UOM', 'Alternate measurement unit')
