@@ -1358,11 +1358,7 @@ def _tool_set_pattern(state, args):
         # Every rule taught so far, so teaching a second pattern does not forget
         # the first - the editor threads the same set through each call.
         'active_rules': known_rules,
-        # The editor's own teach popup sends persist=false, and for the same
-        # reason: the taught rule belongs in this session's config, not in the
-        # named fill-rule library where it shows up as something nobody made
-        # and nothing can apply.
-        'persist': False,
+        'persist': True,
     }))
     result = getattr(response, 'data', {}) or {}
     if not result.get('success', True) and result.get('error'):

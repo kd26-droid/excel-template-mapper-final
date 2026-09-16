@@ -130,22 +130,6 @@ def learn_normalized_bom_rows(
     return {"success": True, **result}
 
 
-#: Whether a confirmed field pattern is also written to ``ColumnRule``.
-#:
-#: Off. ``ColumnRule`` is the named fill/create-column store - its own docstring
-#: says so, and its payload is value_mode/target_column/condition. A field
-#: pattern is the opposite kind of thing: how to READ one cell, keyed by shape
-#: and pattern_key. Writing them to the same table put them in the editor's
-#: "Apply a saved rule" list and in everything else that lists rules, two per
-#: pattern (scoped and global), so one normalise of a 348-row sheet added 26
-#: entries a person never made and cannot use.
-#:
-#: Nothing reads them back from there either - patterns are recognised from the
-#: learned STRUCTURE (BomStructurePattern), which is still written below. So this
-#: only removes the clutter, not the learning.
-SAVE_FIELD_PATTERNS_AS_COLUMN_RULES = False
-
-
 def learn_confirmed_bom_field_patterns(groups, structure_scope=None, structure_fingerprint=""):
     pairs = []
     saved_pattern_rules = []
@@ -163,24 +147,23 @@ def learn_confirmed_bom_field_patterns(groups, structure_scope=None, structure_f
                 "structureSignature": structure_signature,
                 "structureFingerprint": structure_fingerprint,
             }
-            if SAVE_FIELD_PATTERNS_AS_COLUMN_RULES:
-                saved_rule = save_bom_field_pattern_rule(
-                    rule,
-                    description="User-confirmed BOM field parser pattern",
+            saved_rule = save_bom_field_pattern_rule(
+                rule,
+                description="User-confirmed BOM field parser pattern",
+            )
+            if saved_rule:
+                saved_pattern_rules.append(saved_rule)
+            # Only semantic pattern identities are safe across arbitrary sheet
+            # structures. Shape-only cleanup rules (for example strip-prefix)
+            # remain scoped to the structure where the user taught them.
+            if clean(rule.get("patternKey") or rule.get("pattern_key")):
+                global_rule = save_bom_field_pattern_rule(
+                    _global_reusable_pattern_rule(rule),
+                    description="Globally reusable user-confirmed BOM field parser pattern",
+                    library_scope="global",
                 )
-                if saved_rule:
-                    saved_pattern_rules.append(saved_rule)
-                # Only semantic pattern identities are safe across arbitrary sheet
-                # structures. Shape-only cleanup rules (for example strip-prefix)
-                # remain scoped to the structure where the user taught them.
-                if clean(rule.get("patternKey") or rule.get("pattern_key")):
-                    global_rule = save_bom_field_pattern_rule(
-                        _global_reusable_pattern_rule(rule),
-                        description="Globally reusable user-confirmed BOM field parser pattern",
-                        library_scope="global",
-                    )
-                    if global_rule:
-                        saved_pattern_rules.append(global_rule)
+                if global_rule:
+                    saved_pattern_rules.append(global_rule)
         for row in group.get("rows") or []:
             entries = row.get("entries") if isinstance(row, dict) else []
             source_row = row.get("sourceRow") if isinstance(row, dict) else None
