@@ -232,7 +232,7 @@ Work through these in order. Each one ends with a question. After you ask, STOP 
    They may also just tell you what they want in their own words - "make every unit EA", "drop the rows with no part number", "put a suffix on the duplicate codes". Work out which tool that is and confirm the details before running it. If what they asked could mean two things, ask which; do not pick.
    A delete is the one repair that cannot be walked back, so say how many rows will go BEFORE running it, not after. If the result comes back with rows kept because the BOM still needs them, say so plainly - they asked for those rows to go and did not get that.
    After every repair, check with FactWise again and say whether the error count went down. If it went UP, say so plainly - the repair made things worse and they need to know, because there is no undo.
-   If it passes, say how many rows it read. Then ask which they want next: check the manufacturer part numbers against the distributors first, or go straight to importing into FactWise. Stop and wait.
+   If it passes, say how many rows it read. Then ask which they want next, NAMING the distributors rather than calling them that: "Do you want to validate these MPNs with DigiKey, Mouser and Element14 first, or go straight to importing into FactWise?" Those three are the ones it actually queries, and "check against distributors" leaves a person guessing which - and whether the part they care about is even covered. Stop and wait.
    - they want the MPN check -> checkpoint 8.
    - they want to import -> checkpoint 9.
 
@@ -1225,7 +1225,8 @@ def _tool_review_setup(state, args):
     """
     from .bom_setup import (ALTERNATE_INHERIT_FIELDS, detected_setup,
                             detected_toggles, inherit_fields)
-    from .views import _internal_post, _normaliser_saved, bom_role_inference
+    from .views import (_internal_post, _normaliser_saved,
+                        _save_normaliser_state, bom_role_inference)
 
     roles = _normaliser_saved(state['session_id'], 'roles') or {}
     if not roles:
@@ -1252,6 +1253,19 @@ def _tool_review_setup(state, args):
         counts = {}
 
     settings = detected_setup(roles, config)
+    # Write the detected values down. They are what normalisation will use either
+    # way, but only if they are ON the session: left unwritten, `structure` and
+    # `alternateLayout` fall back to defaults that never divide a cell holding
+    # several approved parts. The setup was shown and agreed to, and the sheet
+    # was then built as though it had not been - 141 rows with no alternates
+    # where the same answers through the page give 160 with thirty-one.
+    from .bom_setup import setup_config
+    applied = setup_config(roles, config)
+    if any(str(config.get(key) or '') != str(value or '') for key, value in applied.items()):
+        merged = dict(config)
+        merged.update(applied)
+        _save_normaliser_state(state['session_id'], config=merged)
+        config = merged
     chosen_inherit = inherit_fields(config)
     return {
         'ok': True,
@@ -1821,6 +1835,36 @@ def _spans_from_parts(value, parts):
     return spans, None
 
 
+def _group_separator_span(value, separator):
+    """Where one approved part stops and the next begins, as a span.
+
+    The teacher does not take a separator as a setting: it reads the TEXT under
+    a span whose role is groupSeparator, and splits the cell on that literal.
+    Which means the literal has to be unambiguous, and a bare comma is not -
+    splitting "A(MAKER,CODE),B(MAKER,CODE)" on "," cuts inside the brackets as
+    well and produces four fragments, none of them a part.
+
+    So the separator is taken with the closing bracket in front of it when there
+    is one: ")," divides those parts and appears nowhere else. Found at bracket
+    depth zero, because the comma inside the brackets is not a boundary at all.
+    """
+    text = str(value or '')
+    sep = str(separator or '')
+    if not text or not sep:
+        return None
+    depth = 0
+    for index, char in enumerate(text):
+        if char in '([{':
+            depth += 1
+        elif char in ')]}':
+            depth = max(0, depth - 1)
+        if depth == 0 and text.startswith(sep, index):
+            start = index - 1 if index and text[index - 1] in ')]}' else index
+            return {'start': start, 'end': index + len(sep),
+                    'role': 'groupSeparator'}
+    return None
+
+
 def _tool_set_pattern(state, args):
     """Teach the normaliser to read a column the way the person says it reads."""
     from .views import (_internal_post, _normaliser_saved,
@@ -1860,6 +1904,15 @@ def _tool_set_pattern(state, args):
         spans, problem = _spans_for_grammar(cells.get(source_column), grammar)
     if problem:
         return {'ok': False, 'error': problem}
+
+    # Mark the divider itself. Without a span in this role the parser has no
+    # boundary to cut on, so a cell holding three approved parts is read as one
+    # - which is what it did: the fields came out clean and every alternate was
+    # silently dropped.
+    if group_separator:
+        marker = _group_separator_span(cells.get(source_column), group_separator)
+        if marker:
+            spans = sorted(spans + [marker], key=lambda span: span['start'])
 
     config = dict(_normaliser_saved(state['session_id'], 'config') or {})
     if group_separator:
