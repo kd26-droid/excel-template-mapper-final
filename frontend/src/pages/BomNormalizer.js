@@ -8045,6 +8045,47 @@ const hydrateNormalizerNoteColumns = (rows = [], roles = {}, sourceRows = []) =>
   });
 };
 
+// The structure gate offers to leave documents out. The page builds its own
+// sheet and uploads it, so nothing server-side sees these rows until after the
+// session exists - the backend's own filter sits on /normaliser/continue/, a
+// route this page never takes. Left unapplied, ticking the box changed nothing
+// a person could see: all 71 THALES drawings arrived in the editor.
+//
+// Same rule as the backend's _without_document_rows, and same reasoning behind
+// each guard, so the two paths cannot disagree about what a document is.
+const withoutDocumentRows = (rows = [], answers = null) => {
+  const sheets = Object.values(answers?.sheets || {});
+  // Read as a veto: a sheet that said no keeps its documents for everybody.
+  // Dropping rows is the irreversible direction.
+  if (!sheets.length || sheets.some((sheet) => sheet?.dropDocuments === false)) return rows;
+  if (!rows.some((row) => String(row?.quantity ?? '').trim())) return rows;
+
+  // Only columns that carry something are consulted: absence proves nothing on
+  // a sheet that has no part number at all, and judging every row a document
+  // would empty it.
+  const partColumns = ['mpn', 'Item code']
+    .filter((column) => rows.some((row) => String(row?.[column] ?? '').trim()));
+  if (!partColumns.length) return rows;
+
+  // A row with children is an assembly whatever its quantity says; dropping one
+  // deletes a whole branch. A row is never its own parent, however often these
+  // sheets say so - THALES files a part's drawing under the part's own number.
+  const parents = new Set();
+  rows.forEach((row) => {
+    const parent = String(row?.parent ?? '').trim();
+    if (parent && parent !== String(row?.cpn ?? '').trim()) parents.add(parent);
+  });
+
+  return rows.filter((row) => {
+    const quantity = String(row?.quantity ?? '').trim();
+    const consumes = quantity !== '' && !DASH_ONLY_RE.test(quantity)
+      && Number.isFinite(Number(quantity.replace(/,/g, ''))) && Number(quantity.replace(/,/g, '')) > 0;
+    if (consumes) return true;
+    if (parents.has(String(row?.cpn ?? '').trim())) return true;
+    return partColumns.some((column) => String(row?.[column] ?? '').trim());
+  });
+};
+
 const buildBomMappingRowsFromNormalizedRows = (rows = [], baseColumns = getNormalizedExportColumns(rows)) => {
   const columns = [...baseColumns];
 
@@ -8059,6 +8100,8 @@ const buildBomMappingRowsFromNormalizedRows = (rows = [], baseColumns = getNorma
 
   return { columns, rows: outputRows };
 };
+
+const DASH_ONLY_RE = /^[-–—\s]+$/;
 
 // The repeated template slots a parse can fill. Their internal names match the
 // template's own columns once punctuation is ignored, which is exactly how
@@ -12263,7 +12306,8 @@ const BomNormalizer = () => {
       setError('Run normalization before continuing to BOM Mapping.');
       return;
     }
-    const handoffRows = hydrateNormalizerNoteColumns(normalizedRows, roles, dataRows);
+    const handoffRows = withoutDocumentRows(
+      hydrateNormalizerNoteColumns(normalizedRows, roles, dataRows), answers);
     const baseColumns = getNormalizedExportColumns(handoffRows);
     const { columns, rows } = buildBomMappingRowsFromNormalizedRows(handoffRows, baseColumns);
     const suggestedMappings = buildNormalizerSuggestedMappings(columns, rows);
@@ -12452,7 +12496,8 @@ const BomNormalizer = () => {
       setCombineError('No merged rows are available for BOM Mapping.');
       return;
     }
-    const { columns, rows } = buildBomMappingRowsFromNormalizedRows(mergeRows, headers);
+    const { columns, rows } = buildBomMappingRowsFromNormalizedRows(
+      withoutDocumentRows(mergeRows, answers), headers);
     const suggestedMappings = buildNormalizerSuggestedMappings(columns, rows);
     const file = createWorkbookFileFromRows(rows, columns, 'merged-bom-for-mapping.xlsx', 'Merged BOM');
     const formData = new FormData();

@@ -1010,6 +1010,42 @@ def _internal_get():
     return APIRequestFactory().get('/')
 
 
+def _without_document_rows(rows, bom_structure):
+    """``rows`` minus the ones the structure gate asked to treat as documents.
+
+    The gate asks per sheet and these rows are already merged into one, so the
+    answer is read as a veto: a sheet that said no keeps its documents for
+    everybody. Dropping rows is the irreversible direction, and a wrong "yes"
+    silently deletes parts from a customer BOM.
+    """
+    from .bom_tree import codes_with_children, is_document_row, part_number_columns
+
+    sheets = ((bom_structure or {}).get('sheets') or {}).values()
+    if not sheets or any(sheet.get('dropDocuments') is False for sheet in sheets):
+        return rows
+    if not any(str((row or {}).get('quantity') or '').strip() for row in rows):
+        # No quantities anywhere: every row "consumes nothing" and the whole
+        # sheet would go. Nothing is knowable here, so nothing is removed.
+        return rows
+
+    code_columns = part_number_columns(rows, fallback='cpn')
+    # Same rule the tree uses, in the same order: a row with children is an
+    # assembly, and who has children is asked of the rows that survive. Asking
+    # it of every row makes a part with only its own drawings beneath it look
+    # like an assembly (see derive_tree). Grid and tree have to agree about
+    # which rows exist, so the reasoning cannot differ either.
+    structural = [row for row in rows
+                  if not is_document_row(row or {}, 'quantity', code_columns)]
+    parents = codes_with_children(structural, 'level', 'cpn', 'parent')
+    kept = [row for row in rows
+            if str((row or {}).get('cpn') or '').strip() in parents
+            or not is_document_row(row or {}, 'quantity', code_columns)]
+    if len(kept) != len(rows):
+        logger.info('Normaliser continue: excluded %d document rows of %d',
+                    len(rows) - len(kept), len(rows))
+    return kept
+
+
 @api_view(['POST'])
 def normaliser_continue(request, session_id):
     """Turn the normalised rows into a mapping session, without a browser.
@@ -1047,6 +1083,12 @@ def normaliser_continue(request, session_id):
         or info.get('bom_structure')
         or {}
     )
+
+    # The structure gate offers to leave documents out, and until now that
+    # answer only reached the BOM tree - the sheet built here, which is what the
+    # editor shows and what every export is made from, kept all of them. Ticking
+    # the box excluded nothing a person could see.
+    rows = _without_document_rows(rows, bom_structure)
 
     # Every column the rows actually carry, the known ones first so the sheet
     # reads the way the mapping page expects.
@@ -1093,6 +1135,21 @@ def normaliser_continue(request, session_id):
                         status=status.HTTP_400_BAD_REQUEST)
 
     new_session_id = data['session_id']
+
+    # The entity is what the saved editor defaults are keyed by, and upload does
+    # not carry one - the page supplies it later, on the request that fetches
+    # the grid. A session reached without the page never gets one at all, so the
+    # sheet arrives with no item codes; on a sheet whose alternates are told
+    # apart only by MPN that silently drops every alternate. Carry it across.
+    entity_name = str(request.data.get('entityName')
+                      or info.get('editor_defaults_entity_name')
+                      or info.get('entity_name') or '').strip()
+    if entity_name:
+        carrier = get_session_consistent(new_session_id)
+        if carrier is not None:
+            carrier['editor_defaults_entity_name'] = entity_name
+            SESSION_STORE[new_session_id] = carrier
+            save_session(new_session_id, carrier)
 
     # The mapping is knowable here - these columns were just generated, so what
     # each one means is not in doubt - and applying it is what makes the new
@@ -1288,25 +1345,108 @@ def normaliser_answers(request, session_id):
                      'bom_structure': info.get('bom_structure') or {}})
 
 
+#: The column an outline-grouped workbook's levels are read into.
+#:
+#: Excel can express a BOM's depth two ways: a number in a cell, or the row
+#: grouping in the margin. Only the first was ever read. Honeywell exports the
+#: second - HAB-45002226 carries a three-deep tree entirely in outlineLevel and
+#: not one of its eighteen columns says a word about structure - so the sheet
+#: arrived as a flat list of 141 parts and the levels came out jumbled.
+#:
+#: Named like a column a person would recognise, because from here on it is one:
+#: it is offered in the level dropdown and can be overridden like any other.
+OUTLINE_LEVEL_HEADER = 'Outline level'
+
+
+def _outline_levels(file_path, sheet_name=None):
+    """Each row's outline level, or {} when the workbook groups nothing.
+
+    Row 1 is the first row of the file, matching the positional read below.
+    Anything that is not an openpyxl-readable workbook returns {} rather than
+    raising: a sheet whose depth cannot be read must still upload.
+    """
+    try:
+        import openpyxl
+    except Exception:
+        return {}
+    try:
+        workbook = openpyxl.load_workbook(file_path, data_only=True)
+    except Exception as exc:
+        logger.debug('Outline levels unavailable for %s (%s)', file_path, exc)
+        return {}
+    try:
+        sheet = workbook[sheet_name] if sheet_name else workbook.worksheets[0]
+    except Exception:
+        sheet = workbook.worksheets[0]
+    levels = {}
+    for number, dimension in (sheet.row_dimensions or {}).items():
+        level = getattr(dimension, 'outlineLevel', 0) or 0
+        if level:
+            levels[int(number)] = int(level)
+    workbook.close()
+    # One level throughout is not a hierarchy, it is a grouped block; treating it
+    # as depth would invent a tier the sheet never claimed.
+    return levels if len(set(levels.values())) > 1 else {}
+
+
 def _read_raw_upload_table(file_path, sheet_name=None):
     """Read upload rows positionally so we can repair packed one-cell tables."""
     path_text = str(file_path).lower()
     if path_text.endswith('.csv') or _looks_like_delimited_text_file(file_path):
+        # `header_row` is positional here, and the helper forwards it AS `header`.
+        # Passing `header=None` instead left header_row unsupplied and would have
+        # collided on `header` anyway, so every delimited upload raised TypeError
+        # and came back with no columns, no row count and no detected header.
         return read_csv_with_encoding(
             file_path,
-            header=None,
+            None,
             sep=None,
             engine='python',
             dtype=str,
             keep_default_na=False
         )
-    return pd.read_excel(
+    table = pd.read_excel(
         file_path,
         sheet_name=sheet_name,
         header=None,
         dtype=str,
         keep_default_na=False
     )
+    return _with_outline_level_column(table, file_path, sheet_name)
+
+
+def _with_outline_level_column(table, file_path, sheet_name=None):
+    """Append the row grouping as a column, when the workbook has one.
+
+    Written as an ordinary column so everything downstream - role inference, the
+    level dropdown, the structure gate - treats it exactly like a level column
+    the customer had typed, because as far as the BOM is concerned that is what
+    it is.
+    """
+    # With no sheet named, pandas hands back {name: frame} rather than a frame.
+    # Treated as one table it is a mapping, and the column landed as a dict KEY -
+    # a sheets dict with an "Outline level" entry in it, which nothing downstream
+    # can read as a sheet.
+    if isinstance(table, dict):
+        return {
+            name: _with_outline_level_column(frame, file_path, name)
+            for name, frame in table.items()
+        }
+    levels = _outline_levels(file_path, sheet_name)
+    if not levels or table is None or not len(table):
+        return table
+    column = [OUTLINE_LEVEL_HEADER]
+    for position in range(1, len(table)):
+        # +1 because row 1 of the file is the header row read at position 0.
+        # Excel records only the grouped rows; an ungrouped one is outline 0,
+        # which is the top of the tree, not a missing answer. Left blank it would
+        # be skipped as an unparsable level - and the row that is ungrouped is
+        # the finished good, so the BOM would lose the thing it builds.
+        column.append(str(levels.get(position + 1, 0)))
+    table[OUTLINE_LEVEL_HEADER] = column[:len(table)]
+    logger.info('Upload: read %d outline levels as "%s" (depths %s)',
+                len(levels), OUTLINE_LEVEL_HEADER, sorted(set(levels.values())))
+    return table
 
 
 def _non_empty_cells(row_values):
@@ -1823,7 +1963,22 @@ BOM_DESTINATION_HEADER_ALIASES = BOM_DESTINATION_HEADERS + LEGACY_BOM_DESTINATIO
 # which BOM a line belongs to, and that is structure the tree knows, not a value
 # the uploaded sheet carries.
 COMBINED_FINISHED_GOOD_HEADER = 'Finished good code'
-COMBINED_BOM_CODE_HEADER = 'BOM code' 
+COMBINED_BOM_CODE_HEADER = 'BOM code'
+
+# 4.0 keeps an alternate as its own row and reads these two to fold it onto the
+# line it belongs to (item_import/schema.py declares both STRUCTURAL, and
+# combined.py::_build_group_bom_rows acts on them). The 3.0 sheet says the same
+# thing the other way round - alternates go into repeated slot columns on the
+# primary's row - which is why the generated BOM export needs neither.
+COMBINED_IS_ALTERNATE_HEADER = 'Is alternate?'
+COMBINED_ALTERNATE_FOR_HEADER = 'Alternate for?'
+
+# A line that consumes a sub-assembly has to name that assembly's BOM. The sheet
+# already contains the sub-BOM's own lines, so 4.0 can see it exists - what it
+# cannot see is which line builds it, and it reports that as "Sub BOM X was not
+# found" against the consuming row. Only the derived tree knows: by the time a
+# row reaches the grid nothing on it distinguishes a sub-assembly from a part.
+COMBINED_SUB_BOM_HEADER = 'Sub BOM ID' 
 
 
 def add_bom_destination_headers(headers: list) -> list:
@@ -3119,6 +3274,19 @@ def bom_role_inference(request):
             roles=final_roles,
             config=final_config,
             source_signature=source_signature if isinstance(source_signature, dict) else {},
+        )
+        # Write the FINAL roles down, not the raw ones saved above.
+        #
+        # Structure matching is what fills the roles a plain column-name guess
+        # cannot reach - an MPN and a manufacturer sharing one cell, a level
+        # carried by a parent path. Saving before that ran left the session
+        # holding empty strings for exactly those roles while the response
+        # carried the right ones, so the browser looked correct and every
+        # headless caller normalised the sheet without an MPN.
+        _save_normaliser_state(
+            normaliser_session_id,
+            roles=final_roles,
+            config=final_config,
         )
         response_payload = {
             **result,
@@ -6165,6 +6333,7 @@ def data_view(request):
         # De-dup rules as you already do...
         formula_rules = info.get('formula_rules', [])
 
+
         # Convert list-based data to dict format BEFORE applying formulas
         if transformed_rows and len(transformed_rows) > 0 and isinstance(transformed_rows[0], list):
             dict_rows = []
@@ -6695,7 +6864,18 @@ def data_view(request):
                     template_norm.add(_canon('Mouser Category'))
 
 
+        # A repeated column has two spellings: the label a person reads
+        # ("Tag (1)") and the key its value is stored under ("Tag_1"). These
+        # headers are labels while these rows are keyed, so the has-data probe
+        # below read nothing at all from any of them and dropped every repeated
+        # column as dead - the manufacturer disappeared between the mapping that
+        # filled it and the grid, taking with it the second half of any item
+        # code joined from it. The canon check does not bridge the two either
+        # ('tag(1)' vs 'tag1'), so the probe is the only thing keeping them.
+        cleanup_field_headers = make_unique_field_headers(headers_to_use)
+
         for i, header in enumerate(headers_to_use):
+            field_header = cleanup_field_headers[i] if i < len(cleanup_field_headers) else header
             header_canon = _canon(header)
             is_template_column = header_canon in template_norm
             
@@ -6711,7 +6891,7 @@ def data_view(request):
                 has_data = False
                 for row in transformed_rows:
                     if isinstance(row, dict):
-                        value = row.get(header, '')
+                        value = row.get(header, row.get(field_header, ''))
                     elif isinstance(row, list) and i < len(row):
                         value = row[i] if row[i] is not None else ''
                     else:
@@ -6738,11 +6918,22 @@ def data_view(request):
             if len(cleaned_headers) < original_header_count:
                 cleaned_paginated_rows = []
                 original_headers = [h for h in headers_to_use]  # Keep original reference
+                # A repeated column has two spellings: the label a person reads
+                # ("Tag (1)") and the key a row is stored under ("Tag_1"). These
+                # headers are labels and these rows are keyed, so looking up only
+                # the label missed every one of them and wrote '' in its place -
+                # the manufacturer vanished between the mapping that filled it
+                # and the grid, and with it the second half of any item code
+                # joined from it.
+                cleaned_field_headers = make_unique_field_headers(cleaned_headers)
 
                 for row in paginated_rows:
                     if isinstance(row, dict):
                         # Keep only fields that correspond to cleaned headers
-                        cleaned_row = {header: row.get(header, '') for header in cleaned_headers}
+                        cleaned_row = {
+                            header: row.get(header, row.get(field_header, ''))
+                            for header, field_header in zip(cleaned_headers, cleaned_field_headers)
+                        }
                         cleaned_paginated_rows.append(cleaned_row)
                     elif isinstance(row, list):
                         # Keep only columns that correspond to cleaned headers indices
@@ -7592,6 +7783,37 @@ def _drop_bom_columns(rows, headers):
     return new_rows, new_headers
 
 
+def _apply_export_editor_defaults(rows, headers, info):
+    """Run the saved editor defaults over rows on their way into a file.
+
+    Same call the grid makes, so an export cannot disagree with the screen. It
+    is separate from ``_apply_editor_defaults_for_session`` only because that
+    one reads the entity from a session and records what it did; here the rows
+    are already in hand and the summary belongs to the grid, not the download.
+    """
+    if not rows or not headers:
+        return rows, headers
+    entity_name = str((info or {}).get('editor_defaults_entity_name')
+                      or (info or {}).get('entity_name') or '').strip()
+    if not entity_name:
+        return rows, headers
+    settings_obj = get_editor_defaults_for_entity(entity_name)
+    if not settings_obj:
+        return rows, headers
+    try:
+        output_rows, summary = apply_editor_defaults_to_rows(
+            headers, rows, settings_obj,
+            locked_codes=locked_identity_codes(info, headers, rows),
+        )
+    except Exception as exc:  # pragma: no cover - a download must still produce a file
+        logger.warning('Export: editor defaults skipped (%s)', exc)
+        return rows, headers
+    applied = (summary or {}).get('applied') or {}
+    if applied:
+        logger.info('DOWNLOAD: editor defaults filled %s', applied)
+    return output_rows, headers
+
+
 def _add_combined_bom_identity_columns(session_id, rows, headers):
     """Fill in which BOM each line belongs to, for a combined (4.0) export.
 
@@ -7633,6 +7855,7 @@ def _add_combined_bom_identity_columns(session_id, rows, headers):
         identity.setdefault(int(grid_row), (
             str(bom_row.get('Finished good code') or '').strip(),
             str(bom_row.get('BOM ID') or '').strip(),
+            str(bom_row.get('Sub BOM ID') or '').strip(),
         ))
     if not identity:
         return rows, headers, 0
@@ -7651,9 +7874,22 @@ def _add_combined_bom_identity_columns(session_id, rows, headers):
                 finished_good, str(bom_row.get('BOM ID') or '').strip() or finished_good
             )
 
+    # Which editor row is an alternate, and of what. Without this every one of
+    # them goes out looking like an ordinary BOM line with no BOM code, and 4.0
+    # rejects it as "BOM code is required when BOM fields are populated" - 355
+    # times on a THALES sheet, plus the item errors that follow.
+    alternate_of = {}
+    for entry in (getattr(result, 'alternate_rows', None) or []):
+        grid_row = entry.get('grid_row')
+        if grid_row is None:
+            continue
+        alternate_of.setdefault(int(grid_row), entry)
+
     output_headers = list(headers)
     position_of = {}
-    for label in (COMBINED_FINISHED_GOOD_HEADER, COMBINED_BOM_CODE_HEADER):
+    for label in (COMBINED_FINISHED_GOOD_HEADER, COMBINED_BOM_CODE_HEADER,
+                  COMBINED_IS_ALTERNATE_HEADER, COMBINED_ALTERNATE_FOR_HEADER,
+                  COMBINED_SUB_BOM_HEADER):
         index = _grid_column_index(output_headers, label)
         if index < 0:
             output_headers.append(label)
@@ -7665,6 +7901,7 @@ def _add_combined_bom_identity_columns(session_id, rows, headers):
     width = len(output_headers)
     output_rows = []
     headers_marked = 0
+    alternates_marked = 0
     for position, row in enumerate(rows, start=1):
         if not isinstance(row, list):
             output_rows.append(row)
@@ -7672,10 +7909,27 @@ def _add_combined_bom_identity_columns(session_id, rows, headers):
         values = list(row)
         if len(values) < width:
             values.extend([''] * (width - len(values)))
+        alternate = alternate_of.get(position)
         pair = identity.get(position)
-        if pair:
+        if alternate and not pair:
+            # An alternate belongs to its primary's BOM, so it carries the same
+            # BOM code - it is grouped by that before anything looks at it - and
+            # then names the line it stands in for.
+            values[position_of[COMBINED_FINISHED_GOOD_HEADER]] = alternate.get('finished_good') or ''
+            values[position_of[COMBINED_BOM_CODE_HEADER]] = alternate.get('bom_id') or ''
+            values[position_of[COMBINED_IS_ALTERNATE_HEADER]] = 'Yes'
+            values[position_of[COMBINED_ALTERNATE_FOR_HEADER]] = alternate.get('alternate_for') or ''
+            # Level is deliberately left as the grid has it. 4.0 finds the
+            # primary by (BOM code, level, code), and an alternate sits at the
+            # same level as the line it stands in for - the sheet listed them
+            # side by side. Writing the BOM block's level here instead put every
+            # alternate one tier above its primary and lost all 343 of them.
+            alternates_marked += 1
+        elif pair:
             values[position_of[COMBINED_FINISHED_GOOD_HEADER]] = pair[0]
             values[position_of[COMBINED_BOM_CODE_HEADER]] = pair[1]
+            if len(pair) > 2 and pair[2]:
+                values[position_of[COMBINED_SUB_BOM_HEADER]] = pair[2]
         elif code_index >= 0:
             item_code = str(values[code_index] or '').strip()
             bom_code = heads_bom.get(item_code)
@@ -7690,7 +7944,9 @@ def _add_combined_bom_identity_columns(session_id, rows, headers):
                 headers_marked += 1
         output_rows.append(values)
 
-    return output_rows, output_headers, len(identity) + headers_marked
+    if alternates_marked:
+        logger.info('Combined export: marked %d row(s) as alternates', alternates_marked)
+    return output_rows, output_headers, len(identity) + headers_marked + alternates_marked
 
 
 def _fold_sap_description_column(rows, headers):
@@ -9205,6 +9461,18 @@ def download_file(request, session_id=None):
                 ])
             transformed_rows = converted_rows
         
+        # The saved editor defaults, exactly as the grid applies them. The editor
+        # runs them on every read and does not write the result back, so the
+        # stored grid still holds whatever the normaliser put there - and this
+        # export reads the stored grid. The two then disagree about the sheet:
+        # THALES rows carrying their assembly's CPN showed the joined MPN code
+        # on screen and the bare CPN in the file, which made eleven of them the
+        # same item and FactWise reject each one as a duplicate with a different
+        # mpn_code. Whatever a person is looking at is what must be exported.
+        transformed_rows, all_headers = _apply_export_editor_defaults(
+            transformed_rows, all_headers, info
+        )
+
         # Strip BOM structure columns here rather than from the requested column
         # order: several paths above rebuild `all_headers` from a canonical set,
         # which silently reinstates anything filtered earlier.
@@ -13459,6 +13727,7 @@ def _apply_editor_defaults_for_session(headers, rows, info):
         headers, rows, settings_obj,
         locked_codes=locked_identity_codes(info, headers, rows),
     )
+
     if isinstance(info, dict):
         info['editor_defaults_last_applied'] = summary
     return headers, output_rows
@@ -17462,7 +17731,7 @@ def _generate_hierarchical_bom(records, answer, bom_header):
 
     Returns (result, error_response); exactly one is set.
     """
-    from .bom_tree import derive_tree, BomTreeError
+    from .bom_tree import derive_tree, BomTreeError, part_number_columns
     from .bom_generator import generate_multi_level_bom, split_primaries_and_alternates
 
     level_column, code_column = _hierarchy_columns(records, answer)
@@ -17506,6 +17775,10 @@ def _generate_hierarchical_bom(records, answer, bom_header):
             # The user's answer from the BOM structure gate. Absent on answers
             # saved before the checkbox existed, which keeps the old default.
             drop_documents=answer.get('dropDocuments', True) is not False,
+            # Not code_column. That is whatever identifies a row, and on sheets
+            # that identify rows by the parent's customer number every drawing
+            # carries one, so the document test never fired.
+            document_code_columns=part_number_columns(primaries, fallback=code_column),
         )
     except BomTreeError as exc:
         return None, Response({

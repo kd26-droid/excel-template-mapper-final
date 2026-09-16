@@ -12,6 +12,7 @@ existing FactWise integration keeps talking to the 3.0 API exactly as it did.
 
 import io
 import logging
+from collections import Counter
 
 import requests
 from rest_framework import status
@@ -240,8 +241,36 @@ def factwise40_validate(request):
         return Response({'success': True, 'result': payload,
                          'bom_codes': _sheet_bom_codes(sheet[1])})
 
-    logger.info('FactWise 4.0 validate: rows=%s errors=%s',
+    # A count alone cannot be acted on: "885 problems" is the same line whether
+    # one column is wrong on every row or 885 things are. The grouping is what
+    # says which, and it is the first question asked every time.
+    kinds = Counter()
+    columns = Counter()
+    for problem in (payload.get('errors') or []):
+        if not isinstance(problem, dict):
+            continue
+        kinds[str(problem.get('code') or problem.get('message') or '')[:90]] += 1
+        columns[str(problem.get('column') or problem.get('field_code') or '')] += 1
+    logger.info('FactWise 4.0 validate: rows=%s errors=%s', 
                 payload.get('row_count'), payload.get('error_count'))
+    if kinds:
+        logger.info('FactWise 4.0 validate: by column %s', columns.most_common(8))
+        for code, count in kinds.most_common(8):
+            logger.info('FactWise 4.0 validate:   %5d x %s', count, code)
+        # A code like INVALID_ITEM is a category, not a reason - 4.0 puts the
+        # reason in the message. Without one example per code the count says
+        # nothing about what to fix.
+        seen = set()
+        for problem in (payload.get('errors') or []):
+            if not isinstance(problem, dict):
+                continue
+            code = str(problem.get('code') or '')
+            if code in seen:
+                continue
+            seen.add(code)
+            logger.info('FactWise 4.0 validate:   e.g. %s row=%s col=%s :: %s',
+                        code, problem.get('row'), problem.get('column'),
+                        str(problem.get('message') or '')[:220])
     return Response({'success': True, 'result': payload})
 
 

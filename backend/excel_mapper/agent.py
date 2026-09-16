@@ -25,6 +25,7 @@ a record without a human saying yes.
 import json
 import logging
 import os
+import re
 import uuid
 
 import requests
@@ -135,12 +136,23 @@ Work through these in order. Each one ends with a question. After you ask, STOP 
 
 3. THE BOM CODE
    A list of components never says what assembly it builds, so only they can tell you. Ask what this BOM is called, then call set_bom_code with exactly what they give you.
+   If they answer with a code AND a name - "E49831AAAPB - HIB (HMD INTERCO BOARD)" - pass the code as `bom_code` and the rest as `bom_name`. A code has no spaces in it; taking the whole answer as the code creates the BOM under a name with brackets in it, and every component line then points at something that does not exist.
+
+3b. THE SUB-ASSEMBLIES
+   Only when the sheet has levels. Call review_sub_boms once the BOM can be derived - after normalise.
+   Each sub-assembly becomes a BOM of its own, and its code, name, unit and base quantity were DERIVED, not read from the sheet: the name is its own code repeated, the unit is EA, the quantity is 1. Anything with `confirmed` false is a default nobody chose.
+   Show them as a short list - code, name, unit, quantity, and how many lines each holds - and ask whether any need changing. Do not read out fifteen of them one at a time; show the list and ask once.
+   - They say it is fine -> go on.
+   - They name one to change -> call set_sub_bom with just that code and just the fields that change.
+   If review_sub_boms says the BOM cannot be derived yet, skip this checkpoint rather than asking about it.
 
 4. THE PATTERNS
    Call review_patterns. A pattern is how the normaliser reads one column's cells - `<MPN> <MANUFACTURER>` means it expects a part number followed by a maker. It reports each pattern it found, how many rows use it, whether it recognises it, and real example rows.
    Show every pattern that needs review: its grammar, how many rows, and one or two examples with the ACTUAL cell values. The examples are the point - they are how a person spots that a column holds the wrong thing.
    If the examples show values that look wrong for their column - a manufacturer name sitting in the MPN column, say - point that out plainly.
    Ask whether each pattern is right. If they want to change one, they type the grammar themselves. Show them how, using that pattern's own `example_grammar` - it is built to fit that cell, so it works if they copy it. Never invent an example with more parts than `parts_in_cell`, or it will be rejected. Say which words they can use: MPN, MANUFACTURER, CPN, DESCRIPTION, QUANTITY, UOM, IGNORE.
+
+   A pattern with `reads_alternates` true carries the line's other approved parts - a stem, a placeholder and the list that fills it, like `KGM05AR71H102K@ (H/N)`. It has no `example_grammar`, and that is deliberate: the words above cannot say "and here are the other approved suffixes", so any grammar typed over it silently discards them and the line keeps only the stem, which is not a part number. Say what it reads, show the example cell, and offer to accept it as detected. Only rewrite one if the person asks after being told what it costs.
    Pass what they type to set_pattern exactly as they wrote it.
    If nothing needs review, say so in one line and move on. Do not make them confirm what is already recognised.
 
@@ -164,6 +176,7 @@ Work through these in order. Each one ends with a question. After you ask, STOP 
    Before applying anything, say what you are about to do and to how many rows, and ASK.
    Look before you ask. For anything about a column, call inspect_column first - it says how many cells are empty and what the rest hold, so you can offer a real choice instead of a blind menu: "Measurement unit is empty on 12 rows; the rest are EA, PCS and NOS."
    Every repair tool is a form, not a button. Ask for the mode first - the strategy, the value_mode - and then ask ONLY for what that mode needs: a join wants its columns and separator, a default wants its value, carrying down wants nothing more. Offer the modes the tool actually lists and never a word outside them.
+   When there are more errors than anyone wants read aloud - more than about ten - say the sheet can be downloaded with every objection written onto the cell it belongs to, and that they can filter and fix it in Excel. Do not paste a link; the download is offered next to your message.
    An error kind with no repair behind it, an unresolvable vendor or unit for instance, is not something to guess at. Say it needs them, and offer the sheet: they can download it, correct it in Excel, and send it back with apply_edited_sheet - which keeps this session, its mappings and anything already checked.
    They may also just tell you what they want in their own words - "make every unit EA", "drop the rows with no part number", "put a suffix on the duplicate codes". Work out which tool that is and confirm the details before running it. If what they asked could mean two things, ask which; do not pick.
    A delete is the one repair that cannot be walked back, so say how many rows will go BEFORE running it, not after. If the result comes back with rows kept because the BOM still needs them, say so plainly - they asked for those rows to go and did not get that.
@@ -263,12 +276,52 @@ TOOLS = [
     {
         'type': 'function',
         'function': {
+            'name': 'review_sub_boms',
+            'description': ('The sub-assemblies this sheet builds, and the BOM '
+                            'code, name, unit and base quantity each one will be '
+                            'created with. `confirmed` false means the value is a '
+                            'default nobody has chosen.'),
+            'parameters': {'type': 'object', 'properties': {}},
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'set_sub_bom',
+            'description': ('Correct one sub-assembly. Send only what changes; '
+                            'anything left out keeps its current value.'),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'code': {'type': 'string',
+                             'description': 'The sub-assembly, as review_sub_boms listed it.'},
+                    'bom_code': {'type': 'string'},
+                    'bom_name': {'type': 'string'},
+                    'measurement_unit': {'type': 'string'},
+                    'base_quantity': {'type': 'number'},
+                },
+                'required': ['code'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
             'name': 'set_bom_code',
             'description': 'Record the code of the assembly this BOM builds.',
             'parameters': {
                 'type': 'object',
                 'properties': {
-                    'bom_code': {'type': 'string'},
+                    'bom_code': {
+                        'type': 'string',
+                        'description': ('The code alone, as the assembly is '
+                                        'identified - no descriptive name.'),
+                    },
+                    'bom_name': {
+                        'type': 'string',
+                        'description': ('What the assembly is called, when the '
+                                        'person gives a name as well as a code.'),
+                    },
                     'has_levels': {
                         'type': 'boolean',
                         'description': 'True only if the sheet has a level/indent column.',
@@ -862,19 +915,192 @@ def _sheet_name_for(state):
     return sheets[0] if sheets else 'Sheet1'
 
 
+#: How a person writes a code and its name together, answering "what is this
+#: BOM called?" with one string: "E49831AAAPB - HIB (HMD INTERCO BOARD)".
+_CODE_AND_NAME = re.compile(r'^\s*(?P<code>[^\s]+)\s+[-–—:]\s+(?P<name>.+?)\s*$')
+
+
+def _split_code_and_name(answer):
+    """(code, name) from one answer that may carry both.
+
+    Asked what a BOM is called, a person answers the way the sheet labels it -
+    code, a dash, then the description. Taken whole, that string became the BOM
+    code, the finished good code AND the item code, while every component line
+    pointed at the bare code: the header row then matched nothing, and the BOM
+    was created under a name with spaces and brackets in it.
+
+    A code has no spaces, so anything after the separator is the name. When
+    there is no separator the answer is used as given - guessing a split inside
+    a code would be worse than leaving it alone.
+    """
+    text = str(answer or '').strip()
+    match = _CODE_AND_NAME.match(text)
+    if not match:
+        return text, ''
+    return match.group('code').strip(), match.group('name').strip()
+
+
+def _sheet_bom_answer(session_id, sheet):
+    """One sheet's BOM structure answer, or {}.
+
+    Read straight off the session. ``_normaliser_saved`` looks inside
+    ``info['normaliser']``, where the roles and the config live; the structure
+    gate's answer is a top-level key. Reading it with the wrong accessor returns
+    {} rather than failing, which is how a "send the whole answer back" write
+    came to send only the part that had just changed - and replaced the BOM
+    code, the level column and hasLevels with nothing.
+    """
+    from .views import get_session_consistent
+
+    info = get_session_consistent(session_id) or {}
+    sheets = (info.get('bom_structure') or {}).get('sheets') or {}
+    answer = sheets.get(sheet)
+    return answer if isinstance(answer, dict) else {}
+
+
+def _tool_review_sub_boms(state, args):
+    """Every sub-assembly this sheet builds, and what its BOM will say.
+
+    None of these five values comes from the sheet. A sub-assembly's BOM code,
+    name, unit and base quantity are derived - code repeated as the name, EA,
+    quantity 1 - and the page shows all of them for correction before the BOM is
+    built. The agent asked only about the top BOM, so on a THALES sheet fifteen
+    sub-BOMs were created named after their own codes, in a unit nobody chose,
+    and there was no point in the conversation where that could be said.
+
+    Reported here so the same correction is possible without the page.
+    """
+    from .views import _generate_bom_for_session, _normaliser_saved
+
+    session_id = state.get('mapped_session_id') or state['session_id']
+    try:
+        result, bom_header, error = _generate_bom_for_session(session_id)
+    except Exception as exc:  # pragma: no cover - the BOM may not build yet
+        return {'ok': False, 'error': 'The BOM could not be derived yet (%s).' % exc}
+    if error is not None or result is None:
+        return {'ok': False,
+                'error': 'The BOM could not be derived yet, so its sub-assemblies are not known.'}
+
+    root_code = str((bom_header or {}).get('bomCode')
+                    or (bom_header or {}).get('finishedGoodCode') or '').strip()
+    # Read from the session the BOM was generated from. Once the sheet is built
+    # the answers live on the mapped session too, and generation uses that copy -
+    # a correction written to the normaliser session is real, saved, and has no
+    # effect on the BOM anybody sees.
+    overrides = (_sheet_bom_answer(session_id, _sheet_name_for(state))
+                 .get('subBoms') or {})
+
+    # Read off the generated BOM rather than the tree: the tree is internal to
+    # generation and the result does not carry it, while every generated line
+    # already states the BOM it belongs to and what that BOM was created with.
+    groups = {}
+    for row in (result.bom_rows or []):
+        code = str(row.get('BOM ID') or '').strip()
+        if not code or code == root_code:
+            continue
+        entry = groups.setdefault(code, {'lines': 0, 'row': row})
+        entry['lines'] += 1
+
+    sub_boms = []
+    for code, entry in groups.items():
+        row = entry['row']
+        override = overrides.get(code) or {}
+        sub_boms.append({
+            'code': code,
+            'level': row.get('Level'),
+            'lines': entry['lines'],
+            # What the BOM will be created with, override or derived default.
+            'bom_code': str(override.get('bomCode') or code),
+            'bom_name': str(override.get('bomName') or row.get('BOM name') or code),
+            'measurement_unit': str(override.get('measurementUnit')
+                                    or row.get('BOM measurement unit') or 'EA'),
+            'base_quantity': override.get('baseQuantity') or row.get('Base quantity') or 1,
+            # False means every value above is a default nobody has confirmed.
+            'confirmed': bool(override),
+        })
+    sub_boms.sort(key=lambda sb: (str(sb.get('level')), sb['code']))
+    return {'ok': True, 'sub_boms': sub_boms, 'count': len(sub_boms),
+            'root_bom_code': root_code}
+
+
+def _tool_set_sub_bom(state, args):
+    """Correct one sub-assembly's BOM details."""
+    from .views import _internal_post, _normaliser_saved, normaliser_answers
+
+    code = str(args.get('code') or '').strip()
+    if not code:
+        return {'ok': False, 'error': 'Which sub-assembly? Give its code.'}
+
+    changes = {}
+    for field, key in (('bom_code', 'bomCode'), ('bom_name', 'bomName'),
+                       ('measurement_unit', 'measurementUnit')):
+        value = str(args.get(field) or '').strip()
+        if value:
+            changes[key] = value
+    if args.get('base_quantity') not in (None, ''):
+        changes['baseQuantity'] = args.get('base_quantity')
+    if not changes:
+        return {'ok': False, 'error': 'Nothing was given to change on %s.' % code}
+
+    sheet = _sheet_name_for(state)
+    # Same session review_sub_boms read from, for the same reason.
+    session_id = state.get('mapped_session_id') or state['session_id']
+    saved = _sheet_bom_answer(session_id, sheet)
+    if not saved:
+        return {'ok': False,
+                'error': 'This sheet has no BOM answer yet, so there is nothing to correct.'}
+    sub_boms = dict(saved.get('subBoms') or {})
+    # Merged, not replaced: a person correcting the unit must not blank a name
+    # they set a moment ago.
+    sub_boms[code] = {**(sub_boms.get(code) or {}), **changes}
+
+    # The whole answer, not just the part that changed. A sheet answer is
+    # REPLACED by what is posted, not merged field by field, so sending
+    # {'subBoms': ...} alone drops the BOM code, the level column and hasLevels -
+    # and the completion step then fills defaults over the gap, leaving a sheet
+    # that no longer knows what it builds or that it has levels at all.
+    answer = dict(saved)
+    answer['subBoms'] = sub_boms
+    payload = {'bomStructure': {'sheets': {sheet: answer}}}
+    response = normaliser_answers(_internal_post(payload), session_id)
+    data = getattr(response, 'data', {}) or {}
+    if not data.get('success'):
+        return {'ok': False, 'error': data.get('error') or 'The change was not accepted.'}
+    # Kept on the normaliser session as well, so re-running Continue from there
+    # carries the correction forward instead of silently reverting it.
+    if session_id != state['session_id']:
+        normaliser_answers(_internal_post(payload), state['session_id'])
+    return {'ok': True, 'code': code, 'changed': changes}
+
+
 def _tool_set_bom_code(state, args):
     """The one answer no inference can supply."""
-    from .views import _internal_post, normaliser_answers
+    from .views import _internal_post, _normaliser_saved, normaliser_answers
 
-    code = str(args.get('bom_code') or '').strip()
+    code, split_name = _split_code_and_name(args.get('bom_code'))
     if not code:
         return {'ok': False, 'error': 'No BOM code was given.'}
+    name = str(args.get('bom_name') or '').strip() or split_name
     sheet = _sheet_name_for(state)
+
+    # The level column is already known - it is one of the roles confirmed two
+    # checkpoints ago - so it is carried through rather than asked for again.
+    # Leaving it out is not neutral: the normaliser then reads a multi-level BOM
+    # as a flat one, and a 348-row sheet came out as 1,491 rows instead of 1,010.
+    roles = _normaliser_saved(state['session_id'], 'roles') or {}
+    level_column = str(roles.get('level') or '').strip()
+    header_values = {'bomCode': code}
+    if name:
+        header_values['bomName'] = name
+    answer = {
+        'hasLevels': bool(args.get('has_levels')) or bool(level_column),
+        'bomHeader': header_values,
+    }
+    if level_column:
+        answer['levelColumn'] = level_column
+
     response = normaliser_answers(_internal_post({
-        'bomStructure': {'sheets': {sheet: {
-            'hasLevels': bool(args.get('has_levels')),
-            'bomHeader': {'bomCode': code},
-        }}},
+        'bomStructure': {'sheets': {sheet: answer}},
     }), state['session_id'])
     data = getattr(response, 'data', {}) or {}
     if not data.get('success'):
@@ -913,6 +1139,59 @@ def _pattern_payload(state):
     return getattr(response, 'data', {}) or {}
 
 
+# What the detector's own token names mean in the words a person may type. The
+# detector invents names for whatever it sees - STATUS, REF, PRIMARY_SUFFIX - and
+# only a few of them are things a pattern can actually hold.
+DETECTED_TOKEN_ROLES = {
+    'MPN': 'MPN', 'PART': 'MPN', 'PARTNUMBER': 'MPN', 'MPN_PREFIX': 'MPN',
+    'MFR': 'MANUFACTURER', 'MFG': 'MANUFACTURER', 'MANUFACTURER': 'MANUFACTURER',
+    'BRAND': 'MANUFACTURER', 'MAKER': 'MANUFACTURER',
+    'CPN': 'CPN', 'DESCRIPTION': 'DESCRIPTION', 'DESC': 'DESCRIPTION',
+    'QTY': 'QUANTITY', 'QUANTITY': 'QUANTITY', 'UOM': 'UOM',
+}
+
+#: Tokens that hold approved alternates rather than describing one part.
+#:
+#: A grammar written in the plain vocabulary cannot express them - it has no
+#: word for "and here are the other approved suffixes" - so translating a
+#: pattern that contains one can only lose it. THALES writes a line's approved
+#: parts as a stem, a placeholder and the list that fills it,
+#: ``KGM05AR71H102K@ (H/N)``, and the translation offered <IGNORE> for the list:
+#: the two approved parts collapsed to the stem, which is not a part number at
+#: all. 128 cells lost their alternates that way, and nothing downstream could
+#: notice, because a missing alternate is simply a row that is not there.
+#:
+#: The parser already reads these natively. When one appears, the detected
+#: pattern IS the right reading and there is nothing to suggest.
+ALTERNATE_BEARING_TOKENS = {'PRIMARY_SUFFIX', 'ALTERNATE_SUFFIXES', 'SUFFIX'}
+
+
+def _suggested_grammar(detected, parts_in_cell):
+    """A grammar a person can copy, built from what was actually detected.
+
+    The detector already reports the shape of the cell - `<MPN> (<MFR>) {<STATUS>}
+    [<REF>]` - so the order is known. Offering a fixed guess instead got it
+    exactly backwards on a sheet whose cells lead with the part number: copying
+    the suggestion would have swapped every part with its manufacturer. Anything
+    the detector named that a pattern cannot hold becomes IGNORE, which is the
+    honest translation of "this bit is here and we do not want it".
+    """
+    import re
+
+    tokens = re.findall(r'<\s*([A-Za-z_]+)\s*>', str(detected or ''))
+    if any(token.upper() in ALTERNATE_BEARING_TOKENS for token in tokens):
+        # Reading it any other way drops the alternates; see the note above.
+        return ''
+    if tokens:
+        return ' '.join('<%s>' % DETECTED_TOKEN_ROLES.get(t.upper(), 'IGNORE')
+                        for t in tokens)
+    # Nothing detected to translate: fall back to the shape of the cell itself.
+    if parts_in_cell <= 1:
+        return '<MANUFACTURER>'
+    return ' '.join(['<MPN>', '<MANUFACTURER>'] +
+                    ['<IGNORE>'] * max(0, parts_in_cell - 2))
+
+
 def _tool_review_patterns(state, args):
     """How each column is being read, and which readings are in doubt.
 
@@ -947,9 +1226,12 @@ def _tool_review_patterns(state, args):
         # taken - the grammar would have two parts and the cell one.
         sample = (shown[0]['cells'].get(column) if shown else '') or ''
         parts = len(str(sample).split())
-        suggestion = ('<MANUFACTURER>' if parts <= 1 else
-                      ' '.join(['<MANUFACTURER>', '<MPN>'][:2] +
-                               ['<IGNORE>'] * max(0, parts - 2)))
+        detected_grammar = pattern.get('grammar') or pattern.get('interpretationPattern')
+        suggestion = _suggested_grammar(detected_grammar, parts)
+        # An empty suggestion is not "none available" - it is "this one already
+        # reads the cell correctly, and any rewrite would lose the alternates".
+        # Said plainly here so the agent offers acceptance rather than a change.
+        reads_alternates = suggestion == '' and bool(detected_grammar)
         patterns.append({
             'id': pattern.get('id'),
             'reads_column': column,
@@ -959,6 +1241,9 @@ def _tool_review_patterns(state, args):
             'examples': shown,
             'example_cell': str(sample)[:80],
             'parts_in_cell': parts,
+            # True when the pattern carries approved alternates. Accept it as
+            # detected; do not offer a replacement grammar.
+            'reads_alternates': reads_alternates,
             # Offer THIS, not an invented one.
             'example_grammar': suggestion,
         })
@@ -1063,7 +1348,11 @@ def _tool_set_pattern(state, args):
         # Every rule taught so far, so teaching a second pattern does not forget
         # the first - the editor threads the same set through each call.
         'active_rules': known_rules,
-        'persist': True,
+        # The editor's own teach popup sends persist=false, and for the same
+        # reason: the taught rule belongs in this session's config, not in the
+        # named fill-rule library where it shows up as something nobody made
+        # and nothing can apply.
+        'persist': False,
     }))
     result = getattr(response, 'data', {}) or {}
     if not result.get('success', True) and result.get('error'):
@@ -1459,6 +1748,12 @@ def _tool_check_with_factwise(state, args):
                 'error': data.get('error') or 'FactWise could not check the sheet.'}
     result = data.get('result') or {}
     errors = result.get('errors') or []
+    # Kept so the sheet can be handed back with these written onto its cells.
+    # Thousands of errors are unreadable in a conversation and obvious in Excel,
+    # where they can be filtered, sorted and fixed in place.
+    state['last_errors'] = errors
+    state['last_error_rows'] = result.get('row_count')
+
     # Grouped by kind, because a repair applies to a kind and not to one row -
     # forty "Item Type is required" errors are one decision, not forty.
     kinds = {}
@@ -1483,6 +1778,9 @@ def _tool_check_with_factwise(state, args):
         # Verbatim, capped only so one broken sheet cannot fill the whole turn.
         'errors': errors[:40],
         'errors_shown': min(len(errors), 40),
+        'error_sheet': ('The sheet can be downloaded with every one of these written '
+                        'onto the cell it belongs to. Offer that when there are more '
+                        'than a handful.') if errors else None,
     }
 
 
@@ -2157,6 +2455,8 @@ DISPATCH = {
     'infer_columns': _tool_infer_columns,
     'change_columns': _tool_change_columns,
     'set_bom_code': _tool_set_bom_code,
+    'review_sub_boms': _tool_review_sub_boms,
+    'set_sub_bom': _tool_set_sub_bom,
     'review_patterns': _tool_review_patterns,
     'set_pattern': _tool_set_pattern,
     'normalise': _tool_normalise,
@@ -2270,6 +2570,82 @@ def _grid_bytes(state):
     return content
 
 
+# Errors are painted on: red for a cell FactWise named, amber for a problem it
+# reported against the row without naming a column.
+ERROR_FILL = 'FFC7CE'
+ROW_ERROR_FILL = 'FFEB9C'
+
+
+def _error_sheet_bytes(state):
+    """The validated sheet, with each objection as a comment on its own cell.
+
+    A row is often wrong in more than one place - no item code AND no item type -
+    so the reasons belong on the cells, not in one column of joined-up text. In
+    Excel they can then be filtered and sorted, and the sheet stays a sheet: no
+    extra column to strip before sending it back.
+
+    Annotates the SAME export that was validated, so rows line up by
+    construction rather than by arithmetic.
+    """
+    import io as _io
+    import re
+
+    import openpyxl
+    from openpyxl.comments import Comment
+    from openpyxl.styles import PatternFill
+
+    errors = state.get('last_errors') or []
+    if not errors:
+        raise RuntimeError('Nothing has been checked against FactWise yet.')
+
+    raw = _sheet_bytes(state)
+    workbook = openpyxl.load_workbook(_io.BytesIO(raw))
+    sheet = workbook.worksheets[0]
+
+    def key(name):
+        return re.sub(r'[^a-z0-9]+', ' ', str(name or '').lower()).strip()
+
+    # FactWise names its own columns ("Item Code"); the sheet carries ours
+    # ("Item code"). Matched forgivingly or nothing would be flagged at all.
+    columns = {key(cell.value): cell.column for cell in sheet[1] if cell.value}
+
+    # Several errors can land on one cell; gathered so they read as one note
+    # instead of the last one overwriting the rest.
+    per_cell, rowless = {}, []
+    for error in errors:
+        row = error.get('row')
+        message = str(error.get('message') or '').strip()
+        if not row or not message:
+            continue
+        column = columns.get(key(error.get('column') or error.get('field_code')))
+        if column is None:
+            rowless.append((int(row), message))
+        else:
+            per_cell.setdefault((int(row), int(column)), []).append(message)
+
+    red = PatternFill(start_color=ERROR_FILL, end_color=ERROR_FILL, fill_type='solid')
+    amber = PatternFill(start_color=ROW_ERROR_FILL, end_color=ROW_ERROR_FILL,
+                        fill_type='solid')
+    for (row, column), messages in per_cell.items():
+        if row > sheet.max_row:
+            continue
+        cell = sheet.cell(row=row, column=column)
+        cell.fill = red
+        cell.comment = Comment('\n'.join(dict.fromkeys(messages)), 'FactWise')
+    for row, message in rowless:
+        if row > sheet.max_row:
+            continue
+        cell = sheet.cell(row=row, column=1)
+        if cell.comment is None:
+            cell.fill = amber
+            cell.comment = Comment(message, 'FactWise')
+
+    sheet.freeze_panes = 'A2'
+    buffer = _io.BytesIO()
+    workbook.save(buffer)
+    return buffer.getvalue(), len(per_cell), len(rowless)
+
+
 @api_view(['GET'])
 def agent_download(request, conversation_id):
     """The sheet this conversation built, as an xlsx.
@@ -2287,11 +2663,20 @@ def agent_download(request, conversation_id):
     if not state.get('mapped_session_id'):
         return Response({'success': False, 'error': 'This conversation has no sheet yet.'},
                         status=status.HTTP_409_CONFLICT)
+    # `?errors=1` asks for the checked sheet with FactWise's objections on it,
+    # rather than the working grid.
+    wants_errors = str(request.query_params.get('errors') or '').lower() in (
+        '1', 'true', 'yes', 'on')
     try:
-        content = _grid_bytes(state)
+        if wants_errors:
+            content, flagged, rowless = _error_sheet_bytes(state)
+            logger.info('Agent %s: error sheet with %d flagged cell(s), %d row note(s)',
+                        conversation_id, flagged, rowless)
+        else:
+            content = _grid_bytes(state)
     except Exception as exc:
         logger.warning('Agent download failed for %s: %s', conversation_id, exc)
-        return Response({'success': False, 'error': 'The sheet could not be exported.'},
+        return Response({'success': False, 'error': str(exc)},
                         status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     from django.http import HttpResponse
@@ -2302,7 +2687,8 @@ def agent_download(request, conversation_id):
     response = HttpResponse(
         content,
         content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-    response['Content-Disposition'] = 'attachment; filename="%s (normalised).xlsx"' % name
+    response['Content-Disposition'] = 'attachment; filename="%s (%s).xlsx"' % (
+        name, 'errors' if wants_errors else 'normalised')
     response['Cache-Control'] = 'no-store'
     return response
 
@@ -2410,6 +2796,10 @@ def agent_message(request):
                     # The caller decides how to offer it; the model is never told
                     # about it, so it cannot paste a link into the conversation.
                     'download_ready': bool(state.get('mapped_session_id')),
+                    # A second file exists once FactWise has objected to something:
+                    # the same sheet with its reasons written onto the cells.
+                    'error_sheet_ready': bool(state.get('last_errors')),
+                    'error_count': len(state.get('last_errors') or []) or None,
                     'editor_url': ('/editor/%s' % state['mapped_session_id']
                                    if state.get('mapped_session_id') else None),
                 })

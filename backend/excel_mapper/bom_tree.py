@@ -84,6 +84,91 @@ def parse_quantity(value):
         return None
 
 
+#: Columns whose presence proves a row is a real part, best evidence first.
+#:
+#: A customer part number is deliberately absent. THALES repeats the parent
+#: assembly's CPN on every child row, drawings included, so asking about it
+#: answers "does this row belong to an assembly" rather than "is this row a
+#: part" - and under it all 86 documents in E49831AAAPB looked like parts, which
+#: is why ticking the exclude box appeared to do nothing at all.
+PART_NUMBER_COLUMNS = ('mpn', 'Item code')
+
+
+def part_number_columns(records, fallback=None):
+    """Which columns count as proof of parthood for ``records``.
+
+    Only columns that actually carry a value somewhere are used, because absence
+    proves nothing on a sheet that has no such column: judging every row of an
+    MPN-less sheet a document would empty it. When none of them carries
+    anything, ``fallback`` is used, so sheets identified solely by a customer
+    number behave exactly as they did before.
+    """
+    present = [
+        column for column in PART_NUMBER_COLUMNS
+        if any(unwrap_cell((record or {}).get(column)).strip()
+               for record in records or ())
+    ]
+    if present:
+        return tuple(present)
+    return (fallback,) if fallback else ()
+
+
+def codes_with_children(records, level_column, code_column, parent_column=None):
+    """Codes that something else in the sheet hangs off.
+
+    A row with children is an assembly, whatever its quantity says and whatever
+    part number it lacks. Judging it a document deletes a whole branch: THALES
+    files SUPPORT CMS TB and FPGA FCM with no quantity of their own, and
+    dropping them silently re-parented their components a level up, which the
+    tree reports as no error at all because the children still find a home.
+
+    Parents are read from the stated parent column where there is one. A trail
+    names ancestors in every segment but the last, which is the row itself -
+    except where that last segment is somebody else's code, which is how a
+    parent-naming trail ends. Sheets that state structure only by indentation
+    say the same thing differently: a row the next row sits deeper than.
+    """
+    parents = set()
+    if parent_column:
+        for record in records or ():
+            stated = unwrap_cell((record or {}).get(parent_column)).strip()
+            if not stated:
+                continue
+            own = unwrap_cell((record or {}).get(code_column)).strip()
+            separator = next((s for s in PATH_SEPARATORS if s in stated), '')
+            if not separator:
+                if stated != own:
+                    parents.add(stated)
+                continue
+            segments = [part.strip() for part in stated.split(separator) if part.strip()]
+            if not segments:
+                continue
+            # Never on the strength of this row's own code. Nothing is its own
+            # parent, and these sheets say otherwise often - THALES files a
+            # part's drawing under the part's own number, and a trail that ends
+            # with the code repeated would otherwise make every such row look
+            # like an assembly and keep all of them.
+            parents.update(segment for segment in segments[:-1] if segment != own)
+            if segments[-1] != own:
+                parents.add(segments[-1])
+
+    previous_level = None
+    previous_code = ''
+    for record in records or ():
+        level = parse_level((record or {}).get(level_column))
+        if level is None:
+            continue
+        code = unwrap_cell((record or {}).get(code_column)).strip()
+        if (previous_level is not None and level > previous_level
+                and previous_code and previous_code != code):
+            parents.add(previous_code)
+        previous_level = level
+        previous_code = code
+
+    parents.discard('')
+    return parents
+
+
 def is_document_row(record, quantity_column, code_column=None):
     """True when a row describes a document rather than a consumed part.
 
@@ -103,14 +188,19 @@ def is_document_row(record, quantity_column, code_column=None):
     So a row is a document only when it consumes nothing AND carries no part
     number. Anything with a code stays, and a zero quantity on it is then caught
     by validation, where the user can see it and decide.
+
+    ``code_column`` is one column name or several (see ``part_number_columns``);
+    any one of them filled is enough to keep the row.
     """
     if not quantity_column:
         return False
     quantity = parse_quantity(record.get(quantity_column))
     if quantity is not None and quantity > 0:
         return False
-    if code_column and unwrap_cell(record.get(code_column)).strip():
-        return False
+    columns = (code_column,) if isinstance(code_column, str) else (code_column or ())
+    for column in columns:
+        if column and unwrap_cell(record.get(column)).strip():
+            return False
     return True
 
 
@@ -237,7 +327,7 @@ def _report_unusable_parent_paths(stated_rows, known, warnings):
     warnings.append(note)
 
 
-def _unpack_stated_parent_paths(rows, warnings):
+def _unpack_stated_parent_paths(rows, warnings, root_code=''):
     """Rewrite breadcrumb-path parents into plain parent codes, in place.
 
     A sheet may answer "what is this row's parent?" with a whole path rather
@@ -255,11 +345,20 @@ def _unpack_stated_parent_paths(rows, warnings):
 
     A sheet of plain codes contains no separator, scores no candidates, and is
     left untouched.
+
+    ``root_code`` is the authored finished good. It has no row of its own, so
+    without it every path running through the top assembly scores as dangling
+    and no reading clears the tolerance - the values are then left as raw paths
+    and the caller reports one parent_not_found per row. That is latent on any
+    THALES-style sheet and becomes real the moment the preamble rows carrying
+    the root's code are excluded as documents.
     """
     stated_rows = [row for row in rows if row['stated_parent']]
     if not stated_rows:
         return
     known = {row['code'] for row in rows if row['code']}
+    if root_code:
+        known.add(root_code)
     tolerance = len(stated_rows) * PATH_UNRESOLVED_TOLERANCE
 
     def score(derive):
@@ -317,7 +416,8 @@ def _unpack_stated_parent_paths(rows, warnings):
 
 def derive_tree(records, level_column, code_column,
                 description_column=None, quantity_column=None, uom_column=None,
-                root=None, drop_documents=True, parent_column=None):
+                root=None, drop_documents=True, parent_column=None,
+                document_code_columns=None):
     """Derive tree structure from ``records`` (a list of dicts).
 
     Rows whose level cell does not parse are skipped and reported as warnings —
@@ -331,7 +431,9 @@ def derive_tree(records, level_column, code_column,
 
     ``drop_documents`` removes rows that consume nothing (see ``is_document_row``).
     They are returned on the tree rather than discarded silently, so the caller
-    can show what was excluded.
+    can show what was excluded. ``document_code_columns`` says what counts as a
+    part number for that test; it defaults to ``code_column``, which is the
+    right answer only when the sheet identifies rows by their own part number.
 
     ``parent_column`` names a column that states each row's parent outright. When
     any row fills it, the tree is built from those statements and the levels are
@@ -348,6 +450,34 @@ def derive_tree(records, level_column, code_column,
     rows = []
     documents = []
 
+    # Who has children - asked of the rows that are going to SURVIVE, which is
+    # not the same question as asking it of the sheet.
+    #
+    # The two tests depend on each other: a row with children is never a
+    # document, and a document is never somebody's parent. Asking about children
+    # first, over every row, breaks on a part that has nothing beneath it but its
+    # own drawings: THALES files two under solder-wick 84301060, so it counted as
+    # an assembly, the drawings were then excluded, and it was left heading a BOM
+    # with nothing in it. Its code is a BOM identity from that point on, so the
+    # item-code rule is locked out of all eleven of its rows and every one keeps
+    # the assembly's number - eleven parts, one code, rejected as duplicates.
+    #
+    # The cycle breaks because documenthood does not depend on parenthood: a row
+    # consuming nothing and carrying no part number is a candidate on its own.
+    # Candidates are set aside, parents are read from what is left, and a
+    # candidate that turns out to be a parent is kept by the check in the loop.
+    parent_codes = set()
+    if drop_documents:
+        document_columns = (code_column if document_code_columns is None
+                            else document_code_columns)
+        structural = [
+            record for record in (records or [])
+            if not (quantity_column
+                    and is_document_row(record, quantity_column, document_columns))
+        ]
+        parent_codes = codes_with_children(
+            structural, level_column, code_column, parent_column)
+
     for index, record in enumerate(records or []):
         level = parse_level(record.get(level_column))
         code = unwrap_cell(record.get(code_column)).strip()
@@ -362,7 +492,10 @@ def derive_tree(records, level_column, code_column,
         # Document rows are checked before the missing-code rule so that a
         # drawing (which has no part number by design) is reported as what it is
         # rather than as data loss.
-        if drop_documents and quantity_column and is_document_row(record, quantity_column, code_column):
+        if (drop_documents and quantity_column and code not in parent_codes
+                and is_document_row(
+                    record, quantity_column,
+                    code_column if document_code_columns is None else document_code_columns)):
             documents.append({
                 'row': index,
                 'level': level,
@@ -415,7 +548,8 @@ def derive_tree(records, level_column, code_column,
     if stated:
         # A parent may be given as a breadcrumb path rather than a code. Turn
         # those into codes first so the matching below has something to match.
-        _unpack_stated_parent_paths(rows, warnings)
+        _unpack_stated_parent_paths(
+            rows, warnings, root_code=str((root or {}).get('code') or '').strip())
         # A row naming itself as its own parent is how these exports mark a root
         # (AMAT writes PARENT_PART == PART_NUMBER on the assembly line).
         known = {row['code'] for row in rows}

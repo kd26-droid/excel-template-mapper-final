@@ -103,6 +103,10 @@ const DASH_RE = /^[-‐-―]+$/;
 const QTY_HEADER_RE = /^\s*(qty|quantity|qnty|amount)\s*$/i;
 const UOM_HEADER_RE = /^\s*(uom|u\.?o\.?m\.?|unit(\s*of\s*measure(ment)?)?|measurement\s*unit)\s*$/i;
 const CODE_HEADER_RE = /^\s*(part\s*(number|no\.?|#)?|item\s*(code|number|no\.?)|cpn|component)\s*$/i;
+// A part number in the sense that proves a row is a real part. Not CPN: a
+// customer number is frequently the parent assembly's, repeated down every
+// child row, so it says which BOM a row is in rather than whether it is a part.
+const PART_NUMBER_HEADER_RE = /^\s*(mpn|manufacturer\s*part\s*(number|no\.?|#)?|item\s*code)\s*$/i;
 const NAME_HEADER_RE = /^\s*(description|nomenclature|item\s*name|name|title)\s*$/i;
 
 const parseLevelValue = (value) => {
@@ -434,18 +438,46 @@ const analyzeLevels = (records, levelColumn, headers, rootCode = '') => {
   const qtyColumn = findHeader(headers, QTY_HEADER_RE);
   const uomColumn = findHeader(headers, UOM_HEADER_RE);
 
+  // What the backend will actually exclude, which is not the same as what is
+  // skipped below. Counting the skips instead promised to exclude 86 rows of a
+  // THALES export and excluded 71, because 15 of them - conformal coatings,
+  // adhesives, label stock - consume no countable quantity yet are real parts.
+  // Only columns that carry something are consulted: on a sheet with no part
+  // number at all, absence proves nothing and would condemn every row.
+  const partColumns = [findHeader(headers, PART_NUMBER_HEADER_RE), 'mpn', 'Item code']
+    .filter((column, index, all) => column && all.indexOf(column) === index)
+    .filter(column => (records || []).some(r => String(r?.[column] ?? '').trim()));
+  // A row something else hangs off is an assembly whatever its quantity says,
+  // and the filter keeps it for that reason - so counting it here promised to
+  // exclude 71 rows of a THALES export and excluded 61. A row is never its own
+  // parent, however often these sheets say so.
+  const parentCodes = new Set();
+  (records || []).forEach((record) => {
+    const parent = String(record?.parent ?? '').trim();
+    if (parent && parent !== String(record?.cpn ?? '').trim()) parentCodes.add(parent);
+  });
+
+  const isDocument = record => (
+    qtyColumn
+    && !consumesQuantity(record[qtyColumn])
+    && !parentCodes.has(String(record?.cpn ?? '').trim())
+    && !partColumns.some(column => String(record?.[column] ?? '').trim())
+  );
+
   const rows = [];
   let documents = 0;
   (records || []).forEach((record) => {
+    if (isDocument(record)) documents += 1;
     const level = parseLevelValue(record[levelColumn]);
     if (level === null) return;
     // Rows that consume nothing are skipped here even though the backend's
-    // is_document_row now keeps the ones carrying a part number. The two are
+    // is_document_row keeps the ones carrying a part number. The two are
     // deliberately NOT aligned: this list exists to name the BOMs, and a row
     // with no children is not a BOM whatever its quantity says. Including the
     // finished good here would also make it the shallowest row, shifting every
-    // "Level N BOM" label down by one.
-    if (qtyColumn && !consumesQuantity(record[qtyColumn])) { documents += 1; return; }
+    // "Level N BOM" label down by one. The checkbox's count is taken above, by
+    // the backend's rule, so what it promises is what gets excluded.
+    if (qtyColumn && !consumesQuantity(record[qtyColumn])) return;
     const code = String(record[codeColumn] ?? '').trim();
     if (!code) return;
     rows.push({
