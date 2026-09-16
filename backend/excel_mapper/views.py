@@ -1092,11 +1092,36 @@ def normaliser_continue(request, session_id):
 
     # Every column the rows actually carry, the known ones first so the sheet
     # reads the way the mapping page expects.
+    # The normalised columns first, then everything the rows carry through from
+    # the customer's own sheet.
+    #
+    # A passthrough column may differ from a normalised one only by case -
+    # Honeywell's own "Description" beside the normalised "description" - and
+    # column lookup is case-insensitive, so the mapping "description -> Item
+    # name" read the customer's column instead. It is blank on the four rows the
+    # normaliser had filled from Revision Name, so those items reached FactWise
+    # with no name at all, and choosing a different description column changed
+    # nothing because the mapping was never reading it.
+    #
+    # The carried-through column is kept, under a name that cannot be mistaken
+    # for the normalised one; `source_of` remembers which key each column reads.
     columns = list(NORMALIZED_EXPORT_COLUMNS)
+    source_of = {column: column for column in columns}
+    taken = {str(column).strip().lower() for column in columns}
     for row in rows:
         for key in (row or {}):
-            if key != 'factwiseId' and key not in columns:
-                columns.append(key)
+            if key == 'factwiseId' or key in source_of:
+                continue
+            label = key
+            if str(label).strip().lower() in taken:
+                label = '%s (source)' % key
+                suffix = 2
+                while str(label).strip().lower() in taken:
+                    label = '%s (source %d)' % (key, suffix)
+                    suffix += 1
+            columns.append(label)
+            source_of[label] = key
+            taken.add(str(label).strip().lower())
 
     workbook = openpyxl.Workbook()
     sheet = workbook.active
@@ -1104,7 +1129,8 @@ def normaliser_continue(request, session_id):
     sheet.append(columns)
     for row in rows:
         sheet.append([
-            '' if (row or {}).get(column) is None else str((row or {}).get(column, ''))
+            '' if (row or {}).get(source_of[column]) is None
+            else str((row or {}).get(source_of[column], ''))
             for column in columns
         ])
 
@@ -1144,10 +1170,17 @@ def normaliser_continue(request, session_id):
     entity_name = str(request.data.get('entityName')
                       or info.get('editor_defaults_entity_name')
                       or info.get('entity_name') or '').strip()
-    if entity_name:
+    # Carried the same way. A caller with no browser - the agent - knows the
+    # entity by its id and never by its name, so carrying only the name left
+    # the new session unable to find its own defaults.
+    entity_id = str(request.data.get('entityId') or info.get('entity_id') or '').strip()
+    if entity_name or entity_id:
         carrier = get_session_consistent(new_session_id)
         if carrier is not None:
-            carrier['editor_defaults_entity_name'] = entity_name
+            if entity_name:
+                carrier['editor_defaults_entity_name'] = entity_name
+            if entity_id:
+                carrier['entity_id'] = entity_id
             SESSION_STORE[new_session_id] = carrier
             save_session(new_session_id, carrier)
 
@@ -1355,7 +1388,12 @@ def normaliser_answers(request, session_id):
 #:
 #: Named like a column a person would recognise, because from here on it is one:
 #: it is offered in the level dropdown and can be overridden like any other.
-OUTLINE_LEVEL_HEADER = 'Outline level'
+#:
+#: The name and the numbering both match EXCEL_OUTLINE_LEVEL_HEADER in
+#: pages/BomNormalizer.js, which has read the same grouping in the browser all
+#: along. The two paths describe the same sheet, so a row the page calls level 2
+#: cannot be level 1 here - that is the Tag (1) / Tag_1 split all over again.
+OUTLINE_LEVEL_HEADER = 'Excel Outline Level'
 
 
 def _outline_levels(file_path, sheet_name=None):
@@ -1438,11 +1476,10 @@ def _with_outline_level_column(table, file_path, sheet_name=None):
     column = [OUTLINE_LEVEL_HEADER]
     for position in range(1, len(table)):
         # +1 because row 1 of the file is the header row read at position 0.
-        # Excel records only the grouped rows; an ungrouped one is outline 0,
-        # which is the top of the tree, not a missing answer. Left blank it would
-        # be skipped as an unparsable level - and the row that is ungrouped is
-        # the finished good, so the BOM would lose the thing it builds.
-        column.append(str(levels.get(position + 1, 0)))
+        # Counted from 1 like the page does, so an ungrouped row - the finished
+        # good - is level 1 rather than blank. Blank would be skipped as an
+        # unparsable level, and the BOM would lose the thing it builds.
+        column.append(str(levels.get(position + 1, 0) + 1))
     table[OUTLINE_LEVEL_HEADER] = column[:len(table)]
     logger.info('Upload: read %d outline levels as "%s" (depths %s)',
                 len(levels), OUTLINE_LEVEL_HEADER, sorted(set(levels.values())))
@@ -7812,9 +7849,16 @@ def _apply_export_editor_defaults(rows, headers, info):
         return rows, headers
     entity_name = str((info or {}).get('editor_defaults_entity_name')
                       or (info or {}).get('entity_name') or '').strip()
-    if not entity_name:
+    # The id is the stable key and the name is the fallback, so either will do.
+    # Only the page ever set the name - it arrives on the request that fetches
+    # the grid - so a session nothing has opened had neither, and this returned
+    # the rows untouched. The file then went out with none of the defaults the
+    # editor applies: 1,137 units left as the customer wrote them and 1,407 item
+    # codes missing, against a grid that showed all of them correctly.
+    entity_id = str((info or {}).get('entity_id') or '').strip()
+    if not entity_name and not entity_id:
         return rows, headers
-    settings_obj = get_editor_defaults_for_entity(entity_name)
+    settings_obj = get_editor_defaults_for_entity(entity_name, entity_id)
     if not settings_obj:
         return rows, headers
     try:
@@ -13838,10 +13882,21 @@ def read_session_grid(session_id, info):
 
 
 def write_session_grid(session_id, info, headers, rows):
-    """Persist a rewritten grid, matching how the other review-screen tools save."""
+    """Persist a rewritten grid, matching how the other review-screen tools save.
+
+    All THREE copies, because three different readers each prefer a different
+    one. ``read_session_grid`` takes ``edited_data``/``enhanced_data``, so a
+    repair looked applied to whoever made it; ``data_view`` and the export serve
+    ``formula_enhanced_data``, which nothing here used to touch, so the editor
+    and the file kept showing the grid as it was before. The agent filled
+    eighteen blank item codes, was told they were filled, and every later reader
+    still saw them blank - including FactWise, which rejected all eighteen rows.
+    """
     snapshot = {'headers': list(headers), 'data': [list(row) for row in rows]}
     info['enhanced_data'] = snapshot
     info['edited_data'] = snapshot
+    info['formula_enhanced_data'] = [list(row) for row in rows]
+    info['enhanced_headers'] = list(headers)
     info['enhanced_headers'] = list(headers)
     info['current_template_headers'] = list(headers)
     return snapshot

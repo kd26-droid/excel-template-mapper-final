@@ -11274,6 +11274,22 @@ def _apply_parent_path_hierarchy(normalized_rows, config):
     return normalized_rows
 
 
+def _alternate_group_key(values, source_row, config=None):
+    """The key rows are grouped by when looking for alternates.
+
+    ``following_item_rows`` is the one layout whose alternates live on separate
+    rows, identified by sharing the primary's CPN; there the CPN is the group.
+    Every other layout keeps a line's alternates in the line's own cell, so the
+    source row is the group and two rows can carry the same part without being
+    read as each other's alternate.
+    """
+    layout = clean((config or {}).get("alternateLayout")
+                   or (config or {}).get("alternate_layout"))
+    if layout == "following_item_rows":
+        return values.get("cpn") or str(source_row)
+    return str(source_row)
+
+
 def normalize_bom_rows(headers, rows, roles=None, config=None):
     """Normalize all mapped BOM fields through the backend inference contract."""
     safe_headers = [clean(header) for header in (headers or [])]
@@ -11408,7 +11424,21 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
             relation = clean(entry.get("relation")) if isinstance(entry, dict) else ""
             normalized = {
                 "sourceRow": source_row,
-                "parentKey": values["parent"] or values["cpn"] or str(source_row),
+                # What groups a row with its alternates.
+                #
+                # The customer part number groups them only when the sheet puts
+                # alternates on their own rows under a shared CPN. Used
+                # otherwise it groups by identity rather than by usage, and a
+                # part consumed by two assemblies - a resistor in two boards -
+                # looks like one part with an alternate. The second usage is
+                # then dropped as a redundant alternate, silently: Honeywell's
+                # HAB-45002226 lost 13 resistors from one sub-assembly and 4
+                # ribbon cables from the top, and the BOM still validated.
+                #
+                # Alternates written inside one cell all expand from the same
+                # source row, so the row number groups those correctly too.
+                "parentKey": values["parent"] or _alternate_group_key(
+                    values, source_row, safe_config),
                 "parent": values["parent"],
                 "relation": relation or ("Primary" if entry_index == 0 else f"Alternate {entry_index}"),
                 "level": values["level"] or "1",

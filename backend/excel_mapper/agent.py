@@ -144,7 +144,7 @@ Work through these in order. Each one ends with a question. After you ask, STOP 
    Show them as a short list - code, name, unit, quantity, and how many lines each holds - and ask whether any need changing. Do not read out fifteen of them one at a time; show the list and ask once.
    - They say it is fine -> go on.
    - They name one to change -> call set_sub_bom with just that code and just the fields that change.
-   If review_sub_boms says the BOM cannot be derived yet, skip this checkpoint rather than asking about it.
+   If review_sub_boms returns `not_built_yet`, the sheet simply has not been built - say nothing about it and carry on; it is not a finding about their file. Only if it reports the BOM cannot be derived is there something to tell them.
 
 4. THE PATTERNS
    Call review_patterns. A pattern is how the normaliser reads one column's cells - `<MPN> <MANUFACTURER>` means it expects a part number followed by a maker. It reports each pattern it found, how many rows use it, whether it recognises it, and real example rows.
@@ -972,7 +972,17 @@ def _tool_review_sub_boms(state, args):
     """
     from .views import _generate_bom_for_session, _normaliser_saved
 
-    session_id = state.get('mapped_session_id') or state['session_id']
+    # Only the built sheet has the columns generation needs. The normaliser
+    # session still holds the customer's own upload - ID, Revision, Description
+    # - so generating from it fails on "no part number column", and falling back
+    # to it turned "the sheet is not built yet" into "this BOM cannot be
+    # derived". Said of a Honeywell sheet whose five BOMs derive perfectly, that
+    # is not a delay, it is a wrong answer about the file.
+    session_id = state.get('mapped_session_id')
+    if not session_id:
+        return {'ok': False, 'not_built_yet': True,
+                'error': ('The sheet has not been built yet, so its sub-assemblies '
+                          'are not known. Ask again after normalising.')}
     try:
         result, bom_header, error = _generate_bom_for_session(session_id)
     except Exception as exc:  # pragma: no cover - the BOM may not build yet
@@ -1404,7 +1414,16 @@ def _tool_build_sheet(state, args):
 
     if not state.get('normalised'):
         return {'ok': False, 'error': 'Call normalise before build_sheet.'}
-    response = normaliser_continue(_internal_post({}), state['session_id'])
+    # The entity travels with the sheet. Without it the session that gets built
+    # cannot find the saved defaults, and the exported file goes out with none of
+    # them - no item codes, units left as the customer wrote them - while the
+    # grid, which is handed the entity on every read, looks perfectly correct.
+    carry = {}
+    if state.get('entity_id'):
+        carry['entityId'] = state['entity_id']
+    if state.get('entity_name'):
+        carry['entityName'] = state['entity_name']
+    response = normaliser_continue(_internal_post(carry), state['session_id'])
     data = getattr(response, 'data', {}) or {}
     if not data.get('success'):
         return {'ok': False, 'error': data.get('error') or 'The sheet could not be built.'}

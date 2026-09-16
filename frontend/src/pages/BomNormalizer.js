@@ -8086,12 +8086,41 @@ const withoutDocumentRows = (rows = [], answers = null) => {
 };
 
 const buildBomMappingRowsFromNormalizedRows = (rows = [], baseColumns = getNormalizedExportColumns(rows)) => {
-  const columns = [...baseColumns];
+  // A column carried through from the customer's sheet can differ from a
+  // normalised one only by case - Honeywell's own "Description" beside the
+  // normalised "description" - and column lookup downstream is case-insensitive,
+  // so the mapping "description -> Item name" read the customer's column
+  // instead. It is blank on the four rows the normaliser had filled from
+  // Revision Name, so those items reached FactWise with no name, and choosing a
+  // different description column changed nothing because the mapping was never
+  // reading it.
+  //
+  // Both columns are kept; the carried-through one is renamed so it cannot be
+  // mistaken for the normalised column, and `sourceOf` remembers which key each
+  // one reads. Mirrors normaliser_continue, which de-collides the same way.
+  const columns = [];
+  const sourceOf = new Map();
+  const taken = new Set();
+  baseColumns.forEach((column) => {
+    const key = String(column);
+    let label = key;
+    if (taken.has(label.trim().toLowerCase())) {
+      label = `${key} (source)`;
+      let suffix = 2;
+      while (taken.has(label.trim().toLowerCase())) {
+        label = `${key} (source ${suffix})`;
+        suffix += 1;
+      }
+    }
+    columns.push(label);
+    sourceOf.set(label, key);
+    taken.add(label.trim().toLowerCase());
+  });
 
   const outputRows = rows.map((row) => {
     const output = {};
-    baseColumns.forEach((column) => {
-      output[column] = row[column] || '';
+    columns.forEach((column) => {
+      output[column] = row[sourceOf.get(column)] || '';
     });
 
     return output;
