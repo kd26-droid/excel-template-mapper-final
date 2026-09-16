@@ -136,33 +136,41 @@ Work through these in order. Each one ends with a question. After you ask, STOP 
 3. THE BOM CODE
    A list of components never says what assembly it builds, so only they can tell you. Ask what this BOM is called, then call set_bom_code with exactly what they give you.
 
-4. WHAT WAS FILLED IN
+4. THE PATTERNS
+   Call review_patterns. A pattern is how the normaliser reads one column's cells - `<MPN> <MANUFACTURER>` means it expects a part number followed by a maker. It reports each pattern it found, how many rows use it, whether it recognises it, and real example rows.
+   Show every pattern that needs review: its grammar, how many rows, and one or two examples with the ACTUAL cell values. The examples are the point - they are how a person spots that a column holds the wrong thing.
+   If the examples show values that look wrong for their column - a manufacturer name sitting in the MPN column, say - point that out plainly.
+   Ask whether each pattern is right. If they want to change one, they type the grammar themselves. Show them how, using that pattern's own `example_grammar` - it is built to fit that cell, so it works if they copy it. Never invent an example with more parts than `parts_in_cell`, or it will be rejected. Say which words they can use: MPN, MANUFACTURER, CPN, DESCRIPTION, QUANTITY, UOM, IGNORE.
+   Pass what they type to set_pattern exactly as they wrote it.
+   If nothing needs review, say so in one line and move on. Do not make them confirm what is already recognised.
+
+5. WHAT WAS FILLED IN
    Call normalise, then build_sheet, then apply_defaults, then describe_rules.
    Tell them what got written into cells the file left empty. State the RULE, not the result. Say what the rule does and which column it writes - for example "Item type was set to Component wherever it was blank", or "Item code is the manufacturer joined to the MPN with an underscore". Do NOT report how many cells changed, and do NOT list the values that were written. They want the rule, not a tally.
    If a saved rule was skipped because the sheet has no such column, say so.
    Ask whether that is all right before you continue.
 
-5. CONFLICTS
+6. CONFLICTS
    Call check_sheet. A conflict is one item code used by rows that disagree about a value - two different descriptions for the same part, say. Only a person knows which is right.
    For each conflict, name the item code and the column, and list EVERY value it found as a numbered option. Ask which is correct.
    Call resolve_conflict for each answer, then call check_sheet again.
-   When none are left, go to checkpoint 6.
+   When none are left, go to checkpoint 7.
 
-6. CHECK IT AGAINST FACTWISE
+7. CHECK IT AGAINST FACTWISE
    Call check_with_factwise. This runs FactWise's own import validator over the sheet. It is the only thing that decides whether the sheet can be imported, so report exactly what it says and add no findings of your own.
    If it reports errors, list them plainly - the row, the column and the reason - and say what would fix them. Do not import a sheet that failed.
    If it passes, say how many rows it read. Then ask which they want next: check the manufacturer part numbers against the distributors first, or go straight to importing into FactWise. Stop and wait.
-   - they want the MPN check -> checkpoint 7.
-   - they want to import -> checkpoint 8.
+   - they want the MPN check -> checkpoint 8.
+   - they want to import -> checkpoint 9.
 
-7. THE MPN CHECK (only if they asked for it)
+8. THE MPN CHECK (only if they asked for it)
    Call check_mpns. It looks every manufacturer part number up at DigiKey, Mouser and Element14 and reports what each one said. It can take a couple of minutes.
    Report it per distributor: how many each one confirmed, and how many it did not.
    Be careful what you claim. A distributor not listing a part is not proof the part is wrong - it may simply not stock it, or the lookup may have failed. Say "DigiKey did not confirm 12 of them", never "12 parts are invalid".
    `providers_unavailable` names distributors that could not be reached at all, with the reason. Say which and why - a spent daily quota, a credential problem - and be clear their blank columns are not a finding. If `caution` or `incomplete` is set, read it out. Never let an unreachable distributor stop the import.
    Then ask whether to import.
 
-8. IMPORT IT
+9. IMPORT IT
    Call list_projects. It returns up to three projects, newest first, each with its code, name and id, and how many exist in total.
    Ask where the BOM should go, phrased to match how many there actually are. Never say "your three most recent projects" unless you are showing three.
    - none at all -> say they have no projects yet, and ask for a name to create one, or a project id if they have one in mind.
@@ -258,6 +266,39 @@ TOOLS = [
                     },
                 },
                 'required': ['bom_code'],
+            },
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'review_patterns',
+            'description': (
+                "How the normaliser reads each column's cells, with real example "
+                'rows. Patterns it does not recognise are the ones a person needs '
+                'to look at.'
+            ),
+            'parameters': {'type': 'object', 'properties': {}},
+        },
+    },
+    {
+        'type': 'function',
+        'function': {
+            'name': 'set_pattern',
+            'description': (
+                'Correct one pattern to the grammar the person typed, for example '
+                '"<MANUFACTURER> <MPN>". Tokens are matched to the parts of the '
+                'cell in the order they are written.'
+            ),
+            'parameters': {
+                'type': 'object',
+                'properties': {
+                    'pattern_id': {'type': 'string',
+                                   'description': 'The id from review_patterns.'},
+                    'grammar': {'type': 'string',
+                                'description': 'What they typed, verbatim.'},
+                },
+                'required': ['pattern_id', 'grammar'],
             },
         },
     },
@@ -595,6 +636,209 @@ def _tool_set_bom_code(state, args):
               .get(sheet, {}).get('bomHeader') or {})
     state['bom_code_set'] = bool(header.get('bomCode'))
     return {'ok': True, 'sheet': sheet, 'bom_header': header}
+
+
+# What a person may type in a grammar, and the role each token means. The
+# normaliser's own keys are lowercase; these are the words people actually write.
+PATTERN_ROLES = {
+    'MPN': 'mpn', 'PART': 'mpn', 'PARTNUMBER': 'mpn', 'PART_NUMBER': 'mpn',
+    'MFR': 'manufacturer', 'MFG': 'manufacturer', 'MANUFACTURER': 'manufacturer',
+    'MAKER': 'manufacturer', 'BRAND': 'manufacturer',
+    'CPN': 'cpn', 'DESCRIPTION': 'description', 'DESC': 'description',
+    'QTY': 'quantity', 'QUANTITY': 'quantity', 'UOM': 'uom',
+    'IGNORE': 'ignore', 'UNCLASSIFIED_TEXT': 'ignore', 'TEXT': 'ignore',
+}
+
+
+def _pattern_payload(state):
+    """What the pattern inference returns for this session."""
+    from .views import (_internal_post, _normaliser_saved,
+                        bom_field_pattern_inference)
+
+    config = _normaliser_saved(state['session_id'], 'config') or {}
+    response = bom_field_pattern_inference(_internal_post({
+        'session_id': state['session_id'],
+        # Rules taught earlier in this conversation. The endpoint falls back to
+        # the session's own config, but passing them makes the round trip
+        # explicit rather than relying on where the save happened to land.
+        'config': config,
+    }))
+    return getattr(response, 'data', {}) or {}
+
+
+def _tool_review_patterns(state, args):
+    """How each column is being read, and which readings are in doubt.
+
+    The examples matter more than the grammar. `<MPN> <UNCLASSIFIED_TEXT>` tells
+    a person almost nothing; the row behind it - an MPN column holding "Murata"
+    while the Manufacturer column holds "GCM155R71C683KA55#" - tells them the two
+    columns are swapped on those rows. So every pattern carries real cells.
+    """
+    payload = _pattern_payload(state)
+    if not payload.get('success') and payload.get('error'):
+        return {'ok': False, 'error': payload['error']}
+
+    # Sample rows, keyed by the pattern they were flagged for.
+    examples = {}
+    for row in (payload.get('reviewRows') or []):
+        for occurrence in (row.get('occurrences') or []):
+            key = occurrence.get('patternKey')
+            if not key:
+                continue
+            cells = {str(cell.get('column')): str(cell.get('value') or '')
+                     for cell in (row.get('left') or [])}
+            examples.setdefault(key, []).append(
+                {'row': row.get('sourceRow'), 'cells': cells})
+
+    patterns = []
+    for pattern in (payload.get('patterns') or []):
+        key = pattern.get('patternKey') or pattern.get('id')
+        shown = (examples.get(key) or [])[:2]
+        column = pattern.get('sourceColumn')
+        # An example grammar has to FIT the cell. Suggesting "<MANUFACTURER> <MPN>"
+        # for a cell holding just "Murata" is advice that fails the moment it is
+        # taken - the grammar would have two parts and the cell one.
+        sample = (shown[0]['cells'].get(column) if shown else '') or ''
+        parts = len(str(sample).split())
+        suggestion = ('<MANUFACTURER>' if parts <= 1 else
+                      ' '.join(['<MANUFACTURER>', '<MPN>'][:2] +
+                               ['<IGNORE>'] * max(0, parts - 2)))
+        patterns.append({
+            'id': pattern.get('id'),
+            'reads_column': column,
+            'grammar': pattern.get('grammar') or pattern.get('interpretationPattern'),
+            'rows_using_it': pattern.get('rowCount') or pattern.get('occurrenceCount'),
+            'recognised': bool(pattern.get('recognized')),
+            'examples': shown,
+            'example_cell': str(sample)[:80],
+            'parts_in_cell': parts,
+            # Offer THIS, not an invented one.
+            'example_grammar': suggestion,
+        })
+
+    summary = payload.get('reviewSummary') or {}
+    needs_review = [p for p in patterns if not p['recognised']]
+    return {
+        'ok': True,
+        'patterns': patterns,
+        'needs_review': len(needs_review),
+        'all_recognised': not needs_review,
+        'rows_flagged': summary.get('sourceRowCount') or payload.get('reviewRowCount'),
+        'how_to_correct': ('The person types one token per part of the cell, in order. '
+                           'Words: MPN, MANUFACTURER (or MFR), CPN, DESCRIPTION, '
+                           'QUANTITY, UOM, IGNORE. Each pattern carries an '
+                           'example_grammar that fits its own cell - offer that one.'),
+    }
+
+
+def _spans_for_grammar(value, grammar):
+    """Map the tokens of a typed grammar onto the parts of one cell, in order.
+
+    The teach endpoint works in character ranges, because its usual caller is a
+    popup where someone drags over the text. A typed grammar carries the same
+    information positionally - the first token is the first part of the cell -
+    so the value is split on whitespace and the roles handed out in order.
+    """
+    import re
+
+    tokens = re.findall(r'<\s*([A-Za-z_]+)\s*>', str(grammar or ''))
+    if not tokens:
+        return None, 'A grammar looks like "<MANUFACTURER> <MPN>".'
+    roles = []
+    for token in tokens:
+        role = PATTERN_ROLES.get(token.strip().upper())
+        if role is None:
+            return None, ('"%s" is not something a pattern can hold. Use MPN, '
+                          'MANUFACTURER, CPN, DESCRIPTION, QUANTITY, UOM or IGNORE.'
+                          % token)
+        roles.append(role)
+
+    parts = [m for m in re.finditer(r'\S+', str(value or ''))]
+    if not parts:
+        return None, 'That row has nothing in the column this pattern reads.'
+    if len(roles) > len(parts):
+        return None, ('The grammar has %d parts but the cell has %d ("%s").'
+                      % (len(roles), len(parts), value))
+
+    spans = []
+    for index, role in enumerate(roles):
+        # The last role takes the rest of the cell, so a two-token grammar still
+        # covers a three-word value instead of silently dropping the tail.
+        start = parts[index].start()
+        end = parts[-1].end() if index == len(roles) - 1 else parts[index].end()
+        spans.append({'start': start, 'end': end, 'role': role})
+    return spans, None
+
+
+def _tool_set_pattern(state, args):
+    """Teach the normaliser to read a column the way the person says it reads."""
+    from .views import (_internal_post, _normaliser_saved,
+                        _save_normaliser_state, bom_field_pattern_teaching)
+
+    pattern_id = str(args.get('pattern_id') or '').strip()
+    grammar = str(args.get('grammar') or '').strip()
+    if not pattern_id or not grammar:
+        return {'ok': False, 'error': 'Needs the pattern id and the grammar they typed.'}
+
+    payload = _pattern_payload(state)
+    pattern = next((p for p in (payload.get('patterns') or [])
+                    if p.get('id') == pattern_id or p.get('patternKey') == pattern_id), None)
+    if pattern is None:
+        return {'ok': False, 'error': 'No pattern with that id. Call review_patterns again.'}
+
+    source_column = pattern.get('sourceColumn') or ''
+    key = pattern.get('patternKey') or pattern.get('id')
+    example = next(
+        (row for row in (payload.get('reviewRows') or [])
+         if any((o or {}).get('patternKey') == key for o in (row.get('occurrences') or []))),
+        None)
+    if example is None:
+        return {'ok': False, 'error': 'That pattern has no example row to learn from.'}
+
+    cells = {str(cell.get('column')): cell.get('value')
+             for cell in (example.get('left') or [])}
+    spans, problem = _spans_for_grammar(cells.get(source_column), grammar)
+    if problem:
+        return {'ok': False, 'error': problem}
+
+    config = dict(_normaliser_saved(state['session_id'], 'config') or {})
+    known_rules = dict(config.get('fieldPatternRules') or {})
+
+    response = bom_field_pattern_teaching(_internal_post({
+        'headers': list(cells),
+        'row': cells,
+        'roles': _normaliser_saved(state['session_id'], 'roles') or {},
+        'config': config,
+        'group': pattern,
+        'tagged_spans': spans,
+        'source_header': source_column,
+        'source_row': example.get('sourceRow'),
+        # Every rule taught so far, so teaching a second pattern does not forget
+        # the first - the editor threads the same set through each call.
+        'active_rules': known_rules,
+        'persist': True,
+    }))
+    result = getattr(response, 'data', {}) or {}
+    if not result.get('success', True) and result.get('error'):
+        return {'ok': False, 'error': result['error']}
+
+    # Teaching only DERIVES a rule; it is the config that makes inference and
+    # normalising use it. Without this the rule is computed, returned, and
+    # thrown away - the pattern comes back unrecognised on the very next look,
+    # which is exactly what it did before this line existed.
+    rules = result.get('activeRules') or result.get('active_rules') or {}
+    if rules:
+        config['fieldPatternRules'] = rules
+        _save_normaliser_state(state['session_id'], config=config)
+
+    return {
+        'ok': True,
+        'column': source_column,
+        'grammar': grammar,
+        'learned_from_row': example.get('sourceRow'),
+        'rules_now_active': len(rules),
+        'rule': result.get('rule') or result.get('displayPattern'),
+    }
 
 
 def _tool_normalise(state, args):
@@ -1236,6 +1480,8 @@ DISPATCH = {
     'infer_columns': _tool_infer_columns,
     'change_columns': _tool_change_columns,
     'set_bom_code': _tool_set_bom_code,
+    'review_patterns': _tool_review_patterns,
+    'set_pattern': _tool_set_pattern,
     'normalise': _tool_normalise,
     'build_sheet': _tool_build_sheet,
     'apply_defaults': _tool_apply_defaults,
