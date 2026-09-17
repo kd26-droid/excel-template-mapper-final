@@ -3654,7 +3654,9 @@ def bom_field_pattern_apply(request):
                     if not isinstance(entry, dict):
                         continue
                     normalized_entries.append({
-                        'relation': 'Primary' if entry_index == 0 else f'Alternate {entry_index}',
+                        'relation': entry.get('relation') or (
+                            'Primary' if entry_index == 0 else f'Alternate {entry_index}'
+                        ),
                         'fields': entry.get('fields') or {},
                     })
                 if not normalized_entries:
@@ -3666,7 +3668,9 @@ def bom_field_pattern_apply(request):
                     'entries': [
                         {
                             **entry,
-                            'relation': 'Primary' if entry_index == 0 else f'Alternate {entry_index}',
+                            'relation': entry.get('relation') or (
+                                'Primary' if entry_index == 0 else f'Alternate {entry_index}'
+                            ),
                         }
                         for entry_index, entry in enumerate(combined_entries)
                     ],

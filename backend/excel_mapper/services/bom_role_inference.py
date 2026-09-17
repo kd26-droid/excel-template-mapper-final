@@ -6838,6 +6838,34 @@ def _visual_pattern_ignored_fields(roles, config=None):
     }
 
 
+def _visual_pattern_owned_fields(config=None):
+    """Fields controlled by a confirmed visual rule must not use raw fallbacks."""
+    active_rule = (
+        (config or {}).get("_activeFieldPatternRule")
+        or (config or {}).get("_active_field_pattern_rule")
+        or {}
+    )
+    visual_pattern = active_rule.get("visualPattern") or active_rule.get("visual_pattern")
+    if not isinstance(visual_pattern, dict):
+        return set()
+
+    owned_fields = {
+        clean(segment.get("role"))
+        for segment in (visual_pattern.get("segments") or [])
+        if isinstance(segment, dict) and clean(segment.get("role")) in ROLE_KEYS
+    }
+    owned_fields.update(
+        clean(field)
+        for field in (
+            visual_pattern.get("ignoredFields")
+            or visual_pattern.get("ignored_fields")
+            or []
+        )
+        if clean(field) in ROLE_KEYS
+    )
+    return owned_fields
+
+
 def _field_pattern_rule_excludes_row(rule):
     if not isinstance(rule, dict):
         return False
@@ -6936,7 +6964,7 @@ def _visual_pattern_manual_rows(row, headers, config=None):
         ):
             continue
         corrected_rows = []
-        for entry in correction.get("entries") or []:
+        for entry_index, entry in enumerate(correction.get("entries") or []):
             if not isinstance(entry, dict):
                 continue
             raw_fields = entry.get("fields") if isinstance(entry.get("fields"), dict) else {}
@@ -6944,6 +6972,9 @@ def _visual_pattern_manual_rows(row, headers, config=None):
                 role: clean(value.get("value") if isinstance(value, dict) else value)
                 for role, value in raw_fields.items()
                 if role in ROLE_KEYS
+            } | {
+                "_relation": clean(entry.get("relation"))
+                or ("Primary" if entry_index == 0 else f"Alternate {entry_index}"),
             })
         return corrected_rows, source_header
     return [], source_header
@@ -7091,6 +7122,7 @@ def _infer_field_entries_for_row(row, headers, roles, selected_columns, config=N
     if semantic_entries:
         return semantic_entries
     ignored_fields = _visual_pattern_ignored_fields(roles, config=config)
+    visual_owned_fields = _visual_pattern_owned_fields(config=config)
     tagged_field_rows = _visual_pattern_tagged_field_rows(row, headers, config=config)
     manual_rows, manual_source_header = _visual_pattern_manual_rows(row, headers, config=config)
     tagged_fields = {
@@ -7103,7 +7135,7 @@ def _infer_field_entries_for_row(row, headers, roles, selected_columns, config=N
         for parsed in manual_rows
         for field in parsed
     }
-    pattern_owned_fields = ignored_fields | tagged_fields | manual_fields
+    pattern_owned_fields = ignored_fields | visual_owned_fields | tagged_fields | manual_fields
     fields = {
         key: _blank_factwise_field()
         for key in FACTWISE_FIELD_LABELS
@@ -7146,6 +7178,8 @@ def _infer_field_entries_for_row(row, headers, roles, selected_columns, config=N
                 for field, value in fields.items()
             }
             for role, value in parsed.items():
+                if role not in ROLE_KEYS:
+                    continue
                 entry_fields[role] = _direct_factwise_field(
                     value,
                     manual_source_header,
@@ -7155,7 +7189,8 @@ def _infer_field_entries_for_row(row, headers, roles, selected_columns, config=N
             entries.append(_build_factwise_entry(
                 entry_index,
                 entry_fields,
-                "Primary" if entry_index == 0 else f"Alternate {entry_index}",
+                clean(parsed.get("_relation"))
+                or ("Primary" if entry_index == 0 else f"Alternate {entry_index}"),
             ))
         return entries
     if tagged_field_rows:
@@ -7354,6 +7389,17 @@ def _infer_field_entries_for_row(row, headers, roles, selected_columns, config=N
         if len(mpn_parts) > 1 and len(manufacturer_parts) > len(mpn_parts):
             manufacturer_parts = manufacturer_parts[:len(mpn_parts)]
     entries = [_build_factwise_entry(0, fields, "Primary")]
+    if (
+        visual_owned_fields
+        and not _field_pattern_rule_ignores_fields(active_rule)
+        and not any(
+            clean((fields.get(role) or {}).get("value"))
+            for role in visual_owned_fields
+            if isinstance(fields.get(role), dict)
+        )
+    ):
+        entries[0]["needsReview"] = True
+        entries[0]["reviewReason"] = "confirmed_rule_did_not_match"
 
     separate_column_entries = _infer_separate_column_entries(
         row,
@@ -8291,6 +8337,12 @@ def save_bom_field_pattern_rule(
     visual_pattern = rule.get("visualPattern") or rule.get("visual_pattern")
     if isinstance(visual_pattern, dict) and visual_pattern:
         parser_rule["visualPattern"] = dict(visual_pattern)
+    authoritative_correction = (
+        rule.get("authoritativeCorrection")
+        or rule.get("authoritative_correction")
+    )
+    if isinstance(authoritative_correction, dict) and authoritative_correction:
+        parser_rule["authoritativeCorrection"] = deepcopy(authoritative_correction)
     parser_rule["libraryScope"] = library_scope
 
     try:
@@ -9321,6 +9373,7 @@ def derive_bom_field_pattern_rule_from_correction(
     pattern_key = clean((group or {}).get("patternKey") or (group or {}).get("pattern_key"))
     if pattern_key:
         rule["patternKey"] = pattern_key
+    manual_entries = []
     if isinstance(visual_pattern, dict) and visual_pattern:
         taught_visual_pattern = dict(visual_pattern)
         source_header = clean(
@@ -9338,17 +9391,30 @@ def derive_bom_field_pattern_rule_from_correction(
             for role, header in safe_roles.items()
             if source_header and header == source_header
         } | segment_roles
-        manual_entries = []
-        for entry in corrected_entries:
+        submitted_roles = {
+            clean(role)
+            for entry in corrected_entries
+            if isinstance(entry, dict)
+            for role in (
+                entry.get("fields") if isinstance(entry.get("fields"), dict) else {}
+            )
+            if clean(role) in ROLE_KEYS
+        }
+        corrected_roles = mapped_roles | submitted_roles
+        for entry_index, entry in enumerate(corrected_entries):
             fields = entry.get("fields") if isinstance(entry, dict) and isinstance(entry.get("fields"), dict) else {}
             manual_entries.append({
-                "relation": clean(entry.get("relation")) if isinstance(entry, dict) else "",
+                "relation": (
+                    clean(entry.get("relation"))
+                    if isinstance(entry, dict)
+                    else ""
+                ) or ("Primary" if entry_index == 0 else f"Alternate {entry_index}"),
                 "fields": {
                     role: clean(fields.get(role).get("value") if isinstance(fields.get(role), dict) else fields.get(role))
-                    for role in mapped_roles
+                    for role in corrected_roles
                 },
             })
-        if source_value and manual_entries and mapped_roles and has_manual_edits:
+        if source_value and manual_entries and corrected_roles and has_manual_edits:
             corrections = [
                 correction
                 for correction in (taught_visual_pattern.get("manualCorrections") or [])
@@ -9403,6 +9469,25 @@ def derive_bom_field_pattern_rule_from_correction(
             **field_rule,
             "customerConfirmed": True,
         }
+
+    correction_source_header = clean(
+        (visual_pattern or {}).get("sourceHeader")
+        or (visual_pattern or {}).get("source_header")
+    )
+    rule["authoritativeCorrection"] = {
+        "version": 1,
+        "sourceHeader": correction_source_header,
+        "sourceValue": _row_cell(
+            row,
+            correction_source_header,
+            safe_headers,
+            preserve_delimiters=True,
+        ) if correction_source_header else "",
+        "hasManualEdits": bool(has_manual_edits),
+        "entries": manual_entries if has_manual_edits else [],
+        "fieldRules": deepcopy(field_rules) if isinstance(field_rules, dict) else {},
+        "visualPattern": deepcopy(visual_pattern) if isinstance(visual_pattern, dict) else {},
+    }
 
     if not rule["expansions"]:
         rule.pop("expansions", None)
@@ -9563,6 +9648,18 @@ def build_bom_field_pattern_teach_result(
         } if isinstance(base_rule, dict) else {},
         field_rules=field_rules,
     )
+    rule["authoritativeCorrection"] = {
+        **(rule.get("authoritativeCorrection") or {}),
+        "taggedSpans": deepcopy(safe_tagged_spans),
+        "alternateDelimiter": str(alternate_delimiter or ""),
+        "alternateMode": clean(alternate_mode) or "append",
+        "alternateJoiner": str(alternate_joiner or ""),
+        "ignoredFields": [
+            clean(field)
+            for field in (ignored_fields or [])
+            if clean(field) in ROLE_KEYS
+        ],
+    }
     row_config = _config_with_active_rule({}, rule)
     selected_columns = [
         header for header in dict.fromkeys(safe_roles.values())
@@ -9584,29 +9681,10 @@ def build_bom_field_pattern_teach_result(
         rule,
         interpreted_entries,
     )
-    if has_manual_edits and source_header:
-        structural_spans = []
-        for tagged_span in tagged_spans if isinstance(tagged_spans, list) else []:
-            role = clean((tagged_span or {}).get("role")) if isinstance(tagged_span, dict) else ""
-            if role not in {"alternateList", "insertionMarker", "groupSeparator", "ignore"}:
-                continue
-            _add_interpretation_span(
-                structural_spans,
-                (tagged_span or {}).get("start"),
-                (tagged_span or {}).get("end"),
-                role,
-                len(source_value),
-            )
-        manual_spans = _entry_interpretation_spans(
-            source_value,
-            source_header,
-            interpreted_entries,
-            existing_spans=structural_spans,
-        )
-        if manual_spans:
-            spans[source_header] = manual_spans
-        else:
-            spans.pop(source_header, None)
+    if source_header and safe_tagged_spans:
+        # The confirmed example is authoritative. Derived spans are useful for
+        # replayed rows, but must never expand or replace the user's selection.
+        spans[source_header] = deepcopy(safe_tagged_spans)
     pattern = _visual_pattern_display_pattern(backend_visual_pattern, source_value)
     mapped_fields = [
         role
@@ -9622,6 +9700,7 @@ def build_bom_field_pattern_teach_result(
         "mappedFields": mapped_fields,
         "entries": interpreted_entries,
         "interpretationSpansByColumn": spans,
+        "authoritativeCorrection": rule.get("authoritativeCorrection") or {},
     }
 
 
@@ -10088,7 +10167,6 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                     ):
                         fragment_config.pop(config_key, None)
                     fragment_config["_semanticPatternPass"] = True
-                    fallback_fragment_config = dict(fragment_config)
                     if parser_rule:
                         fragment_config = _config_with_active_rule(fragment_config, parser_rule)
                     entries = _infer_field_entries_for_row(
@@ -10099,15 +10177,41 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                         config=fragment_config,
                     )
                     rule_fallback_used = False
-                    if not entries and parser_rule and not _field_pattern_rule_excludes_row(parser_rule):
-                        entries = _infer_field_entries_for_row(
-                            fragment_row,
-                            headers,
-                            roles,
-                            [source_column],
-                            config=fallback_fragment_config,
-                        )
-                        rule_fallback_used = bool(entries)
+                    if not parser_rule:
+                        # A detected grammar may identify only some of the
+                        # fields mapped to a shared customer column. Do not copy
+                        # that entire cell into roles the grammar did not find.
+                        unclassified_roles = {
+                            role
+                            for role in mapped_fields
+                            if _pattern_display_token(role) not in grammar
+                        }
+                        if unclassified_roles and not entries:
+                            preview_fields = {
+                                role: _blank_factwise_field()
+                                for role in FACTWISE_FIELD_LABELS
+                            }
+                            for role in FACTWISE_FIELD_LABELS:
+                                if role in unclassified_roles:
+                                    continue
+                                mapped_header = clean((roles or {}).get(role))
+                                mapped_value = (
+                                    _row_cell(fragment_row, mapped_header, headers)
+                                    if mapped_header
+                                    else ""
+                                )
+                                if not is_blankish(mapped_value):
+                                    preview_fields[role] = _direct_factwise_field(
+                                        mapped_value,
+                                        mapped_header,
+                                    )
+                            entries = [_build_factwise_entry(0, preview_fields, "Primary")]
+                        for entry in entries:
+                            entry_fields = entry.get("fields") if isinstance(entry, dict) else None
+                            if not isinstance(entry_fields, dict):
+                                continue
+                            for role in unclassified_roles:
+                                entry_fields[role] = _blank_factwise_field()
                     if _field_pattern_rule_ignores_fields(parser_rule) and entries:
                         entries = entries[:1]
                         entries[0]["relation"] = "Ignored"
@@ -10149,6 +10253,11 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                         "entries": entries,
                         "interpretationSpans": spans.get(source_column) or [],
                         "ruleFallbackUsed": rule_fallback_used,
+                        "replayNeedsReview": any(
+                            bool(entry.get("needsReview"))
+                            for entry in entries
+                            if isinstance(entry, dict)
+                        ),
                     }
                     item["interpretations"].append(interpretation)
                     pattern_row = {
@@ -10225,14 +10334,9 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                 "reasons": [],
                 "reason": "",
             }
-        mpn_blocking_reasons = {
-            reason
-            for reason in (mpn_validation.get("reasons") or [])
-            if reason in {"blank_mpn", "parser_fallback_used"}
-        }
         mpn_is_accepted = bool(
             mpn_validation.get("valid")
-            or (has_saved_interpretation and not mpn_blocking_reasons)
+            or has_saved_interpretation
         )
         if (
             has_saved_interpretation
@@ -10261,9 +10365,12 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
         coverage["mpnValidation"] = mpn_validation
         item["recognitionValidation"] = coverage
         item["recognized"] = bool(
-            has_interpretation
-            and coverage.get("valid")
-            and mpn_is_accepted
+            has_saved_interpretation
+            or (
+                has_interpretation
+                and coverage.get("valid")
+                and mpn_is_accepted
+            )
         )
         if has_interpretation:
             item["interpretationPattern"] = effective_grammar
@@ -10670,6 +10777,7 @@ def _build_backend_review_contract(
             for key, value in occurrence.items()
             if key != "entries"
         }
+        preview_entries = _compact_review_entries(occurrence.get("entries") or [])
         return {
             "groupId": group.get("id") or "",
             "workflowStepId": workflow_step.get("id") or "",
@@ -10685,8 +10793,8 @@ def _build_backend_review_contract(
                     **source_fragment,
                     "id": occurrence.get("occurrenceId") or "",
                 },
-                "entries": [],
-                "fields": {},
+                "entries": preview_entries,
+                "fields": preview_entries[0].get("fields", {}) if preview_entries else {},
                 "interpretationSpansByColumn": {
                     source_column: occurrence.get("interpretationSpans") or []
                 } if source_column else {},
@@ -11604,7 +11712,6 @@ def refresh_bom_field_pattern_review_after_teach(
     ):
         parse_config.pop(key, None)
     parse_config["_semanticPatternPass"] = True
-    fallback_parse_config = dict(parse_config)
     parse_config = _config_with_active_rule(
         parse_config,
         _semantic_rule_for_source(rule, source_header),
@@ -11715,15 +11822,6 @@ def refresh_bom_field_pattern_review_after_teach(
                     config=parse_config,
                 )
                 rule_fallback_used = False
-                if not interpreted_entries and not _field_pattern_rule_excludes_row(rule):
-                    interpreted_entries = _infer_field_entries_for_row(
-                        fragment_row,
-                        list(reconstructed_row.keys()),
-                        roles,
-                        [source_header],
-                        config=fallback_parse_config,
-                    )
-                    rule_fallback_used = bool(interpreted_entries)
                 interpretation_spans = _interpretation_spans_by_column(
                     fragment_row,
                     list(reconstructed_row.keys()),
@@ -11736,6 +11834,11 @@ def refresh_bom_field_pattern_review_after_teach(
                 "sourceRow": review_source_row,
                 "interpretationSpans": interpretation_spans,
                 "ruleFallbackUsed": rule_fallback_used,
+                "replayNeedsReview": any(
+                    bool(entry.get("needsReview"))
+                    for entry in interpreted_entries
+                    if isinstance(entry, dict)
+                ),
                 "entries": interpreted_entries,
             })
             for occurrence in review_row.get("occurrences") or []:
@@ -11832,17 +11935,10 @@ def refresh_bom_field_pattern_review_after_teach(
             "reasons": [],
             "reason": "",
         }
-    non_overridable_mpn_reasons = {"blank_mpn", "parser_fallback_used"}
-    mpn_blocking_reasons = [
-        reason
-        for reason in (mpn_validation.get("reasons") or [])
-        if reason in non_overridable_mpn_reasons
-    ]
-    interpretation_is_recognized = bool(
-        confirmed_validation.get("valid")
-        and group_replay_validation.get("valid")
-        and not mpn_blocking_reasons
-    )
+    # Replaying one reusable rule can be ambiguous for individual occurrences,
+    # but that must never revoke the user's explicit confirmation. Surface the
+    # replay failures separately while keeping the taught pattern recognized.
+    interpretation_is_recognized = True
     if interpretation_is_recognized and not mpn_validation.get("valid"):
         mpn_validation = {
             **mpn_validation,
@@ -11851,15 +11947,15 @@ def refresh_bom_field_pattern_review_after_teach(
         }
     recognition_validation = {
         **group_replay_validation,
-        "valid": interpretation_is_recognized,
+        "valid": True,
+        "userConfirmed": True,
         "confirmedOccurrenceValid": bool(confirmed_validation.get("valid")),
         "groupReplayValid": bool(group_replay_validation.get("valid")),
+        "replayNeedsReview": not bool(group_replay_validation.get("valid")),
         "mpnValidation": mpn_validation,
     }
     if not group_replay_validation.get("valid"):
         recognition_validation["reason"] = "incomplete_grammar_coverage"
-    elif mpn_blocking_reasons:
-        recognition_validation["reason"] = mpn_blocking_reasons[0]
     elif not mpn_validation.get("valid"):
         recognition_validation["warning"] = (
             mpn_validation.get("reason") or "mpn_not_verified"
@@ -12258,11 +12354,8 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
             entries_by_source_row[str(source_row)] = [
                 {
                     **entry,
-                    "relation": (
-                        "Ignored"
-                        if clean(entry.get("relation")) == "Ignored"
-                        else "Primary" if index == 0 else f"Alternate {index}"
-                    ),
+                    "relation": clean(entry.get("relation"))
+                    or ("Primary" if index == 0 else f"Alternate {index}"),
                 }
                 for index, entry in enumerate(row_entries)
             ]
@@ -12322,13 +12415,15 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
 
         for entry_index, entry in enumerate(entries):
             fields = entry.get("fields") if isinstance(entry, dict) else {}
+            relation = clean(entry.get("relation")) if isinstance(entry, dict) else ""
 
             def field_value(role):
                 value = fields.get(role) if isinstance(fields, dict) else ""
                 return clean(value.get("value") if isinstance(value, dict) else value)
 
             values = {role: field_value(role) for role in FACTWISE_FIELD_LABELS}
-            if not any(values.values()):
+            needs_review = bool(entry.get("needsReview")) if isinstance(entry, dict) else False
+            if not any(values.values()) and relation != "Ignored" and not needs_review:
                 continue
             confidences = [
                 confidence_value
@@ -12337,7 +12432,6 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
                 for confidence_value in [_factwise_field_confidence(role, fields.get(role))]
                 if confidence_value is not None
             ] if isinstance(fields, dict) else []
-            relation = clean(entry.get("relation")) if isinstance(entry, dict) else ""
             normalized = {
                 "sourceRow": source_row,
                 # What groups a row with its alternates.
@@ -12357,6 +12451,8 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
                     values, source_row, safe_config),
                 "parent": values["parent"],
                 "relation": relation or ("Primary" if entry_index == 0 else f"Alternate {entry_index}"),
+                "needsReview": needs_review,
+                "reviewReason": clean(entry.get("reviewReason")) if isinstance(entry, dict) else "",
                 "level": values["level"] or "1",
                 "cpn": values["cpn"],
                 "description": values["description"],
@@ -12396,7 +12492,7 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
     warnings = []
     for normalized in normalized_rows:
         rows_by_source.setdefault(str(normalized.get("sourceRow")), []).append(normalized)
-        if not clean(normalized.get("mpn")):
+        if not clean(normalized.get("mpn")) and normalized.get("relation") != "Ignored":
             warnings.append({
                 "type": "missing_mpn",
                 "sourceRow": normalized.get("sourceRow"),

@@ -430,6 +430,11 @@ class BomFieldPatternTeachApiTests(TestCase):
         self.assertTrue(confirmation["token"])
         self.assertEqual(confirmation["patternKey"], "shared-pattern")
         self.assertEqual(confirmation["entries"][0]["fields"]["mpn"], "ABC123")
+        correction = confirmation["rule"]["authoritativeCorrection"]
+        self.assertEqual(correction["taggedSpans"], payload["tagged_spans"])
+        self.assertEqual(correction["sourceValue"], "ABC123 (KEMET)")
+        self.assertEqual(correction["alternateDelimiter"], "")
+        self.assertEqual(correction["alternateMode"], "append")
         review_receipt = taught.json()["reviewReceipt"]
         self.assertTrue(review_receipt["token"])
         reviewed = _read_bom_pattern_review(
@@ -515,6 +520,101 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
             [entry["fields"]["mpn"]["value"] for entry in result["entries"]],
             ["BASE"],
         )
+
+    def test_confirmed_correction_preserves_all_controls_and_manual_rows(self):
+        value = "XXBASE@(A/B)(KEMET)"
+        tagged_spans = [
+            {"start": 2, "end": 6, "role": "mpn"},
+            {"start": 6, "end": 7, "role": "insertionMarker"},
+            {"start": 8, "end": 11, "role": "alternateList"},
+            {"start": 13, "end": 18, "role": "manufacturer"},
+        ]
+        result = build_bom_field_pattern_teach_result(
+            headers=["Combined"],
+            row={"Combined": value},
+            roles={"mpn": "Combined", "manufacturer": "Combined"},
+            entries=[
+                {
+                    "relation": "Primary",
+                    "fields": {
+                        "mpn": "",
+                        "manufacturer": "KEMET",
+                        "description": "User supplied description",
+                    },
+                },
+                {
+                    "relation": "Alternate 1",
+                    "fields": {
+                        "mpn": "BASEB",
+                        "manufacturer": "",
+                        "description": "",
+                    },
+                },
+            ],
+            group={"shape": "authoritative-all-controls"},
+            tagged_spans=tagged_spans,
+            source_header="Combined",
+            alternate_delimiter="/",
+            alternate_mode="insert_at_marker",
+            alternate_joiner="#",
+            ignored_fields=["cpn"],
+            field_rules={"mpn": {"prefixMode": "first_n_chars", "stripPrefix": "2"}},
+            has_manual_edits=True,
+        )
+
+        correction = result["rule"]["authoritativeCorrection"]
+        self.assertEqual(correction["taggedSpans"], tagged_spans)
+        self.assertEqual(correction["alternateDelimiter"], "/")
+        self.assertEqual(correction["alternateMode"], "insert_at_marker")
+        self.assertEqual(correction["alternateJoiner"], "#")
+        self.assertEqual(correction["ignoredFields"], ["cpn"])
+        self.assertEqual(correction["fieldRules"]["mpn"]["stripPrefix"], "2")
+        self.assertEqual(
+            result["interpretationSpansByColumn"]["Combined"],
+            tagged_spans,
+        )
+        self.assertEqual(result["entries"][0]["relation"], "Primary")
+        self.assertEqual(result["entries"][0]["fields"]["mpn"]["value"], "")
+        self.assertEqual(
+            result["entries"][0]["fields"]["description"]["value"],
+            "User supplied description",
+        )
+        self.assertEqual(result["entries"][1]["relation"], "Alternate 1")
+        self.assertEqual(result["entries"][1]["fields"]["manufacturer"]["value"], "")
+
+    def test_failed_confirmed_rule_does_not_restore_raw_identity_values(self):
+        entries = _infer_field_entries_for_row(
+            {
+                "Combined": "NOT A MATCH",
+                "Description": "Retained description",
+            },
+            ["Combined", "Description"],
+            {
+                "mpn": "Combined",
+                "manufacturer": "Combined",
+                "description": "Description",
+            },
+            ["Combined", "Description"],
+            {
+                "_activeFieldPatternRule": {
+                    "visualPattern": {
+                        "type": "bracket_manufacturer",
+                        "sourceHeader": "Combined",
+                        "authoritativeSegments": True,
+                        "segments": [
+                            {"role": "mpn", "before": "", "after": " ("},
+                            {"role": "manufacturer", "before": "(", "after": ")"},
+                        ],
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["fields"]["mpn"]["value"], "")
+        self.assertEqual(entries[0]["fields"]["manufacturer"]["value"], "")
+        self.assertEqual(entries[0]["fields"]["description"]["value"], "Retained description")
+        self.assertTrue(entries[0]["needsReview"])
 
     def test_saved_visual_pattern_without_delimiter_does_not_assume_slash(self):
         value = "BASE (A/B) (YAGEO)"
@@ -682,7 +782,7 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
     @patch(
         "excel_mapper.services.bom_role_inference._looks_like_parenthesized_manufacturer_alias"
     )
-    def test_top_level_comma_creates_repeated_records_not_suffixes(self, looks_like_manufacturer):
+    def test_top_level_comma_preserves_each_record_marker_grammar(self, looks_like_manufacturer):
         manufacturers = {
             "LINEAR TECHNOLOGY CORP",
             "MURATA MANUFACTURING CO LTD",
@@ -699,7 +799,11 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         self.assertEqual(len(fragments), 3)
         self.assertEqual(
             [fragment["grammar"] for fragment in fragments],
-            ["<MPN>(<MFR>,<UNCLASSIFIED_TEXT>)"] * 3,
+            [
+                "<MPN_PREFIX>#<MPN_SUFFIX>(<MFR>,<UNCLASSIFIED_TEXT>)",
+                "<MPN_PREFIX>__<MPN_SUFFIX>(<MFR>,<UNCLASSIFIED_TEXT>)",
+                "<MPN_PREFIX>_<MPN_SUFFIX>(<MFR>,<UNCLASSIFIED_TEXT>)",
+            ],
         )
         self.assertEqual(
             [fragment["rawValue"] for fragment in fragments],
@@ -1548,6 +1652,55 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
             [row["description"] for row in preserved_rows],
             ["Section item 1", "Section item 2", "Section item 3"],
         )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    def test_ignored_identity_only_row_is_retained_without_missing_mpn_warning(
+        self,
+        _saved_rules,
+        _saved_interpretations,
+    ):
+        pattern_key = _semantic_pattern_key(
+            "Combined",
+            ["mpn", "manufacturer"],
+            "<UNCLASSIFIED_TEXT>",
+        )
+        config = {
+            "skipTitleRows": False,
+            "fieldPatternRules": {
+                pattern_key: {
+                    "patternKey": pattern_key,
+                    "visualPattern": {
+                        "type": "ignore_fields",
+                        "sourceHeader": "Combined",
+                        "excludeRow": False,
+                        "ignoredFields": ["mpn", "manufacturer"],
+                    },
+                },
+            },
+        }
+
+        normalized = normalize_bom_rows(
+            ["Combined"],
+            [{"Combined": "SECTION LABEL", "__sourceRow": 9}],
+            roles={"mpn": "Combined", "manufacturer": "Combined"},
+            config=config,
+        )
+
+        self.assertEqual(len(normalized["normalizedRows"]), 1)
+        self.assertEqual(normalized["normalizedRows"][0]["relation"], "Ignored")
+        self.assertEqual(normalized["normalizedRows"][0]["mpn"], "")
+        self.assertEqual(normalized["normalizedRows"][0]["manufacturer"], "")
+        self.assertFalse(any(
+            warning.get("type") == "missing_mpn"
+            for warning in normalized["warnings"]
+        ))
 
     @patch(
         "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
@@ -4141,7 +4294,7 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         self.assertTrue(all(fragment["grammar"] != "<UNCLASSIFIED_TEXT>" for fragment in fragments))
         self.assertTrue(fragments[1]["grammar"].endswith('"'))
 
-    def test_manual_preview_edits_realign_backend_highlights(self):
+    def test_manual_preview_edits_preserve_exact_user_highlights(self):
         value = "WR04X000 P@L (A/B/D/H/T) (WTC) {HOM} [3078936]"
 
         def span(text, role):
@@ -4174,7 +4327,7 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         mpn_span = next(item for item in spans if item["role"] == "mpn")
         manufacturer_span = next(item for item in spans if item["role"] == "manufacturer")
         alternate_span = next(item for item in spans if item["role"] == "alternateList")
-        self.assertEqual(value[mpn_span["start"]:mpn_span["end"]], "WR04X000 P@L")
+        self.assertEqual(value[mpn_span["start"]:mpn_span["end"]], "WR04X000")
         self.assertEqual(value[manufacturer_span["start"]:manufacturer_span["end"]], "WTC")
         self.assertEqual(value[alternate_span["start"]:alternate_span["end"]], "A/B/D/H/T")
 
@@ -4281,11 +4434,11 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         spans = result["interpretationSpansByColumn"]["Combined"]
         wrapped_mpn_span = next(
             item for item in spans
-            if item["role"] == "mpn" and value[item["start"]:item["end"]] == "(310ML)"
+            if item["role"] == "mpn" and value[item["start"]:item["end"]] == "310ML"
         )
-        self.assertEqual(value[wrapped_mpn_span["start"]:wrapped_mpn_span["end"]], "(310ML)")
+        self.assertEqual(value[wrapped_mpn_span["start"]:wrapped_mpn_span["end"]], "310ML")
 
-    def test_manual_normalized_preview_values_realign_to_punctuated_source(self):
+    def test_manual_normalized_preview_does_not_replace_user_highlights(self):
         value = "CAF33 TRANSLUCIDE (310ML) (ELKEM SI) {HOM} [ ]"
 
         def span(text, role):
@@ -4318,8 +4471,8 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         spans = result["interpretationSpansByColumn"]["Combined"]
         mpn_span = next(item for item in spans if item["role"] == "mpn")
         manufacturer_span = next(item for item in spans if item["role"] == "manufacturer")
-        self.assertEqual(value[mpn_span["start"]:mpn_span["end"]], "CAF33 TRANSLUCIDE (310ML)")
-        self.assertEqual(value[manufacturer_span["start"]:manufacturer_span["end"]], "ELKEM SI")
+        self.assertEqual(value[mpn_span["start"]:mpn_span["end"]], "CAF33 TRANSLUCIDE")
+        self.assertEqual(value[manufacturer_span["start"]:manufacturer_span["end"]], "310ML")
 
     def test_standalone_punctuation_remains_available_for_user_review(self):
         fragments = _semantic_identity_fragments('"', ["mpn", "manufacturer"])
@@ -4330,6 +4483,44 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
             "rawValue": '"',
             "grammar": "<UNCLASSIFIED_TEXT>",
         }])
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    def test_unclassified_shared_cell_does_not_fill_mpn_or_manufacturer(
+        self,
+        _saved_rules,
+        _saved_interpretations,
+    ):
+        result = build_bom_field_pattern_groups(
+            ["Combined", "Description"],
+            [{
+                "Combined": '"',
+                "Description": "Retained description",
+                "__sourceRow": 4,
+            }],
+            roles={
+                "mpn": "Combined",
+                "manufacturer": "Combined",
+                "description": "Description",
+            },
+            config={"skipTitleRows": False},
+            options={"includeAllRows": True, "reviewContractVersion": 3},
+        )
+
+        pattern = next(
+            item for item in result["review"]["patterns"]
+            if item["detectedPattern"] == "<UNCLASSIFIED_TEXT>"
+        )
+        fields = pattern["teachContext"]["sample"]["entries"][0]["fields"]
+        self.assertEqual(fields["mpn"]["value"], "")
+        self.assertEqual(fields["manufacturer"]["value"], "")
+        self.assertEqual(fields["description"]["value"], "Retained description")
 
     @patch(
         "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
@@ -4761,7 +4952,7 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
         return_value={},
     )
-    def test_confirmed_pattern_needs_review_when_another_occurrence_has_replay_warnings(
+    def test_confirmed_pattern_stays_recognized_when_another_occurrence_needs_review(
         self,
         _saved_rules,
         _saved_interpretations,
@@ -4839,9 +5030,10 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
             )
 
         refreshed_pattern = refreshed["patterns"][0]
-        self.assertFalse(refreshed_pattern["recognized"])
+        self.assertTrue(refreshed_pattern["recognized"])
         self.assertTrue(refreshed_pattern["recognitionValidation"]["confirmedOccurrenceValid"])
         self.assertFalse(refreshed_pattern["recognitionValidation"]["groupReplayValid"])
+        self.assertTrue(refreshed_pattern["recognitionValidation"]["replayNeedsReview"])
         self.assertEqual(
             refreshed_pattern["recognitionValidation"]["reason"],
             "incomplete_grammar_coverage",
@@ -4855,7 +5047,7 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
         return_value={},
     )
-    def test_teach_refresh_falls_back_when_rule_would_blank_another_row(
+    def test_teach_refresh_does_not_fall_back_when_rule_would_blank_another_row(
         self,
         _saved_rules,
         _saved_interpretations,
@@ -4929,16 +5121,10 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
             )
 
         row_39 = next(row for row in refreshed["rows"] if row["sourceRow"] == 39)
-        self.assertEqual(len(row_39["entries"]), 1)
-        self.assertEqual(row_39["entries"][0]["fields"]["mpn"], "201Y04L")
-        self.assertEqual(row_39["entries"][0]["fields"]["manufacturer"], "NICOMATI")
-        self.assertEqual(refreshed["summary"]["recognizedPatternCount"], 0)
-        self.assertEqual(refreshed["summary"]["unrecognizedPatternCount"], 1)
-        self.assertNotIn(teach_context["workflowStepId"], refreshed["workflow"]["completedStepIds"])
-        self.assertEqual(
-            refreshed["patterns"][0]["recognitionValidation"]["reason"],
-            "parser_fallback_used",
-        )
+        self.assertEqual(row_39["entries"], [])
+        self.assertEqual(refreshed["summary"]["recognizedPatternCount"], 1)
+        self.assertEqual(refreshed["summary"]["unrecognizedPatternCount"], 0)
+        self.assertIn(teach_context["workflowStepId"], refreshed["workflow"]["completedStepIds"])
 
 
 class StructureScopedPrefixRuleTests(TestCase):

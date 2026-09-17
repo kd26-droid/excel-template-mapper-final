@@ -80,6 +80,8 @@ def _global_reusable_pattern_rule(rule):
         "structure_signature",
         "structureFingerprint",
         "structure_fingerprint",
+        "authoritativeCorrection",
+        "authoritative_correction",
     ):
         reusable.pop(key, None)
 
