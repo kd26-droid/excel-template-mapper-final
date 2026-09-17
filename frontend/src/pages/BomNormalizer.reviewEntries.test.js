@@ -1,4 +1,7 @@
-import { reviewEntriesWithUserEdits } from './BomNormalizer';
+import {
+  canUseVisualTeachInterpretation,
+  reviewEntriesWithUserEdits,
+} from './BomNormalizer';
 
 const backendEntry = {
   relation: 'Primary',
@@ -60,5 +63,25 @@ describe('reviewEntriesWithUserEdits', () => {
 
     expect(result).toHaveLength(1);
     expect(result[0].fields.mpn).toBe('201Y04L-CORRECTED');
+  });
+});
+
+describe('canUseVisualTeachInterpretation', () => {
+  test('allows an unrecognized backend pattern without requiring an edit', () => {
+    expect(canUseVisualTeachInterpretation({
+      hasUserChanges: false,
+      recognized: false,
+    })).toBe(true);
+  });
+
+  test('requires an edit when the backend pattern is already recognized', () => {
+    expect(canUseVisualTeachInterpretation({
+      hasUserChanges: false,
+      recognized: true,
+    })).toBe(false);
+    expect(canUseVisualTeachInterpretation({
+      hasUserChanges: true,
+      recognized: true,
+    })).toBe(true);
   });
 });

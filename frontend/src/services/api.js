@@ -1656,6 +1656,7 @@ const api = {
     completedStepId = '',
     sourceRow = null,
     occurrenceId = '',
+    confirmInterpretation = false,
     persist = true,
   }) =>
     axios.post(`${API_URL}/bom/field-patterns/teach/`, {
@@ -1681,6 +1682,7 @@ const api = {
       completed_step_id: completedStepId,
       source_row: sourceRow,
       occurrence_id: occurrenceId,
+      confirm_interpretation: confirmInterpretation,
       persist,
     }, { timeout: 120000 }),
 
@@ -1691,14 +1693,13 @@ const api = {
     }, { timeout: 120000 }),
 
   /** Persist confirmed interpretations and return the backend-normalized preview. */
-  applyBomFieldPatterns: ({ headers, rows, roles, config, rules = {}, corrections = [], persist = true }) =>
+  applyBomFieldPatterns: ({ headers, rows, roles, config, confirmationTokens = [], persist = true }) =>
     axios.post(`${API_URL}/bom/field-patterns/apply/`, {
       headers,
       rows,
       roles,
       config,
-      rules,
-      corrections,
+      confirmation_tokens: confirmationTokens,
       persist,
     }, { timeout: 180000 }),
 

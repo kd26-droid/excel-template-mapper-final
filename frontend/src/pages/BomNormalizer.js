@@ -8900,6 +8900,11 @@ export const reviewEntriesWithUserEdits = (row = {}, edits = {}) => {
   }));
 };
 
+export const canUseVisualTeachInterpretation = ({
+  hasUserChanges = false,
+  recognized,
+} = {}) => Boolean(hasUserChanges || recognized === false);
+
 const VISUAL_TEACH_FIELD_STYLES = {
   cpn: { color: '#7c3aed', bg: '#ede9fe' },
   mpn: { color: '#2563eb', bg: '#dbeafe' },
@@ -9333,6 +9338,7 @@ const BomNormalizer = () => {
   const [selectedFieldPatternId, setSelectedFieldPatternId] = useState('');
   const [fieldPatternEdits, setFieldPatternEdits] = useState({});
   const [fieldPatternRuleDrafts, setFieldPatternRuleDrafts] = useState({});
+  const [fieldPatternConfirmations, setFieldPatternConfirmations] = useState({});
   const [fieldPatternSelectedRuleField, setFieldPatternSelectedRuleField] = useState('');
   const [fieldPatternReviewWorkflow, setFieldPatternReviewWorkflow] = useState({ steps: [], nextStep: null });
   const [fieldPatternWorkflowLaunchRevision, setFieldPatternWorkflowLaunchRevision] = useState(0);
@@ -9347,6 +9353,7 @@ const BomNormalizer = () => {
   const [visualTeachMpnPrefixLength, setVisualTeachMpnPrefixLength] = useState('');
   const [visualTeachMpnPrefixTouched, setVisualTeachMpnPrefixTouched] = useState(false);
   const [visualTeachEntryOverrides, setVisualTeachEntryOverrides] = useState({});
+  const [visualTeachHasUserChanges, setVisualTeachHasUserChanges] = useState(false);
   const [visualTeachBackendPreview, setVisualTeachBackendPreview] = useState(null);
   const [visualTeachPreviewLoading, setVisualTeachPreviewLoading] = useState(false);
   const [visualTeachSourceRowExpanded, setVisualTeachSourceRowExpanded] = useState(false);
@@ -10336,6 +10343,18 @@ const BomNormalizer = () => {
     () => visualTeachMappedFields.map((field) => field.key),
     [visualTeachMappedFields]
   );
+  const visualTeachPatternKey = fmt(
+    visualTeachContext?.group?.patternKey ||
+    visualTeachContext?.workflowStep?.patternKey ||
+    visualTeachContext?.group?.shape
+  );
+  const visualTeachReviewPattern = fieldPatternReviewPatterns.find(
+    (pattern) => fmt(pattern?.patternKey) === visualTeachPatternKey
+  ) || null;
+  const visualTeachCanUseInterpretation = canUseVisualTeachInterpretation({
+    hasUserChanges: visualTeachHasUserChanges,
+    recognized: visualTeachReviewPattern?.recognized,
+  });
   const visualTeachDialogTitle = visualTeachBackendPreview?.title ||
     visualTeachContext?.workflowStep?.title ||
     'Confirm pattern';
@@ -10352,6 +10371,7 @@ const BomNormalizer = () => {
   const handleVisualTeachDelimiterSelect = useCallback((event) => {
     const selected = event.target.value;
     setVisualTeachDelimiter(selected === VISUAL_TEACH_CUSTOM_DELIMITER ? '' : selected);
+    setVisualTeachHasUserChanges(true);
   }, []);
   const visualTeachPreparedTags = visualTeachTags;
   const visualTeachIgnoredFields = useMemo(() => {
@@ -13225,6 +13245,7 @@ const BomNormalizer = () => {
       setFieldPatternReviewStage('patterns');
       setFieldPatternFieldFilter('all');
       setFieldPatternExpandedPatternKey('');
+      setFieldPatternConfirmations({});
       setVisualTeachOpen(false);
     }
 
@@ -13380,11 +13401,24 @@ const BomNormalizer = () => {
       setError('No customer cell value is available to teach visually for this sample.');
       return;
     }
+    const patternKey = fmt(group.patternKey || workflowStep?.patternKey || group.shape);
+    const confirmedInterpretation = fieldPatternConfirmations[patternKey];
+    const confirmationMatchesSample = Boolean(
+      confirmedInterpretation &&
+      String(confirmedInterpretation.sourceRow) === String(sample.sourceRow) &&
+      (
+        !confirmedInterpretation.occurrenceId ||
+        !sampleOccurrenceId ||
+        fmt(confirmedInterpretation.occurrenceId) === sampleOccurrenceId
+      )
+    );
     const sampleEdit = fieldPatternEdits[group.id]?.[fieldPatternSampleKey(sample)] || {};
     const backendEntries = Array.isArray(sample.entries) && sample.entries.length
       ? sample.entries
       : [{ fields: sample.fields || {} }];
-    const baseEntries = sampleEdit.entries?.length ? sampleEdit.entries : [{
+    const baseEntries = confirmationMatchesSample && confirmedInterpretation.entries?.length
+      ? confirmedInterpretation.entries
+      : sampleEdit.entries?.length ? sampleEdit.entries : [{
       relation: 'Primary',
       fields: fieldValuesFromBackendFields(sample.fields || {}, fieldPatternFields),
       sourceColumns: sourceColumnsFromBackendFields(sample.fields || {}, fieldPatternFields),
@@ -13409,33 +13443,39 @@ const BomNormalizer = () => {
       workflowStep,
       occurrence: matchingOccurrence || sample?.sourceFragment || null,
     });
-    const backendSpans = sample?.interpretationSpansByColumn?.[sourceItem.column] || [];
+    const backendSpans = confirmationMatchesSample
+      ? confirmedInterpretation.interpretationSpansByColumn?.[sourceItem.column] || []
+      : sample?.interpretationSpansByColumn?.[sourceItem.column] || [];
+    const confirmedRule = confirmationMatchesSample ? confirmedInterpretation.rule || {} : {};
+    const suggestedRule = Object.keys(confirmedRule).length ? confirmedRule : group?.suggestedRule || {};
     setVisualTeachBackendPreview({
       entries: seedEntries,
-      interpretationSpansByColumn: sample?.interpretationSpansByColumn || {},
-      title: workflowStep?.title || '',
-      pattern: workflowStep?.pattern || group?.primaryPatternRow?.pattern || '',
-      rule: group?.suggestedRule || {},
+      interpretationSpansByColumn: confirmationMatchesSample
+        ? confirmedInterpretation.interpretationSpansByColumn || {}
+        : sample?.interpretationSpansByColumn || {},
+      title: (confirmationMatchesSample ? confirmedInterpretation?.title : '') || workflowStep?.title || '',
+      pattern: (confirmationMatchesSample ? confirmedInterpretation?.pattern : '') || workflowStep?.pattern || group?.primaryPatternRow?.pattern || '',
+      rule: suggestedRule,
     });
     setVisualTeachTags(visualTeachTagsFromInterpretationSpans(sourceValue, backendSpans));
     setVisualTeachSelection(null);
     setVisualTeachDrag(null);
     setVisualTeachDelimiter(
       sampleEdit.visualTeachDelimiter ??
-      group?.suggestedRule?.visualPattern?.alternateDelimiter ??
+      suggestedRule?.visualPattern?.alternateDelimiter ??
       ''
     );
     setVisualTeachAltMode(
       sampleEdit.visualTeachAltMode ||
-      group?.suggestedRule?.visualPattern?.alternateMode ||
+      suggestedRule?.visualPattern?.alternateMode ||
       'append'
     );
     setVisualTeachAlternateJoiner(
       sampleEdit.visualTeachAlternateJoiner ??
-      group?.suggestedRule?.visualPattern?.alternateJoiner ??
+      suggestedRule?.visualPattern?.alternateJoiner ??
       ''
     );
-    const suggestedMpnRule = group?.suggestedRule?.fields?.mpn || {};
+    const suggestedMpnRule = suggestedRule?.fields?.mpn || {};
     setVisualTeachMpnPrefixLength(
       sampleEdit.visualTeachMpnPrefixLength ?? (
         suggestedMpnRule.prefixMode === 'first_n_chars'
@@ -13444,11 +13484,12 @@ const BomNormalizer = () => {
       )
     );
     setVisualTeachMpnPrefixTouched(false);
-    setVisualTeachEntryOverrides(sampleEdit.visualTeachEntryOverrides || {});
+    setVisualTeachEntryOverrides(confirmationMatchesSample ? {} : sampleEdit.visualTeachEntryOverrides || {});
+    setVisualTeachHasUserChanges(false);
     setVisualTeachPreviewLoading(false);
     setVisualTeachSourceRowExpanded(false);
     setVisualTeachOpen(options.openDialog !== false);
-  }, [fieldPatternEdits, fieldPatternFields, normalizerConfig, roles]);
+  }, [fieldPatternConfirmations, fieldPatternEdits, fieldPatternFields, normalizerConfig, roles]);
 
   const handleReviewUnrecognizedPattern = useCallback((pattern) => {
     const patternKey = fmt(pattern?.patternKey);
@@ -13670,6 +13711,7 @@ const BomNormalizer = () => {
       }
       return next;
     });
+    setVisualTeachHasUserChanges(true);
   }, [visualTeachContext, visualTeachSelection]);
 
   const handleClearVisualTeachTags = useCallback(() => {
@@ -13685,6 +13727,7 @@ const BomNormalizer = () => {
     });
     setVisualTeachSelection(null);
     setVisualTeachDrag(null);
+    setVisualTeachHasUserChanges(true);
   }, [visualTeachContext]);
 
   const handleClearVisualTeachSelection = useCallback(() => {
@@ -13700,10 +13743,12 @@ const BomNormalizer = () => {
     });
     setVisualTeachSelection(null);
     setVisualTeachDrag(null);
+    setVisualTeachHasUserChanges(true);
   }, [visualTeachContext, visualTeachSelection]);
 
   const handleApplyVisualTeachPattern = useCallback(async () => {
     if (visualTeachApplyInFlightRef.current) return;
+    if (!visualTeachCanUseInterpretation) return;
     const group = visualTeachContext?.group;
     const sample = visualTeachContext?.sample;
     const sourceValue = visualTeachContext?.sourceValue || '';
@@ -13798,8 +13843,13 @@ const BomNormalizer = () => {
         completedStepId: visualTeachContext?.workflowStep?.id || '',
         sourceRow: sample.sourceRow,
         occurrenceId: sample.sourceFragment?.id || '',
+        confirmInterpretation: true,
         persist: false,
       });
+      const confirmation = response.data?.confirmation;
+      if (!confirmation?.token || !confirmation?.patternKey) {
+        throw new Error('Backend did not confirm this interpretation.');
+      }
       const taughtRule = response.data?.rule || {};
       if (!taughtRule.visualPattern && !Object.keys(taughtRule.fields || {}).length) {
         throw new Error('Backend did not accept the pattern rule.');
@@ -13810,6 +13860,17 @@ const BomNormalizer = () => {
         sourceColumns: sourceColumnsFromBackendFields(entry.fields || {}, fieldPatternFields),
       }));
       visualTeachBackendEntriesRef.current = taughtEntries;
+      setFieldPatternConfirmations((current) => ({
+        ...current,
+        [confirmation.patternKey]: {
+          ...confirmation,
+          entries: taughtEntries,
+          interpretationSpansByColumn: response.data?.interpretationSpansByColumn || {},
+          title: response.data?.title || '',
+          pattern: response.data?.pattern || '',
+          rule: taughtRule,
+        },
+      }));
       setVisualTeachBackendPreview({
         entries: taughtEntries,
         interpretationSpansByColumn: response.data?.interpretationSpansByColumn || {},
@@ -13846,6 +13907,29 @@ const BomNormalizer = () => {
       );
       const refreshedSample = refreshedPattern?.teachContext?.sample || (refreshedGroup?.samples || [])
         .find((candidate) => String(candidate.sourceRow) === String(sample.sourceRow));
+      const confirmedGroupId = refreshedGroup?.id || group.id;
+      const confirmedSample = refreshedSample || sample;
+
+      setFieldPatternEdits((current) => ({
+        ...current,
+        [confirmedGroupId]: {
+          ...(current[confirmedGroupId] || {}),
+          [fieldPatternSampleKey(confirmedSample)]: {
+            ...(current[confirmedGroupId]?.[fieldPatternSampleKey(confirmedSample)] || {}),
+            sourceRow: confirmedSample.sourceRow,
+            occurrenceId: confirmedSample.sourceFragment?.id || sample.sourceFragment?.id || '',
+            entries: taughtEntries,
+            visualTeachTags: nextTags,
+            visualTeachDelimiter,
+            visualTeachAltMode,
+            visualTeachAlternateJoiner,
+            visualTeachMpnPrefixLength,
+            visualTeachMpnPrefixTouched: false,
+            visualTeachEntryOverrides: {},
+            manuallyEdited: hasManualEdits,
+          },
+        },
+      }));
 
       setFieldPatternRuleDrafts(nextRules);
       setFieldPatternGroups(refreshedGroups);
@@ -13864,6 +13948,9 @@ const BomNormalizer = () => {
         }));
       }
       setPatternApplyNotice(`Interpretation updated for all ${group.occurrenceCount || group.rowCount || 0} matching fragments.`);
+      setVisualTeachEntryOverrides({});
+      setVisualTeachMpnPrefixTouched(false);
+      setVisualTeachHasUserChanges(false);
     } catch (err) {
       setError(err.response?.data?.error || err.message || 'Could not apply this visual pattern to matching fragments.');
     } finally {
@@ -13879,6 +13966,7 @@ const BomNormalizer = () => {
     roles,
     visualTeachAltMode,
     visualTeachAlternateJoiner,
+    visualTeachCanUseInterpretation,
     visualTeachContext,
     visualTeachDelimiter,
     visualTeachEntryOverrides,
@@ -13963,17 +14051,6 @@ const BomNormalizer = () => {
   }, []);
 
   const handleApplyFieldPatternReview = useCallback(async () => {
-    const corrections = fieldPatternGroups.flatMap((group) => (
-      Object.values(fieldPatternEdits[group.id] || [])
-        .filter((edit) => edit?.manuallyEdited)
-        .map((edit) => ({
-          patternKey: group.patternKey || group.shape || '',
-          sourceRow: edit.sourceRow,
-          occurrenceId: edit.occurrenceId || '',
-          entries: edit.entries || [],
-        }))
-    ));
-
     setFieldPatternLoading(true);
     setError('');
     try {
@@ -13982,8 +14059,9 @@ const BomNormalizer = () => {
         rows: dataRows,
         roles,
         config: { ...normalizerConfig, headerRowIndex },
-        rules: fieldPatternRuleDrafts,
-        corrections,
+        confirmationTokens: Object.values(fieldPatternConfirmations)
+          .map((confirmation) => confirmation?.token)
+          .filter(Boolean),
         persist: true,
       });
       const normalized = response.data?.normalizedRows || [];
@@ -14014,7 +14092,7 @@ const BomNormalizer = () => {
     } finally {
       setFieldPatternLoading(false);
     }
-  }, [commitNormalizedResult, dataRows, fieldPatternEdits, fieldPatternGroups, fieldPatternReviewSummary.patternCount, fieldPatternRuleDrafts, headerRowIndex, headers, normalizerConfig, roles]);
+  }, [commitNormalizedResult, dataRows, fieldPatternConfirmations, fieldPatternReviewSummary.patternCount, headerRowIndex, headers, normalizerConfig, roles]);
 
   const handleApplyConfigureSplitColumns = useCallback((result) => {
     const scope = configureParserScope;
@@ -14688,14 +14766,20 @@ const BomNormalizer = () => {
                   size="small"
                   label="Custom delimiter"
                   value={visualTeachDelimiter}
-                  onChange={(event) => setVisualTeachDelimiter(event.target.value)}
+                  onChange={(event) => {
+                    setVisualTeachDelimiter(event.target.value);
+                    setVisualTeachHasUserChanges(true);
+                  }}
                   inputProps={{ maxLength: 12 }}
                   sx={{ width: 190 }}
                 />
               )}
               <FormControl size="small" sx={{ minWidth: 220 }}>
                 <InputLabel>Alternate MPN mode</InputLabel>
-                <Select label="Alternate MPN mode" value={visualTeachAltMode} onChange={(event) => setVisualTeachAltMode(event.target.value)}>
+                <Select label="Alternate MPN mode" value={visualTeachAltMode} onChange={(event) => {
+                  setVisualTeachAltMode(event.target.value);
+                  setVisualTeachHasUserChanges(true);
+                }}>
                   <MenuItem value="append">Append to base MPN</MenuItem>
                   <MenuItem value="complete">Already complete MPNs</MenuItem>
                   <MenuItem value="replace_suffix_at_marker">Replace suffix at @</MenuItem>
@@ -14707,7 +14791,10 @@ const BomNormalizer = () => {
                   size="small"
                   label="Alternate-only separator"
                   value={visualTeachAlternateJoiner}
-                  onChange={(event) => setVisualTeachAlternateJoiner(event.target.value)}
+                  onChange={(event) => {
+                    setVisualTeachAlternateJoiner(event.target.value);
+                    setVisualTeachHasUserChanges(true);
+                  }}
                   inputProps={{ maxLength: 8 }}
                   sx={{ width: 210 }}
                 />
@@ -14721,6 +14808,7 @@ const BomNormalizer = () => {
                   onChange={(event) => {
                     const value = event.target.value;
                     setVisualTeachMpnPrefixTouched(true);
+                    setVisualTeachHasUserChanges(true);
                     setVisualTeachMpnPrefixLength(
                       value === '' ? '' : String(Math.max(0, Math.min(99, Number(value) || 0)))
                     );
@@ -14747,7 +14835,10 @@ const BomNormalizer = () => {
                       <TableCell sx={{ fontWeight: 800 }}>{entry.relation}</TableCell>
                       {visualTeachMappedFields.map((field) => (
                         <TableCell key={field.key} sx={{ minWidth: 160 }}>
-                          <TextField fullWidth size="small" value={visualTeachEntryOverrides[index]?.[field.key] ?? entry.fields?.[field.key] ?? ''} onChange={(event) => setVisualTeachEntryOverrides((current) => ({ ...current, [index]: { ...(current[index] || {}), [field.key]: event.target.value } }))} />
+                          <TextField fullWidth size="small" value={visualTeachEntryOverrides[index]?.[field.key] ?? entry.fields?.[field.key] ?? ''} onChange={(event) => {
+                            setVisualTeachEntryOverrides((current) => ({ ...current, [index]: { ...(current[index] || {}), [field.key]: event.target.value } }));
+                            setVisualTeachHasUserChanges(true);
+                          }} />
                         </TableCell>
                       ))}
                     </TableRow>
@@ -14759,7 +14850,7 @@ const BomNormalizer = () => {
           <Stack direction="row" justifyContent="flex-end" sx={{ mt: 1 }}>
             <Button
               variant="contained"
-              disabled={(!visualTeachIsIgnoreInterpretation && !visualTeachPreparedTags.some((role) => visualTeachMappedFieldKeys.includes(role))) || fieldPatternLoading || visualTeachPreviewLoading}
+              disabled={!visualTeachCanUseInterpretation || (!visualTeachIsIgnoreInterpretation && !visualTeachPreparedTags.some((role) => visualTeachMappedFieldKeys.includes(role))) || fieldPatternLoading || visualTeachPreviewLoading}
               onClick={handleApplyVisualTeachPattern}
             >
               Use this interpretation
@@ -18391,7 +18482,10 @@ const BomNormalizer = () => {
                           size="small"
                           label="Custom delimiter"
                           value={visualTeachDelimiter}
-                          onChange={(event) => setVisualTeachDelimiter(event.target.value)}
+                          onChange={(event) => {
+                            setVisualTeachDelimiter(event.target.value);
+                            setVisualTeachHasUserChanges(true);
+                          }}
                           inputProps={{ maxLength: 12 }}
                           sx={{ width: 190 }}
                         />
@@ -18401,7 +18495,10 @@ const BomNormalizer = () => {
                         <Select
                           label="Alternate MPN mode"
                           value={visualTeachAltMode}
-                          onChange={(event) => setVisualTeachAltMode(event.target.value)}
+                          onChange={(event) => {
+                            setVisualTeachAltMode(event.target.value);
+                            setVisualTeachHasUserChanges(true);
+                          }}
                         >
                           <MenuItem value="append">Append to base MPN</MenuItem>
                           <MenuItem value="complete">Already complete MPNs</MenuItem>
@@ -18414,7 +18511,10 @@ const BomNormalizer = () => {
                           size="small"
                           label="Alternate-only separator"
                           value={visualTeachAlternateJoiner}
-                          onChange={(event) => setVisualTeachAlternateJoiner(event.target.value)}
+                          onChange={(event) => {
+                            setVisualTeachAlternateJoiner(event.target.value);
+                            setVisualTeachHasUserChanges(true);
+                          }}
                           inputProps={{ maxLength: 8 }}
                           sx={{ width: 210 }}
                         />
@@ -18483,6 +18583,7 @@ const BomNormalizer = () => {
                                             [field.key]: value,
                                           },
                                         }));
+                                        setVisualTeachHasUserChanges(true);
                                       }}
                                       inputProps={{ 'aria-label': `${entry.relation} ${field.label}` }}
                                       sx={{
@@ -18519,6 +18620,7 @@ const BomNormalizer = () => {
           <Button
             variant="contained"
             disabled={
+              !visualTeachCanUseInterpretation ||
               (
                 !visualTeachIsIgnoreInterpretation &&
                 !visualTeachPreparedTags.some((role) => visualTeachMappedFieldKeys.includes(role))
