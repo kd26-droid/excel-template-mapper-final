@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from unittest.mock import patch
 
 from django.db import OperationalError
@@ -49,6 +50,7 @@ from excel_mapper.services.bom_role_inference import (
     _split_field_preview,
     _visual_pattern_identity_pairs,
     _visual_pattern_interpretation_spans,
+    _visual_pattern_display_quality,
     derive_bom_field_pattern_rule_from_correction,
     infer_bom_roles,
     normalize_bom_rows,
@@ -611,7 +613,7 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         self.assertNotIn("alternateSource", visual_pattern["mpnComposition"])
         self.assertEqual(
             visual_pattern["displayPattern"],
-            "<MPN_PREFIX><INSERTION_MARKER><MPN_SUFFIX> (<MFR>) {<STATUS>} [<REF>]",
+            '<MPN_PREFIX><INSERTION_MARKER><MPN_SUFFIX>(<MFR>){<STATUS>}[<REF>]"',
         )
 
         pairs = _visual_pattern_identity_pairs(
@@ -624,6 +626,27 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         self.assertEqual(
             [(pair["mpn"], pair["manufacturer"]) for pair in pairs],
             [("WF06U1503BL", "WTC")],
+        )
+
+    def test_confirmed_mpn_mfr_pattern_preserves_unclassified_trailing_text(self):
+        source = "CAV24C64WE-GT3(ON SEMICONDUCTOR,M000000034)"
+        manufacturer_start = source.index("ON SEMICONDUCTOR")
+        visual_pattern = derive_visual_pattern_from_tagged_spans(
+            source_value=source,
+            source_header="Vendor Parts",
+            tagged_spans=[
+                {"start": 0, "end": source.index("("), "role": "mpn"},
+                {
+                    "start": manufacturer_start,
+                    "end": manufacturer_start + len("ON SEMICONDUCTOR"),
+                    "role": "manufacturer",
+                },
+            ],
+        )
+
+        self.assertEqual(
+            visual_pattern["displayPattern"],
+            "<MPN>(<MFR>,<UNCLASSIFIED_TEXT>)",
         )
 
     @patch(
@@ -1426,6 +1449,133 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         self.assertEqual(
             refreshed["rows"][0]["entries"][0]["fields"]["description"],
             "Section item",
+        )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    def test_confirmed_grammar_stays_recognized_after_refresh_and_fresh_infer(
+        self, _saved_rules, saved_interpretations
+    ):
+        source = "CAV24C64WE-GT3(ON SEMICONDUCTOR,M000000034)"
+        headers = ["Vendor Parts"]
+        roles = {
+            "mpn": "Vendor Parts",
+            "manufacturer": "Vendor Parts",
+        }
+        config = {"alternateLayout": "inside_selected_mpn_columns"}
+        row = {"Vendor Parts": source, "__sourceRow": 15}
+        inferred = build_bom_field_pattern_groups(
+            headers,
+            [row],
+            roles=roles,
+            config=config,
+            options={"includeAllRows": True, "reviewContractVersion": 3},
+        )
+        review = inferred["review"]
+        pattern = review["patterns"][0]
+        teach_context = pattern["teachContext"]
+        manufacturer_start = source.index("ON SEMICONDUCTOR")
+        taught = build_bom_field_pattern_teach_result(
+            headers=headers,
+            row=row,
+            roles=roles,
+            config=config,
+            group={
+                "id": pattern["groupId"],
+                "shape": pattern["patternKey"],
+                "patternKey": pattern["patternKey"],
+            },
+            tagged_spans=[
+                {"start": 0, "end": source.index("("), "role": "mpn"},
+                {
+                    "start": manufacturer_start,
+                    "end": manufacturer_start + len("ON SEMICONDUCTOR"),
+                    "role": "manufacturer",
+                },
+            ],
+            source_header="Vendor Parts",
+        )
+        self.assertEqual(
+            taught["visualPattern"]["displayPattern"],
+            "<MPN>(<MFR>,<UNCLASSIFIED_TEXT>)",
+        )
+
+        with patch(
+            "excel_mapper.services.bom_role_inference._verified_mpn_matches",
+            return_value={},
+        ):
+            refreshed = refresh_bom_field_pattern_review_after_teach(
+                review,
+                taught,
+                group={
+                    "id": pattern["groupId"],
+                    "shape": pattern["patternKey"],
+                    "patternKey": pattern["patternKey"],
+                },
+                roles=roles,
+                config=config,
+                active_rules={pattern["patternKey"]: taught["rule"]},
+                source_row=15,
+                occurrence_id=teach_context["sample"]["sourceFragment"]["id"],
+                completed_step_id=teach_context["workflowStepId"],
+                taught_source_value=source,
+            )
+
+        refreshed_pattern = refreshed["patterns"][0]
+        self.assertTrue(refreshed_pattern["recognized"])
+        self.assertEqual(refreshed_pattern["statusLabel"], "Recognized")
+        self.assertEqual(
+            refreshed_pattern["pattern"],
+            "<MPN>(<MFR>,<UNCLASSIFIED_TEXT>)",
+        )
+        self.assertEqual(refreshed["summary"]["recognizedPatternCount"], 1)
+
+        legacy_saved_rule = deepcopy(taught["rule"])
+        legacy_saved_rule["visualPattern"] = {
+            **legacy_saved_rule["visualPattern"],
+            "displayPattern": "<MPN> (<MFR>)",
+        }
+        saved_interpretations.return_value = {
+            pattern["patternKey"]: {
+                "patternKey": pattern["patternKey"],
+                "matchScope": "structure",
+                "rule": legacy_saved_rule,
+            },
+        }
+        with patch(
+            "excel_mapper.services.bom_role_inference._verified_mpn_matches",
+            return_value={},
+        ):
+            reinferred = build_bom_field_pattern_groups(
+                headers,
+                [row],
+                roles=roles,
+                config=config,
+                options={"includeAllRows": True, "reviewContractVersion": 3},
+            )["review"]
+
+        reinferred_pattern = reinferred["patterns"][0]
+        self.assertTrue(reinferred_pattern["recognized"])
+        self.assertEqual(reinferred_pattern["statusLabel"], "Recognized")
+        self.assertEqual(
+            reinferred_pattern["pattern"],
+            "<MPN>(<MFR>,<UNCLASSIFIED_TEXT>)",
+        )
+        self.assertTrue(
+            reinferred_pattern["recognitionValidation"]["mpnValidation"]["advisoryOnly"]
+        )
+
+        self.assertGreater(
+            _visual_pattern_display_quality(
+                "<MPN>(<MFR>,<UNCLASSIFIED_TEXT>)"
+            ),
+            _visual_pattern_display_quality("<MPN>(,)"),
         )
 
 
@@ -3295,7 +3445,7 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
         return_value={},
     )
-    def test_saved_rule_needs_review_when_it_does_not_cover_detected_alternates(
+    def test_saved_rule_uses_confirmed_grammar_instead_of_stale_detected_alternates(
         self, _saved_rules, saved_interpretations
     ):
         source_header = "Manufacturer Code Number"
@@ -3329,13 +3479,18 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         )
 
         pattern = result["patterns"][0]
-        self.assertFalse(pattern["recognized"])
-        self.assertEqual(
-            pattern["recognitionValidation"]["missingRoles"],
-            ["alternateList"],
+        self.assertTrue(pattern["recognized"])
+        expected_confirmed_pattern = (
+            "<MPN>@ (<UNCLASSIFIED_TEXT>/<UNCLASSIFIED_TEXT>/<UNCLASSIFIED_TEXT>)"
         )
-        self.assertEqual(result["reviewSummary"]["recognizedPatternCount"], 0)
-        self.assertEqual(result["reviewSummary"]["unrecognizedPatternCount"], 1)
+        self.assertEqual(pattern["interpretationPattern"], expected_confirmed_pattern)
+        self.assertEqual(pattern["recognitionValidation"]["missingRoles"], [])
+        self.assertEqual(result["reviewSummary"]["recognizedPatternCount"], 1)
+        self.assertEqual(result["reviewSummary"]["unrecognizedPatternCount"], 0)
+        self.assertEqual(
+            result["reviewSummary"]["recognizedPatterns"][0]["pattern"],
+            expected_confirmed_pattern,
+        )
 
     def test_saved_rule_needs_review_when_alternate_segment_does_not_apply(self):
         validation = _semantic_interpretation_coverage(
@@ -3392,7 +3547,7 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
             "",
         )
 
-    def test_review_labels_preserve_detected_separator_over_saved_display_label(self):
+    def test_review_labels_use_confirmed_interpretation_over_detected_grammar(self):
         grammar = "<MPN>@ (<ALTERNATE_SUFFIXES>) (<MFR>) {<STATUS>} [<REF>]"
         pattern = {
             "patternKey": "semantic-test",
@@ -3418,8 +3573,14 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
             patterns=[pattern],
         )
 
-        self.assertEqual(summary["recognizedPatterns"][0]["pattern"], grammar)
-        self.assertEqual(workflow["steps"][0]["pattern"], grammar)
+        self.assertEqual(
+            summary["recognizedPatterns"][0]["pattern"],
+            pattern["interpretationPattern"],
+        )
+        self.assertEqual(
+            workflow["steps"][0]["pattern"],
+            pattern["interpretationPattern"],
+        )
 
     def test_hash_and_at_marker_sequences_remain_distinct_in_pattern_grammar(self):
         self.assertEqual(
@@ -3485,7 +3646,11 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
             [
                 span("LTC2936IUFD#@PBF", "mpn"),
                 span("/TR", "alternateList"),
-                span("LTC", "manufacturer"),
+                {
+                    "start": source.index("(LTC)") + 1,
+                    "end": source.index("(LTC)") + 4,
+                    "role": "manufacturer",
+                },
             ],
             alternate_delimiter="/",
         )
