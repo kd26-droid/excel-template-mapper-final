@@ -5,6 +5,7 @@ from time import monotonic
 from django.core.cache import cache
 from django.db import OperationalError, ProgrammingError, transaction
 from django.utils import timezone
+from rapidfuzz import fuzz, process
 
 from excel_mapper.models import (
     DirectoryLearningEvent,
@@ -190,6 +191,8 @@ class DatabaseMpnLookup:
         self._entries = {}
         self._loaded = set()
         self._value_matches = {}
+        self._known_trigrams = None
+        self._similarity_matches = {}
 
     def __bool__(self):
         return True
@@ -199,6 +202,83 @@ class DatabaseMpnLookup:
 
     def is_known(self, normalized_key):
         return normalized_key in self._known
+
+    def match_normalized_many(self, normalized_values, *, threshold=90.0):
+        """Return exact or fuzzy verified-directory evidence for unique MPNs."""
+        values = {
+            str(value or "")
+            for value in normalized_values or []
+            if str(value or "")
+        }
+        matches = {}
+        unresolved = []
+        for value in values:
+            known = self._known.get(value)
+            if known:
+                matches[value] = {
+                    "matched": True,
+                    "score": 100.0,
+                    "match_type": "exact",
+                    "matched_mpn": known[1],
+                    "matched_normalized_mpn": value,
+                }
+            elif value in self._similarity_matches:
+                cached = self._similarity_matches[value]
+                if cached:
+                    matches[value] = dict(cached)
+            else:
+                unresolved.append(value)
+
+        if not unresolved or not self._known:
+            return matches
+
+        if self._known_trigrams is None:
+            trigrams = {}
+            for known_value in self._known:
+                for index in range(len(known_value) - 2):
+                    trigram = known_value[index:index + 3]
+                    trigrams.setdefault(trigram, []).append(known_value)
+            self._known_trigrams = {
+                trigram: tuple(items)
+                for trigram, items in trigrams.items()
+            }
+
+        threshold = max(0.0, min(float(threshold), 100.0))
+        for value in unresolved:
+            value_length = len(value)
+            if value_length < 3:
+                continue
+            candidates = {
+                candidate
+                for index in range(value_length - 2)
+                for candidate in self._known_trigrams.get(value[index:index + 3], ())
+                if (
+                    2 * min(value_length, len(candidate)) * 100
+                    >= threshold * (value_length + len(candidate))
+                )
+            }
+            if not candidates:
+                continue
+            best = process.extractOne(
+                value,
+                candidates,
+                scorer=fuzz.ratio,
+                score_cutoff=threshold,
+            )
+            if not best:
+                self._similarity_matches[value] = None
+                continue
+            matched_normalized, score, _index = best
+            match = {
+                "matched": True,
+                "score": round(float(score), 2),
+                "match_type": "similar",
+                "matched_mpn": self._known[matched_normalized][1],
+                "matched_normalized_mpn": matched_normalized,
+            }
+            matches[value] = match
+            self._similarity_matches[value] = match
+        return matches
 
     def set_value_matches(self, normalized_value, matched_keys):
         self._value_matches[normalized_value] = tuple(matched_keys)

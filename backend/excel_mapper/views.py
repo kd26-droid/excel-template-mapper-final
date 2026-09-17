@@ -17,6 +17,7 @@ import time
 import pandas as pd
 from django.conf import settings
 from django.core.cache import cache
+from django.core import signing
 from django.db import IntegrityError, OperationalError, transaction
 from django.http import FileResponse, Http404, JsonResponse, HttpResponse
 from django.utils import timezone
@@ -52,6 +53,7 @@ from .services.bom_role_inference import (
     build_bom_field_pattern_groups,
     build_bom_field_pattern_teach_result,
     infer_bom_roles,
+    load_saved_bom_field_pattern_rules,
     normalize_bom_rows,
     refresh_bom_field_pattern_review_after_teach,
     save_bom_field_pattern_rule,
@@ -109,6 +111,62 @@ except Exception:
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+BOM_PATTERN_CONFIRMATION_SALT = 'excel_mapper.bom_pattern_confirmation.v1'
+BOM_PATTERN_CONFIRMATION_MAX_AGE = 12 * 60 * 60
+
+
+def _plain_bom_confirmation_entries(entries):
+    """Keep exact backend preview values without display metadata."""
+    normalized = []
+    for index, entry in enumerate(entries or []):
+        if not isinstance(entry, dict):
+            continue
+        fields = {}
+        for field, value in (entry.get('fields') or {}).items():
+            fields[field] = value.get('value') if isinstance(value, dict) else value
+        normalized.append({
+            'relation': entry.get('relation') or ('Primary' if index == 0 else f'Alternate {index}'),
+            'fields': fields,
+        })
+    return normalized
+
+
+def _issue_bom_pattern_confirmation(*, rule, pattern_key, shape, entries,
+                                    source_row, occurrence_id, structure_signature):
+    payload = {
+        'version': 1,
+        'patternKey': str(pattern_key or '').strip(),
+        'shape': str(shape or pattern_key or '').strip(),
+        'rule': rule if isinstance(rule, dict) else {},
+        'entries': _plain_bom_confirmation_entries(entries),
+        'sourceRow': source_row,
+        'occurrenceId': str(occurrence_id or '').strip(),
+        'structureSignature': str(structure_signature or '').strip(),
+    }
+    token = signing.dumps(payload, salt=BOM_PATTERN_CONFIRMATION_SALT, compress=True)
+    return {**payload, 'token': token}
+
+
+def _read_bom_pattern_confirmation(token, expected_structure_signature):
+    try:
+        payload = signing.loads(
+            str(token or ''),
+            salt=BOM_PATTERN_CONFIRMATION_SALT,
+            max_age=BOM_PATTERN_CONFIRMATION_MAX_AGE,
+        )
+    except signing.SignatureExpired as exc:
+        raise ValueError('A pattern confirmation expired. Review that pattern again.') from exc
+    except signing.BadSignature as exc:
+        raise ValueError('A pattern confirmation is invalid. Review that pattern again.') from exc
+
+    if not isinstance(payload, dict) or payload.get('version') != 1:
+        raise ValueError('A pattern confirmation has an unsupported format.')
+    if payload.get('structureSignature') != expected_structure_signature:
+        raise ValueError('A pattern confirmation belongs to a different BOM structure.')
+    if not str(payload.get('patternKey') or '').strip() or not isinstance(payload.get('rule'), dict):
+        raise ValueError('A pattern confirmation is incomplete. Review that pattern again.')
+    return payload
 
 # === Canonicalizer for header labels ===
 def _canon(s: str) -> str:
@@ -3453,7 +3511,7 @@ def bom_field_pattern_apply(request):
         roles = request.data.get('roles') or _normaliser_saved(normaliser_session_id, 'roles')
         config = request.data.get('config') or _normaliser_saved(normaliser_session_id, 'config')
         source_signature = request.data.get('sourceSignature') or request.data.get('source_signature') or {}
-        groups = request.data.get('groups') or request.data.get('patterns') or []
+        legacy_groups = request.data.get('groups') or request.data.get('patterns') or []
         rules = request.data.get('rules') or request.data.get('fieldPatternRules') or request.data.get('field_pattern_rules') or {}
         # What was taught earlier, when the caller sent nothing. `roles` and `config` both
         # fall back to the session and `rules` did not, so a caller holding only a session id
@@ -3464,6 +3522,11 @@ def bom_field_pattern_apply(request):
             if isinstance(saved_rules, dict):
                 rules = saved_rules
         corrections = request.data.get('corrections') or []
+        confirmation_tokens = (
+            request.data.get('confirmationTokens')
+            or request.data.get('confirmation_tokens')
+            or []
+        )
         persist = request.data.get('persist', True) is not False
         if not isinstance(headers, list):
             return Response({'success': False, 'error': 'headers must be a list'}, status=status.HTTP_400_BAD_REQUEST)
@@ -3475,80 +3538,81 @@ def bom_field_pattern_apply(request):
             config = {}
         if not isinstance(source_signature, dict):
             source_signature = {}
-        if not isinstance(groups, list):
+        if not isinstance(legacy_groups, list):
             return Response({'success': False, 'error': 'groups must be a list'}, status=status.HTTP_400_BAD_REQUEST)
         if not isinstance(rules, dict):
             return Response({'success': False, 'error': 'rules must be an object'}, status=status.HTTP_400_BAD_REQUEST)
         if not isinstance(corrections, list):
             return Response({'success': False, 'error': 'corrections must be a list'}, status=status.HTTP_400_BAD_REQUEST)
-
-        corrections_by_pattern = defaultdict(list)
-        override_rows = {}
-        for correction in corrections:
-            if not isinstance(correction, dict):
-                continue
-            pattern_key = str(correction.get('patternKey') or correction.get('pattern_key') or '').strip()
-            source_row = correction.get('sourceRow')
-            entries = correction.get('entries') or []
-            if not isinstance(entries, list):
-                continue
-            normalized_entries = []
-            for entry_index, entry in enumerate(entries):
-                if not isinstance(entry, dict):
-                    continue
-                normalized_entries.append({
-                    'relation': 'Primary' if entry_index == 0 else f'Alternate {entry_index}',
-                    'fields': entry.get('fields') or {},
-                })
-            if not normalized_entries:
-                continue
-            normalized_correction = {
-                **correction,
-                'patternKey': pattern_key,
-                'entries': normalized_entries,
-            }
-            if pattern_key:
-                corrections_by_pattern[pattern_key].append(normalized_correction)
-            row_key = str(source_row)
-            existing_entries = (override_rows.get(row_key) or {}).get('entries') or []
-            combined_entries = existing_entries + normalized_entries
-            override_rows[row_key] = {
-                'entries': [
-                    {
-                        **entry,
-                        'relation': 'Primary' if index == 0 else f'Alternate {index}',
-                    }
-                    for index, entry in enumerate(combined_entries)
-                ],
-            }
-
-        if not groups and rules:
-            groups = [
-                {
-                    'id': f'backend-rule-{index}',
-                    'patternKey': pattern_key,
-                    'shape': rule.get('shape') or pattern_key,
-                    'confirmed': True,
-                    'rule': rule,
-                    'rows': corrections_by_pattern.get(pattern_key) or [],
-                }
-                for index, (pattern_key, rule) in enumerate(rules.items(), start=1)
-                if isinstance(rule, dict)
-            ]
-
-        unresolved = [
-            group.get('patternKey') or group.get('id')
-            for group in groups
-            if isinstance(group, dict) and group.get('confirmed') is False
-        ]
-        if unresolved:
+        if not isinstance(confirmation_tokens, list):
+            return Response({'success': False, 'error': 'confirmationTokens must be a list'}, status=status.HTTP_400_BAD_REQUEST)
+        if legacy_groups or rules or corrections:
             return Response({
                 'success': False,
-                'error': 'Every detected pattern must be confirmed before it can be applied.',
-                'unresolvedPatternKeys': unresolved,
+                'error': (
+                    'Apply no longer accepts frontend draft rules, groups, or corrections as confirmation. '
+                    'Confirm changed patterns with Use this interpretation first.'
+                ),
             }, status=status.HTTP_400_BAD_REQUEST)
 
         structure_scope = _bom_pattern_structure_scope(headers, roles, config)
+        try:
+            confirmed_payloads = [
+                _read_bom_pattern_confirmation(token, structure_scope['signature'])
+                for token in confirmation_tokens
+            ]
+        except ValueError as exc:
+            return Response({'success': False, 'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        groups_by_pattern = {}
+        for index, confirmation in enumerate(confirmed_payloads, start=1):
+            pattern_key = str(confirmation.get('patternKey') or '').strip()
+            group = {
+                'id': f'confirmed-pattern-{index}',
+                'patternKey': pattern_key,
+                'shape': confirmation.get('shape') or pattern_key,
+                'confirmed': True,
+                'rule': confirmation.get('rule') or {},
+                'rows': [],
+            }
+            if confirmation.get('entries'):
+                group['rows'].append({
+                    'patternKey': pattern_key,
+                    'sourceRow': confirmation.get('sourceRow'),
+                    'occurrenceId': confirmation.get('occurrenceId') or '',
+                    'entries': confirmation.get('entries') or [],
+                })
+            groups_by_pattern[pattern_key] = group
+        groups = list(groups_by_pattern.values())
+
+        override_rows = {}
+        for group in groups:
+            for correction in group.get('rows') or []:
+                source_row = correction.get('sourceRow')
+                entries = correction.get('entries') or []
+                normalized_entries = []
+                for entry_index, entry in enumerate(entries):
+                    if not isinstance(entry, dict):
+                        continue
+                    normalized_entries.append({
+                        'relation': 'Primary' if entry_index == 0 else f'Alternate {entry_index}',
+                        'fields': entry.get('fields') or {},
+                    })
+                if not normalized_entries:
+                    continue
+                row_key = str(source_row)
+                existing_entries = (override_rows.get(row_key) or {}).get('entries') or []
+                combined_entries = existing_entries + normalized_entries
+                override_rows[row_key] = {
+                    'entries': [
+                        {
+                            **entry,
+                            'relation': 'Primary' if entry_index == 0 else f'Alternate {entry_index}',
+                        }
+                        for entry_index, entry in enumerate(combined_entries)
+                    ],
+                }
+
         structure_profile = build_structure_profile(
             headers=headers,
             rows=rows,
@@ -3558,7 +3622,7 @@ def bom_field_pattern_apply(request):
         )
         structure_fingerprint = structure_profile['fingerprint']
         scoped_groups = []
-        confirmed_rules = {}
+        confirmed_rules = load_saved_bom_field_pattern_rules(structure_scope['signature'])
         for group in groups:
             if not isinstance(group, dict):
                 continue
@@ -3786,6 +3850,10 @@ def bom_field_pattern_teaching(request):
             source_row = request.data.get('source_row')
         occurrence_id = request.data.get('occurrenceId') or request.data.get('occurrence_id') or ''
         persist = request.data.get('persist', True)
+        confirm_interpretation = (
+            request.data.get('confirmInterpretation') is True
+            or request.data.get('confirm_interpretation') is True
+        )
 
         if not isinstance(headers, list):
             return Response({
@@ -3864,12 +3932,25 @@ def bom_field_pattern_teaching(request):
                 rule,
                 description='User-taught BOM field parser pattern',
             )
+        confirmation = None
+        if confirm_interpretation:
+            structure_scope = _bom_pattern_structure_scope(headers, roles, config)
+            confirmation = _issue_bom_pattern_confirmation(
+                rule=rule,
+                pattern_key=rule_key,
+                shape=group.get('shape') or rule.get('shape') or rule_key,
+                entries=teach_result.get('entries') or [],
+                source_row=source_row,
+                occurrence_id=occurrence_id,
+                structure_signature=structure_scope['signature'],
+            )
         return Response({
             'success': True,
             **teach_result,
             'activeRules': next_active_rules,
             'review': refreshed_review,
             'saved_rule': saved_rule,
+            'confirmation': confirmation,
         })
     except Exception as exc:
         logger.error("BOM field pattern teaching failed: %s", exc, exc_info=True)

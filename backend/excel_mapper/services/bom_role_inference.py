@@ -16,6 +16,7 @@ from .mpn_pattern_library import (
     score_manufacturer_value,
     score_mpn_value,
 )
+from .bom_directory_store import normalize_mpn
 
 
 ROLE_KEYS = (
@@ -33,6 +34,7 @@ ROLE_KEYS = (
 
 VALUE_SIGNAL_SAMPLE_SIZE = 150
 FIELD_PATTERN_RULE_NAME_PREFIX = "BOM field pattern:"
+MPN_RECOGNITION_SIMILARITY_THRESHOLD = 90.0
 
 ROLE_LABELS = {
     "cpn": "CPN / customer part number",
@@ -4162,6 +4164,154 @@ def _visual_pattern_display_pattern(visual_pattern, source_value=""):
     return clean(pattern)
 
 
+def _unclassified_display_fragment(value):
+    """Preserve structural punctuation while hiding untagged customer text."""
+    text = str(value or "")
+    if not re.search(r"[A-Za-z0-9]", text):
+        return text
+
+    structural = set("()[]{}<>,;|^~:/@#")
+    rendered = []
+    cursor = 0
+    while cursor < len(text):
+        character = text[cursor]
+        if character == "{":
+            end = text.find("}", cursor + 1)
+            if end >= 0:
+                rendered.append("{<STATUS>}")
+                cursor = end + 1
+                continue
+            if re.search(r"[A-Za-z0-9]", text[cursor + 1:]):
+                rendered.append("{<STATUS>")
+                break
+        if character == "[":
+            end = text.find("]", cursor + 1)
+            if end >= 0:
+                rendered.append("[<REF>]")
+                cursor = end + 1
+                continue
+            if re.search(r"[A-Za-z0-9]", text[cursor + 1:]):
+                rendered.append("[<REF>")
+                break
+        if character in structural:
+            rendered.append(character)
+            cursor += 1
+            continue
+
+        end = cursor
+        while end < len(text) and text[end] not in structural:
+            end += 1
+        chunk = text[cursor:end]
+        if re.search(r"[A-Za-z0-9]", chunk):
+            leading = re.match(r"^\s*", chunk).group(0)
+            trailing = re.search(r"\s*$", chunk).group(0)
+            rendered.append(f"{leading}<UNCLASSIFIED_TEXT>{trailing}")
+        else:
+            rendered.append(chunk)
+        cursor = end
+    return "".join(rendered)
+
+
+def _visual_pattern_display_from_tagged_spans(
+    source_value,
+    template_range,
+    tagged_spans,
+    visual_pattern,
+):
+    """Render the user-confirmed grammar from exact backend span boundaries."""
+    text = str(source_value or "")
+    if not template_range or not isinstance(visual_pattern, dict):
+        return _visual_pattern_display_pattern(visual_pattern, text)
+
+    start, end = template_range
+    spans = sorted(
+        [
+            span for span in (tagged_spans or [])
+            if isinstance(span, dict)
+            and int(span.get("start") or 0) >= start
+            and int(span.get("end") or 0) <= end
+            and clean(span.get("role"))
+            not in {"", "groupSeparator", "insertionMarker"}
+        ],
+        key=lambda item: (int(item.get("start") or 0), int(item.get("end") or 0)),
+    )
+    if not spans:
+        return _visual_pattern_display_pattern(visual_pattern, text)
+
+    composition = (
+        visual_pattern.get("mpnComposition")
+        or visual_pattern.get("mpn_composition")
+        or {}
+    )
+    operation = clean(composition.get("operation")) if isinstance(composition, dict) else ""
+
+    def role_token(span):
+        role = clean(span.get("role"))
+        if role == "ignore":
+            return "<IGNORE>"
+        if role == "mpn" and operation == "insert_alternate_at_marker":
+            token = "<MPN_PREFIX><INSERTION_MARKER><MPN_SUFFIX>"
+        elif role == "alternateList" and operation == "insert_alternate_at_marker":
+            token = "<ALTERNATE_VALUES>"
+        elif role == "mpn" and operation == "replace_suffix_at_marker":
+            marker = str(composition.get("markerSequence") or composition.get("marker") or "@")
+            token = f"<MPN_PREFIX>{marker}<PRIMARY_SUFFIX>"
+        elif role == "alternateList" and operation == "replace_suffix_at_marker":
+            token = "<ALTERNATE_SUFFIXES>"
+        elif role == "alternateList":
+            token = "<ALTERNATE_MPN_VALUES>"
+        else:
+            token = _pattern_display_token(role)
+
+        selected = text[int(span.get("start") or 0):int(span.get("end") or 0)]
+        wrapper = _visual_teach_wrapper(selected)
+        if wrapper:
+            token = f"{wrapper['open']}{token}{wrapper['close']}"
+        return token
+
+    rendered = []
+    cursor = start
+    for span in spans:
+        span_start = int(span.get("start") or 0)
+        span_end = int(span.get("end") or 0)
+        if span_start < cursor:
+            continue
+        rendered.append(_unclassified_display_fragment(text[cursor:span_start]))
+        rendered.append(role_token(span))
+        cursor = span_end
+    rendered.append(_unclassified_display_fragment(text[cursor:end]))
+    pattern = "".join(rendered)
+
+    separator = str(
+        visual_pattern.get("recordSeparator")
+        or visual_pattern.get("record_separator")
+        or visual_pattern.get("groupSeparator")
+        or visual_pattern.get("group_separator")
+        or ""
+    )
+    matching_closers = {")": "(", "]": "[", "}": "{"}
+    for closer in separator:
+        if closer not in matching_closers:
+            break
+        opener = matching_closers[closer]
+        if pattern.count(opener) <= pattern.count(closer):
+            break
+        pattern += closer
+    if separator:
+        pattern = f"{pattern} repeated by {separator}"
+    return clean(pattern)
+
+
+def _visual_pattern_display_quality(pattern):
+    """Prefer grammars with mapped roles over degraded empty-occurrence labels."""
+    text = clean(pattern)
+    placeholders = re.findall(r"<[A-Z0-9_]+>", text.upper())
+    supporting_tokens = {"<UNCLASSIFIED_TEXT>", "<STATUS>", "<REF>", "<IGNORE>"}
+    mapped_token_count = sum(token not in supporting_tokens for token in placeholders)
+    structural_count = len(re.findall(r"[^A-Za-z0-9\s<>_]", text))
+    return mapped_token_count, len(placeholders), structural_count, len(text)
+
+
 def _flexible_literal_pattern(value):
     text = clean(value)
     if not text:
@@ -4630,7 +4780,7 @@ def _semantic_interpretation_coverage(grammar, mapped_fields, parser_rule, inter
     """Validate that a stored/session rule covers and applies every grammar role."""
     required_roles = _semantic_grammar_required_roles(grammar, mapped_fields)
     parser_rule = parser_rule if isinstance(parser_rule, dict) else {}
-    if _field_pattern_rule_excludes_row(parser_rule):
+    if _field_pattern_rule_ignores_fields(parser_rule):
         return {
             "valid": True,
             "requiredRoles": sorted(required_roles),
@@ -4696,6 +4846,152 @@ def _semantic_interpretation_coverage(grammar, mapped_fields, parser_rule, inter
         "failedOccurrenceCount": len(failed_occurrences),
         "failedOccurrences": failed_occurrences[:10],
     }
+
+
+def _generated_mpn_value(entry):
+    fields = entry.get("fields") if isinstance(entry, dict) else {}
+    fields = fields if isinstance(fields, dict) else {}
+    mpn = fields.get("mpn")
+    if isinstance(mpn, dict):
+        return clean(mpn.get("value"))
+    return clean(mpn)
+
+
+def _verified_mpn_matches(normalized_values, lookup=None):
+    """Resolve verification evidence without replacing customer MPN text."""
+    if lookup is None:
+        lookup = load_mpn_mfr_lookup()
+    values = {value for value in normalized_values or [] if value}
+    if not values or not lookup:
+        return {}
+    matcher = getattr(lookup, "match_normalized_many", None)
+    if callable(matcher):
+        return matcher(values, threshold=MPN_RECOGNITION_SIMILARITY_THRESHOLD)
+
+    # Legacy JSON lookup support is exact-only. Production database lookups use
+    # the optimized matcher above for both exact and 90% similarity evidence.
+    normalized_lookup = {
+        normalize_mpn(key): key
+        for key in lookup
+        if normalize_mpn(key)
+    } if isinstance(lookup, dict) else {}
+    return {
+        value: {
+            "matched": True,
+            "score": 100.0,
+            "match_type": "exact",
+            "matched_mpn": normalized_lookup[value],
+            "matched_normalized_mpn": value,
+        }
+        for value in values
+        if value in normalized_lookup
+    }
+
+
+def _validate_semantic_pattern_mpns(patterns, lookup=None):
+    """Validate every generated MPN for each semantic review pattern."""
+    candidates = set()
+    for pattern in patterns or []:
+        if "mpn" not in (pattern.get("mappedFields") or []):
+            continue
+        for interpretation in pattern.get("interpretations") or []:
+            for entry in interpretation.get("entries") or []:
+                normalized = normalize_mpn(_generated_mpn_value(entry))
+                if normalized:
+                    candidates.add(normalized)
+    matches = _verified_mpn_matches(candidates, lookup=lookup)
+
+    validations = {}
+    for pattern in patterns or []:
+        pattern_key = clean(pattern.get("patternKey") or pattern.get("id"))
+        if "mpn" not in (pattern.get("mappedFields") or []):
+            validations[pattern_key] = {
+                "applicable": False,
+                "valid": True,
+                "threshold": MPN_RECOGNITION_SIMILARITY_THRESHOLD,
+                "generatedMpnCount": 0,
+                "matchedMpnCount": 0,
+                "matches": [],
+                "failures": [],
+            }
+            continue
+
+        evidence = []
+        failures = []
+        interpretations = pattern.get("interpretations") or []
+        if not interpretations:
+            failures.append({"reason": "blank_mpn", "value": ""})
+        for interpretation in interpretations:
+            occurrence = {
+                "occurrenceId": clean(interpretation.get("occurrenceId")),
+                "sourceRow": interpretation.get("sourceRow"),
+            }
+            if interpretation.get("ruleFallbackUsed"):
+                failures.append({
+                    **occurrence,
+                    "reason": "parser_fallback_used",
+                    "value": "",
+                })
+            entries = interpretation.get("entries") or []
+            if not entries:
+                failures.append({
+                    **occurrence,
+                    "reason": "blank_mpn",
+                    "value": "",
+                })
+                continue
+            for entry_index, entry in enumerate(entries):
+                value = _generated_mpn_value(entry)
+                normalized = normalize_mpn(value)
+                match = matches.get(normalized) or {}
+                match_type = clean(match.get("match_type"))
+                result = {
+                    **occurrence,
+                    "entryIndex": entry_index,
+                    "value": value,
+                    "normalizedValue": normalized,
+                    "matched": bool(match.get("matched")),
+                    "score": float(match.get("score") or 0.0),
+                    "matchType": match_type or "none",
+                    "matchedMpn": clean(match.get("matched_mpn")),
+                }
+                if not normalized:
+                    result.update(matched=False, matchType="none", reason="blank_mpn")
+                    failures.append(result)
+                elif "%" in value and match_type != "exact":
+                    result.update(matched=False, matchType="invalid_spec", reason="invalid_mpn_spec")
+                    failures.append(result)
+                elif not match.get("matched"):
+                    result["reason"] = "mpn_similarity_below_threshold"
+                    failures.append(result)
+                evidence.append(result)
+
+        reasons = list(dict.fromkeys(item.get("reason") for item in failures if item.get("reason")))
+        validations[pattern_key] = {
+            "applicable": True,
+            "valid": not failures and bool(evidence),
+            "threshold": MPN_RECOGNITION_SIMILARITY_THRESHOLD,
+            "generatedMpnCount": len(evidence),
+            "matchedMpnCount": sum(1 for item in evidence if item.get("matched")),
+            "matches": evidence[:10],
+            "failures": failures[:20],
+            "evidenceTruncated": len(evidence) > 10 or len(failures) > 20,
+            "reasons": reasons,
+            "reason": reasons[0] if reasons else "",
+        }
+    return validations
+
+
+def _compact_recognition_validation(validation):
+    compact = deepcopy(validation or {})
+    mpn_validation = compact.get("mpnValidation")
+    if isinstance(mpn_validation, dict):
+        compact["mpnValidation"] = {
+            key: value
+            for key, value in mpn_validation.items()
+            if key not in {"matches", "failures"}
+        }
+    return compact
 
 
 def _semantic_rule_for_source(rule, source_column):
@@ -5425,7 +5721,7 @@ def derive_visual_pattern_from_tagged_spans(
         return {
             "type": "ignore_fields",
             "sourceHeader": source_header,
-            "excludeRow": True,
+            "excludeRow": False,
             "ignoredFields": [
                 clean(field)
                 for field in (ignored_fields or [])
@@ -5610,7 +5906,16 @@ def derive_visual_pattern_from_tagged_spans(
             preserve_outer_brackets[span["role"]] = True
     if preserve_outer_brackets:
         rule["preserveOuterBrackets"] = preserve_outer_brackets
-    rule["displayPattern"] = _visual_pattern_display_pattern(rule, text)
+    display_spans = list(template_spans) + [
+        span for span in ignored
+        if span["start"] >= group_start and span["end"] <= group_end
+    ]
+    rule["displayPattern"] = _visual_pattern_display_from_tagged_spans(
+        text,
+        template_range,
+        display_spans,
+        rule,
+    )
     return rule
 
 
@@ -6131,14 +6436,21 @@ def _field_pattern_rule_excludes_row(rule):
     visual_pattern = rule.get("visualPattern") or rule.get("visual_pattern")
     if not isinstance(visual_pattern, dict):
         return False
-    if clean(visual_pattern.get("type")) != "ignore_fields":
+    # Ignore is field-level: it suppresses the selected interpretation roles
+    # while preserving the source item and every unrelated mapped field.
+    if clean(visual_pattern.get("type")) == "ignore_fields":
         return False
-    exclude_row = visual_pattern.get("excludeRow")
-    if exclude_row is None:
-        exclude_row = visual_pattern.get("exclude_row")
-    # Existing saved Ignore rules predate excludeRow. Their intended behavior
-    # was still exclusion, so absence defaults to True for compatibility.
-    return exclude_row is not False
+    return visual_pattern.get("excludeRow") is True or visual_pattern.get("exclude_row") is True
+
+
+def _field_pattern_rule_ignores_fields(rule):
+    if not isinstance(rule, dict):
+        return False
+    visual_pattern = rule.get("visualPattern") or rule.get("visual_pattern")
+    return (
+        isinstance(visual_pattern, dict)
+        and clean(visual_pattern.get("type")) == "ignore_fields"
+    )
 
 
 def _visual_pattern_tagged_field_rows(row, headers, config=None):
@@ -6277,6 +6589,7 @@ def _infer_semantic_pattern_entries_for_row(row, headers, roles, selected_column
         return []
 
     combined_entries = []
+    ignored_fragment = None
     for unit in _field_review_mapping_units(headers, roles, config=config):
         if unit.get("relationship") != "shared":
             continue
@@ -6313,6 +6626,10 @@ def _infer_semantic_pattern_entries_for_row(row, headers, roles, selected_column
                     fragment_config,
                     _semantic_rule_for_source(rule, source_column),
                 )
+            if _field_pattern_rule_ignores_fields(rule):
+                if ignored_fragment is None:
+                    ignored_fragment = (fragment_row, fragment_config)
+                continue
             fragment_entries = _infer_field_entries_for_row(
                 fragment_row,
                 headers,
@@ -6321,6 +6638,16 @@ def _infer_semantic_pattern_entries_for_row(row, headers, roles, selected_column
                 config=fragment_config,
             )
             combined_entries.extend(fragment_entries)
+
+    if not combined_entries and ignored_fragment is not None:
+        fragment_row, fragment_config = ignored_fragment
+        combined_entries = _infer_field_entries_for_row(
+            fragment_row,
+            headers,
+            roles,
+            selected_columns,
+            config=fragment_config,
+        )
 
     for index, entry in enumerate(combined_entries):
         entry["index"] = index
@@ -9300,6 +9627,7 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                         "storedInterpretation": stored,
                         "recognized": bool(stored or draft_rule),
                         "ignored": _field_pattern_rule_excludes_row(parser_rule),
+                        "ignoresFields": _field_pattern_rule_ignores_fields(parser_rule),
                         "recognitionScope": clean((stored or {}).get("matchScope")) or ("session" if draft_rule else ""),
                         "draftInterpretation": {"rule": draft_rule} if draft_rule else None,
                         "confirmed": False,
@@ -9373,6 +9701,25 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                         {} if rule_fallback_used else parser_rule,
                         entries,
                     )
+                    confirmed_spans = spans.get(source_column) or []
+                    if stored and visual_pattern and confirmed_spans and not rule_fallback_used:
+                        rendered_interpretation_pattern = (
+                            _visual_pattern_display_from_tagged_spans(
+                                occurrence["rawValue"],
+                                (0, len(occurrence["rawValue"])),
+                                confirmed_spans,
+                                visual_pattern,
+                            )
+                        )
+                        if (
+                            rendered_interpretation_pattern
+                            and _visual_pattern_display_quality(
+                                rendered_interpretation_pattern
+                            ) > _visual_pattern_display_quality(
+                                item.get("interpretationPattern") or ""
+                            )
+                        ):
+                            item["interpretationPattern"] = rendered_interpretation_pattern
                     interpretation = {
                         "occurrenceId": occurrence["id"],
                         "sourceRow": source_row,
@@ -9423,14 +9770,62 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
             item.get("grammar") or "",
         ),
     )
+    mpn_validations = _validate_semantic_pattern_mpns(ordered)
     for index, item in enumerate(ordered, start=1):
-        has_interpretation = bool(item.get("storedInterpretation") or item.get("draftInterpretation"))
+        has_saved_interpretation = bool(item.get("storedInterpretation"))
+        has_interpretation = bool(
+            has_saved_interpretation or item.get("draftInterpretation")
+        )
+        ignores_fields = _field_pattern_rule_ignores_fields(
+            item.get("suggestedRule") or {}
+        )
+        effective_grammar = (
+            item.get("interpretationPattern")
+            if has_interpretation
+            else item.get("grammar")
+        ) or item.get("grammar") or ""
         coverage = _semantic_interpretation_coverage(
-            item.get("grammar") or "",
+            effective_grammar,
             item.get("mappedFields") or [],
             item.get("suggestedRule") or {},
             item.get("interpretations") or [],
         )
+        mpn_validation = mpn_validations.get(clean(item.get("patternKey"))) or {
+            "applicable": False,
+            "valid": True,
+        }
+        if ignores_fields:
+            mpn_validation = {
+                "applicable": False,
+                "valid": True,
+                "ignored": True,
+                "threshold": MPN_RECOGNITION_SIMILARITY_THRESHOLD,
+                "generatedMpnCount": 0,
+                "matchedMpnCount": 0,
+                "matches": [],
+                "failures": [],
+                "reasons": [],
+                "reason": "",
+            }
+        mpn_blocking_reasons = {
+            reason
+            for reason in (mpn_validation.get("reasons") or [])
+            if reason in {"blank_mpn", "parser_fallback_used"}
+        }
+        mpn_is_accepted = bool(
+            mpn_validation.get("valid")
+            or (has_saved_interpretation and not mpn_blocking_reasons)
+        )
+        if (
+            has_saved_interpretation
+            and mpn_is_accepted
+            and not mpn_validation.get("valid")
+        ):
+            mpn_validation = {
+                **mpn_validation,
+                "acceptedByUser": True,
+                "advisoryOnly": True,
+            }
         if not has_interpretation:
             coverage = {
                 **coverage,
@@ -9439,8 +9834,21 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
             }
         elif not coverage.get("valid"):
             coverage["reason"] = "incomplete_grammar_coverage"
+        elif not mpn_is_accepted:
+            coverage = {
+                **coverage,
+                "valid": False,
+                "reason": mpn_validation.get("reason") or "mpn_not_verified",
+            }
+        coverage["mpnValidation"] = mpn_validation
         item["recognitionValidation"] = coverage
-        item["recognized"] = bool(has_interpretation and coverage.get("valid"))
+        item["recognized"] = bool(
+            has_interpretation
+            and coverage.get("valid")
+            and mpn_is_accepted
+        )
+        if has_interpretation:
+            item["interpretationPattern"] = effective_grammar
         item["title"] = f"Pattern {index}"
         item["occurrenceCount"] = len(item.get("occurrences") or [])
         item["rowCount"] = len({occ.get("sourceRow") for occ in item.get("occurrences") or []})
@@ -9676,11 +10084,8 @@ def _build_pattern_review_summary(patterns, combinations):
         pattern_key = clean(pattern.get("patternKey"))
         summary_pattern = {
             "patternKey": pattern_key,
-            # The heading describes what was detected in the uploaded source.
-            # A saved interpretation can come from an older rule whose display
-            # label omitted meaningful literals such as @ or #; keep that rule
-            # for parsing, but never let its label replace the source grammar.
-            "pattern": pattern.get("grammar") or pattern.get("interpretationPattern") or "",
+            "pattern": pattern.get("interpretationPattern") or pattern.get("grammar") or "",
+            "detectedPattern": pattern.get("grammar") or "",
             "sourceColumn": pattern.get("sourceColumn") or "",
             "mappedFields": pattern.get("mappedFields") or [],
             "occurrenceCount": int(pattern.get("occurrenceCount") or 0),
@@ -10085,7 +10490,9 @@ def _build_flat_pattern_review_rows(
                     "mappedFields": pattern.get("mappedFields") or [],
                     "recognized": bool(pattern.get("recognized")),
                     "recognitionScope": clean(pattern.get("recognitionScope")),
-                    "recognitionValidation": pattern.get("recognitionValidation") or {},
+                    "recognitionValidation": _compact_recognition_validation(
+                        pattern.get("recognitionValidation")
+                    ),
                     "occurrenceId": occurrence.get("occurrenceId") or occurrence.get("id") or "",
                 })
             display_entries = []
@@ -10141,6 +10548,10 @@ def _compact_review_group(group):
         for key, value in (group or {}).items()
         if key not in {"interpretations", "occurrences", "rowEntries", "samples"}
     }
+    if "recognitionValidation" in compact:
+        compact["recognitionValidation"] = _compact_recognition_validation(
+            compact.get("recognitionValidation")
+        )
     samples = []
     for sample in list((group or {}).get("samples") or [])[:1]:
         if not isinstance(sample, dict):
@@ -10166,6 +10577,10 @@ def _compact_review_workflow(workflow):
         if not isinstance(step, dict):
             continue
         compact_step = dict(step)
+        if "recognitionValidation" in compact_step:
+            compact_step["recognitionValidation"] = _compact_recognition_validation(
+                compact_step.get("recognitionValidation")
+            )
         compact_step["occurrences"] = list(step.get("occurrences") or [])[:1]
         compact_step["interpretationRefs"] = list(step.get("interpretationRefs") or [])
         interpretation = step.get("interpretation")
@@ -10222,7 +10637,7 @@ def _build_bom_field_review_workflow(headers, roles, config, groups, patterns=No
             "sourceColumn": item["sourceColumn"],
             "mappedFields": item["mappedFields"],
             "title": _field_review_title(item["mappedFields"]),
-            "pattern": item.get("grammar") or item.get("interpretationPattern") or "",
+            "pattern": item.get("interpretationPattern") or item.get("grammar") or "",
             "hasAlternateList": bool(item.get("hasAlternateList")),
             "patternNumberForColumn": pattern_number,
             "patternCountForColumn": len(semantic_patterns),
@@ -10842,6 +11257,7 @@ def refresh_bom_field_pattern_review_after_teach(
                     "sourceRow": review_source_row,
                     "interpretationSpans": taught_spans.get(source_header) or [],
                     "ruleFallbackUsed": False,
+                    "entries": generated_entries,
                 })
         for fragment in matching_fragments:
             start = int(fragment.get("start") or 0)
@@ -10896,6 +11312,7 @@ def refresh_bom_field_pattern_review_after_teach(
                 "sourceRow": review_source_row,
                 "interpretationSpans": interpretation_spans,
                 "ruleFallbackUsed": rule_fallback_used,
+                "entries": interpreted_entries,
             })
             for occurrence in review_row.get("occurrences") or []:
                 if (
@@ -10921,6 +11338,11 @@ def refresh_bom_field_pattern_review_after_teach(
             + generated_entries
             + retained_entries[insert_at:]
         )
+        if _field_pattern_rule_ignores_fields(rule):
+            if retained_entries:
+                merged_entries = retained_entries
+            elif generated_entries:
+                merged_entries = generated_entries[:1]
         for entry_index, entry in enumerate(merged_entries):
             entry["relation"] = "Primary" if entry_index == 0 else f"Alternate {entry_index}"
         review_row["entries"] = merged_entries
@@ -10935,8 +11357,21 @@ def refresh_bom_field_pattern_review_after_teach(
                 row_pattern["recognitionScope"] = "session"
 
     compact_taught_entries = _compact_review_entries(taught_entries)
+    confirmed_visual_pattern = (
+        teach_result.get("visualPattern")
+        or rule.get("visualPattern")
+        or rule.get("visual_pattern")
+        or {}
+    )
+    confirmed_pattern = (
+        _visual_pattern_display_pattern(
+            confirmed_visual_pattern,
+            taught_source_value,
+        )
+        or clean(pattern_record.get("pattern"))
+    )
     group_replay_validation = _semantic_interpretation_coverage(
-        pattern_record.get("pattern") or "",
+        confirmed_pattern,
         mapped_fields,
         rule,
         refreshed_interpretations,
@@ -10947,27 +11382,74 @@ def refresh_bom_field_pattern_review_after_teach(
             "occurrenceId": clean(occurrence_id),
             "sourceRow": source_row,
             "interpretationSpans": taught_spans.get(source_header) or [],
+            "entries": taught_entries,
+            "ruleFallbackUsed": False,
         })
     confirmed_validation = _semantic_interpretation_coverage(
-        pattern_record.get("pattern") or "",
+        confirmed_pattern,
         mapped_fields,
         rule,
         confirmed_interpretations,
     )
-    interpretation_is_recognized = bool(confirmed_validation.get("valid"))
+    mpn_validation = _validate_semantic_pattern_mpns([{
+        "patternKey": pattern_key,
+        "mappedFields": mapped_fields,
+        "interpretations": refreshed_interpretations,
+    }]).get(pattern_key) or {"applicable": False, "valid": True}
+    ignores_fields = _field_pattern_rule_ignores_fields(rule)
+    if ignores_fields:
+        mpn_validation = {
+            "applicable": False,
+            "valid": True,
+            "ignored": True,
+            "threshold": MPN_RECOGNITION_SIMILARITY_THRESHOLD,
+            "generatedMpnCount": 0,
+            "matchedMpnCount": 0,
+            "matches": [],
+            "failures": [],
+            "reasons": [],
+            "reason": "",
+        }
+    non_overridable_mpn_reasons = {"blank_mpn", "parser_fallback_used"}
+    mpn_blocking_reasons = [
+        reason
+        for reason in (mpn_validation.get("reasons") or [])
+        if reason in non_overridable_mpn_reasons
+    ]
+    interpretation_is_recognized = bool(
+        confirmed_validation.get("valid")
+        and group_replay_validation.get("valid")
+        and not mpn_blocking_reasons
+    )
+    if interpretation_is_recognized and not mpn_validation.get("valid"):
+        mpn_validation = {
+            **mpn_validation,
+            "acceptedByUser": True,
+            "advisoryOnly": True,
+        }
     recognition_validation = {
         **group_replay_validation,
         "valid": interpretation_is_recognized,
-        "confirmedOccurrenceValid": interpretation_is_recognized,
+        "confirmedOccurrenceValid": bool(confirmed_validation.get("valid")),
         "groupReplayValid": bool(group_replay_validation.get("valid")),
+        "mpnValidation": mpn_validation,
     }
-    if interpretation_is_recognized and not group_replay_validation.get("valid"):
-        recognition_validation["reason"] = "confirmed_with_replay_warnings"
+    if not group_replay_validation.get("valid"):
+        recognition_validation["reason"] = "incomplete_grammar_coverage"
+    elif mpn_blocking_reasons:
+        recognition_validation["reason"] = mpn_blocking_reasons[0]
+    elif not mpn_validation.get("valid"):
+        recognition_validation["warning"] = (
+            mpn_validation.get("reason") or "mpn_not_verified"
+        )
     for review_row in refreshed.get("rows") or []:
         for row_pattern in review_row.get("patterns") or [] if isinstance(review_row, dict) else []:
             if isinstance(row_pattern, dict) and clean(row_pattern.get("patternKey")) == pattern_key:
                 row_pattern["recognized"] = interpretation_is_recognized
-                row_pattern["recognitionValidation"] = recognition_validation
+                row_pattern["pattern"] = confirmed_pattern
+                row_pattern["recognitionValidation"] = _compact_recognition_validation(
+                    recognition_validation
+                )
     for pattern in refreshed.get("patterns") or []:
         if not isinstance(pattern, dict) or clean(pattern.get("patternKey")) != pattern_key:
             continue
@@ -10978,6 +11460,8 @@ def refresh_bom_field_pattern_review_after_teach(
             "recognitionScope": "session",
             "recognitionValidation": recognition_validation,
             "draftInterpretation": {"rule": rule},
+            "pattern": confirmed_pattern,
+            "detectedPattern": pattern.get("detectedPattern") or pattern.get("pattern") or "",
         })
         teach_context = pattern.get("teachContext")
         if isinstance(teach_context, dict):
@@ -10997,7 +11481,10 @@ def refresh_bom_field_pattern_review_after_teach(
             continue
         review_group["suggestedRule"] = rule
         review_group["recognized"] = interpretation_is_recognized
-        review_group["recognitionValidation"] = recognition_validation
+        review_group["interpretationPattern"] = confirmed_pattern
+        review_group["recognitionValidation"] = _compact_recognition_validation(
+            recognition_validation
+        )
         review_group["recognitionScope"] = "session"
         for sample in review_group.get("samples") or []:
             if isinstance(sample, dict) and str(sample.get("sourceRow")) == str(source_row):
@@ -11049,8 +11536,11 @@ def refresh_bom_field_pattern_review_after_teach(
         if clean(step.get("patternKey")) == pattern_key:
             step["storedInterpretation"] = {"rule": rule}
             step["draftInterpretation"] = {"rule": rule}
+            step["pattern"] = confirmed_pattern
             step["recognized"] = interpretation_is_recognized
-            step["recognitionValidation"] = recognition_validation
+            step["recognitionValidation"] = _compact_recognition_validation(
+                recognition_validation
+            )
             if not interpretation_is_recognized:
                 completed_ids.discard(clean(step.get("id")))
         step["completed"] = clean(step.get("id")) in completed_ids
