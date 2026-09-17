@@ -1662,8 +1662,8 @@ const api = {
     preferFieldRules = false,
     ignoredFields = [],
     hasManualEdits = false,
-    activeRules = {},
     review = {},
+    reviewReceipt = '',
     completedStepId = '',
     sourceRow = null,
     occurrenceId = '',
@@ -1688,8 +1688,8 @@ const api = {
       prefer_field_rules: preferFieldRules,
       ignored_fields: ignoredFields,
       has_manual_edits: hasManualEdits,
-      active_rules: activeRules,
       review,
+      review_receipt: reviewReceipt,
       completed_step_id: completedStepId,
       source_row: sourceRow,
       occurrence_id: occurrenceId,
@@ -1704,12 +1704,13 @@ const api = {
     }, { timeout: 120000 }),
 
   /** Persist confirmed interpretations and return the backend-normalized preview. */
-  applyBomFieldPatterns: ({ headers, rows, roles, config, confirmationTokens = [], persist = true }) =>
+  applyBomFieldPatterns: ({ headers, rows, roles, config, reviewReceipt = '', confirmationTokens = [], persist = true }) =>
     axios.post(`${API_URL}/bom/field-patterns/apply/`, {
       headers,
       rows,
       roles,
       config,
+      review_receipt: reviewReceipt,
       confirmation_tokens: confirmationTokens,
       persist,
     }, { timeout: 180000 }),

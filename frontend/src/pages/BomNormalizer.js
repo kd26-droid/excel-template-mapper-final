@@ -8935,6 +8935,14 @@ const sourceColumnsFromBackendFields = (fields = {}, fieldList = FACTWISE_PARSE_
   return sourceColumns;
 };
 
+export const visualTeachEntriesFromBackend = (entries = [], fieldList = FACTWISE_PARSE_FIELDS) => (
+  (Array.isArray(entries) ? entries : []).map((entry, entryIndex) => ({
+    relation: entry?.relation || (entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`),
+    fields: fieldValuesFromBackendFields(entry?.fields || {}, fieldList),
+    sourceColumns: sourceColumnsFromBackendFields(entry?.fields || {}, fieldList),
+  }))
+);
+
 // Backend owns row construction. This overlay only keeps unsaved user edits
 // visible until they are submitted back to the backend.
 export const reviewEntriesWithUserEdits = (row = {}, edits = {}) => {
@@ -9411,6 +9419,7 @@ const BomNormalizer = () => {
   const [fieldPatternEdits, setFieldPatternEdits] = useState({});
   const [fieldPatternRuleDrafts, setFieldPatternRuleDrafts] = useState({});
   const [fieldPatternConfirmations, setFieldPatternConfirmations] = useState({});
+  const [fieldPatternReviewReceipt, setFieldPatternReviewReceipt] = useState('');
   const [fieldPatternSelectedRuleField, setFieldPatternSelectedRuleField] = useState('');
   const [fieldPatternReviewWorkflow, setFieldPatternReviewWorkflow] = useState({ steps: [], nextStep: null });
   const [fieldPatternWorkflowLaunchRevision, setFieldPatternWorkflowLaunchRevision] = useState(0);
@@ -13320,6 +13329,7 @@ const BomNormalizer = () => {
       setFieldPatternFieldFilter('all');
       setFieldPatternExpandedPatternKey('');
       setFieldPatternConfirmations({});
+      setFieldPatternReviewReceipt('');
       setVisualTeachOpen(false);
     }
 
@@ -13430,6 +13440,7 @@ const BomNormalizer = () => {
       setFieldPatternReviewPage(0);
       setFieldPatternReviewSummary(reviewSummary);
       setFieldPatternReviewContract(review);
+      setFieldPatternReviewReceipt(responseData.reviewReceipt?.token || '');
       setFieldPatternFields(fields);
       setFieldPatternReviewWorkflow(reviewWorkflow);
       if (!options.preserveReviewState) {
@@ -13487,16 +13498,10 @@ const BomNormalizer = () => {
       )
     );
     const sampleEdit = fieldPatternEdits[group.id]?.[fieldPatternSampleKey(sample)] || {};
-    const backendEntries = Array.isArray(sample.entries) && sample.entries.length
-      ? sample.entries
-      : [{ fields: sample.fields || {} }];
+    const backendEntries = visualTeachEntriesFromBackend(sample.entries, fieldPatternFields);
     const baseEntries = confirmationMatchesSample && confirmedInterpretation.entries?.length
       ? confirmedInterpretation.entries
-      : sampleEdit.entries?.length ? sampleEdit.entries : [{
-      relation: 'Primary',
-      fields: fieldValuesFromBackendFields(sample.fields || {}, fieldPatternFields),
-      sourceColumns: sourceColumnsFromBackendFields(sample.fields || {}, fieldPatternFields),
-    }];
+      : sampleEdit.entries?.length ? sampleEdit.entries : backendEntries;
     const backendManufacturerHints = (baseEntries.length ? baseEntries : backendEntries)
       .map((entry) => fmt(
         typeof entry?.fields?.manufacturer === 'object'
@@ -13910,10 +13915,8 @@ const BomNormalizer = () => {
         preferFieldRules: hasPrefixCleanup,
         ignoredFields: visualTeachIgnoredFields,
         hasManualEdits,
-        activeRules: Object.keys(fieldPatternRuleDrafts || {}).length
-          ? fieldPatternRuleDrafts
-          : (normalizerConfig.fieldPatternRules || {}),
         review: fieldPatternReviewContract,
+        reviewReceipt: fieldPatternReviewReceipt,
         completedStepId: visualTeachContext?.workflowStep?.id || '',
         sourceRow: sample.sourceRow,
         occurrenceId: sample.sourceFragment?.id || '',
@@ -14006,6 +14009,7 @@ const BomNormalizer = () => {
       }));
 
       setFieldPatternRuleDrafts(nextRules);
+      setFieldPatternReviewReceipt(response.data?.reviewReceipt?.token || '');
       setFieldPatternGroups(refreshedGroups);
       setFieldPatternReviewRows(refreshedRows);
       setFieldPatternReviewSummary(refreshedReview.summary || {});
@@ -14034,6 +14038,7 @@ const BomNormalizer = () => {
   }, [
     fieldPatternRuleDrafts,
     fieldPatternReviewContract,
+    fieldPatternReviewReceipt,
     fieldPatternFields,
     headers,
     normalizerConfig,
@@ -14133,6 +14138,7 @@ const BomNormalizer = () => {
         rows: dataRows,
         roles,
         config: { ...normalizerConfig, headerRowIndex },
+        reviewReceipt: fieldPatternReviewReceipt,
         confirmationTokens: Object.values(fieldPatternConfirmations)
           .map((confirmation) => confirmation?.token)
           .filter(Boolean),
@@ -14166,7 +14172,7 @@ const BomNormalizer = () => {
     } finally {
       setFieldPatternLoading(false);
     }
-  }, [commitNormalizedResult, dataRows, fieldPatternConfirmations, fieldPatternReviewSummary.patternCount, headerRowIndex, headers, normalizerConfig, roles]);
+  }, [commitNormalizedResult, dataRows, fieldPatternConfirmations, fieldPatternReviewReceipt, fieldPatternReviewSummary.patternCount, headerRowIndex, headers, normalizerConfig, roles]);
 
   const handleApplyConfigureSplitColumns = useCallback((result) => {
     const scope = configureParserScope;

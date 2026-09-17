@@ -114,6 +114,25 @@ logger = logging.getLogger(__name__)
 
 BOM_PATTERN_CONFIRMATION_SALT = 'excel_mapper.bom_pattern_confirmation.v1'
 BOM_PATTERN_CONFIRMATION_MAX_AGE = 12 * 60 * 60
+BOM_PATTERN_REVIEW_SALT = 'excel_mapper.bom_pattern_review.v1'
+BOM_PATTERN_REVIEW_MAX_AGE = 12 * 60 * 60
+
+
+def _without_client_pattern_rules(value):
+    """Return setup config/options without browser-carried parser rules."""
+    cleaned = dict(value) if isinstance(value, dict) else {}
+    for key in (
+        'fieldPatternRules',
+        'field_pattern_rules',
+        'semanticPatternRules',
+        'semantic_pattern_rules',
+        'patternRules',
+        'pattern_rules',
+        'fieldPatternOverrides',
+        'field_pattern_overrides',
+    ):
+        cleaned.pop(key, None)
+    return cleaned
 
 
 def _plain_bom_confirmation_entries(entries):
@@ -166,6 +185,40 @@ def _read_bom_pattern_confirmation(token, expected_structure_signature):
         raise ValueError('A pattern confirmation belongs to a different BOM structure.')
     if not str(payload.get('patternKey') or '').strip() or not isinstance(payload.get('rule'), dict):
         raise ValueError('A pattern confirmation is incomplete. Review that pattern again.')
+    return payload
+
+
+def _issue_bom_pattern_review(*, active_rules, structure_signature):
+    """Sign the exact backend rule snapshot displayed by Confirm Patterns."""
+    payload = {
+        'version': 1,
+        'activeRules': active_rules if isinstance(active_rules, dict) else {},
+        'structureSignature': str(structure_signature or '').strip(),
+    }
+    token = signing.dumps(payload, salt=BOM_PATTERN_REVIEW_SALT, compress=True)
+    return {
+        'version': payload['version'],
+        'token': token,
+        'patternCount': len(payload['activeRules']),
+    }
+
+
+def _read_bom_pattern_review(token, expected_structure_signature):
+    try:
+        payload = signing.loads(
+            str(token or ''),
+            salt=BOM_PATTERN_REVIEW_SALT,
+            max_age=BOM_PATTERN_REVIEW_MAX_AGE,
+        )
+    except (signing.SignatureExpired, signing.BadSignature) as exc:
+        raise ValueError('The Confirm Patterns review snapshot is no longer valid.') from exc
+
+    if not isinstance(payload, dict) or payload.get('version') != 1:
+        raise ValueError('The Confirm Patterns review snapshot has an unsupported format.')
+    if payload.get('structureSignature') != expected_structure_signature:
+        raise ValueError('The Confirm Patterns review belongs to a different BOM structure.')
+    if not isinstance(payload.get('activeRules'), dict):
+        raise ValueError('The Confirm Patterns review snapshot is incomplete.')
     return payload
 
 # === Canonicalizer for header labels ===
@@ -3434,17 +3487,29 @@ def bom_field_pattern_inference(request):
         if not isinstance(options, dict):
             options = {}
 
+        # Pattern rules are backend-owned. A browser may carry rules returned by
+        # an older response, but those values must not become trusted input.
+        trusted_config = _without_client_pattern_rules(config)
+        trusted_options = _without_client_pattern_rules(options)
+
         result = build_bom_field_pattern_groups(
             headers=headers,
             rows=rows,
             roles=roles,
-            config=config,
+            config=trusted_config,
             selected_columns=selected_columns,
-            options=options,
+            options=trusted_options,
+        )
+        review = result.get('review') if isinstance(result.get('review'), dict) else {}
+        structure_scope = _bom_pattern_structure_scope(headers, roles, trusted_config)
+        review_receipt = _issue_bom_pattern_review(
+            active_rules=review.get('activeRules') or {},
+            structure_signature=structure_scope['signature'],
         )
         return Response({
             'success': True,
             **result,
+            'reviewReceipt': review_receipt,
         })
     except Exception as exc:
         logger.error("BOM field pattern inference failed: %s", exc, exc_info=True)
@@ -3514,6 +3579,7 @@ def bom_field_pattern_apply(request):
         legacy_groups = request.data.get('groups') or request.data.get('patterns') or []
         rules = request.data.get('rules') or request.data.get('fieldPatternRules') or request.data.get('field_pattern_rules') or {}
         corrections = request.data.get('corrections') or []
+        review_receipt = request.data.get('reviewReceipt') or request.data.get('review_receipt') or ''
         confirmation_tokens = (
             request.data.get('confirmationTokens')
             or request.data.get('confirmation_tokens')
@@ -3547,7 +3613,8 @@ def bom_field_pattern_apply(request):
                 ),
             }, status=status.HTTP_400_BAD_REQUEST)
 
-        structure_scope = _bom_pattern_structure_scope(headers, roles, config)
+        trusted_config = _without_client_pattern_rules(config)
+        structure_scope = _bom_pattern_structure_scope(headers, roles, trusted_config)
         try:
             confirmed_payloads = [
                 _read_bom_pattern_confirmation(token, structure_scope['signature'])
@@ -3609,12 +3676,39 @@ def bom_field_pattern_apply(request):
             headers=headers,
             rows=rows,
             roles=roles,
-            config=config,
+            config=trusted_config,
             source_signature=source_signature,
         )
         structure_fingerprint = structure_profile['fingerprint']
         scoped_groups = []
         confirmed_rules = load_saved_bom_field_pattern_rules(structure_scope['signature'])
+        review_source = 'backend_review_receipt'
+        try:
+            reviewed_rules = _read_bom_pattern_review(
+                review_receipt,
+                structure_scope['signature'],
+            ).get('activeRules') if review_receipt else None
+        except ValueError as exc:
+            logger.warning('Could not reuse Confirm Patterns review; recomputing: %s', exc)
+            reviewed_rules = None
+        if reviewed_rules is None:
+            review_source = 'backend_recomputed'
+            refreshed = build_bom_field_pattern_groups(
+                headers=headers,
+                rows=rows,
+                roles=roles,
+                config=trusted_config,
+                options={
+                    'headerRowIndex': trusted_config.get('headerRowIndex') or 0,
+                    'includeAllRows': False,
+                    'reviewContractVersion': 3,
+                },
+            )
+            refreshed_review = refreshed.get('review') if isinstance(refreshed.get('review'), dict) else {}
+            reviewed_rules = refreshed_review.get('activeRules') or {}
+        for rule_key, reviewed_rule in reviewed_rules.items():
+            if rule_key and isinstance(reviewed_rule, dict):
+                confirmed_rules[str(rule_key)] = reviewed_rule
         for group in groups:
             if not isinstance(group, dict):
                 continue
@@ -3645,12 +3739,12 @@ def bom_field_pattern_apply(request):
                     confirmed_rules[rule_key] = scoped_rule
             scoped_groups.append(scoped_group)
 
-        reusable_config = dict(config)
+        reusable_config = dict(trusted_config)
         reusable_config.pop('fieldPatternOverrides', None)
         reusable_config.pop('field_pattern_overrides', None)
         reusable_config['fieldPatternRules'] = confirmed_rules
         applied_config = {
-            **config,
+            **trusted_config,
             'fieldPatternRules': confirmed_rules,
             'fieldPatternOverrides': {
                 'source': 'backend_user_corrections',
@@ -3721,13 +3815,14 @@ def bom_field_pattern_apply(request):
             normaliser_session_id,
             normalized_rows=normalized.get('normalizedRows'),
             roles=roles or None,
-            config=config or None,
+            config=reusable_config or None,
         )
         return Response({
             'success': True,
             **normalized,
             'learning': learning,
             'savedStructure': saved_structure,
+            'reviewSource': review_source,
             'appliedConfig': {
                 **reusable_config,
                 'fieldPatternRules': confirmed_rules,
@@ -3828,7 +3923,7 @@ def bom_field_pattern_teaching(request):
             alternate_joiner = request.data.get('alternate_joiner') or ''
         ignored_fields = request.data.get('ignoredFields') or request.data.get('ignored_fields') or []
         has_manual_edits = request.data.get('hasManualEdits') is True or request.data.get('has_manual_edits') is True
-        active_rules = request.data.get('activeRules') or request.data.get('active_rules') or {}
+        review_receipt = request.data.get('reviewReceipt') or request.data.get('review_receipt') or ''
         base_rule = request.data.get('baseRule') or request.data.get('base_rule') or {}
         field_rules = request.data.get('fieldRules') or request.data.get('field_rules') or {}
         prefer_field_rules = (
@@ -3867,8 +3962,6 @@ def bom_field_pattern_teaching(request):
             group = {}
         if not isinstance(visual_pattern, dict):
             visual_pattern = {}
-        if not isinstance(active_rules, dict):
-            active_rules = {}
         if not isinstance(base_rule, dict):
             base_rule = {}
         if not isinstance(field_rules, dict):
@@ -3876,11 +3969,26 @@ def bom_field_pattern_teaching(request):
         if not isinstance(review, dict):
             review = {}
 
+        trusted_config = _without_client_pattern_rules(config)
+        structure_scope = _bom_pattern_structure_scope(headers, roles, trusted_config)
+        try:
+            reviewed_rules = _read_bom_pattern_review(
+                review_receipt,
+                structure_scope['signature'],
+            ).get('activeRules') if review_receipt else None
+        except ValueError as exc:
+            logger.warning('Could not reuse Confirm Patterns review while teaching: %s', exc)
+            reviewed_rules = None
+        if reviewed_rules is None:
+            reviewed_rules = load_saved_bom_field_pattern_rules(
+                structure_scope['signature']
+            )
+
         teach_result = build_bom_field_pattern_teach_result(
             headers=headers,
             row=row,
             roles=roles,
-            config=config,
+            config=trusted_config,
             entries=entries,
             group=group,
             tagged_spans=tagged_spans,
@@ -3896,7 +4004,7 @@ def bom_field_pattern_teaching(request):
             prefer_field_rules=prefer_field_rules,
         )
         rule = teach_result['rule']
-        next_active_rules = dict(active_rules)
+        next_active_rules = dict(reviewed_rules or {})
         rule_key = str(
             group.get('patternKey')
             or rule.get('patternKey')
@@ -3911,7 +4019,7 @@ def bom_field_pattern_teaching(request):
             teach_result,
             group=group,
             roles=roles,
-            config=config,
+            config=trusted_config,
             active_rules=next_active_rules,
             source_row=source_row,
             occurrence_id=occurrence_id,
@@ -3926,7 +4034,6 @@ def bom_field_pattern_teaching(request):
             )
         confirmation = None
         if confirm_interpretation:
-            structure_scope = _bom_pattern_structure_scope(headers, roles, config)
             confirmation = _issue_bom_pattern_confirmation(
                 rule=rule,
                 pattern_key=rule_key,
@@ -3936,6 +4043,10 @@ def bom_field_pattern_teaching(request):
                 occurrence_id=occurrence_id,
                 structure_signature=structure_scope['signature'],
             )
+        next_review_receipt = _issue_bom_pattern_review(
+            active_rules=next_active_rules,
+            structure_signature=structure_scope['signature'],
+        )
         return Response({
             'success': True,
             **teach_result,
@@ -3943,6 +4054,7 @@ def bom_field_pattern_teaching(request):
             'review': refreshed_review,
             'saved_rule': saved_rule,
             'confirmation': confirmation,
+            'reviewReceipt': next_review_receipt,
         })
     except Exception as exc:
         logger.error("BOM field pattern teaching failed: %s", exc, exc_info=True)

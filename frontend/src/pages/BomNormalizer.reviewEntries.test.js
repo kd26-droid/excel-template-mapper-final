@@ -1,6 +1,7 @@
 import {
   canUseVisualTeachInterpretation,
   reviewEntriesWithUserEdits,
+  visualTeachEntriesFromBackend,
 } from './BomNormalizer';
 
 const backendEntry = {
@@ -83,5 +84,49 @@ describe('canUseVisualTeachInterpretation', () => {
       hasUserChanges: true,
       recognized: true,
     })).toBe(true);
+  });
+});
+
+describe('visualTeachEntriesFromBackend', () => {
+  const fields = [
+    { key: 'mpn' },
+    { key: 'manufacturer' },
+  ];
+
+  test('does not synthesize a primary row when backend entries are empty', () => {
+    expect(visualTeachEntriesFromBackend([], fields)).toEqual([]);
+    expect(visualTeachEntriesFromBackend(undefined, fields)).toEqual([]);
+  });
+
+  test('preserves every backend-returned interpretation row', () => {
+    const result = visualTeachEntriesFromBackend([
+      {
+        relation: 'Primary',
+        fields: {
+          mpn: { value: 'IRLML6402PBF', sourceColumn: 'Combined' },
+          manufacturer: { value: 'INFINEON', sourceColumn: 'Combined' },
+        },
+      },
+      {
+        relation: 'Alternate 1',
+        fields: {
+          mpn: { value: 'IRLML6402TR', sourceColumn: 'Combined' },
+          manufacturer: { value: 'INFINEON', sourceColumn: 'Combined' },
+        },
+      },
+    ], fields);
+
+    expect(result).toEqual([
+      {
+        relation: 'Primary',
+        fields: { mpn: 'IRLML6402PBF', manufacturer: 'INFINEON' },
+        sourceColumns: { mpn: 'Combined', manufacturer: 'Combined' },
+      },
+      {
+        relation: 'Alternate 1',
+        fields: { mpn: 'IRLML6402TR', manufacturer: 'INFINEON' },
+        sourceColumns: { mpn: 'Combined', manufacturer: 'Combined' },
+      },
+    ]);
   });
 });

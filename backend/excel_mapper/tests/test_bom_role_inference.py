@@ -30,6 +30,7 @@ from excel_mapper.services.bom_role_inference import (
     build_bom_field_pattern_teach_result,
     derive_visual_pattern_from_tagged_spans,
     _infer_field_entries_for_row,
+    _infer_semantic_pattern_entries_for_row,
     _infer_marker_alternate_visual_rule,
     _interpretation_spans_by_column,
     _mpn_only_marker_alternate_pattern,
@@ -57,7 +58,11 @@ from excel_mapper.services.bom_role_inference import (
     refresh_bom_field_pattern_review_after_teach,
     save_bom_field_pattern_rule,
 )
-from excel_mapper.views import _issue_bom_pattern_confirmation, _retry_sqlite_locked_write
+from excel_mapper.views import (
+    _issue_bom_pattern_confirmation,
+    _read_bom_pattern_review,
+    _retry_sqlite_locked_write,
+)
 
 
 def _all_generated_mpns_are_verified(values, lookup=None):
@@ -425,6 +430,15 @@ class BomFieldPatternTeachApiTests(TestCase):
         self.assertTrue(confirmation["token"])
         self.assertEqual(confirmation["patternKey"], "shared-pattern")
         self.assertEqual(confirmation["entries"][0]["fields"]["mpn"], "ABC123")
+        review_receipt = taught.json()["reviewReceipt"]
+        self.assertTrue(review_receipt["token"])
+        reviewed = _read_bom_pattern_review(
+            review_receipt["token"],
+            _bom_pattern_structure_scope(
+                payload["headers"], payload["roles"], payload["config"]
+            )["signature"],
+        )
+        self.assertIn("shared-pattern", reviewed["activeRules"])
 
         applied = self.client.post(
             "/api/bom/field-patterns/apply/",
@@ -647,6 +661,69 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         self.assertEqual(
             visual_pattern["displayPattern"],
             "<MPN>(<MFR>,<UNCLASSIFIED_TEXT>)",
+        )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference._looks_like_parenthesized_manufacturer_alias"
+    )
+    def test_detected_pattern_preserves_manufacturer_and_customer_text(self, looks_like_manufacturer):
+        looks_like_manufacturer.side_effect = lambda value: str(value or "").strip().upper() == "ON SEMICONDUCTOR"
+        source = "CAV24C64WE-GT3(ON SEMICONDUCTOR,M000000034)"
+
+        fragments = _semantic_identity_fragments(source, ["mpn", "manufacturer"])
+
+        self.assertEqual(len(fragments), 1)
+        self.assertEqual(fragments[0]["rawValue"], source)
+        self.assertEqual(
+            fragments[0]["grammar"],
+            "<MPN>(<MFR>,<UNCLASSIFIED_TEXT>)",
+        )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference._looks_like_parenthesized_manufacturer_alias"
+    )
+    def test_top_level_comma_creates_repeated_records_not_suffixes(self, looks_like_manufacturer):
+        manufacturers = {
+            "LINEAR TECHNOLOGY CORP",
+            "MURATA MANUFACTURING CO LTD",
+        }
+        looks_like_manufacturer.side_effect = lambda value: str(value or "").strip().upper() in manufacturers
+        source = (
+            "LTC6992MPS6-4#TRMPBF(LINEAR TECHNOLOGY CORP,M000000126),"
+            "LTC6992HS6-4__TRMPBF(LINEAR TECHNOLOGY CORP,M000000126),"
+            "LTC6992HS6-4_TRMPBF(LINEAR TECHNOLOGY CORP,M000000126)"
+        )
+
+        fragments = _semantic_identity_fragments(source, ["mpn", "manufacturer"])
+
+        self.assertEqual(len(fragments), 3)
+        self.assertEqual(
+            [fragment["grammar"] for fragment in fragments],
+            ["<MPN>(<MFR>,<UNCLASSIFIED_TEXT>)"] * 3,
+        )
+        self.assertEqual(
+            [fragment["rawValue"] for fragment in fragments],
+            [
+                "LTC6992MPS6-4#TRMPBF(LINEAR TECHNOLOGY CORP,M000000126)",
+                "LTC6992HS6-4__TRMPBF(LINEAR TECHNOLOGY CORP,M000000126)",
+                "LTC6992HS6-4_TRMPBF(LINEAR TECHNOLOGY CORP,M000000126)",
+            ],
+        )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference._looks_like_parenthesized_manufacturer_alias",
+        return_value=False,
+    )
+    def test_unknown_parenthesized_values_preserve_complete_structure(self, _manufacturer_alias):
+        source = "DP10X1.0AHSS(BELMETRIC,M000015374)"
+
+        fragments = _semantic_identity_fragments(source, ["mpn", "manufacturer"])
+
+        self.assertEqual(len(fragments), 1)
+        self.assertEqual(fragments[0]["rawValue"], source)
+        self.assertEqual(
+            fragments[0]["grammar"],
+            "<MPN>(<UNCLASSIFIED_TEXT>,<UNCLASSIFIED_TEXT>)",
         )
 
     @patch(
@@ -1480,6 +1557,73 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
         return_value={},
     )
+    @patch(
+        "excel_mapper.services.bom_role_inference._looks_like_parenthesized_manufacturer_alias"
+    )
+    def test_ignored_fragment_is_preserved_alongside_valid_fragments(
+        self, looks_like_manufacturer, _saved_rules, _saved_interpretations
+    ):
+        looks_like_manufacturer.side_effect = (
+            lambda value: str(value or "").strip().upper() == "KEMET"
+        )
+        headers = ["Combined", "CPN", "Description", "Quantity", "UOM"]
+        roles = {
+            "mpn": "Combined",
+            "manufacturer": "Combined",
+            "cpn": "CPN",
+            "description": "Description",
+            "quantity": "Quantity",
+            "uom": "UOM",
+        }
+        ignored_pattern_key = _semantic_pattern_key(
+            "Combined",
+            ["mpn", "manufacturer"],
+            "<UNCLASSIFIED_TEXT>",
+        )
+        rows = [{
+            "Combined": "ABC123 (KEMET)\nSOLDER MASK\nCONFORMAL COATING",
+            "CPN": "C-100",
+            "Description": "Assembly item",
+            "Quantity": "2",
+            "UOM": "EA",
+            "__sourceRow": 12,
+        }]
+        config = {
+            "fieldPatternRules": {
+                ignored_pattern_key: {
+                    "patternKey": ignored_pattern_key,
+                    "visualPattern": {
+                        "type": "ignore_fields",
+                        "sourceHeader": "Combined",
+                        "excludeRow": False,
+                        "ignoredFields": ["mpn", "manufacturer"],
+                    },
+                },
+            },
+        }
+
+        normalized = normalize_bom_rows(headers, rows, roles=roles, config=config)
+
+        self.assertEqual(len(normalized["normalizedRows"]), 3)
+        self.assertEqual(normalized["normalizedRows"][0]["mpn"], "ABC123")
+        self.assertEqual(normalized["normalizedRows"][0]["manufacturer"], "KEMET")
+        ignored_rows = normalized["normalizedRows"][1:]
+        self.assertTrue(all(row["relation"] == "Ignored" for row in ignored_rows))
+        self.assertTrue(all(row["mpn"] == "" for row in ignored_rows))
+        self.assertTrue(all(row["manufacturer"] == "" for row in ignored_rows))
+        self.assertTrue(all(row["cpn"] == "C-100" for row in ignored_rows))
+        self.assertTrue(all(row["description"] == "Assembly item" for row in ignored_rows))
+        self.assertTrue(all(row["quantity"] == "2" for row in ignored_rows))
+        self.assertTrue(all(row["uom"] == "EA" for row in ignored_rows))
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
     def test_use_interpretation_recognizes_field_level_ignore_without_deleting_row(
         self, _saved_rules, _saved_interpretations
     ):
@@ -2049,6 +2193,85 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
         return_value={},
     )
+    def test_semantic_rule_replay_expands_every_alternate_in_multiline_row(self, _saved_rules):
+        source = (
+            "CRCW0402261KFK@ (ED/EE) (VISH/DRA) {HOM} [2297653]\n"
+            "RC0402FR-@261KL (07/10/13) (YAGEO) {HOM} [2297652]\n"
+            "WCR0402-261KF@ (I) (WELWYN) {HOM} [2297651]"
+        )
+
+        def rule_for(fragment, marker, alternate_list, manufacturer):
+            def span(value, role):
+                start = fragment.index(value)
+                return {"start": start, "end": start + len(value), "role": role}
+
+            marker_start = fragment.index(marker)
+            tagged_spans = [
+                {"start": 0, "end": marker_start, "role": "mpn"},
+                span(marker, "insertionMarker"),
+            ]
+            marker_end = marker_start + len(marker)
+            suffix_end = fragment.index(" (")
+            if marker_end < suffix_end:
+                tagged_spans.append({
+                    "start": marker_end,
+                    "end": suffix_end,
+                    "role": "mpn",
+                })
+            tagged_spans.extend([
+                span(alternate_list, "alternateList"),
+                span(manufacturer, "manufacturer"),
+            ])
+            return build_bom_field_pattern_teach_result(
+                headers=["Combined"],
+                row={"Combined": fragment},
+                roles={"mpn": "Combined", "manufacturer": "Combined"},
+                group={"shape": "marker-rule"},
+                tagged_spans=tagged_spans,
+                source_header="Combined",
+                alternate_delimiter="/",
+                alternate_mode="insert_at_marker",
+            )["rule"]
+
+        fragments = _semantic_identity_fragments(source, ["mpn", "manufacturer"])
+        rules = {}
+        for fragment in fragments[:2]:
+            raw_value = fragment["rawValue"]
+            if raw_value.startswith("CRCW"):
+                rule = rule_for(raw_value, "@", "ED/EE", "VISH/DRA")
+            else:
+                rule = rule_for(raw_value, "@", "07/10/13", "YAGEO")
+            rules[_semantic_pattern_key(
+                "Combined", ["mpn", "manufacturer"], fragment["grammar"]
+            )] = rule
+
+        entries = _infer_semantic_pattern_entries_for_row(
+            {"Combined": source, "__sourceRow": 26},
+            ["Combined"],
+            {"mpn": "Combined", "manufacturer": "Combined"},
+            ["Combined"],
+            config={
+                "alternateLayout": "inside_selected_mpn_columns",
+                "fieldPatternRules": rules,
+            },
+        )
+
+        self.assertEqual(
+            [entry["fields"]["mpn"]["value"] for entry in entries],
+            [
+                "CRCW0402261KFKED",
+                "CRCW0402261KFKEE",
+                "RC0402FR-07261KL",
+                "RC0402FR-10261KL",
+                "RC0402FR-13261KL",
+                "WCR0402-261KFI",
+            ],
+        )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
     def test_normalize_api_returns_backend_owned_rows(self, _saved_rules):
         response = self.client.post(
             "/api/bom/normalize/",
@@ -2094,14 +2317,37 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
     def test_apply_api_returns_combined_backend_preview(
         self, _trusted_saved_rules, _saved_rules, _saved_interpretations
     ):
+        inferred = self.client.post(
+            "/api/bom/field-patterns/infer/",
+            {
+                "headers": ["MPN", "MFR"],
+                "rows": [{"MPN": "ABC123", "MFR": "KEMET", "__sourceRow": 2}],
+                "roles": {"mpn": "MPN", "manufacturer": "MFR"},
+                "config": {"alternateLayout": "already_separate_rows"},
+                "options": {"reviewContractVersion": 3},
+            },
+            content_type="application/json",
+        )
+        self.assertEqual(inferred.status_code, 200)
+        review_receipt = inferred.json()["reviewReceipt"]["token"]
+
         response = self.client.post(
             "/api/bom/field-patterns/apply/",
             {
                 "headers": ["MPN", "MFR"],
                 "rows": [{"MPN": "ABC123", "MFR": "KEMET", "__sourceRow": 2}],
                 "roles": {"mpn": "MPN", "manufacturer": "MFR"},
-                "config": {"alternateLayout": "already_separate_rows"},
+                "config": {
+                    "alternateLayout": "already_separate_rows",
+                    "fieldPatternRules": {
+                        "browser-carried-rule": {
+                            "shape": "browser-carried-rule",
+                            "fields": {"mpn": {"delimiter": "/"}},
+                        },
+                    },
+                },
                 "groups": [],
+                "review_receipt": review_receipt,
                 "persist": False,
             },
             content_type="application/json",
@@ -2111,7 +2357,43 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         payload = response.json()
         self.assertEqual(payload["source"], "backend")
         self.assertEqual(payload["normalizedRows"][0]["mpn"], "ABC123")
+        self.assertEqual(payload["reviewSource"], "backend_review_receipt")
+        self.assertNotIn("browser-carried-rule", payload["appliedConfig"]["fieldPatternRules"])
         self.assertIn("learning", payload)
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.views.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    def test_apply_without_review_receipt_recomputes_instead_of_failing(
+        self, _trusted_saved_rules, _saved_rules, _saved_interpretations
+    ):
+        response = self.client.post(
+            "/api/bom/field-patterns/apply/",
+            {
+                "headers": ["MPN", "MFR"],
+                "rows": [{"MPN": "ABC123", "MFR": "KEMET", "__sourceRow": 2}],
+                "roles": {"mpn": "MPN", "manufacturer": "MFR"},
+                "config": {
+                    "alternateLayout": "already_separate_rows",
+                    "fieldPatternRules": {"stale-browser-copy": {"fields": {}}},
+                },
+                "persist": False,
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["reviewSource"], "backend_recomputed")
+        self.assertEqual(response.json()["normalizedRows"][0]["mpn"], "ABC123")
 
     @patch(
         "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",

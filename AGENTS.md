@@ -29,6 +29,11 @@
 - Backend: no strict unit test harness yet; prefer adding Django tests in `tests.py` or `tests/` per app.
 - Integration flow validated by `comprehensive_test.py` and Docker test runner; no enforced coverage, but cover critical mapping flows and regressions.
 
+## Frontend Logic Approval
+- Before adding or changing any frontend business logic, describe the exact logic and obtain the user's explicit approval. Do not implement it before approval.
+- This includes inference, parsing, mapping, normalization, recognition, fallback/default behavior, generated interpretations, row synthesis, and data repair.
+- BOM Normalizer screens must render backend-returned patterns, spans, interpretations, and normalized rows exactly. The frontend may adapt response objects for display but must not invent, replace, repair, or fall back to synthesized values.
+
 ## Commit & Pull Request Guidelines
 - Commits: imperative and scoped when helpful. Examples:
   - `frontend: fix mapping grid column resize`

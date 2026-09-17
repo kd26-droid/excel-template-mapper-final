@@ -2452,6 +2452,58 @@ def _looks_like_parenthesized_manufacturer_alias(value):
     return False
 
 
+def _parenthesized_identity_content(value):
+    """Classify comma-delimited content without hiding unmatched customer text."""
+    text = str(value or "").replace("\u00a0", " ")
+    components = text.split(",")
+    manufacturer_index = -1
+
+    def component_has_manufacturer_evidence(component):
+        candidate = clean(component)
+        if not candidate or candidate.startswith(("/", "\\")) or candidate.endswith(("/", "\\")):
+            return False
+        if _looks_like_parenthesized_manufacturer_alias(candidate):
+            return True
+        manufacturer, score, _reason = _best_manufacturer_from_text(candidate)
+        return bool(manufacturer and float(score or 0) >= 0.90)
+
+    if len(components) > 1:
+        for index, component in enumerate(components):
+            if component_has_manufacturer_evidence(component):
+                manufacturer_index = index
+                break
+    elif component_has_manufacturer_evidence(text):
+        manufacturer_index = 0
+
+    # A manufacturer alias can legitimately contain a comma. Only fall back to
+    # matching the complete phrase when the remaining components do not look
+    # like customer/vendor reference codes.
+    if manufacturer_index < 0 and len(components) > 1:
+        has_code_component = any(
+            bool(re.fullmatch(r"[A-Za-z]*\d[A-Za-z0-9._/-]*", clean(component)))
+            for component in components[1:]
+        )
+        if not has_code_component and _looks_like_parenthesized_manufacturer_alias(text):
+            return {
+                "manufacturer": clean(text),
+                "pattern": "<MFR>",
+            }
+
+    pattern_components = []
+    for index, component in enumerate(components):
+        if index == manufacturer_index:
+            pattern_components.append("<MFR>")
+        elif clean(component):
+            pattern_components.append("<UNCLASSIFIED_TEXT>")
+        else:
+            pattern_components.append("")
+
+    return {
+        "manufacturer": clean(components[manufacturer_index]) if manufacturer_index >= 0 else "",
+        "pattern": ",".join(pattern_components),
+    }
+
+
 def _has_later_manufacturer_in_same_record(text, start_index):
     """Return whether a later parenthesis is the stronger MFR boundary.
 
@@ -2466,7 +2518,7 @@ def _has_later_manufacturer_in_same_record(text, start_index):
         between = source[search_start:search_start + later.start()]
         if re.search(r"[\r\n;\{\[]|\s/\s", between):
             return False
-        if _looks_like_parenthesized_manufacturer_alias(later.group(1)):
+        if _parenthesized_identity_content(later.group(1)).get("manufacturer"):
             return True
     return False
 
@@ -2486,8 +2538,13 @@ def _has_complete_identity_before_record_separator(value):
         trailing = text[match.end():]
         trailing_is_annotations = _is_terminal_parenthesis_before_annotations(text, match.end())
         trailing_is_blank = not clean(trailing)
-        manufacturer_supported = _looks_like_parenthesized_manufacturer_alias(match.group(1))
-        if not trailing_is_annotations and not (trailing_is_blank and manufacturer_supported):
+        has_structured_content = "," in match.group(1)
+        manufacturer_supported = bool(
+            _parenthesized_identity_content(match.group(1)).get("manufacturer")
+        )
+        if not trailing_is_annotations and not (
+            trailing_is_blank and (manufacturer_supported or has_structured_content)
+        ):
             continue
         mpn_text, _ignored_prefix, _source_fragment = (
             _split_mpn_fragment_before_parenthesized_manufacturer(text[:match.start()])
@@ -2514,6 +2571,12 @@ def _identity_record_spans(text):
         at_top_level = not any(depths.values())
         is_newline = character in "\r\n"
         is_semicolon = character == ";" and at_top_level
+        is_comma = (
+            character == ","
+            and at_top_level
+            and _has_complete_identity_before_record_separator(source[start:index])
+            and _has_complete_identity_before_record_separator(source[index + 1:])
+        )
         is_spaced_slash_candidate = (
             character == "/"
             and at_top_level
@@ -2526,7 +2589,7 @@ def _identity_record_spans(text):
             is_spaced_slash_candidate
             and _has_complete_identity_before_record_separator(source[start:index])
         )
-        if is_newline or is_semicolon or is_spaced_slash:
+        if is_newline or is_semicolon or is_comma or is_spaced_slash:
             span_start, span_end = _trim_semantic_fragment_span(source, start, index)
             if span_end > span_start:
                 spans.append((span_start, span_end))
@@ -2691,9 +2754,25 @@ def _same_cell_parenthesized_mpn_manufacturer_pairs(value):
     pairs = []
     cursor = 0
     for match in re.finditer(r"\(([^()]*)\)", text):
-        manufacturer = clean(match.group(1))
-        is_directory_manufacturer = _looks_like_parenthesized_manufacturer_alias(manufacturer)
-        is_contextual_manufacturer = _is_terminal_parenthesis_before_annotations(text, match.end())
+        content = match.group(1)
+        content_identity = _parenthesized_identity_content(content)
+        manufacturer = clean(content_identity.get("manufacturer"))
+        is_directory_manufacturer = bool(manufacturer)
+        is_contextual_manufacturer = (
+            _is_terminal_parenthesis_before_annotations(text, match.end())
+            or (
+                "," in content
+                and not clean(text[match.end():])
+            )
+        )
+        if not manufacturer and is_contextual_manufacturer and "," not in content:
+            manufacturer = clean(content)
+            content_identity = {
+                **content_identity,
+                "manufacturer": manufacturer,
+                "pattern": "<MFR>",
+            }
+            is_directory_manufacturer = bool(manufacturer)
         if not is_directory_manufacturer and not is_contextual_manufacturer:
             continue
         if _has_later_manufacturer_in_same_record(text, match.end()):
@@ -2710,6 +2789,16 @@ def _same_cell_parenthesized_mpn_manufacturer_pairs(value):
             "manufacturer": manufacturer,
             "_ignoredPrefix": clean(ignored_prefix),
             "_sourceFragment": clean(source_fragment),
+            "_manufacturerConnector": (
+                ""
+                if (
+                    "," in content
+                    and match.start() > cursor
+                    and not text[match.start() - 1].isspace()
+                )
+                else " "
+            ),
+            "_parenthesizedPattern": content_identity.get("pattern") or "",
             "_trailingPattern": _trailing_annotation_pattern(text[match.end():annotation_end]),
         })
         cursor = annotation_end
@@ -4460,6 +4549,8 @@ def _mpn_source_fragment_pattern(fragment):
             connector = "" if suffix_groups[0].start() > 0 and not text[suffix_groups[0].start() - 1].isspace() else " "
         return "<MPN>" + connector + " ".join("(<SUFFIX>)" for _ in suffix_groups)
 
+    # Keep standalone structural markers visible so their interpretations can
+    # be taught and replayed even when this record has no alternate list.
     marker_match = _select_structural_marker(text, "", "")
     if marker_match and clean(marker_match.get("suffix")) and not clean(
         marker_match.get("suffix")
@@ -4518,12 +4609,14 @@ def _same_cell_parenthesized_patterns_from_entries(value, entries, header):
     patterns = {}
     for pair in pairs:
         source_pattern = _mpn_source_fragment_pattern(pair.get("_sourceFragment"))
+        connector = pair.get("_manufacturerConnector", " ")
+        parenthesized_pattern = pair.get("_parenthesizedPattern") or "<MFR>"
         trailing = clean(pair.get("_trailingPattern"))
-        key = (source_pattern, trailing)
+        key = (source_pattern, connector, parenthesized_pattern, trailing)
         patterns[key] = patterns.get(key, 0) + 1
 
     output = []
-    for (source_pattern, trailing), count in sorted(
+    for (source_pattern, connector, parenthesized_pattern, trailing), count in sorted(
         patterns.items(),
         key=lambda item: (
             0 if "@" in item[0][0] else 1,
@@ -4532,7 +4625,7 @@ def _same_cell_parenthesized_patterns_from_entries(value, entries, header):
             item[0][1],
         ),
     ):
-        pattern = f"{source_pattern} (<MFR>)"
+        pattern = f"{source_pattern}{connector}({parenthesized_pattern})"
         if trailing:
             pattern = f"{pattern} {trailing}"
         if count > 1:
@@ -5652,9 +5745,25 @@ def _semantic_identity_fragments(value, mapped_fields):
     fragments = []
     cursor = 0
     for match in re.finditer(r"\(([^()]*)\)", text):
-        manufacturer = clean(match.group(1))
-        is_directory_manufacturer = _looks_like_parenthesized_manufacturer_alias(manufacturer)
-        is_contextual_manufacturer = _is_terminal_parenthesis_before_annotations(text, match.end())
+        content = match.group(1)
+        content_identity = _parenthesized_identity_content(content)
+        manufacturer = clean(content_identity.get("manufacturer"))
+        is_directory_manufacturer = bool(manufacturer)
+        is_contextual_manufacturer = (
+            _is_terminal_parenthesis_before_annotations(text, match.end())
+            or (
+                "," in content
+                and not clean(text[match.end():])
+            )
+        )
+        if not manufacturer and is_contextual_manufacturer and "," not in content:
+            manufacturer = clean(content)
+            content_identity = {
+                **content_identity,
+                "manufacturer": manufacturer,
+                "pattern": "<MFR>",
+            }
+            is_directory_manufacturer = bool(manufacturer)
         if not is_directory_manufacturer and not is_contextual_manufacturer:
             continue
         if _has_later_manufacturer_in_same_record(text, match.end()):
@@ -5676,7 +5785,20 @@ def _semantic_identity_fragments(value, mapped_fields):
         if end <= start:
             cursor = annotation_end
             continue
-        grammar = f"{_mpn_source_fragment_pattern(source_fragment)} (<MFR>)"
+        connector = (
+            ""
+            if (
+                "," in content
+                and match.start() > cursor
+                and not text[match.start() - 1].isspace()
+            )
+            else " "
+        )
+        parenthesized_pattern = content_identity.get("pattern") or "<UNCLASSIFIED_TEXT>"
+        grammar = (
+            f"{_mpn_source_fragment_pattern(source_fragment)}"
+            f"{connector}({parenthesized_pattern})"
+        )
         trailing = _trailing_annotation_pattern(text[match.end():annotation_end])
         if trailing:
             grammar = f"{grammar} {trailing}"
@@ -6875,7 +6997,7 @@ def _infer_semantic_pattern_entries_for_row(row, headers, roles, selected_column
         return []
 
     combined_entries = []
-    ignored_fragment = None
+    ignored_fragments = []
     for unit in _field_review_mapping_units(headers, roles, config=config):
         if unit.get("relationship") != "shared":
             continue
@@ -6913,8 +7035,7 @@ def _infer_semantic_pattern_entries_for_row(row, headers, roles, selected_column
                     _semantic_rule_for_source(rule, source_column),
                 )
             if _field_pattern_rule_ignores_fields(rule):
-                if ignored_fragment is None:
-                    ignored_fragment = (fragment_row, fragment_config)
+                ignored_fragments.append((fragment_row, fragment_config))
                 continue
             fragment_entries = _infer_field_entries_for_row(
                 fragment_row,
@@ -6925,19 +7046,24 @@ def _infer_semantic_pattern_entries_for_row(row, headers, roles, selected_column
             )
             combined_entries.extend(fragment_entries)
 
-    if not combined_entries and ignored_fragment is not None:
-        fragment_row, fragment_config = ignored_fragment
-        combined_entries = _infer_field_entries_for_row(
+    for fragment_row, fragment_config in ignored_fragments:
+        ignored_entries = _infer_field_entries_for_row(
             fragment_row,
             headers,
             roles,
             selected_columns,
             config=fragment_config,
         )
+        if ignored_entries:
+            ignored_entry = ignored_entries[0]
+            ignored_entry["relation"] = "Ignored"
+            ignored_entry["ignoredIdentity"] = True
+            combined_entries.append(ignored_entry)
 
     for index, entry in enumerate(combined_entries):
         entry["index"] = index
-        entry["relation"] = "Primary" if index == 0 else f"Alternate {index}"
+        if not entry.get("ignoredIdentity") and clean(entry.get("relation")) != "Ignored":
+            entry["relation"] = "Primary" if index == 0 else f"Alternate {index}"
     return combined_entries
 
 
@@ -9980,6 +10106,10 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                             config=fallback_fragment_config,
                         )
                         rule_fallback_used = bool(entries)
+                    if _field_pattern_rule_ignores_fields(parser_rule) and entries:
+                        entries = entries[:1]
+                        entries[0]["relation"] = "Ignored"
+                        entries[0]["ignoredIdentity"] = True
                     spans = _interpretation_spans_by_column(
                         fragment_row,
                         headers,
@@ -10257,7 +10387,8 @@ def _build_pattern_combinations(headers, patterns):
                     "patternEntryIndex": pattern_entry_index,
                 })
         for entry_index, entry in enumerate(entries):
-            entry["relation"] = "Primary" if entry_index == 0 else f"Alternate {entry_index}"
+            if clean(entry.get("relation")) != "Ignored":
+                entry["relation"] = "Primary" if entry_index == 0 else f"Alternate {entry_index}"
 
         combination["sourceRows"].append(row["sourceRow"])
         combination["samples"].append({
@@ -10436,7 +10567,11 @@ def _display_review_entries(entries, config=None):
         fields = entry.get("fields") or {}
         display_entries.append({
             "index": entry.get("index", index),
-            "relation": "Primary" if index == 0 else f"Alternate {index}",
+            "relation": (
+                "Ignored"
+                if clean(entry.get("relation")) == "Ignored"
+                else "Primary" if index == 0 else f"Alternate {index}"
+            ),
             "fields": {
                 role: _review_entry_field_value(fields.get(role))
                 for role in FACTWISE_FIELD_LABELS
@@ -10797,7 +10932,8 @@ def _build_flat_pattern_review_rows(
                             "patternEntryIndex": pattern_entry_index,
                         })
                 for entry_index, entry in enumerate(display_entries):
-                    entry["relation"] = "Primary" if entry_index == 0 else f"Alternate {entry_index}"
+                    if clean(entry.get("relation")) != "Ignored":
+                        entry["relation"] = "Primary" if entry_index == 0 else f"Alternate {entry_index}"
             review_row = {
                 "id": f"review-row-{row_key}",
                 "sourceRow": source_row,
@@ -11625,12 +11761,10 @@ def refresh_bom_field_pattern_review_after_teach(
             + retained_entries[insert_at:]
         )
         if _field_pattern_rule_ignores_fields(rule):
-            if retained_entries:
-                merged_entries = retained_entries
-            elif generated_entries:
-                merged_entries = generated_entries[:1]
+            merged_entries = retained_entries + generated_entries[:1]
         for entry_index, entry in enumerate(merged_entries):
-            entry["relation"] = "Primary" if entry_index == 0 else f"Alternate {entry_index}"
+            if clean(entry.get("relation")) != "Ignored":
+                entry["relation"] = "Primary" if entry_index == 0 else f"Alternate {entry_index}"
         review_row["entries"] = merged_entries
         review_row["entryCount"] = len(merged_entries)
         review_row["visibleFieldKeys"] = _visible_review_field_keys(
@@ -12122,7 +12256,11 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
             entries_by_source_row[str(source_row)] = [
                 {
                     **entry,
-                    "relation": "Primary" if index == 0 else f"Alternate {index}",
+                    "relation": (
+                        "Ignored"
+                        if clean(entry.get("relation")) == "Ignored"
+                        else "Primary" if index == 0 else f"Alternate {index}"
+                    ),
                 }
                 for index, entry in enumerate(row_entries)
             ]
