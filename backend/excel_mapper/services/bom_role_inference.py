@@ -5967,11 +5967,11 @@ def _visual_teach_wrapper(value):
 
 def _visual_teach_end_boundary(value):
     text = str(value or "")
-    match = re.match(r"^\s*[\]\)}>]", text)
-    if match:
-        return match.group(0)
-    match = re.match(r"^\s*[,;|^~]", text)
-    return match.group(0) if match else ""
+    end = 0
+    while end < len(text) and not text[end].isalnum():
+        end += 1
+    boundary = text[:end]
+    return boundary if any(not character.isspace() for character in boundary) else ""
 
 
 def _visual_teach_reusable_before(value, segment_index):

@@ -4231,6 +4231,30 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         mpn_span = next(item for item in spans if item["role"] == "mpn")
         self.assertEqual(value[mpn_span["start"]:mpn_span["end"]], mpn_text)
 
+    def test_visual_preview_stops_confirmed_mpn_before_unselected_punctuation_suffix(self):
+        value = "S-1293(,)"
+        mpn_text = "S-1293"
+
+        result = build_bom_field_pattern_teach_result(
+            headers=["Vendor Parts"],
+            row={"Vendor Parts": value},
+            roles={"mpn": "Vendor Parts", "manufacturer": "Vendor Parts"},
+            group={"patternKey": "punctuation-after-confirmed-mpn"},
+            tagged_spans=[{
+                "start": 0,
+                "end": len(mpn_text),
+                "role": "mpn",
+            }],
+            source_header="Vendor Parts",
+        )
+
+        self.assertEqual(result["visualPattern"]["segments"][0]["after"], "(,)")
+        fields = result["entries"][0]["fields"]
+        self.assertEqual(fields["mpn"]["value"], mpn_text)
+        spans = result["interpretationSpansByColumn"]["Vendor Parts"]
+        mpn_span = next(item for item in spans if item["role"] == "mpn")
+        self.assertEqual(value[mpn_span["start"]:mpn_span["end"]], mpn_text)
+
     def test_visual_preview_preserves_brackets_around_a_tagged_mpn_segment(self):
         value = "CAF33 TRANSLUCIDE (310ML) (ELKEM SI) {HOM} [ ]"
 
