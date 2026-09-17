@@ -2659,17 +2659,11 @@ def _visual_base_mpn_fragment(raw_text, preserve_mpn_at=False):
         if candidate_start < 0:
             candidate_start = _mpn_fragment_start(trimmed, candidate)
         candidate_end = candidate_start + len(candidate)
-        if preserve_mpn_at and trimmed[candidate_end:candidate_end + 1] == "@":
-            candidate_end += 1
         original_candidate = clean(trimmed[candidate_start:candidate_end])
         return original_candidate, leading_length + candidate_start, leading_length + candidate_end
 
     value_end = len(trimmed)
-    if not preserve_mpn_at:
-        while value_end > 0 and trimmed[value_end - 1] == "@":
-            value_end -= 1
-        value_end = len(trimmed[:value_end].rstrip())
-    value = clean(trimmed[:value_end] if preserve_mpn_at else trimmed[:value_end].replace("@", ""))
+    value = clean(trimmed[:value_end])
     return value, leading_length, leading_length + value_end
 
 
@@ -4124,9 +4118,18 @@ def _visual_pattern_display_pattern(visual_pattern, source_value=""):
         elif role == "alternateList" and operation == "insert_alternate_at_marker":
             tokens.append("(<ALTERNATE_VALUES>)")
         elif role == "mpn" and operation == "replace_suffix_at_marker":
-            marker = str(composition.get("markerSequence") or composition.get("marker") or "@")
+            marker = str(composition.get("markerSequence") or composition.get("marker") or "<MARKER>")
             tokens.append(f"<MPN_PREFIX>{marker}<PRIMARY_SUFFIX>")
         elif role == "alternateList" and operation == "replace_suffix_at_marker":
+            tokens.append("(<ALTERNATE_SUFFIXES>)")
+        elif role == "mpn" and isinstance(composition, dict) and clean(
+            composition.get("markerSequence") or composition.get("marker")
+        ):
+            marker = str(composition.get("markerSequence") or composition.get("marker"))
+            tokens.append(f"<MPN_PREFIX>{marker}<PRIMARY_SUFFIX>")
+        elif role == "alternateList" and isinstance(composition, dict) and clean(
+            composition.get("markerSequence") or composition.get("marker")
+        ):
             tokens.append("(<ALTERNATE_SUFFIXES>)")
         elif role == "alternateList":
             tokens.append("(<ALTERNATE_MPN_VALUES>)")
@@ -4254,9 +4257,18 @@ def _visual_pattern_display_from_tagged_spans(
         elif role == "alternateList" and operation == "insert_alternate_at_marker":
             token = "<ALTERNATE_VALUES>"
         elif role == "mpn" and operation == "replace_suffix_at_marker":
-            marker = str(composition.get("markerSequence") or composition.get("marker") or "@")
+            marker = str(composition.get("markerSequence") or composition.get("marker") or "<MARKER>")
             token = f"<MPN_PREFIX>{marker}<PRIMARY_SUFFIX>"
         elif role == "alternateList" and operation == "replace_suffix_at_marker":
+            token = "<ALTERNATE_SUFFIXES>"
+        elif role == "mpn" and isinstance(composition, dict) and clean(
+            composition.get("markerSequence") or composition.get("marker")
+        ):
+            marker = str(composition.get("markerSequence") or composition.get("marker"))
+            token = f"<MPN_PREFIX>{marker}<PRIMARY_SUFFIX>"
+        elif role == "alternateList" and isinstance(composition, dict) and clean(
+            composition.get("markerSequence") or composition.get("marker")
+        ):
             token = "<ALTERNATE_SUFFIXES>"
         elif role == "alternateList":
             token = "<ALTERNATE_MPN_VALUES>"
@@ -4427,11 +4439,17 @@ def _mpn_source_fragment_pattern(fragment):
     suffix_groups = list(re.finditer(r"\([^()\r\n]+\)", text))
     if suffix_groups:
         before_first_group = text[:suffix_groups[0].start()].rstrip()
-        marker_match = re.search(r"([@#]+)([^@#]*)$", before_first_group)
+        alternate_text = clean(suffix_groups[0].group(0)[1:-1])
+        delimiter = _infer_list_delimiter(alternate_text)
+        marker_match = (
+            _select_structural_marker(before_first_group, alternate_text, delimiter)
+            if delimiter
+            else None
+        )
         if marker_match:
-            marker = marker_match.group(1)
-            marker_prefix = before_first_group[:marker_match.start()]
-            marker_suffix = marker_match.group(2)
+            marker = marker_match["value"]
+            marker_prefix = marker_match["prefix"]
+            marker_suffix = marker_match["suffix"]
             base_pattern = (
                 f"<MPN_PREFIX>{marker}<PRIMARY_SUFFIX>"
                 if clean(marker_prefix) and clean(marker_suffix)
@@ -4442,14 +4460,15 @@ def _mpn_source_fragment_pattern(fragment):
             connector = "" if suffix_groups[0].start() > 0 and not text[suffix_groups[0].start() - 1].isspace() else " "
         return "<MPN>" + connector + " ".join("(<SUFFIX>)" for _ in suffix_groups)
 
-    # A marker is structural even when this record has no alternate list. If it
-    # is omitted here, marker records collapse into the generic <MPN> pattern
-    # and a confirmed marker interpretation can never be taught or replayed.
-    marker_match = re.search(r"([@#]+)([^@#]*)$", text)
+    marker_match = _select_structural_marker(text, "", "")
+    if marker_match and clean(marker_match.get("suffix")) and not clean(
+        marker_match.get("suffix")
+    ).isalpha():
+        marker_match = None
     if marker_match:
-        marker = marker_match.group(1)
-        marker_prefix = text[:marker_match.start()]
-        marker_suffix = marker_match.group(2)
+        marker = marker_match["value"]
+        marker_prefix = marker_match["prefix"]
+        marker_suffix = marker_match["suffix"]
         if clean(marker_prefix):
             return (
                 f"<MPN_PREFIX>{marker}<MPN_SUFFIX>"
@@ -4467,28 +4486,17 @@ def _mpn_only_marker_alternate_pattern(fragment):
         return ""
 
     before_first_group = text[:groups[0].start()].rstrip()
-    marker_match = re.search(r"([@#]+)([^@#]*)$", before_first_group)
+    alternate_text = clean(groups[0].group(1))
+    delimiter = _infer_list_delimiter(alternate_text)
+    if not delimiter:
+        return ""
+    marker_match = _select_structural_marker(before_first_group, alternate_text, delimiter)
     if not marker_match:
         return ""
 
-    alternate_text = clean(groups[0].group(1))
-    has_list_evidence = any(
-        len([part for part in alternate_text.split(delimiter) if clean(part)]) >= 2
-        or (
-            len([part for part in alternate_text.split(delimiter) if clean(part)]) == 1
-            and (
-                alternate_text.startswith(delimiter)
-                or alternate_text.endswith(delimiter)
-            )
-        )
-        for delimiter in ("/", "|", ";", ",", "^", "~", "\\")
-    )
-    if not has_list_evidence:
-        return ""
-
-    marker = marker_match.group(1)
-    marker_prefix = before_first_group[:marker_match.start()]
-    marker_suffix = marker_match.group(2)
+    marker = marker_match["value"]
+    marker_prefix = marker_match["prefix"]
+    marker_suffix = marker_match["suffix"]
     base_pattern = (
         f"<MPN_PREFIX>{marker}<PRIMARY_SUFFIX>"
         if clean(marker_prefix) and clean(marker_suffix)
@@ -5035,18 +5043,126 @@ def _global_rule_for_current_roles(rule, roles):
     return rebound
 
 
-def _directory_preserves_mpn_text(value):
-    """Return whether the directory's canonical MPN preserves this punctuation."""
-    candidate = clean(value)
-    if not candidate:
-        return False
-    entry = load_mpn_mfr_lookup().get(candidate)
-    canonical = clean((entry or {}).get("mpn")) if isinstance(entry, dict) else ""
-    return bool(canonical and canonical.casefold() == candidate.casefold())
+def _symbol_runs(value):
+    """Return repeated non-alphanumeric symbols without assuming their literals."""
+    text = str(value or "")
+    runs = []
+    index = 0
+    while index < len(text):
+        character = text[index]
+        if character.isalnum() or character.isspace():
+            index += 1
+            continue
+        end = index + 1
+        while end < len(text) and text[end] == character:
+            end += 1
+        runs.append({"start": index, "end": end, "value": text[index:end]})
+        index = end
+    return runs
+
+
+def _contiguous_symbol_runs(value):
+    """Return maximal punctuation runs, including mixed-symbol markers."""
+    text = str(value or "")
+    runs = []
+    index = 0
+    while index < len(text):
+        if text[index].isalnum() or text[index].isspace():
+            index += 1
+            continue
+        end = index + 1
+        while end < len(text) and not text[end].isalnum() and not text[end].isspace():
+            end += 1
+        runs.append({"start": index, "end": end, "value": text[index:end]})
+        index = end
+    return runs
+
+
+def _infer_list_delimiter(value):
+    """Infer a separator from list structure rather than a delimiter whitelist."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    line_breaks = re.findall(r"\r\n|\r|\n", text)
+    if line_breaks and len([part for part in re.split(r"\r\n|\r|\n", text) if clean(part)]) >= 2:
+        return line_breaks[0]
+
+    candidates = []
+    seen = set()
+    for run in _symbol_runs(text):
+        delimiter = run["value"]
+        if delimiter in seen:
+            continue
+        seen.add(delimiter)
+        raw_parts = text.split(delimiter)
+        parts = [clean(part) for part in raw_parts if clean(part)]
+        has_edge_separator = bool(raw_parts and (not clean(raw_parts[0]) or not clean(raw_parts[-1])))
+        if len(parts) < 2 and not (len(parts) == 1 and has_edge_separator):
+            continue
+        if (
+            len(parts) == 2
+            and all(part.isalpha() and len(part) > 3 for part in parts)
+            and any(character.isspace() for character in text)
+        ):
+            continue
+        shapes = {
+            re.sub(r"[A-Za-z]+", "A", re.sub(r"\d+", "9", part.upper()))
+            for part in parts
+        }
+        candidates.append((
+            1 if has_edge_separator else 0,
+            len(parts),
+            -len(shapes),
+            len(delimiter),
+            -run["start"],
+            delimiter,
+        ))
+    return max(candidates)[-1] if candidates else ""
+
+
+def _structural_marker_candidates(value):
+    """Return every possible marker boundary while preserving source offsets."""
+    text = str(value or "").rstrip()
+    candidates = []
+    seen = set()
+    for run in _contiguous_symbol_runs(text) + _symbol_runs(text):
+        identity = (run["start"], run["end"], run["value"])
+        if identity in seen:
+            continue
+        seen.add(identity)
+        prefix = text[:run["start"]]
+        suffix = text[run["end"]:]
+        if not clean(prefix) or not any(character.isalnum() for character in prefix):
+            continue
+        marker = run["value"]
+        candidates.append({
+            **run,
+            "prefix": prefix,
+            "suffix": suffix,
+            "occurrence": text[:run["start"]].count(marker) + 1,
+        })
+    return candidates
+
+
+def _directory_mpn_similarity(value):
+    """Return verified MPN evidence at the configured 90 percent threshold."""
+    normalized = normalize_mpn(value)
+    if not normalized:
+        return 0.0
+    lookup = load_mpn_mfr_lookup()
+    if hasattr(lookup, "match_normalized_many"):
+        match = lookup.match_normalized_many(
+            [normalized],
+            threshold=MPN_RECOGNITION_SIMILARITY_THRESHOLD,
+        ).get(normalized) or {}
+        return float(match.get("score") or 0.0)
+    entry = lookup.get(value) if hasattr(lookup, "get") else None
+    return 100.0 if isinstance(entry, dict) and clean(entry.get("mpn")) else 0.0
 
 
 def _effective_marker_operation(mpn_template, alternate_text, delimiter, composition, default):
-    """Resolve insertion versus suffix replacement from this row's actual values."""
+    """Resolve marker semantics only when verified MPN evidence distinguishes them."""
     marker_parts = _split_visual_mpn_at_marker(mpn_template, composition)
     if not marker_parts or not delimiter:
         return default
@@ -5060,19 +5176,135 @@ def _effective_marker_operation(mpn_template, alternate_text, delimiter, composi
     if not alternates:
         return default
 
+    # With no suffix after the marker, insertion and replacement are the same
+    # operation. Use one canonical name without guessing from token lengths.
+    if not primary_suffix:
+        return "insert_alternate_at_marker"
+
     insertion_values = [f"{prefix}{alternate}{primary_suffix}" for alternate in alternates]
     replacement_values = [f"{prefix}{alternate}" for alternate in alternates]
-    insertion_hits = sum(_directory_preserves_mpn_text(value) for value in insertion_values)
-    replacement_hits = sum(_directory_preserves_mpn_text(value) for value in replacement_values)
+    insertion_scores = [_directory_mpn_similarity(value) for value in insertion_values]
+    replacement_scores = [_directory_mpn_similarity(value) for value in replacement_values]
+    insertion_hits = sum(score >= MPN_RECOGNITION_SIMILARITY_THRESHOLD for score in insertion_scores)
+    replacement_hits = sum(score >= MPN_RECOGNITION_SIMILARITY_THRESHOLD for score in replacement_scores)
     if insertion_hits != replacement_hits:
         return "insert_alternate_at_marker" if insertion_hits > replacement_hits else "replace_suffix_at_marker"
-
-    # A leading/trailing empty list member explicitly represents the primary.
-    if any(not clean(part) for part in (raw_parts[:1] + raw_parts[-1:])):
-        return "insert_alternate_at_marker"
-    if primary_suffix and all(len(alternate) == len(primary_suffix) for alternate in alternates):
-        return "replace_suffix_at_marker"
+    if insertion_hits and replacement_hits:
+        insertion_score = sum(insertion_scores) / len(insertion_scores)
+        replacement_score = sum(replacement_scores) / len(replacement_scores)
+        if insertion_score != replacement_score:
+            return "insert_alternate_at_marker" if insertion_score > replacement_score else "replace_suffix_at_marker"
     return default
+
+
+def _select_structural_marker(mpn_template, alternate_text, delimiter):
+    """Select a marker only when structure or directory evidence is unambiguous."""
+    candidates = _structural_marker_candidates(mpn_template)
+    if not candidates:
+        return None
+    source_length = len(str(mpn_template or "").rstrip())
+    trailing_candidates = [
+        candidate for candidate in candidates
+        if candidate["end"] == source_length
+    ]
+    if trailing_candidates:
+        return {**trailing_candidates[-1], "operation": "insert_alternate_at_marker"}
+    supported = []
+    for candidate in candidates:
+        composition = {
+            "marker": candidate["value"],
+            "markerSequence": candidate["value"],
+            "markerOccurrence": candidate["occurrence"],
+        }
+        operation = _effective_marker_operation(
+            mpn_template,
+            alternate_text,
+            delimiter,
+            composition,
+            "",
+        )
+        if operation:
+            supported.append({**candidate, "operation": operation})
+    if len(supported) == 1:
+        return supported[0]
+    if supported:
+        supported.sort(key=lambda item: (item["end"] - item["start"], item["start"]), reverse=True)
+        return supported[0]
+    maximal_runs = _contiguous_symbol_runs(mpn_template)
+    if not maximal_runs:
+        return None
+    maximal = maximal_runs[-1]
+    maximal_identity = (maximal["start"], maximal["end"], maximal["value"])
+    selected = next(
+        (candidate for candidate in candidates if (
+            candidate["start"], candidate["end"], candidate["value"]
+        ) == maximal_identity),
+        None,
+    )
+    if selected is None:
+        return None
+    if not clean(selected.get("suffix")):
+        selected = next(
+            (
+                candidate
+                for candidate in reversed(candidates)
+                if candidate["end"] == source_length
+            ),
+            selected,
+        )
+    return {**selected, "operation": ""}
+
+
+def _finalize_inferred_marker_operation(visual_pattern, mpn_template, alternate_text, delimiter):
+    """Attach a directory-supported operation or explicitly require review."""
+    if not isinstance(visual_pattern, dict):
+        return visual_pattern
+    composition = dict(visual_pattern.get("mpnComposition") or {})
+    operation = _effective_marker_operation(
+        mpn_template,
+        alternate_text,
+        delimiter,
+        composition,
+        "",
+    )
+    if operation == "replace_suffix_at_marker":
+        marker = str(composition.get("markerSequence") or composition.get("marker") or "")
+        visual_pattern["alternateMode"] = "replace_suffix_at_marker"
+        visual_pattern["mpnComposition"] = {
+            **composition,
+            "operation": operation,
+            "marker": marker,
+            "markerSequence": marker,
+            "prefixSource": "mpn_before_marker",
+            "primarySuffixSource": "mpn_after_marker",
+            "alternateSuffixSource": "alternateList",
+        }
+        visual_pattern["operationStatus"] = "directory_supported"
+    elif operation == "insert_alternate_at_marker":
+        visual_pattern["alternateMode"] = "insert_at_marker"
+        visual_pattern["mpnComposition"] = {
+            **composition,
+            "operation": operation,
+            "prefixSource": "mpn_before_marker",
+            "suffixSource": "mpn_after_marker",
+            "alternateSource": "alternateList",
+        }
+        visual_pattern["operationStatus"] = "directory_supported"
+    else:
+        visual_pattern["alternateMode"] = "marker_operation_requires_confirmation"
+        visual_pattern["mpnComposition"] = {
+            **composition,
+            "operation": "",
+            "prefixSource": "mpn_before_marker",
+            "suffixSource": "mpn_after_marker",
+            "alternateSource": "alternateList",
+        }
+        visual_pattern["operationStatus"] = "needs_user_confirmation"
+        visual_pattern.setdefault("recognitionWarnings", []).append({
+            "code": "ambiguous_marker_operation",
+            "message": "Choose whether alternate values are inserted at the marker or replace the suffix after it.",
+        })
+    return visual_pattern
 
 
 def _infer_marker_alternate_visual_rule(source_value, source_column, mapped_fields):
@@ -5088,25 +5320,11 @@ def _infer_marker_alternate_visual_rule(source_value, source_column, mapped_fiel
             return {}
         suffix_group = suffix_groups[0]
         suffix_text = suffix_group.group(1)
-        delimiter = next((
-            candidate
-            for candidate in ("/", "|", ";", ",", "^", "~", "\\")
-            if (
-                len([part for part in suffix_text.split(candidate) if clean(part)]) >= 2
-                or (
-                    len([part for part in suffix_text.split(candidate) if clean(part)]) == 1
-                    and (
-                        suffix_text.strip().startswith(candidate)
-                        or suffix_text.strip().endswith(candidate)
-                    )
-                )
-            )
-        ), "")
+        delimiter = _infer_list_delimiter(suffix_text)
         if not delimiter:
             return {}
         before_suffix = text[:suffix_group.start()].rstrip()
-        marker_matches = list(re.finditer(r"(@+|#+)", before_suffix))
-        marker_match = marker_matches[-1] if marker_matches else None
+        marker_match = _select_structural_marker(before_suffix, suffix_text, delimiter)
         if not marker_match:
             return {}
         candidate, candidate_score, _reason = _best_mpn_from_text(before_suffix)
@@ -5117,8 +5335,8 @@ def _infer_marker_alternate_visual_rule(source_value, source_column, mapped_fiel
         tagged_spans = [
             {"start": mpn_start, "end": mpn_end, "role": "mpn"},
             {
-                "start": marker_match.start(1),
-                "end": marker_match.end(1),
+                "start": marker_match["start"],
+                "end": marker_match["end"],
                 "role": "insertionMarker",
             },
             {
@@ -5134,6 +5352,12 @@ def _infer_marker_alternate_visual_rule(source_value, source_column, mapped_fiel
             alternate_delimiter=delimiter,
             alternate_mode="insert_at_marker",
         )
+        visual_pattern = _finalize_inferred_marker_operation(
+            visual_pattern,
+            before_suffix,
+            suffix_text,
+            delimiter,
+        )
         return {"fields": {}, "visualPattern": visual_pattern} if visual_pattern else {}
 
     pairs = _same_cell_parenthesized_mpn_manufacturer_pairs(text)
@@ -5148,32 +5372,19 @@ def _infer_marker_alternate_visual_rule(source_value, source_column, mapped_fiel
 
     suffix_group = suffix_groups[0]
     suffix_text = suffix_group.group(1)
-    delimiter = next((
-        candidate
-        for candidate in ("/", "|", ";", ",", "^", "~", "\\")
-        if (
-            len([part for part in suffix_text.split(candidate) if clean(part)]) >= 2
-            or (
-                len([part for part in suffix_text.split(candidate) if clean(part)]) == 1
-                and (
-                    suffix_text.strip().startswith(candidate)
-                    or suffix_text.strip().endswith(candidate)
-                )
-            )
-        )
-    ), "")
+    delimiter = _infer_list_delimiter(suffix_text)
     if not delimiter:
         return {}
 
     before_suffix = source_fragment[:suffix_group.start()].rstrip()
-    marker_matches = list(re.finditer(r"(@+|#+)", before_suffix))
-    marker_match = marker_matches[-1] if marker_matches else None
+    marker_match = _select_structural_marker(before_suffix, suffix_text, delimiter)
     if not marker_match:
         return {}
 
     manufacturer = clean(pair.get("manufacturer"))
-    if not manufacturer or not _looks_like_parenthesized_manufacturer_alias(manufacturer):
+    if not manufacturer:
         return {}
+    manufacturer_supported = _looks_like_parenthesized_manufacturer_alias(manufacturer)
 
     source_offset = text.find(source_fragment)
     mpn_span = _normalized_candidate_source_span(source_fragment, pair.get("mpn"))
@@ -5187,8 +5398,8 @@ def _infer_marker_alternate_visual_rule(source_value, source_column, mapped_fiel
     if source_offset < 0 or not mpn_span or manufacturer_match is None:
         return {}
 
-    marker_start = marker_match.start(1)
-    marker_end = marker_match.end(1)
+    marker_start = marker_match["start"]
+    marker_end = marker_match["end"]
     if (
         marker_start < mpn_span[0]
         or marker_start > mpn_span[1]
@@ -5234,25 +5445,18 @@ def _infer_marker_alternate_visual_rule(source_value, source_column, mapped_fiel
     )
     if not visual_pattern:
         return {}
-    composition = visual_pattern.get("mpnComposition") or {}
-    effective_operation = _effective_marker_operation(
+    visual_pattern = _finalize_inferred_marker_operation(
+        visual_pattern,
         before_suffix,
         suffix_text,
         delimiter,
-        composition,
-        clean(composition.get("operation")) or "insert_alternate_at_marker",
     )
-    if effective_operation == "replace_suffix_at_marker":
-        marker = str(composition.get("markerSequence") or composition.get("marker") or "@")
-        visual_pattern["alternateMode"] = "replace_suffix_at_marker"
-        visual_pattern["mpnComposition"] = {
-            "operation": "replace_suffix_at_marker",
-            "marker": marker,
-            "markerSequence": marker,
-            "prefixSource": "mpn_before_marker",
-            "primarySuffixSource": "mpn_after_marker",
-            "alternateSuffixSource": "alternateList",
-        }
+    if not manufacturer_supported:
+        visual_pattern.setdefault("recognitionWarnings", []).append({
+            "code": "manufacturer_not_verified",
+            "message": "The structurally identified manufacturer is not verified in the manufacturer directory.",
+            "sourceText": manufacturer,
+        })
     return {"fields": {}, "visualPattern": visual_pattern}
 
 
@@ -5838,13 +6042,23 @@ def derive_visual_pattern_from_tagged_spans(
         pattern_type = "bracket_alternate_manufacturer" if "alternateList" in tagged_roles else "bracket_manufacturer"
     else:
         pattern_type = "tagged_fields"
+    requested_alternate_mode = clean(alternate_mode)
     rule = {
         "type": pattern_type,
         "sourceHeader": source_header,
         "groupSeparator": group_separator,
         "recordSeparator": group_separator,
         "alternateDelimiter": "" if alternate_delimiter == "__no_split__" else str(alternate_delimiter or ""),
-        "alternateMode": "complete" if alternate_mode == "complete" else "append",
+        "alternateMode": (
+            requested_alternate_mode
+            if requested_alternate_mode in {
+                "complete",
+                "append",
+                "insert_at_marker",
+                "replace_suffix_at_marker",
+            }
+            else "append"
+        ),
         "alternateJoiner": str(alternate_joiner or ""),
         "segments": segments,
     }
@@ -5883,20 +6097,71 @@ def derive_visual_pattern_from_tagged_spans(
             ),
         }
     else:
-        marker_match = re.search(r"([@#]+)([^@#]*)$", mpn_text)
-        replacement_marker = marker_match.group(1) if marker_match else ""
-    if "alternateList" in tagged_roles and not explicit_marker and replacement_marker:
-        prefix, primary_suffix = mpn_text.rsplit(replacement_marker, 1)
-        if clean(prefix) and clean(primary_suffix):
+        alternate_span = next(
+            (span for span in template_spans if span["role"] == "alternateList"),
+            None,
+        )
+        alternate_text = (
+            text[alternate_span["start"]:alternate_span["end"]]
+            if alternate_span
+            else ""
+        )
+        inferred_delimiter = str(alternate_delimiter or "") or _infer_list_delimiter(alternate_text)
+        marker_match = (
+            _select_structural_marker(mpn_text, alternate_text, inferred_delimiter)
+            if inferred_delimiter and requested_alternate_mode != "complete"
+            else None
+        )
+        replacement_marker = marker_match["value"] if marker_match else ""
+    if (
+        "alternateList" in tagged_roles
+        and not explicit_marker
+        and replacement_marker
+        and requested_alternate_mode == "append"
+        and not clean(marker_match.get("suffix"))
+    ):
+        rule["trailingPlaceholder"] = marker_match["value"]
+    elif "alternateList" in tagged_roles and not explicit_marker and replacement_marker:
+        marker_composition = {
+            "marker": replacement_marker,
+            "markerSequence": replacement_marker,
+            "markerOccurrence": int(marker_match.get("occurrence") or 1),
+        }
+        marker_parts = _split_visual_mpn_at_marker(mpn_text, marker_composition)
+        prefix, primary_suffix = marker_parts if marker_parts else ("", "")
+        inferred_operation = {
+            "insert_at_marker": "insert_alternate_at_marker",
+            "replace_suffix_at_marker": "replace_suffix_at_marker",
+        }.get(requested_alternate_mode, clean(marker_match.get("operation")))
+        if clean(prefix) and (inferred_operation == "insert_alternate_at_marker" or not primary_suffix):
+            rule["alternateMode"] = "insert_at_marker"
+            rule["mpnComposition"] = {
+                **marker_composition,
+                "operation": "insert_alternate_at_marker",
+                "prefixSource": "mpn_before_marker",
+                "suffixSource": "mpn_after_marker",
+                "alternateSource": "alternateList",
+                "listSuppliesPrimary": True,
+            }
+        elif clean(prefix) and inferred_operation == "replace_suffix_at_marker":
             rule["alternateMode"] = "replace_suffix_at_marker"
             rule["mpnComposition"] = {
+                **marker_composition,
                 "operation": "replace_suffix_at_marker",
-                "marker": replacement_marker,
-                "markerSequence": replacement_marker,
                 "prefixSource": "mpn_before_marker",
                 "primarySuffixSource": "mpn_after_marker",
                 "alternateSuffixSource": "alternateList",
             }
+        elif clean(prefix):
+            rule["alternateMode"] = "marker_operation_requires_confirmation"
+            rule["mpnComposition"] = {
+                **marker_composition,
+                "operation": "",
+                "prefixSource": "mpn_before_marker",
+                "suffixSource": "mpn_after_marker",
+                "alternateSource": "alternateList",
+            }
+            rule["operationStatus"] = "needs_user_confirmation"
 
     preserve_outer_brackets = {}
     for span in template_spans:
@@ -6124,8 +6389,13 @@ def _visual_pattern_identity_pairs(row, headers, roles, config=None):
     composition_marker = str(
         mpn_composition.get("markerSequence")
         or mpn_composition.get("marker")
-        or "@"
-    ) if isinstance(mpn_composition, dict) else "@"
+        or ""
+    ) if isinstance(mpn_composition, dict) else ""
+    trailing_placeholder = str(
+        visual_pattern.get("trailingPlaceholder")
+        or visual_pattern.get("trailing_placeholder")
+        or ""
+    )
     preserve_outer_brackets = (
         visual_pattern.get("preserveOuterBrackets")
         or visual_pattern.get("preserve_outer_brackets")
@@ -6165,15 +6435,15 @@ def _visual_pattern_identity_pairs(row, headers, roles, config=None):
 
     def append_base_mpn(value):
         base = str(value or "")
-        if not preserve_mpn_at:
-            base = base.replace("@", "")
+        if trailing_placeholder and base.endswith(trailing_placeholder):
+            base = base[:-len(trailing_placeholder)]
         if alternate_joiner and base.endswith(alternate_joiner):
             base = base[:-len(alternate_joiner)]
         return clean(base)
 
     def append_alternate_mpn(base, alternate):
         if not alternate_joiner:
-            return f"{base}{alternate}"
+            return f"{append_base_mpn(base)}{alternate}"
         alternate_text = str(alternate or "")
         if alternate_text.startswith(alternate_joiner):
             alternate_text = alternate_text[len(alternate_joiner):]
@@ -6182,8 +6452,6 @@ def _visual_pattern_identity_pairs(row, headers, roles, config=None):
     def add_pair(mpn, manufacturer):
         nonlocal pair_position
         mpn_text = str(mpn or "")
-        if not preserve_mpn_at:
-            mpn_text = mpn_text.replace("@", "")
         mpn_text = _strip_configured_prefix(mpn_text, _field_rule(config, "mpn"))
         mpn = clean(mpn_text)
         manufacturer = clean(manufacturer)
@@ -6229,6 +6497,15 @@ def _visual_pattern_identity_pairs(row, headers, roles, config=None):
                 mpn_composition,
                 composition_operation,
             )
+        if (
+            isinstance(mpn_composition, dict)
+            and composition_marker
+            and effective_operation not in {
+                "insert_alternate_at_marker",
+                "replace_suffix_at_marker",
+            }
+        ):
+            continue
         if segment_mpn:
             if effective_operation == "insert_alternate_at_marker":
                 marker_parts = _split_visual_mpn_at_marker(segment_mpn, mpn_composition)
@@ -6265,7 +6542,7 @@ def _visual_pattern_identity_pairs(row, headers, roles, config=None):
             ):
                 replacement_prefix, primary_suffix = segment_mpn.rsplit(composition_marker, 1)
                 primary_mpn = f"{replacement_prefix}{primary_suffix}"
-            elif alternate_mode == "append" and alternate_joiner:
+            elif alternate_mode == "append" and (alternate_joiner or trailing_placeholder):
                 primary_mpn = append_base_mpn(segment_mpn)
             add_pair(primary_mpn, segment_manufacturer)
             if segment_alternates and alternate_delimiter:
@@ -6338,6 +6615,15 @@ def _visual_pattern_identity_pairs(row, headers, roles, config=None):
                 mpn_composition,
                 composition_operation,
             )
+        if (
+            isinstance(mpn_composition, dict)
+            and composition_marker
+            and effective_operation not in {
+                "insert_alternate_at_marker",
+                "replace_suffix_at_marker",
+            }
+        ):
+            continue
         if effective_operation == "insert_alternate_at_marker":
             marker_parts = _split_visual_mpn_at_marker(base_mpn, mpn_composition)
             if not alternate_text or not alternate_delimiter:
@@ -6374,7 +6660,7 @@ def _visual_pattern_identity_pairs(row, headers, roles, config=None):
         ):
             replacement_prefix, primary_suffix = base_mpn.rsplit(composition_marker, 1)
             primary_mpn = f"{replacement_prefix}{primary_suffix}"
-        elif alternate_mode == "append" and alternate_joiner:
+        elif alternate_mode == "append" and (alternate_joiner or trailing_placeholder):
             primary_mpn = append_base_mpn(base_mpn)
         add_pair(primary_mpn, manufacturer)
         if not alternate_text or not alternate_delimiter:

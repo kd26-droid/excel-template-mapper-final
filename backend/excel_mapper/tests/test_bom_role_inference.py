@@ -880,7 +880,11 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         manufacturer_span = next(span for span in spans if span["role"] == "manufacturer")
         self.assertEqual(value[manufacturer_span["start"]:manufacturer_span["end"]], "INFINEON")
 
-    def test_auto_marker_detection_keeps_distinct_adjacent_delimiters(self):
+    @patch(
+        "excel_mapper.services.bom_role_inference._directory_mpn_similarity",
+        side_effect=lambda value: 95.0 if value == "LTC2936IUF#TRPBF" else 0.0,
+    )
+    def test_auto_marker_detection_keeps_distinct_adjacent_delimiters(self, _similarity):
         value = "LTC2936IUF#@@PBF (/TR) (LTC) {HOM} [3489945]"
         rule = _infer_marker_alternate_visual_rule(
             value,
@@ -899,6 +903,105 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         self.assertEqual(
             [(pair["mpn"], pair["manufacturer"]) for pair in pairs],
             [("LTC2936IUF#PBF", "LTC"), ("LTC2936IUF#TRPBF", "LTC")],
+        )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference._directory_mpn_similarity",
+        return_value=0.0,
+    )
+    def test_auto_marker_rule_detects_unlisted_marker_and_delimiter_without_guessing_operation(
+        self,
+        _similarity,
+    ):
+        value = "ABC123%PBF (A~B)"
+
+        rule = _infer_marker_alternate_visual_rule(
+            value,
+            "MPN values",
+            ["mpn"],
+        )
+
+        visual_pattern = rule["visualPattern"]
+        self.assertEqual(visual_pattern["alternateDelimiter"], "~")
+        self.assertEqual(visual_pattern["mpnComposition"]["markerSequence"], "%")
+        self.assertEqual(visual_pattern["mpnComposition"]["operation"], "")
+        self.assertEqual(visual_pattern["operationStatus"], "needs_user_confirmation")
+        self.assertIn(
+            "ambiguous_marker_operation",
+            {warning["code"] for warning in visual_pattern["recognitionWarnings"]},
+        )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference._looks_like_parenthesized_manufacturer_alias",
+        return_value=False,
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference._directory_mpn_similarity",
+        side_effect=lambda value: 95.0 if value == "IRLML6402TR" else 0.0,
+    )
+    def test_structural_marker_rule_survives_unknown_manufacturer_and_uses_directory_operation(
+        self,
+        _similarity,
+        _manufacturer_match,
+    ):
+        value = "IRLML6402@PBF (/TR) (INFINEON) {HOM} [2225412]"
+
+        rule = _infer_marker_alternate_visual_rule(
+            value,
+            "Ref Statut",
+            ["mpn", "manufacturer"],
+        )
+
+        visual_pattern = rule["visualPattern"]
+        self.assertEqual(visual_pattern["mpnComposition"]["operation"], "replace_suffix_at_marker")
+        self.assertEqual(visual_pattern["operationStatus"], "directory_supported")
+        self.assertIn(
+            "manufacturer_not_verified",
+            {warning["code"] for warning in visual_pattern["recognitionWarnings"]},
+        )
+        pairs = _visual_pattern_identity_pairs(
+            {"Ref Statut": value},
+            ["Ref Statut"],
+            {"mpn": "Ref Statut", "manufacturer": "Ref Statut"},
+            {"_activeFieldPatternRule": rule},
+        )
+        self.assertEqual(
+            [(pair["mpn"], pair["manufacturer"]) for pair in pairs],
+            [("IRLML6402PBF", "INFINEON"), ("IRLML6402TR", "INFINEON")],
+        )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference._looks_like_parenthesized_manufacturer_alias",
+        return_value=True,
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference._directory_mpn_similarity",
+        side_effect=lambda value: 95.0 if value in {"A1PZZ", "A1QZZ"} else 0.0,
+    )
+    def test_marker_rule_replays_with_variable_prefix_suffix_and_alternate_lengths(
+        self,
+        _similarity,
+        _manufacturer_match,
+    ):
+        rule = _infer_marker_alternate_visual_rule(
+            "A1%ZZ (P~Q) (MAKER)",
+            "Combined",
+            ["mpn", "manufacturer"],
+        )
+
+        pairs = _visual_pattern_identity_pairs(
+            {"Combined": "LONG-PREFIX-22%TAIL (X~YZ) (OTHER)"},
+            ["Combined"],
+            {"mpn": "Combined", "manufacturer": "Combined"},
+            {"_activeFieldPatternRule": rule},
+        )
+
+        self.assertEqual(
+            [(pair["mpn"], pair["manufacturer"]) for pair in pairs],
+            [
+                ("LONG-PREFIX-22XTAIL", "OTHER"),
+                ("LONG-PREFIX-22YZTAIL", "OTHER"),
+            ],
         )
 
     def test_saved_insertion_rule_is_not_overridden_by_equal_length_values(self):
@@ -1775,6 +1878,7 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
             "Combined part",
             tagged_spans,
             alternate_delimiter="/",
+            alternate_mode="replace_suffix_at_marker",
         )
 
         self.assertEqual(visual_pattern["groupSeparator"], "]")
@@ -1785,6 +1889,7 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
                 "operation": "replace_suffix_at_marker",
                 "marker": "@",
                 "markerSequence": "@",
+                "markerOccurrence": 1,
                 "prefixSource": "mpn_before_marker",
                 "primarySuffixSource": "mpn_after_marker",
                 "alternateSuffixSource": "alternateList",
@@ -1799,6 +1904,7 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
             tagged_spans=tagged_spans,
             source_header="Combined part",
             alternate_delimiter="/",
+            alternate_mode="replace_suffix_at_marker",
         )
         pairs = [
             (entry["fields"]["mpn"]["value"], entry["fields"]["manufacturer"]["value"])
