@@ -3513,14 +3513,6 @@ def bom_field_pattern_apply(request):
         source_signature = request.data.get('sourceSignature') or request.data.get('source_signature') or {}
         legacy_groups = request.data.get('groups') or request.data.get('patterns') or []
         rules = request.data.get('rules') or request.data.get('fieldPatternRules') or request.data.get('field_pattern_rules') or {}
-        # What was taught earlier, when the caller sent nothing. `roles` and `config` both
-        # fall back to the session and `rules` did not, so a caller holding only a session id
-        # - the agent - re-normalised with an empty rule set: every pattern it had just been
-        # taught was derived, saved, and then ignored by the very next step.
-        if not rules and isinstance(config, dict):
-            saved_rules = config.get('fieldPatternRules')
-            if isinstance(saved_rules, dict):
-                rules = saved_rules
         corrections = request.data.get('corrections') or []
         confirmation_tokens = (
             request.data.get('confirmationTokens')

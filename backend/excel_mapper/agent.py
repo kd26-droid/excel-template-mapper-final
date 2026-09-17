@@ -137,25 +137,42 @@ Work through these in order. Each one ends with a question. After you ask, STOP 
 2b. THE SETUP
    Call review_setup. It reports how the sheet will be read and what else each part of that could be. Nothing here was read from their file: the first setting is worked out from the columns they just confirmed, the rest are defaults. `chosen_by_them` false means nobody has agreed to it.
    Use each item's `reads_as`, never its key. A value like `mpn_mfr_same_cpn_separate` is the parser's name for a setting, not a description of anybody's sheet.
-   Say it in three short parts, in this order, in one message:
+   Say ONLY what it decided, and ask. The choices are what you say NEXT, if they want one changed - listing twenty-seven alternatives to a question they were about to answer "yes" to buries the question underneath them.
 
-   First, `settings` - the four layout questions. Take each one in turn: its `question` in bold as a heading, then EVERY one of its `options` beneath it as a numbered list, in their `reads_as` words, with the one in force written in bold and marked "- detected". Like this:
+   The whole message is the four readings in force, one ticked line each in their `reads_as` words, then what the alternates copy, then the ask:
+
+   Here is how I will read the sheet:
+
+   ✓ the part number and the maker share one cell, the internal code has its own column
+   ✓ one part is one row
+   ✓ alternates are in the same cell as the part they stand in for
+   ✓ one straightforward BOM
+
+   Alternates will copy all eight fields from their primary: the internal part number, the description, the quantity, the unit of measure, the BOM level, the parent or group key, the notes and the internal notes.
+
+   Say **go** if that is right, or name the one you want to change and I will show the choices for it.
+
+   That last line matters: any of the four can be read another way, and a person who is never told that assumes there is nothing to decide. Say it every time, even when the reading looks obvious.
+   `copying_now` empty means an alternate copies nothing - which is an alternate with no description and no quantity. Say that plainly rather than leaving an empty list to imply it.
+   Do NOT list the options in this message. Not a few of them, not the count, not "for example".
+
+   WHEN THEY NAME ONE TO CHANGE, and only then, show that setting's choices - just that one, not all four. Its `question` in bold as a heading, then EVERY one of its `options` as a numbered list in their `reads_as` words, IN THE ORDER GIVEN, with the one in force in bold. Like this:
 
    **Where the part number, the maker and the internal code sit**
    1. only a part number, no maker and no internal code
    2. the part number and the maker share one cell
-   3. **the part number and the maker share one cell, the internal code has its own column** - detected
+   3. the part number and the maker are in their own columns
+   ...
+   7. **the part number and the maker share one cell, the internal code has its own column**
 
-   Show every option, not a selection of them. A person can only choose a reading they have been shown the words for, and this list is the whole reason the checkpoint exists.
-   Never give a count in place of the list. "Six ways" tells them nothing they can act on.
-
-   Second, `copied_to_alternates`. `copying_now` is what an alternate copies from the part it stands in for, and an empty list means it copies nothing - say that plainly, because an alternate with no description and no quantity is what that produces. List ALL eight of `options` in their `reads_as` words as a NUMBERED list, 1 to 8, in the order given, marking which are on. It must be numbered: you are about to ask them to answer with numbers, and a list of bare phrases gives them nothing to count. Ask which they want copied. They may answer with numbers, with "all", or with "none".
+   Then every option, not a selection: a person can only choose a reading they have been shown the words for. Never give a count in place of the list. Ask which one, and call set_setup with the `value` of the option they pick.
+   For the copying, show all eight of `copied_to_alternates.options` as a numbered list marking which are on, and take numbers, "all" or "none".
 
    Third, `row_rules`, and only if it is not empty. Each is a kind of row found in THIS sheet, with `rows_found` saying how many. Say what each one does and whether it is on. A different sheet finds a different set, so never say a rule is missing - it simply found nothing of that kind here.
 
    Then ask whether all of that is right.
    - They say it is right -> go to checkpoint 3.
-   - They pick a different reading for one of the four -> call set_setup with that setting and the `value` of the option they picked. They may answer with its number or in their own words; the options are already in front of them, so do not list them again.
+   - They name one of the four to change -> show THAT setting's options, numbered, and ask which. Then call set_setup with the setting and the `value` of the option they picked. They may answer with its number or in their own words.
    - They choose what to copy -> call set_setup with setting `alternateInheritFields` and `fields` set to the values they picked, or an empty list for none.
    - They want a row rule on or off -> call set_setup with that rule's setting and value "true" or "false".
    Confirm what changed in one line and ask whether the rest is right. Change only what they name; never re-save a setting they did not mention.
@@ -180,7 +197,9 @@ Work through these in order. Each one ends with a question. After you ask, STOP 
    If a value came out wrong, say so in your own words before you ask - a part number carrying a bracket, a manufacturer that swallowed half the cell, a manufacturer that belongs to a different part than the number beside it. That is the entire reason for showing them.
    parts_found is how many approved parts the parser got out of the cell. parts_listed is how many that cell visibly lists. When parts_found is the smaller number, say plainly that the rest are being dropped and quote both numbers - "the cell lists three parts and only one is being kept". Never state a count you did not read from one of those two fields. Never tell someone their alternates are preserved when parts_found is the smaller number; for that pattern they are not.
    Ask whether each pattern is right, and say in that same message how they can answer: in their own words, describing where each field sits - "before the bracket is the part number, inside it up to the comma is the maker, after the comma is a suffix so ignore it, and the comma separates the parts". Never ask them to type a grammar, to name a token, or to count characters. Working out the character positions from what they said is your job, not theirs.
-   When one is wrong you can also correct it yourself without being asked: you can see the cell and what it should divide into, so say how you would read it and offer to apply that.
+   When one looks wrong you may say so and offer a correction - you can see the cell and what it should divide into. But an offer is not permission, and the two must never ride on one answer.
+   Ask about the readings, or ask to apply a correction. NOT BOTH IN ONE MESSAGE. If you have proposed a change, that proposal gets its own question and its own answer: "Shall I change pattern 6?". A "yes", "correct", "looks right" or "go ahead" in reply to "are these readings right?" means take them AS THEY ARE and change nothing - it is agreement with the question you asked, not with a change you had in mind. Reading it as consent alters a pattern nobody asked you to touch, and they find out afterwards.
+   If both need asking, ask whether the readings are right first, and raise the correction only once that is answered.
    Correct it with set_pattern and `parts` - one entry per field of the FIRST approved part, quoting the exact text out of the example cell in the order it appears. For `CAV24C64WE-GT3(ON SEMICONDUCTOR,M000000034)` that is MPN `CAV24C64WE-GT3`, MANUFACTURER `ON SEMICONDUCTOR`, IGNORE `,M000000034)`. Quote the brackets and commas that belong to a piece being ignored; they are part of what it covers.
    When the cell lists more than one approved part, pass `group_separator` as the character between them - a comma for a cell like `A(MAKER,CODE),B(MAKER,CODE)`. Without it they are never divided at all: the separators tried by default are slash, pipe, semicolon, newline and caret, and a comma falls through every one, leaving the whole cell as a single part number.
    A person may describe the rule instead of quoting - "before the bracket is the part number, inside it up to the comma is the maker, after the comma is a suffix to ignore, and the comma separates the parts". Read it against the example cell and turn it into `parts` yourself; do not ask them to count characters.
@@ -188,7 +207,8 @@ Work through these in order. Each one ends with a question. After you ask, STOP 
 
    A pattern with `reads_alternates` true carries the line's other approved parts - a stem, a placeholder and the list that fills it, like `KGM05AR71H102K@ (H/N)`. It has no `example_grammar`, and a typed GRAMMAR over one of those silently discards the alternates and keeps only the stem, which is not a part number. `parts` does not: quoting the first approved part and passing `group_separator` teaches the division, and the rest are read the same way. So accept it as detected when it already reads correctly, and correct it with `parts` when it does not - never with a grammar.
    After a correction, say what the cell now reads as, field by field, so they can see it took.
-   If nothing needs review, say so in one line and go to checkpoint 4. Do not make them confirm what is already recognised.
+   Show every pattern, recognised or not. A recognised one is a reading the library already holds, NOT a reading this person has ever seen: it was taught on some earlier sheet and is about to be applied to theirs. Skipping it means the first sight they get of how their part numbers were divided is the finished BOM. So list them all, with their values, and ask.
+   Say which are already recognised and which are not - that is worth knowing - but ask about all of them either way.
    `all_recognised` and `nothing_detected` are not the same answer. The first means every pattern found was one the library already knew. The second means no pattern was found at all - the column holds plain values needing no interpretation. Say whichever is true; telling someone their patterns were all recognised when none were detected tells them their file was checked when it was not.
 
 4. THE BOM CODE
@@ -255,7 +275,10 @@ Work through these in order. Each one ends with a question. After you ask, STOP 
    - they gave a name for a new project -> project_mode "new" with that project_name
    - they said no project -> project_mode "none"
    Never invent a project id or a project name, and do not guess which of the three they meant - if their answer is ambiguous, ask once more.
-   Report what FactWise created, updated and skipped, and which BOM was attached to which project. If anything did not attach, say which and why. Stop there.
+   Report what FactWise created, updated and skipped, and which BOM was attached to which project.
+   `items_skipped` counts items that were ALREADY in FactWise with the same values, so the import changed nothing about them. Say that, not the bare word "skipped" - which reads as a failure and is the first thing they ask about.
+   `inside_another_bom` lists sub-assemblies that were imported but deliberately NOT attached to the project, because they sit inside one that is. Say so in one line; a person counting five BOMs and seeing one attached needs to know the other four are in it rather than missing.
+   `not_attached` IS a failure. If it is not empty, say which and why. Stop there.
 
 RULES
 
@@ -1952,6 +1975,11 @@ def _tool_set_pattern(state, args):
         'active_rules': known_rules,
         'base_rule': pattern.get('suggestedRule') or {},
         'persist': True,
+        # Mint the signed token that says a person accepted this reading.
+        # Applying no longer takes a rule in the request body - it takes proof
+        # that the rule was confirmed - so teaching without asking for one
+        # produces a rule nothing downstream is allowed to use.
+        'confirm_interpretation': True,
     }
     if taught_field_rules:
         payload['field_rules'] = taught_field_rules
@@ -1970,6 +1998,16 @@ def _tool_set_pattern(state, args):
         config['fieldPatternRules'] = rules
         _save_normaliser_state(state['session_id'], config=config)
 
+    # Carried to normalise, one per taught pattern. Kept by pattern key so
+    # teaching the same one twice replaces its token rather than sending a stale
+    # one alongside the new.
+    confirmation = result.get('confirmation') or {}
+    token = str(confirmation.get('token') or '').strip()
+    if token:
+        held = dict(state.get('pattern_confirmations') or {})
+        held[str(key)] = token
+        state['pattern_confirmations'] = held
+
     return {
         'ok': True,
         'column': source_column,
@@ -1987,7 +2025,15 @@ def _tool_normalise(state, args):
     if not state.get('bom_code_set'):
         return {'ok': False,
                 'error': 'Ask for the BOM code and call set_bom_code before normalising.'}
-    response = bom_field_pattern_apply(_internal_post({'session_id': state['session_id']}))
+    # Every confirmed interpretation taught in this conversation. Without them
+    # apply refuses the taught patterns outright - "Confirm changed patterns
+    # with Use this interpretation first" - and the agent has no such action to
+    # offer, so it asked the person to perform one that does not exist.
+    tokens = list((state.get('pattern_confirmations') or {}).values())
+    response = bom_field_pattern_apply(_internal_post({
+        'session_id': state['session_id'],
+        'confirmationTokens': tokens,
+    }))
     data = getattr(response, 'data', {}) or {}
     if not data.get('success'):
         return {'ok': False, 'error': data.get('error') or 'The sheet could not be normalised.'}
@@ -3033,7 +3079,31 @@ def _tool_import_to_factwise(state, args):
                               'returned to attach them to.')}
 
         boms = _rows(_factwise_call(state, 'boms_list'))
-        wanted = {str(code).strip().lower() for code in bom_codes}
+        # Only the BOMs nothing else in this import contains. A sub-assembly is
+        # already inside its parent's tree - that is what makes it a
+        # sub-assembly - so attaching it to the project as well lists the same
+        # thing twice: once as something being built, and once as a part of
+        # something being built. A sheet with several top-level BOMs attaches
+        # all of them, because none of those sits inside another.
+        #
+        # They are still IMPORTED; this is only about what the project lists.
+        # Falls back to attaching everything if the sub-assemblies cannot be
+        # worked out - a project carrying too much is recoverable, one missing
+        # the assembly it was made for is not.
+        sub_codes = set()
+        try:
+            reviewed = _tool_review_sub_boms(state, {})
+            if reviewed.get('ok'):
+                sub_codes = {str(sub.get('code') or '').strip().lower()
+                             for sub in (reviewed.get('sub_boms') or [])}
+                sub_codes.discard('')
+        except Exception:  # pragma: no cover - attaching must not fail on this
+            sub_codes = set()
+        root_codes = [code for code in bom_codes
+                      if str(code).strip().lower() not in sub_codes]
+        if not root_codes:
+            root_codes = list(bom_codes)
+        wanted = {str(code).strip().lower() for code in root_codes}
         # Newest version per code: importing an existing code creates a new
         # version, and the project should carry the one just made.
         newest = {}
@@ -3057,7 +3127,11 @@ def _tool_import_to_factwise(state, args):
         'imported': created,
         'project': {'id': project_id, 'name': label},
         'attached_boms': attached,
-        'not_attached': [c for c in bom_codes
+        # Deliberately left off the project because they sit inside one that is
+        # on it. Separate from `not_attached`, which is a failure.
+        'inside_another_bom': [c for c in bom_codes
+                               if str(c).strip().lower() in sub_codes],
+        'not_attached': [c for c in root_codes
                          if str(c).lower() not in {str(a).lower() for a in attached}],
     }
 
