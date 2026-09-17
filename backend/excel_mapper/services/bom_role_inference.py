@@ -11940,6 +11940,132 @@ def _normalize_following_item_row_groups(normalized_rows, source_rows, headers, 
     return output
 
 
+def _apply_parent_path_hierarchy(normalized_rows, config):
+    """Read each row's own code and depth out of its parent path.
+
+    A parent column may hold a whole trail (``>E49831AAAPB>J89822AA``) rather
+    than a parent code. Read only for the parent, the trail still answers two
+    questions the sheet's own columns get wrong: its depth is the row's BOM
+    level, and its last segment is the row's own part number.
+
+    That matters because THALES numbers a document by the part it belongs to, so
+    dozens of drawings arrive sharing one CPN - the CPN of their own parent.
+    Each then states itself as its own parent, and because they are the only
+    rows carrying the top assembly's code, excluding them as documents deletes
+    the root and every path running through it dangles.
+
+    This is the backend half of the page's "Read levels and part numbers from
+    the parent path" switch. It existed only in the browser, so rows normalised
+    server-side - which is every row the agent produces - never got it.
+    """
+    from ..bom_tree import PATH_SEPARATORS, PATH_UNRESOLVED_TOLERANCE
+
+    stated = [row for row in normalized_rows or [] if clean(row.get("parent"))]
+    if not stated:
+        return normalized_rows
+
+    known = {clean(row.get("cpn")) for row in normalized_rows if clean(row.get("cpn"))}
+    tolerance = len(stated) * PATH_UNRESOLVED_TOLERANCE
+
+    def score(derive):
+        """Edge count for one reading, or None if too much of it dangles."""
+        edges = 0
+        unresolved = 0
+        for row in stated:
+            parent = derive(row)
+            # A row that is its own parent is a root: correct, but it says
+            # nothing about structure, so it must not be scored as an edge.
+            # Without this, reading a row's own trail as its parent's scores
+            # perfectly and yields a tree of roots.
+            if not parent or parent == clean(row.get("cpn")):
+                continue
+            if parent not in known:
+                unresolved += 1
+                if unresolved > tolerance:
+                    return None
+                continue
+            edges += 1
+        return edges
+
+    def split(row, separator):
+        return [segment.strip()
+                for segment in clean(row.get("parent")).split(separator)
+                if segment.strip()]
+
+    baseline = score(lambda row: clean(row.get("parent")))
+    if baseline is not None and baseline == len(stated):
+        return normalized_rows  # already plain codes
+
+    best = None
+    for separator in PATH_SEPARATORS:
+        if not any(separator in clean(row.get("parent")) for row in stated):
+            continue
+        for take_leaf in (False, True):
+            def derive(row, separator=separator, take_leaf=take_leaf):
+                segments = split(row, separator)
+                if not segments:
+                    return ""
+                if take_leaf:
+                    return segments[-1]
+                return segments[-2] if len(segments) > 1 else ""
+
+            edges = score(derive)
+            if edges is None:
+                continue
+            if best is None or edges > best[0]:
+                best = (edges, separator, take_leaf)
+
+    if not best or best[0] <= (baseline or 0):
+        return normalized_rows
+
+    _edges, separator, take_leaf = best
+    parsed = [(row, split(row, separator)) for row in stated]
+
+    # Turning a path into a parent code is always safe: as it stands the value
+    # matches no row at all.
+    for row, segments in parsed:
+        if not segments:
+            continue
+        row["parent"] = (segments[-1] if take_leaf
+                         else (segments[-2] if len(segments) > 1 else ""))
+
+    # Only a row's OWN trail states its depth and its own part number. A path
+    # that names the parent says nothing about either.
+    if take_leaf or (config or {}).get("parentPathLevels") is False:
+        return normalized_rows
+
+    for row, segments in parsed:
+        if not segments:
+            continue
+        row["level"] = str(len(segments))
+        stated_code = clean(row.get("cpn"))
+        stated_parent = segments[-2] if len(segments) > 1 else ""
+        # Fill what the sheet left empty, and overrule a code that names this
+        # row's own parent - nothing is its own parent, so such a code is not
+        # this row's identity. Any OTHER disagreement stands: the sheet stated
+        # it, and overruling would silently re-identify real parts on every
+        # sheet that writes both a code and a path.
+        if not stated_code or (stated_parent and stated_code == stated_parent):
+            row["cpn"] = segments[-1]
+    return normalized_rows
+
+
+def _alternate_group_key(values, source_row, config=None):
+    """The key rows are grouped by when looking for alternates.
+
+    ``following_item_rows`` is the one layout whose alternates live on separate
+    rows, identified by sharing the primary's CPN; there the CPN is the group.
+    Every other layout keeps a line's alternates in the line's own cell, so the
+    source row is the group and two rows can carry the same part without being
+    read as each other's alternate.
+    """
+    layout = clean((config or {}).get("alternateLayout")
+                   or (config or {}).get("alternate_layout"))
+    if layout == "following_item_rows":
+        return values.get("cpn") or str(source_row)
+    return str(source_row)
+
+
 def normalize_bom_rows(headers, rows, roles=None, config=None):
     """Normalize all mapped BOM fields through the backend inference contract."""
     safe_headers = [clean(header) for header in (headers or [])]
@@ -12074,7 +12200,21 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
             relation = clean(entry.get("relation")) if isinstance(entry, dict) else ""
             normalized = {
                 "sourceRow": source_row,
-                "parentKey": values["parent"] or values["cpn"] or str(source_row),
+                # What groups a row with its alternates.
+                #
+                # The customer part number groups them only when the sheet puts
+                # alternates on their own rows under a shared CPN. Used
+                # otherwise it groups by identity rather than by usage, and a
+                # part consumed by two assemblies - a resistor in two boards -
+                # looks like one part with an alternate. The second usage is
+                # then dropped as a redundant alternate, silently: Honeywell's
+                # HAB-45002226 lost 13 resistors from one sub-assembly and 4
+                # ribbon cables from the top, and the BOM still validated.
+                #
+                # Alternates written inside one cell all expand from the same
+                # source row, so the row number groups those correctly too.
+                "parentKey": values["parent"] or _alternate_group_key(
+                    values, source_row, safe_config),
                 "parent": values["parent"],
                 "relation": relation or ("Primary" if entry_index == 0 else f"Alternate {entry_index}"),
                 "level": values["level"] or "1",
@@ -12108,6 +12248,9 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
             safe_config,
             header_row_index=header_row_index,
         )
+
+    # Before anything reads a level, a code or a parent off these rows.
+    normalized_rows = _apply_parent_path_hierarchy(normalized_rows, safe_config)
 
     rows_by_source = {}
     warnings = []

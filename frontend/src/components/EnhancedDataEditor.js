@@ -49,11 +49,14 @@ import {
   ListSubheader,
   Menu,
   Tabs,
-  Tab
+  Tab,
+  ToggleButton,
+  ToggleButtonGroup
 } from '@mui/material';
 import { Pagination } from '@mui/material';
 import {
   Save as SaveIcon,
+  TableRows as TableRowsIcon,
   Download as DownloadIcon,
   UploadFile as UploadFileIcon,
   ImportExport as ImportExportIcon,
@@ -392,12 +395,38 @@ const ITEM_CODE_SEPARATOR_FROM_MODE = {
   comma: ',',
 };
 
+// Which shape the BOM export produces. Set in Settings; 3.0 (item directory +
+// separate BOM sheet) unless the user opted into 4.0's single combined sheet.
+//
+// Kept in sync with FW_EXPORT_VERSION_KEY in pages/Settings.js.
+const FW_EXPORT_VERSION_KEY = 'fw_default_export_version';
+const EXPORT_VERSION_4 = '4.0';
+const EXPORT_VERSION_3 = '3.0';
+
+const readDefaultExportVersion = () => {
+  try {
+    return window.localStorage.getItem(FW_EXPORT_VERSION_KEY) === EXPORT_VERSION_4
+      ? EXPORT_VERSION_4
+      : EXPORT_VERSION_3;
+  } catch (_) {
+    // Storage disabled or blocked - fall back to the shape that has always shipped.
+    return EXPORT_VERSION_3;
+  }
+};
+
 const EnhancedDataEditor = () => {
   const { sessionId } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
   const { isDarkMode, tokens: themeTokens } = useThemeContext();
-  const { isEmbedded: isFactwiseEmbedded, entityName: factwiseEntityName, entityId: factwiseEntityId } = useFactwise();
+  const {
+    isEmbedded: isFactwiseEmbedded,
+    entityName: factwiseEntityName,
+    entityId: factwiseEntityId,
+    enterpriseId: factwiseEnterpriseId,
+    apiUrl: factwiseApiUrl,
+    token: factwiseToken,
+  } = useFactwise();
   const synchronizer = useRef(null);
   const scrollContainerRef = useRef(null);
   const [mousePos, setMousePos] = useState({ x: 50, y: 50 });
@@ -572,6 +601,28 @@ const EnhancedDataEditor = () => {
   const [factwiseExportDialogOpen, setFactwiseExportDialogOpen] = useState(false);
   const [factwisePreviewOpen, setFactwisePreviewOpen] = useState(false);
   const [factwisePreviewType, setFactwisePreviewType] = useState('item');
+  // 4.0 only: after "Export to FactWise" on the combined sheet, ask whether it
+  // should land in a project too before handing the file over.
+  const [combinedProjectPromptOpen, setCombinedProjectPromptOpen] = useState(false);
+  // The 4.0 project step: which project the imported BOM is pulled into, and
+  // how the run is going once it starts.
+  //   'none'     - import the sheet only
+  //   'new'      - create a project and put the BOM in it
+  //   'existing' - put the BOM in a project that already exists
+  const [projectMode, setProjectMode] = useState('none');
+  const [projectName, setProjectName] = useState('');
+  const [projectEntityId, setProjectEntityId] = useState('');
+  const [existingProjectId, setExistingProjectId] = useState('');
+  const [projectChoices, setProjectChoices] = useState({ loading: false, projects: [], entities: [] });
+  //   status: 'idle' | 'running' | 'done' | 'failed'
+  const [exportRun, setExportRun] = useState({ status: 'idle', step: '', error: '', summary: null });
+  // The 4.0 preview shows the same sheet two ways — as the grid that gets
+  // exported, or as the BOM diagram, which is easier to check the hierarchy in.
+  const [combinedPreviewView, setCombinedPreviewView] = useState('sheet');
+  // What FactWise 4.0 says about the sheet. This is the ONLY source of
+  // findings on 4.0 — the mapper's own item and BOM rules do not run.
+  //   status: 'idle' | 'checking' | 'done' | 'failed'
+  const [fwValidation, setFwValidation] = useState({ status: 'idle', result: null, error: '' });
   // BOM-specific validation, kept separate from the item required-field guard.
   const [bomValidationOpen, setBomValidationOpen] = useState(false);
   const [bomValidationIssues, setBomValidationIssues] = useState([]);
@@ -4218,11 +4269,212 @@ const EnhancedDataEditor = () => {
       .map(col => col.field)
   ), [columnDefs]);
 
+  // Ask FactWise what is wrong with the sheet. Sends the very file the user
+  // would download, so the answer is about the real export and not a
+  // reconstruction of it. Everything it reports is shown verbatim; the mapper
+  // contributes no findings of its own on 4.0.
+  const runFactwiseValidation = useCallback(async () => {
+    if (!factwiseApiUrl || !factwiseToken || !factwiseEnterpriseId) {
+      setFwValidation({
+        status: 'failed',
+        result: null,
+        error: 'Open the mapper from FactWise to check this sheet against it.',
+      });
+      return null;
+    }
+    setFwValidation({ status: 'checking', result: null, error: '' });
+    try {
+      const sheet = await api.downloadProcessedFile(
+        sessionId, 'excel', getCurrentExportColumnOrder(), 'raw'
+      );
+      const form = new FormData();
+      form.append('file', new Blob([sheet.data], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      }), `sheet_${sessionId}.xlsx`);
+      form.append('api_url', factwiseApiUrl);
+      form.append('enterprise_id', factwiseEnterpriseId);
+      form.append('token', factwiseToken);
+      // The combined sheet is an item import that carries BOM columns, so the
+      // item validator is the one that reads both halves of it.
+      form.append('import_type', 'item');
+      const response = await api.factwise40Validate(form);
+      const result = response?.data?.result || null;
+      if (!result) {
+        const message = response?.data?.error;
+        setFwValidation({
+          status: 'failed',
+          result: null,
+          error: typeof message === 'string' ? message : 'FactWise could not check this sheet.',
+        });
+        return null;
+      }
+      setFwValidation({ status: 'done', result, error: '' });
+      return result;
+    } catch (e) {
+      setFwValidation({
+        status: 'failed',
+        result: null,
+        error: getFriendlyErrorMessage(e, 'FactWise could not check this sheet.'),
+      });
+      return null;
+    }
+  }, [factwiseApiUrl, factwiseToken, factwiseEnterpriseId, sessionId,
+      getCurrentExportColumnOrder, getFriendlyErrorMessage]);
+
+  const factwise40 = useCallback(async (op, extra = {}) => {
+    const response = await api.factwise40Call({
+      op,
+      api_url: factwiseApiUrl,
+      enterprise_id: factwiseEnterpriseId,
+      token: factwiseToken,
+      ...extra,
+    });
+    if (!response?.data?.success) {
+      const detail = response?.data?.error;
+      throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail || op));
+    }
+    return response.data.result;
+  }, [factwiseApiUrl, factwiseEnterpriseId, factwiseToken]);
+
+  // Projects to choose from, and the entities a new one can be filed under.
+  // The entity matters: a project is created against one, and the id on the
+  // launch URL is the enterprise, not an entity.
+  const loadProjectChoices = useCallback(async () => {
+    setProjectChoices(prev => ({ ...prev, loading: true }));
+    try {
+      const [projects, entities] = await Promise.all([
+        factwise40('projects_list').catch(() => null),
+        factwise40('entities').catch(() => null),
+      ]);
+      const projectRows = Array.isArray(projects?.items) ? projects.items : [];
+      const entityRows = Array.isArray(entities) ? entities : [];
+      setProjectChoices({ loading: false, projects: projectRows, entities: entityRows });
+      // One entity is not a choice, so it is made rather than asked for.
+      if (entityRows.length === 1) setProjectEntityId(entityRows[0].entity_id);
+    } catch (e) {
+      setProjectChoices({ loading: false, projects: [], entities: [] });
+    }
+  }, [factwise40]);
+
+  // Import the sheet, then pull the BOM it created into a project.
+  //
+  // Commit reports counts and no ids, so the BOM has to be found afterwards by
+  // the code the sheet carried — which is why the commit call hands those codes
+  // back. Order matters: the BOM cannot be attached before it exists.
+  const runFactwiseExport = useCallback(async () => {
+    setExportRun({ status: 'running', step: 'Importing the sheet into FactWise…', error: '', summary: null });
+    try {
+      const sheet = await api.downloadProcessedFile(
+        sessionId, 'excel', getCurrentExportColumnOrder(), 'raw'
+      );
+      const form = new FormData();
+      form.append('file', new Blob([sheet.data], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      }), `sheet_${sessionId}.xlsx`);
+      form.append('action', 'commit');
+      form.append('api_url', factwiseApiUrl);
+      form.append('enterprise_id', factwiseEnterpriseId);
+      form.append('token', factwiseToken);
+      form.append('import_type', 'item');
+      const committed = await api.factwise40Validate(form);
+      if (!committed?.data?.success) {
+        const detail = committed?.data?.error;
+        throw new Error(typeof detail === 'string' ? detail : 'FactWise refused the import.');
+      }
+      const outcome = committed.data.result || {};
+      const bomCodes = committed.data.bom_codes || [];
+
+      if (projectMode === 'none') {
+        // Nothing to attach to: FactWise now holds the items and the BOM, and a
+        // project can be built around them there whenever one is wanted.
+        setExportRun({
+          status: 'done',
+          step: '',
+          error: '',
+          summary: {
+            created: outcome.created || 0,
+            updated: outcome.updated || 0,
+            skipped: outcome.skipped_existing || 0,
+            project: '',
+            attached: [],
+            missing: [],
+          },
+        });
+        fetchDataSynchronized();
+        return;
+      }
+
+      setExportRun(prev => ({ ...prev, step: 'Setting up the project…' }));
+      let projectId = existingProjectId;
+      let projectLabel = '';
+      if (projectMode === 'new') {
+        const created = await factwise40('project_create', {
+          body: {
+            entity_id: projectEntityId,
+            project_name: projectName.trim() || `BOM import ${new Date().toLocaleDateString()}`,
+          },
+        });
+        projectId = created?.id || created?.project_id;
+        projectLabel = created?.project_name || created?.project_code || '';
+      } else {
+        const chosen = projectChoices.projects.find(p => (p.id || p.project_id) === existingProjectId);
+        projectLabel = chosen?.project_name || chosen?.project_code || '';
+      }
+      if (!projectId) throw new Error('FactWise did not return a project to attach to.');
+
+      setExportRun(prev => ({ ...prev, step: 'Adding the BOM to the project…' }));
+      const boms = await factwise40('boms_list');
+      const wanted = new Set(bomCodes.map(code => String(code).trim().toLowerCase()));
+      // Newest version per code: an import of an existing code creates a new
+      // version, and the project should carry the one just made.
+      const byCode = new Map();
+      (Array.isArray(boms) ? boms : []).forEach(bom => {
+        const code = String(bom.bom_code || '').trim().toLowerCase();
+        if (!wanted.has(code)) return;
+        const held = byCode.get(code);
+        if (!held || Number(bom.version || 0) > Number(held.version || 0)) byCode.set(code, bom);
+      });
+      const attached = [];
+      for (const bom of byCode.values()) {
+        await factwise40('project_add_bom', {
+          project_id: projectId,
+          body: { enterprise_bom_id: bom.enterprise_bom_id },
+        });
+        attached.push(bom.bom_code);
+      }
+
+      setExportRun({
+        status: 'done',
+        step: '',
+        error: '',
+        summary: {
+          created: outcome.created || 0,
+          updated: outcome.updated || 0,
+          skipped: outcome.skipped_existing || 0,
+          project: projectLabel,
+          attached,
+          missing: bomCodes.filter(
+            code => !attached.some(name => String(name).toLowerCase() === String(code).toLowerCase())
+          ),
+        },
+      });
+      fetchDataSynchronized();
+    } catch (e) {
+      setExportRun({ status: 'failed', step: '', error: e?.message || 'The export did not finish.', summary: null });
+    }
+  }, [sessionId, getCurrentExportColumnOrder, factwiseApiUrl, factwiseEnterpriseId, factwiseToken,
+      factwise40, projectMode, projectName, projectEntityId, existingProjectId,
+      projectChoices.projects, fetchDataSynchronized]);
+
   const openFactwisePreview = useCallback((type) => {
     setFactwisePreviewType(type);
     setFactwisePreviewFullscreen(false);
     setFactwisePreviewOpen(true);
-  }, []);
+    if (type === 'combined') {
+      setFwValidation({ status: 'idle', result: null, error: '' });
+      runFactwiseValidation();
+    }
+  }, [runFactwiseValidation]);
 
   // Real project export runs inside the mapper (no redirects) when embedded
   // in Factwise. Standalone tool keeps the existing mock-only flow.
@@ -4257,6 +4509,21 @@ const EnhancedDataEditor = () => {
     // handleDirectoryExport).
     runGuardedExport(() => openFactwisePreview(destination), destination);
   }, [handleExportToProject, runGuardedExport, openFactwisePreview, isFactwiseEmbedded]);
+
+  // 3.0 asks where the sheet should go, because it has three destinations
+  // (project / item directory / BOM sheet). 4.0 has one delivery - the combined
+  // sheet - so there is nothing to choose: go straight to its preview, and ask
+  // about the project afterwards instead.
+  const openFactwiseExport = useCallback(() => {
+    if (readDefaultExportVersion() !== EXPORT_VERSION_4) {
+      setFactwiseExportDialogOpen(true);
+      return;
+    }
+    // No local pre-flight on 4.0. FactWise's own validate endpoint is the only
+    // thing that decides whether a sheet can be imported, so running our item
+    // and BOM rules here would only show a second, different opinion before it.
+    openFactwisePreview('combined');
+  }, [runGuardedExport, openFactwisePreview]);
 
   const handleExportSheetForEditing = useCallback(async () => {
     setExportingSheet(true);
@@ -4315,7 +4582,11 @@ const EnhancedDataEditor = () => {
 
   const downloadFactwisePreview = useCallback(async (format) => {
     const columnOrder = getCurrentExportColumnOrder();
-    const label = factwisePreviewType === 'bom' ? 'bom_directory' : 'item_directory';
+    const label = factwisePreviewType === 'bom'
+      ? 'bom_directory'
+      : factwisePreviewType === 'combined'
+        ? 'bom_sheet_4_0'
+        : 'item_directory';
     const extension = format === 'csv' ? 'csv' : 'xlsx';
     const mime = format === 'csv'
       ? 'text/csv'
@@ -4331,7 +4602,12 @@ const EnhancedDataEditor = () => {
             sessionId,
             format === 'csv' ? 'csv' : 'excel',
             columnOrder,
-            'item',
+            // 4.0's combined sheet is 'raw': the working grid kept whole - no
+            // BOM-column stripping, no item dedupe, no authored finished good
+            // appended - so item columns and Level / Quantity / BOM Qty ship
+            // together in one sheet, with the Finished good code and BOM code
+            // the combined importer needs to place each line.
+            factwisePreviewType === 'combined' ? 'raw' : 'item',
             duplicateHighlightFieldRef.current ? [duplicateHighlightFieldRef.current] : []
           );
       const contentDisposition = response.headers?.['content-disposition'];
@@ -4351,7 +4627,12 @@ const EnhancedDataEditor = () => {
       link.click();
       document.body.removeChild(link);
       window.URL.revokeObjectURL(url);
-      showSnackbar(`${factwisePreviewType === 'bom' ? 'BOM' : 'Item'} directory downloaded`, 'success');
+      showSnackbar(
+        factwisePreviewType === 'combined'
+          ? 'Sheet downloaded'
+          : `${factwisePreviewType === 'bom' ? 'BOM' : 'Item'} directory downloaded`,
+        'success'
+      );
     } catch (e) {
       showSnackbar(e.message || 'Failed to download export file', 'error');
     } finally {
@@ -4360,15 +4641,19 @@ const EnhancedDataEditor = () => {
   }, [factwisePreviewType, getCurrentExportColumnOrder, sessionId, showSnackbar]);
 
   const handleDirectoryExport = useCallback(async (type = factwisePreviewType) => {
+    // 4.0's combined sheet takes the ITEM hand-off route - it is one sheet, not
+    // the two-step items-then-BOM orchestration - so only the file differs:
+    // 'raw' (grid kept whole) instead of the BOM-stripped item directory.
+    const isCombined = type === 'combined';
     const exportType = type === 'bom' ? 'bom' : 'item';
     setFactwisePreviewOpen(false);
-    setDirectoryExportStatus({ open: true, type: exportType, phase: 'loading' });
+    setDirectoryExportStatus({ open: true, type: isCombined ? 'combined' : exportType, phase: 'loading' });
 
     // Standalone tool (not inside Factwise iframe): keep the existing 1.4s mock
     // behaviour so nothing changes for direct users of the tool.
     if (!isFactwiseEmbedded) {
       window.setTimeout(() => {
-        setDirectoryExportStatus({ open: true, type: exportType, phase: 'success' });
+        setDirectoryExportStatus({ open: true, type: isCombined ? 'combined' : exportType, phase: 'success' });
       }, 1400);
       return;
     }
@@ -4397,12 +4682,12 @@ const EnhancedDataEditor = () => {
     // 3. postMessage to parent so FW opens its own BulkImportPage for that
     //    bulk_import_id — the editable error grid + reupload UX Factwise already has.
     const fwResourceType = exportType === 'bom' ? 'BOM' : 'ITEM';
-    const fileLabel = exportType === 'bom' ? 'bom' : 'items';
+    const fileLabel = isCombined ? 'sheet' : exportType === 'bom' ? 'bom' : 'items';
     try {
       const columnOrder = getCurrentExportColumnOrder();
       const response = exportType === 'bom'
         ? await api.downloadDemoBomSheet(sessionId)
-        : await api.downloadProcessedFile(sessionId, 'excel', columnOrder, 'item');
+        : await api.downloadProcessedFile(sessionId, 'excel', columnOrder, isCombined ? 'raw' : 'item');
       const blob = new Blob([response.data], {
         type: response.headers?.['content-type']
           || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -6193,6 +6478,11 @@ const EnhancedDataEditor = () => {
         muted: '#94a3b8',
         iconBg: '#dbeafe'
       };
+  // The 4.0 preview can show either face of the same sheet, so "is this the
+  // diagram?" is no longer the same question as "is this the BOM export?".
+  const combinedPreviewIsDiagram = factwisePreviewType === 'combined' && combinedPreviewView === 'diagram';
+  const previewShowsDiagram = factwisePreviewType === 'bom' || combinedPreviewIsDiagram;
+  const previewIsFullscreen = previewShowsDiagram && factwisePreviewFullscreen;
   const exportTextFieldSx = {
     '& .MuiOutlinedInput-root': {
       borderRadius: '8px',
@@ -7111,7 +7401,7 @@ const EnhancedDataEditor = () => {
                     tools rather than among them. */}
                 <Button
                   size="small"
-                  onClick={() => setFactwiseExportDialogOpen(true)}
+                  onClick={openFactwiseExport}
                   disabled={downloadLoading || syncStatus.inProgress}
                   startIcon={<FolderOpenIcon sx={{ fontSize: 18 }} />}
                   sx={exportFactwiseActionSx}
@@ -10111,19 +10401,19 @@ const EnhancedDataEditor = () => {
         }}
         maxWidth="lg"
         fullWidth
-        fullScreen={factwisePreviewType === 'bom' && factwisePreviewFullscreen}
+        fullScreen={previewIsFullscreen}
         PaperProps={{
           sx: {
-            borderRadius: factwisePreviewType === 'bom' && factwisePreviewFullscreen ? 0 : '12px',
+            borderRadius: previewIsFullscreen ? 0 : '12px',
             overflow: 'hidden',
-            maxWidth: factwisePreviewType === 'bom' && factwisePreviewFullscreen
+            maxWidth: previewIsFullscreen
               ? 'none'
-              : factwisePreviewType === 'bom'
+              : previewShowsDiagram
                 ? 1068
                 : 980,
-            width: factwisePreviewType === 'bom' && factwisePreviewFullscreen ? '100vw' : undefined,
-            height: factwisePreviewType === 'bom' && factwisePreviewFullscreen ? '100vh' : undefined,
-            m: factwisePreviewType === 'bom' && factwisePreviewFullscreen ? 0 : undefined,
+            width: previewIsFullscreen ? '100vw' : undefined,
+            height: previewIsFullscreen ? '100vh' : undefined,
+            m: previewIsFullscreen ? 0 : undefined,
             bgcolor: exportDialogTone.paper,
             border: `1px solid ${exportDialogTone.border}`
           }
@@ -10142,46 +10432,98 @@ const EnhancedDataEditor = () => {
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
             {factwisePreviewType === 'bom'
               ? <AccountTreeIcon sx={{ color: '#16a34a' }} />
-              : <BadgeIcon sx={{ color: '#2563eb' }} />}
+              : factwisePreviewType === 'combined'
+                ? <AccountTreeIcon sx={{ color: '#2563eb' }} />
+                : <BadgeIcon sx={{ color: '#2563eb' }} />}
             <Typography variant="h6" sx={{ fontSize: 18, fontWeight: 620, color: exportDialogTone.heading }}>
-              {factwisePreviewType === 'bom' ? 'Export BOM' : 'Export Item Directory'}
+              {factwisePreviewType === 'bom'
+                ? 'Export BOM'
+                : factwisePreviewType === 'combined'
+                  ? 'Export Sheet (4.0)'
+                  : 'Export Item Directory'}
             </Typography>
           </Box>
-          {factwisePreviewType === 'bom' ? (
-            <Tooltip title={factwisePreviewFullscreen ? 'Exit full screen' : 'Full screen'}>
-              <IconButton
-                onClick={() => setFactwisePreviewFullscreen(value => !value)}
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+            {/* 4.0 is one sheet shown two ways: the grid that actually gets
+                exported, and the BOM diagram for checking the hierarchy. The
+                file is identical either way — this only changes the view. */}
+            {factwisePreviewType === 'combined' && (
+              <ToggleButtonGroup
                 size="small"
+                exclusive
+                value={combinedPreviewView}
+                onChange={(event, next) => {
+                  if (!next) return;
+                  setCombinedPreviewView(next);
+                  // Full screen only makes sense for the diagram; leaving it on
+                  // would strand the table in a full-screen window.
+                  if (next === 'sheet') setFactwisePreviewFullscreen(false);
+                }}
                 sx={{
-                  color: '#60a5fa',
-                  border: `1px solid ${exportDialogTone.border}`,
-                  bgcolor: 'rgba(37, 99, 235, 0.08)',
-                  '&:hover': { bgcolor: 'rgba(37, 99, 235, 0.18)' }
+                  '& .MuiToggleButton-root': {
+                    textTransform: 'none',
+                    fontWeight: 600,
+                    fontSize: 12.5,
+                    px: 1.5,
+                    py: 0.5,
+                    gap: 0.75,
+                    color: exportDialogTone.secondary,
+                    borderColor: exportDialogTone.border,
+                    '&.Mui-selected': {
+                      color: '#2563eb',
+                      bgcolor: 'rgba(37, 99, 235, 0.12)',
+                      '&:hover': { bgcolor: 'rgba(37, 99, 235, 0.18)' }
+                    }
+                  }
                 }}
               >
-                {factwisePreviewFullscreen ? <FullscreenExitIcon fontSize="small" /> : <FullscreenIcon fontSize="small" />}
-              </IconButton>
-            </Tooltip>
-          ) : (
-            <Button
-              onClick={() => setFactwisePreviewOpen(false)}
-              disabled={Boolean(factwisePreviewDownloading)}
-              sx={{ minWidth: 0, color: exportDialogTone.secondary }}
-            >
-              <CloseIcon fontSize="small" />
-            </Button>
-          )}
+                <ToggleButton value="sheet">
+                  <TableRowsIcon sx={{ fontSize: 16 }} />
+                  Sheet
+                </ToggleButton>
+                <ToggleButton value="diagram">
+                  <AccountTreeIcon sx={{ fontSize: 16 }} />
+                  Diagram
+                </ToggleButton>
+              </ToggleButtonGroup>
+            )}
+            {previewShowsDiagram && (
+              <Tooltip title={factwisePreviewFullscreen ? 'Exit full screen' : 'Full screen'}>
+                <IconButton
+                  onClick={() => setFactwisePreviewFullscreen(value => !value)}
+                  size="small"
+                  sx={{
+                    color: '#60a5fa',
+                    border: `1px solid ${exportDialogTone.border}`,
+                    bgcolor: 'rgba(37, 99, 235, 0.08)',
+                    '&:hover': { bgcolor: 'rgba(37, 99, 235, 0.18)' }
+                  }}
+                >
+                  {factwisePreviewFullscreen ? <FullscreenExitIcon fontSize="small" /> : <FullscreenIcon fontSize="small" />}
+                </IconButton>
+              </Tooltip>
+            )}
+            {factwisePreviewType !== 'bom' && (
+              <Button
+                onClick={() => setFactwisePreviewOpen(false)}
+                disabled={Boolean(factwisePreviewDownloading)}
+                sx={{ minWidth: 0, color: exportDialogTone.secondary }}
+              >
+                <CloseIcon fontSize="small" />
+              </Button>
+            )}
+          </Box>
         </DialogTitle>
         <DialogContent sx={{
-          px: factwisePreviewType === 'bom' && factwisePreviewFullscreen ? 2.5 : 3,
-          pt: factwisePreviewType === 'bom' && factwisePreviewFullscreen ? 3 : 3.25,
-          pb: factwisePreviewType === 'bom' ? 2 : 2.5,
+          px: previewIsFullscreen ? 2.5 : 3,
+          pt: previewIsFullscreen ? 3 : 3.25,
+          pb: previewShowsDiagram ? 2 : 2.5,
           bgcolor: exportDialogTone.body,
-          display: factwisePreviewType === 'bom' ? 'flex' : 'block',
-          flexDirection: factwisePreviewType === 'bom' ? 'column' : undefined,
-          overflow: factwisePreviewType === 'bom' && factwisePreviewFullscreen ? 'hidden' : undefined
+          display: previewShowsDiagram ? 'flex' : 'block',
+          flexDirection: previewShowsDiagram ? 'column' : undefined,
+          overflow: previewIsFullscreen ? 'hidden' : undefined
         }}>
-          {factwisePreviewType === 'bom' ? (
+          {previewShowsDiagram ? (
             <>
               <Box sx={{ mt: factwisePreviewFullscreen ? 1 : 1.5 }}>
                 {factwisePreviewOpen && (
@@ -10196,8 +10538,75 @@ const EnhancedDataEditor = () => {
             </>
           ) : (
             <>
+              {factwisePreviewType === 'combined' && (
+                <Box sx={{ mt: 1.5, mb: 2 }}>
+                  {fwValidation.status === 'checking' && (
+                    <Alert severity="info" icon={<CircularProgress size={16} />}
+                      sx={{ borderRadius: '10px' }}>
+                      Checking this sheet with FactWise…
+                    </Alert>
+                  )}
+                  {fwValidation.status === 'failed' && (
+                    <Alert severity="warning" sx={{ borderRadius: '10px' }}
+                      action={<Button size="small" onClick={runFactwiseValidation}>Retry</Button>}>
+                      {fwValidation.error}
+                    </Alert>
+                  )}
+                  {fwValidation.status === 'done' && fwValidation.result?.ok && (
+                    <Alert severity="success" sx={{ borderRadius: '10px' }}>
+                      FactWise checked {fwValidation.result.row_count} rows and found no problems.
+                    </Alert>
+                  )}
+                  {fwValidation.status === 'done' && !fwValidation.result?.ok && (
+                    <Alert
+                      severity="error"
+                      sx={{ borderRadius: '10px', '& .MuiAlert-message': { width: '100%' } }}
+                      action={<Button size="small" onClick={runFactwiseValidation}>Re-check</Button>}
+                    >
+                      <Typography sx={{ fontWeight: 700, fontSize: 13.5, mb: 0.75 }}>
+                        FactWise found {fwValidation.result.error_count} problem
+                        {fwValidation.result.error_count === 1 ? '' : 's'} in {fwValidation.result.row_count} rows.
+                      </Typography>
+                      <Typography variant="caption" sx={{ display: 'block', mb: 1 }}>
+                        Fix them in the grid, then re-check. These come from FactWise's own import,
+                        so clearing them is what makes the sheet importable.
+                      </Typography>
+                      <TableContainer sx={{ maxHeight: 190, bgcolor: 'transparent' }}>
+                        <Table size="small" stickyHeader>
+                          <TableHead>
+                            <TableRow>
+                              {['Row', 'Column', 'Problem'].map(label => (
+                                <TableCell key={label} sx={{ fontWeight: 700, fontSize: 12, bgcolor: exportDialogTone.panel, borderColor: exportDialogTone.borderSoft }}>
+                                  {label}
+                                </TableCell>
+                              ))}
+                            </TableRow>
+                          </TableHead>
+                          <TableBody>
+                            {(fwValidation.result.errors || []).map((issue, position) => (
+                              <TableRow key={`${issue.row}-${issue.column}-${position}`}>
+                                <TableCell sx={{ fontSize: 12, whiteSpace: 'nowrap', borderColor: exportDialogTone.borderSoft }}>
+                                  {issue.row ? issue.row : '—'}
+                                </TableCell>
+                                <TableCell sx={{ fontSize: 12, whiteSpace: 'nowrap', borderColor: exportDialogTone.borderSoft }}>
+                                  {issue.column || '—'}
+                                </TableCell>
+                                <TableCell sx={{ fontSize: 12, borderColor: exportDialogTone.borderSoft }}>
+                                  {issue.message}
+                                </TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </TableContainer>
+                    </Alert>
+                  )}
+                </Box>
+              )}
               <Typography variant="body2" sx={{ color: exportDialogTone.secondary, mb: 1, mt: 1.5 }}>
-                Review the item directory below, then download it for FactWise.
+                {factwisePreviewType === 'combined'
+                  ? 'Review the combined sheet below — item columns and the BOM structure (Level, Quantity, BOM Qty) in one sheet. The export also carries Finished good code and BOM code, derived from the BOM tree.'
+                  : 'Review the item directory below, then download it for FactWise.'}
               </Typography>
               <Typography variant="caption" sx={{ color: exportDialogTone.secondary, display: 'block', mb: 1.5 }}>
                 Preview shows the current page. The downloaded file includes the full processed sheet.
@@ -10301,8 +10710,23 @@ const EnhancedDataEditor = () => {
           {factwisePreviewType !== 'bom' && (
             <Button
               variant="contained"
-              onClick={() => handleDirectoryExport(factwisePreviewType)}
-              disabled={Boolean(factwisePreviewDownloading)}
+              onClick={() => {
+                // 4.0 asks about the project before handing the sheet over;
+                // the item directory keeps going straight across.
+                if (factwisePreviewType === 'combined') {
+                  setExportRun({ status: 'idle', step: '', error: '', summary: null });
+                  setCombinedProjectPromptOpen(true);
+                  loadProjectChoices();
+                  return;
+                }
+                handleDirectoryExport(factwisePreviewType);
+              }}
+              // On 4.0 the sheet goes nowhere until FactWise itself says it is
+              // clean — there is no "export anyway", because the import would
+              // simply reject it. Downloading the sheet stays available.
+              disabled={Boolean(factwisePreviewDownloading) || (
+                factwisePreviewType === 'combined' && !fwValidation.result?.ok
+              )}
               startIcon={<FolderOpenIcon />}
               sx={{
                 textTransform: 'none',
@@ -10324,6 +10748,206 @@ const EnhancedDataEditor = () => {
         </DialogActions>
       </Dialog>
 
+      {/* 4.0 only — where the imported BOM lands. FactWise creates the items
+          and the BOM from the sheet (commit), then the BOM is pulled into a
+          project, which is either made here or picked from the existing ones. */}
+      <Dialog
+        open={combinedProjectPromptOpen}
+        onClose={() => { if (exportRun.status !== 'running') setCombinedProjectPromptOpen(false); }}
+        maxWidth="sm"
+        fullWidth
+        PaperProps={{ sx: { borderRadius: '14px', overflow: 'hidden', maxWidth: 560, bgcolor: exportDialogTone.paper, border: `1px solid ${exportDialogTone.border}` } }}
+      >
+        <DialogTitle sx={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          px: 3, py: 2, borderBottom: `1px solid ${exportDialogTone.border}`,
+          bgcolor: exportDialogTone.header, color: exportDialogTone.heading
+        }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25 }}>
+            <FolderOpenIcon sx={{ color: '#2563eb' }} />
+            <Typography variant="h6" sx={{ fontSize: 18, fontWeight: 620, color: exportDialogTone.heading }}>
+              Export to FactWise
+            </Typography>
+          </Box>
+          <IconButton
+            onClick={() => setCombinedProjectPromptOpen(false)}
+            disabled={exportRun.status === 'running'}
+            size="small"
+            sx={{ color: exportDialogTone.secondary }}
+          >
+            <CloseIcon />
+          </IconButton>
+        </DialogTitle>
+
+        <DialogContent sx={{ px: 3, pt: 3, pb: 2.5, bgcolor: exportDialogTone.body }}>
+          {exportRun.status === 'done' ? (
+            <Alert severity="success" sx={{ borderRadius: '10px', mt: 1 }}>
+              <Typography sx={{ fontWeight: 700, fontSize: 14, mb: 0.5 }}>
+                Exported to FactWise.
+              </Typography>
+              <Typography variant="body2">
+                {exportRun.summary.created} item{exportRun.summary.created === 1 ? '' : 's'} created
+                {exportRun.summary.updated ? `, ${exportRun.summary.updated} updated` : ''}
+                {exportRun.summary.skipped ? `, ${exportRun.summary.skipped} already in FactWise` : ''}
+                {exportRun.summary.project ? ` · project ${exportRun.summary.project}` : ''}
+              </Typography>
+              {!exportRun.summary.project && (
+                <Typography variant="caption" sx={{ display: 'block', mt: 0.5 }}>
+                  Not added to a project — add it from FactWise when you need one.
+                </Typography>
+              )}
+              {exportRun.summary.attached.length > 0 && (
+                <Typography variant="body2" sx={{ mt: 0.5 }}>
+                  BOM{exportRun.summary.attached.length === 1 ? '' : 's'} added: {exportRun.summary.attached.join(', ')}
+                </Typography>
+              )}
+              {exportRun.summary.missing.length > 0 && (
+                <Typography variant="caption" sx={{ display: 'block', mt: 1 }}>
+                  Not found to attach: {exportRun.summary.missing.join(', ')} — the import succeeded,
+                  so these can be added to the project from FactWise.
+                </Typography>
+              )}
+            </Alert>
+          ) : (
+            <>
+              {exportRun.status === 'failed' && (
+                <Alert severity="error" sx={{ borderRadius: '10px', mb: 2 }}>{exportRun.error}</Alert>
+              )}
+              <Typography variant="body2" sx={{ color: exportDialogTone.secondary, mb: 2 }}>
+                FactWise will create the items and the BOM from this sheet. Choose the project the
+                BOM should belong to.
+              </Typography>
+
+              <RadioGroup
+                value={projectMode}
+                onChange={(event) => setProjectMode(event.target.value)}
+                sx={{ gap: 0.5 }}
+              >
+                <FormControlLabel
+                  value="none"
+                  control={<Radio size="small" />}
+                  label="Import the BOM only"
+                />
+                <FormControlLabel value="new" control={<Radio size="small" />} label="New project" />
+                <FormControlLabel
+                  value="existing"
+                  control={<Radio size="small" />}
+                  label={`Existing project${projectChoices.projects.length ? ` (${projectChoices.projects.length})` : ''}`}
+                  disabled={!projectChoices.loading && projectChoices.projects.length === 0}
+                />
+              </RadioGroup>
+
+              <Box sx={{ mt: 2 }}>
+                {projectMode === 'none' && (
+                  <Typography variant="caption" sx={{ color: exportDialogTone.secondary }}>
+                    FactWise will hold the items and the BOM. You can put it in a project from
+                    FactWise whenever you need one.
+                  </Typography>
+                )}
+                {projectChoices.loading && (
+                  <Typography variant="caption" sx={{ color: exportDialogTone.secondary }}>
+                    Loading projects…
+                  </Typography>
+                )}
+                {!projectChoices.loading && projectMode === 'new' && (
+                  <>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      label="Project name"
+                      value={projectName}
+                      onChange={(event) => setProjectName(event.target.value)}
+                      placeholder={`BOM import ${new Date().toLocaleDateString()}`}
+                      sx={exportTextFieldSx}
+                    />
+                    {projectChoices.entities.length > 1 && (
+                      <FormControl fullWidth size="small" sx={{ mt: 2 }}>
+                        <InputLabel>Entity</InputLabel>
+                        <Select
+                          label="Entity"
+                          value={projectEntityId}
+                          onChange={(event) => setProjectEntityId(event.target.value)}
+                        >
+                          {projectChoices.entities.map(entity => (
+                            <MenuItem key={entity.entity_id} value={entity.entity_id}>
+                              {entity.display_name || entity.legal_name}
+                            </MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    )}
+                    {projectChoices.entities.length === 1 && (
+                      <Typography variant="caption" sx={{ color: exportDialogTone.secondary, display: 'block', mt: 1.25 }}>
+                        Filed under {projectChoices.entities[0].display_name || projectChoices.entities[0].legal_name}.
+                      </Typography>
+                    )}
+                  </>
+                )}
+                {!projectChoices.loading && projectMode === 'existing' && (
+                  <FormControl fullWidth size="small">
+                    <InputLabel>Project</InputLabel>
+                    <Select
+                      label="Project"
+                      value={existingProjectId}
+                      onChange={(event) => setExistingProjectId(event.target.value)}
+                    >
+                      {projectChoices.projects.map(project => {
+                        const id = project.id || project.project_id;
+                        return (
+                          <MenuItem key={id} value={id}>
+                            {project.project_name || project.project_code}
+                            {project.project_code ? ` · ${project.project_code}` : ''}
+                          </MenuItem>
+                        );
+                      })}
+                    </Select>
+                  </FormControl>
+                )}
+              </Box>
+
+              {exportRun.status === 'running' && (
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, mt: 2.5 }}>
+                  <CircularProgress size={16} />
+                  <Typography variant="body2" sx={{ color: exportDialogTone.secondary }}>
+                    {exportRun.step}
+                  </Typography>
+                </Box>
+              )}
+            </>
+          )}
+        </DialogContent>
+
+        <DialogActions sx={{ px: 3, py: 2, gap: 1, borderTop: `1px solid ${exportDialogTone.border}`, bgcolor: exportDialogTone.footer }}>
+          <Button
+            onClick={() => setCombinedProjectPromptOpen(false)}
+            disabled={exportRun.status === 'running'}
+            sx={{ textTransform: 'none', borderRadius: '8px', color: exportDialogTone.secondary, mr: 'auto' }}
+          >
+            {exportRun.status === 'done' ? 'Close' : 'Cancel'}
+          </Button>
+          {exportRun.status !== 'done' && (
+            <Button
+              variant="contained"
+              onClick={runFactwiseExport}
+              disabled={
+                exportRun.status === 'running' ||
+                (projectMode !== 'none' && projectChoices.loading) ||
+                (projectMode === 'new' && !projectEntityId) ||
+                (projectMode === 'existing' && !existingProjectId)
+              }
+              startIcon={exportRun.status === 'running' ? <CircularProgress size={16} /> : <FolderOpenIcon />}
+              sx={{
+                textTransform: 'none', borderRadius: '999px', fontWeight: 700, px: 3, minHeight: 38,
+                bgcolor: '#2563eb',
+                '&:hover': { bgcolor: '#2563eb' }
+              }}
+            >
+              {exportRun.status === 'running' ? 'Exporting…' : 'Export'}
+            </Button>
+          )}
+        </DialogActions>
+      </Dialog>
+
       {/* Directory export loading/success */}
       <Dialog
         open={directoryExportStatus.open}
@@ -10340,7 +10964,7 @@ const EnhancedDataEditor = () => {
           <DialogContent sx={{ p: 0 }}>
             <ExportLoadingContent
               isDarkMode={isDarkMode}
-              title={`Exporting to ${directoryExportStatus.type === 'bom' ? 'BOM Directory' : 'Item Directory'}...`}
+              title={`Exporting to ${directoryExportStatus.type === 'bom' ? 'BOM Directory' : directoryExportStatus.type === 'combined' ? 'FactWise' : 'Item Directory'}...`}
               message="Preparing your FactWise export."
             />
           </DialogContent>
@@ -10364,7 +10988,7 @@ const EnhancedDataEditor = () => {
                 Exported Successfully
               </Typography>
               <Typography sx={{ fontSize: 15, lineHeight: 1.5, fontWeight: 500, color: exportDialogTone.text, mb: 0.5, letterSpacing: 0 }}>
-                Exported to {directoryExportStatus.type === 'bom' ? 'BOM Directory' : 'Item Directory'}.
+                Exported to {directoryExportStatus.type === 'bom' ? 'BOM Directory' : directoryExportStatus.type === 'combined' ? 'FactWise' : 'Item Directory'}.
               </Typography>
               <Typography sx={{ fontSize: 13.5, lineHeight: 1.5, fontWeight: 400, color: exportDialogTone.secondary, letterSpacing: 0 }}>
                 Your FactWise export is ready.

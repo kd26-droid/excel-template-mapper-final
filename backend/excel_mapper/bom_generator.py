@@ -134,6 +134,13 @@ class GenerationResult(object):
         self.bom_rows = []
         # Parallel to bom_rows: the editor row each one came from, or None.
         self.bom_row_grid_rows = []
+        # One entry per alternate folded into a BOM line above, as
+        # {grid_row, alternate_for, finished_good, bom_id, level}. The wide 3.0
+        # sheet writes alternates into slot columns and needs none of this; the
+        # tall 4.0 combined sheet keeps each alternate as its own row and has to
+        # say which line it belongs to, which is knowable only here - by the
+        # time a row reaches the grid, nothing on it says it is an alternate.
+        self.alternate_rows = []
         self.errors = []
         self.warnings = []
         self.stats = {}
@@ -666,6 +673,16 @@ def generate_multi_level_bom(tree, bom_header, alternates_of=None, records=None,
                 for name, value in zip(names, values):
                     row['%s%s' % (name, suffix)] = value
 
+                result.alternate_rows.append({
+                    'grid_row': grid_row_of(alternate),
+                    # What FactWise's "Alternate for?" points at: the primary's
+                    # code as exported, not the code the sheet happened to use.
+                    'alternate_for': child_code,
+                    'finished_good': parent_code,
+                    'bom_id': block_bom_id,
+                    'level': block['level'],
+                })
+
             result.bom_rows.append(row)
             result.bom_row_grid_rows.append(grid_row_of(child.get('source')))
 
@@ -1122,7 +1139,7 @@ def find_grid_duplicate_groups(headers, rows):
     cpn_i = index_of('CPN Code')
     level_i = index_of('Level')
     qty_i = index_of('Quantity')
-    base_qty_i = index_of('Base BOM Qty')
+    base_qty_i = index_of('BOM Qty', 'Base BOM Qty')
     desc_i = index_of('Description')
 
     if code_i < 0 and cpn_i < 0:

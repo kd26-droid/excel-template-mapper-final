@@ -116,6 +116,17 @@ const api = {
       timeout: 60000,
     }),
 
+  /** Run a sheet through FactWise 4.0's validator and return its findings.
+   *  Goes through our own backend because the 4.0 API sends no CORS headers,
+   *  so the browser cannot call it directly. */
+  factwise40Validate: (formData) =>
+    axios.post(`${API_URL}/factwise40/validate/`, formData, { timeout: 200000 }),
+
+  /** One of the allowed FactWise 4.0 calls (projects, entities, BOMs), relayed
+   *  by our backend for the same CORS reason. */
+  factwise40Call: (body) =>
+    axios.post(`${API_URL}/factwise40/call/`, body, { timeout: 120000 }),
+
   uploadFiles: async (formData) => {
     const maxRetries = 3;
     let lastError;

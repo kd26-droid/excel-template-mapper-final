@@ -44,7 +44,7 @@ export const FACTWISE_TEMPLATE_COLUMNS = [
   'Tag_1', 'Tag_2', 'Tag_3', 'Tag_4',
   'Level',
   'Quantity',
-  'Base BOM Qty',
+  'BOM Qty',
   'Procurement entity name',
   'Preferred vendor code',
   'Alternate Item Name for Preferred Vendor',

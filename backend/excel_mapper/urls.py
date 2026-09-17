@@ -60,6 +60,12 @@ from .views import (
     bom_field_pattern_apply,
     bom_directory_confirm,
     bom_normalize,
+    normaliser_state,
+    normaliser_answers,
+    normaliser_continue,
+    apply_editor_defaults,
+    normaliser_run,
+    normaliser_resolve,
 
     # Unified Template + Formula views (MappingTemplate based)
     save_mapping_template,
@@ -177,6 +183,10 @@ from .parser_views import (
     parser_get_columns,
 )
 
+from .factwise40 import factwise40_call, factwise40_validate
+# The conversational normaliser: one endpoint, a model driving the views above.
+from .agent import agent_download, agent_message
+
 urlpatterns = [
     # Health check
     path('health/', health_check, name='health-check'),
@@ -197,6 +207,10 @@ urlpatterns = [
     # File upload & cleanup
     path('upload/', upload_files, name='upload-files'),
     path('repair-spilled-rows/', repair_spilled_rows, name='repair-spilled-rows'),
+    # FactWise 4.0, server-side: the 4.0 backend sends no CORS headers, so the
+    # export popup cannot call it from the browser.
+    path('factwise40/validate/', factwise40_validate, name='factwise40-validate'),
+    path('factwise40/call/', factwise40_call, name='factwise40-call'),
     path('sheet-join/apply/', apply_sheet_join, name='apply-sheet-join'),
     path('cleanup-rows/', cleanup_rows, name='cleanup-rows'),
 
@@ -256,6 +270,21 @@ urlpatterns = [
     path('bom/field-patterns/apply/', bom_field_pattern_apply, name='bom-field-pattern-apply'),
     path('bom/directory/confirm/', bom_directory_confirm, name='bom-directory-confirm'),
     path('bom/normalize/', bom_normalize, name='bom-normalize'),
+    # The normaliser's own state: what it has decided, and what it still needs
+    # answered. Without these the decisions live only in a browser tab.
+    path('normaliser/<str:session_id>/state/', normaliser_state, name='normaliser-state'),
+    path('normaliser/<str:session_id>/answers/', normaliser_answers, name='normaliser-answers'),
+    path('normaliser/<str:session_id>/continue/', normaliser_continue, name='normaliser-continue'),
+    # The Settings panel's Item Directory Defaults, applied in one call.
+    path('editor-defaults/apply/', apply_editor_defaults, name='apply-editor-defaults'),
+    # The whole normaliser in one call: a file in, a normalised session out,
+    # stopping only where a person is genuinely needed.
+    path('normaliser/run/', normaliser_run, name='normaliser-run'),
+    # The same flow as a conversation, for a caller with no UI at all.
+    path('agent/', agent_message, name='agent-message'),
+    # The sheet a conversation built, as a file - no session id needed.
+    path('agent/<str:conversation_id>/download/', agent_download, name='agent-download'),
+    path('normaliser/<str:session_id>/resolve/', normaliser_resolve, name='normaliser-resolve'),
     path('bom/structures/', bom_structure_patterns, name='bom-structure-patterns'),
     path('bom/structures/match/', bom_structure_match, name='bom-structure-match'),
     path('bom/structures/profile/', bom_structure_profile, name='bom-structure-profile'),

@@ -215,6 +215,131 @@ LOCKED_IDENTITY_COLUMNS = {
 }
 
 
+def _saved_item_code_rule(settings_obj):
+    """The Settings panel's item code rule, in the modes only the browser ran.
+
+    ``EditorDefaultSettings.item_code_rule`` can express prefix_sequence and
+    fixed and nothing else - its own sanitiser returns {} for the rest. Copy,
+    join and if/else are kept in ``ui_defaults`` and were applied by the editor
+    page as it loaded, by handing them to ``fill_or_create_column``. So anything
+    that never opens that page got no item codes at all: the agent, and every
+    sheet taken straight from the normaliser into a session.
+
+    That is not cosmetic on a sheet whose alternates are told apart only by
+    their MPN, which is every THALES export. An alternate with no code of its
+    own cannot be referenced, so all 364 of them were dropped from the generated
+    BOM without a word - the BOM still validated, it was just missing every
+    second source.
+
+    Mirrors the rule EnhancedDataEditor builds from the same keys, so the two
+    cannot drift apart.
+    """
+    ui = (getattr(settings_obj, 'ui_defaults', None) or {}) if settings_obj else {}
+    mode = str(ui.get('itemCodeContentType') or '').strip()
+    if mode not in ('copy', 'concat', 'conditional'):
+        return None
+
+    if mode == 'copy':
+        source_columns = [ui.get('itemCodeCopyFromColumn')]
+    elif mode == 'concat':
+        source_columns = [ui.get('itemCodeJoinFirstColumn'),
+                          ui.get('itemCodeJoinSecondColumn')]
+    else:
+        source_columns = []
+
+    branches = []
+    for branch in (ui.get('itemCodeConditionalBranches') or []):
+        column = str((branch or {}).get('column') or '').strip()
+        if not column:
+            continue
+        entry = {
+            'column': column,
+            'operator': (branch or {}).get('operator') or 'contains',
+            'compare': (branch or {}).get('compare'),
+            'output_value': ('' if (branch or {}).get('outputType') == 'empty'
+                             else (branch or {}).get('outputValue')),
+        }
+        if (branch or {}).get('outputType') == 'column':
+            entry['output_source_column'] = (branch or {}).get('outputColumn')
+        branches.append(entry)
+
+    # A mode with nothing to read from is not a rule, and guessing one would
+    # write item codes the user never asked for.
+    if mode == 'conditional':
+        if not branches:
+            return None
+    elif not all(str(column or '').strip() for column in source_columns):
+        return None
+
+    condition = None
+    if mode == 'conditional':
+        condition = {'branches': branches}
+        else_source = str(ui.get('itemCodeElseValueSource') or 'default')
+        if else_source == 'column':
+            condition['else_source_column'] = ui.get('itemCodeElseValueColumn')
+        elif else_source == 'empty':
+            condition['else'] = ''
+        elif str(ui.get('itemCodeElseDefaultValue') or '').strip():
+            condition['else'] = ui.get('itemCodeElseDefaultValue')
+
+    separator = ui.get('itemCodeSeparator')
+    return {
+        'type': 'column_value',
+        'target_mode': 'existing',
+        'target_column': 'Item code',
+        'value_mode': mode,
+        'source_columns': source_columns,
+        'separator': ' ' if separator is None else separator,
+        'write_mode': ui.get('itemCodeRowsToUpdate') or 'fill_empty',
+        'condition': condition,
+    }
+
+
+#: Units a sheet writes one way and FactWise stores another.
+#:
+#: Only spellings whose meaning is not in doubt belong here. THALES writes "P"
+#: for piece, the French abbreviation, and FactWise has no unit of that name at
+#: all - so every row carrying it was rejected twice over, once as
+#: UOM_NOT_FOUND on the line and again as INVALID_ITEM on the item, 526 errors
+#: from a single letter. EA is FactWise's discrete unit and the mapper's own
+#: default for a part, so that is where it lands.
+#:
+#: Matched case-insensitively. A unit FactWise already knows is never rewritten:
+#: the point is to translate, not to overrule what the customer said.
+#:
+#: EMPTY ON PURPOSE. "P" was translated here for THALES, where it is the French
+#: abbreviation for piece. But this table has no idea whose sheet it is reading,
+#: and it runs on every export for every customer: elsewhere P is as likely to
+#: mean pack, pair or pound, and a unit that quietly becomes EA is wrong in the
+#: one direction nobody checks - an order for 40 pairs shipped as 40 pieces
+#: reads as correct everywhere on the way out.
+#:
+#: A translation belongs to a customer, so it needs to hang off the entity, not
+#: off the module. Until it does, THALES sheets carry P through to validation,
+#: where it is rejected visibly and a person decides - which is worse for them
+#: and safer for everyone else.
+MEASUREMENT_UNIT_ALIASES = {}
+
+#: Every column that carries one.
+MEASUREMENT_UNIT_COLUMNS = ('Measurement unit', 'BOM UOM', 'Alternate measurement unit')
+
+
+def _normalise_measurement_units(headers, rows):
+    """Rewrite known unit spellings in place. Returns how many cells changed."""
+    changed = 0
+    for column in MEASUREMENT_UNIT_COLUMNS:
+        index = _column_index(headers, column)
+        if index is None:
+            continue
+        for row in rows:
+            current = _clean(_row_get(row, index, headers[index]))
+            replacement = MEASUREMENT_UNIT_ALIASES.get(current.lower())
+            if replacement and replacement != current:
+                _row_set(row, index, headers[index], replacement)
+                changed += 1
+    return changed
+
+
 def apply_editor_defaults_to_rows(headers, rows, settings_obj, sequence_offset=0, locked_codes=None):
     if not settings_obj or not headers or rows is None:
         return rows, {'applied': {}, 'skipped_missing_columns': []}
@@ -283,6 +408,78 @@ def apply_editor_defaults_to_rows(headers, rows, settings_obj, sequence_offset=0
                     sequence_index += 1
             if changed:
                 applied['Item code'] = changed
+
+    # The copy / join / if-else modes, which the typed rule above cannot hold.
+    # Applied here rather than around this function because three callers reach
+    # it directly - the editor's own grid fetch among them - and a rule that
+    # only some of them run is the bug this is fixing.
+    # Before anything reads a unit off these rows, and in the one place both the
+    # grid and the export come through - so the screen and the file agree.
+    unit_changes = _normalise_measurement_units(headers, output_rows)
+    if unit_changes:
+        applied['Measurement unit (translated)'] = unit_changes
+
+    saved_rule = _saved_item_code_rule(settings_obj)
+    if saved_rule:
+        from .views import apply_column_value_rule
+
+        # That engine works on a POSITIONAL grid, and these rows may be dicts
+        # keyed by header. Handing it dicts makes its own `list(row)` yield the
+        # header names, which it then joins and writes into every cell - the
+        # whole sheet came out reading "MPN Code_Tag_1".
+        from .views import make_unique_field_headers
+
+        # ... and by whichever spelling each row actually uses. A repeated column
+        # is labelled "Tag (1)" but stored under "Tag_1", so reading only the
+        # label returned nothing for the manufacturer and every item code joined
+        # from it came out as the MPN alone.
+        wire = make_unique_field_headers(headers)
+
+        def cell(row, index):
+            value = _row_get(row, index, headers[index])
+            if _clean(value) == '' and isinstance(row, dict) and index < len(wire):
+                value = row.get(wire[index], value)
+            return value
+
+        positional = [
+            [cell(row, index) for index in range(len(headers))]
+            for row in output_rows
+        ]
+        try:
+            _headers, filled, changed = apply_column_value_rule(
+                headers, positional, saved_rule, locked_item_codes=locked_codes)
+        except ValueError:
+            # A rule naming a column this sheet does not have is the user's to
+            # fix, and it must not take the rest of the defaults down with it.
+            skipped.append('Item code')
+        else:
+            target = _column_index(headers, 'Item code')
+            if changed and target is not None:
+                written = 0
+                for row, values in zip(output_rows, filled):
+                    value = values[target] if target < len(values) else ''
+                    # A join of empty inputs is empty, and in overwrite mode that
+                    # would be written over a cell somebody had already filled.
+                    # Rows with no MPN produce nothing here, so every repair that
+                    # gave them a code - by hand or through the agent - was erased
+                    # on the next read, and the sheet could not be made importable
+                    # however many times it was fixed.
+                    current = _row_get(row, target, headers[target])
+                    if isinstance(row, dict) and headers[target] not in row and target < len(wire):
+                        current = row.get(wire[target], current)
+                    if _clean(value) == '' and _clean(current) != '':
+                        continue
+                    # Written back one cell at a time so each row keeps the shape
+                    # it arrived in; the caller's rows are dicts or lists by turns,
+                    # and under the key the row already uses so the cell is
+                    # replaced rather than a second one added beside it.
+                    if isinstance(row, dict) and headers[target] not in row and target < len(wire):
+                        row[wire[target]] = value
+                    else:
+                        _row_set(row, target, headers[target], value)
+                    written += 1
+                if written:
+                    applied['Item code'] = written
 
     return output_rows, {
         'entity_name': settings_obj.entity_name,

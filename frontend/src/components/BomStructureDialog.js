@@ -103,6 +103,10 @@ const DASH_RE = /^[-‐-―]+$/;
 const QTY_HEADER_RE = /^\s*(qty|quantity|qnty|amount)\s*$/i;
 const UOM_HEADER_RE = /^\s*(uom|u\.?o\.?m\.?|unit(\s*of\s*measure(ment)?)?|measurement\s*unit)\s*$/i;
 const CODE_HEADER_RE = /^\s*(part\s*(number|no\.?|#)?|item\s*(code|number|no\.?)|cpn|component)\s*$/i;
+// A part number in the sense that proves a row is a real part. Not CPN: a
+// customer number is frequently the parent assembly's, repeated down every
+// child row, so it says which BOM a row is in rather than whether it is a part.
+const PART_NUMBER_HEADER_RE = /^\s*(mpn|manufacturer\s*part\s*(number|no\.?|#)?|item\s*code)\s*$/i;
 const NAME_HEADER_RE = /^\s*(description|nomenclature|item\s*name|name|title)\s*$/i;
 
 const parseLevelValue = (value) => {
@@ -184,8 +188,8 @@ const detectRootFromRecords = (records = [], levelColumn = '', headers = []) => 
 // Returns null unless exactly ONE assembly sits at that shallowest tier — the
 // same rule the row-based detector uses. Several tops is a forest, and which of
 // them is "the" finished good is the user's call, not a guess worth making.
-const detectRootFromParents = (records = [], levelColumn = '') => {
-  const stated = assembliesFromParents(records, levelColumn);
+const detectRootFromParents = (records = [], levelColumn = '', codeColumn = '') => {
+  const stated = assembliesFromParents(records, levelColumn, codeColumn);
   if (!stated || !stated.shallowestChild.size) return null;
 
   let shallowest = null;
@@ -398,15 +402,49 @@ const assemblyCodeFromPath = (value) => {
   return segments.length ? segments[segments.length - 1] : value;
 };
 
-const assembliesFromParents = (records, levelColumn) => {
+const DASH_ONLY_RE = /^[-–—\s]+$/;
+
+const assembliesFromParents = (records, levelColumn, codeColumn = '') => {
   if (!Array.isArray(records) || !records.length) return null;
   if (!('parent' in (records[0] || {}))) return null;
+
+  // A row whose trail ends with its own code is naming itself, which THALES
+  // does on every line: ">E49831AAAPB>84301060" sits on part 84301060. Counted
+  // as a parent, the part becomes an assembly, is offered as a Level 2 BOM, and
+  // its code is then locked as a BOM identity - so the eleven approved parts
+  // sharing it all keep one item code and FactWise rejects them as duplicates.
+  // Nothing is its own parent; the backend refuses the same thing.
+  // These records are keyed by the SHEET's own column names - "Ref. Article",
+  // not "cpn" - so the code has to be read through the column the caller
+  // resolved. Reading a fixed key returned undefined on every row, the guard
+  // below never fired, and all 27 rows kept naming themselves: documents and
+  // ordinary components alike were offered as sub-assemblies.
+  const ownCode = (record) => String(
+    (codeColumn ? record?.[codeColumn] : undefined) ?? record?.cpn ?? '',
+  ).trim();
+
+  // A document names its parent too, and counting it makes that parent an
+  // assembly. THALES files drawings under the part they describe, so every such
+  // part was offered as a sub-BOM - 27 of them, including plain components and
+  // the drawings themselves - and each one's code was then locked as a BOM
+  // identity, which is what left eleven approved parts sharing a single item
+  // code. Documents are excluded here for the same reason they are excluded
+  // from the BOM: they are not lines, so they cannot make anything a parent.
+  // Same test the backend uses - consumes nothing AND carries no part number.
+  const isDocument = (record) => {
+    const quantity = String(record?.quantity ?? '').trim();
+    const consumes = quantity !== '' && !DASH_ONLY_RE.test(quantity)
+      && Number.isFinite(Number(quantity.replace(/,/g, ''))) && Number(quantity.replace(/,/g, '')) > 0;
+    if (consumes) return false;
+    return !String(record?.mpn ?? '').trim() && !String(record?.['Item code'] ?? '').trim();
+  };
 
   const shallowestChild = new Map();
   let any = false;
   records.forEach((record) => {
+    if (isDocument(record)) return;
     const parent = assemblyCodeFromPath(String(record?.parent ?? '').trim());
-    if (!parent) return;
+    if (!parent || parent === ownCode(record)) return;
     any = true;
     const level = parseLevelValue(record?.[levelColumn]);
     if (level === null) return;
@@ -421,8 +459,9 @@ const assembliesFromParents = (records, levelColumn) => {
   records.forEach((record) => {
     // Reduced the same way as above, or the two maps key on different strings
     // and every lookup here misses.
+    if (isDocument(record)) return;
     const parent = assemblyCodeFromPath(String(record?.parent ?? '').trim());
-    if (parent && !nameOf.has(parent)) nameOf.set(parent, '');
+    if (parent && parent !== ownCode(record) && !nameOf.has(parent)) nameOf.set(parent, '');
   });
 
   return { shallowestChild, nameOf };
@@ -434,18 +473,46 @@ const analyzeLevels = (records, levelColumn, headers, rootCode = '') => {
   const qtyColumn = findHeader(headers, QTY_HEADER_RE);
   const uomColumn = findHeader(headers, UOM_HEADER_RE);
 
+  // What the backend will actually exclude, which is not the same as what is
+  // skipped below. Counting the skips instead promised to exclude 86 rows of a
+  // THALES export and excluded 71, because 15 of them - conformal coatings,
+  // adhesives, label stock - consume no countable quantity yet are real parts.
+  // Only columns that carry something are consulted: on a sheet with no part
+  // number at all, absence proves nothing and would condemn every row.
+  const partColumns = [findHeader(headers, PART_NUMBER_HEADER_RE), 'mpn', 'Item code']
+    .filter((column, index, all) => column && all.indexOf(column) === index)
+    .filter(column => (records || []).some(r => String(r?.[column] ?? '').trim()));
+  // A row something else hangs off is an assembly whatever its quantity says,
+  // and the filter keeps it for that reason - so counting it here promised to
+  // exclude 71 rows of a THALES export and excluded 61. A row is never its own
+  // parent, however often these sheets say so.
+  const parentCodes = new Set();
+  (records || []).forEach((record) => {
+    const parent = String(record?.parent ?? '').trim();
+    if (parent && parent !== String(record?.cpn ?? '').trim()) parentCodes.add(parent);
+  });
+
+  const isDocument = record => (
+    qtyColumn
+    && !consumesQuantity(record[qtyColumn])
+    && !parentCodes.has(String(record?.cpn ?? '').trim())
+    && !partColumns.some(column => String(record?.[column] ?? '').trim())
+  );
+
   const rows = [];
   let documents = 0;
   (records || []).forEach((record) => {
+    if (isDocument(record)) documents += 1;
     const level = parseLevelValue(record[levelColumn]);
     if (level === null) return;
     // Rows that consume nothing are skipped here even though the backend's
-    // is_document_row now keeps the ones carrying a part number. The two are
+    // is_document_row keeps the ones carrying a part number. The two are
     // deliberately NOT aligned: this list exists to name the BOMs, and a row
     // with no children is not a BOM whatever its quantity says. Including the
     // finished good here would also make it the shallowest row, shifting every
-    // "Level N BOM" label down by one.
-    if (qtyColumn && !consumesQuantity(record[qtyColumn])) { documents += 1; return; }
+    // "Level N BOM" label down by one. The checkbox's count is taken above, by
+    // the backend's rule, so what it promises is what gets excluded.
+    if (qtyColumn && !consumesQuantity(record[qtyColumn])) return;
     const code = String(record[codeColumn] ?? '').trim();
     if (!code) return;
     rows.push({
@@ -463,7 +530,7 @@ const analyzeLevels = (records, levelColumn, headers, rootCode = '') => {
 
   // The sheet's own parent column wins when it has one. Everything below is the
   // fallback for sheets that only indent by level.
-  const stated = assembliesFromParents(records, levelColumn);
+  const stated = assembliesFromParents(records, levelColumn, codeColumn);
   if (stated) {
     const byParentLevel = new Map();
     // Level of the assembly itself: one above the shallowest row naming it.
@@ -845,7 +912,7 @@ const BomStructureDialog = ({
         // seeing its row — so anything the sheet states outright wins first.
         const root = detectRootFromPreamble(preamble)
           || detectRootFromRecords(records || [], detected, headers)
-          || detectRootFromParents(records || [], detected);
+          || detectRootFromParents(records || [], detected, findHeader(headers, CODE_HEADER_RE));
         // Nothing detected means nothing prefilled — a wrong guess the user
         // does not notice is worse than an empty required field. Note this
         // clears blankBomHeader's sheet-name guess, which is exactly the guess
