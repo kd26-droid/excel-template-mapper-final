@@ -4203,6 +4203,34 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         self.assertEqual(fields["manufacturer"]["value"], "ELKEM SI")
         self.assertEqual(result["visualPattern"]["segments"][0]["afterOccurrence"], 2)
 
+    def test_visual_preview_preserves_exact_user_tagged_mpn_instead_of_directory_substring(self):
+        value = "CR1206 100 825K F @ (VISH/DRA) {AFAB} [1942049]"
+        mpn_text = "CR1206 100 825K F"
+
+        def span(text, role):
+            start = value.index(text)
+            return {"start": start, "end": start + len(text), "role": role}
+
+        result = build_bom_field_pattern_teach_result(
+            headers=["Combined"],
+            row={"Combined": value},
+            roles={"mpn": "Combined", "manufacturer": "Combined"},
+            group={"patternKey": "exact-user-mpn-boundary"},
+            tagged_spans=[
+                span(mpn_text, "mpn"),
+                span("@", "insertionMarker"),
+                span("VISH/DRA", "manufacturer"),
+            ],
+            source_header="Combined",
+        )
+
+        fields = result["entries"][0]["fields"]
+        self.assertEqual(fields["mpn"]["value"], mpn_text)
+        self.assertEqual(fields["manufacturer"]["value"], "VISH/DRA")
+        spans = result["interpretationSpansByColumn"]["Combined"]
+        mpn_span = next(item for item in spans if item["role"] == "mpn")
+        self.assertEqual(value[mpn_span["start"]:mpn_span["end"]], mpn_text)
+
     def test_visual_preview_preserves_brackets_around_a_tagged_mpn_segment(self):
         value = "CAF33 TRANSLUCIDE (310ML) (ELKEM SI) {HOM} [ ]"
 

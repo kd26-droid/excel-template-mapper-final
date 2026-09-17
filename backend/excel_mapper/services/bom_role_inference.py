@@ -6430,7 +6430,7 @@ def _visual_pattern_segment_values(group_text, visual_pattern):
 
 
 def _normalize_visual_segment_values(parsed):
-    """Refine broad visual MPN spans with backend directory/value evidence."""
+    """Refine automatically inferred visual MPN spans with directory evidence."""
     normalized = dict(parsed or {})
     mpn_value = clean(normalized.get("mpn"))
     if not mpn_value:
@@ -6601,9 +6601,9 @@ def _visual_pattern_identity_pairs(row, headers, roles, config=None):
         group_text = str(raw_group or "").strip()
         if not group_text:
             continue
-        parsed_segments = _normalize_visual_segment_values(
-            _visual_pattern_segment_values(group_text, visual_pattern)
-        )
+        parsed_segments = _visual_pattern_segment_values(group_text, visual_pattern)
+        if not visual_pattern.get("authoritativeSegments"):
+            parsed_segments = _normalize_visual_segment_values(parsed_segments)
         segment_mpn = clean(parsed_segments.get("mpn"))
         segment_manufacturer = clean(parsed_segments.get("manufacturer"))
         segment_alternates = str(parsed_segments.get("alternateList") or "").strip()
@@ -6901,9 +6901,9 @@ def _visual_pattern_tagged_field_rows(row, headers, config=None):
     parsed_rows = []
 
     for group_text in groups:
-        parsed = _normalize_visual_segment_values(
-            _visual_pattern_segment_values(group_text, visual_pattern)
-        )
+        parsed = _visual_pattern_segment_values(group_text, visual_pattern)
+        if not visual_pattern.get("authoritativeSegments"):
+            parsed = _normalize_visual_segment_values(parsed)
         parsed = {role: value for role, value in parsed.items() if role in ROLE_KEYS}
         if parsed:
             parsed_rows.append(parsed)
@@ -8440,7 +8440,7 @@ def _visual_pattern_interpretation_spans(value, visual_pattern):
                     )
                     if next_segment_start >= 0:
                         value_end = next_segment_start
-                if role == "mpn":
+                if role == "mpn" and not visual_pattern.get("authoritativeSegments"):
                     raw_mpn = group_text[value_start:value_end]
                     candidate, ignored_prefix, _source_fragment = (
                         _split_mpn_fragment_before_parenthesized_manufacturer(raw_mpn)
@@ -9545,6 +9545,8 @@ def build_bom_field_pattern_teach_result(
             alternate_joiner=alternate_joiner,
             ignored_fields=ignored_fields,
         )
+        if backend_visual_pattern:
+            backend_visual_pattern["authoritativeSegments"] = True
     rule = derive_bom_field_pattern_rule_from_correction(
         headers=safe_headers,
         row=row,
