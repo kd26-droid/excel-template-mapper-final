@@ -1575,7 +1575,7 @@ DETECTED_TOKEN_ROLES = {
 #: word for "and here are the other approved suffixes" - so translating a
 #: pattern that contains one can only lose it. THALES writes a line's approved
 #: parts as a stem, a placeholder and the list that fills it,
-#: ``KGM05AR71H102K@ (H/N)``, and the translation offered <IGNORE> for the list:
+#: ``KGM05AR71H102K@ (H/N)``, and the translation offered unclassified text for the list:
 #: the two approved parts collapsed to the stem, which is not a part number at
 #: all. 128 cells lost their alternates that way, and nothing downstream could
 #: notice, because a missing alternate is simply a row that is not there.
@@ -1663,8 +1663,7 @@ def _suggested_grammar(detected, parts_in_cell):
     [<REF>]` - so the order is known. Offering a fixed guess instead got it
     exactly backwards on a sheet whose cells lead with the part number: copying
     the suggestion would have swapped every part with its manufacturer. Anything
-    the detector named that a pattern cannot hold becomes IGNORE, which is the
-    honest translation of "this bit is here and we do not want it".
+    the detector named that a pattern cannot hold remains unclassified text.
     """
     import re
 
@@ -1673,13 +1672,13 @@ def _suggested_grammar(detected, parts_in_cell):
         # Reading it any other way drops the alternates; see the note above.
         return ''
     if tokens:
-        return ' '.join('<%s>' % DETECTED_TOKEN_ROLES.get(t.upper(), 'IGNORE')
+        return ' '.join('<%s>' % DETECTED_TOKEN_ROLES.get(t.upper(), 'UNCLASSIFIED_TEXT')
                         for t in tokens)
     # Nothing detected to translate: fall back to the shape of the cell itself.
     if parts_in_cell <= 1:
         return '<MANUFACTURER>'
     return ' '.join(['<MPN>', '<MANUFACTURER>'] +
-                    ['<IGNORE>'] * max(0, parts_in_cell - 2))
+                    ['<UNCLASSIFIED_TEXT>'] * max(0, parts_in_cell - 2))
 
 
 def _tool_review_patterns(state, args):

@@ -763,6 +763,20 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
             "<MPN>(<MFR>,<UNCLASSIFIED_TEXT>)",
         )
 
+    def test_ignore_only_visual_selection_is_displayed_as_unclassified_text(self):
+        visual_pattern = derive_visual_pattern_from_tagged_spans(
+            source_value="SECTION LABEL",
+            source_header="Combined",
+            tagged_spans=[{"start": 0, "end": 13, "role": "ignore"}],
+            ignored_fields=["mpn", "manufacturer"],
+        )
+
+        self.assertEqual(visual_pattern["type"], "ignore_fields")
+        self.assertEqual(
+            visual_pattern["displayPattern"],
+            "<UNCLASSIFIED_TEXT>",
+        )
+
     @patch(
         "excel_mapper.services.bom_role_inference._looks_like_parenthesized_manufacturer_alias"
     )
@@ -1768,6 +1782,36 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         self.assertTrue(all(row["description"] == "Assembly item" for row in ignored_rows))
         self.assertTrue(all(row["quantity"] == "2" for row in ignored_rows))
         self.assertTrue(all(row["uom"] == "EA" for row in ignored_rows))
+
+        automatically_ignored = normalize_bom_rows(
+            headers,
+            rows,
+            roles=roles,
+            config={},
+        )
+        self.assertEqual(len(automatically_ignored["normalizedRows"]), 3)
+        self.assertEqual(
+            automatically_ignored["normalizedRows"][0]["mpn"],
+            "ABC123",
+        )
+        self.assertEqual(
+            automatically_ignored["normalizedRows"][0]["manufacturer"],
+            "KEMET",
+        )
+        automatic_ignored_rows = automatically_ignored["normalizedRows"][1:]
+        self.assertTrue(all(
+            row["relation"] == "Ignored"
+            for row in automatic_ignored_rows
+        ))
+        self.assertTrue(all(row["mpn"] == "" for row in automatic_ignored_rows))
+        self.assertTrue(all(
+            row["manufacturer"] == ""
+            for row in automatic_ignored_rows
+        ))
+        self.assertTrue(all(
+            row["description"] == "Assembly item"
+            for row in automatic_ignored_rows
+        ))
 
     @patch(
         "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
@@ -4521,6 +4565,48 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         self.assertEqual(fields["mpn"]["value"], "")
         self.assertEqual(fields["manufacturer"]["value"], "")
         self.assertEqual(fields["description"]["value"], "Retained description")
+        semantic_pattern = pattern
+        semantic_group = next(
+            item for item in result["review"]["groups"]
+            if item["patternKey"] == semantic_pattern["patternKey"]
+        )
+        self.assertTrue(semantic_pattern["recognized"])
+        self.assertEqual(semantic_pattern["status"], "recognized")
+        self.assertEqual(semantic_pattern["recognitionScope"], "backend")
+        self.assertTrue(semantic_group["automaticUnclassified"])
+        self.assertTrue(semantic_group["ignoresFields"])
+        self.assertNotIn(
+            semantic_pattern["patternKey"],
+            result["review"]["activeRules"],
+        )
+        self.assertFalse(any(
+            step.get("type") == "teach_visual"
+            and step.get("patternKey") == semantic_pattern["patternKey"]
+            for step in result["review"]["workflow"]["steps"]
+        ))
+
+        normalized = normalize_bom_rows(
+            ["Combined", "Description"],
+            [{
+                "Combined": '"',
+                "Description": "Retained description",
+                "__sourceRow": 4,
+            }],
+            roles={
+                "mpn": "Combined",
+                "manufacturer": "Combined",
+                "description": "Description",
+            },
+            config={"skipTitleRows": False},
+        )
+        self.assertEqual(len(normalized["normalizedRows"]), 1)
+        self.assertEqual(normalized["normalizedRows"][0]["relation"], "Ignored")
+        self.assertEqual(normalized["normalizedRows"][0]["mpn"], "")
+        self.assertEqual(normalized["normalizedRows"][0]["manufacturer"], "")
+        self.assertEqual(
+            normalized["normalizedRows"][0]["description"],
+            "Retained description",
+        )
 
     @patch(
         "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",

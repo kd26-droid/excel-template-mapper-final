@@ -4186,7 +4186,12 @@ def _visual_pattern_display_pattern(visual_pattern, source_value=""):
         return ""
     stored = clean(visual_pattern.get("displayPattern") or visual_pattern.get("display_pattern"))
     if stored:
-        return stored
+        return re.sub(
+            r"<\s*IGNORE\s*>",
+            "<UNCLASSIFIED_TEXT>",
+            stored,
+            flags=re.IGNORECASE,
+        )
 
     segments = visual_pattern.get("segments") or []
     if not isinstance(segments, list) or not segments:
@@ -4340,7 +4345,7 @@ def _visual_pattern_display_from_tagged_spans(
     def role_token(span):
         role = clean(span.get("role"))
         if role == "ignore":
-            return "<IGNORE>"
+            return "<UNCLASSIFIED_TEXT>"
         if role == "mpn" and operation == "insert_alternate_at_marker":
             token = "<MPN_PREFIX><INSERTION_MARKER><MPN_SUFFIX>"
         elif role == "alternateList" and operation == "insert_alternate_at_marker":
@@ -4407,7 +4412,7 @@ def _visual_pattern_display_quality(pattern):
     """Prefer grammars with mapped roles over degraded empty-occurrence labels."""
     text = clean(pattern)
     placeholders = re.findall(r"<[A-Z0-9_]+>", text.upper())
-    supporting_tokens = {"<UNCLASSIFIED_TEXT>", "<STATUS>", "<REF>", "<IGNORE>"}
+    supporting_tokens = {"<UNCLASSIFIED_TEXT>", "<STATUS>", "<REF>"}
     mapped_token_count = sum(token not in supporting_tokens for token in placeholders)
     structural_count = len(re.findall(r"[^A-Za-z0-9\s<>_]", text))
     return mapped_token_count, len(placeholders), structural_count, len(text)
@@ -4875,6 +4880,37 @@ def _semantic_grammar_required_roles(grammar, mapped_fields=None):
     if re.search(r"<ALTERNATE_[A-Z0-9_]*>", grammar_text):
         required.add("alternateList")
     return required
+
+
+def _semantic_grammar_is_unclassified(grammar, mapped_fields=None):
+    """Return whether a fragment has no detected mapped-field meaning."""
+    return bool(clean(grammar)) and not _semantic_grammar_required_roles(
+        grammar,
+        mapped_fields,
+    )
+
+
+def _automatic_unclassified_rule(source_column, mapped_fields, pattern_key=""):
+    """Build a transient rule that preserves the row but blanks this source's roles."""
+    ignored_fields = [
+        clean(field)
+        for field in (mapped_fields or [])
+        if clean(field) in ROLE_KEYS
+    ]
+    return {
+        "patternKey": clean(pattern_key),
+        "automaticUnclassified": True,
+        "ephemeral": True,
+        "visualPattern": {
+            "type": "ignore_fields",
+            "sourceHeader": clean(source_column),
+            "excludeRow": False,
+            "ignoredFields": ignored_fields,
+            "displayPattern": "<UNCLASSIFIED_TEXT>",
+            "automaticUnclassified": True,
+            "ephemeral": True,
+        },
+    }
 
 
 def _semantic_interpretation_coverage(grammar, mapped_fields, parser_rule, interpretations=None):
@@ -6053,7 +6089,7 @@ def derive_visual_pattern_from_tagged_spans(
                 for field in (ignored_fields or [])
                 if clean(field) in ROLE_KEYS
             ],
-            "displayPattern": "<IGNORE>",
+            "displayPattern": "<UNCLASSIFIED_TEXT>",
         }
     if not source_header or not value_spans:
         return {}
@@ -7024,21 +7060,33 @@ def _infer_semantic_pattern_entries_for_row(row, headers, roles, selected_column
     if (config or {}).get("_semanticPatternPass"):
         return []
     rules = _semantic_pattern_rules(config)
-    if not rules:
-        return []
+    active_rule = (
+        (config or {}).get("_activeFieldPatternRule")
+        or (config or {}).get("_active_field_pattern_rule")
+        or {}
+    )
+    allow_automatic_unclassified = not _field_pattern_rule_has_content(active_rule)
 
     combined_entries = []
     ignored_fragments = []
     for unit in _field_review_mapping_units(headers, roles, config=config):
-        if unit.get("relationship") != "shared":
+        if unit.get("relationship") != "shared" and unit.get("mappedFields") != ["mpn"]:
             continue
         source_column = unit.get("sourceColumn")
+        mapped_fields = unit.get("mappedFields") or []
         source_value = _row_cell(row, source_column, headers, preserve_delimiters=True)
         if is_blankish(source_value):
             continue
-        fragments = _semantic_identity_fragments(source_value, unit.get("mappedFields") or [])
+        fragments = _semantic_identity_fragments(source_value, mapped_fields)
         if not any(
-            _semantic_pattern_key(source_column, unit.get("mappedFields") or [], fragment.get("grammar")) in rules
+            _semantic_pattern_key(source_column, mapped_fields, fragment.get("grammar")) in rules
+            or (
+                allow_automatic_unclassified
+                and _semantic_grammar_is_unclassified(
+                    fragment.get("grammar"),
+                    mapped_fields,
+                )
+            )
             for fragment in fragments
         ):
             continue
@@ -7046,10 +7094,23 @@ def _infer_semantic_pattern_entries_for_row(row, headers, roles, selected_column
         for fragment in fragments:
             pattern_key = _semantic_pattern_key(
                 source_column,
-                unit.get("mappedFields") or [],
+                mapped_fields,
                 fragment.get("grammar"),
             )
             rule = rules.get(pattern_key) or {}
+            if (
+                not rule
+                and allow_automatic_unclassified
+                and _semantic_grammar_is_unclassified(
+                    fragment.get("grammar"),
+                    mapped_fields,
+                )
+            ):
+                rule = _automatic_unclassified_rule(
+                    source_column,
+                    mapped_fields,
+                    pattern_key,
+                )
             fragment_row = dict(row) if isinstance(row, dict) else {}
             fragment_row[source_column] = fragment.get("rawValue") or ""
             fragment_config = dict(config or {})
@@ -10025,9 +10086,21 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                     if unit.get("relationship") == "one_to_one" and grammar == "<MPN>":
                         continue
                     pattern_key = _semantic_pattern_key(source_column, mapped_fields, grammar)
+                    automatic_unclassified = _semantic_grammar_is_unclassified(
+                        grammar,
+                        mapped_fields,
+                    )
                     stored = saved_interpretations.get(pattern_key)
                     draft_rule = draft_rules.get(pattern_key) if isinstance(draft_rules.get(pattern_key), dict) else {}
-                    parser_rule = draft_rule or ((stored or {}).get("rule") if stored else {}) or {}
+                    parser_rule = (
+                        _automatic_unclassified_rule(
+                            source_column,
+                            mapped_fields,
+                            pattern_key,
+                        )
+                        if automatic_unclassified
+                        else draft_rule or ((stored or {}).get("rule") if stored else {}) or {}
+                    )
                     parser_rule = _semantic_rule_for_source(parser_rule, source_column)
                     has_saved_interpretation = bool(parser_rule)
                     detected_position_rule = (
@@ -10098,6 +10171,8 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                         if visual_pattern and has_saved_interpretation
                         else ""
                     ) or grammar
+                    if automatic_unclassified:
+                        interpretation_pattern = "<UNCLASSIFIED_TEXT>"
                     item = patterns.setdefault(pattern_key, {
                         "id": pattern_key,
                         "patternKey": pattern_key,
@@ -10118,11 +10193,16 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                         "primaryPatternRow": None,
                         "suggestedRule": parser_rule or {"fields": {}},
                         "storedInterpretation": stored,
-                        "recognized": bool(stored or draft_rule),
+                        "recognized": bool(automatic_unclassified or stored or draft_rule),
                         "ignored": _field_pattern_rule_excludes_row(parser_rule),
                         "ignoresFields": _field_pattern_rule_ignores_fields(parser_rule),
-                        "recognitionScope": clean((stored or {}).get("matchScope")) or ("session" if draft_rule else ""),
+                        "recognitionScope": (
+                            "backend"
+                            if automatic_unclassified
+                            else clean((stored or {}).get("matchScope")) or ("session" if draft_rule else "")
+                        ),
                         "draftInterpretation": {"rule": draft_rule} if draft_rule else None,
+                        "automaticUnclassified": automatic_unclassified,
                         "confirmed": False,
                     })
                     if group.get("id") not in item["rowShapeGroupIds"]:
@@ -10299,9 +10379,12 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
     )
     mpn_validations = _validate_semantic_pattern_mpns(ordered)
     for index, item in enumerate(ordered, start=1):
+        automatic_unclassified = bool(item.get("automaticUnclassified"))
         has_saved_interpretation = bool(item.get("storedInterpretation"))
         has_interpretation = bool(
-            has_saved_interpretation or item.get("draftInterpretation")
+            automatic_unclassified
+            or has_saved_interpretation
+            or item.get("draftInterpretation")
         )
         ignores_fields = _field_pattern_rule_ignores_fields(
             item.get("suggestedRule") or {}
@@ -10365,15 +10448,22 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
         coverage["mpnValidation"] = mpn_validation
         item["recognitionValidation"] = coverage
         item["recognized"] = bool(
-            has_saved_interpretation
+            automatic_unclassified
+            or has_saved_interpretation
             or (
                 has_interpretation
                 and coverage.get("valid")
                 and mpn_is_accepted
             )
         )
+        if automatic_unclassified:
+            item["recognitionScope"] = "backend"
         if has_interpretation:
-            item["interpretationPattern"] = effective_grammar
+            item["interpretationPattern"] = (
+                "<UNCLASSIFIED_TEXT>"
+                if automatic_unclassified
+                else effective_grammar
+            )
         item["title"] = f"Pattern {index}"
         item["occurrenceCount"] = len(item.get("occurrences") or [])
         item["rowCount"] = len({occ.get("sourceRow") for occ in item.get("occurrences") or []})
@@ -11155,6 +11245,8 @@ def _build_bom_field_review_workflow(headers, roles, config, groups, patterns=No
 
     semantic_patterns = list(patterns or [])
     for pattern_number, item in enumerate(semantic_patterns, start=1):
+        if item.get("automaticUnclassified") and item.get("recognized"):
+            continue
         interpretations = item.get("interpretations") or []
         interpretation_refs = [
             interpretation.get("occurrenceId")
