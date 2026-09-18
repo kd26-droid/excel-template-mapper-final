@@ -1655,7 +1655,7 @@ const api = {
     taggedSpans = null,
     sourceHeader = '',
     alternateDelimiter = '',
-    alternateMode = 'append',
+    alternateMode = '',
     alternateJoiner = '',
     baseRule = {},
     fieldRules = {},
@@ -1696,6 +1696,30 @@ const api = {
       confirm_interpretation: confirmInterpretation,
       persist,
     }, { timeout: 120000 }),
+
+  /** Apply one backend parsing/cleanup rule to every detected pattern for a mapped field. */
+  applyBomFieldPatternBulkControls: ({
+    headers,
+    rows,
+    roles,
+    config = {},
+    review = {},
+    reviewReceipt = '',
+    field,
+    controls = {},
+    confirm = true,
+  }) =>
+    axios.post(`${API_URL}/bom/field-patterns/bulk-controls/`, {
+      headers,
+      rows,
+      roles,
+      config,
+      review,
+      review_receipt: reviewReceipt,
+      field,
+      controls,
+      confirm,
+    }, { timeout: 180000 }),
 
   /** Learn only user-confirmed MPN/MFR values and pairs from the field-pattern review popup. */
   learnBomFieldPatterns: ({ groups = [] }) =>

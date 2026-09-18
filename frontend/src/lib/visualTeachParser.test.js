@@ -6,6 +6,7 @@ import {
   shouldRepeatVisualTeachGroupSeparator,
   visualTeachAllowsAlternates,
   visualTeachTagsFromInterpretationSpans,
+  withPatternConfirmationDisplayData,
 } from './visualTeachParser';
 
 describe('visual teach display helpers', () => {
@@ -105,5 +106,51 @@ describe('visual teach display helpers', () => {
       },
       sourceColumns: {},
     }]);
+  });
+
+  test('keeps backend display controls and spans with a confirmation token', () => {
+    const confirmation = {
+      patternKey: 'pattern-1',
+      token: 'signed-token',
+      entries: [{ relation: 'Primary', fields: { mpn: 'ABC123' } }],
+    };
+    const review = {
+      patterns: [{
+        patternKey: 'pattern-1',
+        pattern: '<PREFIX><MPN> repeated by <NEW_LINE>',
+        controls: {
+          alternateDelimiter: '\n',
+          alternateMode: 'complete',
+          prefixMode: 'first_n_chars',
+          stripPrefix: '6',
+        },
+        teachContext: {
+          workflowStepId: 'teach-pattern-1',
+          sample: {
+            interpretationSpansByColumn: {
+              MPN: [{ start: 6, end: 12, role: 'mpn' }],
+            },
+          },
+        },
+      }],
+      workflow: {
+        steps: [{ id: 'teach-pattern-1', title: 'Confirm MPN pattern' }],
+      },
+    };
+
+    expect(withPatternConfirmationDisplayData(confirmation, review)).toEqual({
+      ...confirmation,
+      interpretationSpansByColumn: {
+        MPN: [{ start: 6, end: 12, role: 'mpn' }],
+      },
+      controls: {
+        alternateDelimiter: '\n',
+        alternateMode: 'complete',
+        prefixMode: 'first_n_chars',
+        stripPrefix: '6',
+      },
+      title: 'Confirm MPN pattern',
+      pattern: '<PREFIX><MPN> repeated by <NEW_LINE>',
+    });
   });
 });

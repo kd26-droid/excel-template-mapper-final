@@ -32,6 +32,7 @@ from excel_mapper.services.bom_role_inference import (
     _infer_field_entries_for_row,
     _infer_semantic_pattern_entries_for_row,
     _infer_marker_alternate_visual_rule,
+    _field_pattern_control_state,
     _interpretation_spans_by_column,
     _mpn_only_marker_alternate_pattern,
     _mpn_position_prefix_layout,
@@ -49,6 +50,7 @@ from excel_mapper.services.bom_role_inference import (
     _build_bom_field_review_workflow,
     _bom_pattern_structure_scope,
     _split_field_preview,
+    _strip_configured_prefix,
     _visual_pattern_identity_pairs,
     _visual_pattern_interpretation_spans,
     _visual_pattern_display_quality,
@@ -60,6 +62,7 @@ from excel_mapper.services.bom_role_inference import (
 )
 from excel_mapper.views import (
     _issue_bom_pattern_confirmation,
+    _issue_bom_pattern_review,
     _read_bom_pattern_review,
     _retry_sqlite_locked_write,
 )
@@ -461,6 +464,89 @@ class BomFieldPatternTeachApiTests(TestCase):
         self.assertEqual(applied.status_code, 200)
         self.assertEqual(applied.json()["normalizedRows"][0]["mpn"], "ABC123")
 
+    def test_apply_preserves_saved_authoritative_controls_when_review_rule_is_stale(self):
+        headers = ["Combined"]
+        roles = {"mpn": "Combined", "manufacturer": "Combined"}
+        config = {"alternateLayout": "inside_selected_mpn_columns"}
+        value = "CR0805F-5K1J@ (I) (WELWYN) {HOM} [1756556]"
+        row = {"Combined": value, "__sourceRow": 52}
+        def span(selected, role):
+            start = value.index(selected)
+            return {"start": start, "end": start + len(selected), "role": role}
+
+        detected = build_bom_field_pattern_groups(
+            headers,
+            [row],
+            roles=roles,
+            config=config,
+            options={"includeAllRows": True},
+        )
+        pattern_key = detected["patterns"][0]["patternKey"]
+        visual_pattern = derive_visual_pattern_from_tagged_spans(
+            source_value=value,
+            source_header="Combined",
+            tagged_spans=[
+                span("CR0805F-5K1J", "mpn"),
+                span("(I)", "alternateList"),
+                span("WELWYN", "manufacturer"),
+            ],
+            alternate_delimiter="",
+            alternate_mode="append",
+        )
+        structure_signature = _bom_pattern_structure_scope(
+            headers,
+            roles,
+            config,
+        )["signature"]
+        saved_rule = {
+            "shape": pattern_key,
+            "patternKey": pattern_key,
+            "visualPattern": visual_pattern,
+            "authoritativeCorrection": {
+                "visualPattern": deepcopy(visual_pattern),
+                "alternateDelimiter": "__no_split__",
+                "alternateMode": "append",
+                "alternateJoiner": "",
+            },
+        }
+        ColumnRule.objects.create(
+            name="BOM field pattern: apply-authoritative-controls",
+            rule={
+                "rule_type": "bom_field_pattern",
+                "shape": pattern_key,
+                "pattern_key": pattern_key,
+                "structure_signature": structure_signature,
+                "library_scope": "structure",
+                "parser_rule": saved_rule,
+            },
+        )
+        stale_review_rule = deepcopy(saved_rule)
+        stale_review_rule.pop("authoritativeCorrection")
+        review_receipt = _issue_bom_pattern_review(
+            active_rules={pattern_key: stale_review_rule},
+            structure_signature=structure_signature,
+        )["token"]
+
+        response = self.client.post(
+            "/api/bom/field-patterns/apply/",
+            {
+                "headers": headers,
+                "rows": [row],
+                "roles": roles,
+                "config": config,
+                "review_receipt": review_receipt,
+                "confirmation_tokens": [],
+                "persist": False,
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item["mpn"] for item in response.json()["normalizedRows"]],
+            ["CR0805F-5K1J", "CR0805F-5K1J(I)"],
+        )
+
     def test_apply_rejects_tampered_confirmation_receipt(self):
         token = _issue_bom_pattern_confirmation(
             rule={"shape": "pattern-1", "fields": {}},
@@ -519,6 +605,128 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         self.assertEqual(
             [entry["fields"]["mpn"]["value"] for entry in result["entries"]],
             ["BASE"],
+        )
+
+    def test_append_uses_external_placeholder_instead_of_internal_mpn_delimiter(self):
+        value = "CR0805F-5K1J@ (I) (WELWYN) {HOM} [1756556]"
+
+        def span(selected, role):
+            start = value.index(selected)
+            return {"start": start, "end": start + len(selected), "role": role}
+
+        result = build_bom_field_pattern_teach_result(
+            headers=["Combined"],
+            row={"Combined": value},
+            roles={"mpn": "Combined", "manufacturer": "Combined"},
+            group={"shape": "external-placeholder-append"},
+            tagged_spans=[
+                span("CR0805F-5K1J", "mpn"),
+                span("(I)", "alternateList"),
+                span("WELWYN", "manufacturer"),
+            ],
+            source_header="Combined",
+            alternate_delimiter="/",
+            alternate_mode="append",
+        )
+
+        self.assertEqual(result["visualPattern"]["alternateMode"], "append")
+        self.assertEqual(result["visualPattern"]["trailingPlaceholder"], "@")
+        self.assertNotIn("mpnComposition", result["visualPattern"])
+        self.assertEqual(
+            [entry["fields"]["mpn"]["value"] for entry in result["entries"]],
+            ["CR0805F-5K1J", "CR0805F-5K1J(I)"],
+        )
+        self.assertEqual(
+            [entry["fields"]["manufacturer"]["value"] for entry in result["entries"]],
+            ["WELWYN", "WELWYN"],
+        )
+
+        no_split_result = build_bom_field_pattern_teach_result(
+            headers=["Combined"],
+            row={"Combined": value},
+            roles={"mpn": "Combined", "manufacturer": "Combined"},
+            group={"shape": "external-placeholder-single-alternate"},
+            tagged_spans=[
+                span("CR0805F-5K1J", "mpn"),
+                span("(I)", "alternateList"),
+                span("WELWYN", "manufacturer"),
+            ],
+            source_header="Combined",
+            alternate_delimiter="__no_split__",
+            alternate_mode="append",
+        )
+        self.assertEqual(
+            [entry["fields"]["mpn"]["value"] for entry in no_split_result["entries"]],
+            ["CR0805F-5K1J", "CR0805F-5K1J(I)"],
+        )
+        self.assertEqual(
+            no_split_result["rule"]["visualPattern"]["alternateDelimiter"],
+            "__no_split__",
+        )
+        self.assertEqual(
+            no_split_result["rule"]["authoritativeCorrection"]["visualPattern"]["alternateDelimiter"],
+            "__no_split__",
+        )
+
+        no_alternates_result = build_bom_field_pattern_teach_result(
+            headers=["Combined"],
+            row={"Combined": value},
+            roles={"mpn": "Combined", "manufacturer": "Combined"},
+            group={"shape": "external-placeholder-no-alternates"},
+            tagged_spans=[
+                span("CR0805F-5K1J", "mpn"),
+                span("(I)", "alternateList"),
+                span("WELWYN", "manufacturer"),
+            ],
+            source_header="Combined",
+            alternate_delimiter="__no_alternates__",
+            alternate_mode="append",
+        )
+        self.assertEqual(
+            [entry["fields"]["mpn"]["value"] for entry in no_alternates_result["entries"]],
+            ["CR0805F-5K1J"],
+        )
+
+        inconsistent_saved_rule = deepcopy(no_split_result["rule"])
+        inconsistent_saved_rule["visualPattern"]["alternateDelimiter"] = ""
+        inconsistent_saved_rule["authoritativeCorrection"]["alternateDelimiter"] = "__no_split__"
+        replayed_confirmed_controls = _infer_field_entries_for_row(
+            {"Combined": value},
+            ["Combined"],
+            {"mpn": "Combined", "manufacturer": "Combined"},
+            ["Combined"],
+            config={"_activeFieldPatternRule": inconsistent_saved_rule},
+        )
+        self.assertEqual(
+            [entry["fields"]["mpn"]["value"] for entry in replayed_confirmed_controls],
+            ["CR0805F-5K1J", "CR0805F-5K1J(I)"],
+        )
+
+        legacy_rule = deepcopy(result["rule"])
+        legacy_rule["visualPattern"].pop("trailingPlaceholder", None)
+        legacy_rule["visualPattern"].update({
+            "alternateMode": "marker_operation_requires_confirmation",
+            "operationStatus": "needs_user_confirmation",
+            "mpnComposition": {
+                "marker": "-",
+                "markerSequence": "-",
+                "markerOccurrence": 1,
+                "operation": "",
+                "prefixSource": "mpn_before_marker",
+                "suffixSource": "mpn_after_marker",
+                "alternateSource": "alternateList",
+            },
+        })
+        replayed = _infer_field_entries_for_row(
+            {"Combined": value},
+            ["Combined"],
+            {"mpn": "Combined", "manufacturer": "Combined"},
+            ["Combined"],
+            config={"_activeFieldPatternRule": legacy_rule},
+        )
+        self.assertEqual(
+            [entry["fields"]["mpn"]["value"] for entry in replayed],
+            ["CR0805F-5K1J", "CR0805F-5K1J(I)"],
         )
 
     def test_confirmed_correction_preserves_all_controls_and_manual_rows(self):
@@ -1023,7 +1231,7 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         visual_pattern = {
             "type": "tagged_fields",
             "sourceHeader": "Combined part",
-            "alternateDelimiter": "",
+            "alternateDelimiter": "__no_split__",
             "alternateMode": "complete",
             "segments": [
                 {"role": "mpn", "before": "", "after": "\n", "wrapper": None},
@@ -1038,7 +1246,7 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
             {"_activeFieldPatternRule": {"visualPattern": visual_pattern}},
         )
 
-        self.assertEqual([pair["mpn"] for pair in pairs], ["BASE"])
+        self.assertEqual([pair["mpn"] for pair in pairs], ["BASE", "ALT-1/ALT-2"])
 
     def test_saved_visual_pattern_ignores_optional_separator_spaces(self):
         value = "IRLML6402@PBF(/TR)(INFINEON) {HOM} [2225412]"
@@ -1245,7 +1453,7 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
             else (value, 1.0, "known MPN")
         ),
     )
-    def test_backend_derives_prefix_length_from_recognized_mpn_positions(self, _best_mpn):
+    def test_backend_uses_recognized_mpn_position_instead_of_fixed_prefix_length(self, _best_mpn):
         value = "01525-22-03-2061\n28384-69173-406HLF"
 
         rule = _mpn_position_prefix_rule(value)
@@ -1258,14 +1466,15 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
             base_rule=rule,
             field_rules=rule["fields"],
             prefer_field_rules=True,
+            alternate_delimiter="\n",
+            alternate_mode="complete",
         )
 
         self.assertEqual(
             result["rule"]["fields"]["mpn"],
             {
                 "delimiter": "\\n",
-                "stripPrefix": "6",
-                "prefixMode": "first_n_chars",
+                "prefixMode": "recognized_mpn_start",
                 "detectionSource": "recognized_mpn_position",
                 "customerConfirmed": True,
             },
@@ -1274,6 +1483,33 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
             [entry["fields"]["mpn"]["value"] for entry in result["entries"]],
             ["22-03-2061", "69173-406HLF"],
         )
+        self.assertEqual(result["controls"], {
+            "alternateDelimiter": "\n",
+            "alternateMode": "complete",
+            "alternateJoiner": "",
+            "prefixMode": "recognized_mpn_start",
+            "stripPrefix": "",
+        })
+
+    def test_field_pattern_controls_normalize_legacy_field_rule(self):
+        controls = _field_pattern_control_state({
+            "fields": {
+                "mpn": {
+                    "delimiter": "\\n",
+                    "stripPrefix": "6",
+                    "prefixMode": "first_n_chars",
+                    "preserveOriginalValue": True,
+                },
+            },
+        })
+
+        self.assertEqual(controls, {
+            "alternateDelimiter": "\n",
+            "alternateMode": "complete",
+            "alternateJoiner": "",
+            "prefixMode": "first_n_chars",
+            "stripPrefix": "6",
+        })
 
     def test_append_mode_can_add_a_separator_only_to_alternate_mpns(self):
         value = "LTC1625IS#@ (/TR) (ANALOGDV) {LBO} [1771248]"
@@ -3447,8 +3683,77 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
 
         self.assertEqual(
             grammars,
-            ["<PREFIX:6><MPN> repeated by <NEW_LINE>"] * 3,
+            ["<PREFIX><MPN> repeated by <NEW_LINE>"] * 3,
         )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    @patch("excel_mapper.services.bom_role_inference._best_mpn_from_text")
+    def test_different_prefix_lengths_share_one_dynamic_mpn_pattern(
+        self,
+        best_mpn,
+        _saved_rules,
+        _saved_interpretations,
+    ):
+        def recognize(value):
+            text = str(value)
+            start = text.find("MPN-")
+            return (
+                (text[start:], 1.0, "known MPN found inside cell")
+                if start >= 0
+                else (text, 0.0, "")
+            )
+
+        best_mpn.side_effect = recognize
+        values = [
+            "123456789MPN-A1",
+            "12345678901MPN-B2",
+            "123456789012345678MPN-C3",
+        ]
+        inferred = build_bom_field_pattern_groups(
+            ["Customer MPN"],
+            [
+                {"Customer MPN": value, "__sourceRow": index + 2}
+                for index, value in enumerate(values)
+            ],
+            roles={"mpn": "Customer MPN"},
+            config={"skipTitleRows": False},
+            options={"includeAllRows": True, "reviewContractVersion": 3},
+        )
+
+        patterns = inferred["review"]["patterns"]
+        self.assertEqual(len(patterns), 1)
+        self.assertEqual(patterns[0]["pattern"], "<PREFIX><MPN>")
+        self.assertEqual(patterns[0]["occurrenceCount"], 3)
+        self.assertEqual(
+            [
+                occurrence["extraction"]["prefixLengths"]
+                for row in inferred["review"]["rows"]
+                for occurrence in row["occurrences"]
+                if occurrence.get("extraction")
+            ],
+            [[9], [11], [18]],
+        )
+
+        dynamic_rule = _mpn_position_prefix_rule(values[0])
+        self.assertEqual(dynamic_rule["fields"]["mpn"]["prefixMode"], "recognized_mpn_start")
+        extracted = [
+            _infer_field_entries_for_row(
+                {"Customer MPN": value},
+                ["Customer MPN"],
+                {"mpn": "Customer MPN"},
+                ["Customer MPN"],
+                config={"_activeFieldPatternRule": dynamic_rule},
+            )[0]["fields"]["mpn"]["value"]
+            for value in values
+        ]
+        self.assertEqual(extracted, ["MPN-A1", "MPN-B2", "MPN-C3"])
 
     def test_mpn_lookup_returns_loaded_match_while_caching_unknown_keys(self):
         lookup = DatabaseMpnLookup.__new__(DatabaseMpnLookup)
@@ -3505,6 +3810,8 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
             )
 
         self.assertEqual(rule["fields"]["mpn"]["delimiter"], "\\n")
+        self.assertEqual(rule["fields"]["mpn"]["prefixMode"], "recognized_mpn_start")
+        self.assertNotIn("stripPrefix", rule["fields"]["mpn"])
         self.assertEqual(rule["visualPattern"]["alternateDelimiter"], "\n")
         self.assertEqual(rule["visualPattern"]["alternateMode"], "complete")
 
@@ -3549,7 +3856,10 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         )
 
         self.assertEqual(len(inferred["review"]["patterns"]), 1)
-        self.assertEqual(inferred["review"]["patterns"][0]["pattern"], "<PREFIX:6><MPN>")
+        self.assertEqual(
+            inferred["review"]["patterns"][0]["pattern"],
+            "<PREFIX><MPN> repeated by <ADJACENT_RECORD>",
+        )
         rule = _mpn_position_prefix_rule(values[1])
         self.assertEqual(rule["fields"]["mpn"]["delimiter"], "repeated_prefix")
         self.assertTrue(rule["fields"]["mpn"]["preserveOriginalValue"])
@@ -3840,7 +4150,7 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         review = inferred["review"]
         pattern = next(
             item for item in review["patterns"]
-            if "<PREFIX:6><MPN>" in item["pattern"]
+            if "<PREFIX><MPN>" in item["pattern"]
         )
         teach_context = pattern["teachContext"]
         taught = build_bom_field_pattern_teach_result(
@@ -5812,3 +6122,128 @@ class DirectoryDatabaseLearningTests(TestCase):
             normalized_manufacturer="TESTMANUFACTURERLTD",
             status=DirectoryLearningEvent.STATUS_PROMOTED,
         ).exists())
+
+    def test_field_cleanup_can_remove_prefix_and_suffix_in_backend(self):
+        self.assertEqual(
+            _strip_configured_prefix(
+                "SUP-ABC123-TR",
+                {
+                    "prefixMode": "literal",
+                    "stripPrefix": "SUP-",
+                    "suffixMode": "literal",
+                    "stripSuffix": "-TR",
+                },
+            ),
+            "ABC123",
+        )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    def test_review_contract_returns_backend_bulk_parsing_options(
+        self, _saved_rules, _saved_interpretations
+    ):
+        result = build_bom_field_pattern_groups(
+            ["Combined"],
+            [{"Combined": "ABC123 (KEMET)", "__sourceRow": 2}],
+            roles={"mpn": "Combined", "manufacturer": "Combined"},
+            config={"alternateLayout": "inside_selected_mpn_columns"},
+            options={"includeAllRows": True, "reviewContractVersion": 3},
+        )
+
+        controls = result["review"]["bulkParsing"]
+        self.assertEqual(controls["fields"][0]["sourceColumn"], "Combined")
+        self.assertIn(
+            {"value": "\n", "label": "New line"},
+            controls["alternateSeparatorOptions"],
+        )
+        self.assertIn(
+            {"value": "literal", "label": "Remove exact suffix"},
+            controls["suffixModeOptions"],
+        )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    def test_bulk_pattern_controls_return_confirmations_without_persisting(
+        self, _saved_rules, _saved_interpretations
+    ):
+        request_payload = {
+            "headers": ["Manufacturer Equivalent Part", "Manufacturer"],
+            "rows": [
+                {
+                    "Manufacturer Equivalent Part": "01525-22-03-2061\n28384-69173-406HLF",
+                    "Manufacturer": "MOLEX\nAMPHENOL FCI",
+                    "__sourceRow": 2,
+                },
+            ],
+            "roles": {
+                "mpn": "Manufacturer Equivalent Part",
+                "manufacturer": "Manufacturer",
+            },
+            "config": {"alternateLayout": "inside_selected_mpn_columns"},
+            "options": {
+                "includeAllRows": True,
+                "reviewContractVersion": 3,
+            },
+        }
+        inferred = self.client.post(
+            "/api/bom/field-patterns/infer/",
+            request_payload,
+            content_type="application/json",
+        )
+        self.assertEqual(inferred.status_code, 200)
+        inferred_payload = inferred.json()
+        for pattern in inferred_payload["review"]["patternsByField"]["mpn"]:
+            pattern.setdefault("controls", {})["alternateDelimiter"] = "\n"
+
+        response = self.client.post(
+            "/api/bom/field-patterns/bulk-controls/",
+            {
+                **request_payload,
+                "review": inferred_payload["review"],
+                "review_receipt": inferred_payload["reviewReceipt"]["token"],
+                "field": "mpn",
+                "controls": {
+                    "prefixMode": "first_n_chars",
+                    "stripPrefix": "6",
+                },
+                "confirm": True,
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertTrue(payload["updatedPatternKeys"])
+        self.assertEqual(len(payload["confirmations"]), len(payload["updatedPatternKeys"]))
+        for pattern_key in payload["updatedPatternKeys"]:
+            self.assertEqual(
+                payload["activeRules"][pattern_key]["fields"]["mpn"]["delimiter"],
+                "\n",
+            )
+            self.assertTrue(
+                payload["activeRules"][pattern_key]["fields"]["mpn"]["preserveOriginalValue"]
+            )
+        generated_mpns = []
+        for row in payload["review"]["rows"]:
+            for entry in row.get("entries") or []:
+                value = (entry.get("fields") or {}).get("mpn")
+                if isinstance(value, dict):
+                    value = value.get("value")
+                if value:
+                    generated_mpns.append(value)
+        self.assertIn("22-03-2061", generated_mpns)
+        self.assertIn("69173-406HLF", generated_mpns)
+        self.assertEqual(ColumnRule.objects.count(), 0)
+        self.assertEqual(BomStructurePattern.objects.count(), 0)

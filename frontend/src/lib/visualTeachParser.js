@@ -121,3 +121,24 @@ export const normalizeVisualTeachEntries = (entries = []) => (
       relation: index === 0 ? 'Primary' : `Alternate ${index}`,
     }))
 );
+
+// Confirmation tokens carry persistence data; the review contract carries the
+// backend-owned display controls and spans for the same pattern.
+export const withPatternConfirmationDisplayData = (confirmation = {}, review = {}) => {
+  const patternKey = fmt(confirmation?.patternKey);
+  const pattern = (review?.patterns || []).find(
+    (candidate) => fmt(candidate?.patternKey) === patternKey
+  );
+  const sample = pattern?.teachContext?.sample;
+  const workflowStep = (review?.workflow?.steps || []).find(
+    (step) => step?.id === pattern?.teachContext?.workflowStepId
+  );
+
+  return {
+    ...confirmation,
+    interpretationSpansByColumn: sample?.interpretationSpansByColumn || {},
+    controls: pattern?.controls || pattern?.teachContext?.controls || {},
+    title: workflowStep?.title || '',
+    pattern: pattern?.pattern || confirmation?.shape || '',
+  };
+};

@@ -35,6 +35,8 @@ ROLE_KEYS = (
 VALUE_SIGNAL_SAMPLE_SIZE = 150
 FIELD_PATTERN_RULE_NAME_PREFIX = "BOM field pattern:"
 MPN_RECOGNITION_SIMILARITY_THRESHOLD = 90.0
+ALTERNATE_DELIMITER_NONE = "__no_alternates__"
+ALTERNATE_DELIMITER_SINGLE = "__no_split__"
 
 ROLE_LABELS = {
     "cpn": "CPN / customer part number",
@@ -2373,13 +2375,190 @@ def _configured_delimiter(rule):
         return "\n"
     delimiter_mode = raw_delimiter_text.strip()
     custom_delimiter = clean(rule.get("customDelimiter") or rule.get("custom_delimiter"))
-    if delimiter_mode in {"", "none", "auto"}:
+    if delimiter_mode in {
+        "",
+        "none",
+        "auto",
+        ALTERNATE_DELIMITER_NONE,
+        ALTERNATE_DELIMITER_SINGLE,
+    }:
         return ""
     if delimiter_mode == "custom":
         delimiter_mode = custom_delimiter
     if delimiter_mode.lower() in {"\\n", "\\\\n", "newline", "new line"} or delimiter_mode in {"\n", "\r\n"}:
         return "\n"
     return delimiter_mode
+
+
+def _authoritative_visual_pattern(rule):
+    """Overlay confirmed controls onto the visual rule used by every parser path."""
+    rule = rule if isinstance(rule, dict) else {}
+    correction = (
+        rule.get("authoritativeCorrection")
+        or rule.get("authoritative_correction")
+        or {}
+    )
+    correction = correction if isinstance(correction, dict) else {}
+    visual_pattern = {
+        **(rule.get("visualPattern") or rule.get("visual_pattern") or {}),
+        **(
+            correction.get("visualPattern")
+            or correction.get("visual_pattern")
+            or {}
+        ),
+    }
+    if not visual_pattern:
+        return {}
+    for camel_key, snake_key in (
+        ("alternateDelimiter", "alternate_delimiter"),
+        ("alternateMode", "alternate_mode"),
+        ("alternateJoiner", "alternate_joiner"),
+    ):
+        if camel_key in correction:
+            visual_pattern[camel_key] = correction.get(camel_key)
+        elif snake_key in correction:
+            visual_pattern[camel_key] = correction.get(snake_key)
+    return visual_pattern
+
+
+def _field_pattern_control_state(rule):
+    """Return the canonical popup controls for any persisted parser-rule shape."""
+    rule = rule if isinstance(rule, dict) else {}
+    correction = (
+        rule.get("authoritativeCorrection")
+        or rule.get("authoritative_correction")
+        or {}
+    )
+    correction = correction if isinstance(correction, dict) else {}
+
+    visual_pattern = _authoritative_visual_pattern(rule)
+
+    rule_fields = rule.get("fields") if isinstance(rule.get("fields"), dict) else {}
+    correction_fields = (
+        correction.get("fieldRules")
+        or correction.get("field_rules")
+        or {}
+    )
+    correction_fields = correction_fields if isinstance(correction_fields, dict) else {}
+    mpn_rule = {
+        **(rule_fields.get("mpn") if isinstance(rule_fields.get("mpn"), dict) else {}),
+        **(
+            correction_fields.get("mpn")
+            if isinstance(correction_fields.get("mpn"), dict)
+            else {}
+        ),
+    }
+
+    def first_present(mappings, keys):
+        for mapping in mappings:
+            for key in keys:
+                if key in mapping and mapping.get(key) is not None:
+                    return mapping.get(key)
+        return None
+
+    raw_delimiter = first_present(
+        (correction, visual_pattern),
+        ("alternateDelimiter", "alternate_delimiter"),
+    )
+    if raw_delimiter is None:
+        alternate_delimiter = _configured_delimiter(mpn_rule)
+    elif str(raw_delimiter).strip() in {
+        ALTERNATE_DELIMITER_NONE,
+        ALTERNATE_DELIMITER_SINGLE,
+    }:
+        alternate_delimiter = str(raw_delimiter).strip()
+    else:
+        alternate_delimiter = _configured_delimiter({"delimiter": raw_delimiter})
+
+    alternate_mode = clean(first_present(
+        (correction, visual_pattern),
+        ("alternateMode", "alternate_mode"),
+    ))
+    if not alternate_mode:
+        alternate_mode = (
+            "complete"
+            if alternate_delimiter and mpn_rule.get("preserveOriginalValue") is True
+            else "append"
+        )
+
+    alternate_joiner = first_present(
+        (correction, visual_pattern),
+        ("alternateJoiner", "alternate_joiner"),
+    )
+    prefix_mode = clean(mpn_rule.get("prefixMode") or mpn_rule.get("prefix_mode"))
+    strip_prefix = mpn_rule.get("stripPrefix")
+    if strip_prefix is None:
+        strip_prefix = mpn_rule.get("strip_prefix")
+    suffix_mode = clean(mpn_rule.get("suffixMode") or mpn_rule.get("suffix_mode"))
+    strip_suffix = mpn_rule.get("stripSuffix")
+    if strip_suffix is None:
+        strip_suffix = mpn_rule.get("strip_suffix")
+
+    controls = {
+        "alternateDelimiter": alternate_delimiter,
+        "alternateMode": alternate_mode,
+        "alternateJoiner": str(alternate_joiner or ""),
+        "prefixMode": prefix_mode,
+        "stripPrefix": str(strip_prefix or ""),
+    }
+    if suffix_mode or strip_suffix:
+        controls.update({
+            "suffixMode": suffix_mode,
+            "stripSuffix": str(strip_suffix or ""),
+        })
+    return controls
+
+
+def _bulk_pattern_parsing_contract(mapped_field_options):
+    """Return the complete control schema rendered by Confirm Patterns."""
+    return {
+        "fields": deepcopy(mapped_field_options or []),
+        "alternateSeparatorOptions": [
+            {"value": "", "label": "Select alternate handling"},
+            {"value": ALTERNATE_DELIMITER_NONE, "label": "No alternates"},
+            {
+                "value": ALTERNATE_DELIMITER_SINGLE,
+                "label": "Single alternate (entire selected value)",
+            },
+            {"value": "/", "label": "Slash (/)"},
+            {"value": ";", "label": "Semicolon (;)"},
+            {"value": ",", "label": "Comma (,)"},
+            {"value": "|", "label": "Pipe (|)"},
+            {"value": "^", "label": "Caret (^)"},
+            {"value": "~", "label": "Tilde (~)"},
+            {"value": "\n", "label": "New line"},
+            {"value": "custom", "label": "Custom delimiter"},
+        ],
+        "customAlternateDelimiterValue": "custom",
+        "alternateModeOptions": [
+            {"value": "append", "label": "Append to base value"},
+            {"value": "complete", "label": "Already complete values"},
+            {"value": "replace_suffix_at_marker", "label": "Replace suffix at marker"},
+            {"value": "insert_at_marker", "label": "Insert values at marker"},
+        ],
+        "prefixModeOptions": [
+            {"value": "none", "label": "Keep prefix"},
+            {"value": "literal", "label": "Remove exact prefix"},
+            {"value": "first_n_chars", "label": "Remove first characters"},
+            {"value": "before_delimiter", "label": "Remove through delimiter"},
+            {"value": "recognized_mpn_start", "label": "Remove text before recognized MPN"},
+        ],
+        "suffixModeOptions": [
+            {"value": "none", "label": "Keep suffix"},
+            {"value": "literal", "label": "Remove exact suffix"},
+            {"value": "last_n_chars", "label": "Remove last characters"},
+            {"value": "after_delimiter", "label": "Remove from last delimiter"},
+        ],
+        "defaults": {
+            "alternateDelimiter": "",
+            "alternateMode": "",
+            "alternateJoiner": "",
+            "prefixMode": "none",
+            "stripPrefix": "",
+            "suffixMode": "none",
+            "stripSuffix": "",
+        },
+    }
 
 
 def _configured_identity_delimiters(rule):
@@ -3166,14 +3345,48 @@ def _apply_identity_combo_rules(role_values, roles, config=None):
     return next_values
 
 
+def _strip_configured_suffix(value, rule=None):
+    text = str(value or "").replace("\u00a0", " ").strip()
+    rule = rule if isinstance(rule, dict) else {}
+    mode = clean(rule.get("suffixMode") or rule.get("suffix_mode") or "none")
+    suffix = clean(rule.get("stripSuffix") or rule.get("strip_suffix") or rule.get("suffix"))
+    if not text or mode in {"", "none"} or not suffix:
+        return text
+
+    try:
+        if mode == "regex":
+            pattern = suffix if suffix.endswith("$") else f"(?:{suffix})$"
+            stripped = re.sub(pattern, "", text, count=1).strip()
+        elif mode == "last_n_chars":
+            count = int(float(suffix))
+            stripped = text[:-count].strip() if 0 < count < len(text) else text
+        elif mode == "after_delimiter":
+            stripped = text.rsplit(suffix, 1)[0].strip() if suffix in text else text
+        else:
+            stripped = text[:-len(suffix)].strip() if text.lower().endswith(suffix.lower()) else text
+    except Exception:
+        stripped = text
+    return clean(stripped)
+
+
 def _strip_configured_prefix(value, rule=None):
     text = str(value or "").replace("\u00a0", " ").strip()
     rule = rule if isinstance(rule, dict) else {}
-    prefix = clean(rule.get("stripPrefix") or rule.get("strip_prefix") or rule.get("prefix"))
-    if not text or not prefix:
-        return text
-
     mode = clean(rule.get("prefixMode") or rule.get("prefix_mode") or "literal")
+    if not text:
+        return _strip_configured_suffix(text, rule)
+    if mode == "recognized_mpn_start":
+        candidate, score, _reason = _best_mpn_from_text(text)
+        if candidate and float(score or 0) >= 0.9:
+            candidate_span = _normalized_candidate_source_span(text, candidate)
+            if candidate_span is not None and int(candidate_span[0]) > 0:
+                return _strip_configured_suffix(clean(text[int(candidate_span[0]):]), rule)
+        return _strip_configured_suffix(text, rule)
+
+    prefix = clean(rule.get("stripPrefix") or rule.get("strip_prefix") or rule.get("prefix"))
+    if not prefix:
+        return _strip_configured_suffix(text, rule)
+
     try:
         if mode == "regex":
             pattern = prefix if prefix.startswith("^") else f"^(?:{prefix})"
@@ -3190,7 +3403,7 @@ def _strip_configured_prefix(value, rule=None):
             stripped = text[len(prefix):].strip() if text.lower().startswith(prefix.lower()) else text
     except Exception:
         stripped = text
-    return clean(stripped)
+    return _strip_configured_suffix(clean(stripped), rule)
 
 
 def _strip_configured_prefixes(parts, rule=None):
@@ -3218,10 +3431,19 @@ def _repair_wrapped_mpn_segment(value):
 def _configured_prefix_applies(value, rule=None):
     text = str(value or "").replace("\u00a0", " ").strip()
     rule = rule if isinstance(rule, dict) else {}
-    prefix = clean(rule.get("stripPrefix") or rule.get("strip_prefix") or rule.get("prefix"))
-    if not text or not prefix:
-        return False
     mode = clean(rule.get("prefixMode") or rule.get("prefix_mode") or "literal")
+    if not text:
+        return False
+    if mode == "recognized_mpn_start":
+        candidate, score, _reason = _best_mpn_from_text(text)
+        if not candidate or float(score or 0) < 0.9:
+            return False
+        candidate_span = _normalized_candidate_source_span(text, candidate)
+        return candidate_span is not None and int(candidate_span[0]) > 0
+
+    prefix = clean(rule.get("stripPrefix") or rule.get("strip_prefix") or rule.get("prefix"))
+    if not prefix:
+        return False
     try:
         if mode == "regex":
             pattern = prefix if prefix.startswith("^") else f"^(?:{prefix})"
@@ -5678,7 +5900,7 @@ def _repeated_fixed_width_mpn_prefix_layout(value):
 
 
 def _mpn_position_prefix_layout(value):
-    """Infer a fixed-width prefix from where known MPN values begin."""
+    """Locate verified MPN starts without making their offsets pattern identity."""
     text = str(value or "").replace("\u00a0", " ")
     lines = [line.strip() for line in re.split(r"\r?\n+", text) if not is_blankish(line)]
     if not lines:
@@ -5693,25 +5915,23 @@ def _mpn_position_prefix_layout(value):
     for line in lines:
         candidate, score, _reason = _best_mpn_from_text(line)
         if not candidate or float(score or 0) < 0.9:
-            continue
+            return {}
         candidate_span = _normalized_candidate_source_span(line, candidate)
-        if candidate_span is not None:
-            recognized_starts.append(int(candidate_span[0]))
+        if candidate_span is None:
+            return {}
+        recognized_starts.append(int(candidate_span[0]))
 
-    positive_starts = [start for start in recognized_starts if start > 0]
-    if not positive_starts or any(start == 0 for start in recognized_starts):
+    if not recognized_starts or any(start <= 0 for start in recognized_starts):
         return {}
-    prefix_length = max(set(positive_starts), key=positive_starts.count)
-    if positive_starts.count(prefix_length) != len(positive_starts):
-        return {}
-    if any(len(line) <= prefix_length for line in lines):
+    if any(len(line) <= start for line, start in zip(lines, recognized_starts)):
         return {}
 
     return {
-        "prefixLength": prefix_length,
+        "prefixLength": recognized_starts[0] if len(set(recognized_starts)) == 1 else None,
+        "prefixLengths": recognized_starts,
         "recordDelimiter": "\\n" if len(lines) > 1 else "none",
         "lineCount": len(lines),
-        "evidenceCount": len(positive_starts),
+        "evidenceCount": len(recognized_starts),
     }
 
 
@@ -5719,15 +5939,20 @@ def _mpn_position_prefix_rule(value, source_column=""):
     layout = _mpn_position_prefix_layout(value)
     if not layout:
         return {}
+    repeated_prefix = layout["recordDelimiter"] == "repeated_prefix"
+    mpn_rule = {
+        "delimiter": layout["recordDelimiter"],
+        "prefixMode": "first_n_chars" if repeated_prefix else "recognized_mpn_start",
+        "detectionSource": "recognized_mpn_position",
+    }
+    if repeated_prefix:
+        mpn_rule.update({
+            "stripPrefix": str(layout["prefixLength"]),
+            "preserveOriginalValue": True,
+        })
     rule = {
         "fields": {
-            "mpn": {
-                "delimiter": layout["recordDelimiter"],
-                "stripPrefix": str(layout["prefixLength"]),
-                "prefixMode": "first_n_chars",
-                "detectionSource": "recognized_mpn_position",
-                **({"preserveOriginalValue": True} if layout["recordDelimiter"] == "repeated_prefix" else {}),
-            },
+            "mpn": mpn_rule,
         },
     }
     if layout["recordDelimiter"] == "\\n":
@@ -5749,6 +5974,7 @@ def _semantic_identity_fragments(value, mapped_fields):
 
     mapped = set(mapped_fields or [])
     if not {"mpn", "manufacturer"}.issubset(mapped):
+        prefix_layout = {}
         if mapped == {"mpn"}:
             # A one-to-one MPN column can still contain a real MPN plus customer
             # annotations, suffix lists, status text, or other cleanup content.
@@ -5757,14 +5983,23 @@ def _semantic_identity_fragments(value, mapped_fields):
             prefix_layout = _mpn_position_prefix_layout(text)
             grammar = _mpn_only_marker_alternate_pattern(text)
             if not grammar and prefix_layout:
-                grammar = f"<PREFIX:{prefix_layout['prefixLength']}><MPN>"
+                grammar = "<PREFIX><MPN>"
                 if prefix_layout["recordDelimiter"] == "\\n":
                     grammar = f"{grammar} repeated by <NEW_LINE>"
+                elif prefix_layout["recordDelimiter"] == "repeated_prefix":
+                    grammar = f"{grammar} repeated by <ADJACENT_RECORD>"
             if not grammar:
                 grammar = _unclassified_identity_fragment_pattern(text)
         else:
             grammar = " + ".join(_pattern_display_token(role) for role in (mapped_fields or []))
-        return [{"start": 0, "end": len(text), "rawValue": text, "grammar": grammar or "<VALUE>"}]
+        fragment = {"start": 0, "end": len(text), "rawValue": text, "grammar": grammar or "<VALUE>"}
+        if prefix_layout:
+            fragment["extraction"] = {
+                "mode": "recognized_mpn_start",
+                "prefixLengths": list(prefix_layout.get("prefixLengths") or []),
+                "recordDelimiter": prefix_layout.get("recordDelimiter") or "none",
+            }
+        return [fragment]
 
     record_spans = _identity_record_spans(text)
     if len(record_spans) > 1:
@@ -6018,6 +6253,32 @@ def _visual_teach_reusable_before(value, segment_index):
     return match.group(1) if match else text
 
 
+def _punctuation_placeholder(value):
+    boundary = str(value or "").strip()
+    while boundary and boundary[-1] in "([{<":
+        boundary = boundary[:-1].rstrip()
+    if not boundary or any(character.isalnum() for character in boundary):
+        return ""
+    if any(character in ")]}>" for character in boundary):
+        return ""
+    return boundary
+
+
+def _external_alternate_placeholder(text, mpn_span, alternate_span):
+    """Return punctuation placed between a tagged MPN and its alternate list."""
+    if not isinstance(mpn_span, dict) or not isinstance(alternate_span, dict):
+        return ""
+    try:
+        start = int(mpn_span.get("end") or 0)
+        end = int(alternate_span.get("start") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if end < start:
+        return ""
+
+    return _punctuation_placeholder(str(text or "")[start:end])
+
+
 def _visual_token_occurrence_count(text, token):
     """Count taught boundaries while treating separator whitespace as optional."""
     text = str(text or "")
@@ -6206,7 +6467,7 @@ def derive_visual_pattern_from_tagged_spans(
         "sourceHeader": source_header,
         "groupSeparator": group_separator,
         "recordSeparator": group_separator,
-        "alternateDelimiter": "" if alternate_delimiter == "__no_split__" else str(alternate_delimiter or ""),
+        "alternateDelimiter": str(alternate_delimiter or ""),
         "alternateMode": (
             requested_alternate_mode
             if requested_alternate_mode in {
@@ -6265,11 +6526,23 @@ def derive_visual_pattern_from_tagged_spans(
             else ""
         )
         inferred_delimiter = str(alternate_delimiter or "") or _infer_list_delimiter(alternate_text)
-        marker_match = (
-            _select_structural_marker(mpn_text, alternate_text, inferred_delimiter)
-            if inferred_delimiter and requested_alternate_mode != "complete"
-            else None
+        external_placeholder = _external_alternate_placeholder(
+            text,
+            mpn_span,
+            alternate_span,
         )
+        if external_placeholder and requested_alternate_mode == "append":
+            # The user tagged the complete base MPN and chose append. Punctuation
+            # between that value and the alternate list is a source placeholder,
+            # not evidence that an internal MPN delimiter is an insertion marker.
+            rule["trailingPlaceholder"] = external_placeholder
+            marker_match = None
+        else:
+            marker_match = (
+                _select_structural_marker(mpn_text, alternate_text, inferred_delimiter)
+                if inferred_delimiter and requested_alternate_mode != "complete"
+                else None
+            )
         replacement_marker = marker_match["value"] if marker_match else ""
     if (
         "alternateList" in tagged_roles
@@ -6487,7 +6760,7 @@ def _visual_pattern_identity_pairs(row, headers, roles, config=None):
         or (config or {}).get("_active_field_pattern_rule")
         or {}
     )
-    visual_pattern = active_rule.get("visualPattern") or active_rule.get("visual_pattern")
+    visual_pattern = _authoritative_visual_pattern(active_rule)
     if not isinstance(visual_pattern, dict):
         return []
     visual_pattern_type = clean(visual_pattern.get("type"))
@@ -6527,6 +6800,9 @@ def _visual_pattern_identity_pairs(row, headers, roles, config=None):
         raw_alternate_delimiter = visual_pattern.get("alternate_delimiter")
     if raw_alternate_delimiter is None:
         raw_alternate_delimiter = ""
+    delimiter_choice = str(raw_alternate_delimiter).strip()
+    explicit_no_alternates = delimiter_choice == ALTERNATE_DELIMITER_NONE
+    explicit_no_split = delimiter_choice == ALTERNATE_DELIMITER_SINGLE
     alternate_delimiter = _configured_delimiter({"delimiter": raw_alternate_delimiter})
     alternate_mode = clean(
         visual_pattern.get("alternateMode")
@@ -6554,6 +6830,34 @@ def _visual_pattern_identity_pairs(row, headers, roles, config=None):
         or visual_pattern.get("trailing_placeholder")
         or ""
     )
+    authoritative_correction = (
+        active_rule.get("authoritativeCorrection")
+        or active_rule.get("authoritative_correction")
+        or {}
+    )
+    confirmed_alternate_mode = clean(
+        authoritative_correction.get("alternateMode")
+        or authoritative_correction.get("alternate_mode")
+    ) if isinstance(authoritative_correction, dict) else ""
+    if (
+        not composition_operation
+        and confirmed_alternate_mode == "append"
+        and "alternateList" in visual_roles
+    ):
+        external_placeholder = next((
+            _punctuation_placeholder(segment.get("after"))
+            for segment in (visual_pattern.get("segments") or [])
+            if isinstance(segment, dict)
+            and clean(segment.get("role")) == "mpn"
+            and _punctuation_placeholder(segment.get("after"))
+        ), "")
+        if external_placeholder:
+            # Older rules could mistake an internal MPN symbol for a marker even
+            # though the confirmed append placeholder follows the tagged MPN.
+            alternate_mode = "append"
+            trailing_placeholder = trailing_placeholder or external_placeholder
+            composition_marker = ""
+            mpn_composition = {}
     preserve_outer_brackets = (
         visual_pattern.get("preserveOuterBrackets")
         or visual_pattern.get("preserve_outer_brackets")
@@ -6606,6 +6910,33 @@ def _visual_pattern_identity_pairs(row, headers, roles, config=None):
         if alternate_text.startswith(alternate_joiner):
             alternate_text = alternate_text[len(alternate_joiner):]
         return f"{append_base_mpn(base)}{alternate_joiner}{alternate_text}"
+
+    def alternate_values(value, preserve_wrapper=False, preserve_empty=False):
+        alternate_text = str(value or "").strip()
+        if not alternate_text or explicit_no_alternates:
+            return []
+        wrapper = None
+        wrapper_match = re.match(
+            r"^([\(\[\{<])(.*)([\)\]\}>])$",
+            alternate_text,
+            flags=re.DOTALL,
+        )
+        if wrapper_match:
+            wrapper = (wrapper_match.group(1), wrapper_match.group(3))
+            alternate_text = clean(wrapper_match.group(2))
+        if alternate_delimiter:
+            parts = [clean(part) for part in alternate_text.split(alternate_delimiter)]
+        elif explicit_no_split:
+            parts = [clean(alternate_text)]
+        else:
+            parts = []
+        return [
+            f"{wrapper[0]}{part}{wrapper[1]}"
+            if part and preserve_wrapper and wrapper
+            else part
+            for part in parts
+            if part or preserve_empty
+        ]
 
     def add_pair(mpn, manufacturer):
         nonlocal pair_position
@@ -6670,16 +7001,17 @@ def _visual_pattern_identity_pairs(row, headers, roles, config=None):
                 if not marker_parts:
                     continue
                 insertion_prefix, insertion_suffix = marker_parts
-                if not segment_alternates or not alternate_delimiter:
+                segment_alternate_values = alternate_values(
+                    segment_alternates,
+                    preserve_empty=True,
+                )
+                if not segment_alternate_values:
                     add_pair(
                         f"{insertion_prefix}{insertion_suffix}",
                         segment_manufacturer,
                     )
                     continue
-                wrapper_match = re.match(r"^([\(\[\{<])(.*)([\)\]\}>])$", segment_alternates)
-                if wrapper_match:
-                    segment_alternates = clean(wrapper_match.group(2))
-                for alternate in [clean(part) for part in segment_alternates.split(alternate_delimiter)]:
+                for alternate in segment_alternate_values:
                     if alternate:
                         add_pair(
                             f"{insertion_prefix}{alternate}{insertion_suffix}",
@@ -6703,17 +7035,11 @@ def _visual_pattern_identity_pairs(row, headers, roles, config=None):
             elif alternate_mode == "append" and (alternate_joiner or trailing_placeholder):
                 primary_mpn = append_base_mpn(segment_mpn)
             add_pair(primary_mpn, segment_manufacturer)
-            if segment_alternates and alternate_delimiter:
-                wrapper_match = re.match(r"^([\(\[\{<])(.*)([\)\]\}>])$", segment_alternates)
-                alternate_wrapper = None
-                if wrapper_match:
-                    alternate_wrapper = (wrapper_match.group(1), wrapper_match.group(3))
-                    segment_alternates = clean(wrapper_match.group(2))
-                for alternate in [clean(part) for part in segment_alternates.split(alternate_delimiter)]:
-                    if not alternate:
-                        continue
-                    if alternate_wrapper:
-                        alternate = f"{alternate_wrapper[0]}{alternate}{alternate_wrapper[1]}"
+            if segment_alternates:
+                for alternate in alternate_values(
+                    segment_alternates,
+                    preserve_wrapper=bool(preserve_outer_brackets.get("alternateList")),
+                ):
                     if effective_operation == "replace_suffix_at_marker" and replacement_prefix:
                         alternate_mpn = f"{replacement_prefix}{alternate.lstrip(composition_marker)}"
                     else:
@@ -6784,7 +7110,11 @@ def _visual_pattern_identity_pairs(row, headers, roles, config=None):
             continue
         if effective_operation == "insert_alternate_at_marker":
             marker_parts = _split_visual_mpn_at_marker(base_mpn, mpn_composition)
-            if not alternate_text or not alternate_delimiter:
+            parsed_alternates = alternate_values(
+                alternate_text,
+                preserve_empty=True,
+            )
+            if not parsed_alternates:
                 if marker_parts:
                     insertion_prefix, insertion_suffix = marker_parts
                     base_mpn = f"{insertion_prefix}{insertion_suffix}"
@@ -6793,10 +7123,7 @@ def _visual_pattern_identity_pairs(row, headers, roles, config=None):
             if not marker_parts:
                 continue
             insertion_prefix, insertion_suffix = marker_parts
-            wrapper_match = re.match(r"^([\(\[\{<])(.*)([\)\]\}>])$", alternate_text)
-            if wrapper_match:
-                alternate_text = clean(wrapper_match.group(2))
-            for alternate in [clean(part) for part in alternate_text.split(alternate_delimiter)]:
+            for alternate in parsed_alternates:
                 if alternate:
                     add_pair(
                         f"{insertion_prefix}{alternate}{insertion_suffix}",
@@ -6821,22 +7148,12 @@ def _visual_pattern_identity_pairs(row, headers, roles, config=None):
         elif alternate_mode == "append" and (alternate_joiner or trailing_placeholder):
             primary_mpn = append_base_mpn(base_mpn)
         add_pair(primary_mpn, manufacturer)
-        if not alternate_text or not alternate_delimiter:
+        if not alternate_text:
             continue
-        alternate_wrapper = None
-        if preserve_outer_brackets.get("alternateList"):
-            wrapper_pairs = {"(": ")", "[": "]", "{": "}", "<": ">"}
-            opening = alternate_text[:1]
-            closing = wrapper_pairs.get(opening)
-            if closing and alternate_text.endswith(closing):
-                alternate_wrapper = (opening, closing)
-                alternate_text = alternate_text[1:-1].strip()
-        alternate_parts = [clean(part) for part in alternate_text.split(alternate_delimiter)]
-        for alternate in alternate_parts:
-            if not alternate:
-                continue
-            if alternate_wrapper:
-                alternate = f"{alternate_wrapper[0]}{alternate}{alternate_wrapper[1]}"
+        for alternate in alternate_values(
+            alternate_text,
+            preserve_wrapper=bool(preserve_outer_brackets.get("alternateList")),
+        ):
             if effective_operation == "replace_suffix_at_marker" and replacement_prefix:
                 alternate_mpn = f"{replacement_prefix}{alternate.lstrip(composition_marker)}"
             else:
@@ -6856,7 +7173,7 @@ def _visual_pattern_ignored_fields(roles, config=None):
         or (config or {}).get("_active_field_pattern_rule")
         or {}
     )
-    visual_pattern = active_rule.get("visualPattern") or active_rule.get("visual_pattern")
+    visual_pattern = _authoritative_visual_pattern(active_rule)
     if not isinstance(visual_pattern, dict) or clean(visual_pattern.get("type")) != "ignore_fields":
         return set()
     source_header = clean(
@@ -6881,7 +7198,7 @@ def _visual_pattern_owned_fields(config=None):
         or (config or {}).get("_active_field_pattern_rule")
         or {}
     )
-    visual_pattern = active_rule.get("visualPattern") or active_rule.get("visual_pattern")
+    visual_pattern = _authoritative_visual_pattern(active_rule)
     if not isinstance(visual_pattern, dict):
         return set()
 
@@ -6905,7 +7222,7 @@ def _visual_pattern_owned_fields(config=None):
 def _field_pattern_rule_excludes_row(rule):
     if not isinstance(rule, dict):
         return False
-    visual_pattern = rule.get("visualPattern") or rule.get("visual_pattern")
+    visual_pattern = _authoritative_visual_pattern(rule)
     if not isinstance(visual_pattern, dict):
         return False
     # Ignore is field-level: it suppresses the selected interpretation roles
@@ -6918,7 +7235,7 @@ def _field_pattern_rule_excludes_row(rule):
 def _field_pattern_rule_ignores_fields(rule):
     if not isinstance(rule, dict):
         return False
-    visual_pattern = rule.get("visualPattern") or rule.get("visual_pattern")
+    visual_pattern = _authoritative_visual_pattern(rule)
     return (
         isinstance(visual_pattern, dict)
         and clean(visual_pattern.get("type")) == "ignore_fields"
@@ -6931,7 +7248,7 @@ def _visual_pattern_tagged_field_rows(row, headers, config=None):
         or (config or {}).get("_active_field_pattern_rule")
         or {}
     )
-    visual_pattern = active_rule.get("visualPattern") or active_rule.get("visual_pattern")
+    visual_pattern = _authoritative_visual_pattern(active_rule)
     if not isinstance(visual_pattern, dict) or clean(visual_pattern.get("type")) != "tagged_fields":
         return []
     source_header = clean(
@@ -6980,7 +7297,7 @@ def _visual_pattern_manual_rows(row, headers, config=None):
         or (config or {}).get("_active_field_pattern_rule")
         or {}
     )
-    visual_pattern = active_rule.get("visualPattern") or active_rule.get("visual_pattern")
+    visual_pattern = _authoritative_visual_pattern(active_rule)
     if not isinstance(visual_pattern, dict):
         return [], ""
     source_header = clean(
@@ -7313,11 +7630,7 @@ def _infer_field_entries_for_row(row, headers, roles, selected_columns, config=N
         if len(mapped_roles) > 1:
             return True
         field_rule = _field_rule(config, role)
-        delimiter = clean(
-            field_rule.get("delimiterMode")
-            or field_rule.get("delimiter_mode")
-            or field_rule.get("delimiter")
-        )
+        delimiter = _configured_delimiter(field_rule)
         return bool(delimiter and delimiter not in {"none", "no_split", "auto"})
 
     cpn_parts = (
@@ -8095,6 +8408,17 @@ def _merge_pattern_rules(base=None, override=None):
         merged["visualPattern"] = dict(visual_pattern)
     elif isinstance(base.get("visualPattern") or base.get("visual_pattern"), dict):
         merged["visualPattern"] = dict(base.get("visualPattern") or base.get("visual_pattern"))
+    authoritative_correction = (
+        override.get("authoritativeCorrection")
+        or override.get("authoritative_correction")
+        or base.get("authoritativeCorrection")
+        or base.get("authoritative_correction")
+    )
+    if isinstance(authoritative_correction, dict) and authoritative_correction:
+        merged["authoritativeCorrection"] = deepcopy(authoritative_correction)
+    authoritative_visual_pattern = _authoritative_visual_pattern(merged)
+    if authoritative_visual_pattern:
+        merged["visualPattern"] = authoritative_visual_pattern
     return merged
 
 
@@ -8395,7 +8719,7 @@ def save_bom_field_pattern_rule(
     expansions = rule.get("expansions") or rule.get("expansionRules") or rule.get("expansion_rules")
     if isinstance(expansions, list) and expansions:
         parser_rule["expansions"] = expansions
-    visual_pattern = rule.get("visualPattern") or rule.get("visual_pattern")
+    visual_pattern = _authoritative_visual_pattern(rule)
     if isinstance(visual_pattern, dict) and visual_pattern:
         parser_rule["visualPattern"] = dict(visual_pattern)
     authoritative_correction = (
@@ -8731,11 +9055,7 @@ def _entry_interpretation_spans(value, source_header, entries, existing_spans=No
 
 
 def _interpretation_spans_by_column(row, headers, source_columns, active_rule, entries):
-    visual_pattern = (
-        (active_rule or {}).get("visualPattern")
-        or (active_rule or {}).get("visual_pattern")
-        or {}
-    )
+    visual_pattern = _authoritative_visual_pattern(active_rule)
     visual_source_header = clean(
         visual_pattern.get("sourceHeader")
         or visual_pattern.get("source_header")
@@ -9626,6 +9946,7 @@ def build_bom_field_pattern_teach_result(
         requested_prefix_length = 0
     repeated_mpn_field_split = bool(
         repeated_prefix_layout
+        and not _configured_delimiter(requested_mpn_rule)
         and clean(safe_roles.get("mpn")) == source_header
         and requested_prefix_mode == "first_n_chars"
         and requested_prefix_length == int(repeated_prefix_layout.get("prefixLength") or 0)
@@ -9721,6 +10042,11 @@ def build_bom_field_pattern_teach_result(
             if clean(field) in ROLE_KEYS
         ],
     }
+    if isinstance(rule.get("visualPattern"), dict) and rule["visualPattern"]:
+        rule["visualPattern"] = _authoritative_visual_pattern(rule)
+        rule["authoritativeCorrection"]["visualPattern"] = deepcopy(
+            rule["visualPattern"]
+        )
     row_config = _config_with_active_rule({}, rule)
     selected_columns = [
         header for header in dict.fromkeys(safe_roles.values())
@@ -9755,6 +10081,7 @@ def build_bom_field_pattern_teach_result(
     return {
         "source": "backend",
         "rule": rule,
+        "controls": _field_pattern_control_state(rule),
         "visualPattern": backend_visual_pattern,
         "pattern": pattern,
         "title": _field_review_title(mapped_fields),
@@ -10192,6 +10519,7 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                         "patternRows": [],
                         "primaryPatternRow": None,
                         "suggestedRule": parser_rule or {"fields": {}},
+                        "controls": _field_pattern_control_state(parser_rule),
                         "storedInterpretation": stored,
                         "recognized": bool(automatic_unclassified or stored or draft_rule),
                         "ignored": _field_pattern_rule_excludes_row(parser_rule),
@@ -10221,6 +10549,7 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
                         "rawValue": fragment.get("rawValue") or "",
                         "patternKey": pattern_key,
                         "rowShapeGroupId": group.get("id"),
+                        "extraction": deepcopy(fragment.get("extraction") or {}),
                     }
                     occurrence_identity = (
                         occurrence["sourceRow"], occurrence["sourceColumn"],
@@ -10523,6 +10852,7 @@ def _build_pattern_combinations(headers, patterns):
                 "start": int(occurrence.get("start") or 0),
                 "end": int(occurrence.get("end") or 0),
                 "rawValue": occurrence.get("rawValue") or "",
+                "extraction": deepcopy(occurrence.get("extraction") or {}),
                 "entries": interpretation.get("entries") or [],
                 "interpretationSpans": interpretation.get("interpretationSpans") or [],
             })
@@ -10876,6 +11206,9 @@ def _build_backend_review_contract(
             ),
             "reviewRowIndex": row_index,
             "reviewPage": row_index // 4,
+            "controls": pattern.get("controls") or _field_pattern_control_state(
+                group.get("suggestedRule") or {}
+            ),
             "sample": {
                 "sourceRow": row.get("sourceRow"),
                 "left": row.get("left") or [],
@@ -10905,6 +11238,9 @@ def _build_backend_review_contract(
         pattern["mappedFieldsLabel"] = " + ".join(pattern["mappedFieldLabels"])
         pattern["groupId"] = group.get("id") or ""
         pattern["workflowStepId"] = workflow_step.get("id") or ""
+        pattern["controls"] = pattern.get("controls") or _field_pattern_control_state(
+            group.get("suggestedRule") or {}
+        )
         if not row_match:
             pattern["teachContext"] = None
             continue
@@ -10988,6 +11324,7 @@ def _build_backend_review_contract(
                     "rawValue",
                     "pattern",
                     "interpretationSpans",
+                    "extraction",
                 )
                 if occurrence.get(key) is not None
             }
@@ -11012,6 +11349,7 @@ def _build_backend_review_contract(
         "patternsByField": patterns_by_field,
         "fieldFilters": field_filters,
         "mappedFieldOptions": mapped_field_options,
+        "bulkParsing": _bulk_pattern_parsing_contract(mapped_field_options),
         "groups": [_compact_review_group(group) for group in groups or []],
         "rows": public_review_rows,
         "fields": [
@@ -11548,6 +11886,7 @@ def build_bom_field_pattern_groups(headers, rows, roles=None, config=None, selec
             [max(0, len(sample.get("entries") or []) - 1) for sample in group["samples"]] or [0]
         )
         group["primaryPatternRow"] = _primary_pattern_row(group.get("patternRows"))
+        group["controls"] = _field_pattern_control_state(group.get("suggestedRule") or {})
 
     semantic_patterns = _build_semantic_review_patterns(
         safe_headers,
@@ -12072,9 +12411,11 @@ def refresh_bom_field_pattern_review_after_teach(
             "draftInterpretation": {"rule": rule},
             "pattern": confirmed_pattern,
             "detectedPattern": pattern.get("detectedPattern") or pattern.get("pattern") or "",
+            "controls": teach_result.get("controls") or _field_pattern_control_state(rule),
         })
         teach_context = pattern.get("teachContext")
         if isinstance(teach_context, dict):
+            teach_context["controls"] = teach_result.get("controls") or _field_pattern_control_state(rule)
             sample = teach_context.get("sample")
             if isinstance(sample, dict) and str(sample.get("sourceRow")) == str(source_row):
                 sample["entries"] = compact_taught_entries
@@ -12090,6 +12431,7 @@ def refresh_bom_field_pattern_review_after_teach(
         ):
             continue
         review_group["suggestedRule"] = rule
+        review_group["controls"] = teach_result.get("controls") or _field_pattern_control_state(rule)
         review_group["recognized"] = interpretation_is_recognized
         review_group["interpretationPattern"] = confirmed_pattern
         review_group["recognitionValidation"] = _compact_recognition_validation(
@@ -12148,6 +12490,7 @@ def refresh_bom_field_pattern_review_after_teach(
             step["draftInterpretation"] = {"rule": rule}
             step["pattern"] = confirmed_pattern
             step["recognized"] = interpretation_is_recognized
+            step["controls"] = teach_result.get("controls") or _field_pattern_control_state(rule)
             step["recognitionValidation"] = _compact_recognition_validation(
                 recognition_validation
             )

@@ -83,13 +83,13 @@ import {
   STRUCTURE_OPTIONS,
 } from '../lib/bomNormalizerAlgorithmRegistry';
 import {
-  VISUAL_TEACH_NO_SPLIT,
   clearVisualTeachTagSelection,
   fieldPatternSampleKey,
   fieldPatternSampleForWorkflowStep,
   normalizeVisualTeachEntries,
   shouldRepeatVisualTeachGroupSeparator,
   visualTeachTagsFromInterpretationSpans,
+  withPatternConfirmationDisplayData,
 } from '../lib/visualTeachParser';
 import {
   bomNormalizerSourceKey,
@@ -9005,19 +9005,6 @@ const VISUAL_TEACH_STRUCTURAL_ROLES = [
   { key: 'ignore', label: 'Ignore', color: '#64748b', bg: '#f1f5f9' },
 ];
 
-const VISUAL_TEACH_CUSTOM_DELIMITER = '__custom_delimiter__';
-const VISUAL_TEACH_DELIMITER_OPTIONS = [
-  { value: '', label: 'No separator' },
-  { value: '/', label: 'Slash (/)' },
-  { value: ';', label: 'Semicolon (;)' },
-  { value: ',', label: 'Comma (,)' },
-  { value: '|', label: 'Pipe (|)' },
-  { value: '^', label: 'Caret (^)' },
-  { value: '~', label: 'Tilde (~)' },
-  { value: '\n', label: 'New line' },
-  { value: VISUAL_TEACH_NO_SPLIT, label: 'No split' },
-];
-
 const VISUAL_TEACH_ROLE_STYLE_BY_KEY = [
   ...FACTWISE_PARSE_FIELDS.map((field) => ({
     ...field,
@@ -9421,6 +9408,9 @@ const BomNormalizer = () => {
   const [fieldPatternConfirmations, setFieldPatternConfirmations] = useState({});
   const [fieldPatternReviewReceipt, setFieldPatternReviewReceipt] = useState('');
   const [fieldPatternSelectedRuleField, setFieldPatternSelectedRuleField] = useState('');
+  const [bulkPatternControls, setBulkPatternControls] = useState({});
+  const [bulkPatternControlsChanged, setBulkPatternControlsChanged] = useState(false);
+  const [bulkPatternControlsLoading, setBulkPatternControlsLoading] = useState(false);
   const [fieldPatternReviewWorkflow, setFieldPatternReviewWorkflow] = useState({ steps: [], nextStep: null });
   const [fieldPatternWorkflowLaunchRevision, setFieldPatternWorkflowLaunchRevision] = useState(0);
   const [visualTeachOpen, setVisualTeachOpen] = useState(false);
@@ -9429,7 +9419,8 @@ const BomNormalizer = () => {
   const [visualTeachSelection, setVisualTeachSelection] = useState(null);
   const [visualTeachDrag, setVisualTeachDrag] = useState(null);
   const [visualTeachDelimiter, setVisualTeachDelimiter] = useState('');
-  const [visualTeachAltMode, setVisualTeachAltMode] = useState('append');
+  const [visualTeachCustomDelimiterActive, setVisualTeachCustomDelimiterActive] = useState(false);
+  const [visualTeachAltMode, setVisualTeachAltMode] = useState('');
   const [visualTeachAlternateJoiner, setVisualTeachAlternateJoiner] = useState('');
   const [visualTeachMpnPrefixLength, setVisualTeachMpnPrefixLength] = useState('');
   const [visualTeachMpnPrefixTouched, setVisualTeachMpnPrefixTouched] = useState(false);
@@ -10408,6 +10399,9 @@ const BomNormalizer = () => {
     fieldPatternReviewContract.patternsByField?.[fieldPatternFieldFilter] || []
   );
   const mappedFieldPatternRuleOptions = fieldPatternReviewContract.mappedFieldOptions || [];
+  const bulkPatternParsingContract = fieldPatternReviewContract.bulkParsing || {};
+  const visualTeachDelimiterOptions = bulkPatternParsingContract.alternateSeparatorOptions || [];
+  const visualTeachCustomDelimiterValue = bulkPatternParsingContract.customAlternateDelimiterValue || '';
   const selectedFieldPatternRuleOption = mappedFieldPatternRuleOptions.find(
     (field) => field.key === fieldPatternSelectedRuleField
   ) || mappedFieldPatternRuleOptions[0] || null;
@@ -10446,14 +10440,18 @@ const BomNormalizer = () => {
     })),
     ...VISUAL_TEACH_STRUCTURAL_ROLES,
   ], [visualTeachMappedFields]);
-  const visualTeachDelimiterSelectValue = VISUAL_TEACH_DELIMITER_OPTIONS.some(
-    (option) => option.value === visualTeachDelimiter
-  ) ? visualTeachDelimiter : VISUAL_TEACH_CUSTOM_DELIMITER;
+  const visualTeachDelimiterSelectValue = visualTeachCustomDelimiterActive || (
+    visualTeachDelimiter && !visualTeachDelimiterOptions.some(
+      (option) => option.value === visualTeachDelimiter
+    )
+  ) ? visualTeachCustomDelimiterValue : visualTeachDelimiter;
   const handleVisualTeachDelimiterSelect = useCallback((event) => {
     const selected = event.target.value;
-    setVisualTeachDelimiter(selected === VISUAL_TEACH_CUSTOM_DELIMITER ? '' : selected);
+    const customSelected = selected === visualTeachCustomDelimiterValue;
+    setVisualTeachCustomDelimiterActive(customSelected);
+    setVisualTeachDelimiter(customSelected ? '' : selected);
     setVisualTeachHasUserChanges(true);
-  }, []);
+  }, [visualTeachCustomDelimiterValue]);
   const visualTeachPreparedTags = visualTeachTags;
   const visualTeachIgnoredFields = useMemo(() => {
     if (visualTeachMappedFieldKeys.length) return visualTeachMappedFieldKeys;
@@ -13428,7 +13426,7 @@ const BomNormalizer = () => {
             left: focusedSample.left || [],
             visualTeachTags: options.preservedVisualTags || [],
             visualTeachDelimiter: options.preservedVisualDelimiter ?? '',
-            visualTeachAltMode: options.preservedVisualAltMode || 'append',
+            visualTeachAltMode: options.preservedVisualAltMode ?? '',
             visualTeachAlternateJoiner: options.preservedVisualAlternateJoiner || '',
             visualTeachEntryOverrides: options.preservedVisualEntryOverrides || {},
             manuallyEdited: Boolean(Object.keys(options.preservedVisualEntryOverrides || {}).length),
@@ -13440,6 +13438,8 @@ const BomNormalizer = () => {
       setFieldPatternReviewPage(0);
       setFieldPatternReviewSummary(reviewSummary);
       setFieldPatternReviewContract(review);
+      setBulkPatternControls({});
+      setBulkPatternControlsChanged(false);
       setFieldPatternReviewReceipt(responseData.reviewReceipt?.token || '');
       setFieldPatternFields(fields);
       setFieldPatternReviewWorkflow(reviewWorkflow);
@@ -13527,6 +13527,9 @@ const BomNormalizer = () => {
       : sample?.interpretationSpansByColumn?.[sourceItem.column] || [];
     const confirmedRule = confirmationMatchesSample ? confirmedInterpretation.rule || {} : {};
     const suggestedRule = Object.keys(confirmedRule).length ? confirmedRule : group?.suggestedRule || {};
+    const backendControls = confirmationMatchesSample
+      ? confirmedInterpretation.controls || {}
+      : group?.controls || workflowStep?.controls || {};
     setVisualTeachBackendPreview({
       entries: seedEntries,
       interpretationSpansByColumn: confirmationMatchesSample
@@ -13535,32 +13538,30 @@ const BomNormalizer = () => {
       title: (confirmationMatchesSample ? confirmedInterpretation?.title : '') || workflowStep?.title || '',
       pattern: (confirmationMatchesSample ? confirmedInterpretation?.pattern : '') || workflowStep?.pattern || group?.primaryPatternRow?.pattern || '',
       rule: suggestedRule,
+      controls: backendControls,
     });
     setVisualTeachTags(visualTeachTagsFromInterpretationSpans(sourceValue, backendSpans));
     setVisualTeachSelection(null);
     setVisualTeachDrag(null);
+    setVisualTeachCustomDelimiterActive(false);
     setVisualTeachDelimiter(
       sampleEdit.visualTeachDelimiter ??
-      suggestedRule?.visualPattern?.alternateDelimiter ??
+      backendControls.alternateDelimiter ??
       ''
     );
     setVisualTeachAltMode(
-      sampleEdit.visualTeachAltMode ||
-      suggestedRule?.visualPattern?.alternateMode ||
-      'append'
+      sampleEdit.visualTeachAltMode ??
+      backendControls.alternateMode ??
+      ''
     );
     setVisualTeachAlternateJoiner(
       sampleEdit.visualTeachAlternateJoiner ??
-      suggestedRule?.visualPattern?.alternateJoiner ??
+      backendControls.alternateJoiner ??
       ''
     );
-    const suggestedMpnRule = suggestedRule?.fields?.mpn || {};
     setVisualTeachMpnPrefixLength(
-      sampleEdit.visualTeachMpnPrefixLength ?? (
-        suggestedMpnRule.prefixMode === 'first_n_chars'
-          ? String(suggestedMpnRule.stripPrefix || '')
-          : ''
-      )
+      sampleEdit.visualTeachMpnPrefixLength ??
+      (backendControls.prefixMode === 'first_n_chars' ? String(backendControls.stripPrefix ?? '') : '')
     );
     setVisualTeachMpnPrefixTouched(false);
     setVisualTeachEntryOverrides(confirmationMatchesSample ? {} : sampleEdit.visualTeachEntryOverrides || {});
@@ -13690,6 +13691,7 @@ const BomNormalizer = () => {
           title: response.data?.title || '',
           pattern: response.data?.pattern || '',
           rule: response.data?.rule || {},
+          controls: response.data?.controls || {},
         });
         const nextTags = visualTeachTagsFromInterpretationSpans(
           visualTeachContext.sourceValue,
@@ -13700,21 +13702,30 @@ const BomNormalizer = () => {
             ? current
             : nextTags
         ));
-        const backendAlternateMode = response.data?.visualPattern?.alternateMode;
-        if (backendAlternateMode && backendAlternateMode !== visualTeachAltMode) {
+        const backendControls = response.data?.controls || {};
+        const backendAlternateMode = backendControls.alternateMode;
+        if (backendAlternateMode !== undefined && backendAlternateMode !== visualTeachAltMode) {
           setVisualTeachAltMode(backendAlternateMode);
         }
-        const backendAlternateDelimiter = response.data?.visualPattern?.alternateDelimiter;
+        const backendAlternateDelimiter = backendControls.alternateDelimiter;
         if (
           backendAlternateDelimiter !== undefined &&
           backendAlternateDelimiter !== null &&
           backendAlternateDelimiter !== visualTeachDelimiter
         ) {
+          setVisualTeachCustomDelimiterActive(false);
           setVisualTeachDelimiter(backendAlternateDelimiter);
         }
-        const backendAlternateJoiner = response.data?.visualPattern?.alternateJoiner;
+        const backendAlternateJoiner = backendControls.alternateJoiner;
         if (backendAlternateJoiner !== undefined && backendAlternateJoiner !== visualTeachAlternateJoiner) {
           setVisualTeachAlternateJoiner(backendAlternateJoiner);
+        }
+        if (backendControls.prefixMode !== undefined) {
+          setVisualTeachMpnPrefixLength(
+            backendControls.prefixMode === 'first_n_chars'
+              ? String(backendControls.stripPrefix ?? '')
+              : ''
+          );
         }
       } catch (err) {
         if (visualTeachPreviewRequestRef.current === requestId) {
@@ -13928,6 +13939,7 @@ const BomNormalizer = () => {
         throw new Error('Backend did not confirm this interpretation.');
       }
       const taughtRule = response.data?.rule || {};
+      const taughtControls = response.data?.controls || {};
       if (!taughtRule.visualPattern && !Object.keys(taughtRule.fields || {}).length) {
         throw new Error('Backend did not accept the pattern rule.');
       }
@@ -13937,6 +13949,15 @@ const BomNormalizer = () => {
         sourceColumns: sourceColumnsFromBackendFields(entry.fields || {}, fieldPatternFields),
       }));
       visualTeachBackendEntriesRef.current = taughtEntries;
+      setVisualTeachCustomDelimiterActive(false);
+      setVisualTeachDelimiter(taughtControls.alternateDelimiter ?? '');
+      setVisualTeachAltMode(taughtControls.alternateMode ?? '');
+      setVisualTeachAlternateJoiner(taughtControls.alternateJoiner ?? '');
+      setVisualTeachMpnPrefixLength(
+        taughtControls.prefixMode === 'first_n_chars'
+          ? String(taughtControls.stripPrefix ?? '')
+          : ''
+      );
       setFieldPatternConfirmations((current) => ({
         ...current,
         [confirmation.patternKey]: {
@@ -13946,6 +13967,7 @@ const BomNormalizer = () => {
           title: response.data?.title || '',
           pattern: response.data?.pattern || '',
           rule: taughtRule,
+          controls: taughtControls,
         },
       }));
       setVisualTeachBackendPreview({
@@ -13954,6 +13976,7 @@ const BomNormalizer = () => {
         title: response.data?.title || '',
         pattern: response.data?.pattern || '',
         rule: taughtRule,
+        controls: taughtControls,
       });
       const interpretationSpansByColumn = response.data?.interpretationSpansByColumn || {};
       const nextTags = visualTeachTagsFromInterpretationSpans(
@@ -13997,10 +14020,12 @@ const BomNormalizer = () => {
             occurrenceId: confirmedSample.sourceFragment?.id || sample.sourceFragment?.id || '',
             entries: taughtEntries,
             visualTeachTags: nextTags,
-            visualTeachDelimiter,
-            visualTeachAltMode,
-            visualTeachAlternateJoiner,
-            visualTeachMpnPrefixLength,
+            visualTeachDelimiter: taughtControls.alternateDelimiter ?? '',
+            visualTeachAltMode: taughtControls.alternateMode ?? '',
+            visualTeachAlternateJoiner: taughtControls.alternateJoiner ?? '',
+            visualTeachMpnPrefixLength: taughtControls.prefixMode === 'first_n_chars'
+              ? String(taughtControls.stripPrefix ?? '')
+              : '',
             visualTeachMpnPrefixTouched: false,
             visualTeachEntryOverrides: {},
             manuallyEdited: hasManualEdits,
@@ -14128,6 +14153,152 @@ const BomNormalizer = () => {
       };
     });
   }, []);
+
+  const handleApplyBulkPatternControls = useCallback(async () => {
+    if (!selectedFieldPatternRuleOption || !bulkPatternControlsChanged || bulkPatternControlsLoading) return;
+    setBulkPatternControlsLoading(true);
+    setError('');
+    try {
+      const response = await api.applyBomFieldPatternBulkControls({
+        headers,
+        rows: dataRows,
+        roles,
+        config: normalizerConfig,
+        review: fieldPatternReviewContract,
+        reviewReceipt: fieldPatternReviewReceipt,
+        field: selectedFieldPatternRuleOption.key,
+        controls: bulkPatternControls,
+        confirm: true,
+      });
+      const refreshedReview = response.data?.review;
+      if (!refreshedReview || Number(refreshedReview.contractVersion || 0) < 3) {
+        throw new Error('Backend did not return the updated pattern review.');
+      }
+      const confirmations = Array.isArray(response.data?.confirmations) ? response.data.confirmations : [];
+      const refreshedGroups = Array.isArray(refreshedReview.groups) ? refreshedReview.groups : [];
+      const refreshedFields = Array.isArray(refreshedReview.fields) ? refreshedReview.fields : [];
+      const refreshedWorkflow = refreshedReview.workflow || { steps: [], nextStep: null };
+      setFieldPatternConfirmations((current) => {
+        const next = { ...current };
+        confirmations.forEach((confirmation) => {
+          if (confirmation?.patternKey && confirmation?.token) {
+            next[confirmation.patternKey] = withPatternConfirmationDisplayData(
+              confirmation,
+              refreshedReview
+            );
+          }
+        });
+        return next;
+      });
+      setFieldPatternRuleDrafts(refreshedReview.activeRules || response.data?.activeRules || {});
+      setFieldPatternReviewReceipt(response.data?.reviewReceipt?.token || '');
+      setFieldPatternGroups(refreshedGroups);
+      setFieldPatternReviewRows(Array.isArray(refreshedReview.rows) ? refreshedReview.rows : []);
+      setFieldPatternReviewSummary(refreshedReview.summary || {});
+      setFieldPatternReviewContract(refreshedReview);
+      setFieldPatternFields(refreshedFields);
+      setFieldPatternReviewWorkflow(refreshedWorkflow);
+
+      if (fieldPatternExpandedPatternKey) {
+        const refreshedPattern = (refreshedReview.patterns || []).find(
+          (pattern) => fmt(pattern?.patternKey) === fieldPatternExpandedPatternKey
+        );
+        const refreshedTeachContext = refreshedPattern?.teachContext;
+        const refreshedSample = refreshedTeachContext?.sample;
+        const refreshedGroup = refreshedGroups.find(
+          (group) => group.id === refreshedTeachContext?.groupId
+        );
+        if (refreshedPattern && refreshedSample && refreshedGroup) {
+          const refreshedStep = (refreshedWorkflow.steps || []).find(
+            (step) => step.id === refreshedTeachContext.workflowStepId
+          );
+          const sourceColumn = fmt(
+            refreshedSample.sourceFragment?.sourceColumn ||
+            refreshedStep?.sourceColumn ||
+            visualTeachContext?.sourceColumn
+          );
+          const sourceItem = (refreshedSample.left || []).find(
+            (item) => fmt(item?.column) === sourceColumn
+          );
+          const sourceValue = fmt(
+            refreshedSample.sourceFragment?.rawValue || sourceItem?.value
+          );
+          const refreshedEntries = visualTeachEntriesFromBackend(
+            refreshedSample.entries,
+            refreshedFields
+          );
+          const refreshedSpans = refreshedSample.interpretationSpansByColumn || {};
+          const refreshedControls = refreshedPattern.controls || refreshedGroup.controls || {};
+          const refreshedRule = refreshedPattern.draftInterpretation?.rule ||
+            refreshedReview.activeRules?.[refreshedPattern.patternKey] || {};
+
+          visualTeachPreviewRequestRef.current += 1;
+          visualTeachBackendEntriesRef.current = refreshedEntries;
+          setSelectedFieldPatternId(refreshedGroup.id);
+          setVisualTeachContext({
+            group: refreshedGroup,
+            sample: refreshedSample,
+            sourceColumn,
+            sourceValue,
+            seedEntries: refreshedEntries,
+            backendManufacturerHints: refreshedEntries
+              .map((entry) => fmt(entry?.fields?.manufacturer))
+              .filter(Boolean),
+            workflowStep: refreshedStep || null,
+            occurrence: refreshedSample.sourceFragment || null,
+          });
+          setVisualTeachBackendPreview({
+            entries: refreshedEntries,
+            interpretationSpansByColumn: refreshedSpans,
+            title: refreshedStep?.title || '',
+            pattern: refreshedPattern.pattern || refreshedStep?.pattern || '',
+            rule: refreshedRule,
+            controls: refreshedControls,
+          });
+          setVisualTeachTags(visualTeachTagsFromInterpretationSpans(
+            sourceValue,
+            refreshedSpans[sourceColumn] || []
+          ));
+          setVisualTeachCustomDelimiterActive(false);
+          setVisualTeachDelimiter(refreshedControls.alternateDelimiter ?? '');
+          setVisualTeachAltMode(refreshedControls.alternateMode ?? '');
+          setVisualTeachAlternateJoiner(refreshedControls.alternateJoiner ?? '');
+          setVisualTeachMpnPrefixLength(
+            refreshedControls.prefixMode === 'first_n_chars'
+              ? String(refreshedControls.stripPrefix ?? '')
+              : ''
+          );
+          setVisualTeachSelection(null);
+          setVisualTeachDrag(null);
+          setVisualTeachEntryOverrides({});
+          setVisualTeachMpnPrefixTouched(false);
+          setVisualTeachHasUserChanges(false);
+          setVisualTeachPreviewLoading(false);
+        }
+      }
+      setBulkPatternControlsChanged(false);
+      setPatternApplyNotice(
+        `Parsing and cleanup applied to ${response.data?.updatedPatternKeys?.length || 0} ${selectedFieldPatternRuleOption.label || 'field'} pattern(s).`
+      );
+    } catch (err) {
+      setError(err.response?.data?.error || err.message || 'Backend could not apply parsing and cleanup to all patterns.');
+    } finally {
+      setBulkPatternControlsLoading(false);
+    }
+  }, [
+    bulkPatternControls,
+    bulkPatternControlsChanged,
+    bulkPatternControlsLoading,
+    dataRows,
+    fieldPatternReviewContract,
+    fieldPatternReviewReceipt,
+    fieldPatternExpandedPatternKey,
+    headers,
+    normalizerConfig,
+    roles,
+    selectedFieldPatternRuleOption,
+    visualTeachContext,
+  ]);
 
   const handleApplyFieldPatternReview = useCallback(async () => {
     setFieldPatternLoading(true);
@@ -14835,13 +15006,12 @@ const BomNormalizer = () => {
               <FormControl size="small" sx={{ minWidth: 190 }}>
                 <InputLabel>Alternate separator</InputLabel>
                 <Select label="Alternate separator" value={visualTeachDelimiterSelectValue} onChange={handleVisualTeachDelimiterSelect}>
-                  {VISUAL_TEACH_DELIMITER_OPTIONS.map((option) => (
+                  {visualTeachDelimiterOptions.map((option) => (
                     <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
                   ))}
-                  <MenuItem value={VISUAL_TEACH_CUSTOM_DELIMITER}>Custom delimiter</MenuItem>
                 </Select>
               </FormControl>
-              {visualTeachDelimiterSelectValue === VISUAL_TEACH_CUSTOM_DELIMITER && (
+              {visualTeachDelimiterSelectValue === visualTeachCustomDelimiterValue && visualTeachCustomDelimiterValue && (
                 <TextField
                   size="small"
                   label="Custom delimiter"
@@ -17769,20 +17939,163 @@ const BomNormalizer = () => {
                       ))}
                     </Box>
                   </Box>
-                  <Autocomplete
-                    size="small"
-                    options={fieldPatternFieldFilterOptions}
-                    value={fieldPatternFieldFilterOptions.find((option) => option.key === fieldPatternFieldFilter) || fieldPatternFieldFilterOptions[0]}
-                    onChange={(_, option) => {
-                      setFieldPatternFieldFilter(option?.key || 'all');
-                      setFieldPatternExpandedPatternKey('');
-                    }}
-                    getOptionLabel={(option) => option?.label || ''}
-                    isOptionEqualToValue={(option, value) => option.key === value.key}
-                    renderInput={(params) => <TextField {...params} label="Patterns by field" />}
-                    sx={{ width: { xs: '100%', md: 270 }, flexShrink: 0 }}
-                  />
+                  <Stack gap={1} sx={{ width: { xs: '100%', md: 270 }, flexShrink: 0 }}>
+                    <Autocomplete
+                      size="small"
+                      options={fieldPatternFieldFilterOptions}
+                      value={fieldPatternFieldFilterOptions.find((option) => option.key === fieldPatternFieldFilter) || fieldPatternFieldFilterOptions[0]}
+                      onChange={(_, option) => {
+                        setFieldPatternFieldFilter(option?.key || 'all');
+                        setFieldPatternExpandedPatternKey('');
+                      }}
+                      getOptionLabel={(option) => option?.label || ''}
+                      isOptionEqualToValue={(option, value) => option.key === value.key}
+                      renderInput={(params) => <TextField {...params} label="Patterns by field" />}
+                    />
+                  </Stack>
                 </Stack>
+                <Box sx={{ mt: 1.35, pt: 1.25, borderTop: `1px solid ${normalizerTheme.border}` }}>
+                  <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1} sx={{ mb: 1 }}>
+                    <Box>
+                      <Typography sx={{ fontSize: 13.5, fontWeight: 850, color: normalizerTheme.text }}>
+                        Parsing and cleanup
+                      </Typography>
+                      <Typography sx={{ fontSize: 11.5, color: normalizerTheme.muted }}>
+                        Apply one backend parsing rule to every detected pattern for the selected field.
+                      </Typography>
+                    </Box>
+                    <Button
+                      variant="contained"
+                      startIcon={bulkPatternControlsLoading ? <CircularProgress size={15} color="inherit" /> : <TuneIcon />}
+                      disabled={!selectedFieldPatternRuleOption || !bulkPatternControlsChanged || bulkPatternControlsLoading}
+                      onClick={handleApplyBulkPatternControls}
+                    >
+                      Apply to all patterns
+                    </Button>
+                  </Stack>
+                  <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'repeat(3, minmax(180px, 1fr))' }, gap: 1 }}>
+                    <Autocomplete
+                      size="small"
+                      options={bulkPatternParsingContract.fields || []}
+                      value={selectedFieldPatternRuleOption}
+                      onChange={(_, option) => {
+                        setFieldPatternSelectedRuleField(option?.key || '');
+                        setBulkPatternControls({});
+                        setBulkPatternControlsChanged(false);
+                      }}
+                      getOptionLabel={(option) => `${option?.label || ''} - ${option?.sourceColumn || ''}`}
+                      isOptionEqualToValue={(option, value) => option.key === value.key}
+                      renderInput={(params) => <TextField {...params} label="Field and source column" />}
+                    />
+                    <FormControl size="small">
+                      <InputLabel>Prefix cleanup</InputLabel>
+                      <Select
+                        label="Prefix cleanup"
+                        value={bulkPatternControls.prefixMode || 'none'}
+                        onChange={(event) => {
+                          setBulkPatternControls((current) => ({ ...current, prefixMode: event.target.value }));
+                          setBulkPatternControlsChanged(true);
+                        }}
+                      >
+                        {(bulkPatternParsingContract.prefixModeOptions || []).map((option) => (
+                          <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                    {bulkPatternControls.prefixMode && !['none', 'recognized_mpn_start'].includes(bulkPatternControls.prefixMode) ? (
+                      <TextField
+                        size="small"
+                        label={bulkPatternControls.prefixMode === 'first_n_chars' ? 'Number of prefix characters' : 'Prefix text or delimiter'}
+                        type={bulkPatternControls.prefixMode === 'first_n_chars' ? 'number' : 'text'}
+                        value={bulkPatternControls.stripPrefix || ''}
+                        onChange={(event) => {
+                          setBulkPatternControls((current) => ({ ...current, stripPrefix: event.target.value }));
+                          setBulkPatternControlsChanged(true);
+                        }}
+                      />
+                    ) : <Box />}
+                    <FormControl size="small">
+                      <InputLabel>Suffix cleanup</InputLabel>
+                      <Select
+                        label="Suffix cleanup"
+                        value={bulkPatternControls.suffixMode || 'none'}
+                        onChange={(event) => {
+                          setBulkPatternControls((current) => ({ ...current, suffixMode: event.target.value }));
+                          setBulkPatternControlsChanged(true);
+                        }}
+                      >
+                        {(bulkPatternParsingContract.suffixModeOptions || []).map((option) => (
+                          <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                    {bulkPatternControls.suffixMode && bulkPatternControls.suffixMode !== 'none' ? (
+                      <TextField
+                        size="small"
+                        label={bulkPatternControls.suffixMode === 'last_n_chars' ? 'Number of suffix characters' : 'Suffix text or delimiter'}
+                        type={bulkPatternControls.suffixMode === 'last_n_chars' ? 'number' : 'text'}
+                        value={bulkPatternControls.stripSuffix || ''}
+                        onChange={(event) => {
+                          setBulkPatternControls((current) => ({ ...current, stripSuffix: event.target.value }));
+                          setBulkPatternControlsChanged(true);
+                        }}
+                      />
+                    ) : <Box />}
+                    <FormControl size="small">
+                      <InputLabel>Alternate separator</InputLabel>
+                      <Select
+                        label="Alternate separator"
+                        value={bulkPatternControls.alternateDelimiter || ''}
+                        onChange={(event) => {
+                          setBulkPatternControls((current) => ({ ...current, alternateDelimiter: event.target.value }));
+                          setBulkPatternControlsChanged(true);
+                        }}
+                      >
+                        {(bulkPatternParsingContract.alternateSeparatorOptions || []).map((option) => (
+                          <MenuItem key={option.value || 'empty'} value={option.value}>{option.label}</MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                    {bulkPatternControls.alternateDelimiter === 'custom' && (
+                      <TextField
+                        size="small"
+                        label="Custom delimiter"
+                        value={bulkPatternControls.customAlternateDelimiter || ''}
+                        onChange={(event) => {
+                          setBulkPatternControls((current) => ({ ...current, customAlternateDelimiter: event.target.value }));
+                          setBulkPatternControlsChanged(true);
+                        }}
+                      />
+                    )}
+                    <FormControl size="small">
+                      <InputLabel>Alternate value mode</InputLabel>
+                      <Select
+                        label="Alternate value mode"
+                        value={bulkPatternControls.alternateMode || ''}
+                        onChange={(event) => {
+                          setBulkPatternControls((current) => ({ ...current, alternateMode: event.target.value }));
+                          setBulkPatternControlsChanged(true);
+                        }}
+                      >
+                        <MenuItem value=""><em>Unchanged</em></MenuItem>
+                        {(bulkPatternParsingContract.alternateModeOptions || []).map((option) => (
+                          <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                    {bulkPatternControls.alternateMode === 'append' && (
+                      <TextField
+                        size="small"
+                        label="Alternate-only separator"
+                        value={bulkPatternControls.alternateJoiner || ''}
+                        onChange={(event) => {
+                          setBulkPatternControls((current) => ({ ...current, alternateJoiner: event.target.value }));
+                          setBulkPatternControlsChanged(true);
+                        }}
+                      />
+                    )}
+                  </Box>
+                </Box>
               </Paper>
 
               {fieldPatternReviewPatterns.length > 0 ? (
@@ -17829,28 +18142,6 @@ const BomNormalizer = () => {
                   <Alert severity="info" sx={{ mb: 1.25 }}>
                     No reusable patterns were detected. The backend direct mappings are shown below and can still be reviewed.
                   </Alert>
-                  <Stack direction={{ xs: 'column', sm: 'row' }} gap={1} alignItems={{ xs: 'stretch', sm: 'center' }} sx={{ mb: 1.25 }}>
-                    <Autocomplete
-                      size="small"
-                      options={mappedFieldPatternRuleOptions}
-                      value={selectedFieldPatternRuleOption}
-                      onChange={(_, option) => setFieldPatternSelectedRuleField(option?.key || '')}
-                      getOptionLabel={(option) => `${option?.label || ''} - ${option?.sourceColumn || ''}`}
-                      isOptionEqualToValue={(option, value) => option.key === value.key}
-                      renderInput={(params) => <TextField {...params} label="Mapped field" />}
-                      sx={{ minWidth: 300 }}
-                    />
-                    <Button
-                      variant="outlined"
-                      disabled={!selectedFieldPatternRuleOption || configureParserPreparing}
-                      onClick={() => handleOpenConfigureSplitColumns({
-                        title: `Parsing rules for ${selectedFieldPatternRuleOption?.label || 'field'}`,
-                        initialColumn: selectedFieldPatternRuleOption?.sourceColumn || '',
-                      })}
-                    >
-                      Parsing and cleanup rules
-                    </Button>
-                  </Stack>
                   <TableContainer sx={{ border: `1px solid ${normalizerTheme.border}`, maxHeight: 320 }}>
                     <Table stickyHeader size="small">
                       <TableHead><TableRow><TableCell>Source row</TableCell><TableCell>Customer value</TableCell><TableCell>FactWise value</TableCell></TableRow></TableHead>
@@ -18551,13 +18842,12 @@ const BomNormalizer = () => {
                           value={visualTeachDelimiterSelectValue}
                           onChange={handleVisualTeachDelimiterSelect}
                         >
-                          {VISUAL_TEACH_DELIMITER_OPTIONS.map((option) => (
+                          {visualTeachDelimiterOptions.map((option) => (
                             <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
                           ))}
-                          <MenuItem value={VISUAL_TEACH_CUSTOM_DELIMITER}>Custom delimiter</MenuItem>
                         </Select>
                       </FormControl>
-                      {visualTeachDelimiterSelectValue === VISUAL_TEACH_CUSTOM_DELIMITER && (
+                      {visualTeachDelimiterSelectValue === visualTeachCustomDelimiterValue && visualTeachCustomDelimiterValue && (
                         <TextField
                           size="small"
                           label="Custom delimiter"

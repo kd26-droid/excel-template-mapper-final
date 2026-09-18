@@ -39,6 +39,7 @@ import traceback
 import json
 import tempfile
 import shutil
+from copy import deepcopy
 
 from .delimited_reader import (
     ENCODINGS_TO_TRY,
@@ -50,6 +51,7 @@ from .services.bom_directory_learning import learn_confirmed_bom_field_patterns,
 from .services.bom_role_inference import (
     ROLE_KEYS,
     _bom_pattern_structure_scope,
+    _merge_pattern_rules,
     build_bom_field_pattern_groups,
     build_bom_field_pattern_teach_result,
     infer_bom_roles,
@@ -3712,7 +3714,10 @@ def bom_field_pattern_apply(request):
             reviewed_rules = refreshed_review.get('activeRules') or {}
         for rule_key, reviewed_rule in reviewed_rules.items():
             if rule_key and isinstance(reviewed_rule, dict):
-                confirmed_rules[str(rule_key)] = reviewed_rule
+                confirmed_rules[str(rule_key)] = _merge_pattern_rules(
+                    confirmed_rules.get(str(rule_key)),
+                    reviewed_rule,
+                )
         for group in groups:
             if not isinstance(group, dict):
                 continue
@@ -4062,6 +4067,236 @@ def bom_field_pattern_teaching(request):
         })
     except Exception as exc:
         logger.error("BOM field pattern teaching failed: %s", exc, exc_info=True)
+        return Response({
+            'success': False,
+            'error': str(exc),
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+@api_view(['POST'])
+def bom_field_pattern_bulk_controls(request):
+    """Preview and confirm one backend parsing rule across every pattern for a field."""
+    try:
+        headers = request.data.get('headers') or []
+        rows = request.data.get('rows') or []
+        roles = request.data.get('roles') or {}
+        config = request.data.get('config') or {}
+        review = request.data.get('review') or {}
+        field = str(request.data.get('field') or '').strip()
+        controls = request.data.get('controls') or {}
+        review_receipt = request.data.get('reviewReceipt') or request.data.get('review_receipt') or ''
+        confirm = request.data.get('confirm') is True
+
+        if field not in ROLE_KEYS:
+            return Response({'success': False, 'error': 'Select a mapped field.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(review, dict) or int(review.get('contractVersion') or 0) < 3:
+            return Response({'success': False, 'error': 'A current backend review is required.'}, status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(controls, dict):
+            return Response({'success': False, 'error': 'controls must be an object.'}, status=status.HTTP_400_BAD_REQUEST)
+        if controls.get('alternateDelimiter') == 'custom' and not str(controls.get('customAlternateDelimiter') or ''):
+            return Response({'success': False, 'error': 'Enter the custom alternate delimiter.'}, status=status.HTTP_400_BAD_REQUEST)
+        if controls.get('prefixMode') not in (None, '', 'none', 'recognized_mpn_start') and not str(controls.get('stripPrefix') or ''):
+            return Response({'success': False, 'error': 'Enter the prefix text, delimiter, or character count.'}, status=status.HTTP_400_BAD_REQUEST)
+        if controls.get('suffixMode') not in (None, '', 'none') and not str(controls.get('stripSuffix') or ''):
+            return Response({'success': False, 'error': 'Enter the suffix text, delimiter, or character count.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        trusted_config = _without_client_pattern_rules(config)
+        structure_scope = _bom_pattern_structure_scope(headers, roles, trusted_config)
+        try:
+            active_rules = dict(_read_bom_pattern_review(
+                review_receipt,
+                structure_scope['signature'],
+            ).get('activeRules') or {}) if review_receipt else {}
+        except ValueError as exc:
+            return Response({'success': False, 'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        if not active_rules:
+            active_rules = dict(review.get('activeRules') or {})
+
+        patterns = (review.get('patternsByField') or {}).get(field) or []
+        if not patterns:
+            return Response({
+                'success': False,
+                'error': 'No detected patterns use the selected field.',
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        refreshed_review = deepcopy(review)
+        confirmations = []
+        updated_pattern_keys = []
+        source_header_fallback = str(roles.get(field) or '').strip()
+        options = request.data.get('options') or {}
+        try:
+            header_row_index = int(options.get('headerRowIndex') or 0)
+        except (TypeError, ValueError):
+            header_row_index = 0
+        source_rows_by_number = {}
+        for row_index, source_row in enumerate(rows):
+            if not isinstance(source_row, dict):
+                continue
+            source_row_number = (
+                source_row.get('__sourceRow')
+                or source_row.get('sourceRow')
+                or row_index + header_row_index + 2
+            )
+            source_rows_by_number[str(source_row_number)] = source_row
+
+        for pattern in patterns:
+            if not isinstance(pattern, dict):
+                continue
+            pattern_key = str(pattern.get('patternKey') or '').strip()
+            teach_context = pattern.get('teachContext') or {}
+            sample = teach_context.get('sample') or {}
+            fragment = sample.get('sourceFragment') or {}
+            source_header = str(fragment.get('sourceColumn') or source_header_fallback).strip()
+            fragment_source_value = str(fragment.get('rawValue') or '')
+            if not pattern_key or not source_header or not fragment_source_value:
+                continue
+
+            row = {
+                str(item.get('column')): item.get('value') or ''
+                for item in sample.get('left') or []
+                if isinstance(item, dict) and item.get('column')
+            }
+            original_row = source_rows_by_number.get(str(sample.get('sourceRow'))) or {}
+            if isinstance(original_row, dict):
+                row.update(original_row)
+            source_value = str(row.get(source_header) or fragment_source_value)
+            row[source_header] = source_value
+            row['__sourceRow'] = sample.get('sourceRow')
+
+            base_rule = deepcopy(active_rules.get(pattern_key) or {})
+            if not base_rule:
+                base_rule = deepcopy((pattern.get('draftInterpretation') or {}).get('rule') or {})
+            fields = deepcopy(base_rule.get('fields') or {})
+            field_rule = deepcopy(fields.get(field) or {})
+            field_rule['customerConfirmed'] = True
+
+            if 'prefixMode' in controls or 'stripPrefix' in controls:
+                prefix_mode = str(controls.get('prefixMode') or 'none').strip()
+                strip_prefix = str(controls.get('stripPrefix') or '')
+                if prefix_mode == 'none':
+                    for key in ('prefixMode', 'prefix_mode', 'stripPrefix', 'strip_prefix', 'prefix'):
+                        field_rule.pop(key, None)
+                else:
+                    field_rule['prefixMode'] = prefix_mode
+                    field_rule['stripPrefix'] = strip_prefix
+
+            if 'suffixMode' in controls or 'stripSuffix' in controls:
+                suffix_mode = str(controls.get('suffixMode') or 'none').strip()
+                strip_suffix = str(controls.get('stripSuffix') or '')
+                if suffix_mode == 'none':
+                    for key in ('suffixMode', 'suffix_mode', 'stripSuffix', 'strip_suffix', 'suffix'):
+                        field_rule.pop(key, None)
+                else:
+                    field_rule['suffixMode'] = suffix_mode
+                    field_rule['stripSuffix'] = strip_suffix
+            fields[field] = field_rule
+
+            visual_pattern = deepcopy(base_rule.get('visualPattern') or base_rule.get('visual_pattern') or {})
+            pattern_controls = pattern.get('controls') or {}
+            alternate_delimiter = controls.get(
+                'alternateDelimiter',
+                pattern_controls.get('alternateDelimiter', ''),
+            )
+            if alternate_delimiter == 'custom':
+                alternate_delimiter = controls.get('customAlternateDelimiter') or ''
+            if alternate_delimiter is None:
+                alternate_delimiter = ''
+            if 'alternateDelimiter' in controls or alternate_delimiter not in ('', None):
+                if alternate_delimiter in ('', '__no_split__'):
+                    field_rule['delimiter'] = 'none'
+                    field_rule.pop('preserveOriginalValue', None)
+                else:
+                    # A column-wide separator is a field parser rule. Split the
+                    # source first so prefix/suffix cleanup runs once per value.
+                    field_rule['delimiter'] = alternate_delimiter
+                    field_rule['preserveOriginalValue'] = True
+            alternate_mode = str(controls.get(
+                'alternateMode',
+                pattern_controls.get('alternateMode', ''),
+            ) or '')
+            alternate_joiner = str(controls.get(
+                'alternateJoiner',
+                pattern_controls.get('alternateJoiner', ''),
+            ) or '')
+            visual_pattern['alternateDelimiter'] = alternate_delimiter
+            if alternate_mode:
+                visual_pattern['alternateMode'] = alternate_mode
+            visual_pattern['alternateJoiner'] = alternate_joiner
+
+            teach_result = build_bom_field_pattern_teach_result(
+                headers=headers,
+                row=row,
+                roles=roles,
+                config=trusted_config,
+                entries=[],
+                group={
+                    'id': pattern.get('groupId') or teach_context.get('groupId') or '',
+                    'patternKey': pattern_key,
+                    'shape': pattern.get('detectedPattern') or pattern.get('pattern') or pattern_key,
+                },
+                tagged_spans=None,
+                source_header=source_header,
+                alternate_delimiter=alternate_delimiter,
+                alternate_mode=alternate_mode,
+                alternate_joiner=alternate_joiner,
+                visual_pattern=visual_pattern,
+                base_rule=base_rule,
+                field_rules={field: field_rule},
+                prefer_field_rules=True,
+            )
+            rule = teach_result.get('rule') or {}
+            rule['patternKey'] = pattern_key
+            active_rules[pattern_key] = rule
+            refreshed_review = refresh_bom_field_pattern_review_after_teach(
+                refreshed_review,
+                teach_result,
+                group={
+                    'id': pattern.get('groupId') or teach_context.get('groupId') or '',
+                    'patternKey': pattern_key,
+                    'shape': pattern.get('detectedPattern') or pattern.get('pattern') or pattern_key,
+                    'sourceColumn': source_header,
+                },
+                roles=roles,
+                config=trusted_config,
+                active_rules=active_rules,
+                source_row=sample.get('sourceRow'),
+                occurrence_id=fragment.get('id') or '',
+                completed_step_id=pattern.get('workflowStepId') or '',
+                taught_source_value=source_value,
+            ) or refreshed_review
+            updated_pattern_keys.append(pattern_key)
+            if confirm:
+                confirmations.append(_issue_bom_pattern_confirmation(
+                    rule=rule,
+                    pattern_key=pattern_key,
+                    shape=pattern.get('detectedPattern') or pattern.get('pattern') or pattern_key,
+                    entries=teach_result.get('entries') or [],
+                    source_row=sample.get('sourceRow'),
+                    occurrence_id=fragment.get('id') or '',
+                    structure_signature=structure_scope['signature'],
+                ))
+
+        if not updated_pattern_keys:
+            return Response({
+                'success': False,
+                'error': 'The selected field has no teachable pattern examples.',
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        next_review_receipt = _issue_bom_pattern_review(
+            active_rules=active_rules,
+            structure_signature=structure_scope['signature'],
+        )
+        refreshed_review['activeRules'] = active_rules
+        return Response({
+            'success': True,
+            'review': refreshed_review,
+            'activeRules': active_rules,
+            'updatedPatternKeys': updated_pattern_keys,
+            'confirmations': confirmations,
+            'reviewReceipt': next_review_receipt,
+        })
+    except Exception as exc:
+        logger.error('BOM bulk pattern controls failed: %s', exc, exc_info=True)
         return Response({
             'success': False,
             'error': str(exc),
