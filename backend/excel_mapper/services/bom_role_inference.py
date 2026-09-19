@@ -3641,7 +3641,66 @@ def _manufacturer_segments_for_target_count(value, target_count):
     result = [clean(part) for part in (search(0, target_count) or []) if not is_blankish(part)]
     if len(result) == target_count:
         return result
-    return _merge_adjacent_known_manufacturer_segments(result)
+    merged_result = _merge_adjacent_known_manufacturer_segments(result)
+    if len(merged_result) == target_count:
+        return merged_result
+
+    # If all but one positional manufacturer are known, preserve the unmatched
+    # source slice as the remaining manufacturer instead of discarding every
+    # directory match. This also handles minor customer spelling variants.
+    fallback_memo = {}
+
+    def partition(index, remaining):
+        key = (index, remaining)
+        if key in fallback_memo:
+            return fallback_memo[key]
+        tokens_left = len(token_matches) - index
+        if remaining == 0:
+            return (0, 0, []) if tokens_left == 0 else None
+        if tokens_left < remaining:
+            return None
+
+        candidates = []
+        for span in spans_by_start.get(index, []):
+            rest = partition(span["end"], remaining - 1)
+            if rest is not None:
+                candidates.append((
+                    rest[0] + 1,
+                    rest[1] + int(span.get("token_count") or 0),
+                    [(span["value"], True), *rest[2]],
+                ))
+
+        max_unknown_end = len(token_matches) - (remaining - 1)
+        for end in range(index + 1, max_unknown_end + 1):
+            rest = partition(end, remaining - 1)
+            if rest is None:
+                continue
+            start_char = token_matches[index].start()
+            end_char = token_matches[end - 1].end()
+            raw_segment = clean(text[start_char:end_char])
+            candidates.append((
+                rest[0],
+                rest[1],
+                [(raw_segment, False), *rest[2]],
+            ))
+
+        if not candidates:
+            fallback_memo[key] = None
+            return None
+        fallback_memo[key] = max(
+            candidates,
+            key=lambda candidate: (
+                candidate[0],
+                candidate[1],
+                -sum(1 for _value, known in candidate[2] if not known),
+            ),
+        )
+        return fallback_memo[key]
+
+    fallback = partition(0, target_count)
+    if fallback and fallback[0] >= target_count - 1:
+        return [value for value, _known in fallback[2]]
+    return merged_result
 
 
 def _manufacturer_lookup_key(value):
@@ -4338,6 +4397,48 @@ def _build_factwise_entry(index, fields, relation):
         "relation": relation,
         "fields": fields,
     }
+
+
+def _attach_mpn_manufacturer_pairing_check(
+    entries,
+    manufacturer_mapped=False,
+    detected_mpn_count=None,
+    detected_manufacturer_count=None,
+):
+    """Attach one source-fragment-level positional pairing result."""
+    entries = list(entries or [])
+    if not entries:
+        return entries
+
+    emitted_mpn_count = sum(
+        1
+        for entry in entries
+        if clean(_review_entry_field_value((entry.get("fields") or {}).get("mpn")))
+    )
+    emitted_manufacturer_count = sum(
+        1
+        for entry in entries
+        if clean(_review_entry_field_value((entry.get("fields") or {}).get("manufacturer")))
+    )
+    mpn_count = max(emitted_mpn_count, int(detected_mpn_count or 0))
+    manufacturer_count = max(
+        emitted_manufacturer_count,
+        int(detected_manufacturer_count or 0),
+    )
+    has_mismatch = bool(manufacturer_mapped and mpn_count != manufacturer_count)
+    message = (
+        f"{mpn_count} MPNs detected, {manufacturer_count} manufacturers detected. "
+        "Values were paired by position; unmatched values were left blank."
+        if has_mismatch
+        else ""
+    )
+    entries[0]["pairingCheck"] = {
+        "mpnCount": mpn_count,
+        "manufacturerCount": manufacturer_count,
+        "hasPairingMismatch": has_mismatch,
+        "warning": message,
+    }
+    return entries
 
 
 def _value_shape(value, role_hint=""):
@@ -7676,6 +7777,12 @@ def _infer_field_entries_for_row(row, headers, roles, selected_columns, config=N
     primary_cpn_value = cpn_parts[0] if cpn_parts else _clean_field_value(cpn_value, config, "cpn")
     primary_mpn_value = mpn_parts[0] if mpn_parts else _clean_field_value(mpn_value, config, "mpn")
     primary_manufacturer_value = manufacturer_parts[0] if manufacturer_parts else _clean_field_value(manufacturer_value, config, "manufacturer")
+    detected_mpn_count = len(mpn_parts) if mpn_parts else (0 if is_blankish(primary_mpn_value) else 1)
+    detected_manufacturer_count = (
+        len(manufacturer_parts)
+        if manufacturer_parts
+        else (0 if is_blankish(primary_manufacturer_value) else 1)
+    )
     if cpn_header and not is_blankish(primary_cpn_value):
         set_field("cpn", primary_cpn_value, cpn_header, 0.72, "Direct from mapped CPN column", overwrite=True)
 
@@ -7752,7 +7859,15 @@ def _infer_field_entries_for_row(row, headers, roles, selected_columns, config=N
                 + (f": matched {manufacturer}; {reason}" if manufacturer and reason else f": matched {manufacturer}" if manufacturer else ""),
             )
             entries.append(_build_factwise_entry(entry_index, alt_fields, f"Alternate {entry_index}"))
-        return entries
+        return _attach_mpn_manufacturer_pairing_check(
+            entries,
+            manufacturer_mapped=bool(manufacturer_header),
+            detected_mpn_count=len(same_cell_identity_pairs),
+            detected_manufacturer_count=sum(
+                1 for pair in same_cell_identity_pairs
+                if not is_blankish(pair.get("manufacturer"))
+            ),
+        )
 
     entry_count = max(len(cpn_parts), len(mpn_parts), len(manufacturer_parts), 1)
     if mpn_header and (mpn_parts or not is_blankish(primary_mpn_value)):
@@ -7785,10 +7900,21 @@ def _infer_field_entries_for_row(row, headers, roles, selected_columns, config=N
         manufacturer_parts,
     )
     if separate_column_entries:
-        return entries + separate_column_entries
+        combined_entries = entries + separate_column_entries
+        return _attach_mpn_manufacturer_pairing_check(
+            combined_entries,
+            manufacturer_mapped=bool(manufacturer_header),
+            detected_mpn_count=detected_mpn_count,
+            detected_manufacturer_count=detected_manufacturer_count,
+        )
 
     if entry_count <= 1:
-        return entries
+        return _attach_mpn_manufacturer_pairing_check(
+            entries,
+            manufacturer_mapped=bool(manufacturer_header),
+            detected_mpn_count=detected_mpn_count,
+            detected_manufacturer_count=detected_manufacturer_count,
+        )
 
     for entry_index in range(1, entry_count):
         alt_fields = _copy_inheritable_fields(fields, config)
@@ -7842,18 +7968,14 @@ def _infer_field_entries_for_row(row, headers, roles, selected_columns, config=N
                 "method": "Alternate split from mapped Manufacturer column"
                 + (f": matched {manufacturer}; {reason}" if manufacturer and reason else f": matched {manufacturer}" if manufacturer else ""),
             }
-        elif manufacturer_header and len(manufacturer_parts) <= 1 and not is_blankish(primary_manufacturer_value):
-            manufacturer, score, reason = _best_manufacturer_from_text(primary_manufacturer_value)
-            alt_fields["manufacturer"] = {
-                "value": clean(primary_manufacturer_value),
-                "sourceColumn": manufacturer_header,
-                "confidence": round(float(score or 0) or 0.55, 4),
-                "method": "Repeated single mapped Manufacturer for split alternate"
-                + (f": matched {manufacturer}; {reason}" if manufacturer and reason else f": matched {manufacturer}" if manufacturer else ""),
-            }
         entries.append(_build_factwise_entry(entry_index, alt_fields, f"Alternate {entry_index}"))
 
-    return entries
+    return _attach_mpn_manufacturer_pairing_check(
+        entries,
+        manufacturer_mapped=bool(manufacturer_header),
+        detected_mpn_count=detected_mpn_count,
+        detected_manufacturer_count=detected_manufacturer_count,
+    )
 
 
 def _infer_field_values_for_row(row, headers, roles, selected_columns, config=None):
@@ -11133,6 +11255,111 @@ def _visible_review_field_keys(entries, left, roles):
     return visible
 
 
+def _sync_review_display_rows(review):
+    """Synchronize row statuses and return one backend-owned row per interpretation."""
+    review = review if isinstance(review, dict) else {}
+    authoritative_patterns = {
+        clean(pattern.get("patternKey")): pattern
+        for pattern in review.get("patterns") or []
+        if isinstance(pattern, dict) and clean(pattern.get("patternKey"))
+    }
+    source_columns = []
+    review_field_keys = []
+    display_rows = []
+
+    for review_row in review.get("rows") or []:
+        if not isinstance(review_row, dict):
+            continue
+        for source_cell in review_row.get("left") or []:
+            source_column = clean(source_cell.get("column")) if isinstance(source_cell, dict) else ""
+            if source_column and source_column not in source_columns:
+                source_columns.append(source_column)
+        for field_key in review_row.get("visibleFieldKeys") or []:
+            field_key = clean(field_key)
+            if field_key and field_key not in review_field_keys:
+                review_field_keys.append(field_key)
+
+        synchronized_patterns = []
+        for row_pattern in review_row.get("patterns") or []:
+            if not isinstance(row_pattern, dict):
+                continue
+            pattern_key = clean(row_pattern.get("patternKey"))
+            authoritative = authoritative_patterns.get(pattern_key) or {}
+            recognized = bool(authoritative.get("recognized"))
+            synchronized_patterns.append({
+                **row_pattern,
+                "recognized": recognized,
+                "status": "recognized" if recognized else "unrecognized",
+                "statusLabel": "Recognized" if recognized else "Needs review",
+                "recognitionScope": clean(authoritative.get("recognitionScope")),
+                "recognitionValidation": authoritative.get("recognitionValidation") or {},
+                "teachContext": authoritative.get("teachContext") or row_pattern.get("teachContext"),
+            })
+        needs_review = any(not pattern.get("recognized") for pattern in synchronized_patterns)
+        review_row["patterns"] = synchronized_patterns
+        review_row["needsReview"] = needs_review
+
+        entries = [
+            entry for entry in review_row.get("entries") or []
+            if isinstance(entry, dict)
+        ]
+        if not entries:
+            entries = [{
+                "relation": "Primary",
+                "fields": {},
+                "sourceColumns": {},
+                "groupId": "",
+                "occurrenceId": "",
+                "patternEntryIndex": 0,
+            }]
+        for entry_index, entry in enumerate(entries):
+            relation = clean(entry.get("relation")) or (
+                "Primary" if entry_index == 0 else f"Alternate {entry_index}"
+            )
+            entry_pattern_key = clean(entry.get("patternKey"))
+            entry_patterns = [
+                pattern for pattern in synchronized_patterns
+                if clean(pattern.get("patternKey")) == entry_pattern_key
+            ]
+            if not entry_patterns and not entry_pattern_key and len(synchronized_patterns) == 1:
+                entry_patterns = synchronized_patterns[:1]
+            entry_needs_review = any(
+                not pattern.get("recognized") for pattern in entry_patterns
+            )
+            display_rows.append({
+                "id": f"{review_row.get('id') or review_row.get('sourceRow')}:entry:{entry_index}",
+                "reviewRowId": review_row.get("id") or "",
+                "sourceRow": review_row.get("sourceRow"),
+                "left": review_row.get("left") or [],
+                "relation": relation,
+                "fields": entry.get("fields") or {},
+                "sourceColumns": entry.get("sourceColumns") or {},
+                "patternKey": entry_pattern_key,
+                "groupId": entry.get("groupId") or "",
+                "occurrenceId": entry.get("occurrenceId") or "",
+                "patternEntryIndex": entry.get("patternEntryIndex", entry_index),
+                "visibleFieldKeys": review_row.get("visibleFieldKeys") or [],
+                "patterns": entry_patterns,
+                "needsReview": entry_needs_review,
+                "mpnCount": int(review_row.get("mpnCount") or 0),
+                "manufacturerCount": int(review_row.get("manufacturerCount") or 0),
+                "hasPairingMismatch": bool(review_row.get("hasPairingMismatch")),
+                "warnings": review_row.get("warnings") or [],
+                "firstForSourceRow": entry_index == 0,
+                "lastForSourceRow": entry_index == len(entries) - 1,
+            })
+
+    display = review.get("display") if isinstance(review.get("display"), dict) else {}
+    display.update({
+        "sourceColumns": source_columns,
+        "reviewFieldKeys": review_field_keys,
+        "displayRowPageSize": 25,
+    })
+    review["display"] = display
+    review["displayRows"] = display_rows
+    return review
+
+
 def _build_backend_review_contract(
     summary,
     patterns,
@@ -11333,7 +11560,7 @@ def _build_backend_review_contract(
         ]
         public_review_rows.append(public_row)
 
-    return {
+    return _sync_review_display_rows({
         "contractVersion": 3,
         "summary": {
             key: summary.get(key, 0)
@@ -11368,7 +11595,7 @@ def _build_backend_review_contract(
             "allowAddAlternate": alternate_layout != "already_separate_rows",
         },
         "recognizedPatternKeys": sorted(key for key in recognized_keys if key),
-    }
+    })
 
 
 def _compact_review_entries(entries):
@@ -11389,6 +11616,11 @@ def _compact_review_entries(entries):
             "index": entry.get("index"),
             "relation": entry.get("relation") or "",
             "fields": fields,
+            **(
+                {"pairingCheck": entry.get("pairingCheck")}
+                if isinstance(entry.get("pairingCheck"), dict)
+                else {}
+            ),
         })
     return compact
 
@@ -11488,6 +11720,46 @@ def _build_flat_pattern_review_rows(
                     sample.get("left") or [],
                     roles or {},
                 )
+                pairing_checks = [
+                    entry.get("pairingCheck")
+                    for occurrence in occurrences
+                    for entry in occurrence.get("entries") or []
+                    if isinstance(entry.get("pairingCheck"), dict)
+                ]
+                manufacturer_mapped = bool(clean((roles or {}).get("manufacturer")))
+                if pairing_checks:
+                    mpn_count = sum(int(check.get("mpnCount") or 0) for check in pairing_checks)
+                    manufacturer_count = sum(
+                        int(check.get("manufacturerCount") or 0)
+                        for check in pairing_checks
+                    )
+                else:
+                    mpn_count = sum(
+                        1 for entry in display_entries
+                        if clean((entry.get("fields") or {}).get("mpn"))
+                    )
+                    manufacturer_count = sum(
+                        1 for entry in display_entries
+                        if clean((entry.get("fields") or {}).get("manufacturer"))
+                    )
+                has_pairing_mismatch = bool(
+                    manufacturer_mapped and mpn_count != manufacturer_count
+                )
+                warning = (
+                    f"{mpn_count} MPNs detected, {manufacturer_count} manufacturers detected. "
+                    "Values were paired by position; unmatched values were left blank."
+                    if has_pairing_mismatch
+                    else ""
+                )
+                review_row.update({
+                    "mpnCount": mpn_count,
+                    "manufacturerCount": manufacturer_count,
+                    "hasPairingMismatch": has_pairing_mismatch,
+                    "warnings": ([{
+                        "type": "mpn_mfr_count_mismatch",
+                        "message": warning,
+                    }] if warning else []),
+                })
             current = rows_by_key.get(row_key)
             if current is None or review_row["entryCount"] > int(current.get("entryCount") or 0):
                 rows_by_key[row_key] = review_row
@@ -12503,7 +12775,7 @@ def refresh_bom_field_pattern_review_after_teach(
         if isinstance(step, dict) and not step.get("completed")
     ), None)
     refreshed["workflow"] = workflow
-    return refreshed
+    return _sync_review_display_rows(refreshed)
 
 
 def _normalize_following_item_row_groups(normalized_rows, source_rows, headers, roles, config, header_row_index=0):

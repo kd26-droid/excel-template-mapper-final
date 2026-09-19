@@ -2,6 +2,9 @@
 import { useLocation, useNavigate } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
   Alert,
   Autocomplete,
   Box,
@@ -21,6 +24,7 @@ import {
   FormGroup,
   Grid,
   IconButton,
+  InputAdornment,
   InputLabel,
   LinearProgress,
   ListItemText,
@@ -52,6 +56,8 @@ import DownloadIcon from '@mui/icons-material/Download';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown';
 import KeyboardArrowUpIcon from '@mui/icons-material/KeyboardArrowUp';
+import AddIcon from '@mui/icons-material/Add';
+import SearchIcon from '@mui/icons-material/Search';
 import TuneIcon from '@mui/icons-material/Tune';
 import VisibilityIcon from '@mui/icons-material/Visibility';
 import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
@@ -8985,6 +8991,338 @@ export const canUseVisualTeachInterpretation = ({
   recognized,
 } = {}) => Boolean(hasUserChanges || recognized === false);
 
+const FieldPatternReviewTable = ({
+  contract,
+  reviewRows,
+  fields,
+  edits,
+  search,
+  onSearchChange,
+  page,
+  onPageChange,
+  loading,
+  theme,
+  onReteach,
+  onAddAlternate,
+  onRemoveEntry,
+  onValueChange,
+}) => {
+  const backendDisplayRows = Array.isArray(contract?.displayRows) ? contract.displayRows : [];
+  const sourceColumns = Array.isArray(contract?.display?.sourceColumns)
+    ? contract.display.sourceColumns
+    : [];
+  const reviewFieldKeys = new Set(contract?.display?.reviewFieldKeys || []);
+  const visibleFields = fields.filter((field) => reviewFieldKeys.has(field.key));
+  const allowAddAlternate = Boolean(contract?.display?.allowAddAlternate);
+  const pageSize = Math.max(1, Number(contract?.display?.displayRowPageSize || 25));
+  const clientHorizontalScrollRef = useRef(null);
+  const factwiseHorizontalScrollRef = useRef(null);
+  const [clientHorizontalScroll, setClientHorizontalScroll] = useState(0);
+  const [factwiseHorizontalScroll, setFactwiseHorizontalScroll] = useState(0);
+  const [pairingMismatchFilter, setPairingMismatchFilter] = useState('all');
+
+  const resolvedRows = useMemo(() => {
+    const backendRowsByReviewId = new Map();
+    backendDisplayRows.forEach((row) => {
+      const reviewRowId = fmt(row.reviewRowId);
+      if (!backendRowsByReviewId.has(reviewRowId)) backendRowsByReviewId.set(reviewRowId, []);
+      backendRowsByReviewId.get(reviewRowId).push(row);
+    });
+
+    const emittedReviewIds = new Set();
+    const output = [];
+    (reviewRows || []).forEach((reviewRow) => {
+      const reviewRowId = fmt(reviewRow.id);
+      const backendRows = backendRowsByReviewId.get(reviewRowId) || [];
+      if (!backendRows.length) return;
+      emittedReviewIds.add(reviewRowId);
+      const visibleEntries = reviewEntriesWithUserEdits(reviewRow, edits);
+      visibleEntries.forEach((entry, entryIndex) => {
+        const baseRow = backendRows.find((candidate) => (
+          fmt(candidate.groupId) === fmt(entry.groupId)
+          && fmt(candidate.occurrenceId) === fmt(entry.occurrenceId)
+          && Number(candidate.patternEntryIndex || 0) === Number(entry.patternEntryIndex || 0)
+        )) || backendRows[entryIndex] || backendRows[0];
+        output.push({
+          ...baseRow,
+          id: `${reviewRowId}:display:${entryIndex}`,
+          relation: entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`,
+          fields: entry.fields || baseRow.fields || {},
+          sourceColumns: entry.sourceColumns || baseRow.sourceColumns || {},
+          groupId: entry.groupId || baseRow.groupId || '',
+          occurrenceId: entry.occurrenceId || baseRow.occurrenceId || '',
+          patternEntryIndex: entry.patternEntryIndex ?? baseRow.patternEntryIndex ?? entryIndex,
+          firstForSourceRow: entryIndex === 0,
+          lastForSourceRow: entryIndex === visibleEntries.length - 1,
+        });
+      });
+    });
+    backendDisplayRows.forEach((row) => {
+      if (!emittedReviewIds.has(fmt(row.reviewRowId))) output.push(row);
+    });
+    return output;
+  }, [backendDisplayRows, edits, reviewRows]);
+
+  const pairingFilteredRows = pairingMismatchFilter === 'mismatch'
+    ? resolvedRows.filter((row) => row.hasPairingMismatch === true)
+    : resolvedRows;
+  const normalizedSearch = fmt(search).toLowerCase();
+  const filteredRows = normalizedSearch
+    ? pairingFilteredRows.filter((row) => {
+      const sourceValues = (row.left || []).map((item) => item?.value);
+      const factwiseValues = Object.values(row.fields || {});
+      return [row.sourceRow, row.relation, ...sourceValues, ...factwiseValues]
+        .some((value) => fmt(value).toLowerCase().includes(normalizedSearch));
+    })
+    : pairingFilteredRows;
+  const pageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const safePage = Math.min(page, pageCount - 1);
+  const pageStart = safePage * pageSize;
+  const visibleRows = filteredRows.slice(pageStart, pageStart + pageSize);
+  const groupedVisibleRows = visibleRows.map((row, index) => ({
+    ...row,
+    visualFirstForSourceRow: index === 0
+      || fmt(visibleRows[index - 1]?.reviewRowId) !== fmt(row.reviewRowId),
+    visualLastForSourceRow: index === visibleRows.length - 1
+      || fmt(visibleRows[index + 1]?.reviewRowId) !== fmt(row.reviewRowId),
+  }));
+  const visibleSourceGroups = [];
+  groupedVisibleRows.forEach((row) => {
+    const groupKey = fmt(row.reviewRowId) || `source-${fmt(row.sourceRow)}`;
+    const currentGroup = visibleSourceGroups[visibleSourceGroups.length - 1];
+    if (!currentGroup || currentGroup.key !== groupKey) {
+      visibleSourceGroups.push({
+        key: groupKey,
+        sourceRow: row.sourceRow,
+        left: row.left || [],
+        rows: [row],
+      });
+    } else {
+      currentGroup.rows.push(row);
+    }
+  });
+  const clientScrollableWidth = Math.max(170, sourceColumns.length * 170);
+  const factwiseScrollableWidth = Math.max(105, 105 + (visibleFields.length * 150));
+  const reviewRowHeight = 96;
+  const warningRowOutline = (row) => {
+    if (!row.needsReview) return {};
+    return {
+      boxShadow: 'inset 0 1px #f0b35c, inset 0 -1px #f0b35c',
+    };
+  };
+  const scrollPaneHorizontally = useCallback((event, scrollbarRef) => {
+    const delta = event.deltaX || (event.shiftKey ? event.deltaY : 0);
+    if (!delta || !scrollbarRef.current) return;
+    event.preventDefault();
+    scrollbarRef.current.scrollLeft += delta;
+  }, []);
+
+  return (
+    <Paper elevation={0} sx={{ border: `1px solid ${theme.border}`, borderRadius: '8px', overflow: 'hidden', bgcolor: theme.paper }}>
+      <Stack
+        direction={{ xs: 'column', md: 'row' }}
+        justifyContent="space-between"
+        alignItems={{ xs: 'stretch', md: 'center' }}
+        gap={1}
+        sx={{ px: 1.5, py: 1.1, borderBottom: `1px solid ${theme.border}`, bgcolor: theme.paperSoft }}
+      >
+        <Stack direction="row" alignItems="center" gap={0.75} flexWrap="wrap">
+          <Typography sx={{ fontSize: 14, fontWeight: 850, color: theme.text }}>All detected rows</Typography>
+          <Chip size="small" label={contract?.display?.reviewModeLabel || ''} sx={{ height: 25, fontSize: 11, fontWeight: 800, bgcolor: '#e4f3f0', color: '#0f6e63' }} />
+          <Chip size="small" variant="outlined" label={`${reviewRows.length} source rows`} sx={{ height: 25, fontSize: 11, fontWeight: 800, bgcolor: theme.paper }} />
+          <Chip size="small" variant="outlined" label={`${filteredRows.length} displayed rows`} sx={{ height: 25, fontSize: 11, fontWeight: 800, bgcolor: theme.paper }} />
+        </Stack>
+        <Stack direction={{ xs: 'column', sm: 'row' }} alignItems="center" gap={1} sx={{ width: { xs: '100%', md: 'auto' } }}>
+          <FormControl size="small" sx={{ minWidth: 190 }}>
+            <Select
+              value={pairingMismatchFilter}
+              onChange={(event) => {
+                setPairingMismatchFilter(event.target.value);
+                onPageChange(0);
+              }}
+              aria-label="Filter review rows by MPN and manufacturer count"
+            >
+              <MenuItem value="all">All rows</MenuItem>
+              <MenuItem value="mismatch">MPN-MFR mismatch</MenuItem>
+            </Select>
+          </FormControl>
+          <TextField
+            size="small"
+            value={search}
+            onChange={(event) => {
+              onSearchChange(event.target.value);
+              onPageChange(0);
+            }}
+            placeholder="Search source or FactWise values"
+            aria-label="Search review rows"
+            InputProps={{
+              startAdornment: (
+                <InputAdornment position="start"><SearchIcon sx={{ fontSize: 18, color: theme.muted }} /></InputAdornment>
+              ),
+            }}
+            sx={{ width: { xs: '100%', md: 340 } }}
+          />
+        </Stack>
+      </Stack>
+
+      <Box sx={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', minWidth: 0 }}>
+        <Box sx={{ minWidth: 0, borderRight: '2px solid #64748b' }}>
+          <Box sx={{ height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: '#e8eef6', color: '#334155', fontSize: 13, fontWeight: 850, borderBottom: '1px solid #94a3b8' }}>Client file</Box>
+          <Box sx={{ height: 40, display: 'grid', gridTemplateColumns: '88px minmax(0, 1fr)', bgcolor: '#f3f6fb', borderBottom: '1px solid #94a3b8' }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', px: 1, color: '#334155', fontSize: 12, fontWeight: 850, borderRight: '1px solid #cbd5e1' }}>Source row</Box>
+            <Box sx={{ overflow: 'hidden' }}>
+              <Box sx={{ width: clientScrollableWidth, transform: `translateX(-${clientHorizontalScroll}px)`, display: 'grid', gridTemplateColumns: `repeat(${Math.max(1, sourceColumns.length)}, 170px)`, height: '100%' }}>
+                {(sourceColumns.length ? sourceColumns : ['Customer values']).map((column) => (
+                  <Box key={`source-header-${column}`} title={column} sx={{ display: 'flex', alignItems: 'center', px: 1, color: '#334155', fontSize: 12, fontWeight: 850, borderRight: '1px solid #dbe3ee', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{column}</Box>
+                ))}
+              </Box>
+            </Box>
+          </Box>
+        </Box>
+        <Box sx={{ minWidth: 0 }}>
+          <Box sx={{ height: 36, display: 'flex', alignItems: 'center', justifyContent: 'center', bgcolor: '#e4f3f0', color: '#0f6e63', fontSize: 13, fontWeight: 850, borderBottom: '1px solid #94a3b8' }}>FactWise interpretation</Box>
+          <Box sx={{ height: 40, display: 'grid', gridTemplateColumns: '84px minmax(0, 1fr)', bgcolor: '#eef8f6', borderBottom: '1px solid #94a3b8' }}>
+            <Box sx={{ display: 'flex', alignItems: 'center', px: 1, color: '#0f6e63', fontSize: 12, fontWeight: 850, borderRight: '1px solid #c7dfda' }}>Actions</Box>
+            <Box sx={{ overflow: 'hidden' }}>
+              <Box sx={{ width: factwiseScrollableWidth, transform: `translateX(-${factwiseHorizontalScroll}px)`, display: 'grid', gridTemplateColumns: `105px repeat(${visibleFields.length}, 150px)`, height: '100%' }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', px: 1, color: '#0f6e63', fontSize: 12, fontWeight: 850, borderRight: '1px solid #d5ebe7' }}>Type</Box>
+                {visibleFields.map((field) => (
+                  <Box key={`factwise-header-${field.key}`} title={field.label} sx={{ display: 'flex', alignItems: 'center', px: 1, color: '#0f6e63', fontSize: 12, fontWeight: 850, borderRight: '1px solid #d5ebe7', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{field.label}{field.required ? ' *' : ''}</Box>
+                ))}
+              </Box>
+            </Box>
+          </Box>
+        </Box>
+      </Box>
+
+      <Box sx={{ maxHeight: 'calc(100dvh - 333px)', overflowY: 'auto', overflowX: 'hidden', bgcolor: '#fff' }}>
+        {visibleSourceGroups.map((group, groupIndex) => {
+          const sourceValues = new Map((group.left || []).map((item) => [item.column, item.value]));
+          const groupHeight = Math.max(reviewRowHeight, group.rows.length * reviewRowHeight);
+          const groupNeedsReview = group.rows.some((row) => row.needsReview);
+          return (
+            <Box
+              key={group.key}
+              sx={{
+                display: 'grid',
+                gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)',
+                minWidth: 0,
+                height: groupHeight,
+                position: 'relative',
+                borderLeft: '2px solid #94a3b8',
+                borderRight: '2px solid #94a3b8',
+                borderTop: groupIndex === 0 ? '2px solid #94a3b8' : 0,
+                '&::after': {
+                  content: '""',
+                  position: 'absolute',
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  height: '1px',
+                  bgcolor: '#334155',
+                  zIndex: 4,
+                  pointerEvents: 'none',
+                },
+                ...(groupNeedsReview ? { outline: '1px solid #f0b35c', outlineOffset: '-3px' } : {}),
+              }}
+            >
+              <Box sx={{ minWidth: 0, display: 'grid', gridTemplateColumns: '88px minmax(0, 1fr)', borderRight: '2px solid #64748b', bgcolor: '#fff' }}>
+                <Stack alignItems="center" justifyContent="center" gap={0.25} sx={{ px: 0.5, borderRight: '1px solid #e2e8f0' }}>
+                  <Typography sx={{ color: '#1f2937', fontSize: 12, fontWeight: 850 }}>{group.sourceRow || '-'}</Typography>
+                  {group.rows[0]?.hasPairingMismatch && (
+                    <Tooltip title={fmt(group.rows[0]?.warnings?.[0]?.message) || 'MPN and manufacturer counts do not match'}>
+                      <Chip
+                        size="small"
+                        color="warning"
+                        variant="outlined"
+                        label={`${group.rows[0]?.mpnCount || 0}/${group.rows[0]?.manufacturerCount || 0}`}
+                        sx={{ height: 20, fontSize: 10, fontWeight: 800 }}
+                      />
+                    </Tooltip>
+                  )}
+                </Stack>
+                <Box sx={{ minWidth: 0, overflow: 'hidden' }} onWheel={(event) => scrollPaneHorizontally(event, clientHorizontalScrollRef)}>
+                  <Box sx={{ width: clientScrollableWidth, height: '100%', transform: `translateX(-${clientHorizontalScroll}px)`, display: 'grid', gridTemplateColumns: `repeat(${Math.max(1, sourceColumns.length)}, 170px)` }}>
+                    {(sourceColumns.length ? sourceColumns : ['Customer values']).map((column) => (
+                      <Box key={`${group.key}-source-${column}`} sx={{ minWidth: 0, px: 1, py: 0.9, borderRight: '1px solid #edf1f5', color: '#1f2937', fontSize: 12, lineHeight: 1.45, overflow: 'auto', overflowWrap: 'anywhere' }}>{fmt(sourceValues.get(column))}</Box>
+                    ))}
+                  </Box>
+                </Box>
+              </Box>
+
+              <Box sx={{ minWidth: 0, bgcolor: '#fff' }}>
+                {group.rows.map((row, rowIndex) => {
+                  const isAlternate = /^Alternate\b/i.test(fmt(row.relation));
+                  const rowBackground = rowIndex === 0 ? '#fff' : '#f8fbff';
+                  return (
+                    <Box key={row.id} sx={{ height: reviewRowHeight, display: 'grid', gridTemplateColumns: '84px minmax(0, 1fr)', bgcolor: rowBackground, borderBottom: rowIndex < group.rows.length - 1 ? '1px solid #e2e8f0' : 0, ...warningRowOutline(row) }}>
+                      <Stack direction="row" alignItems="center" justifyContent="center" gap={0.25} flexWrap="nowrap" sx={{ px: 0.35, py: 0.5, borderRight: '1px solid #e2e8f0', overflow: 'hidden' }}>
+                        {(row.patterns || []).map((pattern, patternIndex) => (
+                          <Tooltip key={`${row.id}-pattern-${pattern.patternKey || patternIndex}`} title="Teach or re-teach this row's pattern">
+                            <span>
+                              <IconButton size="small" disabled={loading || !pattern.teachContext?.sample} onClick={() => onReteach(pattern)} aria-label={`Teach pattern for ${row.relation}`} sx={{ width: 24, height: 24, color: '#1d4ed8', border: '1px solid #93c5fd', bgcolor: '#fff' }}>
+                                <TuneIcon sx={{ fontSize: 14 }} />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
+                        ))}
+                        {rowIndex === 0 && allowAddAlternate && (
+                          <Tooltip title="Add alternate">
+                            <span>
+                              <IconButton size="small" disabled={!row.occurrenceId} onClick={() => onAddAlternate(row)} aria-label={`Add alternate to source row ${group.sourceRow}`} sx={{ width: 24, height: 24, color: '#334155' }}>
+                                <AddIcon sx={{ fontSize: 14 }} />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
+                        )}
+                        {isAlternate && (
+                          <Tooltip title={`Remove ${row.relation}`}>
+                            <IconButton size="small" color="error" onClick={() => onRemoveEntry(row)} aria-label={`Remove ${row.relation}`} sx={{ width: 24, height: 24 }}><DeleteOutlineIcon sx={{ fontSize: 14 }} /></IconButton>
+                          </Tooltip>
+                        )}
+                      </Stack>
+                      <Box sx={{ minWidth: 0, overflow: 'hidden' }} onWheel={(event) => scrollPaneHorizontally(event, factwiseHorizontalScrollRef)}>
+                        <Box sx={{ width: factwiseScrollableWidth, height: '100%', transform: `translateX(-${factwiseHorizontalScroll}px)`, display: 'grid', gridTemplateColumns: `105px repeat(${visibleFields.length}, 150px)` }}>
+                          <Box sx={{ px: 1, py: 0.9, color: isAlternate ? '#2563eb' : '#1f2937', fontSize: 12, fontWeight: 850, borderRight: '1px solid #edf1f5' }}>{row.relation}</Box>
+                          {visibleFields.map((field) => (
+                            <Box key={`${row.id}-field-${field.key}`} component="textarea" value={row.fields?.[field.key] ?? ''} onChange={(event) => onValueChange(row, field.key, event.target.value)} aria-label={`${row.relation} ${field.label}`} rows={3} sx={{ display: 'block', width: '100%', height: reviewRowHeight - 2, m: 0, px: 1, py: 0.8, border: 0, borderRight: '1px solid #edf1f5', outline: 0, resize: 'none', overflow: 'auto', bgcolor: 'transparent', color: '#1f2937', font: 'inherit', fontSize: 12, lineHeight: 1.35, boxSizing: 'border-box', '&:focus': { boxShadow: 'inset 0 0 0 2px #60a5fa' } }} />
+                          ))}
+                        </Box>
+                      </Box>
+                    </Box>
+                  );
+                })}
+              </Box>
+            </Box>
+          );
+        })}
+        {!visibleSourceGroups.length && <Box sx={{ py: 5, textAlign: 'center', color: '#64748b' }}>No rows match this search.</Box>}
+      </Box>
+
+      <Box sx={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', minWidth: 0, borderTop: '1px solid #cbd5e1' }}>
+        <Box ref={clientHorizontalScrollRef} onScroll={(event) => setClientHorizontalScroll(event.currentTarget.scrollLeft)} sx={{ overflowX: 'auto', overflowY: 'hidden', borderRight: '2px solid #64748b' }}>
+          <Box sx={{ width: clientScrollableWidth + 88, height: 10 }} />
+        </Box>
+        <Box ref={factwiseHorizontalScrollRef} onScroll={(event) => setFactwiseHorizontalScroll(event.currentTarget.scrollLeft)} sx={{ overflowX: 'auto', overflowY: 'hidden' }}>
+          <Box sx={{ width: factwiseScrollableWidth + 84, height: 10 }} />
+        </Box>
+      </Box>
+
+      {filteredRows.length > pageSize && (
+        <Stack direction="row" alignItems="center" justifyContent="center" gap={1} sx={{ p: 1 }}>
+          <ShadcnButton size="sm" variant="outline" disabled={safePage === 0} onClick={() => onPageChange(Math.max(0, safePage - 1))} className="h-9">
+            Previous
+          </ShadcnButton>
+          <Chip size="small" variant="outlined" label={`Rows ${pageStart + 1}-${Math.min(pageStart + visibleRows.length, filteredRows.length)} of ${filteredRows.length}`} sx={{ height: 30, fontSize: 11.5, fontWeight: 800 }} />
+          <ShadcnButton size="sm" variant="outline" disabled={safePage >= pageCount - 1} onClick={() => onPageChange(Math.min(pageCount - 1, safePage + 1))} className="h-9">
+            Next
+          </ShadcnButton>
+        </Stack>
+      )}
+    </Paper>
+  );
+};
+
 const VISUAL_TEACH_FIELD_STYLES = {
   cpn: { color: '#7c3aed', bg: '#ede9fe' },
   mpn: { color: '#2563eb', bg: '#dbeafe' },
@@ -9384,6 +9722,7 @@ const BomNormalizer = () => {
   const [fieldPatternGroups, setFieldPatternGroups] = useState([]);
   const [fieldPatternReviewRows, setFieldPatternReviewRows] = useState([]);
   const [fieldPatternReviewPage, setFieldPatternReviewPage] = useState(0);
+  const [fieldPatternReviewSearch, setFieldPatternReviewSearch] = useState('');
   const [fieldPatternReviewSummary, setFieldPatternReviewSummary] = useState({
     itemCount: 0,
     sourceRowCount: 0,
@@ -9399,7 +9738,15 @@ const BomNormalizer = () => {
     patternsByField: { all: [] },
     fieldFilters: [{ key: 'all', label: 'All mapped fields' }],
     mappedFieldOptions: [],
-    display: { rowPageSize: 4, reviewModeLabel: '', allowAddAlternate: false },
+    displayRows: [],
+    display: {
+      rowPageSize: 4,
+      displayRowPageSize: 25,
+      reviewModeLabel: '',
+      allowAddAlternate: false,
+      sourceColumns: [],
+      reviewFieldKeys: [],
+    },
   });
   const [fieldPatternFields, setFieldPatternFields] = useState([]);
   const [selectedFieldPatternId, setSelectedFieldPatternId] = useState('');
@@ -12821,6 +13168,7 @@ const BomNormalizer = () => {
     setParserTouched(true);
     setFieldPatternGroups([]);
     setFieldPatternReviewRows([]);
+    setFieldPatternReviewSearch('');
     setFieldPatternReviewSummary({
       itemCount: 0,
       sourceRowCount: 0,
@@ -12836,7 +13184,15 @@ const BomNormalizer = () => {
       patternsByField: { all: [] },
       fieldFilters: [{ key: 'all', label: 'All mapped fields' }],
       mappedFieldOptions: [],
-      display: { rowPageSize: 4, reviewModeLabel: '', allowAddAlternate: false },
+      displayRows: [],
+      display: {
+        rowPageSize: 4,
+        displayRowPageSize: 25,
+        reviewModeLabel: '',
+        allowAddAlternate: false,
+        sourceColumns: [],
+        reviewFieldKeys: [],
+      },
     });
     setFieldPatternEdits({});
     setRoles((prev) => ({ ...prev, [role]: header }));
@@ -13326,6 +13682,7 @@ const BomNormalizer = () => {
       setFieldPatternReviewStage('patterns');
       setFieldPatternFieldFilter('all');
       setFieldPatternExpandedPatternKey('');
+      setFieldPatternReviewSearch('');
       setFieldPatternConfirmations({});
       setFieldPatternReviewReceipt('');
       setVisualTeachOpen(false);
@@ -17954,8 +18311,27 @@ const BomNormalizer = () => {
                     />
                   </Stack>
                 </Stack>
-                <Box sx={{ mt: 1.35, pt: 1.25, borderTop: `1px solid ${normalizerTheme.border}` }}>
-                  <Stack direction="row" justifyContent="space-between" alignItems="center" gap={1} sx={{ mb: 1 }}>
+                <Accordion
+                  defaultExpanded={false}
+                  disableGutters
+                  elevation={0}
+                  sx={{
+                    mt: 1.35,
+                    borderTop: `1px solid ${normalizerTheme.border}`,
+                    bgcolor: 'transparent',
+                    '&::before': { display: 'none' },
+                  }}
+                >
+                  <AccordionSummary
+                    expandIcon={<ExpandMoreIcon />}
+                    sx={{
+                      minHeight: 50,
+                      px: 0,
+                      '&.Mui-expanded': { minHeight: 50 },
+                      '& .MuiAccordionSummary-content': { my: 1 },
+                      '& .MuiAccordionSummary-content.Mui-expanded': { my: 1 },
+                    }}
+                  >
                     <Box>
                       <Typography sx={{ fontSize: 13.5, fontWeight: 850, color: normalizerTheme.text }}>
                         Parsing and cleanup
@@ -17964,6 +18340,9 @@ const BomNormalizer = () => {
                         Apply one backend parsing rule to every detected pattern for the selected field.
                       </Typography>
                     </Box>
+                  </AccordionSummary>
+                  <AccordionDetails sx={{ px: 0, pt: 0, pb: 0.5 }}>
+                    <Stack direction="row" justifyContent="flex-end" sx={{ mb: 1 }}>
                     <Button
                       variant="contained"
                       startIcon={bulkPatternControlsLoading ? <CircularProgress size={15} color="inherit" /> : <TuneIcon />}
@@ -17972,8 +18351,18 @@ const BomNormalizer = () => {
                     >
                       Apply to all patterns
                     </Button>
-                  </Stack>
-                  <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'repeat(3, minmax(180px, 1fr))' }, gap: 1 }}>
+                    </Stack>
+                  <Box
+                    sx={{
+                      display: 'grid',
+                      gridTemplateColumns: {
+                        xs: '1fr',
+                        md: 'minmax(220px, 0.85fr) minmax(0, 3.15fr)',
+                      },
+                      gap: 1,
+                      alignItems: 'start',
+                    }}
+                  >
                     <Autocomplete
                       size="small"
                       options={bulkPatternParsingContract.fields || []}
@@ -17986,116 +18375,149 @@ const BomNormalizer = () => {
                       getOptionLabel={(option) => `${option?.label || ''} - ${option?.sourceColumn || ''}`}
                       isOptionEqualToValue={(option, value) => option.key === value.key}
                       renderInput={(params) => <TextField {...params} label="Field and source column" />}
+                      sx={{ minWidth: 0 }}
                     />
-                    <FormControl size="small">
-                      <InputLabel>Prefix cleanup</InputLabel>
-                      <Select
-                        label="Prefix cleanup"
-                        value={bulkPatternControls.prefixMode || 'none'}
-                        onChange={(event) => {
-                          setBulkPatternControls((current) => ({ ...current, prefixMode: event.target.value }));
-                          setBulkPatternControlsChanged(true);
-                        }}
-                      >
-                        {(bulkPatternParsingContract.prefixModeOptions || []).map((option) => (
-                          <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                    {bulkPatternControls.prefixMode && !['none', 'recognized_mpn_start'].includes(bulkPatternControls.prefixMode) ? (
-                      <TextField
-                        size="small"
-                        label={bulkPatternControls.prefixMode === 'first_n_chars' ? 'Number of prefix characters' : 'Prefix text or delimiter'}
-                        type={bulkPatternControls.prefixMode === 'first_n_chars' ? 'number' : 'text'}
-                        value={bulkPatternControls.stripPrefix || ''}
-                        onChange={(event) => {
-                          setBulkPatternControls((current) => ({ ...current, stripPrefix: event.target.value }));
-                          setBulkPatternControlsChanged(true);
-                        }}
-                      />
-                    ) : <Box />}
-                    <FormControl size="small">
-                      <InputLabel>Suffix cleanup</InputLabel>
-                      <Select
-                        label="Suffix cleanup"
-                        value={bulkPatternControls.suffixMode || 'none'}
-                        onChange={(event) => {
-                          setBulkPatternControls((current) => ({ ...current, suffixMode: event.target.value }));
-                          setBulkPatternControlsChanged(true);
-                        }}
-                      >
-                        {(bulkPatternParsingContract.suffixModeOptions || []).map((option) => (
-                          <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                    {bulkPatternControls.suffixMode && bulkPatternControls.suffixMode !== 'none' ? (
-                      <TextField
-                        size="small"
-                        label={bulkPatternControls.suffixMode === 'last_n_chars' ? 'Number of suffix characters' : 'Suffix text or delimiter'}
-                        type={bulkPatternControls.suffixMode === 'last_n_chars' ? 'number' : 'text'}
-                        value={bulkPatternControls.stripSuffix || ''}
-                        onChange={(event) => {
-                          setBulkPatternControls((current) => ({ ...current, stripSuffix: event.target.value }));
-                          setBulkPatternControlsChanged(true);
-                        }}
-                      />
-                    ) : <Box />}
-                    <FormControl size="small">
-                      <InputLabel>Alternate separator</InputLabel>
-                      <Select
-                        label="Alternate separator"
-                        value={bulkPatternControls.alternateDelimiter || ''}
-                        onChange={(event) => {
-                          setBulkPatternControls((current) => ({ ...current, alternateDelimiter: event.target.value }));
-                          setBulkPatternControlsChanged(true);
-                        }}
-                      >
-                        {(bulkPatternParsingContract.alternateSeparatorOptions || []).map((option) => (
-                          <MenuItem key={option.value || 'empty'} value={option.value}>{option.label}</MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                    {bulkPatternControls.alternateDelimiter === 'custom' && (
-                      <TextField
-                        size="small"
-                        label="Custom delimiter"
-                        value={bulkPatternControls.customAlternateDelimiter || ''}
-                        onChange={(event) => {
-                          setBulkPatternControls((current) => ({ ...current, customAlternateDelimiter: event.target.value }));
-                          setBulkPatternControlsChanged(true);
-                        }}
-                      />
-                    )}
-                    <FormControl size="small">
-                      <InputLabel>Alternate value mode</InputLabel>
-                      <Select
-                        label="Alternate value mode"
-                        value={bulkPatternControls.alternateMode || ''}
-                        onChange={(event) => {
-                          setBulkPatternControls((current) => ({ ...current, alternateMode: event.target.value }));
-                          setBulkPatternControlsChanged(true);
-                        }}
-                      >
-                        <MenuItem value=""><em>Unchanged</em></MenuItem>
-                        {(bulkPatternParsingContract.alternateModeOptions || []).map((option) => (
-                          <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
-                    {bulkPatternControls.alternateMode === 'append' && (
-                      <TextField
-                        size="small"
-                        label="Alternate-only separator"
-                        value={bulkPatternControls.alternateJoiner || ''}
-                        onChange={(event) => {
-                          setBulkPatternControls((current) => ({ ...current, alternateJoiner: event.target.value }));
-                          setBulkPatternControlsChanged(true);
-                        }}
-                      />
-                    )}
+                    <Box
+                      sx={{
+                        display: 'grid',
+                        gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, minmax(0, 1fr))', lg: 'repeat(4, minmax(0, 1fr))' },
+                        gap: 1,
+                        minWidth: 0,
+                      }}
+                    >
+                      <FormControl size="small" sx={{ minWidth: 0 }}>
+                        <InputLabel>Prefix cleanup</InputLabel>
+                        <Select
+                          label="Prefix cleanup"
+                          value={bulkPatternControls.prefixMode || 'none'}
+                          onChange={(event) => {
+                            setBulkPatternControls((current) => ({ ...current, prefixMode: event.target.value }));
+                            setBulkPatternControlsChanged(true);
+                          }}
+                        >
+                          {(bulkPatternParsingContract.prefixModeOptions || []).map((option) => (
+                            <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                      <FormControl size="small" sx={{ minWidth: 0 }}>
+                        <InputLabel>Suffix cleanup</InputLabel>
+                        <Select
+                          label="Suffix cleanup"
+                          value={bulkPatternControls.suffixMode || 'none'}
+                          onChange={(event) => {
+                            setBulkPatternControls((current) => ({ ...current, suffixMode: event.target.value }));
+                            setBulkPatternControlsChanged(true);
+                          }}
+                        >
+                          {(bulkPatternParsingContract.suffixModeOptions || []).map((option) => (
+                            <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                      <FormControl size="small" sx={{ minWidth: 0 }}>
+                        <InputLabel>Alternate separator</InputLabel>
+                        <Select
+                          label="Alternate separator"
+                          value={bulkPatternControls.alternateDelimiter || ''}
+                          onChange={(event) => {
+                            setBulkPatternControls((current) => ({ ...current, alternateDelimiter: event.target.value }));
+                            setBulkPatternControlsChanged(true);
+                          }}
+                        >
+                          {(bulkPatternParsingContract.alternateSeparatorOptions || []).map((option) => (
+                            <MenuItem key={option.value || 'empty'} value={option.value}>{option.label}</MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                      <FormControl size="small" sx={{ minWidth: 0 }}>
+                        <InputLabel>Alternate value mode</InputLabel>
+                        <Select
+                          label="Alternate value mode"
+                          value={bulkPatternControls.alternateMode || ''}
+                          onChange={(event) => {
+                            setBulkPatternControls((current) => ({ ...current, alternateMode: event.target.value }));
+                            setBulkPatternControlsChanged(true);
+                          }}
+                        >
+                          <MenuItem value=""><em>Unchanged</em></MenuItem>
+                          {(bulkPatternParsingContract.alternateModeOptions || []).map((option) => (
+                            <MenuItem key={option.value} value={option.value}>{option.label}</MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    </Box>
                   </Box>
-                </Box>
+                  {(bulkPatternControls.prefixMode && !['none', 'recognized_mpn_start'].includes(bulkPatternControls.prefixMode))
+                    || (bulkPatternControls.suffixMode && bulkPatternControls.suffixMode !== 'none')
+                    || bulkPatternControls.alternateDelimiter === 'custom'
+                    || bulkPatternControls.alternateMode === 'append' ? (
+                      <Box
+                        sx={{
+                          mt: 1,
+                          display: 'grid',
+                          gridTemplateColumns: {
+                            xs: '1fr',
+                            sm: 'repeat(2, minmax(0, 1fr))',
+                            md: 'minmax(220px, 0.85fr) repeat(4, minmax(0, 0.7875fr))',
+                          },
+                          gap: 1,
+                        }}
+                      >
+                        {bulkPatternControls.prefixMode && !['none', 'recognized_mpn_start'].includes(bulkPatternControls.prefixMode) && (
+                          <TextField
+                            size="small"
+                            label={bulkPatternControls.prefixMode === 'first_n_chars' ? 'Number of prefix characters' : 'Prefix text or delimiter'}
+                            type={bulkPatternControls.prefixMode === 'first_n_chars' ? 'number' : 'text'}
+                            value={bulkPatternControls.stripPrefix || ''}
+                            onChange={(event) => {
+                              setBulkPatternControls((current) => ({ ...current, stripPrefix: event.target.value }));
+                              setBulkPatternControlsChanged(true);
+                            }}
+                            sx={{ gridColumn: { xs: 'auto', md: '2' } }}
+                          />
+                        )}
+                        {bulkPatternControls.suffixMode && bulkPatternControls.suffixMode !== 'none' && (
+                          <TextField
+                            size="small"
+                            label={bulkPatternControls.suffixMode === 'last_n_chars' ? 'Number of suffix characters' : 'Suffix text or delimiter'}
+                            type={bulkPatternControls.suffixMode === 'last_n_chars' ? 'number' : 'text'}
+                            value={bulkPatternControls.stripSuffix || ''}
+                            onChange={(event) => {
+                              setBulkPatternControls((current) => ({ ...current, stripSuffix: event.target.value }));
+                              setBulkPatternControlsChanged(true);
+                            }}
+                            sx={{ gridColumn: { xs: 'auto', md: '3' } }}
+                          />
+                        )}
+                        {bulkPatternControls.alternateDelimiter === 'custom' && (
+                          <TextField
+                            size="small"
+                            label="Custom delimiter"
+                            value={bulkPatternControls.customAlternateDelimiter || ''}
+                            onChange={(event) => {
+                              setBulkPatternControls((current) => ({ ...current, customAlternateDelimiter: event.target.value }));
+                              setBulkPatternControlsChanged(true);
+                            }}
+                            sx={{ gridColumn: { xs: 'auto', md: '4' } }}
+                          />
+                        )}
+                        {bulkPatternControls.alternateMode === 'append' && (
+                          <TextField
+                            size="small"
+                            label="Alternate-only separator"
+                            value={bulkPatternControls.alternateJoiner || ''}
+                            onChange={(event) => {
+                              setBulkPatternControls((current) => ({ ...current, alternateJoiner: event.target.value }));
+                              setBulkPatternControlsChanged(true);
+                            }}
+                            sx={{ gridColumn: { xs: 'auto', md: '5' } }}
+                          />
+                        )}
+                      </Box>
+                    ) : null}
+                  </AccordionDetails>
+                </Accordion>
               </Paper>
 
               {fieldPatternReviewPatterns.length > 0 ? (
@@ -18172,7 +18594,49 @@ const BomNormalizer = () => {
           ) : (
             <Grid container spacing={0}>
               <Grid item xs={12} md={12}>
-                {fieldPatternReviewRows.length > 0 && (() => {
+                {(fieldPatternReviewContract.displayRows || []).length > 0 && (
+                  <FieldPatternReviewTable
+                    contract={fieldPatternReviewContract}
+                    reviewRows={fieldPatternReviewRows}
+                    fields={fieldPatternFields}
+                    edits={fieldPatternEdits}
+                    search={fieldPatternReviewSearch}
+                    onSearchChange={setFieldPatternReviewSearch}
+                    page={fieldPatternReviewPage}
+                    onPageChange={(nextPage) => {
+                      setFieldPatternReviewPage(nextPage);
+                      fieldPatternReviewContentRef.current?.scrollTo({ top: 0, behavior: 'auto' });
+                    }}
+                    loading={fieldPatternLoading}
+                    theme={normalizerTheme}
+                    onReteach={(pattern) => {
+                      const patternGroup = fieldPatternGroups.find(
+                        (candidate) => candidate.id === pattern.teachContext?.groupId
+                      );
+                      const teachSample = pattern.teachContext?.sample || null;
+                      const workflowStep = (fieldPatternReviewWorkflow?.steps || []).find(
+                        (step) => step.id === pattern.teachContext?.workflowStepId
+                      );
+                      if (!patternGroup || !teachSample) return;
+                      setSelectedFieldPatternId(patternGroup.id);
+                      handleOpenVisualTeachPattern(patternGroup, teachSample, workflowStep);
+                    }}
+                    onAddAlternate={(row) => handleAddFieldPatternAlternate(row.groupId, row.occurrenceId)}
+                    onRemoveEntry={(row) => handleRemoveFieldPatternEntry(
+                      row.groupId,
+                      row.occurrenceId,
+                      row.patternEntryIndex
+                    )}
+                    onValueChange={(row, fieldKey, value) => handleFieldPatternValueChange(
+                      row.groupId,
+                      row.occurrenceId,
+                      row.patternEntryIndex,
+                      fieldKey,
+                      value
+                    )}
+                  />
+                )}
+                {!(fieldPatternReviewContract.displayRows || []).length && fieldPatternReviewRows.length > 0 && (() => {
                   const group = selectedFieldPatternGroup || fieldPatternGroups[0] || {};
                   const groupSamples = fieldPatternReviewRows;
                   const reviewPageSize = Number(fieldPatternReviewContract.display?.rowPageSize || 4);

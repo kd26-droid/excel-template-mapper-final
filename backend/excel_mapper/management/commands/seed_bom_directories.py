@@ -108,7 +108,17 @@ class Command(BaseCommand):
             alias_text = clean(alias)
             canonical_key = normalize_manufacturer(canonical)
             alias_key = normalize_manufacturer(alias_text)
-            if alias_text and alias_key and canonical_key in manufacturers and alias_key != canonical_key:
+            canonical_item = manufacturers.get(canonical_key)
+            has_distinct_search_text = bool(
+                canonical_item
+                and clean(alias_text).upper() != clean(canonical_item.name).upper()
+            )
+            if (
+                alias_text
+                and alias_key
+                and canonical_item
+                and (alias_key != canonical_key or has_distinct_search_text)
+            ):
                 aliases.setdefault(alias_key, (alias_text, canonical_key))
 
         for alias, canonical in (manufacturer_payload.get("aliases") or {}).items():

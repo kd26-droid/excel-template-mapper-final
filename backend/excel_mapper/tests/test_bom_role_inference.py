@@ -9,6 +9,7 @@ from excel_mapper.models import (
     BomStructurePattern,
     ColumnRule,
     DirectoryLearningEvent,
+    ManufacturerAlias,
     ManufacturerDirectoryEntry,
     MpnDirectoryEntry,
     MpnManufacturerPair,
@@ -23,6 +24,7 @@ from excel_mapper.services.bom_directory_store import (
 from excel_mapper.services.bom_directory_learning import learn_confirmed_bom_field_patterns
 from excel_mapper.services.mpn_pattern_library import (
     _looks_like_manufacturer_code_only,
+    load_manufacturer_lookup,
 )
 
 from excel_mapper.services.bom_role_inference import (
@@ -32,6 +34,7 @@ from excel_mapper.services.bom_role_inference import (
     _infer_field_entries_for_row,
     _infer_semantic_pattern_entries_for_row,
     _infer_marker_alternate_visual_rule,
+    _manufacturer_segments_for_target_count,
     _field_pattern_control_state,
     _interpretation_spans_by_column,
     _mpn_only_marker_alternate_pattern,
@@ -3548,6 +3551,19 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         self.assertEqual(review["display"]["reviewModeLabel"], "Shared-column interpretation")
         self.assertTrue(review["rows"][0]["entries"])
         self.assertIn("mpn", review["rows"][0]["visibleFieldKeys"])
+        self.assertTrue(review["rows"][0]["needsReview"])
+        self.assertTrue(review["displayRows"])
+        self.assertTrue(all(row["sourceRow"] == 2 for row in review["displayRows"]))
+        self.assertTrue(all(row["left"] == review["rows"][0]["left"] for row in review["displayRows"]))
+        self.assertTrue(all(row["needsReview"] for row in review["displayRows"]))
+        self.assertTrue(all(
+            [pattern["patternKey"] for pattern in row["patterns"]] == [row["patternKey"]]
+            for row in review["displayRows"]
+        ))
+        self.assertTrue(review["displayRows"][0]["firstForSourceRow"])
+        self.assertTrue(review["displayRows"][-1]["lastForSourceRow"])
+        self.assertEqual(review["display"]["sourceColumns"], ["Combined"])
+        self.assertIn("mpn", review["display"]["reviewFieldKeys"])
         self.assertEqual(
             [option["key"] for option in review["mappedFieldOptions"]],
             ["mpn", "manufacturer"],
@@ -3798,6 +3814,133 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
             [entry["fields"]["mpn"]["value"] for entry in entries],
             ["22-03-2061", "69173-406HLF"],
         )
+
+    def test_split_mpns_and_manufacturers_are_paired_by_position(self):
+        entries = _infer_field_entries_for_row(
+            {"MPN": "MPN-A1\nMPN-B2", "MFR": "KEMET\nYAGEO"},
+            ["MPN", "MFR"],
+            {"mpn": "MPN", "manufacturer": "MFR"},
+            ["MPN", "MFR"],
+            config={
+                "_activeFieldPatternRule": {
+                    "fields": {
+                        "mpn": {"delimiter": "\\n"},
+                        "manufacturer": {"delimiter": "\\n"},
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(
+            [
+                (entry["fields"]["mpn"]["value"], entry["fields"]["manufacturer"]["value"])
+                for entry in entries
+            ],
+            [("MPN-A1", "KEMET"), ("MPN-B2", "YAGEO")],
+        )
+        self.assertEqual(entries[0]["pairingCheck"]["mpnCount"], 2)
+        self.assertEqual(entries[0]["pairingCheck"]["manufacturerCount"], 2)
+        self.assertFalse(entries[0]["pairingCheck"]["hasPairingMismatch"])
+
+    def test_target_count_manufacturer_split_preserves_one_unknown_directory_gap(self):
+        value = "ON SEMICONDUCTOR LITTELFUSE VISHAY DIODES INC."
+        spans = {
+            0: [{
+                "value": "ON SEMICONDUCTOR",
+                "start": 0,
+                "end": 2,
+                "token_count": 2,
+                "exact_directory_match": True,
+            }],
+            3: [{
+                "value": "VISHAY",
+                "start": 3,
+                "end": 4,
+                "token_count": 1,
+                "exact_directory_match": True,
+            }],
+            4: [{
+                "value": "DIODES INC.",
+                "start": 4,
+                "end": 6,
+                "token_count": 2,
+                "exact_directory_match": True,
+            }],
+        }
+        _manufacturer_segments_for_target_count.cache_clear()
+
+        with patch(
+            "excel_mapper.services.bom_role_inference._manufacturer_directory_spans",
+            return_value=(value, spans),
+        ):
+            self.assertEqual(
+                _manufacturer_segments_for_target_count(value, 4),
+                ["ON SEMICONDUCTOR", "LITTELFUSE", "VISHAY", "DIODES INC."],
+            )
+
+    def test_fewer_manufacturers_leave_unmatched_mpn_blank_and_warn(self):
+        entries = _infer_field_entries_for_row(
+            {"MPN": "MPN-A1\nMPN-B2\nMPN-C3", "MFR": "KEMET\nYAGEO"},
+            ["MPN", "MFR"],
+            {"mpn": "MPN", "manufacturer": "MFR"},
+            ["MPN", "MFR"],
+            config={
+                "_activeFieldPatternRule": {
+                    "fields": {
+                        "mpn": {"delimiter": "\\n"},
+                        "manufacturer": {"delimiter": "\\n"},
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(
+            [entry["fields"]["manufacturer"]["value"] for entry in entries],
+            ["KEMET", "YAGEO", ""],
+        )
+        self.assertTrue(entries[0]["pairingCheck"]["hasPairingMismatch"])
+        self.assertEqual(entries[0]["pairingCheck"]["mpnCount"], 3)
+        self.assertEqual(entries[0]["pairingCheck"]["manufacturerCount"], 2)
+
+    def test_extra_manufacturers_do_not_create_mpn_less_rows(self):
+        entries = _infer_field_entries_for_row(
+            {"MPN": "MPN-A1\nMPN-B2", "MFR": "KEMET\nYAGEO\nVISHAY"},
+            ["MPN", "MFR"],
+            {"mpn": "MPN", "manufacturer": "MFR"},
+            ["MPN", "MFR"],
+            config={
+                "_activeFieldPatternRule": {
+                    "fields": {
+                        "mpn": {"delimiter": "\\n"},
+                        "manufacturer": {"delimiter": "\\n"},
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(
+            [entry["fields"]["manufacturer"]["value"] for entry in entries],
+            ["KEMET", "YAGEO"],
+        )
+        self.assertEqual(entries[0]["pairingCheck"]["manufacturerCount"], 3)
+        self.assertTrue(entries[0]["pairingCheck"]["hasPairingMismatch"])
+
+    def test_unmapped_manufacturer_does_not_raise_pairing_warning(self):
+        entries = _infer_field_entries_for_row(
+            {"MPN": "MPN-A1\nMPN-B2"},
+            ["MPN"],
+            {"mpn": "MPN"},
+            ["MPN"],
+            config={
+                "_activeFieldPatternRule": {
+                    "fields": {"mpn": {"delimiter": "\\n"}},
+                },
+            },
+        )
+
+        self.assertEqual(len(entries), 2)
+        self.assertFalse(entries[0]["pairingCheck"]["hasPairingMismatch"])
 
     def test_position_rule_returns_backend_newline_control(self):
         with patch(
@@ -5062,6 +5205,26 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
                 ["XYZ987", "XYZ987C", "XYZ987D"],
             ],
         )
+        self.assertTrue(all(not row["needsReview"] for row in refreshed["rows"]))
+        self.assertTrue(all(
+            pattern["recognized"]
+            for row in refreshed["rows"]
+            for pattern in row["patterns"]
+        ))
+        self.assertEqual(len(refreshed["displayRows"]), 6)
+        self.assertTrue(all(not row["needsReview"] for row in refreshed["displayRows"]))
+        self.assertEqual(
+            [row["sourceRow"] for row in refreshed["displayRows"]],
+            [2, 2, 2, 3, 3, 3],
+        )
+        self.assertEqual(
+            [row["firstForSourceRow"] for row in refreshed["displayRows"]],
+            [True, False, False, True, False, False],
+        )
+        self.assertEqual(
+            [row["lastForSourceRow"] for row in refreshed["displayRows"]],
+            [False, False, True, False, False, True],
+        )
 
     @patch(
         "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
@@ -5847,6 +6010,38 @@ class StructureScopedPrefixRuleTests(TestCase):
 
 
 class DirectoryDatabaseLearningTests(TestCase):
+    def test_littelfuse_compact_spellings_are_active_database_aliases(self):
+        manufacturer = ManufacturerDirectoryEntry.objects.create(
+            name="Littel fuse",
+            normalized_name="LITTELFUSE",
+            status=ManufacturerDirectoryEntry.STATUS_VERIFIED,
+        )
+        for alias in ("LITTELFUSE", "LIITELFUSE"):
+            ManufacturerAlias.objects.create(
+                manufacturer=manufacturer,
+                alias=alias,
+                normalized_alias=alias,
+                is_active=True,
+            )
+        load_manufacturer_lookup.cache_clear()
+        self.addCleanup(load_manufacturer_lookup.cache_clear)
+        aliases = ManufacturerAlias.objects.filter(
+            normalized_alias__in=["LITTELFUSE", "LIITELFUSE"],
+            is_active=True,
+        ).select_related("manufacturer")
+
+        self.assertEqual(
+            {alias.normalized_alias for alias in aliases},
+            {"LITTELFUSE", "LIITELFUSE"},
+        )
+        self.assertEqual(
+            {alias.manufacturer.normalized_name for alias in aliases},
+            {"LITTELFUSE"},
+        )
+        lookup = load_manufacturer_lookup()
+        self.assertEqual(lookup["LITTELFUSE"], aliases[0].manufacturer.name)
+        self.assertEqual(lookup["LIITELFUSE"], aliases[0].manufacturer.name)
+
     @staticmethod
     def _pattern_with_mpns(*values, fallback=False):
         return {
