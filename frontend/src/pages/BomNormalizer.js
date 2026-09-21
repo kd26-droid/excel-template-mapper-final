@@ -8997,10 +8997,7 @@ export const reviewEntriesWithUserEdits = (row = {}, edits = {}) => {
       });
     });
   });
-  return entries.map((entry, index) => ({
-    ...entry,
-    relation: index === 0 ? 'Primary' : `Alternate ${index}`,
-  }));
+  return entries;
 };
 
 export const canUseVisualTeachInterpretation = ({
@@ -9063,7 +9060,7 @@ const FieldPatternReviewTable = ({
         output.push({
           ...baseRow,
           id: `${reviewRowId}:display:${entryIndex}`,
-          relation: entryIndex === 0 ? 'Primary' : `Alternate ${entryIndex}`,
+          relation: entry.relation || baseRow.relation || '',
           fields: entry.fields || baseRow.fields || {},
           sourceColumns: entry.sourceColumns || baseRow.sourceColumns || {},
           groupId: entry.groupId || baseRow.groupId || '',

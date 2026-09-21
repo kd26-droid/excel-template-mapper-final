@@ -3529,6 +3529,44 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         self.assertTrue(all(row["quantity"] == "4" for row in normalized))
         self.assertTrue(all(row["uom"] == "EA" for row in normalized))
 
+        review = build_bom_field_pattern_groups(
+            headers,
+            rows,
+            roles={
+                "cpn": "Item",
+                "mpn": "MPN",
+                "manufacturer": "MFR",
+                "description": "Description",
+                "quantity": "Qty",
+                "uom": "UOM",
+            },
+            config={
+                "alternateLayout": "following_item_rows",
+                "followingItemRowsItemColumn": "Item",
+                "followingItemRowsMpnColumn": "MPN",
+                "followingItemRowsManufacturerColumn": "MFR",
+                "followingItemRowsCpnMode": "primary",
+                "alternateInheritFields": ["cpn", "description", "quantity", "uom"],
+            },
+            options={"includeAllRows": True, "reviewContractVersion": 3},
+        )["review"]
+        relation_by_source_row = {
+            row["sourceRow"]: [entry["relation"] for entry in row["entries"]]
+            for row in review["rows"]
+        }
+        self.assertEqual(relation_by_source_row[3], ["Primary"])
+        self.assertEqual(relation_by_source_row[4], ["Alternate 1"])
+        entries_by_source_row = {
+            row["sourceRow"]: row["entries"]
+            for row in review["rows"]
+        }
+        for source_row in (3, 4):
+            fields = entries_by_source_row[source_row][0]["fields"]
+            self.assertEqual(fields["cpn"], "CPN-100")
+            self.assertEqual(fields["description"], "Chip capacitor")
+            self.assertEqual(fields["quantity"], "4")
+            self.assertEqual(fields["uom"], "EA")
+
     @patch(
         "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
         return_value={},
@@ -4038,6 +4076,315 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
     new=_all_generated_mpns_are_verified,
 )
 class SemanticIdentityFragmentTests(SimpleTestCase):
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    def test_plain_slash_mpn_list_is_reviewable_without_automatic_split(
+        self,
+        _saved_rules,
+        _saved_interpretations,
+    ):
+        result = build_bom_field_pattern_groups(
+            ["MPN"],
+            [{"MPN": "STM32F429IGT6 / STM32F439IGT6", "__sourceRow": 81}],
+            roles={"mpn": "MPN"},
+            config={"alternateLayout": "separate_columns"},
+            options={"includeAllRows": True, "reviewContractVersion": 3},
+        )
+
+        self.assertEqual(result["review"]["summary"]["patternCount"], 1)
+        pattern = result["review"]["patterns"][0]
+        self.assertEqual(pattern["pattern"], "<MPN> / <MPN>")
+        self.assertFalse(pattern["recognized"])
+        self.assertEqual(
+            result["review"]["rows"][0]["entries"][0]["fields"]["mpn"],
+            "STM32F429IGT6 / STM32F439IGT6",
+        )
+
+    def test_confirmed_no_split_rule_preserves_plain_slash_mpn(self):
+        value = "STM32F429IGT6 / STM32F439IGT6"
+        grammar = _semantic_identity_fragments(value, ["mpn"])[0]["grammar"]
+        pattern_key = _semantic_pattern_key("MPN", ["mpn"], grammar)
+
+        entries = _infer_field_entries_for_row(
+            {"MPN": value},
+            ["MPN"],
+            {"mpn": "MPN"},
+            ["MPN"],
+            config={
+                "fieldPatternRules": {
+                    pattern_key: {
+                        "patternKey": pattern_key,
+                        "fields": {"mpn": {"delimiter": "none"}},
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["fields"]["mpn"]["value"], value)
+
+    def test_confirmed_slash_rule_splits_complete_mpns(self):
+        value = "STM32F429IGT6 / STM32F439IGT6"
+        grammar = _semantic_identity_fragments(value, ["mpn"])[0]["grammar"]
+        pattern_key = _semantic_pattern_key("MPN", ["mpn"], grammar)
+
+        entries = _infer_field_entries_for_row(
+            {"MPN": value},
+            ["MPN"],
+            {"mpn": "MPN"},
+            ["MPN"],
+            config={
+                "fieldPatternRules": {
+                    pattern_key: {
+                        "patternKey": pattern_key,
+                        "fields": {
+                            "mpn": {
+                                "delimiter": "/",
+                                "preserveOriginalValue": True,
+                            },
+                        },
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(
+            [entry["fields"]["mpn"]["value"] for entry in entries],
+            ["STM32F429IGT6", "STM32F439IGT6"],
+        )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    def test_alternate_columns_surface_their_slash_pattern_once(
+        self,
+        _saved_rules,
+        _saved_interpretations,
+    ):
+        result = build_bom_field_pattern_groups(
+            ["Primary MPN", "Alternate MPN 1", "Alternate MPN 2"],
+            [{
+                "Primary MPN": "PRIMARY-1",
+                "Alternate MPN 1": "STM32F429IGT6 / STM32F439IGT6",
+                "Alternate MPN 2": "SZE5D5B5.0ST1G / ESD5B5.0ST1G",
+                "__sourceRow": 109,
+            }],
+            roles={"mpn": "Primary MPN"},
+            config={
+                "alternateLayout": "separate_columns",
+                "alternateColumnGroups": [
+                    {"mpn": "Alternate MPN 1"},
+                    {"mpn": "Alternate MPN 2"},
+                ],
+            },
+            options={"includeAllRows": True, "reviewContractVersion": 3},
+        )
+
+        self.assertEqual(result["review"]["summary"]["patternCount"], 1)
+        pattern = result["review"]["patterns"][0]
+        self.assertEqual(pattern["pattern"], "<MPN> / <MPN>")
+        self.assertEqual(pattern["occurrenceCount"], 2)
+        self.assertEqual(
+            {
+                occurrence["sourceColumn"]
+                for row in result["review"]["rows"]
+                for occurrence in row["occurrences"]
+            },
+            {"Alternate MPN 1", "Alternate MPN 2"},
+        )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    def test_alternate_pattern_review_row_keeps_primary_and_mapped_manufacturer(
+        self,
+        _saved_rules,
+        _saved_interpretations,
+    ):
+        result = build_bom_field_pattern_groups(
+            [
+                "No.",
+                "Make",
+                "Mfg Catalogue No",
+                "Manufacture 2",
+                "Mfr Catalogue No. 2",
+                "Manufacture 3",
+                "Mfr Catalogue No. 3",
+            ],
+            [{
+                "No.": "12100201010015",
+                "Make": "JST",
+                "Mfg Catalogue No": "B04B-XASK-1",
+                "Manufacture 2": "JST",
+                "Mfr Catalogue No. 2": "B04B-XASK-1(LF)(SN)",
+                "Manufacture 3": "",
+                "Mfr Catalogue No. 3": "",
+                "__sourceRow": 33,
+            }],
+            roles={
+                "cpn": "No.",
+                "mpn": "Mfg Catalogue No",
+                "manufacturer": "Make",
+            },
+            config={
+                "alternateLayout": "separate_columns",
+                "alternateColumnGroups": [
+                    {
+                        "mpn": "Mfr Catalogue No. 2",
+                        "mfr": "Manufacture 2",
+                    },
+                    {
+                        "mpn": "Mfr Catalogue No. 3",
+                        "mfr": "Manufacture 3",
+                    },
+                ],
+                "alternateInheritFields": ["cpn"],
+            },
+            options={"includeAllRows": True, "reviewContractVersion": 3},
+        )
+
+        review_row = result["review"]["rows"][0]
+        self.assertIn("Manufacture 2", result["review"]["display"]["sourceColumns"])
+        self.assertIn("Manufacture 3", result["review"]["display"]["sourceColumns"])
+        self.assertEqual(
+            [
+                (entry["relation"], entry["fields"]["mpn"], entry["fields"]["manufacturer"])
+                for entry in review_row["entries"]
+            ],
+            [
+                ("Primary", "B04B-XASK-1", "JST"),
+                ("Alternate 1", "B04B-XASK-1(LF)(SN)", "JST"),
+            ],
+        )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    def test_saved_pattern_splits_every_alternate_column_independently(
+        self,
+        _saved_rules,
+        _saved_interpretations,
+    ):
+        grammar = "<MPN> / <MPN>"
+        pattern_key = _semantic_pattern_key("Alternate MPN 1", ["mpn"], grammar)
+        result = normalize_bom_rows(
+            ["Primary MPN", "Alternate MPN 1", "Alternate MPN 2"],
+            [{
+                "Primary MPN": "PRIMARY-1",
+                "Alternate MPN 1": "STM32F429IGT6 / STM32F439IGT6",
+                "Alternate MPN 2": "SZE5D5B5.0ST1G / ESD5B5.0ST1G",
+                "__sourceRow": 109,
+            }],
+            roles={"mpn": "Primary MPN"},
+            config={
+                "alternateLayout": "separate_columns",
+                "alternateColumnGroups": [
+                    {"mpn": "Alternate MPN 1"},
+                    {"mpn": "Alternate MPN 2"},
+                ],
+                "fieldPatternRules": {
+                    pattern_key: {
+                        "patternKey": pattern_key,
+                        "fields": {
+                            "mpn": {
+                                "delimiter": "/",
+                                "preserveOriginalValue": True,
+                            },
+                        },
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(
+            [row["mpn"] for row in result["normalizedRows"]],
+            [
+                "PRIMARY-1",
+                "STM32F429IGT6",
+                "STM32F439IGT6",
+                "SZE5D5B5.0ST1G",
+                "ESD5B5.0ST1G",
+            ],
+        )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    def test_alternate_column_patterns_pair_mpns_and_manufacturers_by_position(
+        self,
+        _saved_rules,
+        _saved_interpretations,
+    ):
+        mpn_key = _semantic_pattern_key("Alternate MPN", ["mpn"], "<MPN> / <MPN>")
+        mfr_key = _semantic_pattern_key(
+            "Alternate Manufacturer",
+            ["manufacturer"],
+            "<MFR> / <MFR>",
+        )
+        result = normalize_bom_rows(
+            ["Primary MPN", "Primary MFR", "Alternate MPN", "Alternate Manufacturer"],
+            [{
+                "Primary MPN": "PRIMARY-1",
+                "Primary MFR": "KEMET",
+                "Alternate MPN": "STM32F429IGT6 / STM32F439IGT6",
+                "Alternate Manufacturer": "YAGEO / VISHAY",
+                "__sourceRow": 109,
+            }],
+            roles={"mpn": "Primary MPN", "manufacturer": "Primary MFR"},
+            config={
+                "alternateLayout": "separate_columns",
+                "alternateColumnGroups": [{
+                    "mpn": "Alternate MPN",
+                    "manufacturer": "Alternate Manufacturer",
+                }],
+                "fieldPatternRules": {
+                    mpn_key: {
+                        "patternKey": mpn_key,
+                        "fields": {"mpn": {"delimiter": "/", "preserveOriginalValue": True}},
+                    },
+                    mfr_key: {
+                        "patternKey": mfr_key,
+                        "fields": {"manufacturer": {"delimiter": "/"}},
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(
+            [(row["mpn"], row["manufacturer"]) for row in result["normalizedRows"]],
+            [
+                ("PRIMARY-1", "KEMET"),
+                ("STM32F429IGT6", "YAGEO"),
+                ("STM32F439IGT6", "VISHAY"),
+            ],
+        )
+
     @patch(
         "excel_mapper.services.bom_role_inference._looks_like_parenthesized_manufacturer_alias",
         return_value=True,

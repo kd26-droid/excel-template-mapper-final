@@ -109,6 +109,17 @@ describe('reviewEntriesWithUserEdits', () => {
     });
     expect(result[0].sourceColumns.cpn).toBe('Ref. Article');
   });
+
+  test('preserves the backend relation for a row-level alternate', () => {
+    const result = reviewEntriesWithUserEdits({
+      entries: [{
+        ...backendEntry,
+        relation: 'Alternate 4',
+      }],
+    });
+
+    expect(result[0].relation).toBe('Alternate 4');
+  });
 });
 
 describe('canUseVisualTeachInterpretation', () => {
