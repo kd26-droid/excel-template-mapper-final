@@ -10149,6 +10149,33 @@ def download_file(request, session_id=None):
         else:
             format_type = request.GET.get('format', 'excel').lower()
         
+        # The same rename and placement the grid does, so the file matches what
+        # the user was just looking at. This path holds a DataFrame rather than a
+        # header list, so it cannot call the list version - but leaving it out is
+        # how the export kept shipping the old 'MPN valid' name after the grid
+        # had moved on.
+        try:
+            from .mpn_views import (CONSOLIDATED_MPN_COLUMN,
+                                    LEGACY_CONSOLIDATED_MPN_COLUMN,
+                                    PROVIDER_VALID_COLUMNS)
+            columns = list(df.columns)
+            providers = [column for column in PROVIDER_VALID_COLUMNS if column in columns]
+            if providers:
+                if (LEGACY_CONSOLIDATED_MPN_COLUMN in columns
+                        and CONSOLIDATED_MPN_COLUMN not in columns
+                        and 'MPN valid (DigiKey)' in columns):
+                    df = df.rename(columns={
+                        LEGACY_CONSOLIDATED_MPN_COLUMN: CONSOLIDATED_MPN_COLUMN})
+                    columns = list(df.columns)
+                if CONSOLIDATED_MPN_COLUMN in columns:
+                    first_provider = min(columns.index(column) for column in providers)
+                    at = columns.index(CONSOLIDATED_MPN_COLUMN)
+                    if at > first_provider:
+                        columns.insert(first_provider, columns.pop(at))
+                        df = df[columns]
+        except Exception as _mpn_place_err:
+            logger.warning(f"MPN verdict column placement skipped for export: {_mpn_place_err}")
+
         # A number for every exported row, first column, before Item code.
         #
         # Every conversation about this sheet is about a row - "row 38 lists the
