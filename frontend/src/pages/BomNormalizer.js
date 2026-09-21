@@ -98,6 +98,7 @@ import {
   withPatternConfirmationDisplayData,
 } from '../lib/visualTeachParser';
 import {
+  bomRoleInferenceKey,
   bomNormalizerSourceKey,
   clearDurableBomNormalizerWorkspace,
   persistDurableBomNormalizerWorkspace,
@@ -8970,9 +8971,25 @@ export const reviewEntriesWithUserEdits = (row = {}, edits = {}) => {
     }
     if (emittedOccurrences.has(occurrenceKey)) return;
     emittedOccurrences.add(occurrenceKey);
+    const backendOccurrenceEntries = (row.entries || []).filter((candidate) => (
+      fmt(candidate.groupId) === groupId &&
+      fmt(candidate.occurrenceId) === occurrenceId
+    ));
     (userEdit.entries || []).forEach((editedEntry, patternEntryIndex) => {
+      const backendEntry = backendOccurrenceEntries.find((candidate) => (
+        Number(candidate.patternEntryIndex || 0) === patternEntryIndex
+      )) || backendOccurrenceEntries[patternEntryIndex] || {};
       entries.push({
+        ...backendEntry,
         ...editedEntry,
+        fields: {
+          ...(backendEntry.fields || {}),
+          ...(editedEntry.fields || {}),
+        },
+        sourceColumns: {
+          ...(backendEntry.sourceColumns || {}),
+          ...(editedEntry.sourceColumns || {}),
+        },
         patternKey: entry.patternKey,
         groupId,
         occurrenceId,
@@ -9960,21 +9977,16 @@ const BomNormalizer = () => {
       rowCount: dataRows.length,
     })) return undefined;
 
-    const inferenceKey = [
+    const inferenceKey = bomRoleInferenceKey({
       sheetScope,
       sheetName,
       headerRowIndex,
-      sourceEndRow || '',
-      headers.join('\u001f'),
-      dataRows.length,
-      config.skipTitleRows ? 'skip-titles' : 'keep-titles',
-      config.skipRepeatedHeaders ? 'skip-headers' : 'keep-headers',
-      config.skipDoNotPopulate ? 'skip-dnp' : 'keep-dnp',
-      config.skipDeletedRows ? 'skip-deleted' : 'keep-deleted',
-      config.skipSummaryRows ? 'skip-summaries' : 'keep-summaries',
-      config.parentPathLevels ? 'use-parent-path' : 'ignore-parent-path',
+      sourceEndRow,
+      headers,
+      rowCount: dataRows.length,
+      config,
       restoreInferenceNonce,
-    ].join('\u001e');
+    });
     if (backendRoleInferenceKeyRef.current === inferenceKey) return undefined;
 
     let cancelled = false;
@@ -10008,7 +10020,7 @@ const BomNormalizer = () => {
     return () => {
       cancelled = true;
     };
-  }, [config.parentPathLevels, config.skipDeletedRows, config.skipDoNotPopulate, config.skipRepeatedHeaders, config.skipSummaryRows, config.skipTitleRows, currentStep, dataRows, headerRowIndex, headers, inferNormalizerRoles, parserTouched, restoreInferenceNonce, sheetName, sheetScope, sourceEndRow]);
+  }, [config, currentStep, dataRows, headerRowIndex, headers, inferNormalizerRoles, parserTouched, restoreInferenceNonce, sheetName, sheetScope, sourceEndRow]);
 
   const sourceRowsExcludedByLimit = Math.max(0, sourceDataRows.length - dataRows.length);
   const sourceLimitActive = Boolean(sourceEndRow && sourceRowsExcludedByLimit > 0);
@@ -11925,15 +11937,15 @@ const BomNormalizer = () => {
       : autoMultiBlock?.multiBlockSummary?.blockCount > 1
         ? autoMultiBlock
         : prepareSingleSheet(nextWorkbook, preferredSheet, { headerRow: options.headerRow });
-    const nextHeaders = prepared.headers;
-    const nextRoles = await inferNormalizerRoles(nextHeaders, prepared.dataRows);
-    const nextStructure = detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40));
     const nextSheetScope = useRequestedSelection
       ? (options.sheetScope === 'all' && requestedSheets.length === nextWorkbook.SheetNames.length ? 'all' : 'selected')
       : autoMultiBlock?.multiBlockSummary?.blockCount > 1 && nextWorkbook.SheetNames.length > 1 ? 'all' : 'single';
     const nextSelectedSheets = useRequestedSelection
       ? requestedSheets
       : nextSheetScope === 'all' ? nextWorkbook.SheetNames : [preferredSheet];
+    const nextHeaders = prepared.headers;
+    const nextRoles = await inferNormalizerRoles(nextHeaders, prepared.dataRows);
+    const nextStructure = detectBestStructure(nextHeaders, nextRoles, prepared.dataRows.slice(0, 40));
     const reconstructedWorkspace = {
       fileName: nextFileName,
       sheetName: nextSelectedSheets[0] || preferredSheet,
@@ -11962,6 +11974,29 @@ const BomNormalizer = () => {
     const restoredConfig = hasMatchingConfigureDraft
       ? sanitizeNormalizerConfig(restoredConfigure.config || {})
       : {};
+    const nextSourceEndRow = hasMatchingConfigureDraft ? (restoredConfigure.sourceEndRow || '') : '';
+    const nextConfig = {
+      ...config,
+      ...detectedConfig,
+      ...restoredConfig,
+      ...(hasMatchingConfigureDraft && restoredConfig.alternateColumnGroups ? {
+        alternateColumnGroups: resolveSavedAlternateGroups(restoredConfig.alternateColumnGroups, nextHeaders),
+      } : {}),
+    };
+
+    // The workbook load already completed role inference for this exact
+    // Configure state. Seed the effect's key so mounting the page does not
+    // immediately repeat the same backend request.
+    backendRoleInferenceKeyRef.current = bomRoleInferenceKey({
+      sheetScope: nextSheetScope,
+      sheetName: reconstructedWorkspace.sheetName,
+      headerRowIndex: prepared.headerRowIndex,
+      sourceEndRow: nextSourceEndRow,
+      headers: nextHeaders,
+      rowCount: prepared.dataRows.length,
+      config: nextConfig,
+      restoreInferenceNonce,
+    });
 
     setSheetHeaderRowOverride(hasMatchingConfigureDraft
       ? (restoredConfigure.sheetHeaderRowOverride || '')
@@ -11976,16 +12011,9 @@ const BomNormalizer = () => {
     setPreparedHeaders(prepared.headers);
     setPreparedDataRows(prepared.dataRows);
     setPatternParserOverrides([]);
-    setSourceEndRow(hasMatchingConfigureDraft ? (restoredConfigure.sourceEndRow || '') : '');
+    setSourceEndRow(nextSourceEndRow);
     setRoles(restoredRoles);
-    setConfig((prev) => ({
-      ...prev,
-      ...detectedConfig,
-      ...restoredConfig,
-      ...(hasMatchingConfigureDraft && restoredConfig.alternateColumnGroups ? {
-        alternateColumnGroups: resolveSavedAlternateGroups(restoredConfig.alternateColumnGroups, nextHeaders),
-      } : {}),
-    }));
+    setConfig(nextConfig);
     setNormalizedRows([]);
     setCurrentStep(2);
     setProgress({ processed: 0, total: 0, outputRows: 0, skippedRows: 0 });
@@ -11996,7 +12024,7 @@ const BomNormalizer = () => {
     setNormalizationSummary(null);
     setConfirmOpen(false);
     setError('');
-  }, [inferNormalizerRoles]);
+  }, [config, inferNormalizerRoles, restoreInferenceNonce]);
 
   useEffect(() => {
     const state = location.state || {};

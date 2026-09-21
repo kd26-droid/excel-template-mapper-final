@@ -1,4 +1,5 @@
 import {
+  bomRoleInferenceKey,
   bomNormalizerSourceKey,
   restoreUserRoleSelections,
   restoredConfigureState,
@@ -8,6 +9,45 @@ import {
 } from './bomNormalizerWorkspace';
 
 describe('BOM normalizer workspace restoration', () => {
+  test('uses the same role inference key for direct load and configure effect inputs', () => {
+    const input = {
+      sheetScope: 'single',
+      sheetName: 'Partlist',
+      headerRowIndex: 3,
+      sourceEndRow: '',
+      headers: ['CPN', 'MPN', 'Manufacturer'],
+      rowCount: 210,
+      config: {
+        skipTitleRows: true,
+        skipRepeatedHeaders: false,
+        skipDoNotPopulate: true,
+        skipDeletedRows: false,
+        skipSummaryRows: true,
+        parentPathLevels: false,
+      },
+      restoreInferenceNonce: 0,
+    };
+
+    const completedLoadKey = bomRoleInferenceKey(input);
+    const configureEffectKey = bomRoleInferenceKey({ ...input });
+
+    expect(configureEffectKey).toBe(completedLoadKey);
+  });
+
+  test('changes the role inference key when a real inference input changes', () => {
+    const input = {
+      sheetName: 'Partlist',
+      headers: ['CPN', 'MPN'],
+      rowCount: 210,
+      config: {},
+    };
+
+    expect(bomRoleInferenceKey({ ...input, headerRowIndex: 3 }))
+      .not.toBe(bomRoleInferenceKey({ ...input, headerRowIndex: 4 }));
+    expect(bomRoleInferenceKey(input))
+      .not.toBe(bomRoleInferenceKey({ ...input, config: { skipTitleRows: true } }));
+  });
+
   test('does not overwrite restored user selections with fresh inference', () => {
     expect(shouldRunBomRoleInference({
       currentStep: 2,

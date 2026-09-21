@@ -4441,6 +4441,102 @@ def _attach_mpn_manufacturer_pairing_check(
     return entries
 
 
+def _positional_newline_values(value):
+    """Split explicit Excel line breaks without collapsing internal blanks."""
+    raw_value = str(value or "").replace("\u00a0", " ")
+    values = [clean(part) for part in re.split(r"\r\n|\r|\n", raw_value)]
+    while values and not values[0]:
+        values.pop(0)
+    while values and not values[-1]:
+        values.pop()
+    return values
+
+
+def _pair_semantic_entries_with_separate_manufacturers(
+    entries,
+    row,
+    headers,
+    roles,
+    semantic_source_columns,
+):
+    """Pair semantic MPN rows with a separately mapped MFR cell by position."""
+    entries = list(entries or [])
+    manufacturer_header = clean((roles or {}).get("manufacturer"))
+    if (
+        not entries
+        or not manufacturer_header
+        or manufacturer_header in set(semantic_source_columns or [])
+    ):
+        return entries
+
+    mpn_entries = [
+        entry
+        for entry in entries
+        if (
+            not entry.get("ignoredIdentity")
+            and clean(entry.get("relation")) != "Ignored"
+            and clean(_review_entry_field_value((entry.get("fields") or {}).get("mpn")))
+        )
+    ]
+    if not mpn_entries:
+        return entries
+
+    manufacturer_value = _row_cell(
+        row,
+        manufacturer_header,
+        headers,
+        preserve_delimiters=True,
+    )
+    manufacturer_slots = _positional_newline_values(manufacturer_value)
+    if not manufacturer_slots and not is_blankish(manufacturer_value):
+        manufacturer_slots = [clean(manufacturer_value)]
+
+    unknown_manufacturers = []
+    for index, entry in enumerate(mpn_entries):
+        fields = entry.setdefault("fields", {})
+        manufacturer = (
+            manufacturer_slots[index]
+            if index < len(manufacturer_slots)
+            else ""
+        )
+        if not manufacturer:
+            fields["manufacturer"] = _blank_factwise_field()
+            continue
+
+        matched_manufacturer, _, _ = _best_manufacturer_from_text(manufacturer)
+        fields["manufacturer"] = _manufacturer_factwise_field(
+            manufacturer,
+            manufacturer_header,
+            "Positionally paired Manufacturer value",
+        )
+        if not matched_manufacturer:
+            warning = {
+                "type": "manufacturer_not_in_directory",
+                "message": (
+                    f'Manufacturer "{manufacturer}" was preserved from the uploaded file '
+                    "but was not found in the manufacturer directory."
+                ),
+                "value": manufacturer,
+                "position": index + 1,
+            }
+            entry.setdefault("warnings", []).append(warning)
+            unknown_manufacturers.append(warning)
+
+    for entry in entries:
+        entry.pop("pairingCheck", None)
+    result = _attach_mpn_manufacturer_pairing_check(
+        entries,
+        manufacturer_mapped=True,
+        detected_mpn_count=len(mpn_entries),
+        detected_manufacturer_count=sum(
+            1 for value in manufacturer_slots if not is_blankish(value)
+        ),
+    )
+    if result and unknown_manufacturers:
+        result[0]["pairingCheck"]["unknownManufacturers"] = unknown_manufacturers
+    return result
+
+
 def _value_shape(value, role_hint=""):
     text = clean(value)
     if is_blankish(text):
@@ -4858,11 +4954,21 @@ def _mpn_source_fragment_pattern(fragment):
         before_first_group = text[:suffix_groups[0].start()].rstrip()
         alternate_text = clean(suffix_groups[0].group(0)[1:-1])
         delimiter = _infer_list_delimiter(alternate_text)
-        marker_match = (
-            _select_structural_marker(before_first_group, alternate_text, delimiter)
-            if delimiter
-            else None
+        # Marker placement is part of the grammar even when the first wrapped
+        # value is singular. Otherwise ``MPN@ (ALT)`` and
+        # ``MPN_PREFIX@MPN_SUFFIX (ALT)`` collapse to the same semantic key and
+        # can replay each other's saved rules.
+        marker_match = _select_structural_marker(
+            before_first_group,
+            alternate_text,
+            delimiter,
         )
+        if (
+            marker_match
+            and not delimiter
+            and not any(marker in clean(marker_match.get("value")) for marker in ("@", "#"))
+        ):
+            marker_match = None
         if marker_match:
             marker = marker_match["value"]
             marker_prefix = marker_match["prefix"]
@@ -4872,7 +4978,8 @@ def _mpn_source_fragment_pattern(fragment):
                 if clean(marker_prefix) and clean(marker_suffix)
                 else f"<MPN>{marker}"
             )
-            return base_pattern + " " + " ".join("(<ALTERNATE_SUFFIXES>)" for _ in suffix_groups)
+            wrapped_role = "<ALTERNATE_SUFFIXES>" if delimiter else "<SUFFIX>"
+            return base_pattern + " " + " ".join(f"({wrapped_role})" for _ in suffix_groups)
         else:
             connector = "" if suffix_groups[0].start() > 0 and not text[suffix_groups[0].start() - 1].isspace() else " "
         return "<MPN>" + connector + " ".join("(<SUFFIX>)" for _ in suffix_groups)
@@ -7570,6 +7677,7 @@ def _infer_semantic_pattern_entries_for_row(row, headers, roles, selected_column
 
     combined_entries = []
     ignored_fragments = []
+    semantic_source_columns = set()
     for unit in _field_review_mapping_units(headers, roles, config=config):
         if unit.get("relationship") != "shared" and unit.get("mappedFields") != ["mpn"]:
             continue
@@ -7637,6 +7745,8 @@ def _infer_semantic_pattern_entries_for_row(row, headers, roles, selected_column
                 selected_columns,
                 config=fragment_config,
             )
+            if fragment_entries:
+                semantic_source_columns.add(source_column)
             combined_entries.extend(fragment_entries)
 
     for fragment_row, fragment_config in ignored_fragments:
@@ -7657,7 +7767,13 @@ def _infer_semantic_pattern_entries_for_row(row, headers, roles, selected_column
         entry["index"] = index
         if not entry.get("ignoredIdentity") and clean(entry.get("relation")) != "Ignored":
             entry["relation"] = "Primary" if index == 0 else f"Alternate {index}"
-    return combined_entries
+    return _pair_semantic_entries_with_separate_manufacturers(
+        combined_entries,
+        row,
+        headers,
+        roles,
+        semantic_source_columns,
+    )
 
 
 def _infer_field_entries_for_row(row, headers, roles, selected_columns, config=None):
@@ -11699,6 +11815,11 @@ def _compact_review_entries(entries):
             "index": entry.get("index"),
             "relation": entry.get("relation") or "",
             "fields": fields,
+            **(
+                {"warnings": entry.get("warnings")}
+                if isinstance(entry.get("warnings"), list)
+                else {}
+            ),
             **(
                 {"pairingCheck": entry.get("pairingCheck")}
                 if isinstance(entry.get("pairingCheck"), dict)

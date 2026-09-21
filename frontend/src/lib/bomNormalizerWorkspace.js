@@ -12,6 +12,31 @@ export const shouldRunBomRoleInference = ({
   Number(rowCount) > 0
 );
 
+export const bomRoleInferenceKey = ({
+  sheetScope = 'single',
+  sheetName = '',
+  headerRowIndex = 0,
+  sourceEndRow = '',
+  headers = [],
+  rowCount = 0,
+  config = {},
+  restoreInferenceNonce = 0,
+} = {}) => [
+  sheetScope,
+  sheetName,
+  Number(headerRowIndex) || 0,
+  sourceEndRow || '',
+  (headers || []).join('\u001f'),
+  Number(rowCount) || 0,
+  config.skipTitleRows ? 'skip-titles' : 'keep-titles',
+  config.skipRepeatedHeaders ? 'skip-headers' : 'keep-headers',
+  config.skipDoNotPopulate ? 'skip-dnp' : 'keep-dnp',
+  config.skipDeletedRows ? 'skip-deleted' : 'keep-deleted',
+  config.skipSummaryRows ? 'skip-summaries' : 'keep-summaries',
+  config.parentPathLevels ? 'use-parent-path' : 'ignore-parent-path',
+  Number(restoreInferenceNonce) || 0,
+].join('\u001e');
+
 export const restoreUserRoleSelections = (
   savedRoles = {},
   currentHeaders = [],

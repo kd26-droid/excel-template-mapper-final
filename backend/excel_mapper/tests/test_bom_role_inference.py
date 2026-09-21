@@ -4235,6 +4235,118 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         self.assertEqual(entries[0]["pairingCheck"]["manufacturerCount"], 2)
         self.assertFalse(entries[0]["pairingCheck"]["hasPairingMismatch"])
 
+    def _semantic_entries_with_separate_manufacturers(self, mpns, manufacturers):
+        mpn_value = "\n".join(mpns)
+        fragments = _semantic_identity_fragments(mpn_value, ["mpn"])
+        rules = {
+            _semantic_pattern_key("MPN", ["mpn"], fragment["grammar"]): {
+                "patternKey": _semantic_pattern_key(
+                    "MPN", ["mpn"], fragment["grammar"]
+                ),
+                "fields": {"mpn": {"delimiter": "\\n"}},
+            }
+            for fragment in fragments
+        }
+        return _infer_semantic_pattern_entries_for_row(
+            {"MPN": mpn_value, "MFR": manufacturers, "__sourceRow": 11},
+            ["MPN", "MFR"],
+            {"mpn": "MPN", "manufacturer": "MFR"},
+            ["MPN", "MFR"],
+            config={"fieldPatternRules": rules},
+        )
+
+    def test_semantic_mpn_rows_pair_with_separate_multiline_manufacturers(self):
+        entries = self._semantic_entries_with_separate_manufacturers(
+            ["MPN-A1", "MPN-B2", "MPN-C3", "MPN-D4", "MPN-E5"],
+            "KEMET\nYAGEO\nVISHAY\nWELWYN\nLITTELFUSE",
+        )
+
+        self.assertEqual(
+            [entry["fields"]["manufacturer"]["value"] for entry in entries],
+            ["KEMET", "YAGEO", "VISHAY", "WELWYN", "LITTELFUSE"],
+        )
+        self.assertFalse(entries[0]["pairingCheck"]["hasPairingMismatch"])
+
+    def test_semantic_manufacturer_blank_slot_does_not_shift_later_values(self):
+        entries = self._semantic_entries_with_separate_manufacturers(
+            ["MPN-A1", "MPN-B2", "MPN-C3", "MPN-D4", "MPN-E5"],
+            "KEMET\nYAGEO\n\nWELWYN\nLITTELFUSE",
+        )
+
+        self.assertEqual(
+            [entry["fields"]["manufacturer"]["value"] for entry in entries],
+            ["KEMET", "YAGEO", "", "WELWYN", "LITTELFUSE"],
+        )
+        self.assertTrue(entries[0]["pairingCheck"]["hasPairingMismatch"])
+        self.assertEqual(entries[0]["pairingCheck"]["manufacturerCount"], 4)
+
+    @patch("excel_mapper.services.bom_role_inference._best_manufacturer_from_text")
+    def test_semantic_unknown_manufacturer_is_preserved_with_warning(self, best_mfr):
+        best_mfr.side_effect = lambda value: (
+            ("KEMET", 1.0, "exact")
+            if value == "KEMET"
+            else (None, 0.0, "not found")
+        )
+        entries = self._semantic_entries_with_separate_manufacturers(
+            ["MPN-A1", "MPN-B2"],
+            "KEMET\nCUSTOM MFR",
+        )
+
+        self.assertEqual(entries[1]["fields"]["manufacturer"]["value"], "CUSTOM MFR")
+        self.assertEqual(
+            entries[1]["warnings"][0]["type"],
+            "manufacturer_not_in_directory",
+        )
+        self.assertEqual(
+            entries[0]["pairingCheck"]["unknownManufacturers"][0]["value"],
+            "CUSTOM MFR",
+        )
+
+    def test_semantic_manufacturer_count_mismatch_leaves_unmatched_mpn_blank(self):
+        entries = self._semantic_entries_with_separate_manufacturers(
+            ["MPN-A1", "MPN-B2", "MPN-C3"],
+            "KEMET\nYAGEO",
+        )
+
+        self.assertEqual(
+            [entry["fields"]["manufacturer"]["value"] for entry in entries],
+            ["KEMET", "YAGEO", ""],
+        )
+        self.assertTrue(entries[0]["pairingCheck"]["hasPairingMismatch"])
+        self.assertEqual(entries[0]["pairingCheck"]["mpnCount"], 3)
+        self.assertEqual(entries[0]["pairingCheck"]["manufacturerCount"], 2)
+
+    def test_same_cell_semantic_manufacturer_behavior_is_unchanged(self):
+        source = "MPN-A1 (KEMET)\nMPN-B2 (YAGEO)"
+        fragments = _semantic_identity_fragments(source, ["mpn", "manufacturer"])
+        rules = {
+            _semantic_pattern_key(
+                "Combined", ["mpn", "manufacturer"], fragment["grammar"]
+            ): {
+                "patternKey": _semantic_pattern_key(
+                    "Combined", ["mpn", "manufacturer"], fragment["grammar"]
+                ),
+                "fields": {"mpn": {"delimiter": "none"}},
+            }
+            for fragment in fragments
+        }
+        entries = _infer_semantic_pattern_entries_for_row(
+            {"Combined": source},
+            ["Combined"],
+            {"mpn": "Combined", "manufacturer": "Combined"},
+            ["Combined"],
+            config={"fieldPatternRules": rules},
+        )
+
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(
+            [
+                (entry["fields"]["mpn"]["value"], entry["fields"]["manufacturer"]["value"])
+                for entry in entries
+            ],
+            [("MPN-A1", "KEMET"), ("MPN-B2", "YAGEO")],
+        )
+
     def test_target_count_manufacturer_split_preserves_one_unknown_directory_gap(self):
         value = "ON SEMICONDUCTOR LITTELFUSE VISHAY DIODES INC."
         spans = {
@@ -5025,6 +5137,21 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
         self.assertEqual(
             _mpn_source_fragment_pattern("LTC2936IUFD#@PBF (/TR)"),
             "<MPN_PREFIX>#@<PRIMARY_SUFFIX> (<ALTERNATE_SUFFIXES>)",
+        )
+
+    def test_marker_position_with_single_wrapped_value_changes_pattern_identity(self):
+        trailing_marker_pattern = _mpn_source_fragment_pattern("CR0805F-5K1J@ (I)")
+        embedded_marker_pattern = _mpn_source_fragment_pattern("MCR10 @ J 512 (EZP)")
+
+        self.assertEqual(trailing_marker_pattern, "<MPN>@ (<SUFFIX>)")
+        self.assertEqual(
+            embedded_marker_pattern,
+            "<MPN_PREFIX>@<PRIMARY_SUFFIX> (<SUFFIX>)",
+        )
+        self.assertNotEqual(trailing_marker_pattern, embedded_marker_pattern)
+        self.assertNotEqual(
+            _semantic_pattern_key("Combined", ["mpn", "manufacturer"], trailing_marker_pattern),
+            _semantic_pattern_key("Combined", ["mpn", "manufacturer"], embedded_marker_pattern),
         )
 
     @patch(

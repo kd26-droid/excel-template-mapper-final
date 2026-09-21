@@ -65,6 +65,50 @@ describe('reviewEntriesWithUserEdits', () => {
     expect(result).toHaveLength(1);
     expect(result[0].fields.mpn).toBe('201Y04L-CORRECTED');
   });
+
+  test('preserves backend carry-forward fields in partial alternate edits', () => {
+    const alternateEntry = {
+      relation: 'Alternate 1',
+      fields: {
+        cpn: 'A1002491',
+        mpn: 'CR0805F-5K1J(I)',
+        manufacturer: 'WELWYN',
+        description: 'RESIST PAVE_0805',
+        quantity: '8',
+      },
+      sourceColumns: {
+        cpn: 'Ref. Article',
+        description: 'Libelle',
+        quantity: 'Qte',
+      },
+      groupId: 'pattern-1',
+      occurrenceId: 'row-52-item-1',
+      patternEntryIndex: 1,
+    };
+    const result = reviewEntriesWithUserEdits(
+      { entries: [alternateEntry] },
+      {
+        'pattern-1': {
+          'row-52-item-1': {
+            entries: [{
+              relation: 'Alternate 1',
+              fields: { mpn: 'CR0805F-5K1J-CORRECTED', manufacturer: 'WELWYN' },
+            }],
+            manuallyEdited: true,
+          },
+        },
+      }
+    );
+
+    expect(result[0].fields).toEqual({
+      cpn: 'A1002491',
+      mpn: 'CR0805F-5K1J-CORRECTED',
+      manufacturer: 'WELWYN',
+      description: 'RESIST PAVE_0805',
+      quantity: '8',
+    });
+    expect(result[0].sourceColumns.cpn).toBe('Ref. Article');
+  });
 });
 
 describe('canUseVisualTeachInterpretation', () => {
