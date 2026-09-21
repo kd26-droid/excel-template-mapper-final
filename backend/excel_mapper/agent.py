@@ -734,6 +734,11 @@ TOOLS = [
                 "mode's inputs - the same way the editor's own dialog changes "
                 'its form. Use this rather than fill_blanks when the value has '
                 'to be built, not just copied. '
+                'To clean a column in place - spaces, stray hyphens, a prefix '
+                'nobody wants - use value_mode remove with write_mode overwrite '
+                'and no source_columns: it reads the column it writes. '
+                'fill_empty would skip every cell that has something in it, '
+                'which is every cell needing cleaned. '
                 'There is no undo. Before writing, say how many rows the '
                 'combination you chose will touch and why that is the set they '
                 'asked for; if that is more rows than they named, you have the '
@@ -750,13 +755,23 @@ TOOLS = [
                     'value_mode': {
                         'type': 'string',
                         'enum': ['fixed', 'join', 'copy', 'serial', 'conditional',
-                                 'saved_rule'],
+                                 'saved_rule', 'remove'],
                         'description': ('fixed: one value. join: two or more columns '
                                         'joined. copy: another column as-is. serial: a '
                                         'numbered sequence. conditional: if a column '
                                         'looks a certain way write one value, otherwise '
                                         'another. saved_rule: run a rule this entity '
-                                        'already saved - call list_saved_rules first.'),
+                                        'already saved - call list_saved_rules first. '
+                                        'remove: take characters out of the values '
+                                        'already in the column, leaving the rest.'),
+                    },
+                    'remove_text': {
+                        'type': 'array',
+                        'items': {'type': 'string'},
+                        'description': ('For remove. Each piece of text to take out, '
+                                        'exactly as it appears - " " for a space, "-" '
+                                        'for a hyphen. Every occurrence in the cell '
+                                        'goes, not just the first.'),
                     },
                     'write_mode': {
                         'type': 'string',
@@ -776,6 +791,11 @@ TOOLS = [
                             'are touched, so the others keep what they had.'),
                     },
                     'fixed_value': {'type': 'string', 'description': 'For fixed.'},
+                    'trim_ends': {
+                        'type': 'boolean',
+                        'description': ('For remove. Leading and trailing spaces are '
+                                        'dropped as well unless this is false.'),
+                    },
                     'source_columns': {
                         'type': 'array', 'items': {'type': 'string'},
                         'description': 'For join (two or more) or copy (one).',
@@ -2802,6 +2822,19 @@ def _tool_fill_column(state, args):
             return {'ok': False, 'error': 'A copy needs exactly one source column.'}
         rule['source_column'] = sources[0]
         described = 'copied %s into %s' % (sources[0], target)
+    elif value_mode == 'remove':
+        fragments = [str(piece) for piece in (args.get('remove_text') or [])
+                     if str(piece) != '']
+        if not fragments:
+            return {'ok': False,
+                    'error': ('Say which text to take out - " " for spaces, "-" for '
+                              'hyphens. Removing nothing would rewrite the column '
+                              'with what it already holds.')}
+        rule['remove_text'] = fragments
+        if args.get('trim_ends') is not None:
+            rule['trim_ends'] = bool(args.get('trim_ends'))
+        shown = ', '.join('"%s"' % piece for piece in fragments)
+        described = 'removed %s from %s' % (shown, sources[0] if sources else target)
     elif value_mode == 'serial':
         rule['serial_prefix'] = args.get('serial_prefix') or ''
         rule['serial_start'] = int(args.get('serial_start') or 1)

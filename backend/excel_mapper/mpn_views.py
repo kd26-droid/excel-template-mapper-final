@@ -27,6 +27,74 @@ from .views import get_session_consistent, save_session, apply_column_mappings, 
 
 logger = logging.getLogger(__name__)
 
+#: The one column that answers "can this part be bought?" across every source.
+#: `Valid` when any provider confirmed it, `Invalid` when the ones that answered
+#: all said no, `Unknown` when none of them answered at all.
+# Not 'MPN valid'. That is this codebase's own name for the DigiKey column
+# from before there were three providers, and the editor still rewrites it
+# to 'MPN valid (DigiKey)' on sight - so a consolidated column called that
+# was relabelled as DigiKey and became impossible to find in the grid.
+CONSOLIDATED_MPN_COLUMN = 'MPN Validity'
+LEGACY_CONSOLIDATED_MPN_COLUMN = 'MPN valid'
+
+#: The per-provider columns it reads. A provider that was never asked leaves its
+#: cell blank rather than writing "No", which is what keeps Unknown honest.
+PROVIDER_VALID_COLUMNS = (
+    'MPN valid (DigiKey)',
+    'MPN valid (Mouser)',
+    'MPN valid (Element14)',
+)
+
+
+def apply_consolidated_mpn_column(headers, rows):
+    """Write the one-column verdict, adding the column when it is missing.
+
+    Every path that fills the per-provider columns has to call this, which is
+    why it is a function rather than a few lines inside one of them. It was
+    inside `mpn_validate` alone, so a sheet whose values arrived through the
+    cache-restore path got the column and never got a verdict in it - present,
+    empty, and indistinguishable from "nobody checked".
+
+    Reads the per-provider cells rather than recomputing from the raw results:
+    whatever each provider decided is already in its column, including the blank
+    that a row gets when nobody managed to look it up.
+    """
+    if not isinstance(headers, list) or not isinstance(rows, list):
+        return 0
+    present = [column for column in PROVIDER_VALID_COLUMNS if column in headers]
+    if not present:
+        return 0
+
+    if CONSOLIDATED_MPN_COLUMN not in headers:
+        # Ahead of the provider columns it summarises, so it is read first.
+        insert_at = min(headers.index(column) for column in present)
+        headers.insert(insert_at, CONSOLIDATED_MPN_COLUMN)
+        for row in rows:
+            if isinstance(row, list) and len(row) > insert_at:
+                row.insert(insert_at, '')
+
+    verdict_at = headers.index(CONSOLIDATED_MPN_COLUMN)
+    provider_at = [headers.index(column) for column in present]
+    written = 0
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        while len(row) < len(headers):
+            row.append('')
+        answers = [str(row[index] or '').strip().lower() for index in provider_at]
+        if 'yes' in answers:
+            verdict = 'Valid'
+        elif 'no' in answers:
+            verdict = 'Invalid'
+        else:
+            # Nobody answered - no key, a failed call, or a row whose batch has
+            # not been checked. Not a finding about the part, so it must not
+            # read as one.
+            verdict = 'Unknown'
+        row[verdict_at] = verdict
+        written += 1
+    return written
+
 VALIDATION_PROVIDER_IDS = {'digikey', 'mouser', 'element14'}
 
 
@@ -1098,6 +1166,10 @@ def mpn_parse_producer_column(request):
                 output_rows.append(new_row)
                 created_rows += 1
 
+        # Same verdict on this path. Values reaching the grid from the cache are
+        # values a person will read.
+        apply_consolidated_mpn_column(headers, rows)
+
         enhanced_result = {
             'headers': headers,
             'data': output_rows,
@@ -2143,6 +2215,8 @@ def mpn_validate(request):
                         rows[i][element14_canonical_idx] = ''
                         if element14_cat_idx is not None:
                             rows[i][element14_cat_idx] = ''
+
+        apply_consolidated_mpn_column(headers, rows)
 
         # Update the session with enhanced data
         enhanced_result = {

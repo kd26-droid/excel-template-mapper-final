@@ -5616,10 +5616,9 @@ def get_headers(request, session_id):
                 if mpn_validation.get('column') and mpn_validation.get('results'):
 
                     # Add base MPN validation columns
-                    base_validation_columns = ['MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
-                    for mpn_col in base_validation_columns:
-                        if mpn_col not in template_headers_to_use:
-                            template_headers_to_use.append(mpn_col)
+                    base_validation_columns = ['MPN Validity',  # mirrors mpn_views.CONSOLIDATED_MPN_COLUMN
+                                               'MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
+                    _add_mpn_validation_columns(template_headers_to_use, base_validation_columns)
 
                     # Determine number of canonical MPN columns needed
                     results_map = mpn_validation.get('results', {})
@@ -5692,10 +5691,9 @@ def get_headers(request, session_id):
             if mpn_validation.get('column') and mpn_validation.get('results'):
 
                 # Add base MPN validation columns
-                base_validation_columns = ['MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
-                for mpn_col in base_validation_columns:
-                    if mpn_col not in complete_template_headers:
-                        complete_template_headers.append(mpn_col)
+                base_validation_columns = ['MPN Validity',  # mirrors mpn_views.CONSOLIDATED_MPN_COLUMN
+                                               'MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
+                _add_mpn_validation_columns(complete_template_headers, base_validation_columns)
 
                 # Determine number of canonical MPN columns needed
                 results_map = mpn_validation.get('results', {})
@@ -6630,6 +6628,8 @@ def data_view(request):
             header_confidence_scores = {}
             quality_metrics = calculate_data_quality_metrics(final_data, final_headers, header_confidence_scores, confidence_data)
 
+            _place_consolidated_mpn_column(final_headers, final_data)
+
             return no_store(Response({
                 'success': True,
                 'headers': final_headers,
@@ -6871,10 +6871,9 @@ def data_view(request):
                             max_canonical_mpns = min(len(all_canonicals), 5)  # Cap at 5 columns
 
                 # Add base MPN validation columns to headers if not present
-                base_validation_columns = ['MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
-                for mpn_col in base_validation_columns:
-                    if mpn_col not in headers_to_use:
-                        headers_to_use.append(mpn_col)
+                base_validation_columns = ['MPN Validity',  # mirrors mpn_views.CONSOLIDATED_MPN_COLUMN
+                                               'MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
+                _add_mpn_validation_columns(headers_to_use, base_validation_columns)
 
                 # Add multiple canonical MPN columns based on maximum needed
                 canonical_columns = []
@@ -7875,6 +7874,7 @@ def data_view(request):
             if dirty:
                 save_session(session_id, info)
 
+        _place_consolidated_mpn_column(display_headers, final_data)
         field_headers = make_unique_field_headers(display_headers)
         response_data = []
         response_defaults = info.get("default_values", {}) or {}
@@ -9478,10 +9478,9 @@ def download_file(request, session_id=None):
                                 max_canonical_mpns = min(len(all_canonicals), 5)  # Cap at 5 columns
 
                     # Add base MPN validation columns to base headers if not present
-                    base_validation_columns = ['MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
-                    for mpn_col in base_validation_columns:
-                        if mpn_col not in base_headers:
-                            base_headers.append(mpn_col)
+                    base_validation_columns = ['MPN Validity',  # mirrors mpn_views.CONSOLIDATED_MPN_COLUMN
+                                               'MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
+                    _add_mpn_validation_columns(base_headers, base_validation_columns)
 
                     # Add multiple canonical MPN columns based on maximum needed
                     canonical_columns = []
@@ -9626,10 +9625,9 @@ def download_file(request, session_id=None):
                             max_canonical_mpns = min(len(all_canonicals), 5)  # Cap at 5 columns
 
                     # Add base MPN validation columns
-                    base_validation_columns = ['MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
-                    for mpn_col in base_validation_columns:
-                        if mpn_col not in all_headers:
-                            all_headers.append(mpn_col)
+                    base_validation_columns = ['MPN Validity',  # mirrors mpn_views.CONSOLIDATED_MPN_COLUMN
+                                               'MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
+                    _add_mpn_validation_columns(all_headers, base_validation_columns)
 
                     # Add multiple canonical MPN columns based on maximum needed
                     canonical_columns = []
@@ -10163,6 +10161,52 @@ def download_file(request, session_id=None):
         else:
             format_type = request.GET.get('format', 'excel').lower()
         
+        # The same rename and placement the grid does, so the file matches what
+        # the user was just looking at. This path holds a DataFrame rather than a
+        # header list, so it cannot call the list version - but leaving it out is
+        # how the export kept shipping the old 'MPN valid' name after the grid
+        # had moved on.
+        try:
+            from .mpn_views import (CONSOLIDATED_MPN_COLUMN,
+                                    LEGACY_CONSOLIDATED_MPN_COLUMN,
+                                    PROVIDER_VALID_COLUMNS)
+            columns = list(df.columns)
+            providers = [column for column in PROVIDER_VALID_COLUMNS if column in columns]
+            if providers:
+                if (LEGACY_CONSOLIDATED_MPN_COLUMN in columns
+                        and CONSOLIDATED_MPN_COLUMN not in columns
+                        and 'MPN valid (DigiKey)' in columns):
+                    df = df.rename(columns={
+                        LEGACY_CONSOLIDATED_MPN_COLUMN: CONSOLIDATED_MPN_COLUMN})
+                    columns = list(df.columns)
+                if CONSOLIDATED_MPN_COLUMN in columns:
+                    first_provider = min(columns.index(column) for column in providers)
+                    at = columns.index(CONSOLIDATED_MPN_COLUMN)
+                    if at > first_provider:
+                        columns.insert(first_provider, columns.pop(at))
+                        df = df[columns]
+        except Exception as _mpn_place_err:
+            logger.warning(f"MPN verdict column placement skipped for export: {_mpn_place_err}")
+
+        # A number for every exported row, first column, before Item code.
+        #
+        # Every conversation about this sheet is about a row - "row 38 lists the
+        # same MPN twice", "the four bad quantities are rows 14, 30, 79 and 81" -
+        # and until now the only way to find one was to count. An alternate gets
+        # its own number rather than sharing its primary's, because the validator
+        # counts it as its own row and the point of this column is to agree with
+        # whatever is telling them to look.
+        #
+        # Placed here, after every export path has finished with `df`, so item,
+        # BOM and combined sheets all get it from one line. FactWise reads
+        # columns by header name and knows no field called this, so it is carried
+        # for the reader and ignored by the importer.
+        try:
+            if 'Sr No' not in list(df.columns):
+                df.insert(0, 'Sr No', range(1, len(df) + 1))
+        except Exception as _srno_err:
+            logger.warning(f"Sr No column skipped for export: {_srno_err}")
+
         # Create output file
         output_dir = hybrid_file_manager.local_temp_dir
         
@@ -14609,6 +14653,21 @@ def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
             generated = '' if rule.get('fixed_value') is None else str(rule.get('fixed_value'))
         elif value_mode == 'copy':
             generated = row[source_indexes[0]] if source_indexes else ''
+        elif value_mode == 'remove':
+            # Take out characters the column should not carry, leaving the rest
+            # of the value alone. Reads the target column itself unless another
+            # is named, because the usual job is cleaning a column in place -
+            # "MPN Code has spaces in it, take them out" - not deriving one
+            # column from another.
+            source = (row[source_indexes[0]] if source_indexes
+                      else row[target_index])
+            generated = str(source or '')
+            for fragment in (rule.get('remove_text') or []):
+                fragment = str(fragment)
+                if fragment:
+                    generated = generated.replace(fragment, '')
+            if rule.get('trim_ends') is not False:
+                generated = generated.strip()
         elif value_mode == 'join':
             values = [str(row[index] or '').strip() for index in source_indexes]
             generated = str(rule.get('separator') or '').join(value for value in values if value)
@@ -18219,6 +18278,72 @@ def _read_normalized_source_table(info):
         return [], []
 
 
+def _place_consolidated_mpn_column(headers, rows=None):
+    """Move the one-word verdict in front of the provider columns it reads.
+
+    It can arrive at the far right of fifty-odd columns - appended by whichever
+    path noticed it was missing - and a verdict nobody scrolls to is a verdict
+    nobody reads. Fixing it where the response is built rather than where the
+    column is created covers sessions that already stored it in the wrong place,
+    which are exactly the sessions someone is looking at now.
+
+    Rows are moved with it: some callers hand back list rows mapped to headers
+    by position, so reordering headers alone would shift every value one column.
+    """
+    from .mpn_views import (CONSOLIDATED_MPN_COLUMN, LEGACY_CONSOLIDATED_MPN_COLUMN,
+                            PROVIDER_VALID_COLUMNS)
+    if not isinstance(headers, list):
+        return
+    present = [column for column in PROVIDER_VALID_COLUMNS if column in headers]
+    if not present:
+        return
+    # Sessions checked while this column was still called 'MPN valid' carry that
+    # name, and the editor reads it as the old DigiKey column and relabels it -
+    # so the verdict is on screen under someone else's name. The two are told
+    # apart by what they sit next to: the old DigiKey column is the only
+    # 'MPN valid' in its sheet, the consolidated one has 'MPN valid (DigiKey)'
+    # beside it. Renamed on read so a session already open corrects itself.
+    if (LEGACY_CONSOLIDATED_MPN_COLUMN in headers
+            and CONSOLIDATED_MPN_COLUMN not in headers
+            and 'MPN valid (DigiKey)' in headers):
+        headers[headers.index(LEGACY_CONSOLIDATED_MPN_COLUMN)] = CONSOLIDATED_MPN_COLUMN
+        for row in (rows or []):
+            # List rows are positional, so the rename costs them nothing.
+            if isinstance(row, dict) and LEGACY_CONSOLIDATED_MPN_COLUMN in row:
+                row[CONSOLIDATED_MPN_COLUMN] = row.pop(LEGACY_CONSOLIDATED_MPN_COLUMN)
+    if CONSOLIDATED_MPN_COLUMN not in headers:
+        return
+    first_provider = min(headers.index(column) for column in present)
+    at = headers.index(CONSOLIDATED_MPN_COLUMN)
+    if at <= first_provider:
+        return
+    headers.insert(first_provider, headers.pop(at))
+    for row in (rows or []):
+        # Dict rows are keyed by header and need nothing.
+        if isinstance(row, list) and len(row) > at:
+            row.insert(first_provider, row.pop(at))
+
+
+def _add_mpn_validation_columns(headers, columns):
+    """Add any missing validation columns, and keep the one-word verdict in
+    front of the per-provider columns it summarises.
+
+    Appending every missing column is what put `MPN valid` at the far right of
+    fifty-eight columns: the provider columns already existed from an earlier
+    run, so only the verdict was missing, and only it got appended. A verdict
+    nobody scrolls to is a verdict nobody reads.
+
+    Repositioning an existing column is deliberate, not just placement for new
+    ones - a session that already stored it in the wrong place is exactly the
+    session someone is looking at right now. Safe here because every caller
+    keys its rows by header name, so moving a header moves its column with it.
+    """
+    for column in columns:
+        if column not in headers:
+            headers.append(column)
+    _place_consolidated_mpn_column(headers)
+
+
 def _hierarchy_columns(records, answer):
     """Pick the level / code columns to derive a tree from.
 
@@ -18897,11 +19022,18 @@ def download_bom_sheet(request, session_id):
     sheet.cell(row=1, column=1, value=None)
     sheet.cell(row=2, column=1, value=None)
     sheet.cell(row=3, column=1, value=' ')
-    for column_index, header in enumerate(result.bom_headers, start=1):
+    # A number for every BOM line, first column, same as the other exports.
+    # Every conversation about this sheet is about a row - "line 38 has the
+    # wrong quantity" - and without it the only way to find one is to count.
+    # FactWise reads these columns by header name and knows no field called
+    # this, so it is carried for the reader and ignored by the importer.
+    bom_headers = ['Sr No'] + list(result.bom_headers)
+    for column_index, header in enumerate(bom_headers, start=1):
         sheet.cell(row=4, column=column_index, value=header)
     data_start_row = 5
     for row_offset, row_values in enumerate(bom_rows_as_lists(result)):
-        for column_index, value in enumerate(row_values, start=1):
+        sheet.cell(row=data_start_row + row_offset, column=1, value=row_offset + 1)
+        for column_index, value in enumerate(row_values, start=2):
             sheet.cell(row=data_start_row + row_offset, column=column_index, value=value)
 
     response = HttpResponse(
