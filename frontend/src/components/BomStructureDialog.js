@@ -279,9 +279,8 @@ const blankSheetAnswer = () => ({
   hasLevels: false,
   levelColumn: '',
   treeConfirmed: null,
-  // Whether rows that consume nothing are dropped as documents. Defaults on
-  // because a row consuming nothing is usually a drawing, but the user can turn
-  // it off for exports that write 0 on real parts.
+  // Internal BOM classification only. Normalized rows are never removed from
+  // the editor; document rows simply do not define assembly relationships.
   dropDocuments: true,
   bomHeader: null,
   // Per sub-assembly overrides, keyed by part code. A multi-level sheet produces
@@ -404,7 +403,7 @@ const assemblyCodeFromPath = (value) => {
 
 const DASH_ONLY_RE = /^[-–—\s]+$/;
 
-const assembliesFromParents = (records, levelColumn, codeColumn = '') => {
+const assembliesFromParents = (records, levelColumn, codeColumn = '', excludeRow = () => false) => {
   if (!Array.isArray(records) || !records.length) return null;
   if (!('parent' in (records[0] || {}))) return null;
 
@@ -423,26 +422,10 @@ const assembliesFromParents = (records, levelColumn, codeColumn = '') => {
     (codeColumn ? record?.[codeColumn] : undefined) ?? record?.cpn ?? '',
   ).trim();
 
-  // A document names its parent too, and counting it makes that parent an
-  // assembly. THALES files drawings under the part they describe, so every such
-  // part was offered as a sub-BOM - 27 of them, including plain components and
-  // the drawings themselves - and each one's code was then locked as a BOM
-  // identity, which is what left eleven approved parts sharing a single item
-  // code. Documents are excluded here for the same reason they are excluded
-  // from the BOM: they are not lines, so they cannot make anything a parent.
-  // Same test the backend uses - consumes nothing AND carries no part number.
-  const isDocument = (record) => {
-    const quantity = String(record?.quantity ?? '').trim();
-    const consumes = quantity !== '' && !DASH_ONLY_RE.test(quantity)
-      && Number.isFinite(Number(quantity.replace(/,/g, ''))) && Number(quantity.replace(/,/g, '')) > 0;
-    if (consumes) return false;
-    return !String(record?.mpn ?? '').trim() && !String(record?.['Item code'] ?? '').trim();
-  };
-
   const shallowestChild = new Map();
   let any = false;
   records.forEach((record) => {
-    if (isDocument(record)) return;
+    if (excludeRow(record)) return;
     const parent = assemblyCodeFromPath(String(record?.parent ?? '').trim());
     if (!parent || parent === ownCode(record)) return;
     any = true;
@@ -459,7 +442,7 @@ const assembliesFromParents = (records, levelColumn, codeColumn = '') => {
   records.forEach((record) => {
     // Reduced the same way as above, or the two maps key on different strings
     // and every lookup here misses.
-    if (isDocument(record)) return;
+    if (excludeRow(record)) return;
     const parent = assemblyCodeFromPath(String(record?.parent ?? '').trim());
     if (parent && parent !== ownCode(record) && !nameOf.has(parent)) nameOf.set(parent, '');
   });
@@ -467,7 +450,7 @@ const assembliesFromParents = (records, levelColumn, codeColumn = '') => {
   return { shallowestChild, nameOf };
 };
 
-const analyzeLevels = (records, levelColumn, headers, rootCode = '') => {
+const analyzeLevels = (records, levelColumn, headers, rootCode = '', dropDocuments = true) => {
   const codeColumn = findHeader(headers, CODE_HEADER_RE);
   const nameColumn = findHeader(headers, NAME_HEADER_RE);
   const qtyColumn = findHeader(headers, QTY_HEADER_RE);
@@ -482,6 +465,7 @@ const analyzeLevels = (records, levelColumn, headers, rootCode = '') => {
   const partColumns = [findHeader(headers, PART_NUMBER_HEADER_RE), 'mpn', 'Item code']
     .filter((column, index, all) => column && all.indexOf(column) === index)
     .filter(column => (records || []).some(r => String(r?.[column] ?? '').trim()));
+  const typeColumn = findHeader(headers, /^\s*type\s*$/i);
   // A row something else hangs off is an assembly whatever its quantity says,
   // and the filter keeps it for that reason - so counting it here promised to
   // exclude 71 rows of a THALES export and excluded 61. A row is never its own
@@ -492,12 +476,18 @@ const analyzeLevels = (records, levelColumn, headers, rootCode = '') => {
     if (parent && parent !== String(record?.cpn ?? '').trim()) parentCodes.add(parent);
   });
 
-  const isDocument = record => (
-    qtyColumn
-    && !consumesQuantity(record[qtyColumn])
-    && !parentCodes.has(String(record?.cpn ?? '').trim())
-    && !partColumns.some(column => String(record?.[column] ?? '').trim())
-  );
+  const isDocument = (record) => {
+    if (!qtyColumn || consumesQuantity(record[qtyColumn])) return false;
+    if (parentCodes.has(String(record?.cpn ?? '').trim())) return false;
+
+    // When the source identifies row types, trust it. Quantity alone cannot
+    // distinguish a drawing from a real zero-quantity PRD/CGS line.
+    const rowType = typeColumn ? String(record?.[typeColumn] ?? '').trim() : '';
+    if (rowType) return /^doc\.(ass|def)\.?$/i.test(rowType);
+
+    return !partColumns.some(column => String(record?.[column] ?? '').trim());
+  };
+  const excludeRow = record => dropDocuments === true && isDocument(record);
 
   const rows = [];
   let documents = 0;
@@ -512,7 +502,7 @@ const analyzeLevels = (records, levelColumn, headers, rootCode = '') => {
     // finished good here would also make it the shallowest row, shifting every
     // "Level N BOM" label down by one. The checkbox's count is taken above, by
     // the backend's rule, so what it promises is what gets excluded.
-    if (qtyColumn && !consumesQuantity(record[qtyColumn])) return;
+    if (excludeRow(record)) return;
     const code = String(record[codeColumn] ?? '').trim();
     if (!code) return;
     rows.push({
@@ -530,7 +520,7 @@ const analyzeLevels = (records, levelColumn, headers, rootCode = '') => {
 
   // The sheet's own parent column wins when it has one. Everything below is the
   // fallback for sheets that only indent by level.
-  const stated = assembliesFromParents(records, levelColumn, codeColumn);
+  const stated = assembliesFromParents(records, levelColumn, codeColumn, excludeRow);
   if (stated) {
     const byParentLevel = new Map();
     // Level of the assembly itself: one above the shallowest row naming it.
@@ -675,6 +665,7 @@ export const reconcileSavedBomStructure = (saved, { sheetNames = [], getSheetHea
       hasLevels: Boolean(savedAnswer.hasLevels),
       levelColumn: savedAnswer.levelColumn || '',
       treeConfirmed: savedAnswer.treeConfirmed ?? null,
+      dropDocuments: true,
       bomHeader: savedAnswer.bomHeader || blankBomHeader(name),
       subBoms: savedAnswer.subBoms || {},
     };
@@ -963,7 +954,8 @@ const BomStructureDialog = ({
         getSheetRecords(sheetName),
         levelColumn,
         headersFor(sheetName),
-        answers[sheetName]?.bomHeader?.finishedGoodCode || ''
+        answers[sheetName]?.bomHeader?.finishedGoodCode || '',
+        true
       );
     } catch (err) {
       // The structure preview is a convenience; failing to draw it must never
@@ -1615,7 +1607,7 @@ const BomStructureDialog = ({
         bomGenerationAvailable: answer.hasLevels ? answer.treeConfirmed !== false : true,
         // Sent explicitly rather than defaulted server-side, so an older saved
         // answer without the field keeps the previous behaviour.
-        dropDocuments: answer.dropDocuments !== false,
+        dropDocuments: true,
         bomHeader,
         subBoms,
       };
@@ -2266,34 +2258,6 @@ const BomStructureDialog = ({
                     </Box>
                   </Box>
                 ))}
-                {/* A choice, not a rule. "Consumes nothing" usually means a
-                    drawing, but not always — some exports write 0 on real parts
-                    — and only the user knows which this sheet is. Excluding is
-                    still the default because it is right more often. */}
-                {structure?.documents > 0 && (
-                  <Box sx={{ mt: 1 }}>
-                    <FormControlLabel
-                      control={
-                        <Checkbox
-                          size="small"
-                          checked={answer.dropDocuments !== false}
-                          onChange={e => patch(name, { dropDocuments: e.target.checked })}
-                        />
-                      }
-                      label={
-                        <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                          {`Exclude ${structure.documents} ${structure.documents === 1 ? 'row that consumes' : 'rows that consume'} no quantity `}
-                          {'— treat them as documents rather than parts.'}
-                        </Typography>
-                      }
-                    />
-                    {answer.dropDocuments === false && (
-                      <Typography variant="caption" sx={{ display: 'block', ml: 4, color: 'text.secondary' }}>
-                        They will be kept as BOM lines, and their quantity flagged by validation.
-                      </Typography>
-                    )}
-                  </Box>
-                )}
               </Box>
 
           </Box>

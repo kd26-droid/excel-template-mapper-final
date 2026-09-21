@@ -1126,39 +1126,10 @@ def _internal_get():
 
 
 def _without_document_rows(rows, bom_structure):
-    """``rows`` minus the ones the structure gate asked to treat as documents.
-
-    The gate asks per sheet and these rows are already merged into one, so the
-    answer is read as a veto: a sheet that said no keeps its documents for
-    everybody. Dropping rows is the irreversible direction, and a wrong "yes"
-    silently deletes parts from a customer BOM.
-    """
-    from .bom_tree import codes_with_children, is_document_row, part_number_columns
-
-    sheets = ((bom_structure or {}).get('sheets') or {}).values()
-    if not sheets or any(sheet.get('dropDocuments') is False for sheet in sheets):
-        return rows
-    if not any(str((row or {}).get('quantity') or '').strip() for row in rows):
-        # No quantities anywhere: every row "consumes nothing" and the whole
-        # sheet would go. Nothing is knowable here, so nothing is removed.
-        return rows
-
-    code_columns = part_number_columns(rows, fallback='cpn')
-    # Same rule the tree uses, in the same order: a row with children is an
-    # assembly, and who has children is asked of the rows that survive. Asking
-    # it of every row makes a part with only its own drawings beneath it look
-    # like an assembly (see derive_tree). Grid and tree have to agree about
-    # which rows exist, so the reasoning cannot differ either.
-    structural = [row for row in rows
-                  if not is_document_row(row or {}, 'quantity', code_columns)]
-    parents = codes_with_children(structural, 'level', 'cpn', 'parent')
-    kept = [row for row in rows
-            if str((row or {}).get('cpn') or '').strip() in parents
-            or not is_document_row(row or {}, 'quantity', code_columns)]
-    if len(kept) != len(rows):
-        logger.info('Normaliser continue: excluded %d document rows of %d',
-                    len(rows) - len(kept), len(rows))
-    return kept
+    """Keep every normalized row, including zero/blank-quantity rows."""
+    # Zero or blank quantity is valid source data. Document removal is no longer
+    # offered by the normalizer, so every row continues into the editor.
+    return rows
 
 
 @api_view(['POST'])
@@ -1444,7 +1415,7 @@ def _complete_bom_header(bom_structure):
         sheet.setdefault('hasLevels', False)
         sheet.setdefault('treeConfirmed', True)
         sheet.setdefault('bomGenerationAvailable', True)
-        sheet.setdefault('dropDocuments', True)
+        sheet['dropDocuments'] = True
         sheet.setdefault('subBoms', {})
         sheets[sheet_name] = sheet
 
@@ -18415,7 +18386,9 @@ def _generate_hierarchical_bom(records, answer, bom_header):
             parent_column='parent' if 'parent' in (primaries[0] if primaries else {}) else None,
             # The user's answer from the BOM structure gate. Absent on answers
             # saved before the checkbox existed, which keeps the old default.
-            drop_documents=answer.get('dropDocuments', True) is not False,
+            # Documents remain visible in the normalized editor. They are
+            # ignored only here, when deciding which rows form BOM lines.
+            drop_documents=True,
             # Not code_column. That is whatever identifies a row, and on sheets
             # that identify rows by the parent's customer number every drawing
             # carries one, so the document test never fired.
