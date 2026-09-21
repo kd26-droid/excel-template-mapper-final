@@ -8051,46 +8051,10 @@ const hydrateNormalizerNoteColumns = (rows = [], roles = {}, sourceRows = []) =>
   });
 };
 
-// The structure gate offers to leave documents out. The page builds its own
-// sheet and uploads it, so nothing server-side sees these rows until after the
-// session exists - the backend's own filter sits on /normaliser/continue/, a
-// route this page never takes. Left unapplied, ticking the box changed nothing
-// a person could see: all 71 THALES drawings arrived in the editor.
-//
-// Same rule as the backend's _without_document_rows, and same reasoning behind
-// each guard, so the two paths cannot disagree about what a document is.
-const withoutDocumentRows = (rows = [], answers = null) => {
-  const sheets = Object.values(answers?.sheets || {});
-  // Read as a veto: a sheet that said no keeps its documents for everybody.
-  // Dropping rows is the irreversible direction.
-  if (!sheets.length || sheets.some((sheet) => sheet?.dropDocuments === false)) return rows;
-  if (!rows.some((row) => String(row?.quantity ?? '').trim())) return rows;
-
-  // Only columns that carry something are consulted: absence proves nothing on
-  // a sheet that has no part number at all, and judging every row a document
-  // would empty it.
-  const partColumns = ['mpn', 'Item code']
-    .filter((column) => rows.some((row) => String(row?.[column] ?? '').trim()));
-  if (!partColumns.length) return rows;
-
-  // A row with children is an assembly whatever its quantity says; dropping one
-  // deletes a whole branch. A row is never its own parent, however often these
-  // sheets say so - THALES files a part's drawing under the part's own number.
-  const parents = new Set();
-  rows.forEach((row) => {
-    const parent = String(row?.parent ?? '').trim();
-    if (parent && parent !== String(row?.cpn ?? '').trim()) parents.add(parent);
-  });
-
-  return rows.filter((row) => {
-    const quantity = String(row?.quantity ?? '').trim();
-    const consumes = quantity !== '' && !DASH_ONLY_RE.test(quantity)
-      && Number.isFinite(Number(quantity.replace(/,/g, ''))) && Number(quantity.replace(/,/g, '')) > 0;
-    if (consumes) return true;
-    if (parents.has(String(row?.cpn ?? '').trim())) return true;
-    return partColumns.some((column) => String(row?.[column] ?? '').trim());
-  });
-};
+// Normalization is lossless: zero/blank-quantity rows and document rows remain
+// visible in the editor. BOM generation classifies explicit document rows
+// separately when building relationships, without deleting them from this grid.
+const withoutDocumentRows = (rows = []) => rows;
 
 const buildBomMappingRowsFromNormalizedRows = (rows = [], baseColumns = getNormalizedExportColumns(rows)) => {
   // A column carried through from the customer's sheet can differ from a

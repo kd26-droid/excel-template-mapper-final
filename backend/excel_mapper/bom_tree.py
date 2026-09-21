@@ -209,6 +209,18 @@ def is_document_row(record, quantity_column, code_column=None):
     quantity = parse_quantity(record.get(quantity_column))
     if quantity is not None and quantity > 0:
         return False
+
+    # Some customer exports state the distinction directly. Honour that before
+    # inferring from identifiers: a PRD/CGS row with zero or blank quantity is
+    # still a part, while Doc.Ass./Doc.Def. is explicitly reference material.
+    row_type = ''
+    for key, value in (record or {}).items():
+        if str(key or '').strip().lower() == 'type':
+            row_type = unwrap_cell(value).strip()
+            break
+    if row_type:
+        return bool(re.match(r'^doc\.(ass|def)\.?$', row_type, re.IGNORECASE))
+
     columns = (code_column,) if isinstance(code_column, str) else (code_column or ())
     for column in columns:
         if column and unwrap_cell(record.get(column)).strip():
