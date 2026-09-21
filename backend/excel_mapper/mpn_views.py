@@ -30,7 +30,12 @@ logger = logging.getLogger(__name__)
 #: The one column that answers "can this part be bought?" across every source.
 #: `Valid` when any provider confirmed it, `Invalid` when the ones that answered
 #: all said no, `Unknown` when none of them answered at all.
-CONSOLIDATED_MPN_COLUMN = 'MPN valid'
+# Not 'MPN valid'. That is this codebase's own name for the DigiKey column
+# from before there were three providers, and the editor still rewrites it
+# to 'MPN valid (DigiKey)' on sight - so a consolidated column called that
+# was relabelled as DigiKey and became impossible to find in the grid.
+CONSOLIDATED_MPN_COLUMN = 'MPN Validity'
+LEGACY_CONSOLIDATED_MPN_COLUMN = 'MPN valid'
 
 #: The per-provider columns it reads. A provider that was never asked leaves its
 #: cell blank rather than writing "No", which is what keeps Unknown honest.
