@@ -5604,7 +5604,8 @@ def get_headers(request, session_id):
                 if mpn_validation.get('column') and mpn_validation.get('results'):
 
                     # Add base MPN validation columns
-                    base_validation_columns = ['MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
+                    base_validation_columns = ['MPN valid',  # mirrors mpn_views.CONSOLIDATED_MPN_COLUMN
+                                               'MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
                     for mpn_col in base_validation_columns:
                         if mpn_col not in template_headers_to_use:
                             template_headers_to_use.append(mpn_col)
@@ -5680,7 +5681,8 @@ def get_headers(request, session_id):
             if mpn_validation.get('column') and mpn_validation.get('results'):
 
                 # Add base MPN validation columns
-                base_validation_columns = ['MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
+                base_validation_columns = ['MPN valid',  # mirrors mpn_views.CONSOLIDATED_MPN_COLUMN
+                                               'MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
                 for mpn_col in base_validation_columns:
                     if mpn_col not in complete_template_headers:
                         complete_template_headers.append(mpn_col)
@@ -6859,7 +6861,8 @@ def data_view(request):
                             max_canonical_mpns = min(len(all_canonicals), 5)  # Cap at 5 columns
 
                 # Add base MPN validation columns to headers if not present
-                base_validation_columns = ['MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
+                base_validation_columns = ['MPN valid',  # mirrors mpn_views.CONSOLIDATED_MPN_COLUMN
+                                               'MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
                 for mpn_col in base_validation_columns:
                     if mpn_col not in headers_to_use:
                         headers_to_use.append(mpn_col)
@@ -9466,7 +9469,8 @@ def download_file(request, session_id=None):
                                 max_canonical_mpns = min(len(all_canonicals), 5)  # Cap at 5 columns
 
                     # Add base MPN validation columns to base headers if not present
-                    base_validation_columns = ['MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
+                    base_validation_columns = ['MPN valid',  # mirrors mpn_views.CONSOLIDATED_MPN_COLUMN
+                                               'MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
                     for mpn_col in base_validation_columns:
                         if mpn_col not in base_headers:
                             base_headers.append(mpn_col)
@@ -9614,7 +9618,8 @@ def download_file(request, session_id=None):
                             max_canonical_mpns = min(len(all_canonicals), 5)  # Cap at 5 columns
 
                     # Add base MPN validation columns
-                    base_validation_columns = ['MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
+                    base_validation_columns = ['MPN valid',  # mirrors mpn_views.CONSOLIDATED_MPN_COLUMN
+                                               'MPN valid (DigiKey)', 'DigiKey Status', 'DigiKey EOL Status', 'DigiKey Discontinued', 'DigiKey Part Number', 'DigiKey Category']
                     for mpn_col in base_validation_columns:
                         if mpn_col not in all_headers:
                             all_headers.append(mpn_col)
@@ -10151,6 +10156,25 @@ def download_file(request, session_id=None):
         else:
             format_type = request.GET.get('format', 'excel').lower()
         
+        # A number for every exported row, first column, before Item code.
+        #
+        # Every conversation about this sheet is about a row - "row 38 lists the
+        # same MPN twice", "the four bad quantities are rows 14, 30, 79 and 81" -
+        # and until now the only way to find one was to count. An alternate gets
+        # its own number rather than sharing its primary's, because the validator
+        # counts it as its own row and the point of this column is to agree with
+        # whatever is telling them to look.
+        #
+        # Placed here, after every export path has finished with `df`, so item,
+        # BOM and combined sheets all get it from one line. FactWise reads
+        # columns by header name and knows no field called this, so it is carried
+        # for the reader and ignored by the importer.
+        try:
+            if 'Sr No' not in list(df.columns):
+                df.insert(0, 'Sr No', range(1, len(df) + 1))
+        except Exception as _srno_err:
+            logger.warning(f"Sr No column skipped for export: {_srno_err}")
+
         # Create output file
         output_dir = hybrid_file_manager.local_temp_dir
         
@@ -14597,6 +14621,21 @@ def apply_column_value_rule(headers, rows, raw_rule, locked_item_codes=None):
             generated = '' if rule.get('fixed_value') is None else str(rule.get('fixed_value'))
         elif value_mode == 'copy':
             generated = row[source_indexes[0]] if source_indexes else ''
+        elif value_mode == 'remove':
+            # Take out characters the column should not carry, leaving the rest
+            # of the value alone. Reads the target column itself unless another
+            # is named, because the usual job is cleaning a column in place -
+            # "MPN Code has spaces in it, take them out" - not deriving one
+            # column from another.
+            source = (row[source_indexes[0]] if source_indexes
+                      else row[target_index])
+            generated = str(source or '')
+            for fragment in (rule.get('remove_text') or []):
+                fragment = str(fragment)
+                if fragment:
+                    generated = generated.replace(fragment, '')
+            if rule.get('trim_ends') is not False:
+                generated = generated.strip()
         elif value_mode == 'join':
             values = [str(row[index] or '').strip() for index in source_indexes]
             generated = str(rule.get('separator') or '').join(value for value in values if value)

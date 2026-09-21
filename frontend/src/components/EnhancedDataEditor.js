@@ -535,6 +535,25 @@ const EnhancedDataEditor = () => {
   const [createColumnTarget, setCreateColumnTarget] = useState('Item name');
   const [createColumnNewName, setCreateColumnNewName] = useState('');
   const [createColumnContentType, setCreateColumnContentType] = useState('concat');
+  // What the remove mode takes out. Named toggles rather than a text box: the
+  // commonest thing to remove is a space, and a space typed into a field is
+  // invisible - the box looks empty whether it holds one or not, and there is
+  // no way to check by looking. A row of labels says what will go.
+  const [removePicks, setRemovePicks] = useState({ space: true });
+  const [removeCustom, setRemoveCustom] = useState('');
+  const [removeTrimEnds, setRemoveTrimEnds] = useState(true);
+  const REMOVE_CHOICES = [
+    { key: 'space', label: 'Spaces', char: ' ' },
+    { key: 'hyphen', label: 'Hyphens  -', char: '-' },
+    { key: 'dot', label: 'Dots  .', char: '.' },
+    { key: 'underscore', label: 'Underscores  _', char: '_' },
+    { key: 'slash', label: 'Slashes  /', char: '/' },
+    { key: 'comma', label: 'Commas  ,', char: ',' },
+  ];
+  const removeCharacters = [
+    ...REMOVE_CHOICES.filter((choice) => removePicks[choice.key]).map((choice) => choice.char),
+    ...Array.from(removeCustom),
+  ].filter((char, index, all) => char && all.indexOf(char) === index);
   const [createColumnFirst, setCreateColumnFirst] = useState('');
   const [createColumnSecond, setCreateColumnSecond] = useState('');
   const [createColumnSeparator, setCreateColumnSeparator] = useState(' ');
@@ -2951,6 +2970,16 @@ const EnhancedDataEditor = () => {
       showSnackbar('Select two source columns', 'warning');
       return;
     }
+    if (createColumnContentType === 'remove' && removeCharacters.length === 0) {
+      showSnackbar('Say which characters to remove - a space, a hyphen, whatever should go.', 'warning');
+      return;
+    }
+    if (createColumnContentType === 'remove' && createColumnTab === 0 && createColumnMode === 'fill_empty') {
+      // Cleaning only the empty cells cleans nothing: every cell that needs it
+      // has something in it.
+      showSnackbar('Removing characters needs "All rows" - the empty cells are not the ones to clean.', 'warning');
+      return;
+    }
     if (createColumnContentType === 'copy' && !createColumnFirst) {
       showSnackbar('Select a source column', 'warning');
       return;
@@ -3037,6 +3066,14 @@ const EnhancedDataEditor = () => {
         serial_start: factwiseSerialStart,
         serial_padding: factwiseSerialPadding,
         serial_increment: effectiveSerialIncrement,
+        ...(createColumnContentType === 'remove'
+          ? {
+            // One entry per character. Typing " -" means remove spaces AND
+            // hyphens, which is how people describe it out loud.
+            remove_text: removeCharacters,
+            trim_ends: removeTrimEnds,
+          }
+          : {}),
       };
       const response = await api.fillOrCreateColumn(sessionId, rule);
       if (!response.data?.success) throw new Error(response.data?.error || 'Column update failed');
@@ -6674,6 +6711,11 @@ const EnhancedDataEditor = () => {
                   <MenuItem value="conditional">Use an if / else condition</MenuItem>
                   <MenuItem value="serial">Generate a serial sequence</MenuItem>
                   <MenuItem value="saved_rule">Apply a saved rule</MenuItem>
+                  {/* Reads the column it writes, so it is only offered for a
+                      column that already exists. */}
+                  {createColumnTab === 0 && (
+                    <MenuItem value="remove">Remove characters from the values</MenuItem>
+                  )}
                   {createColumnTab === 1 && <MenuItem value="blank">Leave the new column blank</MenuItem>}
                 </Select>
               </FormControl>
@@ -6691,6 +6733,48 @@ const EnhancedDataEditor = () => {
                     <MenuItem value="duplicates">Only rows with a duplicate value</MenuItem>
                   </Select>
                 </FormControl>
+              </Grid>
+            )}
+
+            {createColumnContentType === 'remove' && (
+              <Grid item xs={12}>
+                <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5 }}>
+                  What to remove
+                </Typography>
+                <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5, mb: 1 }}>
+                  {REMOVE_CHOICES.map((choice) => (
+                    <Chip
+                      key={choice.key}
+                      label={choice.label}
+                      size="small"
+                      color={removePicks[choice.key] ? 'primary' : 'default'}
+                      variant={removePicks[choice.key] ? 'filled' : 'outlined'}
+                      onClick={() => setRemovePicks((prev) => ({
+                        ...prev, [choice.key]: !prev[choice.key],
+                      }))}
+                    />
+                  ))}
+                </Box>
+                <TextField
+                  fullWidth
+                  size="small"
+                  label="Anything else (optional)"
+                  value={removeCustom}
+                  onChange={(e) => setRemoveCustom(e.target.value)}
+                  placeholder="e.g. #"
+                  helperText="Every character typed here is removed too, wherever it appears."
+                />
+                <FormControlLabel
+                  sx={{ mt: 0.5 }}
+                  control={(
+                    <Checkbox
+                      size="small"
+                      checked={removeTrimEnds}
+                      onChange={(e) => setRemoveTrimEnds(e.target.checked)}
+                    />
+                  )}
+                  label="Also trim spaces at the start and end"
+                />
               </Grid>
             )}
 

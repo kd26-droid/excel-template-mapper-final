@@ -47,10 +47,22 @@ def parse_level(value):
     Accepts ``3``, ``3.0``, ``"  3"`` (indent-encoded) and
     ``=CONCATENATE("  3")``. Returns None for blanks and non-numeric text so the
     caller can skip title/section rows rather than guessing at them.
+
+    Also accepts a level drawn with leading dots - ``". .          1"``,
+    ``". .  . .          2"`` - which is how SAP writes an indented BOM. The
+    dots are the same claim as the number, drawn twice, and only the number is
+    read. Without this the obvious column to map is the one that destroys the
+    tree: every row whose level will not parse is skipped, so a sheet whose
+    depth is drawn in dots normalises to its root and nothing else.
     """
     text = unwrap_cell(value).strip()
     if not text:
         return None
+    # Strip the indentation, not the value. Anything left that is not a plain
+    # number is still refused, so "Section A" stays unreadable.
+    stripped = text.lstrip('. 	 ')
+    if stripped and stripped != text and set(text[:len(text) - len(stripped)]) <= set('. 	 '):
+        text = stripped
     try:
         number = float(text)
     except (TypeError, ValueError):

@@ -9752,6 +9752,27 @@ const BomNormalizer = () => {
   const [selectedFieldPatternId, setSelectedFieldPatternId] = useState('');
   const [fieldPatternEdits, setFieldPatternEdits] = useState({});
   const [fieldPatternRuleDrafts, setFieldPatternRuleDrafts] = useState({});
+  // What the rows currently on screen were normalised FROM.
+  //
+  // Changing a role or teaching a pattern does not recompute the grid - only
+  // Run again or Apply does - and Continue ships whatever the grid holds. So a
+  // sheet corrected and then continued goes out parsed under the settings it
+  // had BEFORE the correction, and nothing says so. It has cost two runs: a
+  // taught sheet continued with 130 rows carrying one alternate where the
+  // taught rules give 158 carrying thirty-one, and a SAP sheet whose MPN and
+  // manufacturer columns were mapped by hand and continued with both empty on
+  // all 114 rows, because the grid predated the mapping.
+  //
+  // Roles as well as rules: the second case would have walked straight past a
+  // guard that only watched what had been taught.
+  const latestNormalizerInputsRef = useRef('');
+  const normalizedInputsRef = useRef('');
+  useEffect(() => {
+    latestNormalizerInputsRef.current = JSON.stringify({
+      roles: roles || {},
+      rules: fieldPatternRuleDrafts || {},
+    });
+  }, [roles, fieldPatternRuleDrafts]);
   const [fieldPatternConfirmations, setFieldPatternConfirmations] = useState({});
   const [fieldPatternReviewReceipt, setFieldPatternReviewReceipt] = useState('');
   const [fieldPatternSelectedRuleField, setFieldPatternSelectedRuleField] = useState('');
@@ -12727,6 +12748,14 @@ const BomNormalizer = () => {
       setError('Run normalization before continuing to BOM Mapping.');
       return;
     }
+    if (latestNormalizerInputsRef.current !== normalizedInputsRef.current) {
+      setError(
+        'These rows were normalized before your latest changes to the columns or patterns. '
+        + 'Choose "Run again" first - continuing now sends the sheet as it was read BEFORE '
+        + 'those changes.'
+      );
+      return;
+    }
     const handoffRows = withoutDocumentRows(
       hydrateNormalizerNoteColumns(normalizedRows, roles, dataRows), answers);
     const baseColumns = getNormalizedExportColumns(handoffRows);
@@ -13421,6 +13450,9 @@ const BomNormalizer = () => {
 
   const commitNormalizedResult = useCallback((rows, pairingCheck = null, options = {}) => {
     setNormalizedRows(rows);
+    // Read through a ref so this callback keeps its identity; it is in the
+    // dependency list of several others.
+    normalizedInputsRef.current = latestNormalizerInputsRef.current;
     setNormalizationSummary(buildNormalizationSummary(rows, pairingCheck));
     setSummaryParserDetailsOpen(false);
     if (options.openResults === true) {

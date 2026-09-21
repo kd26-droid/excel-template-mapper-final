@@ -13154,7 +13154,17 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
                 #
                 # Alternates written inside one cell all expand from the same
                 # source row, so the row number groups those correctly too.
-                "parentKey": values["parent"] or _alternate_group_key(
+                #
+                # The stated parent is NOT a group key either, for the same
+                # reason the CPN is not: it groups by position in the tree
+                # rather than by line. Every sibling under one assembly shares
+                # it, so a sheet that states its parents collapses to one group
+                # per parent and `split_primaries_and_alternates` keeps a single
+                # primary from each - the rest are read as its alternates and
+                # never reach the tree. A 114-row LAM sheet came out as 4 rows,
+                # and the three that survived reported their parents missing,
+                # because the parents had been swallowed as alternates.
+                "parentKey": _alternate_group_key(
                     values, source_row, safe_config),
                 "parent": values["parent"],
                 "relation": relation or ("Primary" if entry_index == 0 else f"Alternate {entry_index}"),
