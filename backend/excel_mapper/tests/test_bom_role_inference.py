@@ -550,6 +550,132 @@ class BomFieldPatternTeachApiTests(TestCase):
             ["CR0805F-5K1J", "CR0805F-5K1J(I)"],
         )
 
+    def test_confirmed_append_rule_removes_placeholder_when_replayed(self):
+        headers = ["Combined"]
+        roles = {"mpn": "Combined", "manufacturer": "Combined"}
+        config = {"alternateLayout": "inside_selected_mpn_columns"}
+        taught_value = "SH31B105K500C@ (G/T) (WTC)"
+        replay_value = "WR04X000 P@ (L/LA/LB/LD/LH) (WTC)"
+
+        detected = build_bom_field_pattern_groups(
+            headers,
+            [
+                {"Combined": taught_value, "__sourceRow": 2},
+                {"Combined": replay_value, "__sourceRow": 3},
+            ],
+            roles=roles,
+            config=config,
+            options={"includeAllRows": True, "reviewContractVersion": 3},
+        )
+        pattern = detected["review"]["patterns"][0]
+
+        def span(value, selected, role):
+            start = value.index(selected)
+            return {"start": start, "end": start + len(selected), "role": role}
+
+        taught = self.client.post(
+            "/api/bom/field-patterns/teach/",
+            {
+                "headers": headers,
+                "row": {"Combined": taught_value, "__sourceRow": 2},
+                "roles": roles,
+                "config": config,
+                "group": {
+                    "shape": pattern["patternKey"],
+                    "patternKey": pattern["patternKey"],
+                },
+                "tagged_spans": [
+                    span(taught_value, "SH31B105K500C", "mpn"),
+                    span(taught_value, "G/T", "alternateList"),
+                    span(taught_value, "WTC", "manufacturer"),
+                ],
+                "source_header": "Combined",
+                "alternate_delimiter": "/",
+                "alternate_mode": "append",
+                "source_row": 2,
+                "confirm_interpretation": True,
+                "persist": False,
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(taught.status_code, 200)
+        confirmation = taught.json()["confirmation"]
+        self.assertEqual(
+            confirmation["rule"]["authoritativeCorrection"]["alternateDelimiter"],
+            "/",
+        )
+        structure_signature = _bom_pattern_structure_scope(
+            headers,
+            roles,
+            config,
+        )["signature"]
+        stale_rule = deepcopy(confirmation["rule"])
+        stale_rule["visualPattern"]["alternateDelimiter"] = "__no_split__"
+        stale_rule["authoritativeCorrection"]["alternateDelimiter"] = "__no_split__"
+        stale_rule["authoritativeCorrection"]["visualPattern"]["alternateDelimiter"] = "__no_split__"
+        ColumnRule.objects.create(
+            name="BOM field pattern: stale append controls",
+            rule={
+                "rule_type": "bom_field_pattern",
+                "shape": pattern["patternKey"],
+                "pattern_key": pattern["patternKey"],
+                "structure_signature": structure_signature,
+                "library_scope": "structure",
+                "parser_rule": stale_rule,
+            },
+        )
+        stale_review_receipt = _issue_bom_pattern_review(
+            active_rules={pattern["patternKey"]: stale_rule},
+            structure_signature=structure_signature,
+        )["token"]
+
+        applied = self.client.post(
+            "/api/bom/field-patterns/apply/",
+            {
+                "headers": headers,
+                "rows": [
+                    {"Combined": taught_value, "__sourceRow": 2},
+                    {"Combined": replay_value, "__sourceRow": 3},
+                ],
+                "roles": roles,
+                "config": {
+                    **config,
+                    "_activeFieldPatternRule": {
+                        "visualPattern": {
+                            "type": "tagged_fields",
+                            "sourceHeader": "Combined",
+                            "alternateDelimiter": "__no_split__",
+                            "alternateMode": "append",
+                        },
+                    },
+                },
+                "review_receipt": stale_review_receipt,
+                "confirmation_tokens": [confirmation["token"]],
+                "persist": False,
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(applied.status_code, 200)
+        replayed_mpns = [
+            item["mpn"]
+            for item in applied.json()["normalizedRows"]
+            if item["sourceRow"] == 3
+        ]
+        self.assertEqual(
+            replayed_mpns,
+            [
+                "WR04X000 P",
+                "WR04X000 PL",
+                "WR04X000 PLA",
+                "WR04X000 PLB",
+                "WR04X000 PLD",
+                "WR04X000 PLH",
+            ],
+        )
+        self.assertTrue(all("@" not in mpn for mpn in replayed_mpns))
+
     def test_apply_rejects_tampered_confirmation_receipt(self):
         token = _issue_bom_pattern_confirmation(
             rule={"shape": "pattern-1", "fields": {}},
@@ -577,6 +703,240 @@ class BomFieldPatternTeachApiTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("invalid", response.json()["error"])
+
+    def test_occurrence_override_preserves_every_other_item_in_same_cell(self):
+        headers = ["CPN", "Combined", "Description"]
+        roles = {
+            "cpn": "CPN",
+            "mpn": "Combined",
+            "manufacturer": "Combined",
+            "description": "Description",
+        }
+        value = (
+            "EM-370(Z) / EM-37B(Z) (EMCTW) {HOM} [8343756]\n"
+            "EM-827(I) (EMCTW) {HOM} [3266379]\n"
+            "IS410 (ISOLA) {HOM} [2718788]\n"
+            "MCL-E-679F(J) (HITACHEM) {HOM} [2718792]\n"
+            "N4000-29 (AGC) {HOM} [2718795]\n"
+            "PCL370HR (ISOLA) {HOM} [2718788]\n"
+            "R-1755V (PANAS_CO) {HOM} [2718791]"
+        )
+        row = {
+            "CPN": "84200230",
+            "Combined": value,
+            "Description": "EPOXY HP SUBSTRAT",
+            "__sourceRow": 195,
+        }
+        detected = build_bom_field_pattern_groups(
+            headers,
+            [row],
+            roles=roles,
+            config={"alternateLayout": "inside_selected_mpn_columns"},
+            options={"includeAllRows": True},
+        )
+        occurrence = next(
+            occurrence
+            for review_row in detected["reviewRows"]
+            for occurrence in review_row.get("occurrences") or []
+            if occurrence.get("rawValue", "").startswith("EM-827(I)")
+        )
+        config = {
+            "alternateLayout": "inside_selected_mpn_columns",
+            "fieldPatternOverrides": {
+                "source": "backend_user_corrections",
+                "rows": {
+                    "195": {
+                        "occurrences": [{
+                            "occurrenceId": occurrence["occurrenceId"],
+                            "patternKey": occurrence["patternKey"],
+                            "entries": [
+                                {
+                                    "relation": "Primary",
+                                    "fields": {
+                                        "cpn": "84200230",
+                                        "mpn": "EM-827",
+                                        "manufacturer": "EMCTW",
+                                        "description": "EPOXY HP SUBSTRAT",
+                                    },
+                                },
+                                {
+                                    "relation": "Alternate 1",
+                                    "fields": {
+                                        "mpn": "EM-827I",
+                                        "manufacturer": "EMCTW",
+                                    },
+                                },
+                                {
+                                    "relation": "Alternate 2",
+                                    "fields": {"mpn": "", "manufacturer": ""},
+                                },
+                            ],
+                        }],
+                    },
+                },
+            },
+        }
+
+        normalized = normalize_bom_rows(
+            headers,
+            [row],
+            roles=roles,
+            config=config,
+        )["normalizedRows"]
+        mpns = [item["mpn"] for item in normalized]
+
+        self.assertIn("EM-827", mpns)
+        self.assertIn("EM-827I", mpns)
+        self.assertIn("IS410", mpns)
+        self.assertIn("N4000-29", mpns)
+        self.assertIn("PCL370HR", mpns)
+        self.assertIn("R-1755V", mpns)
+        self.assertNotIn("", mpns)
+        self.assertEqual(
+            [item["relation"] for item in normalized],
+            ["Primary"] + [f"Alternate {index}" for index in range(1, len(normalized))],
+        )
+
+    @patch("excel_mapper.services.bom_role_inference.build_bom_field_pattern_groups")
+    def test_mpn_only_occurrence_override_preserves_separate_manufacturer(self, build_groups):
+        headers = ["Part", "Mfr Part No", "Mfr Name", "Description"]
+        roles = {
+            "cpn": "Part",
+            "mpn": "Mfr Part No",
+            "manufacturer": "Mfr Name",
+            "description": "Description",
+        }
+        row = {
+            "Part": "648-005168-022",
+            "Mfr Part No": "EEEFC1V220P",
+            "Mfr Name": "PANASONIC",
+            "Description": "CAP,SMD,AL,ELECTROLYTIC",
+            "__sourceRow": 11,
+        }
+        base_fields = {
+            "cpn": {"value": row["Part"]},
+            "mpn": {"value": row["Mfr Part No"]},
+            "manufacturer": {"value": row["Mfr Name"]},
+            "description": {"value": row["Description"]},
+        }
+        build_groups.return_value = {
+            "groups": [],
+            "reviewRows": [{
+                "sourceRow": 11,
+                "occurrences": [{
+                    "occurrenceId": "row-11-mpn",
+                    "patternKey": "semantic-mpn",
+                    "entries": [{"relation": "Primary", "fields": base_fields}],
+                }],
+            }],
+        }
+        config = {
+            "fieldPatternOverrides": {
+                "source": "backend_user_corrections",
+                "rows": {
+                    "11": {
+                        "occurrences": [{
+                            "occurrenceId": "row-11-mpn",
+                            "patternKey": "semantic-mpn",
+                            "rule": {"fields": {"mpn": {"delimiter": "none"}}},
+                            "entries": [{
+                                "relation": "Primary",
+                                "fields": {
+                                    "mpn": "EEEFC1V220P",
+                                    "manufacturer": "",
+                                },
+                            }],
+                        }],
+                    },
+                },
+            },
+        }
+
+        normalized = normalize_bom_rows(headers, [row], roles=roles, config=config)["normalizedRows"]
+
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual(normalized[0]["mpn"], "EEEFC1V220P")
+        self.assertEqual(normalized[0]["manufacturer"], "PANASONIC")
+        self.assertEqual(normalized[0]["description"], "CAP,SMD,AL,ELECTROLYTIC")
+
+    def test_teach_refresh_preserves_separate_manufacturer_for_mpn_only_rule(self):
+        pattern_key = "semantic-mpn"
+        review = {
+            "contractVersion": 3,
+            "activeRules": {},
+            "patterns": [{
+                "patternKey": pattern_key,
+                "sourceColumn": "Mfr Part No",
+                "mappedFields": ["mpn"],
+                "pattern": "<MPN>",
+                "groupId": "pattern-1",
+            }],
+            "groups": [],
+            "rows": [{
+                "sourceRow": 11,
+                "left": [
+                    {"column": "Part", "value": "648-005168-022"},
+                    {"column": "Mfr Part No", "value": "EEEFC1V220P"},
+                    {"column": "Mfr Name", "value": "PANASONIC"},
+                ],
+                "patterns": [{"patternKey": pattern_key}],
+                "occurrences": [{
+                    "occurrenceId": "row-11-mpn",
+                    "patternKey": pattern_key,
+                    "sourceColumn": "Mfr Part No",
+                    "start": 0,
+                    "end": 12,
+                    "rawValue": "EEEFC1V220P",
+                    "pattern": "<MPN>",
+                }],
+                "entries": [{
+                    "relation": "Primary",
+                    "patternKey": pattern_key,
+                    "groupId": "pattern-1",
+                    "occurrenceId": "row-11-mpn",
+                    "fields": {
+                        "cpn": {"value": "648-005168-022"},
+                        "mpn": {"value": "EEEFC1V220P"},
+                        "manufacturer": {"value": "PANASONIC"},
+                    },
+                }],
+            }],
+            "summary": {},
+            "workflow": {},
+        }
+        rule = {
+            "patternKey": pattern_key,
+            "fields": {"mpn": {"delimiter": "none"}},
+        }
+        refreshed = refresh_bom_field_pattern_review_after_teach(
+            review,
+            {
+                "rule": rule,
+                "entries": [{
+                    "relation": "Primary",
+                    "fields": {
+                        "mpn": {"value": "EEEFC1V220P"},
+                        "manufacturer": {"value": ""},
+                    },
+                }],
+                "interpretationSpansByColumn": {},
+            },
+            group={"id": "pattern-1", "patternKey": pattern_key},
+            roles={
+                "cpn": "Part",
+                "mpn": "Mfr Part No",
+                "manufacturer": "Mfr Name",
+            },
+            config={},
+            active_rules={pattern_key: rule},
+            source_row=11,
+            occurrence_id="row-11-mpn",
+            taught_source_value="EEEFC1V220P",
+        )
+
+        fields = refreshed["rows"][0]["entries"][0]["fields"]
+        self.assertEqual(fields["mpn"], "EEEFC1V220P")
+        self.assertEqual(fields["manufacturer"], "PANASONIC")
 
 
 class VisualPatternMpnExtractionTests(SimpleTestCase):
@@ -730,6 +1090,39 @@ class VisualPatternMpnExtractionTests(SimpleTestCase):
         self.assertEqual(
             [entry["fields"]["mpn"]["value"] for entry in replayed],
             ["CR0805F-5K1J", "CR0805F-5K1J(I)"],
+        )
+
+    def test_explicit_append_does_not_reinterpret_internal_hyphen_as_marker(self):
+        value = "EM-827(I) (EMCTW) {HOM} [3266379]"
+
+        def span(selected, role):
+            start = value.index(selected)
+            return {"start": start, "end": start + len(selected), "role": role}
+
+        result = build_bom_field_pattern_teach_result(
+            headers=["Combined"],
+            row={"Combined": value},
+            roles={"mpn": "Combined", "manufacturer": "Combined"},
+            group={"shape": "append-parenthesized-alternate"},
+            tagged_spans=[
+                span("EM-827", "mpn"),
+                span("I", "alternateList"),
+                span("EMCTW", "manufacturer"),
+            ],
+            source_header="Combined",
+            alternate_delimiter="__no_split__",
+            alternate_mode="append",
+        )
+
+        self.assertEqual(result["visualPattern"]["alternateMode"], "append")
+        self.assertNotIn("mpnComposition", result["visualPattern"])
+        self.assertEqual(
+            [entry["fields"]["mpn"]["value"] for entry in result["entries"]],
+            ["EM-827", "EM-827I"],
+        )
+        self.assertEqual(
+            [entry["fields"]["manufacturer"]["value"] for entry in result["entries"]],
+            ["EMCTW", "EMCTW"],
         )
 
     def test_confirmed_correction_preserves_all_controls_and_manual_rows(self):

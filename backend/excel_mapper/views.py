@@ -132,6 +132,8 @@ def _without_client_pattern_rules(value):
         'pattern_rules',
         'fieldPatternOverrides',
         'field_pattern_overrides',
+        '_activeFieldPatternRule',
+        '_active_field_pattern_rule',
     ):
         cleaned.pop(key, None)
     return cleaned
@@ -3650,6 +3652,8 @@ def bom_field_pattern_apply(request):
         for group in groups:
             for correction in group.get('rows') or []:
                 source_row = correction.get('sourceRow')
+                occurrence_id = str(correction.get('occurrenceId') or '').strip()
+                pattern_key = str(correction.get('patternKey') or group.get('patternKey') or '').strip()
                 entries = correction.get('entries') or []
                 normalized_entries = []
                 for entry_index, entry in enumerate(entries):
@@ -3664,19 +3668,24 @@ def bom_field_pattern_apply(request):
                 if not normalized_entries:
                     continue
                 row_key = str(source_row)
-                existing_entries = (override_rows.get(row_key) or {}).get('entries') or []
-                combined_entries = existing_entries + normalized_entries
-                override_rows[row_key] = {
-                    'entries': [
-                        {
-                            **entry,
-                            'relation': entry.get('relation') or (
-                                'Primary' if entry_index == 0 else f'Alternate {entry_index}'
-                            ),
-                        }
-                        for entry_index, entry in enumerate(combined_entries)
-                    ],
+                row_override = override_rows.setdefault(row_key, {'occurrences': []})
+                occurrence_override = {
+                    'occurrenceId': occurrence_id,
+                    'patternKey': pattern_key,
+                    'entries': normalized_entries,
+                    'rule': group.get('rule') or {},
                 }
+                if occurrence_id:
+                    row_override['occurrences'] = [
+                        item
+                        for item in row_override.get('occurrences') or []
+                        if str(item.get('occurrenceId') or '').strip() != occurrence_id
+                    ]
+                    row_override['occurrences'].append(occurrence_override)
+                else:
+                    # Compatibility for old confirmation payloads that did not
+                    # identify a fragment inside the source cell.
+                    row_override.setdefault('entries', []).extend(normalized_entries)
 
         structure_profile = build_structure_profile(
             headers=headers,
@@ -3745,7 +3754,10 @@ def bom_field_pattern_apply(request):
                     or ''
                 ).strip()
                 if rule_key:
-                    confirmed_rules[rule_key] = scoped_rule
+                    # The signed confirmation is the exact backend rule the
+                    # user just reviewed. Do not merge an older saved or
+                    # detected interpretation back into it before replay.
+                    confirmed_rules[rule_key] = deepcopy(scoped_rule)
             scoped_groups.append(scoped_group)
 
         reusable_config = dict(trusted_config)

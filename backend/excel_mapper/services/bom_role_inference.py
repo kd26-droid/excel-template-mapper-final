@@ -6430,7 +6430,7 @@ def derive_visual_pattern_from_tagged_spans(
     source_header,
     tagged_spans,
     alternate_delimiter="",
-    alternate_mode="append",
+    alternate_mode=None,
     alternate_joiner="",
     ignored_fields=None,
 ):
@@ -6563,6 +6563,7 @@ def derive_visual_pattern_from_tagged_spans(
     else:
         pattern_type = "tagged_fields"
     requested_alternate_mode = clean(alternate_mode)
+    alternate_mode_is_explicit = bool(requested_alternate_mode)
     rule = {
         "type": pattern_type,
         "sourceHeader": source_header,
@@ -6653,7 +6654,15 @@ def derive_visual_pattern_from_tagged_spans(
         and not clean(marker_match.get("suffix"))
     ):
         rule["trailingPlaceholder"] = marker_match["value"]
-    elif "alternateList" in tagged_roles and not explicit_marker and replacement_marker:
+    elif (
+        "alternateList" in tagged_roles
+        and not explicit_marker
+        and replacement_marker
+        and (
+            requested_alternate_mode != "append"
+            or not alternate_mode_is_explicit
+        )
+    ):
         marker_composition = {
             "marker": replacement_marker,
             "markerSequence": replacement_marker,
@@ -6931,18 +6940,9 @@ def _visual_pattern_identity_pairs(row, headers, roles, config=None):
         or visual_pattern.get("trailing_placeholder")
         or ""
     )
-    authoritative_correction = (
-        active_rule.get("authoritativeCorrection")
-        or active_rule.get("authoritative_correction")
-        or {}
-    )
-    confirmed_alternate_mode = clean(
-        authoritative_correction.get("alternateMode")
-        or authoritative_correction.get("alternate_mode")
-    ) if isinstance(authoritative_correction, dict) else ""
     if (
         not composition_operation
-        and confirmed_alternate_mode == "append"
+        and alternate_mode == "append"
         and "alternateList" in visual_roles
     ):
         external_placeholder = next((
@@ -6997,11 +6997,18 @@ def _visual_pattern_identity_pairs(row, headers, roles, config=None):
     pair_position = 0
 
     def append_base_mpn(value):
-        base = str(value or "")
-        if trailing_placeholder and base.endswith(trailing_placeholder):
-            base = base[:-len(trailing_placeholder)]
-        if alternate_joiner and base.endswith(alternate_joiner):
-            base = base[:-len(alternate_joiner)]
+        base = str(value or "").rstrip()
+        placeholder = str(trailing_placeholder or "").strip()
+        if placeholder:
+            placeholder_match = re.search(
+                rf"{re.escape(placeholder)}\s*$",
+                base,
+            )
+            if placeholder_match:
+                base = base[:placeholder_match.start()].rstrip()
+        joiner = str(alternate_joiner or "").strip()
+        if joiner and base.endswith(joiner):
+            base = base[:-len(joiner)].rstrip()
         return clean(base)
 
     def append_alternate_mpn(base, alternate):
@@ -7318,6 +7325,82 @@ def _visual_pattern_owned_fields(config=None):
         if clean(field) in ROLE_KEYS
     )
     return owned_fields
+
+
+def _field_pattern_rule_controlled_fields(rule):
+    """Fields a confirmed rule is allowed to replace, including with blanks."""
+    if not isinstance(rule, dict):
+        return set()
+
+    controlled_fields = {
+        clean(field)
+        for field in (rule.get("fields") or {})
+        if clean(field) in ROLE_KEYS
+    }
+    visual_pattern = _authoritative_visual_pattern(rule)
+    if isinstance(visual_pattern, dict):
+        controlled_fields.update(
+            clean(segment.get("role"))
+            for segment in (visual_pattern.get("segments") or [])
+            if isinstance(segment, dict) and clean(segment.get("role")) in ROLE_KEYS
+        )
+        controlled_fields.update(
+            clean(field)
+            for field in (
+                visual_pattern.get("ignoredFields")
+                or visual_pattern.get("ignored_fields")
+                or []
+            )
+            if clean(field) in ROLE_KEYS
+        )
+
+    authoritative_correction = rule.get("authoritativeCorrection") or {}
+    controlled_fields.update(
+        clean(field)
+        for field in (authoritative_correction.get("fieldRules") or {})
+        if clean(field) in ROLE_KEYS
+    )
+    return controlled_fields
+
+
+def _merge_confirmed_pattern_entries(base_entries, corrected_entries, rule):
+    """Overlay a pattern correction without clearing unrelated mapped fields."""
+    base_entries = [entry for entry in (base_entries or []) if isinstance(entry, dict)]
+    corrected_entries = [entry for entry in (corrected_entries or []) if isinstance(entry, dict)]
+    controlled_fields = _field_pattern_rule_controlled_fields(rule)
+    merged_entries = []
+
+    for corrected_index, corrected_entry in enumerate(corrected_entries):
+        base_entry = (
+            base_entries[corrected_index]
+            if corrected_index < len(base_entries)
+            else (base_entries[0] if base_entries else {})
+        )
+        merged_fields = deepcopy(
+            base_entry.get("fields")
+            if isinstance(base_entry.get("fields"), dict)
+            else {}
+        )
+        if corrected_index >= len(base_entries):
+            for field in controlled_fields:
+                merged_fields[field] = ""
+
+        corrected_fields = corrected_entry.get("fields") or {}
+        for field, value in corrected_fields.items() if isinstance(corrected_fields, dict) else []:
+            # Empty cells emitted for display are not user instructions to
+            # clear separately mapped fields. A field owned by this rule may
+            # still be intentionally cleared, and every nonblank correction
+            # remains authoritative.
+            plain_value = value.get("value") if isinstance(value, dict) else value
+            if field in controlled_fields or not is_blankish(plain_value):
+                merged_fields[field] = value
+
+        merged_entries.append({
+            **base_entry,
+            **corrected_entry,
+            "fields": merged_fields,
+        })
+    return merged_entries
 
 
 def _field_pattern_rule_excludes_row(rule):
@@ -12532,6 +12615,19 @@ def refresh_bom_field_pattern_review_after_teach(
                     {} if rule_fallback_used else rule,
                     interpreted_entries,
                 ).get(source_header) or []
+            base_fragment_entries = [
+                entry
+                for entry in existing_entries
+                if (
+                    clean(entry.get("patternKey")) == pattern_key
+                    and clean(entry.get("occurrenceId")) == generated_occurrence_id
+                )
+            ]
+            interpreted_entries = _merge_confirmed_pattern_entries(
+                base_fragment_entries,
+                interpreted_entries,
+                rule,
+            )
             refreshed_interpretations.append({
                 "occurrenceId": generated_occurrence_id,
                 "sourceRow": review_source_row,
@@ -13051,7 +13147,13 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
     for review_row in result.get("reviewRows") or []:
         source_row = review_row.get("sourceRow")
         row_entries = [
-            entry
+            {
+                **entry,
+                "_occurrenceId": clean(
+                    occurrence.get("occurrenceId") or occurrence.get("id")
+                ),
+                "_patternKey": clean(occurrence.get("patternKey")),
+            }
             for occurrence in review_row.get("occurrences") or []
             if isinstance(occurrence, dict)
             for entry in occurrence.get("entries") or []
@@ -13088,29 +13190,39 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
             skipped_rows += 1
             continue
         override = confirmed_rows.get(str(source_row)) if isinstance(confirmed_rows, dict) else None
-        entries = override.get("entries") if isinstance(override, dict) else None
-        if not isinstance(entries, list) or not entries:
-            row_shape = _pattern_shape_for_row(
+        row_shape = _pattern_shape_for_row(
+            row,
+            safe_headers,
+            safe_roles,
+            selected_columns,
+            config=safe_config,
+        )
+        row_rule = _pattern_rule_for_shape(
+            {"fieldPatternRules": pattern_rules},
+            row_shape,
+        )
+        occurrence_overrides = (
+            override.get("occurrences")
+            if isinstance(override, dict)
+            and isinstance(override.get("occurrences"), list)
+            else []
+        )
+        reviewed_entries = entries_by_source_row.get(str(source_row)) or []
+        if occurrence_overrides and reviewed_entries:
+            # Occurrence IDs come from the semantic review result. Keep that
+            # complete ordered row as the merge base so confirming one
+            # fragment cannot replace or duplicate its siblings.
+            entries = reviewed_entries
+        elif row_rule:
+            entries = _infer_field_entries_for_row(
                 row,
                 safe_headers,
                 safe_roles,
                 selected_columns,
-                config=safe_config,
+                config=_config_with_active_rule(safe_config, row_rule),
             )
-            row_rule = _pattern_rule_for_shape(
-                {"fieldPatternRules": pattern_rules},
-                row_shape,
-            )
-            if row_rule:
-                entries = _infer_field_entries_for_row(
-                    row,
-                    safe_headers,
-                    safe_roles,
-                    selected_columns,
-                    config=_config_with_active_rule(safe_config, row_rule),
-                )
-            else:
-                entries = entries_by_source_row.get(str(source_row)) or []
+        else:
+            entries = reviewed_entries
         if not entries:
             entries = _infer_field_entries_for_row(
                 row,
@@ -13119,6 +13231,83 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
                 selected_columns,
                 config=safe_config,
             )
+        if isinstance(override, dict):
+            if isinstance(occurrence_overrides, list) and occurrence_overrides:
+                overrides_by_occurrence = {
+                    clean(item.get("occurrenceId")): item
+                    for item in occurrence_overrides
+                    if isinstance(item, dict) and clean(item.get("occurrenceId"))
+                }
+                merged_entries = []
+                consumed_occurrences = set()
+
+                def corrected_entries(occurrence_override, occurrence_id, base_entries):
+                    corrected = _merge_confirmed_pattern_entries(
+                        base_entries,
+                        occurrence_override.get("entries") or [],
+                        occurrence_override.get("rule") or {},
+                    )
+                    for corrected_entry in corrected:
+                        corrected_fields = corrected_entry.get("fields") or {}
+                        relation = clean(corrected_entry.get("relation"))
+                        has_value = any(
+                            not is_blankish(
+                                field.get("value") if isinstance(field, dict) else field
+                            )
+                            for field in corrected_fields.values()
+                        ) if isinstance(corrected_fields, dict) else False
+                        if not has_value and relation != "Ignored":
+                            continue
+                        yield {
+                            **corrected_entry,
+                            "_occurrenceId": occurrence_id,
+                            "_patternKey": clean(occurrence_override.get("patternKey")),
+                        }
+
+                for entry in entries:
+                    occurrence_id = clean(
+                        entry.get("_occurrenceId") or entry.get("occurrenceId")
+                    ) if isinstance(entry, dict) else ""
+                    occurrence_override = overrides_by_occurrence.get(occurrence_id)
+                    if not occurrence_override:
+                        merged_entries.append(entry)
+                        continue
+                    if occurrence_id in consumed_occurrences:
+                        continue
+                    consumed_occurrences.add(occurrence_id)
+                    base_occurrence_entries = [
+                        candidate
+                        for candidate in entries
+                        if isinstance(candidate, dict)
+                        and clean(candidate.get("_occurrenceId") or candidate.get("occurrenceId")) == occurrence_id
+                    ]
+                    merged_entries.extend(corrected_entries(
+                        occurrence_override,
+                        occurrence_id,
+                        base_occurrence_entries,
+                    ))
+                for occurrence_id, occurrence_override in overrides_by_occurrence.items():
+                    if occurrence_id in consumed_occurrences:
+                        continue
+                    merged_entries.extend(corrected_entries(
+                        occurrence_override,
+                        occurrence_id,
+                        [],
+                    ))
+                entries = merged_entries
+            elif isinstance(override.get("entries"), list) and override.get("entries"):
+                entries = override.get("entries")
+
+        non_ignored_index = 0
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if clean(entry.get("relation")) == "Ignored":
+                continue
+            entry["relation"] = (
+                "Primary" if non_ignored_index == 0 else f"Alternate {non_ignored_index}"
+            )
+            non_ignored_index += 1
 
         for entry_index, entry in enumerate(entries):
             fields = entry.get("fields") if isinstance(entry, dict) else {}
