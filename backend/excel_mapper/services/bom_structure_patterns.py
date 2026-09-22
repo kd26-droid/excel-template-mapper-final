@@ -373,6 +373,44 @@ def resolve_saved_structure(pattern, current_headers):
     if groups:
         config["alternateLayout"] = "separate_columns"
         config["alternateColumnGroups"] = groups
+    conditional_mappings = {}
+    raw_conditional_mappings = (
+        config.get("conditionalFieldMappings")
+        or config.get("conditional_field_mappings")
+        or {}
+    )
+    for role, rule in raw_conditional_mappings.items() if isinstance(raw_conditional_mappings, dict) else []:
+        if role not in ROLE_KEYS or not isinstance(rule, dict):
+            continue
+        condition = rule.get("if") if isinstance(rule.get("if"), dict) else {}
+        then_branch = rule.get("then") if isinstance(rule.get("then"), dict) else {}
+        else_branch = rule.get("else") if isinstance(rule.get("else"), dict) else {}
+        resolved_condition = _resolve_header(
+            condition.get("sourceColumn") or condition.get("source_column"),
+            current_headers,
+        )
+        resolved_then = _resolve_header(
+            then_branch.get("sourceColumn") or then_branch.get("source_column"),
+            current_headers,
+        )
+        resolved_else = _resolve_header(
+            else_branch.get("sourceColumn") or else_branch.get("source_column"),
+            current_headers,
+        )
+        if not resolved_condition or not resolved_then or not resolved_else:
+            continue
+        conditional_mappings[role] = {
+            "if": {
+                "sourceColumn": resolved_condition,
+                "operator": clean(condition.get("operator")),
+                "value": clean(condition.get("value")),
+            },
+            "then": {"sourceColumn": resolved_then},
+            "else": {"sourceColumn": resolved_else},
+        }
+    if conditional_mappings:
+        config["conditionalFieldMappings"] = conditional_mappings
+    config.pop("conditional_field_mappings", None)
     return roles, config
 
 

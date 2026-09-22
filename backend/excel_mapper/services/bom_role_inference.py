@@ -322,6 +322,37 @@ def bom_setup_requirements(headers=None, roles=None, config=None):
         safe_config.get("sameGroupKeyColumn")
         or safe_config.get("same_group_key_column")
     )
+    raw_conditional_mappings = (
+        safe_config.get("conditionalFieldMappings")
+        or safe_config.get("conditional_field_mappings")
+        or {}
+    )
+    if raw_conditional_mappings and not isinstance(raw_conditional_mappings, dict):
+        return [{
+            "code": "invalid_conditional_field_mappings",
+            "field": "conditionalFieldMappings",
+            "message": "Conditional field mappings must be an object keyed by FactWise field.",
+        }]
+    for role, rule in (raw_conditional_mappings or {}).items():
+        condition = rule.get("if") if isinstance(rule, dict) and isinstance(rule.get("if"), dict) else {}
+        then_branch = rule.get("then") if isinstance(rule, dict) and isinstance(rule.get("then"), dict) else {}
+        else_branch = rule.get("else") if isinstance(rule, dict) and isinstance(rule.get("else"), dict) else {}
+        operator = clean(condition.get("operator")).lower()
+        columns = [
+            clean(condition.get("sourceColumn") or condition.get("source_column")),
+            clean(then_branch.get("sourceColumn") or then_branch.get("source_column")),
+            clean(else_branch.get("sourceColumn") or else_branch.get("source_column")),
+        ]
+        if (
+            role not in ROLE_KEYS
+            or operator not in CONDITIONAL_MAPPING_OPERATORS
+            or any(not column or (safe_headers and column not in safe_headers) for column in columns)
+        ):
+            return [{
+                "code": "invalid_conditional_field_mapping",
+                "field": f"conditionalFieldMappings.{role}",
+                "message": f"Conditional mapping for {role} contains an invalid field, operator, or source column.",
+            }]
     if (
         alternate_layout == "same_group_rows"
         and (
@@ -349,6 +380,132 @@ def _require_valid_bom_setup(headers=None, roles=None, config=None):
             requirement["message"],
             requirement["field"],
         )
+
+
+CONDITIONAL_MAPPING_OPERATORS = {
+    "is_empty",
+    "is_not_empty",
+    "equals",
+    "not_equals",
+    "contains",
+    "not_contains",
+}
+
+
+def _conditional_field_mappings(config=None, headers=None):
+    """Return validated per-field source-selection rules from setup config."""
+    config = config if isinstance(config, dict) else {}
+    raw_rules = (
+        config.get("conditionalFieldMappings")
+        or config.get("conditional_field_mappings")
+        or {}
+    )
+    if not isinstance(raw_rules, dict):
+        return {}
+    allowed_headers = set(headers or [])
+    mappings = {}
+    for role, raw_rule in raw_rules.items():
+        if role not in ROLE_KEYS or not isinstance(raw_rule, dict):
+            continue
+        condition = raw_rule.get("if") if isinstance(raw_rule.get("if"), dict) else {}
+        then_branch = raw_rule.get("then") if isinstance(raw_rule.get("then"), dict) else {}
+        else_branch = raw_rule.get("else") if isinstance(raw_rule.get("else"), dict) else {}
+        condition_column = clean(
+            condition.get("sourceColumn") or condition.get("source_column")
+        )
+        then_column = clean(
+            then_branch.get("sourceColumn") or then_branch.get("source_column")
+        )
+        else_column = clean(
+            else_branch.get("sourceColumn") or else_branch.get("source_column")
+        )
+        operator = clean(condition.get("operator")).lower()
+        if (
+            not condition_column
+            or not then_column
+            or not else_column
+            or operator not in CONDITIONAL_MAPPING_OPERATORS
+            or (
+                allowed_headers
+                and any(
+                    column not in allowed_headers
+                    for column in (condition_column, then_column, else_column)
+                )
+            )
+        ):
+            continue
+        mappings[role] = {
+            "if": {
+                "sourceColumn": condition_column,
+                "operator": operator,
+                "value": clean(condition.get("value")),
+            },
+            "then": {"sourceColumn": then_column},
+            "else": {"sourceColumn": else_column},
+        }
+    return mappings
+
+
+def _conditional_mapping_matches(value, operator, expected=""):
+    text = clean(value)
+    expected_text = clean(expected)
+    if operator == "is_empty":
+        return not text
+    if operator == "is_not_empty":
+        return bool(text)
+    normalized = text.casefold()
+    normalized_expected = expected_text.casefold()
+    if operator == "equals":
+        return normalized == normalized_expected
+    if operator == "not_equals":
+        return normalized != normalized_expected
+    if operator == "contains":
+        return normalized_expected in normalized
+    if operator == "not_contains":
+        return normalized_expected not in normalized
+    return False
+
+
+def _resolved_role_source(row, headers, roles, config, role, preserve_delimiters=False):
+    """Resolve one FactWise field to the selected customer column for this row."""
+    rule = _conditional_field_mappings(config, headers).get(role)
+    if not rule:
+        source_column = clean((roles or {}).get(role))
+        return (
+            _row_cell(row, source_column, headers, preserve_delimiters=preserve_delimiters),
+            source_column,
+            "direct",
+        )
+    condition = rule["if"]
+    condition_value = _row_cell(
+        row,
+        condition["sourceColumn"],
+        headers,
+        preserve_delimiters=True,
+    )
+    branch = "then" if _conditional_mapping_matches(
+        condition_value,
+        condition["operator"],
+        condition.get("value") or "",
+    ) else "else"
+    source_column = rule[branch]["sourceColumn"]
+    return (
+        _row_cell(row, source_column, headers, preserve_delimiters=preserve_delimiters),
+        source_column,
+        branch,
+    )
+
+
+def _conditional_source_columns(config, headers, role=None):
+    mappings = _conditional_field_mappings(config, headers)
+    roles = [role] if role else list(ROLE_KEYS)
+    return [
+        rule[branch]["sourceColumn"]
+        for candidate_role in roles
+        for rule in [mappings.get(candidate_role)]
+        if rule
+        for branch in ("then", "else")
+    ]
 
 
 def norm_header(value):
@@ -2311,6 +2468,8 @@ def _selected_customer_columns(headers, roles, selected_columns=None, config=Non
         add(header)
     for role in ROLE_KEYS:
         add((roles or {}).get(role))
+    for header in _conditional_source_columns(config, headers):
+        add(header)
     add(
         (config or {}).get("sameGroupKeyColumn")
         or (config or {}).get("same_group_key_column")
@@ -4656,7 +4815,14 @@ def _pair_semantic_entries_with_separate_manufacturers(
 ):
     """Pair semantic MPN rows with a separately mapped MFR cell by position."""
     entries = list(entries or [])
-    manufacturer_header = clean((roles or {}).get("manufacturer"))
+    manufacturer_value, manufacturer_header, _manufacturer_branch = _resolved_role_source(
+        row,
+        headers,
+        roles,
+        config,
+        "manufacturer",
+        preserve_delimiters=True,
+    )
     semantic_source_columns = {
         clean(column) for column in (semantic_source_columns or []) if clean(column)
     }
@@ -4689,12 +4855,6 @@ def _pair_semantic_entries_with_separate_manufacturers(
     if not mpn_entries:
         return entries
 
-    manufacturer_value = _row_cell(
-        row,
-        manufacturer_header,
-        headers,
-        preserve_delimiters=True,
-    )
     manufacturer_slots = _positional_newline_values(manufacturer_value)
     if not manufacturer_slots and not is_blankish(manufacturer_value):
         manufacturer_slots = [clean(manufacturer_value)]
@@ -7917,7 +8077,10 @@ def _semantic_pattern_excludes_row(row, headers, roles, config=None):
     if not rules:
         return False
     for unit in _field_review_mapping_units(headers, roles, config=config):
-        if unit.get("relationship") != "shared" and unit.get("mappedFields") != ["mpn"]:
+        mapped_fields = _active_mapping_unit_fields(
+            unit, row, headers, roles, config=config
+        )
+        if len(mapped_fields) < 2 and mapped_fields != ["mpn"]:
             continue
         source_column = unit.get("sourceColumn")
         source_value = _row_cell(row, source_column, headers, preserve_delimiters=True)
@@ -7925,11 +8088,11 @@ def _semantic_pattern_excludes_row(row, headers, roles, config=None):
             continue
         for fragment in _semantic_identity_fragments(
             source_value,
-            unit.get("mappedFields") or [],
+            mapped_fields,
         ):
             pattern_key = _semantic_pattern_key(
                 source_column,
-                unit.get("mappedFields") or [],
+                mapped_fields,
                 fragment.get("grammar"),
             )
             if _field_pattern_rule_excludes_row(rules.get(pattern_key)):
@@ -7954,10 +8117,12 @@ def _infer_semantic_pattern_entries_for_row(row, headers, roles, selected_column
     for unit in _field_review_mapping_units(headers, roles, config=config):
         if "primary" not in (unit.get("scopes") or []):
             continue
-        if unit.get("relationship") != "shared" and unit.get("mappedFields") != ["mpn"]:
-            continue
         source_column = unit.get("sourceColumn")
-        mapped_fields = unit.get("mappedFields") or []
+        mapped_fields = _active_mapping_unit_fields(
+            unit, row, headers, roles, config=config
+        )
+        if len(mapped_fields) < 2 and mapped_fields != ["mpn"]:
+            continue
         source_value = _row_cell(row, source_column, headers, preserve_delimiters=True)
         if is_blankish(source_value):
             continue
@@ -8016,7 +8181,10 @@ def _infer_semantic_pattern_entries_for_row(row, headers, roles, selected_column
             fragment_entries = _infer_field_entries_for_row(
                 fragment_row,
                 headers,
-                roles,
+                _roles_for_mapping_unit(roles, config, {
+                    **unit,
+                    "mappedFields": mapped_fields,
+                }),
                 selected_columns,
                 config=fragment_config,
             )
@@ -8111,19 +8279,33 @@ def _infer_field_entries_for_row(row, headers, roles, selected_columns, config=N
     for role in ("cpn", "description", "quantity", "uom", "level", "parent", "notes", "internalNotes"):
         if role in pattern_owned_fields:
             continue
-        header = clean((roles or {}).get(role))
+        value, header, _branch = _resolved_role_source(
+            row,
+            headers,
+            roles,
+            config,
+            role,
+        )
         if header:
-            value = _row_cell(row, header, headers)
             if not is_blankish(value):
                 clean_value = _clean_field_value(value, config, role) if role in {"cpn"} else value
                 set_field(role, clean_value, header)
 
-    cpn_header = "" if "cpn" in pattern_owned_fields else clean((roles or {}).get("cpn"))
-    mpn_header = "" if "mpn" in pattern_owned_fields else clean((roles or {}).get("mpn"))
-    manufacturer_header = "" if "manufacturer" in pattern_owned_fields else clean((roles or {}).get("manufacturer"))
-    cpn_value = _row_cell(row, cpn_header, headers, preserve_delimiters=True) if cpn_header else ""
-    mpn_value = _row_cell(row, mpn_header, headers, preserve_delimiters=True) if mpn_header else ""
-    manufacturer_value = _row_cell(row, manufacturer_header, headers, preserve_delimiters=True) if manufacturer_header else ""
+    cpn_value, cpn_header, _cpn_branch = _resolved_role_source(
+        row, headers, roles, config, "cpn", preserve_delimiters=True
+    )
+    mpn_value, mpn_header, _mpn_branch = _resolved_role_source(
+        row, headers, roles, config, "mpn", preserve_delimiters=True
+    )
+    manufacturer_value, manufacturer_header, _manufacturer_branch = _resolved_role_source(
+        row, headers, roles, config, "manufacturer", preserve_delimiters=True
+    )
+    if "cpn" in pattern_owned_fields:
+        cpn_value, cpn_header = "", ""
+    if "mpn" in pattern_owned_fields:
+        mpn_value, mpn_header = "", ""
+    if "manufacturer" in pattern_owned_fields:
+        manufacturer_value, manufacturer_header = "", ""
     if manual_rows:
         entries = []
         for entry_index, parsed in enumerate(manual_rows):
@@ -8839,10 +9021,19 @@ def _pattern_shape_for_row(row, headers, roles, selected_columns, config=None):
     ]
     structural_parts = []
 
-    for scope, header, role_hints in _group_sources_by_header(_primary_identity_pattern_sources(roles)):
+    active_identity_sources = []
+    active_values = {}
+    for role in ("cpn", "mpn", "manufacturer"):
+        value, header, _branch = _resolved_role_source(
+            row, headers, roles, config, role
+        )
+        if header:
+            active_identity_sources.append(("primary", role, header))
+            active_values[header] = value
+    for scope, header, role_hints in _group_sources_by_header(active_identity_sources):
         if header not in headers:
             continue
-        value = _row_cell(row, header, headers)
+        value = active_values.get(header, "")
         signature = _structural_identity_cell_signature(value, role_hints)
         if signature:
             structural_parts.append(f"{scope}.{'+'.join(role_hints)}={signature}")
@@ -8877,7 +9068,7 @@ def _pattern_shape_for_row(row, headers, roles, selected_columns, config=None):
     if structural_parts:
         return " | ".join(identity_parts + structural_parts)
 
-    if _primary_identity_pattern_sources(roles):
+    if active_identity_sources:
         return " | ".join(identity_parts + ["pattern=no_structural_delimiters"])
 
     role_by_header = {}
@@ -10778,8 +10969,14 @@ def _field_review_mapping_units(headers, roles, config=None):
         if scope not in unit["scopes"]:
             unit["scopes"].append(scope)
 
+    conditional_mappings = _conditional_field_mappings(config, headers)
     for role in ROLE_KEYS:
-        add_mapping("primary", (roles or {}).get(role), role)
+        conditional_rule = conditional_mappings.get(role)
+        if conditional_rule:
+            add_mapping("primary", conditional_rule["then"]["sourceColumn"], role)
+            add_mapping("primary", conditional_rule["else"]["sourceColumn"], role)
+        else:
+            add_mapping("primary", (roles or {}).get(role), role)
 
     if clean((config or {}).get("alternateLayout") or (config or {}).get("alternate_layout")) == "separate_columns":
         alternate_role_keys = {
@@ -10809,6 +11006,26 @@ def _field_review_mapping_units(headers, roles, config=None):
     )
 
 
+def _active_mapping_unit_fields(unit, row, headers, roles, config=None):
+    """Return only the mapped fields whose selected branch uses this unit."""
+    if "primary" not in ((unit or {}).get("scopes") or []):
+        return list((unit or {}).get("mappedFields") or [])
+    source_column = clean((unit or {}).get("sourceColumn"))
+    active_fields = []
+    for role in (unit or {}).get("mappedFields") or []:
+        _value, resolved_source, _branch = _resolved_role_source(
+            row,
+            headers,
+            roles,
+            config,
+            role,
+            preserve_delimiters=True,
+        )
+        if clean(resolved_source) == source_column:
+            active_fields.append(role)
+    return active_fields
+
+
 def _roles_for_mapping_unit(roles, config, unit):
     """Bind parsing roles to the primary or alternate source represented by a unit."""
     scopes = list((unit or {}).get("scopes") or [])
@@ -10817,7 +11034,11 @@ def _roles_for_mapping_unit(roles, config, unit):
         "",
     )
     if not alternate_scope or "primary" in scopes:
-        return dict(roles or {})
+        scoped_roles = dict(roles or {})
+        for role in (unit or {}).get("mappedFields") or []:
+            if role in _conditional_field_mappings(config):
+                scoped_roles[role] = clean((unit or {}).get("sourceColumn"))
+        return scoped_roles
 
     try:
         group_index = int(alternate_scope.rsplit("-", 1)[-1]) - 1
@@ -11056,8 +11277,20 @@ def _build_semantic_review_patterns(headers, roles, config, row_shape_groups, op
             source_row = raw_sample.get("sourceRow")
             for unit in semantic_units:
                 source_column = unit.get("sourceColumn")
-                mapped_fields = unit.get("mappedFields") or []
-                unit_roles = _roles_for_mapping_unit(roles, config, unit)
+                mapped_fields = _active_mapping_unit_fields(
+                    unit, row, headers, roles, config=config
+                )
+                if (
+                    len(mapped_fields) < 2
+                    and mapped_fields != ["mpn"]
+                    and not any(
+                        clean(scope).startswith("alternate-")
+                        for scope in (unit.get("scopes") or [])
+                    )
+                ):
+                    continue
+                active_unit = {**unit, "mappedFields": mapped_fields}
+                unit_roles = _roles_for_mapping_unit(roles, config, active_unit)
                 source_value = _row_cell(row, source_column, headers, preserve_delimiters=True)
                 if is_blankish(source_value):
                     continue
@@ -12047,14 +12280,24 @@ def _build_backend_review_contract(
                     occurrence,
                 )
 
+    conditional_mappings = _conditional_field_mappings(config, headers)
     mapped_field_options = [
         {
             "key": role,
             "label": FACTWISE_FIELD_LABELS.get(role) or ROLE_LABELS.get(role) or role,
-            "sourceColumn": clean((roles or {}).get(role)),
+            "sourceColumn": clean((roles or {}).get(role)) or clean(
+                ((conditional_mappings.get(role) or {}).get("else") or {}).get("sourceColumn")
+            ),
+            "sourceColumns": list(dict.fromkeys(
+                _conditional_source_columns(config, headers, role)
+                or [clean((roles or {}).get(role))]
+            )),
         }
         for role in ROLE_KEYS
-        if clean((roles or {}).get(role)) in set(headers or [])
+        if (
+            clean((roles or {}).get(role)) in set(headers or [])
+            or role in conditional_mappings
+        )
     ]
     field_filters = [{"key": "all", "label": "All mapped fields"}] + [
         {"key": option["key"], "label": option["label"]}
@@ -12344,8 +12587,15 @@ def _build_flat_pattern_review_rows(
                     occurrences,
                     interpreted_entries,
                 ) if interpreted_entries else complete_entries
-                primary_mpn_column = clean((roles or {}).get("mpn"))
                 raw_source_row = (source_rows_by_number or {}).get(str(source_row))
+                _primary_mpn_value, primary_mpn_column, _primary_mpn_branch = _resolved_role_source(
+                    raw_source_row or {},
+                    headers or [],
+                    roles or {},
+                    config,
+                    "mpn",
+                    preserve_delimiters=True,
+                )
                 if (
                     source_entries
                     and raw_source_row is not None
@@ -12844,7 +13094,10 @@ def _build_bom_field_review_workflow(headers, roles, config, groups, patterns=No
         "case": "preview",
         "type": "preview",
         "sourceColumns": [unit["sourceColumn"] for unit in units],
-        "mappedFields": [role for role in ROLE_KEYS if clean((roles or {}).get(role))],
+        "mappedFields": [
+            role for role in ROLE_KEYS
+            if clean((roles or {}).get(role)) or role in _conditional_field_mappings(config, headers)
+        ],
     })
     for index, step in enumerate(steps):
         step["position"] = index + 1
@@ -14305,7 +14558,14 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
             elif isinstance(override.get("entries"), list) and override.get("entries"):
                 entries = override.get("entries")
 
-        primary_mpn_column = clean(safe_roles.get("mpn"))
+        _primary_mpn_value, primary_mpn_column, _primary_mpn_branch = _resolved_role_source(
+            row,
+            safe_headers,
+            safe_roles,
+            safe_config,
+            "mpn",
+            preserve_delimiters=True,
+        )
         if primary_mpn_column:
             entries = _pair_semantic_entries_with_separate_manufacturers(
                 entries,

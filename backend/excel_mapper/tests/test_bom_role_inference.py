@@ -62,9 +62,12 @@ from excel_mapper.services.bom_role_inference import (
     derive_bom_field_pattern_rule_from_correction,
     infer_bom_roles,
     normalize_bom_rows,
+    bom_setup_requirements,
+    _resolved_role_source,
     refresh_bom_field_pattern_review_after_teach,
     save_bom_field_pattern_rule,
 )
+from excel_mapper.services.bom_structure_patterns import resolve_saved_structure
 from excel_mapper.views import (
     _issue_bom_pattern_confirmation,
     _issue_bom_pattern_review,
@@ -100,6 +103,120 @@ class SqliteWriteRetryTests(SimpleTestCase):
         self.assertEqual(_retry_sqlite_locked_write(operation), 'saved')
         self.assertEqual(len(attempts), 2)
         sleep.assert_called_once_with(0.25)
+
+
+class ConditionalFieldMappingTests(SimpleTestCase):
+    headers = ["Document", "Client CPN", "Description"]
+    roles = {"cpn": "Document", "description": "Description"}
+    config = {
+        "skipTitleRows": False,
+        "conditionalFieldMappings": {
+            "cpn": {
+                "if": {"sourceColumn": "Document", "operator": "is_empty"},
+                "then": {"sourceColumn": "Client CPN"},
+                "else": {"sourceColumn": "Document"},
+            },
+        },
+    }
+
+    def test_resolves_each_row_and_preserves_selected_source_column(self):
+        fallback = _resolved_role_source(
+            {"Document": "   ", "Client CPN": "CPN-456"},
+            self.headers,
+            self.roles,
+            self.config,
+            "cpn",
+        )
+        document = _resolved_role_source(
+            {"Document": "DOC-123", "Client CPN": "CPN-456"},
+            self.headers,
+            self.roles,
+            self.config,
+            "cpn",
+        )
+
+        self.assertEqual(fallback, ("CPN-456", "Client CPN", "then"))
+        self.assertEqual(document, ("DOC-123", "Document", "else"))
+
+    def test_only_null_or_whitespace_is_empty(self):
+        value, source_column, branch = _resolved_role_source(
+            {"Document": "N/A", "Client CPN": "CPN-456"},
+            self.headers,
+            self.roles,
+            self.config,
+            "cpn",
+        )
+
+        self.assertEqual((value, source_column, branch), ("N/A", "Document", "else"))
+
+    def test_direct_interpretation_uses_conditional_value_and_lineage(self):
+        entries = _infer_field_entries_for_row(
+            {"Document": "", "Client CPN": "CPN-456", "Description": "Part"},
+            self.headers,
+            self.roles,
+            self.headers,
+            config=self.config,
+        )
+
+        self.assertEqual(entries[0]["fields"]["cpn"]["value"], "CPN-456")
+        self.assertEqual(entries[0]["fields"]["cpn"]["sourceColumn"], "Client CPN")
+
+    @patch("excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations", return_value={})
+    @patch("excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules", return_value={})
+    def test_review_and_normalizer_use_the_same_conditional_mapping(self, _saved_rules, _saved_interpretations):
+        rows = [
+            {"Document": "", "Client CPN": "CPN-456", "Description": "Part A", "__sourceRow": 2},
+            {"Document": "DOC-123", "Client CPN": "CPN-789", "Description": "Part B", "__sourceRow": 3},
+        ]
+        review = build_bom_field_pattern_groups(
+            self.headers,
+            rows,
+            roles=self.roles,
+            config=self.config,
+            options={"includeAllRows": True, "reviewContractVersion": 3},
+        )
+        normalized = normalize_bom_rows(
+            self.headers,
+            rows,
+            roles=self.roles,
+            config=self.config,
+        )
+
+        review_cpns = [
+            entry["fields"]["cpn"]
+            for row in review["review"]["rows"]
+            for entry in row.get("entries") or []
+        ]
+        self.assertEqual(review_cpns, ["CPN-456", "DOC-123"])
+        self.assertEqual(
+            [row["cpn"] for row in normalized["normalizedRows"]],
+            ["CPN-456", "DOC-123"],
+        )
+
+    def test_invalid_source_column_is_rejected(self):
+        invalid = deepcopy(self.config)
+        invalid["conditionalFieldMappings"]["cpn"]["then"]["sourceColumn"] = "Missing"
+
+        self.assertEqual(
+            bom_setup_requirements(self.headers, self.roles, invalid)[0]["code"],
+            "invalid_conditional_field_mapping",
+        )
+
+    def test_saved_structure_resolves_all_conditional_headers(self):
+        pattern = BomStructurePattern(
+            roles=self.roles,
+            config=self.config,
+        )
+
+        _roles, resolved = resolve_saved_structure(
+            pattern,
+            ["DOCUMENT", "CLIENT CPN", "Description"],
+        )
+
+        rule = resolved["conditionalFieldMappings"]["cpn"]
+        self.assertEqual(rule["if"]["sourceColumn"], "DOCUMENT")
+        self.assertEqual(rule["then"]["sourceColumn"], "CLIENT CPN")
+        self.assertEqual(rule["else"]["sourceColumn"], "DOCUMENT")
 
 
 class BomRoleInferenceCleanupConfigTests(TestCase):
