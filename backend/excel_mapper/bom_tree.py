@@ -614,6 +614,32 @@ def derive_tree(records, level_column, code_column,
                 row['parent'] = None
                 continue
             if parent not in known:
+                # A top row naming something the sheet does not contain is
+                # saying "nothing above me", not pointing at a missing part.
+                # Exports write a placeholder in the parent column for the
+                # topmost line - THALES writes "Top" beside S141951 - and read
+                # literally it dangles: the whole sheet refuses to build, and
+                # naming the placeholder as the finished good instead invents a
+                # BOM for it and pushes every real assembly down a level.
+                #
+                # Narrow on purpose. Only the sheet's own minimum level counts,
+                # so a dangling parent further down stays the error it is - that
+                # is a broken reference, not a root marker. Nothing is invented
+                # either: the placeholder never becomes a row or a BOM, the row
+                # simply has nothing above it.
+                if row['level'] == min_level:
+                    warnings.append({
+                        'type': 'root_parent_placeholder',
+                        'row': row['row'],
+                        'code': row['code'],
+                        'parent': parent,
+                        'message': ('Row names "%s" as its parent, but no row in '
+                                    'this sheet has that code and this is the top '
+                                    'level - read as the top of the sheet.'
+                                    % parent),
+                    })
+                    row['parent'] = None
+                    continue
                 errors.append({
                     'type': 'parent_not_found',
                     'row': row['row'],
