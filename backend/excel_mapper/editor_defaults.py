@@ -215,6 +215,20 @@ LOCKED_IDENTITY_COLUMNS = {
 }
 
 
+#: What a join uses when the settings never recorded one.
+#:
+#: The Settings box SHOWS "_" as its value when nothing is stored, but a field
+#: the user never types in writes nothing back - so the rule saved with no
+#: separator at all and the join came out "TAG 15-400HELLERMANNTYTON", which
+#: reads as a real item code and is not one. Absent means the default; an
+#: explicitly emptied box is a deliberate "" and is left alone.
+JOIN_DEFAULT_SEPARATOR = '_'
+
+
+def _join_separator(value):
+    return JOIN_DEFAULT_SEPARATOR if value is None else str(value)
+
+
 def _saved_item_code_rule(settings_obj):
     """The Settings panel's item code rule, in the modes only the browser ran.
 
@@ -261,6 +275,15 @@ def _saved_item_code_rule(settings_obj):
         }
         if (branch or {}).get('outputType') == 'column':
             entry['output_source_column'] = (branch or {}).get('outputColumn')
+        elif (branch or {}).get('outputType') == 'join':
+            # The item code every customer uses is a join - part number and
+            # manufacturer - so a branch that could only name ONE column could
+            # not express the normal case, only the exception to it.
+            entry['output_source_columns'] = [
+                (branch or {}).get('outputColumn'),
+                (branch or {}).get('outputSecondColumn'),
+            ]
+            entry['output_separator'] = _join_separator((branch or {}).get('outputSeparator'))
         branches.append(entry)
 
     # A mode with nothing to read from is not a rule, and guessing one would
@@ -277,6 +300,12 @@ def _saved_item_code_rule(settings_obj):
         else_source = str(ui.get('itemCodeElseValueSource') or 'default')
         if else_source == 'column':
             condition['else_source_column'] = ui.get('itemCodeElseValueColumn')
+        elif else_source == 'join':
+            condition['else_source_columns'] = [
+                ui.get('itemCodeElseValueColumn'),
+                ui.get('itemCodeElseSecondColumn'),
+            ]
+            condition['else_separator'] = _join_separator(ui.get('itemCodeElseSeparator'))
         elif else_source == 'empty':
             condition['else'] = ''
         elif str(ui.get('itemCodeElseDefaultValue') or '').strip():
