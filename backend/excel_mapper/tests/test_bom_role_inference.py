@@ -379,6 +379,88 @@ class BomRoleInferenceCleanupConfigTests(TestCase):
 
 
 class BomFieldPatternTeachApiTests(TestCase):
+    def test_same_group_rows_requires_an_explicit_group_key(self):
+        payload = {
+            "headers": ["CPN", "MPN", "MFR", "Ref Des"],
+            "rows": [{
+                "CPN": "C-100",
+                "MPN": "ABC123",
+                "MFR": "KEMET",
+                "Ref Des": "C1",
+                "__sourceRow": 2,
+            }],
+            "roles": {
+                "cpn": "CPN",
+                "mpn": "MPN",
+                "manufacturer": "MFR",
+            },
+            "config": {"alternateLayout": "same_group_rows"},
+        }
+
+        for endpoint in (
+            "/api/bom/field-patterns/infer/",
+            "/api/bom/normalize/",
+        ):
+            response = self.client.post(endpoint, payload, content_type="application/json")
+            self.assertEqual(response.status_code, 400)
+            self.assertEqual(response.json()["code"], "group_key_required")
+            self.assertEqual(response.json()["field"], "parent")
+
+    def test_same_group_rows_uses_only_the_selected_group_key(self):
+        response = self.client.post(
+            "/api/bom/normalize/",
+            {
+                "headers": ["CPN", "MPN", "MFR", "Qty", "Ref Des"],
+                "rows": [
+                    {
+                        "CPN": "C-100",
+                        "MPN": "ABC123",
+                        "MFR": "KEMET",
+                        "Qty": "4",
+                        "Ref Des": "C1",
+                        "__sourceRow": 2,
+                    },
+                    {
+                        "CPN": "",
+                        "MPN": "XYZ987",
+                        "MFR": "AVX",
+                        "Qty": "",
+                        "Ref Des": "C1",
+                        "__sourceRow": 3,
+                    },
+                    {
+                        "CPN": "C-200",
+                        "MPN": "DEF456",
+                        "MFR": "YAGEO",
+                        "Qty": "2",
+                        "Ref Des": "C2",
+                        "__sourceRow": 4,
+                    },
+                ],
+                "roles": {
+                    "cpn": "CPN",
+                    "mpn": "MPN",
+                    "manufacturer": "MFR",
+                    "quantity": "Qty",
+                    "parent": "Ref Des",
+                },
+                "config": {
+                    "alternateLayout": "same_group_rows",
+                    "alternateInheritFields": ["cpn", "quantity"],
+                },
+            },
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        rows = response.json()["normalizedRows"]
+        self.assertEqual(
+            [(row["parentKey"], row["relation"]) for row in rows],
+            [("C1", "Primary"), ("C1", "Alternate 1"), ("C2", "Primary")],
+        )
+        self.assertEqual(rows[1]["cpn"], "C-100")
+        self.assertEqual(rows[1]["quantity"], "4")
+
     def test_missing_alternate_separator_stays_empty(self):
         response = self.client.post(
             "/api/bom/field-patterns/teach/",
@@ -4105,6 +4187,90 @@ class SemanticIdentityFragmentTests(SimpleTestCase):
             result["review"]["rows"][0]["entries"][0]["fields"]["mpn"],
             "STM32F429IGT6 / STM32F439IGT6",
         )
+
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_pattern_interpretations",
+        return_value={},
+    )
+    @patch(
+        "excel_mapper.services.bom_role_inference.load_saved_bom_field_pattern_rules",
+        return_value={},
+    )
+    def test_marker_pattern_preview_uses_interpreted_rows_and_external_manufacturer(
+        self,
+        _saved_rules,
+        _saved_interpretations,
+    ):
+        source_header = "Manufacturer Descriptions"
+        source_value = "C0603X103K2RAC@ (/TU/7411)"
+        grammar = _semantic_identity_fragments(source_value, ["mpn"])[0]["grammar"]
+        pattern_key = _semantic_pattern_key(source_header, ["mpn"], grammar)
+        parser_rule = {
+            "patternKey": pattern_key,
+            "fields": {},
+            "visualPattern": {
+                "type": "tagged_fields",
+                "sourceHeader": source_header,
+                "alternateDelimiter": "/",
+                "alternateMode": "insert_at_marker",
+                "segments": [
+                    {"role": "mpn", "before": "", "after": " (", "wrapper": None},
+                    {"role": "alternateList", "before": " (", "after": ")", "wrapper": None},
+                ],
+                "mpnComposition": {
+                    "operation": "insert_alternate_at_marker",
+                    "markerSequence": "@",
+                    "markerOccurrence": 1,
+                    "listSuppliesPrimary": True,
+                },
+                "authoritativeSegments": True,
+            },
+        }
+
+        result = build_bom_field_pattern_groups(
+            [source_header, "Manufacturers", "BCN"],
+            [{
+                source_header: source_value,
+                "Manufacturers": "KEMET ELECTRONICS CORP.",
+                "BCN": "99242462",
+                "__sourceRow": 2,
+            }],
+            roles={
+                "mpn": source_header,
+                "manufacturer": "Manufacturers",
+                "cpn": "BCN",
+            },
+            config={"alternateLayout": "inside_selected_mpn_columns"},
+            options={
+                "includeAllRows": True,
+                "reviewContractVersion": 3,
+                "fieldPatternRules": {pattern_key: parser_rule},
+            },
+        )
+
+        review = result["review"]
+        expected_mpns = [
+            "C0603X103K2RAC",
+            "C0603X103K2RACTU",
+            "C0603X103K2RAC7411",
+        ]
+        pattern_entries = review["patterns"][0]["teachContext"]["sample"]["entries"]
+        self.assertEqual(
+            [entry["fields"]["mpn"]["value"] for entry in pattern_entries],
+            expected_mpns,
+        )
+        self.assertEqual(
+            [entry["fields"]["mpn"] for entry in review["rows"][0]["entries"]],
+            expected_mpns,
+        )
+        self.assertEqual(
+            [entry["fields"]["mpn"] for entry in review["displayRows"]],
+            expected_mpns,
+        )
+        self.assertTrue(all(
+            entry["fields"]["manufacturer"] == "KEMET ELECTRONICS CORP."
+            for entry in review["rows"][0]["entries"]
+        ))
 
     def test_confirmed_no_split_rule_preserves_plain_slash_mpn(self):
         value = "STM32F429IGT6 / STM32F439IGT6"

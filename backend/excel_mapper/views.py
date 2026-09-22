@@ -49,11 +49,13 @@ from .delimited_reader import (
 from .bom_header_mapper import BOMHeaderMapper
 from .services.bom_directory_learning import learn_confirmed_bom_field_patterns, learn_normalized_bom_rows
 from .services.bom_role_inference import (
+    BomSetupValidationError,
     ROLE_KEYS,
     _bom_pattern_structure_scope,
     _merge_pattern_rules,
     build_bom_field_pattern_groups,
     build_bom_field_pattern_teach_result,
+    bom_setup_requirements,
     infer_bom_roles,
     load_saved_bom_field_pattern_rules,
     normalize_bom_rows,
@@ -3420,6 +3422,11 @@ def bom_role_inference(request):
             'appliedStructure': applied_structure,
             'structureProfile': structure_profile,
             'matchedStructures': learned_matches,
+            'setupRequirements': bom_setup_requirements(
+                headers,
+                final_roles,
+                final_config,
+            ),
         }
         return Response({
             'success': True,
@@ -3486,6 +3493,13 @@ def bom_field_pattern_inference(request):
             **result,
             'reviewReceipt': review_receipt,
         })
+    except BomSetupValidationError as exc:
+        return Response({
+            'success': False,
+            'code': exc.code,
+            'field': exc.field,
+            'error': str(exc),
+        }, status=status.HTTP_400_BAD_REQUEST)
     except Exception as exc:
         logger.error("BOM field pattern inference failed: %s", exc, exc_info=True)
         return Response({
@@ -3513,6 +3527,13 @@ def bom_normalize(request):
             'success': True,
             **normalize_bom_rows(headers, rows, roles=roles, config=config),
         })
+    except BomSetupValidationError as exc:
+        return Response({
+            'success': False,
+            'code': exc.code,
+            'field': exc.field,
+            'error': str(exc),
+        }, status=status.HTTP_400_BAD_REQUEST)
     except Exception as exc:
         logger.error("Backend BOM normalization failed: %s", exc, exc_info=True)
         return Response({
@@ -3820,6 +3841,13 @@ def bom_field_pattern_apply(request):
                 'fieldPatternRules': confirmed_rules,
             },
         })
+    except BomSetupValidationError as exc:
+        return Response({
+            'success': False,
+            'code': exc.code,
+            'field': exc.field,
+            'error': str(exc),
+        }, status=status.HTTP_400_BAD_REQUEST)
     except Exception as exc:
         logger.error("BOM field pattern apply failed: %s", exc, exc_info=True)
         return Response({
