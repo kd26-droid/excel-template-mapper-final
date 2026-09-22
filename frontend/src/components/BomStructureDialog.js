@@ -279,9 +279,9 @@ const blankSheetAnswer = () => ({
   hasLevels: false,
   levelColumn: '',
   treeConfirmed: null,
-  // Internal BOM classification only. Normalized rows are never removed from
-  // the editor; document rows simply do not define assembly relationships.
-  dropDocuments: true,
+  // Document rows remain BOM children for this workflow. Their parent paths
+  // therefore also participate in assembly detection.
+  dropDocuments: false,
   bomHeader: null,
   // Per sub-assembly overrides, keyed by part code. A multi-level sheet produces
   // one BOM per assembly, and each of those BOMs needs its own name, base
@@ -450,7 +450,7 @@ const assembliesFromParents = (records, levelColumn, codeColumn = '', excludeRow
   return { shallowestChild, nameOf };
 };
 
-const analyzeLevels = (records, levelColumn, headers, rootCode = '', dropDocuments = true) => {
+const analyzeLevels = (records, levelColumn, headers, rootCode = '', dropDocuments = false) => {
   const codeColumn = findHeader(headers, CODE_HEADER_RE);
   const nameColumn = findHeader(headers, NAME_HEADER_RE);
   const qtyColumn = findHeader(headers, QTY_HEADER_RE);
@@ -665,7 +665,7 @@ export const reconcileSavedBomStructure = (saved, { sheetNames = [], getSheetHea
       hasLevels: Boolean(savedAnswer.hasLevels),
       levelColumn: savedAnswer.levelColumn || '',
       treeConfirmed: savedAnswer.treeConfirmed ?? null,
-      dropDocuments: true,
+      dropDocuments: false,
       bomHeader: savedAnswer.bomHeader || blankBomHeader(name),
       subBoms: savedAnswer.subBoms || {},
     };
@@ -955,7 +955,7 @@ const BomStructureDialog = ({
         levelColumn,
         headersFor(sheetName),
         answers[sheetName]?.bomHeader?.finishedGoodCode || '',
-        true
+        false
       );
     } catch (err) {
       // The structure preview is a convenience; failing to draw it must never
@@ -1605,9 +1605,9 @@ const BomStructureDialog = ({
         levelColumn: answer.hasLevels ? answer.levelColumn : null,
         treeConfirmed: answer.hasLevels ? answer.treeConfirmed : null,
         bomGenerationAvailable: answer.hasLevels ? answer.treeConfirmed !== false : true,
-        // Sent explicitly rather than defaulted server-side, so an older saved
-        // answer without the field keeps the previous behaviour.
-        dropDocuments: true,
+        // Document rows are BOM children in this workflow, so their parents
+        // must appear in this confirmation and in the generated export.
+        dropDocuments: false,
         bomHeader,
         subBoms,
       };
