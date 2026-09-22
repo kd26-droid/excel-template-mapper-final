@@ -404,20 +404,21 @@ class BomFieldPatternTeachApiTests(TestCase):
             response = self.client.post(endpoint, payload, content_type="application/json")
             self.assertEqual(response.status_code, 400)
             self.assertEqual(response.json()["code"], "group_key_required")
-            self.assertEqual(response.json()["field"], "parent")
+            self.assertEqual(response.json()["field"], "sameGroupKeyColumn")
 
     def test_same_group_rows_uses_only_the_selected_group_key(self):
         response = self.client.post(
             "/api/bom/normalize/",
             {
-                "headers": ["CPN", "MPN", "MFR", "Qty", "Ref Des"],
+                "headers": ["CPN", "MPN", "MFR", "Qty", "Group ID", "Parent"],
                 "rows": [
                     {
                         "CPN": "C-100",
                         "MPN": "ABC123",
                         "MFR": "KEMET",
                         "Qty": "4",
-                        "Ref Des": "C1",
+                        "Group ID": "G1",
+                        "Parent": "ASSY-A",
                         "__sourceRow": 2,
                     },
                     {
@@ -425,7 +426,8 @@ class BomFieldPatternTeachApiTests(TestCase):
                         "MPN": "XYZ987",
                         "MFR": "AVX",
                         "Qty": "",
-                        "Ref Des": "C1",
+                        "Group ID": "G1",
+                        "Parent": "ASSY-A",
                         "__sourceRow": 3,
                     },
                     {
@@ -433,7 +435,8 @@ class BomFieldPatternTeachApiTests(TestCase):
                         "MPN": "DEF456",
                         "MFR": "YAGEO",
                         "Qty": "2",
-                        "Ref Des": "C2",
+                        "Group ID": "G2",
+                        "Parent": "ASSY-B",
                         "__sourceRow": 4,
                     },
                 ],
@@ -442,10 +445,11 @@ class BomFieldPatternTeachApiTests(TestCase):
                     "mpn": "MPN",
                     "manufacturer": "MFR",
                     "quantity": "Qty",
-                    "parent": "Ref Des",
+                    "parent": "Parent",
                 },
                 "config": {
                     "alternateLayout": "same_group_rows",
+                    "sameGroupKeyColumn": "Group ID",
                     "alternateInheritFields": ["cpn", "quantity"],
                 },
             },
@@ -456,7 +460,11 @@ class BomFieldPatternTeachApiTests(TestCase):
         rows = response.json()["normalizedRows"]
         self.assertEqual(
             [(row["parentKey"], row["relation"]) for row in rows],
-            [("C1", "Primary"), ("C1", "Alternate 1"), ("C2", "Primary")],
+            [("G1", "Primary"), ("G1", "Alternate 1"), ("G2", "Primary")],
+        )
+        self.assertEqual(
+            [row["parent"] for row in rows],
+            ["ASSY-A", "ASSY-A", "ASSY-B"],
         )
         self.assertEqual(rows[1]["cpn"], "C-100")
         self.assertEqual(rows[1]["quantity"], "4")
@@ -7464,6 +7472,7 @@ class DirectoryDatabaseLearningTests(TestCase):
                 payload["activeRules"][pattern_key]["fields"]["mpn"]["preserveOriginalValue"]
             )
         generated_mpns = []
+        generated_manufacturers = []
         for row in payload["review"]["rows"]:
             for entry in row.get("entries") or []:
                 value = (entry.get("fields") or {}).get("mpn")
@@ -7471,7 +7480,12 @@ class DirectoryDatabaseLearningTests(TestCase):
                     value = value.get("value")
                 if value:
                     generated_mpns.append(value)
+                    manufacturer = (entry.get("fields") or {}).get("manufacturer")
+                    if isinstance(manufacturer, dict):
+                        manufacturer = manufacturer.get("value")
+                    generated_manufacturers.append(manufacturer or "")
         self.assertIn("22-03-2061", generated_mpns)
         self.assertIn("69173-406HLF", generated_mpns)
+        self.assertEqual(generated_manufacturers, ["MOLEX", "AMPHENOL FCI"])
         self.assertEqual(ColumnRule.objects.count(), 0)
         self.assertEqual(BomStructurePattern.objects.count(), 0)

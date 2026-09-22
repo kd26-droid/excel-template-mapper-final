@@ -56,7 +56,7 @@ ROLE_LABELS = {
     "notes": "Notes",
     "internalNotes": "Internal notes",
     "level": "BOM level",
-    "parent": "Parent / group key",
+    "parent": "Parent",
 }
 
 FACTWISE_FIELD_LABELS = {
@@ -67,7 +67,7 @@ FACTWISE_FIELD_LABELS = {
     "quantity": "Quantity",
     "uom": "UOM",
     "level": "Level",
-    "parent": "Parent / group key",
+    "parent": "Parent",
     "notes": "Notes",
     "internalNotes": "Internal notes",
 }
@@ -313,13 +313,15 @@ def is_blankish(value):
 
 def bom_setup_requirements(headers=None, roles=None, config=None):
     safe_headers = {clean(header) for header in (headers or []) if clean(header)}
-    safe_roles = roles if isinstance(roles, dict) else {}
     safe_config = config if isinstance(config, dict) else {}
     alternate_layout = clean(
         safe_config.get("alternateLayout")
         or safe_config.get("alternate_layout")
     )
-    group_key_header = clean(safe_roles.get("parent"))
+    group_key_header = clean(
+        safe_config.get("sameGroupKeyColumn")
+        or safe_config.get("same_group_key_column")
+    )
     if (
         alternate_layout == "same_group_rows"
         and (
@@ -329,9 +331,9 @@ def bom_setup_requirements(headers=None, roles=None, config=None):
     ):
         return [{
             "code": "group_key_required",
-            "field": "parent",
+            "field": "sameGroupKeyColumn",
             "message": (
-                "Select a Parent / group key column before reviewing or "
+                "Select a group key column before reviewing or "
                 "normalizing rows with the same group key."
             ),
         }]
@@ -2309,6 +2311,10 @@ def _selected_customer_columns(headers, roles, selected_columns=None, config=Non
         add(header)
     for role in ROLE_KEYS:
         add((roles or {}).get(role))
+    add(
+        (config or {}).get("sameGroupKeyColumn")
+        or (config or {}).get("same_group_key_column")
+    )
     for group in (config or {}).get("alternateColumnGroups") or (config or {}).get("alternate_column_groups") or []:
         if not isinstance(group, dict):
             continue
@@ -9118,6 +9124,23 @@ def _bom_pattern_structure_scope(headers, roles=None, config=None):
         "identityLayout": clean(safe_config.get("identityLayout") or safe_config.get("identity_layout")),
         "rowPlacement": clean(safe_config.get("rowPlacement") or safe_config.get("row_placement")),
         "alternateLayout": clean(safe_config.get("alternateLayout") or safe_config.get("alternate_layout")),
+        "sameGroupKeyColumn": (
+            {
+                "header": _normalized_structure_header(clean(
+                    safe_config.get("sameGroupKeyColumn")
+                    or safe_config.get("same_group_key_column")
+                )),
+                "index": safe_headers.index(clean(
+                    safe_config.get("sameGroupKeyColumn")
+                    or safe_config.get("same_group_key_column")
+                )),
+            }
+            if clean(
+                safe_config.get("sameGroupKeyColumn")
+                or safe_config.get("same_group_key_column")
+            ) in safe_headers
+            else None
+        ),
         "alternateColumns": alternate_groups,
     }
     signature_basis = repr((
@@ -9129,6 +9152,10 @@ def _bom_pattern_structure_scope(headers, roles=None, config=None):
         scope["identityLayout"],
         scope["rowPlacement"],
         scope["alternateLayout"],
+        (
+            scope["sameGroupKeyColumn"]["header"],
+            scope["sameGroupKeyColumn"]["index"],
+        ) if scope["sameGroupKeyColumn"] else None,
         tuple(
             tuple((role, group.get(role, -1)) for role in ("cpn", "mpn", "manufacturer"))
             for group in alternate_groups
@@ -12181,21 +12208,26 @@ def _build_flat_pattern_review_rows(
                     composed.extend(interpreted)
                     continue
 
-            base_entry = composed[target_index]
-            first_interpreted = interpreted[0]
-            merged_first = deepcopy(base_entry)
-            merged_fields = merged_first.setdefault("fields", {})
-            for field, value in (first_interpreted.get("fields") or {}).items():
-                plain_value = value.get("value") if isinstance(value, dict) else value
-                if field in mapped_fields or not is_blankish(plain_value):
-                    merged_fields[field] = deepcopy(value)
-            merged_first.update({
-                key: deepcopy(value)
-                for key, value in first_interpreted.items()
-                if key != "fields"
-            })
-            replacements = [merged_first, *interpreted[1:]]
-            composed[target_index:target_index + 1] = replacements
+            replacements = []
+            for offset, interpreted_entry in enumerate(interpreted):
+                base_index = target_index + offset
+                base_entry = (
+                    composed[base_index]
+                    if base_index < len(composed)
+                    else composed[target_index]
+                )
+                merged_entry = deepcopy(base_entry)
+                merged_fields = merged_entry.setdefault("fields", {})
+                for field, value in (interpreted_entry.get("fields") or {}).items():
+                    if field in mapped_fields:
+                        merged_fields[field] = deepcopy(value)
+                merged_entry.update({
+                    key: deepcopy(value)
+                    for key, value in interpreted_entry.items()
+                    if key != "fields"
+                })
+                replacements.append(merged_entry)
+            composed[target_index:target_index + len(interpreted)] = replacements
         return composed
 
     patterns_by_key = {
@@ -12546,13 +12578,18 @@ def _apply_following_item_row_review_relations(
 
 
 def _apply_same_group_row_review_relations(review_rows, config):
-    """Group review rows only by the user-selected Parent / group key value."""
+    """Group review rows only by the explicitly selected source column."""
     alternate_layout = clean(
         (config or {}).get("alternateLayout")
         or (config or {}).get("alternate_layout")
     )
     if alternate_layout != "same_group_rows":
         return review_rows
+
+    group_key_header = clean(
+        (config or {}).get("sameGroupKeyColumn")
+        or (config or {}).get("same_group_key_column")
+    )
 
     configured_inherit_fields = (config or {}).get("alternateInheritFields")
     if not isinstance(configured_inherit_fields, list):
@@ -12562,12 +12599,16 @@ def _apply_same_group_row_review_relations(review_rows, config):
     primary_by_group = {}
 
     for review_row in review_rows or []:
+        group_key = clean(next((
+            item.get("value")
+            for item in (review_row.get("left") or [])
+            if isinstance(item, dict) and clean(item.get("column")) == group_key_header
+        ), ""))
         for entry in review_row.get("entries") or []:
             if not isinstance(entry, dict) or clean(entry.get("relation")) == "Ignored":
                 continue
             fields = entry.setdefault("fields", {})
             source_columns = entry.setdefault("sourceColumns", {})
-            group_key = clean(fields.get("parent"))
             if not group_key:
                 entry["relation"] = "Primary"
                 continue
@@ -13753,7 +13794,7 @@ def _normalize_same_group_rows(normalized_rows, config):
 
     for row in normalized_rows or []:
         grouped = dict(row)
-        group_key = clean(grouped.get("parent"))
+        group_key = clean(grouped.get("parentKey"))
         if not group_key:
             grouped["parentKey"] = str(grouped.get("sourceRow") or "")
             grouped["relation"] = "Primary"
@@ -13890,7 +13931,7 @@ def _apply_parent_path_hierarchy(normalized_rows, config):
     return normalized_rows
 
 
-def _alternate_group_key(values, source_row, config=None):
+def _alternate_group_key(values, source_row, config=None, source_values=None, headers=None):
     """The key rows are grouped by when looking for alternates.
 
     ``following_item_rows`` is the one layout whose alternates live on separate
@@ -13904,7 +13945,16 @@ def _alternate_group_key(values, source_row, config=None):
     if layout == "following_item_rows":
         return values.get("cpn") or str(source_row)
     if layout == "same_group_rows":
-        return values.get("parent") or str(source_row)
+        group_key_header = clean(
+            (config or {}).get("sameGroupKeyColumn")
+            or (config or {}).get("same_group_key_column")
+        )
+        group_key = (
+            _row_cell(source_values, group_key_header, headers or [])
+            if group_key_header
+            else ""
+        )
+        return clean(group_key) or str(source_row)
     return str(source_row)
 
 
@@ -14200,7 +14250,12 @@ def normalize_bom_rows(headers, rows, roles=None, config=None):
                 # and the three that survived reported their parents missing,
                 # because the parents had been swallowed as alternates.
                 "parentKey": _alternate_group_key(
-                    values, source_row, safe_config),
+                    values,
+                    source_row,
+                    safe_config,
+                    source_values=row,
+                    headers=safe_headers,
+                ),
                 "parent": values["parent"],
                 "relation": relation or ("Primary" if entry_index == 0 else f"Alternate {entry_index}"),
                 "needsReview": needs_review,

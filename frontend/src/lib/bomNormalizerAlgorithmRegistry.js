@@ -8,7 +8,7 @@ export const ROLE_FIELDS = [
   { key: 'notes', label: 'Notes' },
   { key: 'internalNotes', label: 'Internal notes' },
   { key: 'level', label: 'BOM level' },
-  { key: 'parent', label: 'Parent / group key' },
+  { key: 'parent', label: 'Parent' },
 ];
 
 export const IDENTITY_LAYOUT_OPTIONS = [

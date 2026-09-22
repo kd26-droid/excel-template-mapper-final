@@ -254,11 +254,23 @@ def build_structure_profile(headers, rows=None, roles=None, config=None, source_
         for role, header in role_headers.items()
         if header in safe_headers
     }
+    group_key_header = clean(
+        config.get("sameGroupKeyColumn")
+        or config.get("same_group_key_column")
+    )
+    group_key = {
+        "header": group_key_header,
+        "position": safe_headers.index(group_key_header),
+    } if group_key_header in safe_headers else None
     profile_basis = {
         "layout": layout,
         "headers": normalized_headers,
         "roles": {role: normalize_key(header) for role, header in role_headers.items()},
         "role_positions": role_positions,
+        "same_group_key": {
+            "header": normalize_key(group_key["header"]),
+            "position": group_key["position"],
+        } if group_key else None,
         "column_shapes": [
             {
                 "header": column["normalized_header"],
@@ -293,6 +305,7 @@ def build_structure_profile(headers, rows=None, roles=None, config=None, source_
         "column_profiles": column_profiles,
         "roles": role_headers,
         "role_positions": role_positions,
+        "same_group_key": group_key,
         "alternate_column_groups": alternate_groups or [],
         "source_hints": {
             "fileName": source_signature.get("fileName") or source_signature.get("file_name") or "",
@@ -332,6 +345,16 @@ def resolve_saved_structure(pattern, current_headers):
         if role in ROLE_KEYS
     }
     config = dict(pattern.config or {})
+    saved_group_key = clean(
+        config.get("sameGroupKeyColumn")
+        or config.get("same_group_key_column")
+    )
+    if saved_group_key:
+        config["sameGroupKeyColumn"] = _resolve_header(
+            saved_group_key,
+            current_headers,
+        )
+        config.pop("same_group_key_column", None)
     groups = []
     for group in config.get("alternateColumnGroups") or (pattern.structure_profile or {}).get("alternate_column_groups") or []:
         if not isinstance(group, dict):

@@ -851,7 +851,7 @@ _NORMALISED_COLUMN_TARGETS = (
     ('level', ('Level', 'BOM level')),
     ('Notes', ('Notes',)),
     ('Internal notes', ('Internal notes',)),
-    ('parentKey', ('Parent / group key', 'Sub BOM ID', 'BOM ID')),
+    ('parent', ('Parent', 'Sub BOM ID', 'BOM ID')),
 )
 
 
